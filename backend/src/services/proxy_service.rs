@@ -1641,6 +1641,47 @@ async fn maybe_refresh_provider_backed_api_key(
         None => return Ok(api_key),
     };
 
+    // Multi-connection keys carry their own tokens directly on the
+    // UserApiKey row (no `user_provider_tokens` shadow). Refresh in
+    // place so a per-key revocation / expiry never disturbs sibling
+    // connections under the same `(user, provider)` pair.
+    //
+    // Concurrency: `refresh_user_api_key_in_place` is read-modify-write
+    // without a row lock (see its rustdoc). Two simultaneous proxy
+    // requests for the same expiring key can race; last-write-wins on
+    // the response, and a rotated refresh_token from response A may be
+    // overwritten by B's now-invalidated value. Self-healing on the
+    // next refresh attempt; acceptable for v1.
+    if api_key.connection_id.is_some() {
+        return match user_token_service::refresh_user_api_key_in_place(
+            db,
+            encryption_keys,
+            &api_key,
+        )
+        .await
+        {
+            Ok(refreshed) => Ok(refreshed),
+            // Refresh attempt failed. Mirror the legacy branch's
+            // "fall back on the existing key" semantics so the proxy
+            // can still attempt the request with the (about-to-expire)
+            // access token; the downstream provider will surface the
+            // real auth error to the client. Note: for the
+            // provider-side rejection path the helper has already
+            // persisted `status: "failed"` on the row, so subsequent
+            // proxy hits will see the terminal state and stop
+            // retrying. Infrastructure-level errors (missing
+            // provider config, DB, encryption) are caught here too —
+            // a TODO for a future refactor would split these into a
+            // distinct error variant so infra failures bubble up
+            // instead of silently falling back.
+            Err(AppError::Internal(_)) => Ok(api_key),
+            Err(error) => Err(error),
+        };
+    }
+
+    // Legacy single-tenant path: refresh runs against
+    // `user_provider_tokens`, then `sync_provider_token_to_api_keys`
+    // fans the new token out to all legacy keys for `(user, provider)`.
     match user_token_service::get_active_token(db, encryption_keys, user_id, provider_config_id)
         .await
     {
@@ -1817,6 +1858,21 @@ fn build_minimal_downstream_service(
 /// Returns `Ok(None)` for providers that don't require a gateway URL.
 /// Returns `Err` if the provider requires a gateway URL but the user hasn't
 /// connected one -- this prevents fallback to the placeholder base_url.
+/// Resolve the per-user gateway URL for self-hosted providers (e.g.
+/// OpenClaw) on the LEGACY proxy path.
+///
+/// LEGACY-PATH ONLY — multi-connection invariant.
+/// This reads `UserProviderToken.gateway_url` keyed by
+/// `(user_id, provider_config_id)`. It is only ever called from
+/// `resolve_proxy_target` / `resolve_proxy_target_lenient`, which
+/// operate on a legacy `DownstreamService`. The new-path
+/// `UserService` resolution (`finish_resolution`) takes the gateway
+/// URL straight off `UserEndpoint.url` — which is already
+/// per-connection, since every `UserService` add provisions its own
+/// `UserEndpoint`. A multi-connection `UserApiKey` therefore never
+/// reaches this function; its gateway URL lives on its endpoint row.
+/// (This is why the multi-connection design needs no `gateway_url`
+/// field on `UserApiKey`.)
 async fn resolve_gateway_url_override(
     db: &mongodb::Database,
     user_id: &str,

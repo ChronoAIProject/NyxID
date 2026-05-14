@@ -13,6 +13,13 @@ pub struct UserProviderToken {
     pub id: String,
     pub user_id: String,
     pub provider_config_id: String,
+    /// Per-add OAuth identity inside a `(user_id, provider_config_id)` pair.
+    /// Every call to add a new service mints a fresh `connection_id` so two
+    /// distinct authorizations against the same provider can coexist (e.g.
+    /// two Lark Custom Apps, two ChatGPT accounts via codex). `None` only
+    /// during the migration window before the startup backfill runs.
+    #[serde(default)]
+    pub connection_id: Option<String>,
     /// When present, the OAuth connection was minted with user-provided app
     /// credentials owned by this user ID. `None` means provider-level
     /// credentials were used instead.
@@ -79,6 +86,7 @@ mod tests {
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             provider_config_id: uuid::Uuid::new_v4().to_string(),
+            connection_id: Some(uuid::Uuid::new_v4().to_string()),
             credential_user_id: Some(uuid::Uuid::new_v4().to_string()),
             token_type: "oauth2".to_string(),
             access_token_encrypted: Some(vec![1, 2, 3]),
@@ -103,6 +111,7 @@ mod tests {
         assert!(restored.expires_at.is_some());
         assert!(restored.last_refreshed_at.is_some());
         assert_eq!(restored.credential_user_id, token.credential_user_id);
+        assert_eq!(restored.connection_id, token.connection_id);
     }
 
     #[test]
@@ -111,6 +120,7 @@ mod tests {
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             provider_config_id: uuid::Uuid::new_v4().to_string(),
+            connection_id: None,
             credential_user_id: None,
             token_type: "api_key".to_string(),
             access_token_encrypted: None,
@@ -151,5 +161,8 @@ mod tests {
         };
         let restored: UserProviderToken = bson::from_document(doc).expect("deserialize");
         assert!(restored.credential_user_id.is_none());
+        // Pre-migration rows have no `connection_id`; deserializer must
+        // tolerate the missing field rather than rejecting the document.
+        assert!(restored.connection_id.is_none());
     }
 }

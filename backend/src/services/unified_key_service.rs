@@ -518,12 +518,22 @@ pub async fn create_key(
             .collection::<ServiceProviderRequirement>(SERVICE_PROVIDER_REQUIREMENTS)
             .find_one(doc! { "service_id": &svc.id })
             .await?;
-        let existing_provider_token =
-            if let Some(provider_config_id) = svc.provider_config_id.as_deref() {
-                find_existing_provider_token(db, user_id, provider_config_id).await?
-            } else {
-                None
-            };
+        // Multi-connection: OAuth2 / device-code adds are ALWAYS
+        // independent. We never reuse an existing provider token for
+        // them — `create_key` mints a fresh `connection_id` below and
+        // the wizard runs the full auth flow, so adding a second codex
+        // / Lark service authorizes a separate account instead of
+        // silently aliasing onto the first. Token reuse via
+        // `find_existing_provider_token` stays ONLY for `api_key`-type
+        // providers, which are out of scope for the multi-connection
+        // work and keep their existing single-credential behavior.
+        let existing_provider_token = if matches!(provider_type, Some("oauth2" | "device_code")) {
+            None
+        } else if let Some(provider_config_id) = svc.provider_config_id.as_deref() {
+            find_existing_provider_token(db, user_id, provider_config_id).await?
+        } else {
+            None
+        };
         let is_truly_no_auth =
             !is_ssh && svc.auth_method == "none" && provider_requirement.is_none();
 
@@ -651,6 +661,17 @@ pub async fn create_key(
                 let pending_oauth = matches!(provider_type, Some("oauth2" | "device_code"))
                     && credential.is_empty()
                     && node_id.is_none();
+                // Multi-connection: a fresh pending OAuth/device-code add
+                // gets its own `connection_id`. The wizard's OAuth-initiate
+                // call threads this id into the `OAuthState`, and the
+                // callback writes the resulting token straight onto THIS
+                // `UserApiKey` (via `write_oauth_tokens_to_key`) — never
+                // onto `user_provider_tokens`. That is what lets two codex
+                // / Lark services coexist with independent tokens. Adds
+                // that aren't pending OAuth (api_key providers, or an
+                // OAuth add with an inline credential) stay connection-less
+                // and follow the legacy path.
+                let connection_id = pending_oauth.then(|| uuid::Uuid::new_v4().to_string());
                 Some(
                     user_api_key_service::create_api_key(
                         db,
@@ -666,6 +687,7 @@ pub async fn create_key(
                             token_scopes: None,
                             expires_at: None,
                             provider_config_id,
+                            connection_id: connection_id.as_deref(),
                             status: if pending_oauth {
                                 "pending_auth"
                             } else {
@@ -693,6 +715,7 @@ pub async fn create_key(
                         token_scopes: None,
                         expires_at: None,
                         provider_config_id,
+                        connection_id: None,
                         status: "active",
                         source: Some("user_created"),
                         source_id: None,
@@ -931,6 +954,7 @@ pub async fn create_key(
                 token_scopes: None,
                 expires_at: None,
                 provider_config_id: None,
+                connection_id: None,
                 status: "active",
                 source: Some("user_created"),
                 source_id: None,
@@ -1086,6 +1110,7 @@ pub async fn create_key(
                         token_scopes: None,
                         expires_at: None,
                         provider_config_id: None,
+                        connection_id: None,
                         status: "active",
                         source: Some("user_created"),
                         source_id: None,
@@ -2190,9 +2215,23 @@ pub async fn ensure_user_api_key_for_update(
             }
             None => None,
         };
-        let token = match ds.as_ref().and_then(|d| d.provider_config_id.as_deref()) {
-            Some(pid) => find_existing_provider_token(db, user_id, pid).await?,
-            None => None,
+        // Multi-connection: never reuse an existing provider token when
+        // upgrading a service to an OAuth2 / device-code provider — same
+        // rule as `create_key`'s catalog POST path. Each upgrade-to-OAuth
+        // mints a fresh `connection_id` (below) and runs the full auth
+        // flow, so it authorizes its own account rather than aliasing
+        // onto a sibling service's token. `api_key`-type providers keep
+        // the existing reuse behavior (out of scope for multi-connection).
+        let is_oauth_like = provider
+            .as_ref()
+            .is_some_and(|p| matches!(p.provider_type.as_str(), "oauth2" | "device_code"));
+        let token = if is_oauth_like {
+            None
+        } else {
+            match ds.as_ref().and_then(|d| d.provider_config_id.as_deref()) {
+                Some(pid) => find_existing_provider_token(db, user_id, pid).await?,
+                None => None,
+            }
         };
         (ds, provider, token)
     } else {
@@ -2353,6 +2392,12 @@ pub async fn ensure_user_api_key_for_update(
                 } else {
                     "active"
                 };
+                // Multi-connection: an upgrade-to-OAuth placeholder gets
+                // its own `connection_id`, exactly like a fresh
+                // `create_key` POST. The wizard's OAuth-initiate call
+                // threads it into the `OAuthState`, and the callback
+                // writes the token straight onto this `UserApiKey`.
+                let connection_id = is_deferred_pending.then(|| uuid::Uuid::new_v4().to_string());
                 user_api_key_service::create_api_key(
                     db,
                     encryption_keys,
@@ -2366,6 +2411,7 @@ pub async fn ensure_user_api_key_for_update(
                         token_scopes: None,
                         expires_at: None,
                         provider_config_id: catalog_provider_config_id,
+                        connection_id: connection_id.as_deref(),
                         status,
                         source: Some("user_created"),
                         source_id: None,
@@ -2661,11 +2707,13 @@ mod tests {
         resolve_openapi_spec_url, resolve_unique_slug, revoke_key,
         validate_token_exchange_catalog_credential,
     };
-    use crate::errors::AppError;
+    use crate::errors::{AppError, AppResult};
     use crate::models::downstream_service::{
-        CredentialFieldSpec, DownstreamService, TokenExchangeConfig,
+        COLLECTION_NAME as DOWNSTREAM_SERVICES, CredentialFieldSpec, DownstreamService,
+        TokenExchangeConfig,
     };
     use crate::models::node::{COLLECTION_NAME as NODES, Node, NodeMetrics, NodeStatus};
+    use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
     use crate::models::service_provider_requirement::ServiceProviderRequirement;
     use crate::models::ssh_auth_mode::SshAuthMode;
     use crate::models::user_api_key::COLLECTION_NAME as USER_API_KEYS;
@@ -2692,6 +2740,7 @@ mod tests {
             token_scopes: None,
             expires_at: None,
             provider_config_id: None,
+            connection_id: None,
             user_oauth_client_id_encrypted: None,
             user_oauth_client_secret_encrypted: None,
             status: "active".to_string(),
@@ -2764,6 +2813,7 @@ mod tests {
                 id: token_id.clone(),
                 user_id: user_id.to_string(),
                 provider_config_id: provider_id.to_string(),
+                connection_id: None,
                 credential_user_id: None,
                 token_type: "oauth2".to_string(),
                 access_token_encrypted: Some(vec![1, 2, 3]),
@@ -4518,6 +4568,303 @@ mod tests {
         assert!(
             !has_match,
             "private with empty developer_app_ids should never auto-provision"
+        );
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // Multi-connection OAuth: end-to-end `create_key` integration tests.
+    // These prove step 19 — the silent-alias removal — actually works:
+    // a second codex / Lark add produces an independent connection
+    // instead of aliasing onto the first.
+    // ───────────────────────────────────────────────────────────────────
+
+    /// Minimal valid `ProviderConfig` for the multi-connection tests.
+    /// `provider_type` drives the create_key branch under test
+    /// (`oauth2` / `device_code` → mint a fresh connection_id;
+    /// `api_key` → legacy reuse path).
+    fn multi_conn_provider(provider_type: &str) -> ProviderConfig {
+        ProviderConfig {
+            id: uuid::Uuid::new_v4().to_string(),
+            slug: format!("prov-{}", uuid::Uuid::new_v4()),
+            name: "Multi-Conn Test Provider".to_string(),
+            description: None,
+            provider_type: provider_type.to_string(),
+            authorization_url: Some("https://example.com/authorize".to_string()),
+            token_url: Some("https://example.com/token".to_string()),
+            revocation_url: None,
+            default_scopes: None,
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: true,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: None,
+            is_active: true,
+            credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            requires_gateway_url: false,
+            created_by: "system".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    /// Catalog `DownstreamService` backed by `provider`, shaped so
+    /// `create_key` with an empty credential mints a `pending_auth`
+    /// `UserApiKey` (auth_method != "none" so it isn't `is_truly_no_auth`).
+    fn multi_conn_catalog(provider: &ProviderConfig) -> DownstreamService {
+        let mut svc = sample_catalog_service();
+        svc.id = uuid::Uuid::new_v4().to_string();
+        svc.slug = format!("cat-{}", uuid::Uuid::new_v4());
+        svc.auth_method = "bearer".to_string();
+        svc.auth_key_name = "Authorization".to_string();
+        svc.provider_config_id = Some(provider.id.clone());
+        svc
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn create_catalog_key(
+        db: &mongodb::Database,
+        encryption_keys: &crate::crypto::aes::EncryptionKeys,
+        user_id: &str,
+        slug: &str,
+        label: &str,
+    ) -> AppResult<super::CreateKeyResult> {
+        create_key(
+            db,
+            encryption_keys,
+            user_id,
+            user_id,
+            Some(slug),
+            None,
+            "",
+            label,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            OpenApiSpecUrlInput::Inherit,
+            None,
+            false,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn create_key_oauth_multi_add_mints_distinct_connection_ids() {
+        // THE step-19 proof: adding a device-code service (codex) twice
+        // produces two INDEPENDENT pending_auth keys, each with its own
+        // connection_id — not a silent alias onto the first.
+        let Some(db) = connect_test_database("ukey_multi_add_distinct").await else {
+            eprintln!("skipping unified_key_service integration test: no local MongoDB available");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let provider = multi_conn_provider("device_code");
+        let catalog = multi_conn_catalog(&provider);
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(&provider)
+            .await
+            .unwrap();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+
+        let first = create_catalog_key(&db, &encryption_keys, &user_id, &catalog.slug, "codex one")
+            .await
+            .expect("first codex add should succeed");
+        let second =
+            create_catalog_key(&db, &encryption_keys, &user_id, &catalog.slug, "codex two")
+                .await
+                .expect("second codex add must NOT be blocked or silently aliased");
+
+        let key_a = first.api_key.expect("first add mints a UserApiKey");
+        let key_b = second.api_key.expect("second add mints a UserApiKey");
+
+        // Both are fresh pending_auth placeholders awaiting their own
+        // device-code flow — neither short-circuited to `active`.
+        assert_eq!(key_a.status, "pending_auth");
+        assert_eq!(key_b.status, "pending_auth");
+
+        // Distinct rows, distinct connection_ids — the heart of the fix.
+        assert_ne!(key_a.id, key_b.id, "each add must mint its own UserApiKey");
+        let conn_a = key_a.connection_id.expect("first add has a connection_id");
+        let conn_b = key_b.connection_id.expect("second add has a connection_id");
+        assert_ne!(
+            conn_a, conn_b,
+            "each add must mint a DISTINCT connection_id (no silent alias)"
+        );
+
+        // Distinct UserService rows too (different slugs, auto-disambiguated).
+        assert_ne!(first.service.id, second.service.id);
+        assert_ne!(first.service.slug, second.service.slug);
+    }
+
+    #[tokio::test]
+    async fn create_key_oauth_ignores_existing_provider_token() {
+        // Even when the user already has a `user_provider_tokens` row for
+        // this provider (e.g. a legacy single-connection codex), a NEW
+        // device-code add must still mint a fresh pending_auth key with
+        // its own connection_id — never reuse / alias the legacy token.
+        let Some(db) = connect_test_database("ukey_multi_add_ignores_legacy").await else {
+            eprintln!("skipping unified_key_service integration test: no local MongoDB available");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let provider = multi_conn_provider("device_code");
+        let catalog = multi_conn_catalog(&provider);
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(&provider)
+            .await
+            .unwrap();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+
+        // Pre-existing legacy provider token for (user, provider).
+        let now = Utc::now();
+        db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
+            .insert_one(UserProviderToken {
+                id: uuid::Uuid::new_v4().to_string(),
+                user_id: user_id.clone(),
+                provider_config_id: provider.id.clone(),
+                connection_id: None,
+                credential_user_id: None,
+                token_type: "oauth2".to_string(),
+                access_token_encrypted: Some(vec![1, 2, 3]),
+                refresh_token_encrypted: Some(vec![4, 5, 6]),
+                token_scopes: None,
+                expires_at: None,
+                api_key_encrypted: None,
+                status: "active".to_string(),
+                last_refreshed_at: None,
+                last_used_at: None,
+                error_message: None,
+                label: None,
+                metadata: None,
+                gateway_url: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+
+        let created =
+            create_catalog_key(&db, &encryption_keys, &user_id, &catalog.slug, "codex new")
+                .await
+                .expect("add should succeed");
+        let key = created.api_key.expect("add mints a UserApiKey");
+
+        // Fresh pending_auth placeholder — NOT activated from the legacy
+        // token, NOT aliased (no source_id pointing at the legacy token).
+        assert_eq!(
+            key.status, "pending_auth",
+            "must NOT inherit `active` from the pre-existing provider token"
+        );
+        assert!(
+            key.connection_id.is_some(),
+            "must mint its own connection_id"
+        );
+        assert!(
+            key.access_token_encrypted.is_none(),
+            "must not copy the legacy token's access token"
+        );
+        assert!(
+            key.source_id.is_none(),
+            "must not be aliased to the legacy provider token via source_id"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_key_api_key_provider_still_reuses_existing_token() {
+        // Regression guard: the silent-alias removal is scoped to
+        // oauth2 / device_code providers ONLY. An `api_key`-type
+        // provider with an existing token must STILL reuse it — that
+        // behavior is out of scope for multi-connection and unchanged.
+        let Some(db) = connect_test_database("ukey_api_key_still_reuses").await else {
+            eprintln!("skipping unified_key_service integration test: no local MongoDB available");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let provider = multi_conn_provider("api_key");
+        let catalog = multi_conn_catalog(&provider);
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(&provider)
+            .await
+            .unwrap();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+
+        let now = Utc::now();
+        let token_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
+            .insert_one(UserProviderToken {
+                id: token_id.clone(),
+                user_id: user_id.clone(),
+                provider_config_id: provider.id.clone(),
+                connection_id: None,
+                credential_user_id: None,
+                token_type: "api_key".to_string(),
+                access_token_encrypted: None,
+                refresh_token_encrypted: None,
+                token_scopes: None,
+                expires_at: None,
+                api_key_encrypted: Some(vec![9, 9, 9]),
+                status: "active".to_string(),
+                last_refreshed_at: None,
+                last_used_at: None,
+                error_message: None,
+                label: None,
+                metadata: None,
+                gateway_url: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+
+        let created = create_catalog_key(
+            &db,
+            &encryption_keys,
+            &user_id,
+            &catalog.slug,
+            "api-key svc",
+        )
+        .await
+        .expect("add should succeed");
+        let key = created.api_key.expect("add mints a UserApiKey");
+
+        // api_key provider: legacy reuse path is preserved — the new
+        // UserApiKey is sourced from the existing provider token and
+        // carries no connection_id.
+        assert_eq!(
+            key.source_id.as_deref(),
+            Some(token_id.as_str()),
+            "api_key provider must still reuse the existing provider token"
+        );
+        assert!(
+            key.connection_id.is_none(),
+            "api_key provider reuse path stays connection-less"
         );
     }
 }

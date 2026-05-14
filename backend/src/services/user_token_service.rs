@@ -10,6 +10,7 @@ use crate::crypto::aes::EncryptionKeys;
 use crate::errors::{AppError, AppResult};
 use crate::models::oauth_state::{COLLECTION_NAME as OAUTH_STATES, OAuthState};
 use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
+use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
 use crate::models::user_provider_token::{COLLECTION_NAME, UserProviderToken};
 use crate::services::oauth_flow;
 use crate::services::user_credentials_service;
@@ -19,6 +20,24 @@ pub struct DecryptedProviderToken {
     pub token_type: String,
     pub access_token: Option<String>,
     pub api_key: Option<String>,
+}
+
+/// Outcome of an OAuth/device-code callback, regardless of write path.
+///
+/// `connection_id` is `Some` when the multi-connection write path was
+/// taken (token landed on a `UserApiKey` row by connection_id, bypassing
+/// `user_provider_tokens`). `None` means the legacy write path ran:
+/// a new `UserProviderToken` was inserted and the caller may want to
+/// run the legacy `sync_provider_token_to_api_keys` fanout afterwards.
+pub struct OAuthCallbackOutcome {
+    pub user_id: String,
+    /// The provider this OAuth flow targeted. Carried so callers don't
+    /// need to refetch from the route or the (now-consumed) `OAuthState`.
+    /// Currently unused by in-tree callers (they have the route param)
+    /// but kept for future audit/log emission and downstream callers.
+    #[allow(dead_code)]
+    pub provider_config_id: String,
+    pub connection_id: Option<String>,
 }
 
 /// Summary for listing (no decrypted tokens).
@@ -341,6 +360,7 @@ pub async fn store_api_key(
         id: Uuid::new_v4().to_string(),
         user_id: user_id.to_string(),
         provider_config_id: provider_id.to_string(),
+        connection_id: None,
         credential_user_id: None,
         token_type: "api_key".to_string(),
         access_token_encrypted: None,
@@ -468,6 +488,7 @@ async fn store_telegram_identity(
         id: Uuid::new_v4().to_string(),
         user_id: user_id.to_string(),
         provider_config_id: provider_id.to_string(),
+        connection_id: None,
         credential_user_id: None,
         token_type: "telegram_identity".to_string(),
         access_token_encrypted: None,
@@ -510,6 +531,14 @@ async fn store_telegram_identity(
 /// provider's `default_scopes`. Pass an empty slice to preserve the original
 /// default-scopes-only behavior.
 #[allow(clippy::too_many_arguments)]
+/// Initiate an OAuth2 authorization-code flow.
+///
+/// `connection_id` (multi-connection rollout): when `Some`, the flow is
+/// part of a fresh multi-connection add — the callback will write the
+/// resulting token directly to the `UserApiKey` row carrying this
+/// `connection_id` (bypassing `user_provider_tokens`). When `None`, the
+/// callback takes the legacy single-tenant path (writing to
+/// `user_provider_tokens` keyed by `(user_id, provider_config_id)`).
 pub async fn initiate_oauth_connect(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
@@ -519,6 +548,7 @@ pub async fn initiate_oauth_connect(
     on_behalf_of: Option<&str>,
     redirect_path: Option<&str>,
     additional_scopes: &[String],
+    connection_id: Option<&str>,
 ) -> AppResult<String> {
     let provider = db
         .collection::<ProviderConfig>(PROVIDER_CONFIGS)
@@ -581,6 +611,7 @@ pub async fn initiate_oauth_connect(
         target_user_id: on_behalf_of.map(String::from),
         credential_user_id: resolved.credential_user_id.clone(),
         redirect_path: redirect_path.map(String::from),
+        connection_id: connection_id.map(String::from),
         consumed: false,
         expires_at,
         created_at: now,
@@ -693,6 +724,14 @@ pub struct DeviceCodePollResult {
 /// `additional_scopes` are merged on top of `provider.default_scopes` and sent
 /// in the RFC 8628 device code request. Pass an empty slice to preserve the
 /// original default-scopes-only behavior.
+///
+/// `connection_id` (multi-connection rollout): when `Some`, the eventual
+/// poll-completion will write the resulting token directly to the
+/// `UserApiKey` row carrying this `connection_id` (bypassing
+/// `user_provider_tokens`). When `None`, the completion takes the legacy
+/// single-tenant path (writing to `user_provider_tokens` keyed by
+/// `(user_id, provider_config_id)`). Mirrors the `connection_id`
+/// semantics of [`initiate_oauth_connect`].
 pub async fn request_device_code(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
@@ -700,6 +739,7 @@ pub async fn request_device_code(
     provider_id: &str,
     on_behalf_of: Option<&str>,
     additional_scopes: &[String],
+    connection_id: Option<&str>,
 ) -> AppResult<DeviceCodeInitiateResult> {
     let provider = db
         .collection::<ProviderConfig>(PROVIDER_CONFIGS)
@@ -849,6 +889,7 @@ pub async fn request_device_code(
         target_user_id: on_behalf_of.map(String::from),
         credential_user_id: resolved.credential_user_id.clone(),
         redirect_path: None,
+        connection_id: connection_id.map(String::from),
         consumed: false,
         expires_at,
         created_at: now,
@@ -1129,6 +1170,7 @@ pub async fn poll_device_code(
             provider_id,
             state,
             resolved.credential_user_id.as_deref(),
+            oauth_state.connection_id.as_deref(),
             &token_data,
             now,
         )
@@ -1143,6 +1185,7 @@ pub async fn poll_device_code(
         provider_id,
         state,
         oauth_state.credential_user_id.as_deref(),
+        oauth_state.connection_id.as_deref(),
         &resp_data,
         now,
     )
@@ -1150,6 +1193,12 @@ pub async fn poll_device_code(
 }
 
 /// Store tokens from a device code flow response (either direct or after code exchange).
+///
+/// `connection_id` (multi-connection rollout): when `Some`, the tokens
+/// are written directly to the matching `UserApiKey` row (via
+/// [`user_api_key_service::write_oauth_tokens_to_key`]), bypassing
+/// `user_provider_tokens`. When `None`, the legacy single-tenant path
+/// runs (`delete_many` + `insert_one` on `user_provider_tokens`).
 #[allow(clippy::too_many_arguments)]
 async fn store_device_code_tokens(
     db: &mongodb::Database,
@@ -1158,6 +1207,7 @@ async fn store_device_code_tokens(
     provider_id: &str,
     state: &str,
     credential_user_id: Option<&str>,
+    connection_id: Option<&str>,
     token_data: &serde_json::Value,
     now: chrono::DateTime<Utc>,
 ) -> AppResult<DeviceCodePollResult> {
@@ -1169,15 +1219,71 @@ async fn store_device_code_tokens(
     let expires_in = token_data["expires_in"].as_i64();
     let scope = token_data["scope"].as_str();
 
+    let token_expires_at = expires_in.map(|secs| now + Duration::seconds(secs));
+
+    // Multi-connection path: write tokens directly to the UserApiKey
+    // identified by connection_id, then delete the OAuth state. State
+    // deletion happens AFTER the token write so reconcile's "no live
+    // state ⇒ abandoned" inference can never observe an in-flight
+    // window where the new credential isn't yet visible (issue #653
+    // race fix parity with `handle_oauth_callback`).
+    if let Some(ref conn_id) = connection_id {
+        crate::services::user_api_key_service::write_oauth_tokens_to_key(
+            db,
+            encryption_keys,
+            conn_id,
+            access_token,
+            refresh_token,
+            scope,
+            token_expires_at,
+        )
+        .await
+        .inspect_err(|e| {
+            tracing::warn!(
+                user_id = %user_id,
+                provider_id = %provider_id,
+                connection_id = %conn_id,
+                error = %e,
+                "multi-connection device-code write failed; OAuthState left in place (TTL will sweep)"
+            );
+        })?;
+
+        let _ = db
+            .collection::<OAuthState>(OAUTH_STATES)
+            .delete_one(doc! { "_id": state })
+            .await;
+
+        tracing::info!(
+            user_id = %user_id,
+            provider_id = %provider_id,
+            connection_id = %conn_id,
+            "Device code tokens written to UserApiKey (multi-connection path)"
+        );
+
+        return Ok(DeviceCodePollResult {
+            status: "complete".to_string(),
+            interval: None,
+            effective_user_id: Some(user_id.to_string()),
+        });
+    }
+
+    // ── Legacy single-tenant path ──
     let access_enc = encryption_keys.encrypt(access_token.as_bytes()).await?;
     let refresh_enc = match refresh_token {
         Some(rt) => Some(encryption_keys.encrypt(rt.as_bytes()).await?),
         None => None,
     };
 
-    let token_expires_at = expires_in.map(|secs| now + Duration::seconds(secs));
-
-    // Delete the oauth_state (flow complete)
+    // Delete the oauth_state (flow complete). Pre-existing ordering:
+    // state-delete first, then token upsert below. This leaves a small
+    // window between state-delete and token-insert during which
+    // `reconcile_pending_oauth_placeholder` Pass 2 (triggered by
+    // `GET /keys/{id}` wizard polling) could observe a missing state +
+    // missing token and mark a `pending_auth` placeholder as failed.
+    // The window is very tight (two adjacent Mongo round-trips) and
+    // pre-dates this multi-connection work — addressing it would be a
+    // separate refactor. Multi-connection callers go through the
+    // `write_oauth_tokens_to_key` branch above and avoid this entirely.
     db.collection::<OAuthState>(OAUTH_STATES)
         .delete_one(doc! { "_id": state })
         .await?;
@@ -1194,6 +1300,7 @@ async fn store_device_code_tokens(
         id: Uuid::new_v4().to_string(),
         user_id: user_id.to_string(),
         provider_config_id: provider_id.to_string(),
+        connection_id: None,
         credential_user_id: credential_user_id.map(String::from),
         token_type: "oauth2".to_string(),
         access_token_encrypted: Some(access_enc),
@@ -1240,6 +1347,21 @@ pub async fn peek_oauth_state(db: &mongodb::Database, state_id: &str) -> AppResu
 /// Handle the OAuth2 callback after user authorizes.
 ///
 /// Uses a dedicated no-redirect HTTP client (SEC-H2) for the token exchange.
+///
+/// Returns an [`OAuthCallbackOutcome`]. Two write paths are possible:
+///
+/// - **Multi-connection** (`OAuthState.connection_id.is_some()`): tokens
+///   are written directly to the matching `UserApiKey` row via
+///   [`user_api_key_service::write_oauth_tokens_to_key`]. The
+///   `user_provider_tokens` collection is **not** touched. The outcome
+///   carries `connection_id: Some(...)` so the caller can skip the
+///   legacy fan-out sync.
+///
+/// - **Legacy** (`connection_id.is_none()`): existing behavior —
+///   `delete_many({user, provider})` followed by `insert_one(new token)`
+///   on `user_provider_tokens`. The outcome carries
+///   `connection_id: None` and the caller typically follows with
+///   `sync_provider_token_to_api_keys` to fan tokens out to legacy keys.
 pub async fn handle_oauth_callback(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
@@ -1247,7 +1369,7 @@ pub async fn handle_oauth_callback(
     provider_id: &str,
     code: &str,
     state: &str,
-) -> AppResult<UserProviderToken> {
+) -> AppResult<OAuthCallbackOutcome> {
     // Atomic-claim the state: flip `consumed` from false→true, returning
     // the document. A concurrent callback (replay) loses the race because
     // the filter requires `consumed: { $ne: true }`.
@@ -1425,6 +1547,65 @@ pub async fn handle_oauth_callback(
 
     let token_expires_at = expires_in.map(|secs| now + Duration::seconds(secs));
 
+    // Branch on connection_id (set by `initiate_oauth_connect` when the
+    // flow is part of a fresh multi-connection add). When present, the
+    // new tokens land directly on the matching `UserApiKey` row and the
+    // `user_provider_tokens` collection is untouched. Otherwise: legacy
+    // single-tenant path — delete + insert into `user_provider_tokens`.
+    if let Some(ref conn_id) = oauth_state.connection_id {
+        // The pre-encrypted blobs computed above are discarded; the
+        // helper owns encryption end-to-end (encrypts from plaintext).
+        // Letting them drop naturally at end-of-scope is functionally
+        // identical to dropping them explicitly.
+        crate::services::user_api_key_service::write_oauth_tokens_to_key(
+            db,
+            encryption_keys,
+            conn_id,
+            access_token,
+            refresh_token,
+            scope,
+            token_expires_at,
+        )
+        .await
+        .inspect_err(|e| {
+            // Multi-connection write failed (e.g. UserApiKey was
+            // deleted mid-flow). The OAuth state row is still alive
+            // with `consumed: true` and will be cleaned up by TTL.
+            // Logging here so the rare race is visible to ops without
+            // requiring a heavier audit-log emission.
+            tracing::warn!(
+                user_id = %user_id,
+                provider_id = %provider_id,
+                connection_id = %conn_id,
+                error = %e,
+                "multi-connection write failed; OAuthState left consumed=true (TTL will sweep)"
+            );
+        })?;
+
+        // Best-effort cleanup of the consumed OAuth state. Identical
+        // ordering to the legacy branch (done last so reconcile's "no
+        // live state => abandoned" inference can never observe an
+        // in-flight window where the new token isn't yet visible).
+        let _ = db
+            .collection::<OAuthState>(OAUTH_STATES)
+            .delete_one(doc! { "_id": state })
+            .await;
+
+        tracing::info!(
+            user_id = %user_id,
+            provider_id = %provider_id,
+            connection_id = %conn_id,
+            "OAuth tokens written to UserApiKey (multi-connection callback path)"
+        );
+
+        return Ok(OAuthCallbackOutcome {
+            user_id: user_id.to_string(),
+            provider_config_id: provider_id.to_string(),
+            connection_id: Some(conn_id.clone()),
+        });
+    }
+
+    // ── Legacy single-tenant path ──
     // Upsert: remove existing token for this user+provider, insert new
     db.collection::<UserProviderToken>(COLLECTION_NAME)
         .delete_many(doc! {
@@ -1437,6 +1618,7 @@ pub async fn handle_oauth_callback(
         id: Uuid::new_v4().to_string(),
         user_id: user_id.to_string(),
         provider_config_id: provider_id.to_string(),
+        connection_id: None,
         credential_user_id: resolved.credential_user_id.clone(),
         token_type: "oauth2".to_string(),
         access_token_encrypted: Some(access_enc),
@@ -1475,7 +1657,11 @@ pub async fn handle_oauth_callback(
         "OAuth token stored for provider"
     );
 
-    Ok(token)
+    Ok(OAuthCallbackOutcome {
+        user_id: token.user_id,
+        provider_config_id: token.provider_config_id,
+        connection_id: None,
+    })
 }
 
 fn uses_json_oauth_token_exchange(provider: &ProviderConfig) -> bool {
@@ -1510,6 +1696,265 @@ fn oauth_token_payload(token_data: &serde_json::Value) -> &serde_json::Value {
                 .is_some()
         })
         .unwrap_or(token_data)
+}
+
+/// Multi-connection OAuth refresh path: refresh an access token using the
+/// `refresh_token` stored on a `UserApiKey` row, write the new tokens back
+/// to the same row, and return the refreshed key.
+///
+/// Mirrors [`oauth_flow::refresh_oauth_token`] (which operates on
+/// `UserProviderToken`) but for keys minted via the multi-connection
+/// add path. Crucially:
+///
+/// - **OAuth client credentials**: if the key carries user-provided BYO
+///   creds (`user_oauth_client_id_encrypted` set — the Lark / Feishu
+///   case), they are decrypted from the key itself. Otherwise the
+///   `ProviderConfig` client_id (and optional secret) is used (the
+///   codex / device-code case where NyxID owns the OAuth client). This
+///   avoids consulting `user_provider_credentials`, which is single-tenant
+///   per `(user, provider)` and can't represent two different Lark
+///   Custom Apps owned by the same user.
+///
+/// - **Token storage**: success writes new `access_token_encrypted`,
+///   `refresh_token_encrypted` (if returned), `expires_at`,
+///   `last_used_at`, `status: "active"`, and clears `error_message`
+///   directly on the `UserApiKey` row by `_id`. No write to
+///   `user_provider_tokens`.
+///
+/// - **Failure**: writes `status: "failed"` (intentional — `auth-flow-
+///   polling.ts` treats `failed` as terminal; using `refresh_failed`
+///   would silently leave the wizard polling until timeout) and a
+///   truncated error message (200 chars, SEC-M5 parity). Then returns
+///   `AppError::Internal`. Lark / Feishu return HTTP 200 with a non-zero
+///   `code` on failure (rather than a 4xx body); both shapes are handled
+///   and both write `status: "failed"`.
+///
+/// Caller (`proxy_service::maybe_refresh_provider_backed_api_key`)
+/// reaches this path only when `api_key.connection_id.is_some()`.
+///
+/// Concurrency: this function is read-modify-write on the `UserApiKey`
+/// row without a database-level lock. Two simultaneous refreshes for the
+/// same `_id` will both call the IdP; the loser's response is discarded
+/// (last-write-wins), and if the provider rotates the refresh_token, the
+/// loser may end up persisting an already-invalidated value. Acceptable
+/// per the design intent — the next refresh attempt would fail and the
+/// row would be marked `status: "failed"`. Callers should not invoke
+/// this function concurrently for the same key.
+pub async fn refresh_user_api_key_in_place(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    api_key: &UserApiKey,
+) -> AppResult<UserApiKey> {
+    let provider_id = api_key.provider_config_id.as_deref().ok_or_else(|| {
+        AppError::Internal(
+            "refresh_user_api_key_in_place: UserApiKey missing provider_config_id".to_string(),
+        )
+    })?;
+    let provider = db
+        .collection::<ProviderConfig>(PROVIDER_CONFIGS)
+        .find_one(doc! { "_id": provider_id })
+        .await?
+        .ok_or_else(|| AppError::Internal("Provider config not found for refresh".to_string()))?;
+
+    let token_url = provider.token_url.as_ref().ok_or_else(|| {
+        AppError::Internal("OAuth provider missing token_url for refresh".to_string())
+    })?;
+
+    // Resolve OAuth client credentials. BYO (Lark) lives on the key
+    // itself; provider-owned (codex) lives on ProviderConfig.
+    let (client_id, client_secret) = if let Some(enc_cid) =
+        api_key.user_oauth_client_id_encrypted.as_ref()
+    {
+        let dec_cid = Zeroizing::new(encryption_keys.decrypt(enc_cid).await?);
+        let cid = String::from_utf8((*dec_cid).clone())
+            .map_err(|e| AppError::Internal(format!("Failed to decode key client_id: {e}")))?;
+        let secret = if let Some(enc_sec) = api_key.user_oauth_client_secret_encrypted.as_ref() {
+            let dec_sec = Zeroizing::new(encryption_keys.decrypt(enc_sec).await?);
+            Some(String::from_utf8((*dec_sec).clone()).map_err(|e| {
+                AppError::Internal(format!("Failed to decode key client_secret: {e}"))
+            })?)
+        } else {
+            None
+        };
+        (cid, secret)
+    } else {
+        let enc_cid = provider.client_id_encrypted.as_ref().ok_or_else(|| {
+            AppError::Internal(format!(
+                "Provider {} missing client_id_encrypted",
+                provider.slug
+            ))
+        })?;
+        let dec_cid = Zeroizing::new(encryption_keys.decrypt(enc_cid).await?);
+        let cid = String::from_utf8((*dec_cid).clone())
+            .map_err(|e| AppError::Internal(format!("Failed to decode provider client_id: {e}")))?;
+        let secret = if let Some(enc_sec) = provider.client_secret_encrypted.as_ref() {
+            let dec_sec = Zeroizing::new(encryption_keys.decrypt(enc_sec).await?);
+            Some(String::from_utf8((*dec_sec).clone()).map_err(|e| {
+                AppError::Internal(format!("Failed to decode provider client_secret: {e}"))
+            })?)
+        } else {
+            None
+        };
+        (cid, secret)
+    };
+
+    let enc_refresh = api_key.refresh_token_encrypted.as_ref().ok_or_else(|| {
+        AppError::Internal("UserApiKey missing refresh_token for refresh".to_string())
+    })?;
+    let dec_refresh = Zeroizing::new(encryption_keys.decrypt(enc_refresh).await?);
+    let refresh_token = String::from_utf8((*dec_refresh).clone())
+        .map_err(|e| AppError::Internal(format!("Failed to decode refresh_token: {e}")))?;
+
+    let use_basic_auth = provider.token_endpoint_auth_method == "client_secret_basic";
+    let mut params = vec![
+        ("grant_type".to_string(), "refresh_token".to_string()),
+        ("refresh_token".to_string(), refresh_token.clone()),
+    ];
+    if !use_basic_auth {
+        params.push(oauth_flow::client_id_form_field(&provider, &client_id));
+        if let Some(ref secret) = client_secret {
+            params.push(("client_secret".to_string(), secret.clone()));
+        }
+    }
+
+    let mut request =
+        oauth_flow::expect_json_response(oauth_flow::token_exchange_client().post(token_url));
+    request = if uses_json_oauth_token_exchange(&provider) {
+        request.json(&params_to_json_body(&params))
+    } else {
+        request.form(&params)
+    };
+    if use_basic_auth {
+        request = request.basic_auth(&client_id, client_secret.as_deref());
+    }
+
+    let response = request
+        .send()
+        .await
+        .map_err(|e| AppError::Internal(format!("Token refresh request failed: {e}")))?;
+
+    if !response.status().is_success() {
+        let now = Utc::now();
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        let truncated = &body[..body.len().min(200)];
+
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .update_one(
+                doc! { "_id": &api_key.id },
+                doc! { "$set": {
+                    "status": "failed",
+                    "error_message": format!("Refresh failed: {status} {truncated}"),
+                    "updated_at": bson::DateTime::from_chrono(now),
+                }},
+            )
+            .await?;
+
+        return Err(AppError::Internal(format!(
+            "Token refresh failed with status {status}"
+        )));
+    }
+
+    let token_data: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to parse refresh response: {e}")))?;
+
+    // Lark / Feishu return HTTP 200 with a non-zero `code` field on
+    // refresh failure (e.g. `{code: 99991663, msg: "invalid refresh
+    // token"}`). Treat this as a refresh failure: write `status:
+    // "failed"` so the wizard polling exits and the user knows the
+    // refresh didn't succeed. Without this branch the function would
+    // fall through to the missing-access_token error below and leave
+    // the row in `active` with a stale token (the exact silent-failure
+    // mode the design doc set out to avoid).
+    if token_data
+        .get("code")
+        .and_then(|value| value.as_i64())
+        .is_some_and(|code| code != 0)
+    {
+        let now = Utc::now();
+        let msg = token_data
+            .get("msg")
+            .and_then(|m| m.as_str())
+            .unwrap_or("provider returned non-zero code");
+        let truncated = &msg[..msg.len().min(200)];
+
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .update_one(
+                doc! { "_id": &api_key.id },
+                doc! { "$set": {
+                    "status": "failed",
+                    "error_message": format!("Refresh failed: {truncated}"),
+                    "updated_at": bson::DateTime::from_chrono(now),
+                }},
+            )
+            .await?;
+        return Err(AppError::Internal(
+            "Token refresh failed (provider returned non-zero code)".to_string(),
+        ));
+    }
+
+    let payload = oauth_token_payload(&token_data);
+    let new_access_token = payload["access_token"].as_str().ok_or_else(|| {
+        AppError::Internal("Missing access_token in refresh response".to_string())
+    })?;
+    let new_refresh_token = payload["refresh_token"].as_str();
+    let expires_in = payload["expires_in"].as_i64();
+    let new_scope = payload["scope"].as_str();
+    let now = Utc::now();
+
+    let access_enc = encryption_keys.encrypt(new_access_token.as_bytes()).await?;
+    let mut set_doc = doc! {
+        "access_token_encrypted": bson::Binary {
+            subtype: bson::spec::BinarySubtype::Generic,
+            bytes: access_enc,
+        },
+        "status": "active",
+        "error_message": bson::Bson::Null,
+        "last_used_at": bson::DateTime::from_chrono(now),
+        "updated_at": bson::DateTime::from_chrono(now),
+    };
+    if let Some(exp) = expires_in {
+        let new_expires = now + Duration::seconds(exp);
+        set_doc.insert("expires_at", bson::DateTime::from_chrono(new_expires));
+    }
+    if let Some(rt) = new_refresh_token {
+        let rt_enc = encryption_keys.encrypt(rt.as_bytes()).await?;
+        set_doc.insert(
+            "refresh_token_encrypted",
+            bson::Binary {
+                subtype: bson::spec::BinarySubtype::Generic,
+                bytes: rt_enc,
+            },
+        );
+    }
+    if let Some(scope) = new_scope {
+        set_doc.insert("token_scopes", scope);
+    }
+
+    db.collection::<UserApiKey>(USER_API_KEYS)
+        .update_one(doc! { "_id": &api_key.id }, doc! { "$set": set_doc })
+        .await?;
+
+    let refreshed = db
+        .collection::<UserApiKey>(USER_API_KEYS)
+        .find_one(doc! { "_id": &api_key.id })
+        .await?
+        .ok_or_else(|| {
+            AppError::Internal(
+                "UserApiKey disappeared after refresh_user_api_key_in_place".to_string(),
+            )
+        })?;
+
+    tracing::info!(
+        user_id = %api_key.user_id,
+        connection_id = ?api_key.connection_id,
+        provider_id = %provider_id,
+        "UserApiKey OAuth tokens refreshed in place (multi-connection path)"
+    );
+
+    Ok(refreshed)
 }
 
 /// Get a user's decrypted token for a provider, with lazy refresh for OAuth tokens.
@@ -1898,6 +2343,7 @@ mod tests {
             id: "token-1".to_string(),
             user_id: "user-1".to_string(),
             provider_config_id: "provider-1".to_string(),
+            connection_id: None,
             credential_user_id: None,
             token_type: token_type.to_string(),
             access_token_encrypted: None,
@@ -2221,5 +2667,449 @@ mod tests {
         let percent = normalize_telegram_bot_api_key("123456:ABC%2FDEF")
             .expect_err("percent-encoded slash should be rejected");
         assert!(percent.to_string().contains("invalid characters"));
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // refresh_user_api_key_in_place tests (multi-connection refresh path)
+    // ───────────────────────────────────────────────────────────────────
+
+    use super::{AppError, Duration, PROVIDER_CONFIGS};
+    use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
+    use crate::test_utils::{connect_test_database, test_encryption_keys};
+    use mongodb::bson::doc;
+    use uuid::Uuid;
+
+    async fn spawn_token_server(
+        response: serde_json::Value,
+        status: axum::http::StatusCode,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let app = axum::Router::new().route(
+            "/token",
+            axum::routing::post(move || {
+                let resp = response.clone();
+                async move { (status, axum::Json(resp)) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{addr}/token"), handle)
+    }
+
+    fn make_test_provider(
+        id: &str,
+        token_url: &str,
+        client_id_encrypted: Option<Vec<u8>>,
+        client_secret_encrypted: Option<Vec<u8>>,
+    ) -> ProviderConfig {
+        ProviderConfig {
+            id: id.to_string(),
+            slug: "test-provider".to_string(),
+            name: "Test Provider".to_string(),
+            description: None,
+            provider_type: "oauth2".to_string(),
+            authorization_url: Some("https://example.com/authorize".to_string()),
+            token_url: Some(token_url.to_string()),
+            revocation_url: None,
+            default_scopes: None,
+            client_id_encrypted,
+            client_secret_encrypted,
+            supports_pkce: true,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: None,
+            is_active: true,
+            credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            requires_gateway_url: false,
+            created_by: "system".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    async fn insert_pending_user_api_key(
+        db: &mongodb::Database,
+        encryption_keys: &crate::crypto::aes::EncryptionKeys,
+        provider_config_id: &str,
+        user_oauth_client_id: Option<&str>,
+        user_oauth_client_secret: Option<&str>,
+    ) -> UserApiKey {
+        let connection_id = Uuid::new_v4().to_string();
+        let key_id = Uuid::new_v4().to_string();
+        let refresh_enc = encryption_keys
+            .encrypt(b"stored-refresh-token")
+            .await
+            .unwrap();
+        let access_enc = encryption_keys.encrypt(b"stale-access").await.unwrap();
+        let user_client_id_enc = match user_oauth_client_id {
+            Some(cid) => Some(encryption_keys.encrypt(cid.as_bytes()).await.unwrap()),
+            None => None,
+        };
+        let user_client_secret_enc = match user_oauth_client_secret {
+            Some(s) => Some(encryption_keys.encrypt(s.as_bytes()).await.unwrap()),
+            None => None,
+        };
+        let now = Utc::now();
+        let key = UserApiKey {
+            id: key_id,
+            user_id: Uuid::new_v4().to_string(),
+            label: "test-key".to_string(),
+            credential_type: "oauth2".to_string(),
+            credential_encrypted: None,
+            access_token_encrypted: Some(access_enc),
+            refresh_token_encrypted: Some(refresh_enc),
+            token_scopes: Some("openid".to_string()),
+            expires_at: Some(now - Duration::minutes(1)),
+            provider_config_id: Some(provider_config_id.to_string()),
+            connection_id: Some(connection_id),
+            user_oauth_client_id_encrypted: user_client_id_enc,
+            user_oauth_client_secret_encrypted: user_client_secret_enc,
+            status: "active".to_string(),
+            last_used_at: None,
+            error_message: None,
+            source: Some("user_created".to_string()),
+            source_id: None,
+            created_at: now,
+            updated_at: now,
+        };
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .insert_one(&key)
+            .await
+            .unwrap();
+        key
+    }
+
+    #[tokio::test]
+    async fn refresh_user_api_key_in_place_provider_owned_creds() {
+        let Some(db) = connect_test_database("refresh_in_place_provider_creds").await else {
+            eprintln!("skipping refresh_user_api_key_in_place test: no local MongoDB available");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let (token_url, _server) = spawn_token_server(
+            serde_json::json!({
+                "access_token": "fresh-access-token",
+                "refresh_token": "fresh-refresh-token",
+                "expires_in": 3600,
+                "scope": "openid profile",
+            }),
+            axum::http::StatusCode::OK,
+        )
+        .await;
+
+        // Provider-owned creds (codex/OpenAI scenario): provider has
+        // client_id_encrypted, the UserApiKey does NOT carry BYO creds.
+        let provider_id = Uuid::new_v4().to_string();
+        let admin_cid_enc = encryption_keys.encrypt(b"admin-client-id").await.unwrap();
+        let provider = make_test_provider(&provider_id, &token_url, Some(admin_cid_enc), None);
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(&provider)
+            .await
+            .unwrap();
+
+        let key =
+            insert_pending_user_api_key(&db, &encryption_keys, &provider_id, None, None).await;
+
+        let refreshed = super::refresh_user_api_key_in_place(&db, &encryption_keys, &key)
+            .await
+            .expect("refresh should succeed");
+
+        assert_eq!(refreshed.status, "active");
+        assert!(refreshed.error_message.is_none());
+        // Access token updated to the mock's value (decrypt to verify).
+        let bytes = encryption_keys
+            .decrypt(refreshed.access_token_encrypted.as_ref().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(String::from_utf8(bytes).unwrap(), "fresh-access-token");
+        assert_eq!(refreshed.token_scopes.as_deref(), Some("openid profile"));
+        // expires_at advanced past now.
+        assert!(refreshed.expires_at.unwrap() > Utc::now());
+    }
+
+    #[tokio::test]
+    async fn refresh_user_api_key_in_place_byo_creds_lark() {
+        let Some(db) = connect_test_database("refresh_in_place_byo_creds").await else {
+            eprintln!("skipping refresh_user_api_key_in_place test: no local MongoDB available");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let (token_url, _server) = spawn_token_server(
+            serde_json::json!({
+                "access_token": "byo-access-token",
+                "refresh_token": "byo-refresh-token",
+                "expires_in": 7200,
+            }),
+            axum::http::StatusCode::OK,
+        )
+        .await;
+
+        // Lark scenario: provider has NO admin client_id; the UserApiKey
+        // carries the user-provided OAuth client_id/secret.
+        let provider_id = Uuid::new_v4().to_string();
+        let provider = make_test_provider(&provider_id, &token_url, None, None);
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(&provider)
+            .await
+            .unwrap();
+
+        let key = insert_pending_user_api_key(
+            &db,
+            &encryption_keys,
+            &provider_id,
+            Some("byo-client-id"),
+            Some("byo-client-secret"),
+        )
+        .await;
+
+        let refreshed = super::refresh_user_api_key_in_place(&db, &encryption_keys, &key)
+            .await
+            .expect("BYO refresh should succeed");
+
+        assert_eq!(refreshed.status, "active");
+        let bytes = encryption_keys
+            .decrypt(refreshed.access_token_encrypted.as_ref().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(String::from_utf8(bytes).unwrap(), "byo-access-token");
+    }
+
+    #[tokio::test]
+    async fn refresh_user_api_key_in_place_writes_failed_on_4xx() {
+        let Some(db) = connect_test_database("refresh_in_place_failure").await else {
+            eprintln!("skipping refresh_user_api_key_in_place test: no local MongoDB available");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let (token_url, _server) = spawn_token_server(
+            serde_json::json!({"error": "invalid_grant"}),
+            axum::http::StatusCode::UNAUTHORIZED,
+        )
+        .await;
+
+        let provider_id = Uuid::new_v4().to_string();
+        let admin_cid_enc = encryption_keys.encrypt(b"admin-client-id").await.unwrap();
+        let provider = make_test_provider(&provider_id, &token_url, Some(admin_cid_enc), None);
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(&provider)
+            .await
+            .unwrap();
+
+        let key =
+            insert_pending_user_api_key(&db, &encryption_keys, &provider_id, None, None).await;
+
+        let err = super::refresh_user_api_key_in_place(&db, &encryption_keys, &key)
+            .await
+            .expect_err("expected Err on 4xx refresh");
+        assert!(matches!(err, AppError::Internal(_)));
+
+        // Status persisted as "failed" (not "refresh_failed" — see doc §4.7).
+        let updated = db
+            .collection::<UserApiKey>(USER_API_KEYS)
+            .find_one(doc! { "_id": &key.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.status, "failed");
+        assert!(
+            updated
+                .error_message
+                .as_deref()
+                .is_some_and(|m| m.contains("401"))
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_user_api_key_in_place_handles_lark_json_body_and_code_error() {
+        // Lark / Feishu specifics:
+        //   1. Refresh request must be JSON body, not form-encoded.
+        //   2. Provider returns HTTP 200 with `{code: <non-zero>, msg: ...}`
+        //      on failure (not the standard 4xx body).
+        // Verify the function correctly writes `status: "failed"` instead
+        // of falling through to a missing-access_token error.
+        let Some(db) = connect_test_database("refresh_in_place_lark_code_err").await else {
+            eprintln!("skipping refresh_user_api_key_in_place test: no local MongoDB available");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        // Lark-flavored error: HTTP 200 + nonzero code.
+        let (token_url, _server) = spawn_token_server(
+            serde_json::json!({
+                "code": 99991663,
+                "msg": "invalid refresh token",
+                "data": null,
+            }),
+            axum::http::StatusCode::OK,
+        )
+        .await;
+
+        let provider_id = Uuid::new_v4().to_string();
+        let admin_cid_enc = encryption_keys.encrypt(b"lark-client-id").await.unwrap();
+        let admin_sec_enc = encryption_keys
+            .encrypt(b"lark-client-secret")
+            .await
+            .unwrap();
+        // slug = "lark" triggers `uses_json_oauth_token_exchange`, exercising
+        // the JSON-body code path that legacy `refresh_oauth_token` lacks.
+        let mut provider = make_test_provider(
+            &provider_id,
+            &token_url,
+            Some(admin_cid_enc),
+            Some(admin_sec_enc),
+        );
+        provider.slug = "lark".to_string();
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(&provider)
+            .await
+            .unwrap();
+
+        let key =
+            insert_pending_user_api_key(&db, &encryption_keys, &provider_id, None, None).await;
+
+        let err = super::refresh_user_api_key_in_place(&db, &encryption_keys, &key)
+            .await
+            .expect_err("Lark non-zero code response should error");
+        assert!(matches!(err, AppError::Internal(_)));
+
+        let updated = db
+            .collection::<UserApiKey>(USER_API_KEYS)
+            .find_one(doc! { "_id": &key.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            updated.status, "failed",
+            "Lark code-error must mark the key as failed so the wizard exits"
+        );
+        assert!(
+            updated
+                .error_message
+                .as_deref()
+                .is_some_and(|m| m.contains("invalid refresh token")),
+            "error_message should include the Lark msg, got {:?}",
+            updated.error_message
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_user_api_key_in_place_preserves_refresh_token_when_provider_omits_it() {
+        // Some providers don't rotate refresh_tokens on every refresh
+        // (e.g. they only issue a new one when the old one is near
+        // expiry). Verify the function keeps the existing refresh_token
+        // in that case instead of nulling it out.
+        let Some(db) = connect_test_database("refresh_in_place_keeps_old_refresh").await else {
+            eprintln!("skipping refresh_user_api_key_in_place test: no local MongoDB available");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let (token_url, _server) = spawn_token_server(
+            // Response omits refresh_token entirely — standard OAuth behavior.
+            serde_json::json!({
+                "access_token": "new-access",
+                "expires_in": 3600,
+            }),
+            axum::http::StatusCode::OK,
+        )
+        .await;
+
+        let provider_id = Uuid::new_v4().to_string();
+        let admin_cid_enc = encryption_keys.encrypt(b"admin-client-id").await.unwrap();
+        let provider = make_test_provider(&provider_id, &token_url, Some(admin_cid_enc), None);
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(&provider)
+            .await
+            .unwrap();
+
+        let key =
+            insert_pending_user_api_key(&db, &encryption_keys, &provider_id, None, None).await;
+        let original_rt_encrypted = key.refresh_token_encrypted.clone().unwrap();
+
+        let refreshed = super::refresh_user_api_key_in_place(&db, &encryption_keys, &key)
+            .await
+            .expect("refresh should succeed");
+
+        // Access token rotated to the new value.
+        let access_bytes = encryption_keys
+            .decrypt(refreshed.access_token_encrypted.as_ref().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(String::from_utf8(access_bytes).unwrap(), "new-access");
+
+        // Refresh token preserved (provider didn't issue a new one).
+        let restored_rt = refreshed.refresh_token_encrypted.clone().unwrap();
+        let stored_plain = encryption_keys
+            .decrypt(&original_rt_encrypted)
+            .await
+            .unwrap();
+        let restored_plain = encryption_keys.decrypt(&restored_rt).await.unwrap();
+        assert_eq!(
+            stored_plain, restored_plain,
+            "refresh_token must be preserved when provider omits it from the response"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_user_api_key_in_place_errors_when_refresh_token_missing() {
+        let Some(db) = connect_test_database("refresh_in_place_no_refresh").await else {
+            eprintln!("skipping refresh_user_api_key_in_place test: no local MongoDB available");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let provider_id = Uuid::new_v4().to_string();
+        let admin_cid_enc = encryption_keys.encrypt(b"admin-client-id").await.unwrap();
+        let provider = make_test_provider(
+            &provider_id,
+            "http://127.0.0.1:0/token",
+            Some(admin_cid_enc),
+            None,
+        );
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(&provider)
+            .await
+            .unwrap();
+
+        let now = Utc::now();
+        let key = UserApiKey {
+            id: Uuid::new_v4().to_string(),
+            user_id: Uuid::new_v4().to_string(),
+            label: "no-refresh-token".to_string(),
+            credential_type: "oauth2".to_string(),
+            credential_encrypted: None,
+            access_token_encrypted: Some(encryption_keys.encrypt(b"a").await.unwrap()),
+            refresh_token_encrypted: None, // ← missing on purpose
+            token_scopes: None,
+            expires_at: None,
+            provider_config_id: Some(provider_id.clone()),
+            connection_id: Some(Uuid::new_v4().to_string()),
+            user_oauth_client_id_encrypted: None,
+            user_oauth_client_secret_encrypted: None,
+            status: "active".to_string(),
+            last_used_at: None,
+            error_message: None,
+            source: Some("user_created".to_string()),
+            source_id: None,
+            created_at: now,
+            updated_at: now,
+        };
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .insert_one(&key)
+            .await
+            .unwrap();
+
+        let err = super::refresh_user_api_key_in_place(&db, &encryption_keys, &key)
+            .await
+            .expect_err("missing refresh_token should error");
+        assert!(matches!(err, AppError::Internal(ref m) if m.contains("refresh_token")));
     }
 }

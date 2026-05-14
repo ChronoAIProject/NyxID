@@ -1942,6 +1942,7 @@ mod tests {
             token_scopes: None,
             expires_at: None,
             provider_config_id: None,
+            connection_id: None,
             user_oauth_client_id_encrypted: None,
             user_oauth_client_secret_encrypted: None,
             status: "active".to_string(),

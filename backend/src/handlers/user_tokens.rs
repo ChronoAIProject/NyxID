@@ -13,7 +13,7 @@ use crate::mw::auth::{AuthUser, OptionalAuthUser};
 use crate::services::url_validation::validate_base_url;
 use crate::services::{
     admin_user_service, audit_service, credential_push_service, org_service, provider_service,
-    user_api_key_service, user_token_service,
+    user_api_key_service, user_service_service, user_token_service,
 };
 
 // TODO(SEC-9): Apply stricter per-endpoint rate limiting to OAuth callback and
@@ -78,6 +78,14 @@ pub struct OAuthInitiateQuery {
     /// member of the org can proxy through the resulting credential. The
     /// caller must be an admin of the org.
     pub target_org_id: Option<String>,
+    /// Multi-connection: the placeholder this OAuth flow is authorizing,
+    /// identified by the `POST /keys` response `id` (a `UserService` id).
+    /// When set, the handler resolves it to the linked `UserApiKey`'s
+    /// `connection_id` and threads that into the `OAuthState` so the
+    /// callback writes the token directly onto that key (instead of the
+    /// legacy `user_provider_tokens` path). Set by the wizard for every
+    /// multi-connection add; absent for legacy provider-connect flows.
+    pub key_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -90,6 +98,9 @@ pub struct DeviceCodeInitiateQuery {
     /// resulting token is stored under the org's user_id. The caller must
     /// be an admin of the org. See [`OAuthInitiateQuery::target_org_id`].
     pub target_org_id: Option<String>,
+    /// Multi-connection: the placeholder this device-code flow is
+    /// authorizing (a `UserService` id). See [`OAuthInitiateQuery::key_id`].
+    pub key_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -270,6 +281,49 @@ async fn resolve_oauth_target_org(
     Ok(Some(target.to_string()))
 }
 
+/// Multi-connection: resolve the `connection_id` for the placeholder the
+/// wizard is authorizing, so the OAuth / device-code callback can scope
+/// its token write to that one `UserApiKey` (`write_oauth_tokens_to_key`)
+/// instead of the legacy `user_provider_tokens` path.
+///
+/// The wizard's `key_id` query param carries the `POST /keys` response
+/// `id`, which is the **`UserService`** id (the `UserApiKey` id is the
+/// separate `api_key_id` field on that response). So this resolves
+/// `key_id` as a `UserService` id first — looking up the service, then
+/// reading `connection_id` off its linked `UserApiKey`. As a defensive
+/// fallback — and to honor the original param contract — if no
+/// `UserService` matches it also tries `key_id` as a `UserApiKey` id
+/// directly, so any caller passing a `UserApiKey` id still works.
+///
+/// `owner_id` must be the effective owner of the placeholder — the org
+/// user_id for org-scoped adds, otherwise the caller. Both lookups are
+/// owner-scoped. Returns `None` (legacy path) when `key_id` is absent,
+/// nothing resolves under `owner_id`, or the resolved key carries no
+/// `connection_id`. A `None` result is always safe: the callback simply
+/// takes the legacy write path.
+async fn resolve_connection_id_for_key(
+    state: &AppState,
+    owner_id: &str,
+    key_id: Option<&str>,
+) -> Option<String> {
+    let key_id = key_id?;
+    // Primary path: `key_id` is a `UserService` id (what both wizard
+    // frontends send). Resolve service -> its `api_key_id` -> that
+    // `UserApiKey`'s `connection_id`.
+    if let Ok(service) = user_service_service::get_user_service(&state.db, owner_id, key_id).await
+        && let Some(api_key_id) = service.api_key_id.as_deref()
+        && let Ok(key) = user_api_key_service::get_api_key(&state.db, owner_id, api_key_id).await
+    {
+        return key.connection_id;
+    }
+    // Fallback: `key_id` may already be a `UserApiKey` id (the original
+    // param contract). Preserved so no existing caller regresses.
+    user_api_key_service::get_api_key(&state.db, owner_id, key_id)
+        .await
+        .ok()
+        .and_then(|key| key.connection_id)
+}
+
 /// GET /api/v1/providers/{provider_id}/connect/oauth
 pub async fn initiate_oauth_connect(
     State(state): State<AppState>,
@@ -289,6 +343,14 @@ pub async fn initiate_oauth_connect(
     let target_org_user_id =
         resolve_oauth_target_org(&state, &user_id_str, query.target_org_id.as_deref()).await?;
 
+    // Multi-connection: if the wizard passed the placeholder `key_id`,
+    // thread its `connection_id` so the callback writes the token onto
+    // that key. `None` (legacy provider-connect flows) keeps the
+    // `user_provider_tokens` write path.
+    let effective_owner = target_org_user_id.as_deref().unwrap_or(&user_id_str);
+    let connection_id =
+        resolve_connection_id_for_key(&state, effective_owner, query.key_id.as_deref()).await;
+
     let auth_url = user_token_service::initiate_oauth_connect(
         &state.db,
         &state.encryption_keys,
@@ -298,6 +360,7 @@ pub async fn initiate_oauth_connect(
         target_org_user_id.as_deref(),
         query.redirect_path.as_deref(),
         &additional_scopes,
+        connection_id.as_deref(),
     )
     .await?;
 
@@ -323,7 +386,7 @@ pub async fn oauth_callback(
     Query(query): Query<OAuthCallbackQuery>,
     headers: HeaderMap,
 ) -> AppResult<Json<ConnectResponse>> {
-    let token = user_token_service::handle_oauth_callback(
+    let outcome = user_token_service::handle_oauth_callback(
         &state.db,
         &state.encryption_keys,
         &state.config.base_url,
@@ -335,11 +398,14 @@ pub async fn oauth_callback(
 
     audit_service::log_async(
         state.db.clone(),
-        Some(token.user_id.clone()),
+        Some(outcome.user_id.clone()),
         "provider_token_connected".to_string(),
         Some(serde_json::json!({
             "provider_id": &provider_id,
             "token_type": "oauth2",
+            // Surfaces which write path executed: a UUID for multi-
+            // connection, null for the legacy single-tenant path.
+            "connection_id": &outcome.connection_id,
         })),
         crate::handlers::admin_helpers::extract_ip(&headers),
         crate::handlers::admin_helpers::extract_user_agent(&headers),
@@ -535,15 +601,16 @@ async fn generic_oauth_callback_impl(
     )
     .await
     {
-        Ok(token) => {
+        Ok(outcome) => {
             audit_service::log_async(
                 state.db.clone(),
-                Some(token.user_id.clone()),
+                Some(outcome.user_id.clone()),
                 "provider_token_connected".to_string(),
                 Some(serde_json::json!({
                     "provider_id": provider_id,
                     "token_type": "oauth2",
                     "on_behalf_of": &oauth_state.target_user_id,
+                    "connection_id": &outcome.connection_id,
                 })),
                 auth_user.as_ref().and_then(|u| u.ip_address.clone()),
                 auth_user.as_ref().and_then(|u| u.user_agent.clone()),
@@ -551,15 +618,32 @@ async fn generic_oauth_callback_impl(
                 auth_user.as_ref().and_then(|u| u.api_key_name.clone()),
             );
 
-            if let Err(error) =
-                sync_provider_credentials_to_unified_keys(&state, &token.user_id, provider_id, true)
-                    .await
+            // Multi-connection writes already populated the UserApiKey
+            // directly inside `handle_oauth_callback`. The legacy fan-out
+            // sync only matters when the callback wrote to
+            // `user_provider_tokens` (connection_id == None).
+            if outcome.connection_id.is_some() {
+                // Skip legacy sync but still wake the wizard if redirect was set.
+                // (No further work needed; UserApiKey already active.)
+                tracing::debug!(
+                    user_id = %outcome.user_id,
+                    provider_id = %provider_id,
+                    connection_id = ?outcome.connection_id,
+                    "Multi-connection callback complete; skipping legacy sync"
+                );
+            } else if let Err(error) = sync_provider_credentials_to_unified_keys(
+                &state,
+                &outcome.user_id,
+                provider_id,
+                true,
+            )
+            .await
             {
                 let user_msg = safe_error_message(&error);
                 let failed_placeholders =
                     match user_api_key_service::fail_pending_placeholders_for_provider(
                         &state.db,
-                        &token.user_id,
+                        &outcome.user_id,
                         provider_id,
                         &user_msg,
                     )
@@ -568,7 +652,7 @@ async fn generic_oauth_callback_impl(
                         Ok(count) => Some(count),
                         Err(e) => {
                             tracing::warn!(
-                                user_id = %token.user_id,
+                                user_id = %outcome.user_id,
                                 provider_id = %provider_id,
                                 error = %e,
                                 "failed to mark OAuth placeholders as failed after sync error"
@@ -578,7 +662,7 @@ async fn generic_oauth_callback_impl(
                     };
                 audit_service::log_async(
                     state.db.clone(),
-                    Some(token.user_id.clone()),
+                    Some(outcome.user_id.clone()),
                     "provider_oauth_callback_failed".to_string(),
                     Some(serde_json::json!({
                         "provider_id": provider_id,
@@ -809,6 +893,14 @@ pub async fn request_device_code(
     let target_org_user_id =
         resolve_oauth_target_org(&state, &user_id_str, query.target_org_id.as_deref()).await?;
 
+    // Multi-connection: thread the placeholder's `connection_id` (if the
+    // wizard passed `key_id`) so the device-code completion writes the
+    // token onto that key. `None` keeps the legacy `user_provider_tokens`
+    // path. See `initiate_oauth_connect` for the full rationale.
+    let effective_owner = target_org_user_id.as_deref().unwrap_or(&user_id_str);
+    let connection_id =
+        resolve_connection_id_for_key(&state, effective_owner, query.key_id.as_deref()).await;
+
     let result = user_token_service::request_device_code(
         &state.db,
         &state.encryption_keys,
@@ -816,6 +908,7 @@ pub async fn request_device_code(
         &provider_id,
         target_org_user_id.as_deref(),
         &additional_scopes,
+        connection_id.as_deref(),
     )
     .await?;
 
@@ -1113,6 +1206,7 @@ mod tests {
             id: token_id.to_string(),
             user_id: user_id.to_string(),
             provider_config_id: provider_id.to_string(),
+            connection_id: None,
             credential_user_id: None,
             token_type: "oauth2".to_string(),
             access_token_encrypted: Some(vec![1, 2, 3]),
@@ -1145,6 +1239,7 @@ mod tests {
             target_user_id: None,
             credential_user_id: None,
             redirect_path: None,
+            connection_id: None,
             consumed: false,
             expires_at: now + Duration::minutes(10),
             created_at: now,
@@ -1164,6 +1259,7 @@ mod tests {
             token_scopes: None,
             expires_at: None,
             provider_config_id: Some(provider_id.to_string()),
+            connection_id: None,
             user_oauth_client_id_encrypted: None,
             user_oauth_client_secret_encrypted: None,
             status: "pending_auth".to_string(),

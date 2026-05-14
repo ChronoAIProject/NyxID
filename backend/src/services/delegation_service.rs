@@ -47,6 +47,25 @@ fn normalize_delegated_injection(
 /// provider token is missing (CR-15).
 ///
 /// Uses batch queries for provider lookups (CR-4/5/6: fix N+1).
+///
+/// LEGACY-PATH ONLY — multi-connection invariant.
+/// This function reads `UserProviderToken` rows via
+/// `user_token_service::get_active_token`, which is keyed by
+/// `(user_id, provider_config_id)` and has no notion of `connection_id`.
+/// That is correct because **every caller gates this behind the legacy
+/// `DownstreamService` path**: `handlers/proxy.rs` skips it when
+/// `resolved_user_service_id.is_some()`, `handlers/llm_gateway.rs` skips
+/// it when `resolved_via_user_service`, and `services/mcp_service.rs`
+/// skips it for `McpToolSource::UserManaged`. A multi-connection
+/// `UserApiKey` (`connection_id: Some`) only ever backs a new-path
+/// `UserService`, so it can never reach this function — its token is
+/// injected directly from `target.credential` by the proxy.
+///
+/// If a future refactor ever routed a multi-connection request here, the
+/// failure mode is *safe*: `get_active_token` returns `NotFound` (no
+/// `user_provider_tokens` row exists for a connection-scoped key), which
+/// surfaces as an explicit `BadRequest("... connection required")` for
+/// required providers — never a silent wrong-credential injection.
 pub async fn resolve_delegated_credentials(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
@@ -263,6 +282,7 @@ mod tests {
             id: uuid::Uuid::new_v4().to_string(),
             user_id: org_user_id.clone(),
             provider_config_id: provider_id,
+            connection_id: None,
             credential_user_id: None,
             token_type: "oauth2".to_string(),
             access_token_encrypted: Some(

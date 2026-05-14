@@ -33,6 +33,13 @@ pub struct UserApiKey {
     /// Optional: link to ProviderConfig for OAuth refresh
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_config_id: Option<String>,
+    /// Optional: which `UserProviderToken.connection_id` this key is bound to.
+    /// `None` for non-OAuth keys (api_key/bearer/basic/ssh_certificate/
+    /// node_managed) and for pre-migration OAuth rows. After backfill, all
+    /// OAuth-backed keys have a `connection_id` so token sync can scope by
+    /// connection rather than by `(user_id, provider_config_id)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<String>,
 
     // --- User-owned OAuth app credentials (merged from UserProviderCredentials) ---
     #[serde(default, with = "crate::models::bson_bytes::optional")]
@@ -82,6 +89,7 @@ mod tests {
             token_scopes: None,
             expires_at: None,
             provider_config_id: None,
+            connection_id: None,
             user_oauth_client_id_encrypted: None,
             user_oauth_client_secret_encrypted: None,
             status: "active".to_string(),
@@ -97,10 +105,12 @@ mod tests {
         assert_eq!(key.id, restored.id);
         assert_eq!(key.credential_type, restored.credential_type);
         assert_eq!(key.status, restored.status);
+        assert!(restored.connection_id.is_none());
     }
 
     #[test]
     fn bson_roundtrip_oauth2() {
+        let conn_id = uuid::Uuid::new_v4().to_string();
         let key = UserApiKey {
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
@@ -112,6 +122,7 @@ mod tests {
             token_scopes: Some("repo read:user".to_string()),
             expires_at: Some(Utc::now()),
             provider_config_id: Some("github-provider-id".to_string()),
+            connection_id: Some(conn_id.clone()),
             user_oauth_client_id_encrypted: Some(vec![10, 11]),
             user_oauth_client_secret_encrypted: Some(vec![12, 13]),
             status: "active".to_string(),
@@ -132,5 +143,26 @@ mod tests {
         assert!(restored.expires_at.is_some());
         assert_eq!(restored.source.as_deref(), Some("migration_provider_token"));
         assert_eq!(restored.source_id.as_deref(), Some("old-token-id"));
+        assert_eq!(restored.connection_id.as_deref(), Some(conn_id.as_str()));
+    }
+
+    #[test]
+    fn bson_backward_compat_missing_connection_id() {
+        // Pre-migration documents have no `connection_id` field at all.
+        // The deserializer must tolerate the missing field so a freshly
+        // deployed backend can read existing rows before the backfill
+        // migration runs.
+        let doc = bson::doc! {
+            "_id": uuid::Uuid::new_v4().to_string(),
+            "user_id": uuid::Uuid::new_v4().to_string(),
+            "label": "Pre-migration OAuth Key",
+            "credential_type": "oauth2",
+            "status": "active",
+            "provider_config_id": "github-provider-id",
+            "created_at": bson::DateTime::from_chrono(Utc::now()),
+            "updated_at": bson::DateTime::from_chrono(Utc::now()),
+        };
+        let restored: UserApiKey = bson::from_document(doc).expect("deserialize");
+        assert!(restored.connection_id.is_none());
     }
 }

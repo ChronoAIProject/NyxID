@@ -28,6 +28,15 @@ pub struct OAuthState {
     /// the same OAuth client even if provider config changes.
     #[serde(default)]
     pub credential_user_id: Option<String>,
+    /// The `UserProviderToken.connection_id` (and matching
+    /// `UserApiKey.connection_id`) this OAuth flow will write to on
+    /// callback. Set when the flow is initiated for a fresh "add" so the
+    /// callback's token write is scoped to one connection instead of
+    /// every token under `(user, provider)`. `None` only for legacy
+    /// states created before the multi-connection rollout — those fall
+    /// back to the old `(user, provider)` write scope.
+    #[serde(default)]
+    pub connection_id: Option<String>,
     /// Custom frontend redirect path after OAuth callback completes.
     /// e.g., "/admin/service-accounts/{sa_id}" for admin flows.
     #[serde(default)]
@@ -71,6 +80,7 @@ mod tests {
             target_user_id: None,
             credential_user_id: None,
             redirect_path: None,
+            connection_id: None,
             consumed: false,
             expires_at: Utc::now(),
             created_at: Utc::now(),
@@ -97,6 +107,7 @@ mod tests {
             target_user_id: None,
             credential_user_id: Some(uuid::Uuid::new_v4().to_string()),
             redirect_path: None,
+            connection_id: None,
             consumed: false,
             expires_at: Utc::now(),
             created_at: Utc::now(),
@@ -123,6 +134,7 @@ mod tests {
             target_user_id: Some(sa_id.clone()),
             credential_user_id: Some(uuid::Uuid::new_v4().to_string()),
             redirect_path: Some(redirect.clone()),
+            connection_id: None,
             consumed: false,
             expires_at: Utc::now(),
             created_at: Utc::now(),
@@ -153,5 +165,9 @@ mod tests {
         // the field — the in-flight-callback race fix in `handle_oauth_
         // callback` tolerates either shape.
         assert!(!restored.consumed);
+        // Pre-multi-connection states have no `connection_id`; the
+        // callback path treats `None` as "use the legacy
+        // (user, provider) write scope".
+        assert!(restored.connection_id.is_none());
     }
 }

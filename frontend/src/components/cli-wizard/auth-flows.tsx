@@ -859,10 +859,15 @@ export function OAuthFlow({
           return;
         }
 
+        // `key_id` threads the placeholder's multi-connection id into the
+        // OAuth state so the callback writes the token directly onto this
+        // UserApiKey (rather than the legacy user_provider_tokens path).
+        // Harmless for legacy keys: the backend just falls back to the
+        // legacy write path when the key carries no connection_id.
         const initiate = await api.get<InitiateOAuthResponse>(
           `/providers/${encodeURIComponent(providerId)}/connect/oauth?redirect_path=${encodeURIComponent(
             `/keys/${placeholder.id}`,
-          )}`,
+          )}&key_id=${encodeURIComponent(placeholder.id)}`,
         );
         if (cancel) return;
         if (!initiate.authorization_url) {
@@ -1339,8 +1344,14 @@ export function DeviceCodeFlow({
         }
       }
 
+      // `key_id` threads the placeholder's multi-connection id into the
+      // device-code OAuth state so completion writes the token directly
+      // onto this UserApiKey. Omitted when no placeholder id is known;
+      // the backend falls back to the legacy write path either way.
       const init = await api.post<DeviceCodeInitiateResponse>(
-        `/providers/${encodeURIComponent(providerId)}/connect/device-code/initiate`,
+        `/providers/${encodeURIComponent(providerId)}/connect/device-code/initiate${
+          keyId ? `?key_id=${encodeURIComponent(keyId)}` : ""
+        }`,
         {},
       );
       if (myGen !== genRef.current) return;

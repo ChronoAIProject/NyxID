@@ -42,6 +42,11 @@ pub struct CreateApiKeyParams<'a> {
     pub token_scopes: Option<&'a str>,
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
     pub provider_config_id: Option<&'a str>,
+    /// Per-add OAuth connection identifier. Set when this key is being
+    /// minted as part of a fresh OAuth/device-code add (so the eventual
+    /// callback can scope the token write to this key). `None` for
+    /// non-OAuth keys (api_key / bearer / basic / ssh / node-managed).
+    pub connection_id: Option<&'a str>,
     pub status: &'a str,
     pub source: Option<&'a str>,
     pub source_id: Option<&'a str>,
@@ -142,6 +147,7 @@ pub async fn create_api_key(
         token_scopes: params.token_scopes.map(str::to_string),
         expires_at: params.expires_at,
         provider_config_id: params.provider_config_id.map(str::to_string),
+        connection_id: params.connection_id.map(str::to_string),
         user_oauth_client_id_encrypted: None,
         user_oauth_client_secret_encrypted: None,
         status: params.status.to_string(),
@@ -209,6 +215,7 @@ pub async fn create_api_key_from_provider_token(
         token_scopes: provider_token.token_scopes.clone(),
         expires_at: provider_token.expires_at,
         provider_config_id: Some(provider_config_id.to_string()),
+        connection_id: provider_token.connection_id.clone(),
         user_oauth_client_id_encrypted: None,
         user_oauth_client_secret_encrypted: None,
         status: provider_token.status.clone(),
@@ -226,6 +233,17 @@ pub async fn create_api_key_from_provider_token(
 }
 
 /// Synchronize any provider-linked unified keys with the latest provider token state.
+///
+/// Legacy-only fan-out: this function operates on keys with no
+/// `connection_id` (the pre-multi-connection storage model where a
+/// single `(user, provider)` token is shared by every key for that
+/// pair). Multi-connection keys (`connection_id: Some(uuid)`) own their
+/// tokens directly on the `UserApiKey` row and are written by
+/// [`write_oauth_tokens_to_key`] / refreshed by
+/// [`crate::services::user_token_service::refresh_user_api_key_in_place`];
+/// they must NOT be touched here, otherwise a legacy refresh on one
+/// connection would clobber a sibling connection's independently-managed
+/// token (the "B2" failure mode in the design doc).
 pub async fn sync_provider_token_to_api_keys(
     db: &mongodb::Database,
     user_id: &str,
@@ -240,12 +258,17 @@ pub async fn sync_provider_token_to_api_keys(
     // token's status. `revoked` and `failed` are terminal by design:
     // once explicit cleanup or provider denial took effect, a later
     // provider callback must not flip that row back to `active`.
+    //
+    // `connection_id: null` filter scopes this to legacy keys only
+    // (B2 fix). Multi-connection keys deliberately have `connection_id:
+    // Some(uuid)` and are excluded from the legacy fan-out path.
     let keys: Vec<UserApiKey> = db
         .collection::<UserApiKey>(COLLECTION_NAME)
         .find(doc! {
             "user_id": user_id,
             "provider_config_id": provider_config_id,
             "status": { "$nin": ["revoked", "failed"] },
+            "connection_id": null,
         })
         .await?
         .try_collect()
@@ -305,6 +328,90 @@ pub async fn sync_provider_token_to_api_keys(
     Ok(())
 }
 
+/// Multi-connection OAuth callback write path.
+///
+/// Writes a freshly-minted OAuth/device-code token directly onto the
+/// `UserApiKey` row identified by `connection_id`, encrypting tokens
+/// before storage and flipping the row from `pending_auth` to `active`.
+/// Unlike [`sync_provider_token_to_api_keys`] (which fans out per
+/// `(user, provider)`), this function is scoped to a single key — one
+/// connection's authorization can never clobber a sibling connection's
+/// token, even when both belong to the same `(user, provider)` pair.
+///
+/// Callers (`handle_oauth_callback`, `store_device_code_tokens`) reach
+/// this path only when `OAuthState.connection_id` is `Some`. The
+/// `connection_id` is unique across `user_api_keys` (enforced by the
+/// partial unique index added in `db.rs::ensure_indexes`).
+///
+/// Errors:
+/// - `AppError::NotFound` if no `UserApiKey` matches the connection_id
+///   (e.g. the user deleted the pending placeholder mid-flow).
+/// - Encryption / database errors bubble up unchanged.
+pub async fn write_oauth_tokens_to_key(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    connection_id: &str,
+    access_token: &str,
+    refresh_token: Option<&str>,
+    token_scopes: Option<&str>,
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> AppResult<()> {
+    let access_enc = encryption_keys.encrypt(access_token.as_bytes()).await?;
+    let refresh_enc = match refresh_token {
+        Some(rt) if !rt.is_empty() => Some(encryption_keys.encrypt(rt.as_bytes()).await?),
+        _ => None,
+    };
+
+    let now = bson::DateTime::from_chrono(Utc::now());
+
+    let mut set_doc = doc! {
+        "credential_type": "oauth2",
+        "access_token_encrypted": optional_binary_bson(Some(&access_enc)),
+        "refresh_token_encrypted": optional_binary_bson(refresh_enc.as_ref()),
+        "token_scopes": optional_string_bson(token_scopes),
+        "expires_at": optional_datetime_bson(expires_at),
+        "status": "active",
+        "error_message": bson::Bson::Null,
+        "updated_at": &now,
+    };
+    // Preserve the existing `credential_encrypted` (which is None for
+    // OAuth keys); explicit unset so a previously-set credential cannot
+    // mask the new access_token at proxy time.
+    set_doc.insert("credential_encrypted", bson::Bson::Null);
+
+    // Exclude terminal-status rows from the write. `revoked` / `failed`
+    // are terminal by design (matching `sync_provider_token_to_api_keys`
+    // and `fail_pending_placeholders_for_provider`): once a user has
+    // revoked the key or it failed, a duplicate or late provider
+    // callback must not resurrect it back to `active`. A fresh add
+    // (`pending_auth`) and a re-authorization of a live connection
+    // (`active` / `expired`) are both still matched.
+    let result = db
+        .collection::<UserApiKey>(COLLECTION_NAME)
+        .update_one(
+            doc! {
+                "connection_id": connection_id,
+                "status": { "$nin": ["revoked", "failed"] },
+            },
+            doc! { "$set": set_doc },
+        )
+        .await?;
+
+    if result.matched_count == 0 {
+        return Err(AppError::NotFound(format!(
+            "No writable UserApiKey found for connection_id {connection_id} \
+             (it may not exist, or may have been revoked / already failed)"
+        )));
+    }
+
+    tracing::info!(
+        connection_id = %connection_id,
+        "OAuth tokens written to UserApiKey (multi-connection path)"
+    );
+
+    Ok(())
+}
+
 /// Mark placeholder UserApiKey rows tied to a denied or failed OAuth
 /// flow so the wizard's polling can exit immediately instead of waiting for
 /// the 5-minute deadline.
@@ -312,6 +419,13 @@ pub async fn sync_provider_token_to_api_keys(
 /// The status filter keeps this race-safe: an OAuth callback that already
 /// activated a credential is no longer `pending_auth`, so it will not be
 /// overwritten by a late provider error callback.
+///
+/// Legacy-only fan-out: scoped to `connection_id: null` so a denial on
+/// one legacy flow cannot mark a concurrent multi-connection placeholder
+/// (different `connection_id`) as failed. Multi-connection failures are
+/// recorded directly on their own `UserApiKey` row by
+/// [`crate::services::user_token_service::refresh_user_api_key_in_place`]
+/// or the OAuth callback's multi-connection branch.
 pub async fn fail_pending_placeholders_for_provider(
     db: &mongodb::Database,
     user_id: &str,
@@ -327,6 +441,7 @@ pub async fn fail_pending_placeholders_for_provider(
                 "provider_config_id": provider_config_id,
                 "status": { "$in": ["pending_auth"] },
                 "credential_type": { "$ne": "node_managed" },
+                "connection_id": null,
             },
             doc! {
                 "$set": {
@@ -401,29 +516,43 @@ pub async fn reconcile_pending_oauth_placeholder(
     // Pass 1: pull forward only if a token landed AFTER this placeholder
     // was last touched. A token from a previous OAuth must not retroactively
     // mark a fresh placeholder active.
-    let candidate_token = db
-        .collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
-        .find_one(doc! {
-            "user_id": user_id,
-            "provider_config_id": provider_config_id,
-            "status": { "$in": ["active", "expired", "refresh_failed"] },
-        })
-        .await?;
-    if let Some(token) = candidate_token
-        && token.updated_at > api_key.updated_at
-    {
-        sync_provider_token_to_api_keys(db, user_id, provider_config_id).await?;
-        // Re-read; if pass 1 promoted us to `active`, we're done.
-        let api_key = match get_api_key(db, user_id, api_key_id).await {
-            Ok(k) => k,
-            Err(_) => return Ok(()),
-        };
-        if api_key.status != "pending_auth" {
-            return Ok(());
+    //
+    // LEGACY-ONLY. Multi-connection keys are activated directly by their
+    // own OAuth callback (`write_oauth_tokens_to_key`) and never read from
+    // `user_provider_tokens`. Running Pass 1 for them would be the "B1"
+    // silent-failure mode: a legacy *sibling* token's refresh bumps
+    // `user_provider_tokens.updated_at` past this pending key's
+    // `updated_at`, Pass 1 inherits that unrelated token, and the
+    // multi-connection placeholder flips to `active` with the wrong
+    // credentials before the user even authorizes on the provider page.
+    // Pass 2 below still runs for multi-connection keys (scoped by
+    // `connection_id`) so abandoned flows are still swept to `failed`.
+    if api_key.connection_id.is_none() {
+        let candidate_token = db
+            .collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
+            .find_one(doc! {
+                "user_id": user_id,
+                "provider_config_id": provider_config_id,
+                "status": { "$in": ["active", "expired", "refresh_failed"] },
+            })
+            .await?;
+        if let Some(token) = candidate_token
+            && token.updated_at > api_key.updated_at
+        {
+            sync_provider_token_to_api_keys(db, user_id, provider_config_id).await?;
+            // Re-read; if pass 1 promoted us to `active`, we're done.
+            let api_key = match get_api_key(db, user_id, api_key_id).await {
+                Ok(k) => k,
+                Err(_) => return Ok(()),
+            };
+            if api_key.status != "pending_auth" {
+                return Ok(());
+            }
         }
     }
 
     // Pass 2: mark failed if the OAuth state is gone (abandoned flow).
+    // Runs for BOTH legacy and multi-connection placeholders.
     //
     // The `$or` on `user_id` / `target_user_id` is critical for org-scoped
     // wizard flows. When an admin runs `nyxid service add --org X`, the
@@ -432,19 +561,58 @@ pub async fn reconcile_pending_oauth_placeholder(
     // `OAuthState.target_user_id`. Querying only by `user_id` would never
     // find the live state for org flows, so Pass 2 would fire on the very
     // first poll and fail every legitimate org-scoped placeholder.
+    //
+    // For multi-connection placeholders the live-state lookup is further
+    // narrowed by `connection_id`: each connection's OAuth flow has its
+    // own `OAuthState` row carrying that id (threaded through
+    // `initiate_oauth_connect` / `request_device_code`). Without this
+    // narrowing, a *sibling* connection's in-flight `OAuthState` for the
+    // same `(user, provider)` would keep this placeholder pending forever
+    // — abandonment would never be detected.
+    //
+    // ORDERING REQUIREMENT (see design doc §4.2/§4.3): the multi-connection
+    // `create_key` path MUST insert the `OAuthState` (carrying the
+    // connection_id) before — or in the same logical unit as — minting
+    // the `pending_auth` placeholder. Otherwise a `GET /keys/:id` poll in
+    // the gap between placeholder-mint and state-insert would find no
+    // matching state and fail the placeholder prematurely.
     let now = bson::DateTime::from_chrono(Utc::now());
+    let mut state_filter = doc! {
+        "$or": [
+            { "user_id": user_id },
+            { "target_user_id": user_id },
+        ],
+        "provider_config_id": provider_config_id,
+        "expires_at": { "$gt": &now },
+    };
+    if let Some(ref conn_id) = api_key.connection_id {
+        state_filter.insert("connection_id", conn_id.as_str());
+    }
     let live_state_count = db
         .collection::<OAuthState>(OAUTH_STATES)
-        .count_documents(doc! {
-            "$or": [
-                { "user_id": user_id },
-                { "target_user_id": user_id },
-            ],
-            "provider_config_id": provider_config_id,
-            "expires_at": { "$gt": &now },
-        })
+        .count_documents(state_filter)
         .await?;
     if live_state_count > 0 {
+        return Ok(());
+    }
+
+    // Grace window for fresh multi-connection placeholders.
+    //
+    // `create_key` mints a multi-connection placeholder (`connection_id:
+    // Some(..)`), and the wizard's *subsequent, separate* OAuth-initiate
+    // request creates the connection-scoped `OAuthState` a beat later.
+    // Between those two requests a `GET /keys/:id` poll would find no
+    // matching state and — because Pass 2 is connection-scoped — fail
+    // the placeholder prematurely. Don't fail a multi-connection
+    // placeholder younger than this window; its `OAuthState` is expected
+    // imminently. Legacy placeholders are exempt: their Pass 2 lookup is
+    // by `(user, provider)`, so a sibling's leftover state already
+    // bridges the gap (and this path is unchanged from pre-multi-
+    // connection behavior).
+    let fresh_grace = chrono::Duration::seconds(60);
+    if api_key.connection_id.is_some()
+        && Utc::now().signed_duration_since(api_key.created_at) < fresh_grace
+    {
         return Ok(());
     }
 
@@ -885,12 +1053,13 @@ mod tests {
     use super::{
         OAUTH_STATES, USER_PROVIDER_TOKENS, fail_pending_placeholders_for_provider,
         has_server_credential, reconcile_pending_oauth_placeholder,
-        sync_provider_token_to_api_keys,
+        sync_provider_token_to_api_keys, write_oauth_tokens_to_key,
     };
     use crate::models::oauth_state::OAuthState;
     use crate::models::user_api_key::UserApiKey;
     use crate::models::user_provider_token::UserProviderToken;
     use crate::test_utils::connect_test_database;
+    use crate::test_utils::test_encryption_keys;
     use chrono::Duration;
 
     fn sample_key(credential_type: &str) -> UserApiKey {
@@ -905,6 +1074,7 @@ mod tests {
             token_scopes: None,
             expires_at: None,
             provider_config_id: Some("provider-1".to_string()),
+            connection_id: None,
             user_oauth_client_id_encrypted: None,
             user_oauth_client_secret_encrypted: None,
             status: "active".to_string(),
@@ -981,6 +1151,7 @@ mod tests {
                 token_scopes: None,
                 expires_at: None,
                 provider_config_id: Some(provider_id.clone()),
+                connection_id: None,
                 user_oauth_client_id_encrypted: None,
                 user_oauth_client_secret_encrypted: None,
                 status: "pending_auth".to_string(),
@@ -999,6 +1170,7 @@ mod tests {
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: org_id.clone(),
                 provider_config_id: provider_id.clone(),
+                connection_id: None,
                 credential_user_id: None,
                 token_type: "oauth2".to_string(),
                 access_token_encrypted: Some(vec![1, 2, 3]),
@@ -1075,6 +1247,7 @@ mod tests {
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: user_id.clone(),
                 provider_config_id: provider_id.clone(),
+                connection_id: None,
                 credential_user_id: None,
                 token_type: "oauth2".to_string(),
                 access_token_encrypted: Some(vec![1, 2, 3]),
@@ -1260,6 +1433,7 @@ mod tests {
             target_user_id: target_user_id.map(str::to_string),
             credential_user_id: None,
             redirect_path: None,
+            connection_id: None,
             consumed: false,
             expires_at: now + Duration::minutes(10),
             created_at: now,
@@ -1272,6 +1446,7 @@ mod tests {
             id: uuid::Uuid::new_v4().to_string(),
             user_id: user_id.to_string(),
             provider_config_id: provider_id.to_string(),
+            connection_id: None,
             credential_user_id: None,
             token_type: "oauth2".to_string(),
             access_token_encrypted: Some(vec![1, 2, 3]),
@@ -1677,5 +1852,649 @@ mod tests {
         assert_eq!(failed, 1);
         assert_eq!(get_key(&db, &matching_key).await.status, "failed");
         assert_eq!(get_key(&db, &other_key).await.status, "pending_auth");
+    }
+
+    #[tokio::test]
+    async fn write_oauth_tokens_to_key_activates_pending_key() {
+        let Some(db) = connect_test_database("user_api_key_write_oauth_basic").await else {
+            eprintln!("skipping write_oauth_tokens_to_key test: no local MongoDB available");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+
+        let now = Utc::now();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let provider_id = uuid::Uuid::new_v4().to_string();
+        let connection_id = uuid::Uuid::new_v4().to_string();
+        let key_id = uuid::Uuid::new_v4().to_string();
+
+        db.collection::<UserApiKey>(super::COLLECTION_NAME)
+            .insert_one(UserApiKey {
+                id: key_id.clone(),
+                user_id: user_id.clone(),
+                label: "Multi-conn Codex".to_string(),
+                credential_type: "oauth2".to_string(),
+                credential_encrypted: None,
+                access_token_encrypted: None,
+                refresh_token_encrypted: None,
+                token_scopes: None,
+                expires_at: None,
+                provider_config_id: Some(provider_id.clone()),
+                connection_id: Some(connection_id.clone()),
+                user_oauth_client_id_encrypted: None,
+                user_oauth_client_secret_encrypted: None,
+                status: "pending_auth".to_string(),
+                last_used_at: None,
+                error_message: None,
+                source: Some("user_created".to_string()),
+                source_id: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+
+        let expires = now + Duration::seconds(3600);
+        write_oauth_tokens_to_key(
+            &db,
+            &encryption_keys,
+            &connection_id,
+            "access-token-123",
+            Some("refresh-token-456"),
+            Some("openid profile"),
+            Some(expires),
+        )
+        .await
+        .unwrap();
+
+        let restored = get_key(&db, &key_id).await;
+        assert_eq!(restored.status, "active");
+        assert_eq!(restored.credential_type, "oauth2");
+        assert!(restored.access_token_encrypted.is_some());
+        assert!(restored.refresh_token_encrypted.is_some());
+        assert_eq!(restored.token_scopes.as_deref(), Some("openid profile"));
+        assert!(restored.expires_at.is_some());
+        assert!(restored.error_message.is_none());
+
+        // Decrypt and verify the stored access token is the plaintext we wrote.
+        let access_bytes = encryption_keys
+            .decrypt(restored.access_token_encrypted.as_ref().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(String::from_utf8(access_bytes).unwrap(), "access-token-123");
+    }
+
+    #[tokio::test]
+    async fn sync_provider_token_skips_multi_connection_keys() {
+        // B2 isolation test: a legacy `user_provider_tokens` refresh
+        // sync must NOT touch any UserApiKey that carries its own
+        // connection_id. Otherwise a legacy refresh on connection-null
+        // keys would silently overwrite a multi-connection sibling's
+        // independent token (the silent-alias bug reborn).
+        let Some(db) = connect_test_database("user_api_key_sync_skips_multi_conn").await else {
+            eprintln!("skipping integration test: no local MongoDB available");
+            return;
+        };
+
+        let now = Utc::now();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let provider_id = uuid::Uuid::new_v4().to_string();
+        let legacy_key_id = uuid::Uuid::new_v4().to_string();
+        let multi_conn_key_id = uuid::Uuid::new_v4().to_string();
+        let connection_id = uuid::Uuid::new_v4().to_string();
+
+        // Legacy key: connection_id=None, pending_auth.
+        let mut legacy = provider_key(
+            &legacy_key_id,
+            &user_id,
+            &provider_id,
+            "pending_auth",
+            "oauth2",
+        );
+        legacy.access_token_encrypted = None;
+        // Multi-connection key: connection_id=Some, also pending_auth.
+        let mut multi = provider_key(
+            &multi_conn_key_id,
+            &user_id,
+            &provider_id,
+            "pending_auth",
+            "oauth2",
+        );
+        multi.connection_id = Some(connection_id);
+        multi.access_token_encrypted = None;
+
+        db.collection::<UserApiKey>(super::COLLECTION_NAME)
+            .insert_many(vec![legacy, multi])
+            .await
+            .unwrap();
+
+        // Insert a legacy provider token to sync from.
+        db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
+            .insert_one(UserProviderToken {
+                id: uuid::Uuid::new_v4().to_string(),
+                user_id: user_id.clone(),
+                provider_config_id: provider_id.clone(),
+                connection_id: None,
+                credential_user_id: None,
+                token_type: "oauth2".to_string(),
+                access_token_encrypted: Some(vec![7, 7, 7]),
+                refresh_token_encrypted: Some(vec![8, 8, 8]),
+                token_scopes: Some("legacy".to_string()),
+                expires_at: None,
+                api_key_encrypted: None,
+                status: "active".to_string(),
+                last_refreshed_at: None,
+                last_used_at: None,
+                error_message: None,
+                label: None,
+                metadata: None,
+                gateway_url: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+
+        sync_provider_token_to_api_keys(&db, &user_id, &provider_id)
+            .await
+            .unwrap();
+
+        // Legacy key: tokens copied in, flipped to active.
+        let legacy_after = get_key(&db, &legacy_key_id).await;
+        assert_eq!(legacy_after.status, "active");
+        assert_eq!(legacy_after.access_token_encrypted, Some(vec![7, 7, 7]));
+
+        // Multi-connection key: completely untouched.
+        let multi_after = get_key(&db, &multi_conn_key_id).await;
+        assert_eq!(
+            multi_after.status, "pending_auth",
+            "multi-connection key must not be activated by a legacy sync"
+        );
+        assert!(
+            multi_after.access_token_encrypted.is_none(),
+            "multi-connection key must not inherit legacy tokens"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_skips_pass1_for_multi_connection_keys() {
+        // B1 isolation: scenario from the design doc.
+        //   1. Legacy codex A exists with a `user_provider_tokens` row.
+        //   2. User adds codex B (multi-connection, pending_auth).
+        //   3. A's background refresh bumps user_provider_tokens.updated_at
+        //      past B's updated_at.
+        //   4. GET /keys/{B.id} triggers reconcile on B. WITHOUT the fix,
+        //      Pass 1 finds the newer token and activates B with A's
+        //      credentials — the silent-alias bug.
+        // With the fix, Pass 1 is skipped for multi-connection keys. Pass 2
+        // still runs, but here B's own OAuthState is live, so the
+        // placeholder is correctly left `pending_auth` for its own callback.
+        let Some(db) = connect_test_database("user_api_key_reconcile_skips_pass1_multi").await
+        else {
+            eprintln!("skipping integration test: no local MongoDB available");
+            return;
+        };
+
+        let now = Utc::now();
+        let earlier = now - Duration::minutes(10);
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let provider_id = uuid::Uuid::new_v4().to_string();
+        let multi_key_id = uuid::Uuid::new_v4().to_string();
+        let conn_id = uuid::Uuid::new_v4().to_string();
+
+        // Pending multi-connection placeholder created BEFORE the
+        // legacy token's refresh bumped its updated_at.
+        let mut multi = provider_key(
+            &multi_key_id,
+            &user_id,
+            &provider_id,
+            "pending_auth",
+            "oauth2",
+        );
+        multi.connection_id = Some(conn_id.clone());
+        multi.access_token_encrypted = None;
+        multi.refresh_token_encrypted = None;
+        multi.updated_at = earlier;
+        db.collection::<UserApiKey>(super::COLLECTION_NAME)
+            .insert_one(multi)
+            .await
+            .unwrap();
+
+        // Legacy provider-token row, with a FRESHER updated_at — this is
+        // the Pass 1 trap the reconcile logic must NOT take.
+        db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
+            .insert_one(UserProviderToken {
+                id: uuid::Uuid::new_v4().to_string(),
+                user_id: user_id.clone(),
+                provider_config_id: provider_id.clone(),
+                connection_id: None,
+                credential_user_id: None,
+                token_type: "oauth2".to_string(),
+                access_token_encrypted: Some(vec![9, 9, 9]),
+                refresh_token_encrypted: Some(vec![8, 8, 8]),
+                token_scopes: Some("legacy".to_string()),
+                expires_at: None,
+                api_key_encrypted: None,
+                status: "active".to_string(),
+                last_refreshed_at: None,
+                last_used_at: None,
+                error_message: None,
+                label: None,
+                metadata: None,
+                gateway_url: None,
+                created_at: earlier,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+
+        // B's own OAuthState is live (carries the matching connection_id)
+        // so Pass 2 must NOT fail it — the flow is still in progress.
+        let mut state = live_oauth_state(&user_id, &provider_id);
+        state.connection_id = Some(conn_id.clone());
+        db.collection::<OAuthState>(OAUTH_STATES)
+            .insert_one(state)
+            .await
+            .unwrap();
+
+        reconcile_pending_oauth_placeholder(&db, &user_id, &multi_key_id)
+            .await
+            .unwrap();
+
+        let after = get_key(&db, &multi_key_id).await;
+        assert_eq!(
+            after.status, "pending_auth",
+            "multi-connection placeholder must stay pending: Pass 1 skipped, Pass 2 sees live state"
+        );
+        assert!(
+            after.access_token_encrypted.is_none(),
+            "multi-connection placeholder must not inherit legacy access_token"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_fails_abandoned_multi_connection_placeholder() {
+        // Abandonment sweep: a multi-connection placeholder whose own
+        // OAuthState is gone (user closed the provider tab, TTL swept the
+        // state) must be marked `failed` by Pass 2 — same cleanup
+        // guarantee legacy keys have. Without Pass 2 running for
+        // multi-connection keys, the row would be a permanent orphan.
+        let Some(db) = connect_test_database("user_api_key_reconcile_fails_abandoned_multi").await
+        else {
+            eprintln!("skipping integration test: no local MongoDB available");
+            return;
+        };
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let provider_id = uuid::Uuid::new_v4().to_string();
+        let multi_key_id = uuid::Uuid::new_v4().to_string();
+        let conn_id = uuid::Uuid::new_v4().to_string();
+
+        let mut multi = provider_key(
+            &multi_key_id,
+            &user_id,
+            &provider_id,
+            "pending_auth",
+            "oauth2",
+        );
+        multi.connection_id = Some(conn_id.clone());
+        multi.access_token_encrypted = None;
+        // Age the placeholder past the 60s fresh-placeholder grace window
+        // so Pass 2's abandonment sweep actually fires. A freshly-minted
+        // multi-connection placeholder is deliberately spared (its
+        // OAuthState insert is a beat behind `POST /keys`).
+        multi.created_at = Utc::now() - Duration::minutes(5);
+        db.collection::<UserApiKey>(super::COLLECTION_NAME)
+            .insert_one(multi)
+            .await
+            .unwrap();
+
+        // A live OAuthState exists for the SAME (user, provider) but a
+        // DIFFERENT connection_id — a sibling connection's in-flight
+        // flow. It must NOT keep this placeholder alive: Pass 2 is
+        // scoped by connection_id.
+        let mut sibling_state = live_oauth_state(&user_id, &provider_id);
+        sibling_state.connection_id = Some(uuid::Uuid::new_v4().to_string());
+        db.collection::<OAuthState>(OAUTH_STATES)
+            .insert_one(sibling_state)
+            .await
+            .unwrap();
+
+        reconcile_pending_oauth_placeholder(&db, &user_id, &multi_key_id)
+            .await
+            .unwrap();
+
+        let after = get_key(&db, &multi_key_id).await;
+        assert_eq!(
+            after.status, "failed",
+            "abandoned multi-connection placeholder must be swept to failed by Pass 2"
+        );
+        assert!(
+            after.error_message.is_some(),
+            "failed placeholder should carry a user-facing error message"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_spares_fresh_multi_connection_placeholder_without_state() {
+        // Race-window guard: between `POST /keys` (mints the multi-
+        // connection placeholder) and the wizard's separate
+        // OAuth-initiate request (creates the connection-scoped
+        // OAuthState), a `GET /keys/:id` poll sees a placeholder with NO
+        // matching live state. Pass 2 must NOT fail it — the state
+        // insert is a beat behind. A placeholder younger than the 60s
+        // grace window is spared.
+        let Some(db) = connect_test_database("user_api_key_reconcile_spares_fresh_multi").await
+        else {
+            eprintln!("skipping integration test: no local MongoDB available");
+            return;
+        };
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let provider_id = uuid::Uuid::new_v4().to_string();
+        let multi_key_id = uuid::Uuid::new_v4().to_string();
+        let conn_id = uuid::Uuid::new_v4().to_string();
+
+        // Fresh placeholder: `provider_key` sets created_at = now, which
+        // is well within the 60s grace window.
+        let mut multi = provider_key(
+            &multi_key_id,
+            &user_id,
+            &provider_id,
+            "pending_auth",
+            "oauth2",
+        );
+        multi.connection_id = Some(conn_id);
+        multi.access_token_encrypted = None;
+        db.collection::<UserApiKey>(super::COLLECTION_NAME)
+            .insert_one(multi)
+            .await
+            .unwrap();
+
+        // No OAuthState at all — simulating the gap before the
+        // OAuth-initiate request lands.
+        reconcile_pending_oauth_placeholder(&db, &user_id, &multi_key_id)
+            .await
+            .unwrap();
+
+        let after = get_key(&db, &multi_key_id).await;
+        assert_eq!(
+            after.status, "pending_auth",
+            "a fresh multi-connection placeholder must be spared by the grace window"
+        );
+    }
+
+    #[tokio::test]
+    async fn fail_pending_placeholders_skips_multi_connection_keys() {
+        // B2 isolation test for the failure path: a legacy provider
+        // denial must NOT mark a concurrent multi-connection placeholder
+        // as failed. Otherwise an unrelated codex / Lark add could be
+        // sabotaged by a sibling's bad refresh.
+        let Some(db) = connect_test_database("user_api_key_fail_skips_multi_conn").await else {
+            eprintln!("skipping integration test: no local MongoDB available");
+            return;
+        };
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let provider_id = uuid::Uuid::new_v4().to_string();
+        let legacy_key_id = uuid::Uuid::new_v4().to_string();
+        let multi_key_id = uuid::Uuid::new_v4().to_string();
+        let conn_id = uuid::Uuid::new_v4().to_string();
+
+        let legacy = provider_key(
+            &legacy_key_id,
+            &user_id,
+            &provider_id,
+            "pending_auth",
+            "oauth2",
+        );
+        let mut multi = provider_key(
+            &multi_key_id,
+            &user_id,
+            &provider_id,
+            "pending_auth",
+            "oauth2",
+        );
+        multi.connection_id = Some(conn_id);
+
+        db.collection::<UserApiKey>(super::COLLECTION_NAME)
+            .insert_many(vec![legacy, multi])
+            .await
+            .unwrap();
+
+        let failed =
+            fail_pending_placeholders_for_provider(&db, &user_id, &provider_id, "access_denied")
+                .await
+                .unwrap();
+
+        assert_eq!(failed, 1, "only the legacy key should be failed");
+        assert_eq!(get_key(&db, &legacy_key_id).await.status, "failed");
+        assert_eq!(
+            get_key(&db, &multi_key_id).await.status,
+            "pending_auth",
+            "multi-connection key must not be failed by a legacy denial"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_oauth_tokens_to_key_treats_empty_refresh_as_absent() {
+        let Some(db) = connect_test_database("user_api_key_write_oauth_empty_refresh").await else {
+            eprintln!("skipping write_oauth_tokens_to_key test: no local MongoDB available");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let now = Utc::now();
+        let connection_id = uuid::Uuid::new_v4().to_string();
+        let key_id = uuid::Uuid::new_v4().to_string();
+
+        db.collection::<UserApiKey>(super::COLLECTION_NAME)
+            .insert_one(UserApiKey {
+                id: key_id.clone(),
+                user_id: uuid::Uuid::new_v4().to_string(),
+                label: "k".to_string(),
+                credential_type: "oauth2".to_string(),
+                credential_encrypted: None,
+                access_token_encrypted: None,
+                refresh_token_encrypted: None,
+                token_scopes: None,
+                expires_at: None,
+                provider_config_id: Some(uuid::Uuid::new_v4().to_string()),
+                connection_id: Some(connection_id.clone()),
+                user_oauth_client_id_encrypted: None,
+                user_oauth_client_secret_encrypted: None,
+                status: "pending_auth".to_string(),
+                last_used_at: None,
+                error_message: None,
+                source: Some("user_created".to_string()),
+                source_id: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+
+        // Empty-string refresh should serialize as Null (same as None),
+        // not encrypt and store an empty ciphertext blob. Also test that
+        // `token_scopes: None` round-trips as None.
+        write_oauth_tokens_to_key(
+            &db,
+            &encryption_keys,
+            &connection_id,
+            "access-token",
+            Some(""),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let restored = get_key(&db, &key_id).await;
+        assert_eq!(restored.status, "active");
+        assert!(restored.refresh_token_encrypted.is_none());
+        assert!(restored.token_scopes.is_none());
+    }
+
+    #[tokio::test]
+    async fn write_oauth_tokens_to_key_returns_not_found_for_unknown_connection() {
+        let Some(db) = connect_test_database("user_api_key_write_oauth_not_found").await else {
+            eprintln!("skipping write_oauth_tokens_to_key test: no local MongoDB available");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+
+        let bogus_connection_id = uuid::Uuid::new_v4().to_string();
+        let result = write_oauth_tokens_to_key(
+            &db,
+            &encryption_keys,
+            &bogus_connection_id,
+            "access-token",
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        match result {
+            Err(crate::errors::AppError::NotFound(_)) => {}
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn write_oauth_tokens_to_key_refuses_to_resurrect_revoked_key() {
+        // A duplicate or late provider callback for a connection the user
+        // has since revoked must NOT flip the key back to `active`.
+        // `revoked` / `failed` are terminal — same contract as
+        // `sync_provider_token_to_api_keys`.
+        let Some(db) = connect_test_database("user_api_key_write_oauth_revoked").await else {
+            eprintln!("skipping write_oauth_tokens_to_key test: no local MongoDB available");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+
+        let now = Utc::now();
+        let connection_id = uuid::Uuid::new_v4().to_string();
+        let key_id = uuid::Uuid::new_v4().to_string();
+
+        db.collection::<UserApiKey>(super::COLLECTION_NAME)
+            .insert_one(UserApiKey {
+                id: key_id.clone(),
+                user_id: uuid::Uuid::new_v4().to_string(),
+                label: "revoked codex".to_string(),
+                credential_type: "oauth2".to_string(),
+                credential_encrypted: None,
+                access_token_encrypted: None,
+                refresh_token_encrypted: None,
+                token_scopes: None,
+                expires_at: None,
+                provider_config_id: Some(uuid::Uuid::new_v4().to_string()),
+                connection_id: Some(connection_id.clone()),
+                user_oauth_client_id_encrypted: None,
+                user_oauth_client_secret_encrypted: None,
+                status: "revoked".to_string(),
+                last_used_at: None,
+                error_message: None,
+                source: Some("user_created".to_string()),
+                source_id: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+
+        let result = write_oauth_tokens_to_key(
+            &db,
+            &encryption_keys,
+            &connection_id,
+            "access-token",
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        // The terminal-status filter means no row matches → NotFound.
+        match result {
+            Err(crate::errors::AppError::NotFound(_)) => {}
+            other => panic!("expected NotFound for revoked key, got {other:?}"),
+        }
+
+        // The revoked key is untouched — not resurrected to `active`.
+        let after = get_key(&db, &key_id).await;
+        assert_eq!(after.status, "revoked");
+        assert!(after.access_token_encrypted.is_none());
+    }
+
+    #[tokio::test]
+    async fn write_oauth_tokens_to_key_only_touches_matching_connection() {
+        let Some(db) = connect_test_database("user_api_key_write_oauth_isolated").await else {
+            eprintln!("skipping write_oauth_tokens_to_key test: no local MongoDB available");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+
+        let now = Utc::now();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let provider_id = uuid::Uuid::new_v4().to_string();
+        let conn_a = uuid::Uuid::new_v4().to_string();
+        let conn_b = uuid::Uuid::new_v4().to_string();
+        let key_a = uuid::Uuid::new_v4().to_string();
+        let key_b = uuid::Uuid::new_v4().to_string();
+
+        // Insert two pending keys for the same user+provider but different
+        // connection_ids — this is the multi-add scenario (e.g. user adds
+        // a second codex; both keys exist concurrently while one is
+        // authorizing).
+        for (key_id, conn_id) in [(&key_a, &conn_a), (&key_b, &conn_b)] {
+            db.collection::<UserApiKey>(super::COLLECTION_NAME)
+                .insert_one(UserApiKey {
+                    id: key_id.clone(),
+                    user_id: user_id.clone(),
+                    label: format!("Key for {conn_id}"),
+                    credential_type: "oauth2".to_string(),
+                    credential_encrypted: None,
+                    access_token_encrypted: None,
+                    refresh_token_encrypted: None,
+                    token_scopes: None,
+                    expires_at: None,
+                    provider_config_id: Some(provider_id.clone()),
+                    connection_id: Some(conn_id.clone()),
+                    user_oauth_client_id_encrypted: None,
+                    user_oauth_client_secret_encrypted: None,
+                    status: "pending_auth".to_string(),
+                    last_used_at: None,
+                    error_message: None,
+                    source: Some("user_created".to_string()),
+                    source_id: None,
+                    created_at: now,
+                    updated_at: now,
+                })
+                .await
+                .unwrap();
+        }
+
+        // Authorize only connection A.
+        write_oauth_tokens_to_key(
+            &db,
+            &encryption_keys,
+            &conn_a,
+            "token-for-A",
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let restored_a = get_key(&db, &key_a).await;
+        let restored_b = get_key(&db, &key_b).await;
+
+        assert_eq!(restored_a.status, "active");
+        assert!(restored_a.access_token_encrypted.is_some());
+
+        // Connection B must be untouched — proves the new write path
+        // does NOT fan out across a `(user, provider)` pair.
+        assert_eq!(restored_b.status, "pending_auth");
+        assert!(restored_b.access_token_encrypted.is_none());
     }
 }
