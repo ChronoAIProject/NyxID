@@ -5,6 +5,8 @@ import { CommandPalette, ALL_ITEMS as SEARCH_ITEMS } from "@/components/navigati
 import { AmbientStatusLine } from "@/components/chrome/ambient-status-line";
 import { useAuthStore } from "@/stores/auth-store";
 import { useLogout } from "@/hooks/use-auth";
+import { useShouldShowOnboarding } from "@/hooks/use-onboarding";
+import { OnboardingTakeover } from "@/components/dashboard/onboarding-takeover";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -25,30 +27,22 @@ export function useRightPanel() {
   return useContext(RightPanelContext);
 }
 
-type OnboardingContextType = {
-  isOnboarding: boolean;
-  setOnboarding: (v: boolean) => void;
-};
-
-const OnboardingContext = createContext<OnboardingContextType>({
-  isOnboarding: false,
-  setOnboarding: () => {},
-});
-
-export function useOnboarding() {
-  return useContext(OnboardingContext);
-}
-
 export function DashboardLayout() {
   const [commandOpen, setCommandOpen] = useState(false);
   const [mobileNavState, setMobileNavState] = useState<"closed" | "open" | "closing">("closed");
   const [rightPanel, setRightPanel] = useState<React.ReactNode>(null);
-  const [isOnboarding, setOnboarding] = useState(false);
 
   const closeMobileNav = useCallback(() => setMobileNavState("closing"), []);
 
+  // First-run gate: until the user finishes the onboarding wizard, render it
+  // in place of the dashboard chrome. No separate route — the wizard wraps
+  // over the dashboard. Gated on auth / `GET /users/me` settling so we never
+  // flash the wrong thing.
+  const onboarding = useShouldShowOnboarding();
+  if (onboarding.status === "loading") return null;
+  if (onboarding.status === "show") return <OnboardingTakeover />;
+
   return (
-    <OnboardingContext.Provider value={{ isOnboarding, setOnboarding }}>
     <RightPanelContext.Provider value={{ setRightPanel }}>
       <div
         className="flex flex-col h-dvh overflow-hidden bg-background"
@@ -62,16 +56,13 @@ export function DashboardLayout() {
 
         <TopBar
           onSearch={() => setCommandOpen(true)}
-          onMobileMenu={isOnboarding ? undefined : () => setMobileNavState("open")}
-          sidebarHidden={isOnboarding}
+          onMobileMenu={() => setMobileNavState("open")}
         />
 
         <div className="flex flex-1 min-h-0 overflow-hidden">
-          {!isOnboarding && (
-            <div className="hidden md:flex shrink-0">
-              <Sidebar />
-            </div>
-          )}
+          <div className="hidden md:flex shrink-0">
+            <Sidebar />
+          </div>
 
           <main
             className="flex-1 min-w-0 overflow-x-hidden overflow-y-auto overscroll-contain px-4 pt-4 sm:px-6 sm:pt-6 md:px-8 lg:px-10"
@@ -84,7 +75,7 @@ export function DashboardLayout() {
             </div>
           </main>
 
-          {!isOnboarding && rightPanel && (
+          {rightPanel && (
             <aside className="hidden lg:flex shrink-0 w-[280px] flex-col overflow-y-auto px-3 pt-6 pb-6">
               <div className="flex flex-col gap-3">
                 {rightPanel}
@@ -93,7 +84,7 @@ export function DashboardLayout() {
           )}
         </div>
 
-        {!isOnboarding && mobileNavState !== "closed" && (
+        {mobileNavState !== "closed" && (
           <MobileNav
             isClosing={mobileNavState === "closing"}
             onClose={closeMobileNav}
@@ -104,7 +95,6 @@ export function DashboardLayout() {
         <CommandPalette open={commandOpen} onOpenChange={setCommandOpen} />
       </div>
     </RightPanelContext.Provider>
-    </OnboardingContext.Provider>
   );
 }
 
@@ -208,11 +198,9 @@ function TopBarBreadcrumbs() {
 function TopBar({
   onSearch,
   onMobileMenu,
-  sidebarHidden,
 }: {
   readonly onSearch: () => void;
   readonly onMobileMenu?: () => void;
-  readonly sidebarHidden?: boolean;
 }) {
   const user = useAuthStore((s) => s.user);
   const navigate = useNavigate();
@@ -254,7 +242,7 @@ function TopBar({
       <Link
         to="/dashboard"
         className="hidden md:flex items-center shrink-0 justify-center w-[52px] transition-[width] duration-300 ease-in-out"
-        style={{ width: sidebarHidden ? "52px" : "var(--sidebar-width, 52px)", justifyContent: "start", paddingLeft: "16px" }}
+        style={{ width: "var(--sidebar-width, 52px)", justifyContent: "start", paddingLeft: "16px" }}
       >
         <img
           src="/nyxid-coloured-icon.svg"

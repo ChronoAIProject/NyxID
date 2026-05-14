@@ -4,8 +4,7 @@ import { useAuthStore } from "@/stores/auth-store";
 import { useApiKeys } from "@/hooks/use-api-keys";
 import { useKeys } from "@/hooks/use-keys";
 import { useNodes } from "@/hooks/use-nodes";
-import { useRightPanel, useOnboarding } from "@/components/layout/dashboard-layout";
-import { AddKeyDialog } from "@/components/dashboard/add-key-dialog";
+import { useRightPanel } from "@/components/layout/dashboard-layout";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button, ButtonIcon } from "@/components/ui/button";
 import {
@@ -41,27 +40,11 @@ export function DashboardPage() {
   const { data: services, isLoading: servicesLoading } = useKeys();
   const { data: nodes, isLoading: nodesLoading } = useNodes();
   const { setRightPanel } = useRightPanel();
-  const { setOnboarding } = useOnboarding();
 
   const activeKeys = apiKeys?.filter((k) => k.is_active).length ?? 0;
   const serviceCount = services?.length ?? 0;
   const onlineNodes = nodes?.filter((n) => n.status === "Online").length ?? 0;
   const totalNodes = nodes?.length ?? 0;
-
-  const [onboardingComplete, setOnboardingComplete] = useState(
-    () => localStorage.getItem("nyxid:onboarding-complete") === "true",
-  );
-  const completeOnboarding = useCallback(() => {
-    localStorage.setItem("nyxid:onboarding-complete", "true");
-    setOnboardingComplete(true);
-  }, []);
-
-  const isFirstTime = !servicesLoading && serviceCount === 0 && !onboardingComplete;
-
-  useEffect(() => {
-    setOnboarding(isFirstTime);
-    return () => setOnboarding(false);
-  }, [isFirstTime, setOnboarding]);
 
   const [aiDismissed, setAiDismissed] = useState(
     () => localStorage.getItem(AI_SETUP_DISMISSED_KEY) === "true",
@@ -80,7 +63,6 @@ export function DashboardPage() {
   }, []);
 
   useEffect(() => {
-    if (isFirstTime) return;
     setRightPanel(
       <>
         {!aiDismissed && <AiSetupCard onDismiss={dismissAi} />}
@@ -88,7 +70,7 @@ export function DashboardPage() {
       </>,
     );
     return () => setRightPanel(null);
-  }, [setRightPanel, aiDismissed, dismissAi, isFirstTime]);
+  }, [setRightPanel, aiDismissed, dismissAi]);
 
   if (servicesLoading) {
     return (
@@ -104,10 +86,6 @@ export function DashboardPage() {
     );
   }
 
-  if (isFirstTime) {
-    return <OnboardingTakeover userName={user?.display_name ?? "there"} onComplete={completeOnboarding} />;
-  }
-
   const emailVerified = !!user?.email_verified;
   const mfaEnabled = !!user?.mfa_enabled;
 
@@ -116,7 +94,7 @@ export function DashboardPage() {
       {/* Onboarding checklist — guides remaining steps after first service */}
       {!onboardingDismissed && activeKeys === 0 && (
         <OnboardingChecklist
-          serviceConnected={serviceCount > 0 || onboardingComplete}
+          serviceConnected={serviceCount > 0}
           activeKeys={activeKeys}
           loading={keysLoading}
           onDismiss={dismissOnboarding}
@@ -276,79 +254,6 @@ export function DashboardPage() {
           </div>
         </div>
       </div>
-    </div>
-  );
-}
-
-/* ─────────────── First-time onboarding takeover ─────────────── */
-
-function OnboardingTakeover({
-  userName,
-  onComplete,
-}: {
-  readonly userName: string;
-  readonly onComplete: () => void;
-}) {
-  const [addServiceOpen, setAddServiceOpen] = useState(false);
-
-  function handleCta() {
-    onComplete();
-    setAddServiceOpen(true);
-  }
-
-  return (
-    <div className="flex h-full flex-col items-center justify-start px-6 pt-[12vh] pb-12">
-      <div className="flex w-full max-w-md flex-col items-center gap-8 text-center">
-        {/* Brand mark */}
-        <div className="flex h-16 w-16 items-center justify-center rounded-2xl border border-nyx-500/30 bg-nyx-500/10">
-          <Cable className="h-7 w-7 text-nyx-secondary-400" />
-        </div>
-
-        {/* Copy */}
-        <div className="space-y-3">
-          <h1
-            className="text-[28px] font-bold leading-[1.1] text-foreground"
-            style={{ letterSpacing: "-0.03em" }}
-          >
-            Welcome, {userName}
-          </h1>
-          <p className="text-[14px] leading-relaxed text-muted-foreground">
-            Connect your first AI service to get started with NyxID.
-            Your agents will proxy requests through NyxID so credentials
-            never leave your control.
-          </p>
-        </div>
-
-        {/* CTA */}
-        <Button
-          variant="primary"
-          size="lg"
-          className="w-full max-w-xs"
-          onClick={handleCta}
-        >
-          <ButtonIcon variant="primary">
-            <ArrowRight className="h-4 w-4" />
-          </ButtonIcon>
-          Connect a service
-        </Button>
-
-        {/* Trust signals */}
-        <div className="flex items-center gap-6 text-[11px] text-text-tertiary">
-          <span className="flex items-center gap-1.5">
-            <ShieldCheck className="h-3.5 w-3.5" />
-            End-to-end encrypted
-          </span>
-          <span className="flex items-center gap-1.5">
-            <KeyRound className="h-3.5 w-3.5" />
-            Zero credential exposure
-          </span>
-        </div>
-      </div>
-
-      <AddKeyDialog
-        open={addServiceOpen}
-        onOpenChange={setAddServiceOpen}
-      />
     </div>
   );
 }
