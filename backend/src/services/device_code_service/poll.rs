@@ -1,7 +1,8 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use mongodb::{
-    Database,
+    Collection, Database,
     bson::{self, doc},
+    options::ReturnDocument,
 };
 
 use crate::crypto::device_code::verify_poll_signature;
@@ -11,9 +12,9 @@ use crate::models::device_code::{COLLECTION_NAME as DEVICE_CODES, DeviceCode, De
 
 use super::rotation::rotate_user_code_if_needed;
 use super::{
-    DEVICE_CODE_DELIVERY_EXPIRES_IN_SECS, DEVICE_CODE_POLL_INTERVAL_SECS,
-    DEVICE_CODE_TIMESTAMP_SKEW_SECS, DeviceCodePoll, DeviceCodePollInput,
-    apply_signature_failure_lockout, is_locked,
+    DEVICE_CODE_DELIVERY_EXPIRES_IN_SECS, DEVICE_CODE_LOCKOUT_SECS, DEVICE_CODE_POLL_INTERVAL_SECS,
+    DEVICE_CODE_SIGNATURE_FAILURE_LOCK_THRESHOLD, DEVICE_CODE_TIMESTAMP_SKEW_SECS, DeviceCodePoll,
+    DeviceCodePollInput, is_locked,
 };
 
 pub async fn poll(db: &Database, input: DeviceCodePollInput) -> AppResult<DeviceCodePoll> {
@@ -57,19 +58,7 @@ pub async fn poll(db: &Database, input: DeviceCodePollInput) -> AppResult<Device
         input.timestamp,
         &input.signature,
     ) {
-        let transition = apply_signature_failure_lockout(row.failed_poll_count, now);
-        let mut set_doc = doc! {
-            "failed_poll_count": i64::from(transition.failed_poll_count),
-            "last_polled_at": bson::DateTime::from_chrono(now),
-        };
-        if let Some(locked_until) = transition.locked_until {
-            set_doc.insert("locked_until", bson::DateTime::from_chrono(locked_until));
-        }
-        collection
-            .update_one(doc! { "_id": &row.id }, doc! { "$set": set_doc })
-            .await?;
-
-        if transition.locked_until.is_some() {
+        if record_signature_failure(&collection, &row.id, now).await? {
             return Err(AppError::DeviceCodeLocked);
         }
         return Err(error);
@@ -89,19 +78,21 @@ pub async fn poll(db: &Database, input: DeviceCodePollInput) -> AppResult<Device
             })
         }
         DeviceCodeStatus::Approved => {
-            let api_key = row.delivery_api_key.clone().ok_or_else(|| {
+            let claimed = claim_approved_delivery(&collection, &row.id, now, input.timestamp)
+                .await?
+                .ok_or(AppError::DeviceCodeAlreadyDelivered)?;
+            let api_key = claimed.delivery_api_key.clone().ok_or_else(|| {
                 AppError::Internal("approved device code missing delivery api key".to_string())
             })?;
-            let refresh_token = row.delivery_refresh_token.clone().ok_or_else(|| {
+            let refresh_token = claimed.delivery_refresh_token.clone().ok_or_else(|| {
                 AppError::Internal(
                     "approved device code missing delivery refresh token".to_string(),
                 )
             })?;
-            let node_id = row.issued_node_id.clone().ok_or_else(|| {
+            let node_id = claimed.issued_node_id.clone().ok_or_else(|| {
                 AppError::Internal("approved device code missing issued node id".to_string())
             })?;
 
-            persist_successful_poll(db, &row, Some(DeviceCodeStatus::Delivered)).await?;
             Ok(DeviceCodePoll::Approved {
                 api_key,
                 node_id,
@@ -130,6 +121,78 @@ fn verify_poll_timestamp(row: &DeviceCode, timestamp: i64, now: DateTime<Utc>) -
         ));
     }
     Ok(())
+}
+
+async fn record_signature_failure(
+    collection: &Collection<DeviceCode>,
+    row_id: &str,
+    now: DateTime<Utc>,
+) -> AppResult<bool> {
+    let updated = collection
+        .find_one_and_update(
+            doc! { "_id": row_id },
+            doc! {
+                "$inc": { "failed_poll_count": 1_i64 },
+                "$set": { "last_polled_at": bson::DateTime::from_chrono(now) },
+            },
+        )
+        .return_document(ReturnDocument::After)
+        .await?
+        .ok_or(AppError::DeviceCodeNotFound)?;
+
+    if updated.failed_poll_count < DEVICE_CODE_SIGNATURE_FAILURE_LOCK_THRESHOLD {
+        return Ok(false);
+    }
+
+    let locked_until = now + Duration::seconds(DEVICE_CODE_LOCKOUT_SECS);
+    collection
+        .find_one_and_update(
+            doc! {
+                "_id": row_id,
+                "$or": [
+                    { "locked_until": bson::Bson::Null },
+                    { "locked_until": { "$lte": bson::DateTime::from_chrono(now) } },
+                ],
+            },
+            doc! { "$set": { "locked_until": bson::DateTime::from_chrono(locked_until) } },
+        )
+        .return_document(ReturnDocument::After)
+        .await?;
+
+    Ok(true)
+}
+
+async fn claim_approved_delivery(
+    collection: &Collection<DeviceCode>,
+    row_id: &str,
+    now: DateTime<Utc>,
+    timestamp: i64,
+) -> AppResult<Option<DeviceCode>> {
+    let delivered_status = bson::to_bson(&DeviceCodeStatus::Delivered)
+        .map_err(|e| AppError::Internal(format!("serialize device code status: {e}")))?;
+    let delivery_expires_at = now + Duration::seconds(DEVICE_CODE_DELIVERY_EXPIRES_IN_SECS);
+
+    let claimed = collection
+        .find_one_and_update(
+            doc! { "_id": row_id, "status": "approved" },
+            doc! {
+                "$set": {
+                    "status": delivered_status,
+                    "failed_poll_count": 0_i64,
+                    "last_polled_at": bson::DateTime::from_chrono(now),
+                    "last_poll_timestamp": timestamp,
+                    "expires_at": bson::DateTime::from_chrono(delivery_expires_at),
+                },
+                "$unset": {
+                    "delivery_api_key": "",
+                    "delivery_refresh_token": "",
+                },
+            },
+        )
+        .return_document(ReturnDocument::Before)
+        .await?;
+
+    Ok(claimed)
 }
 
 async fn persist_successful_poll(
@@ -233,6 +296,62 @@ mod tests {
                 assert!(matches!(error, AppError::DeviceCodeLocked));
             }
         }
+
+        let row = db
+            .collection::<DeviceCode>(DEVICE_CODES)
+            .find_one(doc! { "device_code_hash": hash_token(&response.device_code) })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.failed_poll_count, 3);
+        assert!(row.locked_until.is_some());
+    }
+
+    #[tokio::test]
+    async fn concurrent_wrong_signatures_do_not_lose_failed_poll_increments() {
+        let Some((db, response, _key)) =
+            setup_pending_row("device_code_poll_wrong_sig_concurrent").await
+        else {
+            return;
+        };
+        db.collection::<DeviceCode>(DEVICE_CODES)
+            .update_one(
+                doc! { "device_code_hash": hash_token(&response.device_code) },
+                doc! { "$set": { "failed_poll_count": 1_i64 } },
+            )
+            .await
+            .expect("seed failed count");
+        let wrong_key = SigningKey::from_bytes(&[88u8; 32]);
+        let timestamp = Utc::now().timestamp();
+        let first = DeviceCodePollInput {
+            device_code: response.device_code.clone(),
+            timestamp,
+            signature: sign_poll(&response.device_code, timestamp, &wrong_key),
+        };
+        let second_timestamp = timestamp + 1;
+        let second = DeviceCodePollInput {
+            device_code: response.device_code.clone(),
+            timestamp: second_timestamp,
+            signature: sign_poll(&response.device_code, second_timestamp, &wrong_key),
+        };
+
+        let (first_result, second_result) = tokio::join!(poll(&db, first), poll(&db, second));
+        let results = [first_result, second_result];
+
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(AppError::DevicePollSignatureInvalid(_))))
+                .count(),
+            1
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(AppError::DeviceCodeLocked)))
+                .count(),
+            1
+        );
 
         let row = db
             .collection::<DeviceCode>(DEVICE_CODES)
@@ -413,5 +532,59 @@ mod tests {
         .await
         .expect_err("delivered");
         assert!(matches!(error, AppError::DeviceCodeAlreadyDelivered));
+    }
+
+    #[tokio::test]
+    async fn concurrent_approved_polls_deliver_secrets_once() {
+        let Some((db, response, key)) =
+            setup_pending_row("device_code_poll_approved_concurrent").await
+        else {
+            return;
+        };
+        db.collection::<DeviceCode>(DEVICE_CODES)
+            .update_one(
+                doc! { "device_code_hash": hash_token(&response.device_code) },
+                doc! {
+                    "$set": {
+                        "status": "approved",
+                        "issued_node_id": "node-1",
+                        "delivery_api_key": "nyx_secret",
+                        "delivery_refresh_token": "refresh_secret",
+                        "refresh_token_hash": hash_token("refresh_secret"),
+                    }
+                },
+            )
+            .await
+            .expect("approve row");
+        let timestamp = Utc::now().timestamp();
+        let first = DeviceCodePollInput {
+            device_code: response.device_code.clone(),
+            timestamp,
+            signature: sign_poll(&response.device_code, timestamp, &key),
+        };
+        let second_timestamp = timestamp + 1;
+        let second = DeviceCodePollInput {
+            device_code: response.device_code.clone(),
+            timestamp: second_timestamp,
+            signature: sign_poll(&response.device_code, second_timestamp, &key),
+        };
+
+        let (first_result, second_result) = tokio::join!(poll(&db, first), poll(&db, second));
+        let results = [first_result, second_result];
+
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Ok(DeviceCodePoll::Approved { .. })))
+                .count(),
+            1
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(AppError::DeviceCodeAlreadyDelivered)))
+                .count(),
+            1
+        );
     }
 }

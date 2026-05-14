@@ -14,7 +14,9 @@ mod rotation;
 
 pub use approve::approve;
 pub use initiate::initiate;
-pub use lockout::{apply_signature_failure_lockout, claim_lockout_notification, is_locked};
+#[allow(unused_imports)]
+pub use lockout::apply_signature_failure_lockout;
+pub use lockout::{claim_lockout_notification, is_locked};
 pub use poll::poll;
 
 pub const DEVICE_CODE_SIGNATURE_FAILURE_LOCK_THRESHOLD: u32 = 3;
