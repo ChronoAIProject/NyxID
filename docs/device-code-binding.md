@@ -60,7 +60,7 @@ Important fields:
 | `device_pubkey` | 32 bytes | Ed25519 verifying key |
 | `hw_id` | String | 1 to 256 chars, device hardware identifier |
 | `suggested_label` | Optional string | Device-provided label hint |
-| `user_code_history` | Up to 4 generations | Newest code is first |
+| `user_code_history` | Up to 4 generations | Newest code is first; only the newest generation can be approved |
 | `status` | `pending`, `approved`, `denied`, `expired`, `delivered` | `delivered` means credentials were already returned once |
 | `approved_by_user_id` | Optional user id | Human who approved |
 | `approved_org_id` | Optional org user id | Target org owner, if any |
@@ -89,7 +89,7 @@ The default binding window is 15 minutes.
 ABCDEFGHJKLMNPQRSTUVWXYZ23456789
 ```
 
-It is grouped as `XXXX-XXXX-XXXX`, excludes ambiguous `0/O/1/I`, rotates every 30 seconds while pending, and retains the newest 4 generations so the user does not lose a code while typing.
+It is grouped as `XXXX-XXXX-XXXX`, excludes ambiguous `0/O/1/I`, and rotates every 30 seconds while pending. NyxID retains the newest 4 generations for device display continuity and audit context, but approval accepts only the newest generation to preserve the anti-shoulder-surfing property of rotation.
 
 ### Signed polling
 

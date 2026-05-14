@@ -5,16 +5,17 @@ use mongodb::{
     options::ReturnDocument,
 };
 
-use crate::crypto::device_code::verify_poll_signature;
+use crate::crypto::device_code::{generate_user_code, verify_poll_signature};
 use crate::crypto::token::hash_token;
 use crate::errors::{AppError, AppResult};
 use crate::models::device_code::{COLLECTION_NAME as DEVICE_CODES, DeviceCode, DeviceCodeStatus};
 
-use super::rotation::rotate_user_code_if_needed;
+use super::rotation::rotate_user_code_if_needed_with_generator;
 use super::{
     DEVICE_CODE_DELIVERY_EXPIRES_IN_SECS, DEVICE_CODE_LOCKOUT_SECS, DEVICE_CODE_POLL_INTERVAL_SECS,
-    DEVICE_CODE_SIGNATURE_FAILURE_LOCK_THRESHOLD, DEVICE_CODE_TIMESTAMP_SKEW_SECS, DeviceCodePoll,
-    DeviceCodePollInput, is_locked,
+    DEVICE_CODE_SIGNATURE_FAILURE_LOCK_THRESHOLD, DEVICE_CODE_TIMESTAMP_SKEW_SECS,
+    DEVICE_CODE_USER_CODE_WRITE_RETRIES, DeviceCodePoll, DeviceCodePollInput,
+    is_duplicate_key_error, is_locked,
 };
 
 pub async fn poll(db: &Database, input: DeviceCodePollInput) -> AppResult<DeviceCodePoll> {
@@ -70,8 +71,7 @@ pub async fn poll(db: &Database, input: DeviceCodePollInput) -> AppResult<Device
 
     match row.status {
         DeviceCodeStatus::Pending => {
-            let current_user_code = rotate_user_code_if_needed(&mut row, now)?;
-            persist_successful_poll(db, &row, None).await?;
+            let current_user_code = rotate_and_persist_pending_poll(db, &mut row, now).await?;
             Ok(DeviceCodePoll::Pending {
                 current_user_code,
                 interval: DEVICE_CODE_POLL_INTERVAL_SECS,
@@ -121,6 +121,49 @@ fn verify_poll_timestamp(row: &DeviceCode, timestamp: i64, now: DateTime<Utc>) -
         ));
     }
     Ok(())
+}
+
+async fn rotate_and_persist_pending_poll(
+    db: &Database,
+    row: &mut DeviceCode,
+    now: DateTime<Utc>,
+) -> AppResult<String> {
+    rotate_and_persist_pending_poll_with_generator(db, row, now, generate_user_code).await
+}
+
+async fn rotate_and_persist_pending_poll_with_generator<F>(
+    db: &Database,
+    row: &mut DeviceCode,
+    now: DateTime<Utc>,
+    mut user_code_generator: F,
+) -> AppResult<String>
+where
+    F: FnMut() -> String,
+{
+    let original_history = row.user_code_history.clone();
+    let original_last_rotated_at = row.last_rotated_at;
+
+    for attempt in 0..=DEVICE_CODE_USER_CODE_WRITE_RETRIES {
+        row.user_code_history = original_history.clone();
+        row.last_rotated_at = original_last_rotated_at;
+        let current_user_code =
+            rotate_user_code_if_needed_with_generator(row, now, &mut user_code_generator)?;
+
+        match persist_successful_poll(db, row, None).await {
+            Ok(()) => return Ok(current_user_code),
+            Err(AppError::DatabaseError(error))
+                if is_duplicate_key_error(&error)
+                    && attempt < DEVICE_CODE_USER_CODE_WRITE_RETRIES =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(AppError::Internal(
+        "device-code user_code collision retry limit exceeded".to_string(),
+    ))
 }
 
 async fn record_signature_failure(
@@ -237,10 +280,12 @@ async fn persist_successful_poll(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::device_code::UserCodeGen;
     use crate::services::device_code_service::DEVICE_CODE_ROTATE_SECS;
     use crate::services::device_code_service::tests_support::{setup_pending_row, sign_poll};
     use chrono::Duration;
     use ed25519_dalek::SigningKey;
+    use uuid::Uuid;
 
     #[tokio::test]
     async fn poll_pending_returns_current_user_code() {
@@ -438,6 +483,63 @@ mod tests {
         assert_eq!(row.user_code_history.len(), 2);
         assert_eq!(row.user_code_history[0].code, current_user_code);
         assert_eq!(row.user_code_history[1].code, response.user_code);
+    }
+
+    #[tokio::test]
+    async fn pending_rotation_retries_duplicate_current_user_code() {
+        let Some((db, response, _key)) =
+            setup_pending_row("device_code_poll_rotate_duplicate").await
+        else {
+            return;
+        };
+        let now = Utc::now();
+        let duplicate_code = "AAAA-BBBB-CCCC".to_string();
+        let unique_code = "DDDD-EEEE-FFFF".to_string();
+        let mut row = db
+            .collection::<DeviceCode>(DEVICE_CODES)
+            .find_one(doc! { "device_code_hash": hash_token(&response.device_code) })
+            .await
+            .unwrap()
+            .unwrap();
+        let holder = DeviceCode {
+            id: Uuid::new_v4().to_string(),
+            device_code_hash: "cafebabe".repeat(8),
+            hw_id: "esp32-holder".to_string(),
+            user_code_history: vec![UserCodeGen {
+                code: duplicate_code.clone(),
+                generated_at: now,
+            }],
+            ..row.clone()
+        };
+        db.collection::<DeviceCode>(DEVICE_CODES)
+            .insert_one(&holder)
+            .await
+            .expect("insert duplicate holder row");
+
+        row.last_rotated_at = now - Duration::seconds(DEVICE_CODE_ROTATE_SECS + 1);
+        row.last_polled_at = Some(now);
+        row.last_poll_timestamp = Some(now.timestamp());
+        let mut calls = 0;
+        let current = rotate_and_persist_pending_poll_with_generator(&db, &mut row, now, || {
+            calls += 1;
+            if calls == 1 {
+                duplicate_code.clone()
+            } else {
+                unique_code.clone()
+            }
+        })
+        .await
+        .expect("retry duplicate rotation");
+
+        assert_eq!(calls, 2);
+        assert_eq!(current, unique_code);
+        let updated = db
+            .collection::<DeviceCode>(DEVICE_CODES)
+            .find_one(doc! { "device_code_hash": hash_token(&response.device_code) })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.user_code_history[0].code, unique_code);
     }
 
     #[tokio::test]

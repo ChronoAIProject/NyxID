@@ -17,6 +17,11 @@ use super::{
     DeviceCodeApproveInput, choose_device_label, is_locked,
 };
 
+/// Approve a device using only the current displayed user-code generation.
+///
+/// Older retained generations are kept so polling devices can continue to show
+/// recent codes, but approval intentionally requires `user_code_history[0]` to
+/// preserve the anti-shoulder-surfing value of 30-second rotation.
 pub async fn approve(
     db: &Database,
     actor_user_id: &str,
@@ -25,8 +30,7 @@ pub async fn approve(
     let now = Utc::now();
     let collection = db.collection::<DeviceCode>(DEVICE_CODES);
     let row = collection
-        .find_one(doc! { "user_code_history.code": &input.user_code })
-        .sort(doc! { "created_at": -1 })
+        .find_one(doc! { "user_code_history.0.code": &input.user_code })
         .await?
         .ok_or(AppError::DeviceUserCodeInvalid)?;
 
@@ -244,6 +248,7 @@ async fn cleanup_partial_approval(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::device_code::UserCodeGen;
     use crate::models::node::NodeStatus;
     use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
     use crate::services::device_code_service::tests_support::{setup_pending_row, sign_poll};
@@ -423,6 +428,51 @@ mod tests {
         .expect_err("second approval should fail");
 
         assert!(matches!(error, AppError::DeviceCodeAlreadyDelivered));
+    }
+
+    #[tokio::test]
+    async fn approve_rejects_stale_retained_user_code_generation() {
+        let Some((db, response, _key)) = setup_pending_row("device_code_approve_stale_gen").await
+        else {
+            return;
+        };
+        let now = Utc::now();
+        let current_code = "AAAA-BBBB-CCCC".to_string();
+        let history = vec![
+            UserCodeGen {
+                code: current_code,
+                generated_at: now,
+            },
+            UserCodeGen {
+                code: response.user_code.clone(),
+                generated_at: now - Duration::seconds(31),
+            },
+        ];
+        db.collection::<DeviceCode>(DEVICE_CODES)
+            .update_one(
+                doc! { "device_code_hash": hash_token(&response.device_code) },
+                doc! {
+                    "$set": {
+                        "user_code_history": bson::to_bson(&history).expect("serialize history"),
+                    }
+                },
+            )
+            .await
+            .expect("set stale history");
+
+        let error = approve(
+            &db,
+            &Uuid::new_v4().to_string(),
+            DeviceCodeApproveInput {
+                user_code: response.user_code,
+                org_id: None,
+                label: None,
+            },
+        )
+        .await
+        .expect_err("stale generation must not approve");
+
+        assert!(matches!(error, AppError::DeviceUserCodeInvalid));
     }
 
     #[tokio::test]

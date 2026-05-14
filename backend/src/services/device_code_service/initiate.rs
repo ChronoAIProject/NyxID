@@ -9,60 +9,96 @@ use crate::models::device_code::{
 };
 
 use super::{
-    DEVICE_CODE_EXPIRES_IN_SECS, DEVICE_CODE_POLL_INTERVAL_SECS, DeviceCodeInitiate,
-    DeviceCodeInitiateInput,
+    DEVICE_CODE_EXPIRES_IN_SECS, DEVICE_CODE_POLL_INTERVAL_SECS,
+    DEVICE_CODE_USER_CODE_WRITE_RETRIES, DeviceCodeInitiate, DeviceCodeInitiateInput,
+    is_duplicate_key_error,
 };
 
 pub async fn initiate(
     db: &Database,
     input: DeviceCodeInitiateInput,
 ) -> AppResult<DeviceCodeInitiate> {
-    let now = Utc::now();
-    let (device_code, device_code_hash) = generate_device_code();
-    let user_code = generate_user_code();
-    let (verification_uri, verification_uri_complete) =
-        build_verification_uris(&input.frontend_url, &user_code)?;
+    initiate_with_user_code_generator(db, input, generate_user_code).await
+}
 
-    let row = DeviceCode {
-        id: Uuid::new_v4().to_string(),
-        device_code_hash,
-        device_pubkey: input.device_pubkey.to_vec(),
-        hw_id: input.hw_id,
-        suggested_label: input.suggested_label,
-        user_code_history: vec![UserCodeGen {
-            code: user_code.clone(),
-            generated_at: now,
-        }],
-        status: DeviceCodeStatus::Pending,
-        approved_by_user_id: None,
-        approved_org_id: None,
-        issued_api_key_id: None,
-        issued_node_id: None,
-        delivery_api_key: None,
-        delivery_refresh_token: None,
-        refresh_token_hash: None,
-        failed_poll_count: 0,
-        locked_until: None,
-        lock_alert_sent_at: None,
-        expires_at: now + Duration::seconds(DEVICE_CODE_EXPIRES_IN_SECS),
-        created_at: now,
-        last_polled_at: None,
-        last_poll_timestamp: None,
-        last_rotated_at: now,
-    };
+async fn initiate_with_user_code_generator<F>(
+    db: &Database,
+    input: DeviceCodeInitiateInput,
+    mut user_code_generator: F,
+) -> AppResult<DeviceCodeInitiate>
+where
+    F: FnMut() -> String,
+{
+    let DeviceCodeInitiateInput {
+        device_pubkey,
+        hw_id,
+        suggested_label,
+        frontend_url,
+    } = input;
 
-    db.collection::<DeviceCode>(DEVICE_CODES)
-        .insert_one(&row)
-        .await?;
+    for attempt in 0..=DEVICE_CODE_USER_CODE_WRITE_RETRIES {
+        let now = Utc::now();
+        let (device_code, device_code_hash) = generate_device_code();
+        let user_code = user_code_generator();
+        let (verification_uri, verification_uri_complete) =
+            build_verification_uris(&frontend_url, &user_code)?;
 
-    Ok(DeviceCodeInitiate {
-        device_code,
-        user_code,
-        verification_uri,
-        verification_uri_complete,
-        expires_in: DEVICE_CODE_EXPIRES_IN_SECS,
-        poll_interval: DEVICE_CODE_POLL_INTERVAL_SECS,
-    })
+        let row = DeviceCode {
+            id: Uuid::new_v4().to_string(),
+            device_code_hash,
+            device_pubkey: device_pubkey.to_vec(),
+            hw_id: hw_id.clone(),
+            suggested_label: suggested_label.clone(),
+            user_code_history: vec![UserCodeGen {
+                code: user_code.clone(),
+                generated_at: now,
+            }],
+            status: DeviceCodeStatus::Pending,
+            approved_by_user_id: None,
+            approved_org_id: None,
+            issued_api_key_id: None,
+            issued_node_id: None,
+            delivery_api_key: None,
+            delivery_refresh_token: None,
+            refresh_token_hash: None,
+            failed_poll_count: 0,
+            locked_until: None,
+            lock_alert_sent_at: None,
+            expires_at: now + Duration::seconds(DEVICE_CODE_EXPIRES_IN_SECS),
+            created_at: now,
+            last_polled_at: None,
+            last_poll_timestamp: None,
+            last_rotated_at: now,
+        };
+
+        match db
+            .collection::<DeviceCode>(DEVICE_CODES)
+            .insert_one(&row)
+            .await
+        {
+            Ok(_) => {
+                return Ok(DeviceCodeInitiate {
+                    device_code,
+                    user_code,
+                    verification_uri,
+                    verification_uri_complete,
+                    expires_in: DEVICE_CODE_EXPIRES_IN_SECS,
+                    poll_interval: DEVICE_CODE_POLL_INTERVAL_SECS,
+                });
+            }
+            Err(error)
+                if is_duplicate_key_error(&error)
+                    && attempt < DEVICE_CODE_USER_CODE_WRITE_RETRIES =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    Err(AppError::Internal(
+        "device-code user_code collision retry limit exceeded".to_string(),
+    ))
 }
 
 fn build_verification_uris(frontend_url: &str, user_code: &str) -> AppResult<(String, String)> {
@@ -133,5 +169,61 @@ mod tests {
         assert_eq!(row.user_code_history[0].code, response.user_code);
         assert_eq!(row.failed_poll_count, 0);
         assert!(row.locked_until.is_none());
+    }
+
+    #[tokio::test]
+    async fn initiate_retries_duplicate_pending_current_user_code() {
+        let Some(db) = connect_test_database("device_code_initiate_duplicate_retry").await else {
+            return;
+        };
+        crate::db::ensure_indexes(&db)
+            .await
+            .expect("ensure indexes");
+        let duplicate_code = "AAAA-BBBB-CCCC".to_string();
+        let unique_code = "DDDD-EEEE-FFFF".to_string();
+
+        initiate_with_user_code_generator(
+            &db,
+            DeviceCodeInitiateInput {
+                device_pubkey: [21u8; 32],
+                hw_id: "esp32-existing".to_string(),
+                suggested_label: None,
+                frontend_url: "https://app.example.com".to_string(),
+            },
+            || duplicate_code.clone(),
+        )
+        .await
+        .expect("seed duplicate code");
+
+        let mut calls = 0;
+        let response = initiate_with_user_code_generator(
+            &db,
+            DeviceCodeInitiateInput {
+                device_pubkey: [22u8; 32],
+                hw_id: "esp32-retry".to_string(),
+                suggested_label: None,
+                frontend_url: "https://app.example.com".to_string(),
+            },
+            || {
+                calls += 1;
+                if calls == 1 {
+                    duplicate_code.clone()
+                } else {
+                    unique_code.clone()
+                }
+            },
+        )
+        .await
+        .expect("retry after duplicate user code");
+
+        assert_eq!(calls, 2);
+        assert_eq!(response.user_code, unique_code);
+        assert_eq!(
+            db.collection::<DeviceCode>(DEVICE_CODES)
+                .count_documents(doc! { "user_code_history.0.code": &duplicate_code })
+                .await
+                .unwrap(),
+            1
+        );
     }
 }

@@ -27,6 +27,15 @@ pub const DEVICE_CODE_ROTATE_SECS: i64 = 30;
 pub const DEVICE_CODE_TIMESTAMP_SKEW_SECS: i64 = 60;
 pub const DEVICE_CODE_DELIVERY_EXPIRES_IN_SECS: i64 = 24 * 60 * 60;
 pub(super) const DEVICE_CODE_API_KEY_SCOPES: &str = "read write proxy";
+pub(super) const DEVICE_CODE_USER_CODE_WRITE_RETRIES: usize = 5;
+
+pub(super) fn is_duplicate_key_error(error: &mongodb::error::Error) -> bool {
+    matches!(
+        error.kind.as_ref(),
+        mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(write_error))
+            if write_error.code == 11000
+    )
+}
 
 #[derive(Clone, Debug)]
 pub struct DeviceCodeInitiateInput {

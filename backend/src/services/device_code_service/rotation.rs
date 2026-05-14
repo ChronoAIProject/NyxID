@@ -10,8 +10,19 @@ pub(super) fn rotate_user_code_if_needed(
     row: &mut DeviceCode,
     now: DateTime<Utc>,
 ) -> AppResult<String> {
+    rotate_user_code_if_needed_with_generator(row, now, generate_user_code)
+}
+
+pub(super) fn rotate_user_code_if_needed_with_generator<F>(
+    row: &mut DeviceCode,
+    now: DateTime<Utc>,
+    mut user_code_generator: F,
+) -> AppResult<String>
+where
+    F: FnMut() -> String,
+{
     if now.signed_duration_since(row.last_rotated_at) > Duration::seconds(DEVICE_CODE_ROTATE_SECS) {
-        let new_code = generate_user_code();
+        let new_code = user_code_generator();
         row.user_code_history.insert(
             0,
             UserCodeGen {

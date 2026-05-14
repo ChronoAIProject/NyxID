@@ -855,6 +855,20 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     device_codes
         .create_index(
             IndexModel::builder()
+                .keys(doc! { "user_code_history.0.code": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .unique(true)
+                        .partial_filter_expression(doc! { "status": "pending" })
+                        .name("device_code_pending_current_user_code_unique".to_string())
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    device_codes
+        .create_index(
+            IndexModel::builder()
                 .keys(doc! { "expires_at": 1 })
                 .options(
                     IndexOptions::builder()
