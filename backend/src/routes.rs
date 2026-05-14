@@ -786,8 +786,9 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
     let llm_routes = llm_routes.layer(RequestBodyLimitLayer::new(10 * 1024 * 1024));
 
     // Public API routes that expose non-sensitive runtime metadata.
-    let device_code_public_routes =
-        Router::new().route("/request", post(handlers::devices::request_device_code));
+    let device_code_public_routes = Router::new()
+        .route("/request", post(handlers::devices::request_device_code))
+        .route("/poll", post(handlers::devices::poll_device_code));
 
     let api_v1_public = Router::new()
         .route(

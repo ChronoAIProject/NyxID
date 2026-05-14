@@ -4,7 +4,10 @@ use serde::Deserialize;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
-use crate::services::device_code_service::{DeviceCodeInitiate, DeviceCodeInitiateInput, initiate};
+use crate::services::device_code_service::{
+    DeviceCodeInitiate, DeviceCodeInitiateInput, DeviceCodePoll, DeviceCodePollInput, initiate,
+    poll,
+};
 
 #[derive(Debug, Deserialize)]
 pub struct RequestDeviceCodeRequest {
@@ -12,6 +15,13 @@ pub struct RequestDeviceCodeRequest {
     pub hw_id: String,
     #[serde(default)]
     pub suggested_label: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PollDeviceCodeRequest {
+    pub device_code: String,
+    pub timestamp: i64,
+    pub signature: String,
 }
 
 pub async fn request_device_code(
@@ -34,6 +44,44 @@ pub async fn request_device_code(
     .await?;
 
     Ok(Json(response))
+}
+
+pub async fn poll_device_code(
+    State(state): State<AppState>,
+    Json(req): Json<PollDeviceCodeRequest>,
+) -> AppResult<Json<DeviceCodePoll>> {
+    let device_code = normalize_device_code(&req.device_code)?;
+    let signature = decode_poll_signature(&req.signature)?;
+    let response = poll(
+        &state.db,
+        DeviceCodePollInput {
+            device_code,
+            timestamp: req.timestamp,
+            signature,
+        },
+    )
+    .await?;
+
+    Ok(Json(response))
+}
+
+fn normalize_device_code(value: &str) -> AppResult<String> {
+    let trimmed = value.trim();
+    if trimmed.len() != 64 || !trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(AppError::BadRequest(
+            "device_code must be 64 hex characters".to_string(),
+        ));
+    }
+    Ok(trimmed.to_ascii_lowercase())
+}
+
+fn decode_poll_signature(value: &str) -> AppResult<[u8; 64]> {
+    let decoded = BASE64_STANDARD
+        .decode(value)
+        .map_err(|_| AppError::BadRequest("signature must be valid base64".to_string()))?;
+    decoded
+        .try_into()
+        .map_err(|_| AppError::BadRequest("signature must decode to 64 bytes".to_string()))
 }
 
 fn decode_device_pubkey(value: &str) -> AppResult<[u8; 32]> {
@@ -95,6 +143,36 @@ mod tests {
         let error = decode_device_pubkey(&encoded).expect_err("wrong length");
 
         assert!(matches!(error, AppError::BadRequest(_)));
+    }
+
+    #[test]
+    fn normalize_device_code_accepts_64_hex_chars_and_lowercases() {
+        let raw = "AABBCCDD".repeat(8);
+
+        assert_eq!(
+            normalize_device_code(&raw).unwrap(),
+            raw.to_ascii_lowercase()
+        );
+    }
+
+    #[test]
+    fn normalize_device_code_rejects_wrong_shape() {
+        assert!(normalize_device_code("abc").is_err());
+        assert!(normalize_device_code(&"z".repeat(64)).is_err());
+    }
+
+    #[test]
+    fn decode_poll_signature_accepts_exactly_64_base64_bytes() {
+        let encoded = BASE64_STANDARD.encode([8u8; 64]);
+
+        assert_eq!(decode_poll_signature(&encoded).unwrap(), [8u8; 64]);
+    }
+
+    #[test]
+    fn decode_poll_signature_rejects_wrong_length() {
+        let encoded = BASE64_STANDARD.encode([8u8; 63]);
+
+        assert!(decode_poll_signature(&encoded).is_err());
     }
 
     #[test]

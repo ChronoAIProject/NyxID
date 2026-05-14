@@ -757,6 +757,7 @@ async fn main() {
     let device_code_rate_limiters = mw::rate_limit::DeviceCodeRateLimiters {
         per_ip: state.device_code_ip_limiter.clone(),
         per_pubkey: state.device_code_pubkey_limiter.clone(),
+        db: Some(state.db.clone()),
     };
 
     let app = public_oauth

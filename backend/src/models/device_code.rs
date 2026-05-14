@@ -44,6 +44,10 @@ pub struct DeviceCode {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issued_node_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_refresh_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh_token_hash: Option<String>,
     pub failed_poll_count: u32,
     #[serde(default, with = "bson_datetime::optional")]
@@ -54,6 +58,8 @@ pub struct DeviceCode {
     pub created_at: DateTime<Utc>,
     #[serde(default, with = "bson_datetime::optional")]
     pub last_polled_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_poll_timestamp: Option<i64>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub last_rotated_at: DateTime<Utc>,
 }
@@ -79,12 +85,15 @@ mod tests {
             approved_org_id: None,
             issued_api_key_id: None,
             issued_node_id: None,
+            delivery_api_key: None,
+            delivery_refresh_token: None,
             refresh_token_hash: None,
             failed_poll_count: 0,
             locked_until: None,
             expires_at: now + chrono::Duration::minutes(15),
             created_at: now,
             last_polled_at: None,
+            last_poll_timestamp: None,
             last_rotated_at: now,
         }
     }

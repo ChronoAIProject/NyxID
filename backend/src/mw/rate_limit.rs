@@ -12,6 +12,7 @@ use governor::{
     clock::DefaultClock,
     state::{InMemoryState, NotKeyed},
 };
+use mongodb::{Database, bson::doc};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroU32;
@@ -19,6 +20,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::errors::AppError;
+use crate::models::device_code::{COLLECTION_NAME as DEVICE_CODES, DeviceCode};
 
 /// A shared rate limiter instance for global fallback.
 /// Uses a token-bucket algorithm via the `governor` crate.
@@ -194,6 +196,7 @@ pub type SharedPerPubkeyRateLimiter = Arc<PerPubkeyRateLimiter>;
 pub struct DeviceCodeRateLimiters {
     pub per_ip: SharedPerIpRateLimiter,
     pub per_pubkey: SharedPerPubkeyRateLimiter,
+    pub db: Option<Database>,
 }
 
 /// Per-message edit limiter keyed by upstream platform message ID.
@@ -548,7 +551,7 @@ pub async fn device_code_rate_limit_middleware(
         .await
         .map_err(|_| AppError::BadRequest("Unable to read request body".to_string()))?;
 
-    if let Some(pubkey) = extract_device_pubkey_from_json(&bytes)
+    if let Some(pubkey) = extract_device_pubkey_for_rate_limit(limiters.db.as_ref(), &bytes).await
         && !limiters.per_pubkey.check(&pubkey)
     {
         tracing::warn!(
@@ -561,6 +564,27 @@ pub async fn device_code_rate_limit_middleware(
 
     let request = Request::from_parts(parts, Body::from(bytes));
     Ok(next.run(request).await)
+}
+
+async fn extract_device_pubkey_for_rate_limit(
+    db: Option<&Database>,
+    bytes: &[u8],
+) -> Option<[u8; 32]> {
+    if let Some(pubkey) = extract_device_pubkey_from_json(bytes) {
+        return Some(pubkey);
+    }
+
+    let db = db?;
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    let raw_device_code = value.get("device_code")?.as_str()?;
+    let row = db
+        .collection::<DeviceCode>(DEVICE_CODES)
+        .find_one(doc! {
+            "device_code_hash": crate::crypto::token::hash_token(raw_device_code),
+        })
+        .await
+        .ok()??;
+    row.device_pubkey.try_into().ok()
 }
 
 fn extract_device_pubkey_from_json(bytes: &[u8]) -> Option<[u8; 32]> {
