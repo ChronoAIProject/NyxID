@@ -675,6 +675,7 @@ fn build_verification_uris(frontend_url: &str, user_code: &str) -> AppResult<(St
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crypto::device_code::decode_device_code;
     use crate::crypto::token::hash_token;
     use crate::models::api_key::ApiKey;
     use crate::models::node::{Node, NodeStatus};
@@ -687,8 +688,9 @@ mod tests {
     }
 
     fn sign_poll(device_code: &str, timestamp: i64, key: &SigningKey) -> [u8; 64] {
-        let mut message = Vec::with_capacity(device_code.len() + std::mem::size_of::<i64>());
-        message.extend_from_slice(device_code.as_bytes());
+        let decoded = decode_device_code(device_code).expect("valid device code");
+        let mut message = Vec::with_capacity(decoded.len() + std::mem::size_of::<i64>());
+        message.extend_from_slice(&decoded);
         message.extend_from_slice(&timestamp.to_be_bytes());
         key.sign(&message).to_bytes()
     }

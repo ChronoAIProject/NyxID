@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
@@ -14,9 +15,16 @@ const USER_CODE_ALPHABET: &[u8; 32] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 pub fn generate_device_code() -> (String, String) {
     let mut bytes = [0u8; DEVICE_CODE_BYTES];
     rand::thread_rng().fill_bytes(&mut bytes);
-    let raw = hex::encode(bytes);
+    let raw = URL_SAFE_NO_PAD.encode(bytes);
     let hash = sha256_hex(raw.as_bytes());
     (raw, hash)
+}
+
+pub fn decode_device_code(device_code_raw: &str) -> AppResult<[u8; DEVICE_CODE_BYTES]> {
+    let decoded = URL_SAFE_NO_PAD
+        .decode(device_code_raw)
+        .map_err(|_| AppError::DeviceCodeNotFound)?;
+    decoded.try_into().map_err(|_| AppError::DeviceCodeNotFound)
 }
 
 pub fn generate_user_code() -> String {
@@ -44,10 +52,20 @@ pub fn verify_poll_signature(
     })?;
     let signature = Signature::from_bytes(sig);
 
-    let message = poll_signature_message(device_code_raw, timestamp);
+    let device_code_bytes = decode_device_code_for_signature(device_code_raw)?;
+    let message = poll_signature_message(&device_code_bytes, timestamp);
     verifying_key.verify(&message, &signature).map_err(|_| {
         AppError::DevicePollSignatureInvalid("poll signature verification failed".to_string())
     })
+}
+
+fn decode_device_code_for_signature(device_code_raw: &str) -> AppResult<[u8; DEVICE_CODE_BYTES]> {
+    let decoded = URL_SAFE_NO_PAD
+        .decode(device_code_raw)
+        .map_err(|_| AppError::DevicePollSignatureInvalid("malformed device code".to_string()))?;
+    decoded
+        .try_into()
+        .map_err(|_| AppError::DevicePollSignatureInvalid("malformed device code".to_string()))
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -56,9 +74,9 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(hasher.finalize())
 }
 
-fn poll_signature_message(device_code_raw: &str, timestamp: i64) -> Vec<u8> {
-    let mut message = Vec::with_capacity(device_code_raw.len() + std::mem::size_of::<i64>());
-    message.extend_from_slice(device_code_raw.as_bytes());
+fn poll_signature_message(device_code_raw: &[u8; DEVICE_CODE_BYTES], timestamp: i64) -> Vec<u8> {
+    let mut message = Vec::with_capacity(DEVICE_CODE_BYTES + std::mem::size_of::<i64>());
+    message.extend_from_slice(device_code_raw);
     message.extend_from_slice(&timestamp.to_be_bytes());
     message
 }
@@ -73,16 +91,25 @@ mod tests {
     }
 
     fn sign(device_code_raw: &str, timestamp: i64, key: &SigningKey) -> [u8; 64] {
-        key.sign(&poll_signature_message(device_code_raw, timestamp))
+        let device_code_bytes = decode_device_code(device_code_raw).expect("valid device code");
+        key.sign(&poll_signature_message(&device_code_bytes, timestamp))
             .to_bytes()
     }
 
     #[test]
-    fn generate_device_code_returns_hex_raw_and_hash() {
+    fn generate_device_code_returns_base64url_raw_and_hash() {
         let (raw, hash) = generate_device_code();
 
-        assert_eq!(raw.len(), DEVICE_CODE_BYTES * 2);
-        assert!(raw.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(raw.len(), 43);
+        assert!(
+            raw.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        );
+        assert!(!raw.contains('='));
+        assert_eq!(
+            URL_SAFE_NO_PAD.decode(&raw).expect("decode").len(),
+            DEVICE_CODE_BYTES
+        );
         assert_eq!(hash.len(), 64);
         assert_eq!(hash, sha256_hex(raw.as_bytes()));
     }
@@ -124,7 +151,7 @@ mod tests {
         let key = signing_key();
         let pubkey = key.verifying_key().to_bytes();
         let timestamp = 1_761_000_000;
-        let raw = "aabbccdd".repeat(8);
+        let raw = URL_SAFE_NO_PAD.encode([7u8; DEVICE_CODE_BYTES]);
         let signature = sign(&raw, timestamp, &key);
 
         verify_poll_signature(&pubkey, &raw, timestamp, &signature)
@@ -136,10 +163,11 @@ mod tests {
         let key = signing_key();
         let pubkey = key.verifying_key().to_bytes();
         let timestamp = 1_761_000_000;
-        let raw = "aabbccdd".repeat(8);
+        let raw = URL_SAFE_NO_PAD.encode([7u8; DEVICE_CODE_BYTES]);
         let signature = sign(&raw, timestamp, &key);
 
-        let error = verify_poll_signature(&pubkey, "00112233", timestamp, &signature)
+        let wrong_raw = URL_SAFE_NO_PAD.encode([8u8; DEVICE_CODE_BYTES]);
+        let error = verify_poll_signature(&pubkey, &wrong_raw, timestamp, &signature)
             .expect_err("signature should fail");
         assert!(matches!(error, AppError::DevicePollSignatureInvalid(_)));
     }
@@ -149,10 +177,23 @@ mod tests {
         let key = signing_key();
         let pubkey = key.verifying_key().to_bytes();
         let timestamp = 1_761_000_000;
-        let raw = "aabbccdd".repeat(8);
+        let raw = URL_SAFE_NO_PAD.encode([7u8; DEVICE_CODE_BYTES]);
         let signature = sign(&raw, timestamp, &key);
 
         let error = verify_poll_signature(&pubkey, &raw, timestamp + 1, &signature)
+            .expect_err("signature should fail");
+        assert!(matches!(error, AppError::DevicePollSignatureInvalid(_)));
+    }
+
+    #[test]
+    fn verify_poll_signature_rejects_malformed_device_code() {
+        let key = signing_key();
+        let pubkey = key.verifying_key().to_bytes();
+        let timestamp = 1_761_000_000;
+        let raw = URL_SAFE_NO_PAD.encode([7u8; DEVICE_CODE_BYTES]);
+        let signature = sign(&raw, timestamp, &key);
+
+        let error = verify_poll_signature(&pubkey, "not-valid-device-code", timestamp, &signature)
             .expect_err("signature should fail");
         assert!(matches!(error, AppError::DevicePollSignatureInvalid(_)));
     }

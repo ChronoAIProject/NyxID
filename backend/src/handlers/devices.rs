@@ -4,6 +4,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::AppState;
+use crate::crypto::device_code::decode_device_code;
 use crate::errors::{AppError, AppResult};
 use crate::mw::auth::AuthUser;
 use crate::services::device_code_service::{
@@ -211,12 +212,8 @@ async fn send_lockout_notifications(state: &AppState, device_code: &str) -> AppR
 
 fn normalize_device_code(value: &str) -> AppResult<String> {
     let trimmed = value.trim();
-    if trimmed.len() != 64 || !trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(AppError::BadRequest(
-            "device_code must be 64 hex characters".to_string(),
-        ));
-    }
-    Ok(trimmed.to_ascii_lowercase())
+    decode_device_code(trimmed)?;
+    Ok(trimmed.to_string())
 }
 
 fn normalize_user_code(value: &str) -> AppResult<String> {
@@ -375,19 +372,17 @@ mod tests {
     }
 
     #[test]
-    fn normalize_device_code_accepts_64_hex_chars_and_lowercases() {
-        let raw = "AABBCCDD".repeat(8);
+    fn normalize_device_code_accepts_base64url_unpadded() {
+        let raw = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
-        assert_eq!(
-            normalize_device_code(&raw).unwrap(),
-            raw.to_ascii_lowercase()
-        );
+        assert_eq!(normalize_device_code(raw).unwrap(), raw);
     }
 
     #[test]
     fn normalize_device_code_rejects_wrong_shape() {
         assert!(normalize_device_code("abc").is_err());
-        assert!(normalize_device_code(&"z".repeat(64)).is_err());
+        assert!(normalize_device_code(&"=".repeat(43)).is_err());
+        assert!(normalize_device_code(&"A".repeat(44)).is_err());
     }
 
     #[test]

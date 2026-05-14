@@ -77,7 +77,7 @@ Important fields:
 
 ### Device code
 
-`device_code` is a 32-byte random opaque value returned to the device as 64 lowercase hex characters. NyxID stores only `sha256(device_code)`.
+`device_code` is a 32-byte random opaque value returned to the device as a 43-character base64url-unpadded string. NyxID stores only `sha256(device_code)`.
 
 The default binding window is 15 minutes.
 
@@ -102,7 +102,7 @@ Each poll request includes:
 The signature is over:
 
 ```text
-device_code UTF-8 bytes || timestamp as signed i64 big-endian bytes
+base64url_decode(device_code) || timestamp as signed i64 big-endian bytes
 ```
 
 NyxID accepts timestamps within plus or minus 60 seconds and rejects exact timestamp replay per device-code row.
@@ -141,7 +141,7 @@ Example response:
 
 ```json
 {
-  "device_code": "9b6cc2f5010f9a1b5d7c9a0422ee4ec6370d6c76145ff9edbf9a94df20fbf2f4",
+  "device_code": "m2zC9QEPmhtdfJoEIu5OxjcNbHYUX_ntv5qU3yD78vQ",
   "user_code": "ABCD-EFGH-JKLM",
   "verification_uri": "http://localhost:3000/settings/devices/bind",
   "verification_uri_complete": "http://localhost:3000/settings/devices/bind?user_code=ABCD-EFGH-JKLM",
