@@ -89,6 +89,7 @@ pub struct DeviceCodeLockoutNotification {
     pub device_label: String,
     pub hw_id: String,
     pub node_id: Option<String>,
+    pub device_pubkey_fingerprint: String,
     pub failed_poll_count: u32,
     pub locked_until: DateTime<Utc>,
 }

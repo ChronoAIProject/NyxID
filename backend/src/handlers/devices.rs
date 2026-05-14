@@ -1,4 +1,10 @@
-use axum::{Json, extract::State};
+use std::net::SocketAddr;
+
+use axum::{
+    Json,
+    extract::{ConnectInfo, State},
+    http::HeaderMap,
+};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use serde::Deserialize;
 use serde_json::json;
@@ -6,10 +12,12 @@ use serde_json::json;
 use crate::AppState;
 use crate::crypto::device_code::decode_device_code;
 use crate::errors::{AppError, AppResult};
+use crate::handlers::auth::{extract_ip, extract_user_agent};
 use crate::mw::auth::AuthUser;
 use crate::services::device_code_service::{
     DeviceCodeApprove, DeviceCodeApproveInput, DeviceCodeInitiate, DeviceCodeInitiateInput,
-    DeviceCodePoll, DeviceCodePollInput, approve, claim_lockout_notification, initiate, poll,
+    DeviceCodeLockoutNotification, DeviceCodePoll, DeviceCodePollInput, approve,
+    claim_lockout_notification, initiate, poll,
 };
 use crate::services::notification_service::{
     DeviceNotificationContext, DeviceNotificationTemplate,
@@ -64,10 +72,14 @@ pub async fn request_device_code(
 
 pub async fn poll_device_code(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(req): Json<PollDeviceCodeRequest>,
 ) -> AppResult<Json<DeviceCodePoll>> {
     let device_code = normalize_device_code(&req.device_code)?;
     let signature = decode_poll_signature(&req.signature)?;
+    let ip_address = extract_ip(&headers, Some(peer));
+    let user_agent = extract_user_agent(&headers);
     let response = match poll(
         &state.db,
         DeviceCodePollInput {
@@ -81,7 +93,8 @@ pub async fn poll_device_code(
         Ok(response) => response,
         Err(error) => {
             if matches!(error, AppError::DeviceCodeLocked)
-                && let Err(notify_error) = send_lockout_notifications(&state, &device_code).await
+                && let Err(notify_error) =
+                    send_lockout_notifications(&state, &device_code, ip_address, user_agent).await
             {
                 tracing::warn!(
                     error = %notify_error,
@@ -158,14 +171,35 @@ pub async fn approve_device_code(
     Ok(Json(response))
 }
 
-async fn send_lockout_notifications(state: &AppState, device_code: &str) -> AppResult<()> {
+/// Sends lockout notifications for bound device-code rows.
+///
+/// Pre-approval lockouts have no notification recipient because no org/user is
+/// bound to the device_code yet; we record a system-level audit log instead so
+/// operators can investigate via audit-log query.
+async fn send_lockout_notifications(
+    state: &AppState,
+    device_code: &str,
+    ip_address: Option<String>,
+    user_agent: Option<String>,
+) -> AppResult<()> {
     let Some(lockout) = claim_lockout_notification(&state.db, device_code).await? else {
         return Ok(());
     };
 
     if lockout.recipients.is_empty() {
+        audit_service::log_async(
+            state.db.clone(),
+            None,
+            "device_code_locked_no_owner".to_string(),
+            Some(lockout_no_owner_event_data(&lockout, ip_address.as_deref())),
+            ip_address,
+            user_agent,
+            None,
+            None,
+        );
         tracing::warn!(
             hw_id = %lockout.hw_id,
+            device_pubkey_fingerprint = %lockout.device_pubkey_fingerprint,
             failed_poll_count = lockout.failed_poll_count,
             "Device-code lockout has no approved owner or org admins to notify"
         );
@@ -208,6 +242,19 @@ async fn send_lockout_notifications(state: &AppState, device_code: &str) -> AppR
     }
 
     Ok(())
+}
+
+fn lockout_no_owner_event_data(
+    lockout: &DeviceCodeLockoutNotification,
+    ip_address: Option<&str>,
+) -> serde_json::Value {
+    json!({
+        "device_pubkey_fingerprint": lockout.device_pubkey_fingerprint.clone(),
+        "ip": ip_address,
+        "hw_id": lockout.hw_id.clone(),
+        "failed_poll_count": lockout.failed_poll_count,
+        "locked_until": lockout.locked_until.to_rfc3339(),
+    })
 }
 
 fn normalize_device_code(value: &str) -> AppResult<String> {
@@ -462,5 +509,28 @@ mod tests {
         let id = uuid::Uuid::new_v4().to_string();
         assert_eq!(normalize_org_id(Some(id.clone())).unwrap(), Some(id));
         assert!(normalize_org_id(Some("my-org".to_string())).is_err());
+    }
+
+    #[test]
+    fn lockout_no_owner_event_data_includes_forensic_fields() {
+        let locked_until = chrono::Utc::now();
+        let event = lockout_no_owner_event_data(
+            &DeviceCodeLockoutNotification {
+                recipients: vec![],
+                device_label: "Kitchen cam".to_string(),
+                hw_id: "esp32-p4-cam-1".to_string(),
+                node_id: None,
+                device_pubkey_fingerprint: "0123456789abcdef".to_string(),
+                failed_poll_count: 3,
+                locked_until,
+            },
+            Some("203.0.113.10"),
+        );
+
+        assert_eq!(event["device_pubkey_fingerprint"], "0123456789abcdef");
+        assert_eq!(event["ip"], "203.0.113.10");
+        assert_eq!(event["hw_id"], "esp32-p4-cam-1");
+        assert_eq!(event["failed_poll_count"], 3);
+        assert_eq!(event["locked_until"], locked_until.to_rfc3339());
     }
 }

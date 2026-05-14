@@ -9,6 +9,7 @@ use crate::crypto::token::hash_token;
 use crate::errors::AppResult;
 use crate::models::device_code::{COLLECTION_NAME as DEVICE_CODES, DeviceCode};
 use crate::services::org_service;
+use sha2::{Digest, Sha256};
 
 use super::{
     DEVICE_CODE_LOCKOUT_SECS, DEVICE_CODE_SIGNATURE_FAILURE_LOCK_THRESHOLD,
@@ -66,6 +67,7 @@ pub async fn claim_lockout_notification(
         device_label,
         hw_id: row.hw_id,
         node_id: row.issued_node_id,
+        device_pubkey_fingerprint: device_pubkey_fingerprint(&row.device_pubkey),
         failed_poll_count: row.failed_poll_count,
         locked_until,
     }))
@@ -90,6 +92,13 @@ async fn lockout_notification_recipients(
     recipients.sort();
     recipients.dedup();
     Ok(recipients)
+}
+
+fn device_pubkey_fingerprint(pubkey: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(pubkey);
+    let digest = hex::encode(hasher.finalize());
+    digest[..16].to_string()
 }
 
 #[cfg(test)]
@@ -169,6 +178,10 @@ mod tests {
         assert_eq!(claim.recipients, vec![approved_by]);
         assert_eq!(claim.device_label, "Kitchen cam");
         assert_eq!(claim.hw_id, "esp32-p4-cam-1");
+        assert_eq!(
+            claim.device_pubkey_fingerprint,
+            device_pubkey_fingerprint(&[77u8; 32])
+        );
         assert_eq!(
             claim.failed_poll_count,
             DEVICE_CODE_SIGNATURE_FAILURE_LOCK_THRESHOLD
