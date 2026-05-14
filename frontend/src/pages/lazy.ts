@@ -45,6 +45,11 @@ export const ServiceEditPage = lazy(() =>
 export const SettingsPage = lazy(() =>
   import("@/pages/settings").then((m) => ({ default: m.SettingsPage })),
 );
+export const DevicesBindPage = lazy(() =>
+  import("@/pages/devices-bind").then((m) => ({
+    default: m.DevicesBindPage,
+  })),
+);
 export const GuidePage = lazy(() =>
   import("@/pages/guide").then((m) => ({ default: m.GuidePage })),
 );
