@@ -170,6 +170,7 @@ pub async fn create_user(
         created_at: now,
         updated_at: now,
         last_login_at: None,
+        profile_config: Default::default(),
     };
 
     db.collection::<User>(USERS).insert_one(&new_user).await?;

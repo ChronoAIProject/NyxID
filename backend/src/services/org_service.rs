@@ -100,6 +100,7 @@ pub async fn create_org_user(
         created_at: now,
         updated_at: now,
         last_login_at: None,
+        profile_config: Default::default(),
     };
 
     db.collection::<User>(USERS).insert_one(&org).await?;
@@ -1408,6 +1409,7 @@ mod tests {
             created_at: now,
             updated_at: now,
             last_login_at: None,
+            profile_config: Default::default(),
         }
     }
 

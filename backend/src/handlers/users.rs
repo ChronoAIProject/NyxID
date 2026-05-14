@@ -1,4 +1,5 @@
 use axum::{Json, extract::State, http::HeaderMap};
+use chrono::Utc;
 use mongodb::bson::{self, doc};
 use serde::{Deserialize, Serialize};
 
@@ -10,6 +11,19 @@ use crate::services::{admin_user_service, audit_service, role_service, telemetry
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 // --- Request / Response types ---
+
+/// AI-services (and future) onboarding flags exposed to the frontend.
+/// Timestamps are rfc3339 strings; `None` means the flow is not done.
+#[derive(Debug, Serialize)]
+pub struct OnboardingStateResponse {
+    pub ai_services_completed_at: Option<String>,
+}
+
+/// User-scoped config / preferences surfaced on `GET /users/me`.
+#[derive(Debug, Serialize)]
+pub struct ProfileConfigResponse {
+    pub onboarding: OnboardingStateResponse,
+}
 
 #[derive(Debug, Serialize)]
 pub struct UserProfileResponse {
@@ -27,6 +41,7 @@ pub struct UserProfileResponse {
     pub social_provider: Option<String>,
     pub created_at: String,
     pub last_login_at: Option<String>,
+    pub profile_config: ProfileConfigResponse,
 }
 
 #[derive(Debug, Deserialize)]
@@ -85,6 +100,62 @@ pub async fn get_me(
         social_provider: user_model.social_provider,
         created_at: user_model.created_at.to_rfc3339(),
         last_login_at: user_model.last_login_at.map(|t| t.to_rfc3339()),
+        profile_config: ProfileConfigResponse {
+            onboarding: OnboardingStateResponse {
+                ai_services_completed_at: user_model
+                    .profile_config
+                    .onboarding
+                    .ai_services_completed_at
+                    .map(|t| t.to_rfc3339()),
+            },
+        },
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CompleteOnboardingRequest {
+    /// Onboarding flow identifier. Currently only `"ai_services"`.
+    pub key: String,
+}
+
+/// POST /api/v1/users/me/onboarding/complete
+///
+/// Marks a first-run onboarding flow as completed (or skipped) for the
+/// caller, so the post-login wizard redirect stops firing. Idempotent:
+/// re-stamping an already-completed flow just refreshes the timestamp.
+pub async fn complete_onboarding(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Json(req): Json<CompleteOnboardingRequest>,
+) -> AppResult<Json<OnboardingStateResponse>> {
+    let user_id = auth_user.user_id.to_string();
+
+    let field = match req.key.as_str() {
+        "ai_services" => "profile_config.onboarding.ai_services_completed_at",
+        other => {
+            return Err(AppError::BadRequest(format!(
+                "Unknown onboarding key: {other}"
+            )));
+        }
+    };
+
+    let now = Utc::now();
+    // Build the `$set` doc explicitly: `field` is a dynamic dotted path, not
+    // a literal, so insert it rather than relying on `doc!` key parsing.
+    let mut set_doc = bson::Document::new();
+    set_doc.insert(field, bson::DateTime::from_chrono(now));
+    let result = state
+        .db
+        .collection::<User>(USERS)
+        .update_one(doc! { "_id": &user_id }, doc! { "$set": set_doc })
+        .await?;
+
+    if result.matched_count == 0 {
+        return Err(AppError::NotFound("User not found".to_string()));
+    }
+
+    Ok(Json(OnboardingStateResponse {
+        ai_services_completed_at: Some(now.to_rfc3339()),
     }))
 }
 

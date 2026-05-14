@@ -68,6 +68,7 @@ pub async fn create_connection(config: &AppConfig) -> Result<DbHandle, mongodb::
 
     backfill_downstream_service_types(&db).await?;
     migrate_legacy_api_spec_url(&db).await?;
+    backfill_onboarding_state(&db).await?;
 
     Ok(db)
 }
@@ -1384,6 +1385,47 @@ async fn backfill_user_type(db: &Database) -> Result<(), mongodb::error::Error> 
         tracing::info!(
             count = result.modified_count,
             "Backfilled missing user_type to 'person'"
+        );
+    }
+
+    Ok(())
+}
+
+/// Backfill onboarding state for pre-existing users who already use the
+/// product. Anyone with at least one `user_services` row has clearly
+/// finished the AI-services flow, so stamp `ai_services_completed_at` to
+/// spare them the post-login wizard redirect. Querying the field against
+/// `null` matches both missing and explicitly-null documents, so this is
+/// idempotent across boots.
+async fn backfill_onboarding_state(db: &Database) -> Result<(), mongodb::error::Error> {
+    let user_ids = db
+        .collection::<Document>("user_services")
+        .distinct("user_id", doc! {})
+        .await?;
+
+    if user_ids.is_empty() {
+        return Ok(());
+    }
+
+    let result = db
+        .collection::<Document>("users")
+        .update_many(
+            doc! {
+                "_id": { "$in": user_ids },
+                "profile_config.onboarding.ai_services_completed_at":
+                    mongodb::bson::Bson::Null,
+            },
+            doc! { "$set": {
+                "profile_config.onboarding.ai_services_completed_at":
+                    mongodb::bson::DateTime::from_chrono(Utc::now()),
+            }},
+        )
+        .await?;
+
+    if result.modified_count > 0 {
+        tracing::info!(
+            count = result.modified_count,
+            "Backfilled onboarding state for users with existing services"
         );
     }
 

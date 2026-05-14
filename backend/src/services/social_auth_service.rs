@@ -580,6 +580,7 @@ fn resolve_social_login(
         created_at: now,
         updated_at: now,
         last_login_at: Some(now),
+        profile_config: Default::default(),
     };
 
     Ok(SocialLoginOutcome::CreateNew(new_user))
@@ -963,6 +964,7 @@ mod tests {
             created_at: now,
             updated_at: now,
             last_login_at: None,
+            profile_config: Default::default(),
         }
     }
 

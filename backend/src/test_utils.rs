@@ -331,6 +331,7 @@ pub(crate) fn test_user(user_id: &str, user_type: UserType) -> User {
         created_at: now,
         updated_at: now,
         last_login_at: None,
+        profile_config: Default::default(),
     }
 }
 
