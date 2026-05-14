@@ -115,6 +115,8 @@ Device-code endpoints use the device-code rate-limit layer:
 - 5 requests per minute per device public key where the public key is known
 - 3 consecutive invalid poll signatures locks the row for 1 hour
 
+Behind a reverse proxy, set `TRUSTED_PROXY_IPS` to the proxy IPs that strip or overwrite client-supplied `X-Forwarded-For` and `X-Real-IP` headers. NyxID only uses forwarded headers for rate-limit keying when the TCP peer is in that allowlist; otherwise it keys on the peer IP, and if no peer is available it skips the IP bucket and relies on the per-public-key bucket.
+
 Lockout triggers device failure notifications. Bind success triggers a notification to the approving user.
 
 ### Credential storage

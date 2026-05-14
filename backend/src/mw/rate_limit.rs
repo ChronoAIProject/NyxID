@@ -1,7 +1,7 @@
 use axum::{
     body::Body,
     body::to_bytes,
-    extract::{Extension, State},
+    extract::{ConnectInfo, Extension, State},
     http::{HeaderMap, Request},
     middleware::Next,
     response::Response,
@@ -197,6 +197,7 @@ pub struct DeviceCodeRateLimiters {
     pub per_ip: SharedPerIpRateLimiter,
     pub per_pubkey: SharedPerPubkeyRateLimiter,
     pub db: Option<Database>,
+    pub trusted_proxies: Arc<Vec<IpAddr>>,
 }
 
 /// Per-message edit limiter keyed by upstream platform message ID.
@@ -536,15 +537,11 @@ pub async fn device_code_rate_limit_middleware(
         return Ok(next.run(request).await);
     }
 
-    let client_ip = extract_client_ip(&request);
-    if !limiters.per_ip.check(client_ip) {
-        tracing::warn!(
-            path = %request.uri().path(),
-            ip = %client_ip,
-            "Device-code per-IP rate limit exceeded"
-        );
-        return Err(AppError::DeviceCodeRateLimited);
-    }
+    let peer = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(peer)| *peer);
+    enforce_device_code_ip_rate_limit(&limiters, request.headers(), peer, request.uri().path())?;
 
     let (parts, body) = request.into_parts();
     let bytes = to_bytes(body, 64 * 1024)
@@ -564,6 +561,34 @@ pub async fn device_code_rate_limit_middleware(
 
     let request = Request::from_parts(parts, Body::from(bytes));
     Ok(next.run(request).await)
+}
+
+fn enforce_device_code_ip_rate_limit(
+    limiters: &DeviceCodeRateLimiters,
+    headers: &HeaderMap,
+    peer: Option<SocketAddr>,
+    path: &str,
+) -> Result<Option<IpAddr>, AppError> {
+    let Some(client_ip) =
+        resolve_client_ip_for_rate_limit(headers, peer, limiters.trusted_proxies.as_slice())
+    else {
+        tracing::debug!(
+            path = %path,
+            "Skipping device-code per-IP rate limit because no trusted peer IP is available"
+        );
+        return Ok(None);
+    };
+
+    if !limiters.per_ip.check(client_ip) {
+        tracing::warn!(
+            path = %path,
+            ip = %client_ip,
+            "Device-code per-IP rate limit exceeded"
+        );
+        return Err(AppError::DeviceCodeRateLimited);
+    }
+
+    Ok(Some(client_ip))
 }
 
 async fn extract_device_pubkey_for_rate_limit(
@@ -598,6 +623,7 @@ fn extract_device_pubkey_from_json(bytes: &[u8]) -> Option<[u8; 32]> {
 mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    use std::sync::Arc;
 
     #[test]
     fn per_ip_allows_under_limit() {
@@ -930,6 +956,60 @@ mod tests {
             &[IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))],
         );
         assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn device_code_ip_limiter_skips_ip_bucket_without_peer() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "198.51.100.4".parse().unwrap());
+        let limiters = DeviceCodeRateLimiters {
+            per_ip: Arc::new(PerIpRateLimiter::new(0, 60)),
+            per_pubkey: Arc::new(PerPubkeyRateLimiter::new()),
+            db: None,
+            trusted_proxies: Arc::new(vec![IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))]),
+        };
+
+        let result = enforce_device_code_ip_rate_limit(
+            &limiters,
+            &headers,
+            None,
+            "/api/v1/devices/code/poll",
+        )
+        .expect("missing peer should skip IP bucket");
+
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn device_code_ip_limiter_honors_xff_only_from_trusted_proxy() {
+        let proxy_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let client_ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 4));
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", client_ip.to_string().parse().unwrap());
+        let limiters = DeviceCodeRateLimiters {
+            per_ip: Arc::new(PerIpRateLimiter::new(1, 60)),
+            per_pubkey: Arc::new(PerPubkeyRateLimiter::new()),
+            db: None,
+            trusted_proxies: Arc::new(vec![proxy_ip]),
+        };
+
+        let first = enforce_device_code_ip_rate_limit(
+            &limiters,
+            &headers,
+            Some(socket(proxy_ip)),
+            "/api/v1/devices/code/request",
+        )
+        .expect("first request allowed");
+        let second = enforce_device_code_ip_rate_limit(
+            &limiters,
+            &headers,
+            Some(socket(proxy_ip)),
+            "/api/v1/devices/code/request",
+        )
+        .expect_err("second request should be rate-limited by forwarded client IP");
+
+        assert_eq!(first, Some(client_ip));
+        assert!(matches!(second, AppError::DeviceCodeRateLimited));
     }
 
     #[test]

@@ -758,6 +758,7 @@ async fn main() {
         per_ip: state.device_code_ip_limiter.clone(),
         per_pubkey: state.device_code_pubkey_limiter.clone(),
         db: Some(state.db.clone()),
+        trusted_proxies: Arc::new(state.config.trusted_proxy_ips.clone()),
     };
 
     let app = public_oauth
