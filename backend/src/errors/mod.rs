@@ -187,6 +187,33 @@ pub enum AppError {
     #[error("API key scope not found: {0}")]
     ApiKeyScopeNotFound(String),
 
+    #[error("Device code not found")]
+    DeviceCodeNotFound,
+
+    #[error("Device code expired")]
+    DeviceCodeExpired,
+
+    #[error("Device poll signature invalid: {0}")]
+    DevicePollSignatureInvalid(String),
+
+    #[error("Device user code invalid")]
+    DeviceUserCodeInvalid,
+
+    #[error("Device code pending")]
+    DeviceCodePending,
+
+    #[error("Device code already delivered")]
+    DeviceCodeAlreadyDelivered,
+
+    #[error("Device code rate limited")]
+    DeviceCodeRateLimited,
+
+    #[error("Device code locked")]
+    DeviceCodeLocked,
+
+    #[error("Device code poll interval must slow down")]
+    DeviceCodeSlowDown,
+
     #[error("Channel bot not found: {0}")]
     ChannelBotNotFound(String),
 
@@ -302,6 +329,15 @@ impl AppError {
             Self::ApiKeyScopeForbidden(_) => StatusCode::FORBIDDEN,
             Self::ApiKeyScopeInactive => StatusCode::FORBIDDEN,
             Self::ApiKeyScopeNotFound(_) => StatusCode::NOT_FOUND,
+            Self::DeviceCodeNotFound => StatusCode::BAD_REQUEST,
+            Self::DeviceCodeExpired => StatusCode::GONE,
+            Self::DevicePollSignatureInvalid(_) => StatusCode::FORBIDDEN,
+            Self::DeviceUserCodeInvalid => StatusCode::BAD_REQUEST,
+            Self::DeviceCodePending => StatusCode::BAD_REQUEST,
+            Self::DeviceCodeAlreadyDelivered => StatusCode::GONE,
+            Self::DeviceCodeRateLimited => StatusCode::TOO_MANY_REQUESTS,
+            Self::DeviceCodeLocked => StatusCode::TOO_MANY_REQUESTS,
+            Self::DeviceCodeSlowDown => StatusCode::TOO_MANY_REQUESTS,
             Self::ChannelBotNotFound(_) => StatusCode::NOT_FOUND,
             Self::ChannelBotInactive(_) => StatusCode::BAD_REQUEST,
             Self::ChannelBotLimitReached(_) => StatusCode::TOO_MANY_REQUESTS,
@@ -377,9 +413,18 @@ impl AppError {
             Self::NodeRegistrationFailed(_) => 8003,
             Self::NodeCredentialMissing(_) => 8004,
             Self::WsProxyDownstream(_) => 8005,
-            Self::ApiKeyScopeForbidden(_) => 9000,
-            Self::ApiKeyScopeInactive => 9001,
-            Self::ApiKeyScopeNotFound(_) => 9002,
+            Self::ApiKeyScopeForbidden(_) => 9100,
+            Self::ApiKeyScopeInactive => 9101,
+            Self::ApiKeyScopeNotFound(_) => 9102,
+            Self::DeviceCodeNotFound => 9000,
+            Self::DeviceCodeExpired => 9001,
+            Self::DevicePollSignatureInvalid(_) => 9002,
+            Self::DeviceUserCodeInvalid => 9003,
+            Self::DeviceCodePending => 9004,
+            Self::DeviceCodeAlreadyDelivered => 9005,
+            Self::DeviceCodeRateLimited => 9006,
+            Self::DeviceCodeLocked => 9007,
+            Self::DeviceCodeSlowDown => 9008,
             Self::ChannelBotNotFound(_) => 10000,
             Self::ChannelBotInactive(_) => 10001,
             Self::ChannelBotLimitReached(_) => 10002,
@@ -490,6 +535,15 @@ impl AppError {
             Self::ApiKeyScopeForbidden(_) => "api_key_scope_forbidden",
             Self::ApiKeyScopeInactive => "api_key_scope_inactive",
             Self::ApiKeyScopeNotFound(_) => "api_key_scope_not_found",
+            Self::DeviceCodeNotFound => "device_code_not_found",
+            Self::DeviceCodeExpired => "device_code_expired",
+            Self::DevicePollSignatureInvalid(_) => "device_poll_signature_invalid",
+            Self::DeviceUserCodeInvalid => "device_user_code_invalid",
+            Self::DeviceCodePending => "device_code_pending",
+            Self::DeviceCodeAlreadyDelivered => "device_code_already_delivered",
+            Self::DeviceCodeRateLimited => "device_code_rate_limited",
+            Self::DeviceCodeLocked => "device_code_locked",
+            Self::DeviceCodeSlowDown => "device_code_slow_down",
             Self::ChannelBotNotFound(_) => "channel_bot_not_found",
             Self::ChannelBotInactive(_) => "channel_bot_inactive",
             Self::ChannelBotLimitReached(_) => "channel_bot_limit_reached",
@@ -773,6 +827,39 @@ mod tests {
             StatusCode::NOT_FOUND
         );
         assert_eq!(
+            AppError::DeviceCodeNotFound.status_code(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(AppError::DeviceCodeExpired.status_code(), StatusCode::GONE);
+        assert_eq!(
+            AppError::DevicePollSignatureInvalid("x".into()).status_code(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            AppError::DeviceUserCodeInvalid.status_code(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            AppError::DeviceCodePending.status_code(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            AppError::DeviceCodeAlreadyDelivered.status_code(),
+            StatusCode::GONE
+        );
+        assert_eq!(
+            AppError::DeviceCodeRateLimited.status_code(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(
+            AppError::DeviceCodeLocked.status_code(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(
+            AppError::DeviceCodeSlowDown.status_code(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(
             AppError::ChannelBotNotFound("x".into()).status_code(),
             StatusCode::NOT_FOUND
         );
@@ -872,6 +959,15 @@ mod tests {
             AppError::ApiKeyScopeForbidden("".into()).error_code(),
             AppError::ApiKeyScopeInactive.error_code(),
             AppError::ApiKeyScopeNotFound("".into()).error_code(),
+            AppError::DeviceCodeNotFound.error_code(),
+            AppError::DeviceCodeExpired.error_code(),
+            AppError::DevicePollSignatureInvalid("".into()).error_code(),
+            AppError::DeviceUserCodeInvalid.error_code(),
+            AppError::DeviceCodePending.error_code(),
+            AppError::DeviceCodeAlreadyDelivered.error_code(),
+            AppError::DeviceCodeRateLimited.error_code(),
+            AppError::DeviceCodeLocked.error_code(),
+            AppError::DeviceCodeSlowDown.error_code(),
             AppError::ChannelBotNotFound("".into()).error_code(),
             AppError::ChannelBotInactive("".into()).error_code(),
             AppError::ChannelBotLimitReached("".into()).error_code(),
@@ -1060,6 +1156,54 @@ mod tests {
             AppError::ApiKeyScopeNotFound("".into()).error_key(),
             "api_key_scope_not_found"
         );
+        assert_eq!(AppError::ApiKeyScopeForbidden("".into()).error_code(), 9100);
+        assert_eq!(AppError::ApiKeyScopeInactive.error_code(), 9101);
+        assert_eq!(AppError::ApiKeyScopeNotFound("".into()).error_code(), 9102);
+        assert_eq!(
+            AppError::DeviceCodeNotFound.error_key(),
+            "device_code_not_found"
+        );
+        assert_eq!(AppError::DeviceCodeNotFound.error_code(), 9000);
+        assert_eq!(
+            AppError::DeviceCodeExpired.error_key(),
+            "device_code_expired"
+        );
+        assert_eq!(AppError::DeviceCodeExpired.error_code(), 9001);
+        assert_eq!(
+            AppError::DevicePollSignatureInvalid("".into()).error_key(),
+            "device_poll_signature_invalid"
+        );
+        assert_eq!(
+            AppError::DevicePollSignatureInvalid("".into()).error_code(),
+            9002
+        );
+        assert_eq!(
+            AppError::DeviceUserCodeInvalid.error_key(),
+            "device_user_code_invalid"
+        );
+        assert_eq!(AppError::DeviceUserCodeInvalid.error_code(), 9003);
+        assert_eq!(
+            AppError::DeviceCodePending.error_key(),
+            "device_code_pending"
+        );
+        assert_eq!(AppError::DeviceCodePending.error_code(), 9004);
+        assert_eq!(
+            AppError::DeviceCodeAlreadyDelivered.error_key(),
+            "device_code_already_delivered"
+        );
+        assert_eq!(AppError::DeviceCodeAlreadyDelivered.error_code(), 9005);
+        assert_eq!(
+            AppError::DeviceCodeRateLimited.error_key(),
+            "device_code_rate_limited"
+        );
+        assert_eq!(AppError::DeviceCodeRateLimited.error_code(), 9006);
+        assert_eq!(AppError::DeviceCodeLocked.error_key(), "device_code_locked");
+        assert_eq!(AppError::DeviceCodeLocked.error_code(), 9007);
+        assert_eq!(
+            AppError::DeviceCodeSlowDown.error_key(),
+            "device_code_slow_down"
+        );
+        assert_eq!(AppError::DeviceCodeSlowDown.error_code(), 9008);
         assert_eq!(
             AppError::ChannelBotNotFound("".into()).error_key(),
             "channel_bot_not_found"

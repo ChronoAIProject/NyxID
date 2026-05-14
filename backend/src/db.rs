@@ -8,6 +8,7 @@ use mongodb::options::{ClientOptions, IndexOptions};
 use mongodb::{Client, Database, IndexModel};
 
 use crate::config::AppConfig;
+use crate::models::device_code::COLLECTION_NAME as DEVICE_CODES;
 use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
 };
@@ -833,6 +834,36 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
             .build(),
     )
     .await?;
+
+    // ── device_codes ──
+    let device_codes = db.collection::<mongodb::bson::Document>(DEVICE_CODES);
+    device_codes
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "device_code_hash": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    device_codes
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "user_code_history.code": 1 })
+                .build(),
+        )
+        .await?;
+    device_codes
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "expires_at": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(Duration::from_secs(0))
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
 
     // ── node_pending_credentials ──
     let npc = db.collection::<mongodb::bson::Document>("node_pending_credentials");
