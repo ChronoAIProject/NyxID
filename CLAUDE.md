@@ -39,7 +39,7 @@ fn my_handler() -> AppResult<Json<MyResponse>> {
 ```
 Error variants map to HTTP status codes and numeric error codes; see `backend/src/errors/mod.rs` for the authoritative list. Internal/database errors never leak details to clients.
 
-Reserved device-code binding errors live in numeric block 9000-9099.
+Reserved device-code binding errors live in numeric block 9500-9599.
 
 ### 4. Frontend Patterns
 
@@ -91,16 +91,16 @@ Add new entries here when introducing additional vendored URN types.
   - 1013 `SshNodeExecChannelClosed`
   - 1014 `SshPrincipalAmbiguous`
   - 1015 `SshAuthModeUnsupportedForOperation`
-- Error codes 9000-9099 are reserved for device-code binding:
-  - 9000 `DeviceCodeNotFound`
-  - 9001 `DeviceCodeExpired`
-  - 9002 `DevicePollSignatureInvalid`
-  - 9003 `DeviceUserCodeInvalid`
-  - 9004 `DeviceCodePending`
-  - 9005 `DeviceCodeAlreadyDelivered`
-  - 9006 `DeviceCodeRateLimited`
-  - 9007 `DeviceCodeLocked`
-  - 9008 `DeviceCodeSlowDown`
+- Error codes 9500-9599 are reserved for device-code binding:
+  - 9500 `DeviceCodeNotFound`
+  - 9501 `DeviceCodeExpired`
+  - 9502 `DevicePollSignatureInvalid`
+  - 9503 `DeviceUserCodeInvalid`
+  - 9504 `DeviceCodePending`
+  - 9505 `DeviceCodeAlreadyDelivered`
+  - 9506 `DeviceCodeRateLimited`
+  - 9507 `DeviceCodeLocked`
+  - 9508 `DeviceCodeSlowDown`
 - `NodeStatus` is an enum (`Online`/`Offline`/`Draining`) -- not a bare string
 - WS writer channels are bounded (capacity: 256); `try_send` treats full buffers as node offline (H4)
 - WebSocket auth-frame injection rules live on `DownstreamService.ws_frame_injections` and `UserService.ws_frame_injections`; they are additive and separate from HTTP `auth_method` injection. `WsFrameDirection` is the trigger direction, so a `downstream` rule matches frames from the service and injects the configured response back toward that service. Direct and node-routed WS paths emit metadata-only `ws_frame_auth_injected` audit events; never log injected payloads or credentials.

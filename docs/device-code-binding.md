@@ -223,7 +223,7 @@ The device continues polling with the same signed request shape. The first succe
 }
 ```
 
-A later poll for the same row returns `410` with error code `9005`.
+A later poll for the same row returns `410` with error code `9505`.
 
 ## Factory Provisioning
 
@@ -266,19 +266,19 @@ The private key should be written to the device secure provisioning path or encr
 
 ## Error Codes
 
-Device-code errors reserve numeric block `9000-9099`.
+Device-code errors reserve numeric block `9500-9599`.
 
 | Code | Key | HTTP | Meaning |
 |---:|---|---:|---|
-| 9000 | `device_code_not_found` | 400 | Raw device code hash was not found |
-| 9001 | `device_code_expired` | 410 | Binding window expired |
-| 9002 | `device_poll_signature_invalid` | 403 | Ed25519 signature failed or poll timestamp was invalid |
-| 9003 | `device_user_code_invalid` | 400 | User-entered code was malformed or not found |
-| 9004 | `device_code_pending` | 400 | Device is still waiting for approval |
-| 9005 | `device_code_already_delivered` | 410 | Credentials were already delivered, or approval is no longer allowed |
-| 9006 | `device_code_rate_limited` | 429 | Device-code rate limit exceeded |
-| 9007 | `device_code_locked` | 429 | Row is locked after repeated invalid signatures |
-| 9008 | `device_code_slow_down` | 429 | Poll interval must slow down |
+| 9500 | `device_code_not_found` | 400 | Raw device code hash was not found |
+| 9501 | `device_code_expired` | 410 | Binding window expired |
+| 9502 | `device_poll_signature_invalid` | 403 | Ed25519 signature failed or poll timestamp was invalid |
+| 9503 | `device_user_code_invalid` | 400 | User-entered code was malformed or not found |
+| 9504 | `device_code_pending` | 400 | Device is still waiting for approval |
+| 9505 | `device_code_already_delivered` | 410 | Credentials were already delivered, or approval is no longer allowed |
+| 9506 | `device_code_rate_limited` | 429 | Device-code rate limit exceeded |
+| 9507 | `device_code_locked` | 429 | Row is locked after repeated invalid signatures |
+| 9508 | `device_code_slow_down` | 429 | Poll interval must slow down |
 
 ## ESP32 Firmware Notes
 

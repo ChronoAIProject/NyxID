@@ -279,17 +279,17 @@ function deviceApprovalErrorMessage(error: unknown): string {
   }
 
   switch (error.errorCode) {
-    case 9000:
-    case 9003:
+    case 9500:
+    case 9503:
       return "That device code is not valid.";
-    case 9001:
+    case 9501:
       return "That device code has expired.";
-    case 9005:
+    case 9505:
       return "That device has already received credentials.";
-    case 9006:
-    case 9008:
+    case 9506:
+    case 9508:
       return "Too many attempts. Wait a moment before trying again.";
-    case 9007:
+    case 9507:
       return "That device request is locked after repeated failed polls.";
     default:
       return error.message || "Device approval failed. Try again.";

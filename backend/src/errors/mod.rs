@@ -413,18 +413,18 @@ impl AppError {
             Self::NodeRegistrationFailed(_) => 8003,
             Self::NodeCredentialMissing(_) => 8004,
             Self::WsProxyDownstream(_) => 8005,
-            Self::ApiKeyScopeForbidden(_) => 9100,
-            Self::ApiKeyScopeInactive => 9101,
-            Self::ApiKeyScopeNotFound(_) => 9102,
-            Self::DeviceCodeNotFound => 9000,
-            Self::DeviceCodeExpired => 9001,
-            Self::DevicePollSignatureInvalid(_) => 9002,
-            Self::DeviceUserCodeInvalid => 9003,
-            Self::DeviceCodePending => 9004,
-            Self::DeviceCodeAlreadyDelivered => 9005,
-            Self::DeviceCodeRateLimited => 9006,
-            Self::DeviceCodeLocked => 9007,
-            Self::DeviceCodeSlowDown => 9008,
+            Self::ApiKeyScopeForbidden(_) => 9000,
+            Self::ApiKeyScopeInactive => 9001,
+            Self::ApiKeyScopeNotFound(_) => 9002,
+            Self::DeviceCodeNotFound => 9500,
+            Self::DeviceCodeExpired => 9501,
+            Self::DevicePollSignatureInvalid(_) => 9502,
+            Self::DeviceUserCodeInvalid => 9503,
+            Self::DeviceCodePending => 9504,
+            Self::DeviceCodeAlreadyDelivered => 9505,
+            Self::DeviceCodeRateLimited => 9506,
+            Self::DeviceCodeLocked => 9507,
+            Self::DeviceCodeSlowDown => 9508,
             Self::ChannelBotNotFound(_) => 10000,
             Self::ChannelBotInactive(_) => 10001,
             Self::ChannelBotLimitReached(_) => 10002,
@@ -1156,54 +1156,54 @@ mod tests {
             AppError::ApiKeyScopeNotFound("".into()).error_key(),
             "api_key_scope_not_found"
         );
-        assert_eq!(AppError::ApiKeyScopeForbidden("".into()).error_code(), 9100);
-        assert_eq!(AppError::ApiKeyScopeInactive.error_code(), 9101);
-        assert_eq!(AppError::ApiKeyScopeNotFound("".into()).error_code(), 9102);
+        assert_eq!(AppError::ApiKeyScopeForbidden("".into()).error_code(), 9000);
+        assert_eq!(AppError::ApiKeyScopeInactive.error_code(), 9001);
+        assert_eq!(AppError::ApiKeyScopeNotFound("".into()).error_code(), 9002);
         assert_eq!(
             AppError::DeviceCodeNotFound.error_key(),
             "device_code_not_found"
         );
-        assert_eq!(AppError::DeviceCodeNotFound.error_code(), 9000);
+        assert_eq!(AppError::DeviceCodeNotFound.error_code(), 9500);
         assert_eq!(
             AppError::DeviceCodeExpired.error_key(),
             "device_code_expired"
         );
-        assert_eq!(AppError::DeviceCodeExpired.error_code(), 9001);
+        assert_eq!(AppError::DeviceCodeExpired.error_code(), 9501);
         assert_eq!(
             AppError::DevicePollSignatureInvalid("".into()).error_key(),
             "device_poll_signature_invalid"
         );
         assert_eq!(
             AppError::DevicePollSignatureInvalid("".into()).error_code(),
-            9002
+            9502
         );
         assert_eq!(
             AppError::DeviceUserCodeInvalid.error_key(),
             "device_user_code_invalid"
         );
-        assert_eq!(AppError::DeviceUserCodeInvalid.error_code(), 9003);
+        assert_eq!(AppError::DeviceUserCodeInvalid.error_code(), 9503);
         assert_eq!(
             AppError::DeviceCodePending.error_key(),
             "device_code_pending"
         );
-        assert_eq!(AppError::DeviceCodePending.error_code(), 9004);
+        assert_eq!(AppError::DeviceCodePending.error_code(), 9504);
         assert_eq!(
             AppError::DeviceCodeAlreadyDelivered.error_key(),
             "device_code_already_delivered"
         );
-        assert_eq!(AppError::DeviceCodeAlreadyDelivered.error_code(), 9005);
+        assert_eq!(AppError::DeviceCodeAlreadyDelivered.error_code(), 9505);
         assert_eq!(
             AppError::DeviceCodeRateLimited.error_key(),
             "device_code_rate_limited"
         );
-        assert_eq!(AppError::DeviceCodeRateLimited.error_code(), 9006);
+        assert_eq!(AppError::DeviceCodeRateLimited.error_code(), 9506);
         assert_eq!(AppError::DeviceCodeLocked.error_key(), "device_code_locked");
-        assert_eq!(AppError::DeviceCodeLocked.error_code(), 9007);
+        assert_eq!(AppError::DeviceCodeLocked.error_code(), 9507);
         assert_eq!(
             AppError::DeviceCodeSlowDown.error_key(),
             "device_code_slow_down"
         );
-        assert_eq!(AppError::DeviceCodeSlowDown.error_code(), 9008);
+        assert_eq!(AppError::DeviceCodeSlowDown.error_code(), 9508);
         assert_eq!(
             AppError::ChannelBotNotFound("".into()).error_key(),
             "channel_bot_not_found"
