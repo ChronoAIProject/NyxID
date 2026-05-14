@@ -524,7 +524,7 @@ pub async fn rate_limit_middleware(
     Ok(next.run(request).await)
 }
 
-async fn device_code_rate_limit_middleware(
+pub async fn device_code_rate_limit_middleware(
     State(limiters): State<DeviceCodeRateLimiters>,
     request: Request<Body>,
     next: Next,

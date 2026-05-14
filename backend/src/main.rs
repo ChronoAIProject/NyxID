@@ -754,11 +754,26 @@ async fn main() {
         csrf_state,
         mw::csrf::browser_csrf_middleware,
     ));
+    let device_code_rate_limiters = mw::rate_limit::DeviceCodeRateLimiters {
+        per_ip: state.device_code_ip_limiter.clone(),
+        per_pubkey: state.device_code_pubkey_limiter.clone(),
+    };
 
     let app = public_oauth
         .merge(private_api)
         .with_state(state)
         .layer(DefaultBodyLimit::max(1_048_576))
+        .layer(axum_mw::from_fn_with_state::<
+            _,
+            _,
+            (
+                axum::extract::State<mw::rate_limit::DeviceCodeRateLimiters>,
+                axum::http::Request<axum::body::Body>,
+            ),
+        >(
+            device_code_rate_limiters,
+            mw::rate_limit::device_code_rate_limit_middleware,
+        ))
         .layer(axum_mw::from_fn(
             mw::security_headers::security_headers_middleware,
         ))
