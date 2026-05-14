@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
+import { useSearch } from "@tanstack/react-router";
 import { CheckCircle2, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
 import { useApproveDevice } from "@/hooks/use-devices";
@@ -43,10 +44,15 @@ import {
 const PERSONAL_OWNER_VALUE = "__personal__";
 
 export function DevicesBindPage() {
+  const search = useSearch({ strict: false }) as { user_code?: string };
   const approveDevice = useApproveDevice();
   const { data: orgs, isLoading: isOrgsLoading } = useOrgs();
   const [approvedDevice, setApprovedDevice] =
     useState<ApproveDeviceResponse | null>(null);
+  const initialUserCode =
+    typeof search.user_code === "string"
+      ? formatDeviceUserCodeInput(search.user_code)
+      : "";
 
   const adminOrgs = (orgs ?? []).filter((org) => org.your_role === "admin");
 
@@ -57,11 +63,16 @@ export function DevicesBindPage() {
   >({
     resolver: zodResolver(approveDeviceFormSchema),
     defaultValues: {
-      user_code: "",
+      user_code: initialUserCode,
       org_id: null,
       label: "",
     },
   });
+
+  useEffect(() => {
+    if (!initialUserCode || form.formState.dirtyFields.user_code) return;
+    form.setValue("user_code", initialUserCode, { shouldValidate: true });
+  }, [form, initialUserCode]);
 
   async function handleApprove(values: ApproveDeviceRequest) {
     form.clearErrors("root");
@@ -76,12 +87,15 @@ export function DevicesBindPage() {
   }
 
   return (
-    <div className="mx-auto flex w-full max-w-3xl flex-col gap-5 px-4 py-6 sm:px-6 lg:px-8">
+    <div
+      className="mx-auto flex w-full max-w-3xl flex-col gap-5 py-6"
+      style={{ maxWidth: "min(48rem, calc(100vw - 2rem))" }}
+    >
       <header className="flex flex-col gap-1">
         <h1 className="text-[24px] font-semibold leading-tight text-foreground sm:text-[28px]">
           Bind device
         </h1>
-        <p className="text-[13px] text-muted-foreground">
+        <p className="break-words text-[13px] text-muted-foreground">
           Approve a device-code request and create scoped device credentials.
         </p>
       </header>

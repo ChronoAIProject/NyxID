@@ -412,6 +412,15 @@ const settingsRoute = createRoute({
 const devicesBindRoute = createRoute({
   path: "/settings/devices/bind",
   getParentRoute: () => dashboardLayout,
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { user_code?: string } => ({
+    ...(typeof search.user_code === "string" &&
+    search.user_code.length > 0 &&
+    search.user_code.length <= 32
+      ? { user_code: search.user_code }
+      : {}),
+  }),
   component: DevicesBindPage,
 });
 
