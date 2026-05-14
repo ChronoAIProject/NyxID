@@ -6,7 +6,7 @@ const MOCK_USER = {
   avatar_url: null,
   email_verified: true,
   mfa_enabled: true,
-  is_admin: false,
+  is_admin: true,
   is_active: true,
   created_at: "2025-11-20T08:00:00Z",
 };
@@ -893,6 +893,331 @@ const MOCK_LLM_STATUS = {
   ],
 };
 
+// ── Admin Users ──
+const MOCK_ADMIN_USERS = [
+  {
+    id: "d4f5a6b7-c8d9-4e0f-a1b2-c3d4e5f60718",
+    email: "dannick@nyxid.dev",
+    display_name: "Dannick Young",
+    avatar_url: null,
+    email_verified: true,
+    is_active: true,
+    is_admin: true,
+    is_operator: false,
+    role: "admin" as const,
+    mfa_enabled: true,
+    role_ids: ["role-001"],
+    group_ids: ["grp-001"],
+    created_at: "2025-11-20T08:00:00Z",
+    last_login_at: "2026-05-14T09:30:00Z",
+  },
+  {
+    id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    email: "alex@chronoai.dev",
+    display_name: "Alex Chen",
+    avatar_url: null,
+    email_verified: true,
+    is_active: true,
+    is_admin: false,
+    is_operator: true,
+    role: "operator" as const,
+    mfa_enabled: true,
+    role_ids: ["role-002"],
+    group_ids: ["grp-001"],
+    created_at: "2025-12-15T10:00:00Z",
+    last_login_at: "2026-05-13T16:45:00Z",
+  },
+  {
+    id: "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+    email: "sarah@chronoai.dev",
+    display_name: "Sarah Park",
+    avatar_url: null,
+    email_verified: true,
+    is_active: true,
+    is_admin: false,
+    is_operator: false,
+    role: "user" as const,
+    mfa_enabled: false,
+    role_ids: [],
+    group_ids: ["grp-002"],
+    created_at: "2026-01-05T09:00:00Z",
+    last_login_at: "2026-05-12T11:20:00Z",
+  },
+  {
+    id: "c3d4e5f6-a7b8-9012-cdef-123456789012",
+    email: "mike@chronoai.dev",
+    display_name: "Mike Torres",
+    avatar_url: null,
+    email_verified: true,
+    is_active: true,
+    is_admin: false,
+    is_operator: false,
+    role: "user" as const,
+    mfa_enabled: true,
+    role_ids: ["role-002"],
+    group_ids: ["grp-002"],
+    created_at: "2026-02-10T14:00:00Z",
+    last_login_at: "2026-05-14T08:10:00Z",
+  },
+  {
+    id: "d4e5f6a7-b8c9-0123-defa-234567890123",
+    email: "lin@chronoai.dev",
+    display_name: "Lin Wei",
+    avatar_url: null,
+    email_verified: false,
+    is_active: true,
+    is_admin: false,
+    is_operator: false,
+    role: "user" as const,
+    mfa_enabled: false,
+    role_ids: [],
+    group_ids: [],
+    created_at: "2026-03-20T11:00:00Z",
+    last_login_at: "2026-05-10T15:00:00Z",
+  },
+  {
+    id: "e5f6a7b8-c9d0-1234-efab-345678901234",
+    email: "deactivated@example.com",
+    display_name: "Former Employee",
+    avatar_url: null,
+    email_verified: true,
+    is_active: false,
+    is_admin: false,
+    is_operator: false,
+    role: "user" as const,
+    mfa_enabled: false,
+    role_ids: [],
+    group_ids: [],
+    created_at: "2025-10-01T12:00:00Z",
+    last_login_at: "2026-01-15T09:00:00Z",
+  },
+];
+
+// ── Admin Audit Log ──
+const MOCK_AUDIT_LOG = [
+  { id: "aud-001", user_id: MOCK_ADMIN_USERS[0]!.id, api_key_id: null, api_key_name: null, event_type: "user.login", event_data: { method: "password", ip: "192.168.1.10" }, ip_address: "192.168.1.10", user_agent: "Mozilla/5.0 (Macintosh)", created_at: "2026-05-14T09:30:00Z" },
+  { id: "aud-002", user_id: MOCK_ADMIN_USERS[0]!.id, api_key_id: "k1-0001-0001-0001-000000000001", api_key_name: "claude-code-agent", event_type: "proxy.request", event_data: { service: "openai", method: "POST", path: "/v1/chat/completions" }, ip_address: "10.0.1.50", user_agent: "nyxid-agent/0.9.2", created_at: "2026-05-14T09:25:00Z" },
+  { id: "aud-003", user_id: MOCK_ADMIN_USERS[1]!.id, api_key_id: null, api_key_name: null, event_type: "user.login", event_data: { method: "password" }, ip_address: "10.0.0.5", user_agent: "Mozilla/5.0 (Windows NT 10.0)", created_at: "2026-05-13T16:45:00Z" },
+  { id: "aud-004", user_id: MOCK_ADMIN_USERS[0]!.id, api_key_id: null, api_key_name: null, event_type: "service_account.create", event_data: { name: "CI/CD Pipeline" }, ip_address: "192.168.1.10", user_agent: "Mozilla/5.0 (Macintosh)", created_at: "2026-05-13T14:00:00Z" },
+  { id: "aud-005", user_id: MOCK_ADMIN_USERS[2]!.id, api_key_id: null, api_key_name: null, event_type: "mfa.setup", event_data: { method: "totp" }, ip_address: "172.16.0.20", user_agent: "Mozilla/5.0 (Linux)", created_at: "2026-05-13T10:00:00Z" },
+  { id: "aud-006", user_id: MOCK_ADMIN_USERS[3]!.id, api_key_id: null, api_key_name: null, event_type: "user.login", event_data: { method: "password" }, ip_address: "192.168.1.42", user_agent: "Mozilla/5.0 (Macintosh)", created_at: "2026-05-14T08:10:00Z" },
+  { id: "aud-007", user_id: MOCK_ADMIN_USERS[0]!.id, api_key_id: null, api_key_name: null, event_type: "invite_code.create", event_data: { max_uses: 5 }, ip_address: "192.168.1.10", user_agent: "Mozilla/5.0 (Macintosh)", created_at: "2026-05-12T15:00:00Z" },
+  { id: "aud-008", user_id: MOCK_ADMIN_USERS[4]!.id, api_key_id: null, api_key_name: null, event_type: "user.register", event_data: { invite_code: "CHRONO-2026" }, ip_address: "203.0.113.50", user_agent: "Mozilla/5.0 (iPhone)", created_at: "2026-05-10T15:00:00Z" },
+  { id: "aud-009", user_id: MOCK_ADMIN_USERS[0]!.id, api_key_id: null, api_key_name: null, event_type: "role.create", event_data: { name: "API Consumer" }, ip_address: "192.168.1.10", user_agent: "Mozilla/5.0 (Macintosh)", created_at: "2026-05-10T11:00:00Z" },
+  { id: "aud-010", user_id: MOCK_ADMIN_USERS[0]!.id, api_key_id: null, api_key_name: null, event_type: "user.status_change", event_data: { target_user: "deactivated@example.com", is_active: false }, ip_address: "192.168.1.10", user_agent: "Mozilla/5.0 (Macintosh)", created_at: "2026-05-09T10:00:00Z" },
+];
+
+// ── Admin Invite Codes ──
+const MOCK_INVITE_CODES = [
+  {
+    id: "inv-001", code: "CHRONO-2026", max_uses: 5, used_count: 3, is_active: true,
+    created_by: MOCK_ADMIN_USERS[0]!.id,
+    creator: { email: "dannick@nyxid.dev", display_name: "Donnick Young" },
+    note: "Team onboarding Q1 2026",
+    created_at: "2026-01-10T09:00:00Z", updated_at: "2026-03-20T11:00:00Z",
+    usages: [
+      { user_id: MOCK_ADMIN_USERS[2]!.id, used_at: "2026-01-05T09:00:00Z", user_email: "sarah@chronoai.dev", user_display_name: "Sarah Park" },
+      { user_id: MOCK_ADMIN_USERS[3]!.id, used_at: "2026-02-10T14:00:00Z", user_email: "mike@chronoai.dev", user_display_name: "Mike Torres" },
+      { user_id: MOCK_ADMIN_USERS[4]!.id, used_at: "2026-03-20T11:00:00Z", user_email: "lin@chronoai.dev", user_display_name: "Lin Wei" },
+    ],
+  },
+  {
+    id: "inv-002", code: "PARTNER-VIP", max_uses: 10, used_count: 0, is_active: true,
+    created_by: MOCK_ADMIN_USERS[0]!.id,
+    creator: { email: "dannick@nyxid.dev", display_name: "Dannick Young" },
+    note: "Partner program invites",
+    created_at: "2026-04-01T12:00:00Z", updated_at: "2026-04-01T12:00:00Z",
+    usages: [],
+  },
+  {
+    id: "inv-003", code: "BETA-TEST-42", max_uses: 1, used_count: 1, is_active: false,
+    created_by: MOCK_ADMIN_USERS[1]!.id,
+    creator: { email: "alex@chronoai.dev", display_name: "Alex Chen" },
+    note: null,
+    created_at: "2025-12-20T08:00:00Z", updated_at: "2026-01-05T09:00:00Z",
+    usages: [
+      { user_id: MOCK_ADMIN_USERS[2]!.id, used_at: "2026-01-05T09:00:00Z", user_email: "sarah@chronoai.dev", user_display_name: "Sarah Park" },
+    ],
+  },
+];
+
+// ── Admin Roles ──
+const MOCK_ROLES = [
+  {
+    id: "role-001", name: "Platform Admin", slug: "platform-admin",
+    description: "Full administrative access to all platform features",
+    permissions: ["admin:read", "admin:write", "users:manage", "roles:manage", "audit:read"],
+    is_default: false, is_system: true, client_id: null,
+    created_at: "2025-11-01T00:00:00Z", updated_at: "2025-11-01T00:00:00Z",
+  },
+  {
+    id: "role-002", name: "API Consumer", slug: "api-consumer",
+    description: "Can connect services and use the proxy",
+    permissions: ["proxy:read", "proxy:write", "services:read", "keys:manage"],
+    is_default: true, is_system: false, client_id: null,
+    created_at: "2026-01-15T10:00:00Z", updated_at: "2026-03-10T14:00:00Z",
+  },
+  {
+    id: "role-003", name: "Node Operator", slug: "node-operator",
+    description: "Can register and manage credential nodes",
+    permissions: ["nodes:manage", "proxy:read", "proxy:write"],
+    is_default: false, is_system: false, client_id: null,
+    created_at: "2026-02-20T09:00:00Z", updated_at: "2026-02-20T09:00:00Z",
+  },
+  {
+    id: "role-004", name: "Audit Viewer", slug: "audit-viewer",
+    description: "Read-only access to audit logs",
+    permissions: ["audit:read"],
+    is_default: false, is_system: false, client_id: null,
+    created_at: "2026-03-05T11:00:00Z", updated_at: "2026-03-05T11:00:00Z",
+  },
+];
+
+// ── Admin Groups ──
+const MOCK_GROUPS = [
+  {
+    id: "grp-001", name: "Engineering", slug: "engineering",
+    description: "Core engineering team with full proxy and node access",
+    roles: [MOCK_ROLES[1]!, MOCK_ROLES[2]!],
+    parent_group_id: null, member_count: 3,
+    created_at: "2025-12-01T08:00:00Z", updated_at: "2026-04-10T14:00:00Z",
+  },
+  {
+    id: "grp-002", name: "Product", slug: "product",
+    description: "Product team with service access",
+    roles: [MOCK_ROLES[1]!],
+    parent_group_id: null, member_count: 2,
+    created_at: "2026-01-10T09:00:00Z", updated_at: "2026-03-15T10:00:00Z",
+  },
+  {
+    id: "grp-003", name: "Security", slug: "security",
+    description: "Security team with audit access",
+    roles: [MOCK_ROLES[3]!],
+    parent_group_id: null, member_count: 1,
+    created_at: "2026-02-15T11:00:00Z", updated_at: "2026-02-15T11:00:00Z",
+  },
+];
+
+const MOCK_GROUP_MEMBERS: Record<string, { members: unknown[]; total: number }> = {
+  "grp-001": {
+    members: [
+      { id: MOCK_ADMIN_USERS[0]!.id, email: "dannick@nyxid.dev", display_name: "Dannick Young" },
+      { id: MOCK_ADMIN_USERS[1]!.id, email: "alex@chronoai.dev", display_name: "Alex Chen" },
+      { id: MOCK_ADMIN_USERS[3]!.id, email: "mike@chronoai.dev", display_name: "Mike Torres" },
+    ],
+    total: 3,
+  },
+  "grp-002": {
+    members: [
+      { id: MOCK_ADMIN_USERS[2]!.id, email: "sarah@chronoai.dev", display_name: "Sarah Park" },
+      { id: MOCK_ADMIN_USERS[3]!.id, email: "mike@chronoai.dev", display_name: "Mike Torres" },
+    ],
+    total: 2,
+  },
+  "grp-003": {
+    members: [
+      { id: MOCK_ADMIN_USERS[1]!.id, email: "alex@chronoai.dev", display_name: "Alex Chen" },
+    ],
+    total: 1,
+  },
+};
+
+// ── Admin Service Accounts ──
+const MOCK_SERVICE_ACCOUNTS = [
+  {
+    id: "sa-001", name: "CI/CD Pipeline", description: "Automated deployment pipeline",
+    client_id: "nyx_sa_ci_cd_pipeline_8f3a", secret_prefix: "nyx_ss_8f3a",
+    allowed_scopes: "openid proxy:* llm:proxy", role_ids: ["role-002"],
+    is_active: true, rate_limit_override: 50,
+    created_by: MOCK_ADMIN_USERS[0]!.id,
+    created_at: "2026-03-01T09:00:00Z", updated_at: "2026-05-10T14:00:00Z",
+    last_authenticated_at: "2026-05-14T06:00:00Z",
+  },
+  {
+    id: "sa-002", name: "Monitoring Agent", description: "Health check and monitoring service",
+    client_id: "nyx_sa_monitoring_agent_2b7c", secret_prefix: "nyx_ss_2b7c",
+    allowed_scopes: "openid proxy:read", role_ids: [],
+    is_active: true, rate_limit_override: null,
+    created_by: MOCK_ADMIN_USERS[0]!.id,
+    created_at: "2026-04-15T11:00:00Z", updated_at: "2026-04-15T11:00:00Z",
+    last_authenticated_at: "2026-05-14T09:28:00Z",
+  },
+  {
+    id: "sa-003", name: "Data Sync Worker", description: null,
+    client_id: "nyx_sa_data_sync_worker_9d1e", secret_prefix: "nyx_ss_9d1e",
+    allowed_scopes: "openid proxy:read proxy:write", role_ids: ["role-002"],
+    is_active: false, rate_limit_override: 20,
+    created_by: MOCK_ADMIN_USERS[1]!.id,
+    created_at: "2026-02-20T15:00:00Z", updated_at: "2026-05-01T10:00:00Z",
+    last_authenticated_at: "2026-04-28T22:00:00Z",
+  },
+];
+
+// ── Admin Nodes ──
+const MOCK_ADMIN_NODES = [
+  {
+    id: "node-0001", name: "prod-us-east",
+    user_id: MOCK_ADMIN_USERS[0]!.id, user_email: "dannick@nyxid.dev",
+    status: "Online", is_connected: true,
+    last_heartbeat_at: "2026-05-14T09:30:00Z", connected_at: "2026-05-12T08:00:00Z",
+    metadata: { agent_version: "0.9.2", os: "linux", arch: "x86_64", ip_address: "10.0.1.50" },
+    metrics: { total_requests: 12450, success_count: 12380, error_count: 70, success_rate: 0.994, avg_latency_ms: 42, last_error: null, last_error_at: null, last_success_at: "2026-05-14T09:29:00Z" },
+    binding_count: 3, created_at: "2026-02-10T09:00:00Z",
+  },
+  {
+    id: "node-0002", name: "staging-eu",
+    user_id: MOCK_ADMIN_USERS[0]!.id, user_email: "dannick@nyxid.dev",
+    status: "Online", is_connected: true,
+    last_heartbeat_at: "2026-05-14T09:28:00Z", connected_at: "2026-05-10T10:00:00Z",
+    metadata: { agent_version: "0.9.2", os: "darwin", arch: "arm64", ip_address: "192.168.1.100" },
+    metrics: { total_requests: 3200, success_count: 3180, error_count: 20, success_rate: 0.994, avg_latency_ms: 85, last_error: null, last_error_at: null, last_success_at: "2026-05-14T09:25:00Z" },
+    binding_count: 2, created_at: "2026-03-15T14:00:00Z",
+  },
+  {
+    id: "node-0003", name: "alex-dev-local",
+    user_id: MOCK_ADMIN_USERS[1]!.id, user_email: "alex@chronoai.dev",
+    status: "Offline", is_connected: false,
+    last_heartbeat_at: "2026-05-13T18:00:00Z", connected_at: null,
+    metadata: { agent_version: "0.9.1", os: "darwin", arch: "arm64", ip_address: "192.168.1.42" },
+    metrics: { total_requests: 890, success_count: 875, error_count: 15, success_rate: 0.983, avg_latency_ms: 120, last_error: "connection timeout", last_error_at: "2026-05-13T17:55:00Z", last_success_at: "2026-05-13T17:50:00Z" },
+    binding_count: 1, created_at: "2026-04-01T10:00:00Z",
+  },
+  {
+    id: "node-0004", name: "prod-drain-test",
+    user_id: MOCK_ADMIN_USERS[0]!.id, user_email: "dannick@nyxid.dev",
+    status: "Draining", is_connected: true,
+    last_heartbeat_at: "2026-05-14T09:29:00Z", connected_at: "2026-05-14T06:00:00Z",
+    metadata: { agent_version: "0.9.2", os: "linux", arch: "x86_64", ip_address: "10.0.1.51" },
+    metrics: { total_requests: 450, success_count: 448, error_count: 2, success_rate: 0.996, avg_latency_ms: 38, last_error: null, last_error_at: null, last_success_at: "2026-05-14T09:20:00Z" },
+    binding_count: 1, created_at: "2026-05-01T12:00:00Z",
+  },
+];
+
+// ── Admin Sessions ──
+const MOCK_ADMIN_SESSIONS: Record<string, { sessions: unknown[]; total: number }> = {
+  [MOCK_ADMIN_USERS[0]!.id]: {
+    sessions: [
+      { id: "sess-a01", ip_address: "192.168.1.10", user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)", created_at: "2026-05-14T09:30:00Z", expires_at: "2026-05-21T09:30:00Z", last_active_at: "2026-05-14T09:30:00Z", revoked: false },
+      { id: "sess-a02", ip_address: "10.0.0.5", user_agent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0)", created_at: "2026-05-13T20:00:00Z", expires_at: "2026-05-20T20:00:00Z", last_active_at: "2026-05-14T08:00:00Z", revoked: false },
+    ],
+    total: 2,
+  },
+};
+
+// ── Admin User Roles / Groups ──
+const MOCK_USER_ROLES: Record<string, { direct_roles: unknown[]; inherited_roles: unknown[]; effective_permissions: string[] }> = {
+  [MOCK_ADMIN_USERS[0]!.id]: { direct_roles: [MOCK_ROLES[0]], inherited_roles: [MOCK_ROLES[1], MOCK_ROLES[2]], effective_permissions: ["admin:read", "admin:write", "users:manage", "roles:manage", "audit:read", "proxy:read", "proxy:write", "services:read", "keys:manage", "nodes:manage"] },
+  [MOCK_ADMIN_USERS[1]!.id]: { direct_roles: [MOCK_ROLES[1]], inherited_roles: [], effective_permissions: ["proxy:read", "proxy:write", "services:read", "keys:manage"] },
+  [MOCK_ADMIN_USERS[3]!.id]: { direct_roles: [MOCK_ROLES[1]], inherited_roles: [], effective_permissions: ["proxy:read", "proxy:write", "services:read", "keys:manage"] },
+};
+
+const MOCK_USER_GROUPS_MAP: Record<string, { groups: unknown[] }> = {
+  [MOCK_ADMIN_USERS[0]!.id]: { groups: [MOCK_GROUPS[0]] },
+  [MOCK_ADMIN_USERS[1]!.id]: { groups: [MOCK_GROUPS[0]] },
+  [MOCK_ADMIN_USERS[2]!.id]: { groups: [MOCK_GROUPS[1]] },
+  [MOCK_ADMIN_USERS[3]!.id]: { groups: [MOCK_GROUPS[0], MOCK_GROUPS[1]] },
+};
+
 // ── Helper: find by ID in an array ──
 function findById<T extends { id: string }>(items: readonly T[], id: string): T | undefined {
   return items.find((item) => item.id === id);
@@ -1052,6 +1377,73 @@ const MOCK_HANDLERS: MockHandler[] = [
     return m ? findBySlug(MOCK_CATALOG, m[1] ?? "") ?? MOCK_CATALOG[0] : undefined;
   },
   (p) => p.match(/^\/catalog$/) ? { entries: MOCK_CATALOG } : undefined,
+
+  // ── Admin endpoints ──
+
+  // Admin users
+  (p) => {
+    const m = p.match(/^\/admin\/users\/([\w-]+)\/sessions$/);
+    return m ? (MOCK_ADMIN_SESSIONS[m[1] ?? ""] ?? { sessions: [], total: 0 }) : undefined;
+  },
+  (p) => {
+    const m = p.match(/^\/admin\/users\/([\w-]+)\/roles$/);
+    return m ? (MOCK_USER_ROLES[m[1] ?? ""] ?? { direct_roles: [], inherited_roles: [], effective_permissions: [] }) : undefined;
+  },
+  (p) => {
+    const m = p.match(/^\/admin\/users\/([\w-]+)\/groups$/);
+    return m ? (MOCK_USER_GROUPS_MAP[m[1] ?? ""] ?? { groups: [] }) : undefined;
+  },
+  (p) => {
+    const m = p.match(/^\/admin\/users\/([\w-]+)$/);
+    return m ? findById(MOCK_ADMIN_USERS, m[1] ?? "") ?? MOCK_ADMIN_USERS[0] : undefined;
+  },
+  (p) => p.match(/^\/admin\/users$/) ? { users: MOCK_ADMIN_USERS, total: MOCK_ADMIN_USERS.length, page: 1, per_page: 20 } : undefined,
+
+  // Admin audit log
+  (p) => p.match(/^\/admin\/audit-log/) ? { entries: MOCK_AUDIT_LOG, total: MOCK_AUDIT_LOG.length, page: 1, per_page: 50 } : undefined,
+
+  // Admin invite codes
+  (p) => p.match(/^\/admin\/invite-codes$/) ? { invite_codes: MOCK_INVITE_CODES } : undefined,
+
+  // Admin service accounts
+  (p) => {
+    const m = p.match(/^\/admin\/service-accounts\/([\w-]+)\/providers$/);
+    return m ? { tokens: [] } : undefined;
+  },
+  (p) => {
+    const m = p.match(/^\/admin\/service-accounts\/([\w-]+)\/connections$/);
+    return m ? { connections: [] } : undefined;
+  },
+  (p) => {
+    const m = p.match(/^\/admin\/service-accounts\/([\w-]+)$/);
+    return m ? findById(MOCK_SERVICE_ACCOUNTS, m[1] ?? "") ?? MOCK_SERVICE_ACCOUNTS[0] : undefined;
+  },
+  (p) => p.match(/^\/admin\/service-accounts$/) ? { service_accounts: MOCK_SERVICE_ACCOUNTS, total: MOCK_SERVICE_ACCOUNTS.length, page: 1, per_page: 20 } : undefined,
+
+  // Admin nodes
+  (p) => {
+    const m = p.match(/^\/admin\/nodes\/([\w-]+)$/);
+    return m ? findById(MOCK_ADMIN_NODES, m[1] ?? "") ?? MOCK_ADMIN_NODES[0] : undefined;
+  },
+  (p) => p.match(/^\/admin\/nodes$/) ? { nodes: MOCK_ADMIN_NODES, total: MOCK_ADMIN_NODES.length, page: 1, per_page: 50 } : undefined,
+
+  // Roles
+  (p) => {
+    const m = p.match(/^\/roles\/([\w-]+)$/);
+    return m ? findById(MOCK_ROLES, m[1] ?? "") ?? MOCK_ROLES[0] : undefined;
+  },
+  (p) => p.match(/^\/roles$/) ? { roles: MOCK_ROLES } : undefined,
+
+  // Groups
+  (p) => {
+    const m = p.match(/^\/groups\/([\w-]+)\/members$/);
+    return m ? (MOCK_GROUP_MEMBERS[m[1] ?? ""] ?? { members: [], total: 0 }) : undefined;
+  },
+  (p) => {
+    const m = p.match(/^\/groups\/([\w-]+)$/);
+    return m ? findById(MOCK_GROUPS, m[1] ?? "") ?? MOCK_GROUPS[0] : undefined;
+  },
+  (p) => p.match(/^\/groups$/) ? { groups: MOCK_GROUPS } : undefined,
 
   // Services (admin/legacy)
   (p) => p === "/services" ? { services: [] } : undefined,
