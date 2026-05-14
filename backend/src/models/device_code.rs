@@ -52,6 +52,8 @@ pub struct DeviceCode {
     pub failed_poll_count: u32,
     #[serde(default, with = "bson_datetime::optional")]
     pub locked_until: Option<DateTime<Utc>>,
+    #[serde(default, with = "bson_datetime::optional")]
+    pub lock_alert_sent_at: Option<DateTime<Utc>>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub expires_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
@@ -90,6 +92,7 @@ mod tests {
             refresh_token_hash: None,
             failed_poll_count: 0,
             locked_until: None,
+            lock_alert_sent_at: None,
             expires_at: now + chrono::Duration::minutes(15),
             created_at: now,
             last_polled_at: None,
@@ -137,8 +140,10 @@ mod tests {
     fn bson_roundtrip_preserves_optional_dates() {
         let mut row = make_device_code();
         let lock_until = Utc::now() + chrono::Duration::hours(1);
+        let alert_sent_at = Utc::now();
         let polled_at = Utc::now();
         row.locked_until = Some(lock_until);
+        row.lock_alert_sent_at = Some(alert_sent_at);
         row.last_polled_at = Some(polled_at);
 
         let doc = bson::to_document(&row).expect("serialize");
@@ -150,6 +155,13 @@ mod tests {
                 .expect("locked_until")
                 .timestamp_millis(),
             lock_until.timestamp_millis()
+        );
+        assert_eq!(
+            restored
+                .lock_alert_sent_at
+                .expect("lock_alert_sent_at")
+                .timestamp_millis(),
+            alert_sent_at.timestamp_millis()
         );
         assert_eq!(
             restored

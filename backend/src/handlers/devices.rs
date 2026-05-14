@@ -6,11 +6,14 @@ use serde_json::json;
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::mw::auth::AuthUser;
-use crate::services::audit_service;
 use crate::services::device_code_service::{
     DeviceCodeApprove, DeviceCodeApproveInput, DeviceCodeInitiate, DeviceCodeInitiateInput,
-    DeviceCodePoll, DeviceCodePollInput, approve, initiate, poll,
+    DeviceCodePoll, DeviceCodePollInput, approve, claim_lockout_notification, initiate, poll,
 };
+use crate::services::notification_service::{
+    DeviceNotificationContext, DeviceNotificationTemplate,
+};
+use crate::services::{audit_service, notification_service};
 
 #[derive(Debug, Deserialize)]
 pub struct RequestDeviceCodeRequest {
@@ -64,15 +67,29 @@ pub async fn poll_device_code(
 ) -> AppResult<Json<DeviceCodePoll>> {
     let device_code = normalize_device_code(&req.device_code)?;
     let signature = decode_poll_signature(&req.signature)?;
-    let response = poll(
+    let response = match poll(
         &state.db,
         DeviceCodePollInput {
-            device_code,
+            device_code: device_code.clone(),
             timestamp: req.timestamp,
             signature,
         },
     )
-    .await?;
+    .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            if matches!(error, AppError::DeviceCodeLocked)
+                && let Err(notify_error) = send_lockout_notifications(&state, &device_code).await
+            {
+                tracing::warn!(
+                    error = %notify_error,
+                    "Failed to send device-code lockout notification"
+                );
+            }
+            return Err(error);
+        }
+    };
 
     Ok(Json(response))
 }
@@ -111,7 +128,85 @@ pub async fn approve_device_code(
         })),
     );
 
+    let context = DeviceNotificationContext {
+        device_label: response.device_label.clone(),
+        hw_id: response.hw_id.clone(),
+        node_id: Some(response.node_id.clone()),
+        failed_poll_count: None,
+        locked_until: None,
+    };
+    if let Err(error) = notification_service::send_device_notification(
+        &state.db,
+        &state.config,
+        &state.http_client,
+        state.fcm_auth.as_deref(),
+        state.apns_auth.as_deref(),
+        &auth_user.user_id.to_string(),
+        DeviceNotificationTemplate::BindSuccess,
+        &context,
+    )
+    .await
+    {
+        tracing::warn!(
+            user_id = %auth_user.user_id,
+            error = %error,
+            "Failed to send device bind success notification"
+        );
+    }
+
     Ok(Json(response))
+}
+
+async fn send_lockout_notifications(state: &AppState, device_code: &str) -> AppResult<()> {
+    let Some(lockout) = claim_lockout_notification(&state.db, device_code).await? else {
+        return Ok(());
+    };
+
+    if lockout.recipients.is_empty() {
+        tracing::warn!(
+            hw_id = %lockout.hw_id,
+            failed_poll_count = lockout.failed_poll_count,
+            "Device-code lockout has no approved owner or org admins to notify"
+        );
+        return Ok(());
+    }
+
+    let context = DeviceNotificationContext {
+        device_label: lockout.device_label,
+        hw_id: lockout.hw_id,
+        node_id: lockout.node_id,
+        failed_poll_count: Some(lockout.failed_poll_count),
+        locked_until: Some(lockout.locked_until),
+    };
+
+    for recipient in lockout.recipients {
+        for template in [
+            DeviceNotificationTemplate::RepeatedFail,
+            DeviceNotificationTemplate::LockAlert,
+        ] {
+            if let Err(error) = notification_service::send_device_notification(
+                &state.db,
+                &state.config,
+                &state.http_client,
+                state.fcm_auth.as_deref(),
+                state.apns_auth.as_deref(),
+                &recipient,
+                template,
+                &context,
+            )
+            .await
+            {
+                tracing::warn!(
+                    user_id = %recipient,
+                    template = %template.as_str(),
+                    error = %error,
+                    "Failed to send device-code failure notification"
+                );
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn normalize_device_code(value: &str) -> AppResult<String> {

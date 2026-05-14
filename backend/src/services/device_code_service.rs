@@ -4,6 +4,7 @@ use chrono::{DateTime, Duration, Utc};
 use mongodb::{
     Collection, Database,
     bson::{self, doc},
+    options::ReturnDocument,
 };
 use serde::Serialize;
 use uuid::Uuid;
@@ -86,6 +87,16 @@ pub struct DeviceCodeApprove {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct DeviceCodeLockoutNotification {
+    pub recipients: Vec<String>,
+    pub device_label: String,
+    pub hw_id: String,
+    pub node_id: Option<String>,
+    pub failed_poll_count: u32,
+    pub locked_until: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct SignatureFailureLockout {
     pub failed_poll_count: u32,
     pub locked_until: Option<DateTime<Utc>>,
@@ -139,6 +150,7 @@ pub async fn initiate(
         refresh_token_hash: None,
         failed_poll_count: 0,
         locked_until: None,
+        lock_alert_sent_at: None,
         expires_at: now + Duration::seconds(DEVICE_CODE_EXPIRES_IN_SECS),
         created_at: now,
         last_polled_at: None,
@@ -288,6 +300,44 @@ pub async fn approve(
         owner_user_id,
         org_id: input.org_id,
     })
+}
+
+pub async fn claim_lockout_notification(
+    db: &Database,
+    device_code_raw: &str,
+) -> AppResult<Option<DeviceCodeLockoutNotification>> {
+    let now = Utc::now();
+    let row = db
+        .collection::<DeviceCode>(DEVICE_CODES)
+        .find_one_and_update(
+            doc! {
+                "device_code_hash": hash_token(device_code_raw),
+                "failed_poll_count": { "$gte": i64::from(DEVICE_CODE_SIGNATURE_FAILURE_LOCK_THRESHOLD) },
+                "locked_until": { "$gt": bson::DateTime::from_chrono(now) },
+                "lock_alert_sent_at": bson::Bson::Null,
+            },
+            doc! { "$set": { "lock_alert_sent_at": bson::DateTime::from_chrono(now) } },
+        )
+        .return_document(ReturnDocument::After)
+        .await?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let Some(locked_until) = row.locked_until else {
+        return Ok(None);
+    };
+
+    let recipients = lockout_notification_recipients(db, &row).await?;
+    let device_label = choose_device_label(&row, None)?;
+    Ok(Some(DeviceCodeLockoutNotification {
+        recipients,
+        device_label,
+        hw_id: row.hw_id,
+        node_id: row.issued_node_id,
+        failed_poll_count: row.failed_poll_count,
+        locked_until,
+    }))
 }
 
 pub async fn poll(db: &Database, input: DeviceCodePollInput) -> AppResult<DeviceCodePoll> {
@@ -479,6 +529,27 @@ async fn cleanup_partial_approval(
             "Failed to clean up partial device-code API key"
         );
     }
+}
+
+async fn lockout_notification_recipients(
+    db: &Database,
+    row: &DeviceCode,
+) -> AppResult<Vec<String>> {
+    let mut recipients = if let Some(org_id) = row.approved_org_id.as_deref() {
+        org_service::list_admin_user_ids(db, org_id).await?
+    } else {
+        Vec::new()
+    };
+
+    if recipients.is_empty()
+        && let Some(user_id) = row.approved_by_user_id.as_ref()
+    {
+        recipients.push(user_id.clone());
+    }
+
+    recipients.sort();
+    recipients.dedup();
+    Ok(recipients)
 }
 
 fn choose_device_label(row: &DeviceCode, requested_label: Option<&str>) -> AppResult<String> {
@@ -713,6 +784,7 @@ mod tests {
             refresh_token_hash: None,
             failed_poll_count: 0,
             locked_until: None,
+            lock_alert_sent_at: None,
             expires_at: Utc::now() + Duration::minutes(15),
             created_at: Utc::now(),
             last_polled_at: None,
@@ -1010,6 +1082,48 @@ mod tests {
         .await
         .expect_err("delivered");
         assert!(matches!(error, AppError::DeviceCodeAlreadyDelivered));
+    }
+
+    #[tokio::test]
+    async fn claim_lockout_notification_claims_once_and_returns_recipients() {
+        let Some((db, response, _key)) = setup_pending_row("device_code_lockout_claim").await
+        else {
+            return;
+        };
+        let approved_by = Uuid::new_v4().to_string();
+        let locked_until = Utc::now() + Duration::hours(1);
+        db.collection::<DeviceCode>(DEVICE_CODES)
+            .update_one(
+                doc! { "device_code_hash": hash_token(&response.device_code) },
+                doc! {
+                    "$set": {
+                        "failed_poll_count": i64::from(DEVICE_CODE_SIGNATURE_FAILURE_LOCK_THRESHOLD),
+                        "locked_until": bson::DateTime::from_chrono(locked_until),
+                        "approved_by_user_id": &approved_by,
+                    }
+                },
+            )
+            .await
+            .expect("lock row");
+
+        let claim = claim_lockout_notification(&db, &response.device_code)
+            .await
+            .expect("claim")
+            .expect("claimed");
+
+        assert_eq!(claim.recipients, vec![approved_by]);
+        assert_eq!(claim.device_label, "Kitchen cam");
+        assert_eq!(claim.hw_id, "esp32-p4-cam-1");
+        assert_eq!(
+            claim.failed_poll_count,
+            DEVICE_CODE_SIGNATURE_FAILURE_LOCK_THRESHOLD
+        );
+        assert_eq!(claim.locked_until.timestamp(), locked_until.timestamp());
+
+        let second = claim_lockout_notification(&db, &response.device_code)
+            .await
+            .expect("second claim");
+        assert!(second.is_none());
     }
 
     #[tokio::test]
