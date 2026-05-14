@@ -1,5 +1,10 @@
-use anyhow::{Result, bail};
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result, bail};
 use comfy_table::{Table, presets::UTF8_FULL_CONDENSED};
+use ed25519_dalek::SigningKey;
+use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 
 use crate::api::ApiClient;
@@ -11,6 +16,12 @@ pub struct ApproveDeviceArgs {
     pub org: Option<String>,
     pub label: Option<String>,
     pub auth: AuthArgs,
+}
+
+pub struct FactoryKeyArgs {
+    pub count: usize,
+    pub out: Option<PathBuf>,
+    pub ndjson: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -32,6 +43,12 @@ struct ApproveDeviceResponse {
     org_id: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+struct FactoryKey {
+    pubkey_hex: String,
+    privkey_hex: String,
+}
+
 pub async fn run(command: DeviceCommands) -> Result<()> {
     match command {
         DeviceCommands::Approve {
@@ -47,6 +64,9 @@ pub async fn run(command: DeviceCommands) -> Result<()> {
                 auth,
             })
             .await
+        }
+        DeviceCommands::FactoryKey { count, out, ndjson } => {
+            factory_key_cmd(FactoryKeyArgs { count, out, ndjson })
         }
     }
 }
@@ -71,6 +91,85 @@ pub async fn approve_cmd(args: ApproveDeviceArgs) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&response)?);
         }
         OutputFormat::Table => print_approval_table(&response),
+    }
+
+    Ok(())
+}
+
+pub fn factory_key_cmd(args: FactoryKeyArgs) -> Result<()> {
+    if args.count == 0 {
+        bail!("--count must be at least 1");
+    }
+
+    let keys = generate_factory_keys(args.count);
+    let output = render_factory_keys(&keys, args.ndjson)?;
+
+    match args.out {
+        Some(path) => write_factory_key_output(&path, output.as_bytes()),
+        None => {
+            print!("{output}");
+            Ok(())
+        }
+    }
+}
+
+fn generate_factory_keys(count: usize) -> Vec<FactoryKey> {
+    let mut rng = OsRng;
+    (0..count)
+        .map(|_| {
+            let signing_key = SigningKey::generate(&mut rng);
+            let verifying_key = signing_key.verifying_key();
+            FactoryKey {
+                pubkey_hex: hex::encode(verifying_key.to_bytes()),
+                privkey_hex: hex::encode(signing_key.to_bytes()),
+            }
+        })
+        .collect()
+}
+
+fn render_factory_keys(keys: &[FactoryKey], ndjson: bool) -> Result<String> {
+    if ndjson {
+        let mut out = String::new();
+        for key in keys {
+            out.push_str(&serde_json::to_string(key)?);
+            out.push('\n');
+        }
+        return Ok(out);
+    }
+
+    let mut out = serde_json::to_string_pretty(keys)?;
+    out.push('\n');
+    Ok(out)
+}
+
+fn write_factory_key_output(path: &Path, contents: &[u8]) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(0o600)
+            .open(path)
+            .with_context(|| format!("Failed to create {}", path.display()))?;
+        file.write_all(contents)
+            .with_context(|| format!("Failed to write {}", path.display()))?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("Failed to set permissions on {}", path.display()))?;
+    }
+
+    #[cfg(not(unix))]
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(path)
+            .with_context(|| format!("Failed to create {}", path.display()))?;
+        file.write_all(contents)
+            .with_context(|| format!("Failed to write {}", path.display()))?;
     }
 
     Ok(())
@@ -213,5 +312,96 @@ mod tests {
     fn short_id_truncates_long_ids() {
         assert_eq!(short_id("12345678-1234"), "12345678...");
         assert_eq!(short_id("short"), "short");
+    }
+
+    #[test]
+    fn generate_factory_keys_returns_32_byte_hex_fields() {
+        let keys = generate_factory_keys(2);
+
+        assert_eq!(keys.len(), 2);
+        for key in keys {
+            assert_eq!(key.pubkey_hex.len(), 64);
+            assert_eq!(key.privkey_hex.len(), 64);
+            assert_eq!(hex::decode(&key.pubkey_hex).unwrap().len(), 32);
+            assert_eq!(hex::decode(&key.privkey_hex).unwrap().len(), 32);
+        }
+    }
+
+    #[test]
+    fn render_factory_keys_defaults_to_json_array() {
+        let keys = vec![FactoryKey {
+            pubkey_hex: "a".repeat(64),
+            privkey_hex: "b".repeat(64),
+        }];
+
+        let rendered = render_factory_keys(&keys, false).unwrap();
+        let parsed: Vec<FactoryKey> = serde_json::from_str(&rendered).unwrap();
+
+        assert_eq!(parsed, keys);
+        assert!(rendered.starts_with("["));
+        assert!(rendered.ends_with('\n'));
+    }
+
+    #[test]
+    fn render_factory_keys_supports_ndjson() {
+        let keys = vec![
+            FactoryKey {
+                pubkey_hex: "a".repeat(64),
+                privkey_hex: "b".repeat(64),
+            },
+            FactoryKey {
+                pubkey_hex: "c".repeat(64),
+                privkey_hex: "d".repeat(64),
+            },
+        ];
+
+        let rendered = render_factory_keys(&keys, true).unwrap();
+        let lines = rendered.lines().collect::<Vec<_>>();
+
+        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            serde_json::from_str::<FactoryKey>(lines[0]).unwrap(),
+            keys[0]
+        );
+        assert_eq!(
+            serde_json::from_str::<FactoryKey>(lines[1]).unwrap(),
+            keys[1]
+        );
+    }
+
+    #[test]
+    fn factory_key_cmd_rejects_zero_count() {
+        let error = factory_key_cmd(FactoryKeyArgs {
+            count: 0,
+            out: None,
+            ndjson: false,
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("at least 1"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn factory_key_cmd_writes_output_file_with_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("factory-keys.json");
+
+        factory_key_cmd(FactoryKeyArgs {
+            count: 1,
+            out: Some(path.clone()),
+            ndjson: false,
+        })
+        .unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let parsed: Vec<FactoryKey> = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 }

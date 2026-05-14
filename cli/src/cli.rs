@@ -1588,6 +1588,18 @@ pub enum DeviceCommands {
         #[command(flatten)]
         auth: AuthArgs,
     },
+    /// Generate Ed25519 factory provisioning keys
+    FactoryKey {
+        /// Number of keypairs to generate
+        #[arg(long, default_value_t = 1)]
+        count: usize,
+        /// Write output to this file instead of stdout
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Emit newline-delimited JSON instead of a JSON array
+        #[arg(long)]
+        ndjson: bool,
+    },
 }
 
 // ---- Node Docker subcommands ----
@@ -1748,6 +1760,32 @@ mod tests {
                 assert_eq!(user_code, "ABCD-EFGH-JKLM");
                 assert_eq!(org.as_deref(), Some("team-ai"));
                 assert_eq!(label.as_deref(), Some("Hallway camera"));
+            }
+            _ => panic!("unexpected parse result"),
+        }
+    }
+
+    #[test]
+    fn device_factory_key_accepts_count_out_and_ndjson() {
+        let cli = Cli::try_parse_from([
+            "nyxid",
+            "device",
+            "factory-key",
+            "--count",
+            "2",
+            "--out",
+            "keys.ndjson",
+            "--ndjson",
+        ])
+        .expect("device factory-key should parse");
+
+        match cli.command {
+            Commands::Device {
+                command: DeviceCommands::FactoryKey { count, out, ndjson },
+            } => {
+                assert_eq!(count, 2);
+                assert_eq!(out.as_deref(), Some(std::path::Path::new("keys.ndjson")));
+                assert!(ndjson);
             }
             _ => panic!("unexpected parse result"),
         }
