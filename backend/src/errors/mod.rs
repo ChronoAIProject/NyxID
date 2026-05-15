@@ -363,7 +363,7 @@ impl AppError {
         }
     }
 
-    fn error_code(&self) -> u32 {
+    pub(crate) fn error_code(&self) -> u32 {
         match self {
             Self::BadRequest(_) => 1000,
             Self::Unauthorized(_) => 1001,

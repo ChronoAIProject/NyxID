@@ -131,12 +131,31 @@ async fn approve_device_code_with_notification_dispatcher<F>(
 where
     F: FnOnce(&AppState, String, DeviceNotificationContext),
 {
-    let user_code = normalize_user_code(&req.user_code)?;
-    let label = normalize_label(req.label)?;
-    let org_id = normalize_org_id(req.org_id)?;
+    let user_code_prefix = audit_user_code_prefix(&req.user_code);
     let actor_user_id = auth_user.user_id.to_string();
+    let user_code = match normalize_user_code(&req.user_code) {
+        Ok(user_code) => user_code,
+        Err(error) => {
+            audit_failed_approve_attempt(&state, &auth_user, &user_code_prefix, &error);
+            return Err(error);
+        }
+    };
+    let label = match normalize_label(req.label) {
+        Ok(label) => label,
+        Err(error) => {
+            audit_failed_approve_attempt(&state, &auth_user, &user_code_prefix, &error);
+            return Err(error);
+        }
+    };
+    let org_id = match normalize_org_id(req.org_id) {
+        Ok(org_id) => org_id,
+        Err(error) => {
+            audit_failed_approve_attempt(&state, &auth_user, &user_code_prefix, &error);
+            return Err(error);
+        }
+    };
 
-    let response = approve(
+    let response = match approve(
         &state.db,
         &actor_user_id,
         DeviceCodeApproveInput {
@@ -145,7 +164,14 @@ where
             label,
         },
     )
-    .await?;
+    .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            audit_failed_approve_attempt(&state, &auth_user, &user_code_prefix, &error);
+            return Err(error);
+        }
+    };
 
     audit_service::log_for_user(
         state.db.clone(),
@@ -171,6 +197,33 @@ where
     dispatch_notification(&state, actor_user_id, context);
 
     Ok(Json(response))
+}
+
+fn audit_failed_approve_attempt(
+    state: &AppState,
+    auth_user: &AuthUser,
+    user_code_prefix: &str,
+    error: &AppError,
+) {
+    audit_service::log_for_user(
+        state.db.clone(),
+        auth_user,
+        "device_code_approve_failed",
+        Some(json!({
+            "user_code_prefix": user_code_prefix,
+            "error_code": error.error_code(),
+            "ip": auth_user.ip_address.clone(),
+        })),
+    );
+}
+
+fn audit_user_code_prefix(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| !c.is_ascii_whitespace() && *c != '-')
+        .take(4)
+        .collect::<String>()
+        .to_ascii_uppercase()
 }
 
 fn spawn_bind_success_notification(
@@ -430,8 +483,10 @@ fn normalize_org_id(value: Option<String>) -> AppResult<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};
     use crate::services::device_code_service::tests_support::setup_pending_row;
-    use crate::test_utils::{test_app_state, test_auth_user};
+    use crate::test_utils::{connect_test_database, test_app_state, test_auth_user};
+    use mongodb::bson::doc;
     use std::time::{Duration, Instant};
     use tokio::sync::oneshot;
 
@@ -484,6 +539,40 @@ mod tests {
                 .is_err(),
             "slow notification task should still be running after handler returns"
         );
+    }
+
+    #[tokio::test]
+    async fn approve_handler_audits_failed_attempts_with_redacted_user_code() {
+        let Some(db) = connect_test_database("device_code_handler_approve_failed_audit").await
+        else {
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let actor_user_id = uuid::Uuid::new_v4().to_string();
+        let mut auth_user = test_auth_user(&actor_user_id);
+        auth_user.ip_address = Some("203.0.113.77".to_string());
+
+        let error = approve_device_code_with_notification_dispatcher(
+            state,
+            auth_user,
+            ApproveDeviceCodeRequest {
+                user_code: "abcd-efgh-jklm".to_string(),
+                org_id: None,
+                label: None,
+            },
+            |_state, _user_id, _context| panic!("notification should not dispatch on failure"),
+        )
+        .await
+        .expect_err("approve should fail without matching code");
+        assert!(matches!(error, AppError::DeviceUserCodeInvalid));
+
+        let audit = wait_for_approve_failed_audit(&db, &actor_user_id).await;
+        let event = audit
+            .event_data
+            .expect("device_code_approve_failed event data");
+        assert_eq!(event["user_code_prefix"], "ABCD");
+        assert_eq!(event["error_code"], 9503);
+        assert_eq!(event["ip"], "203.0.113.77");
     }
 
     #[test]
@@ -615,5 +704,23 @@ mod tests {
         assert_eq!(event["hw_id"], "esp32-p4-cam-1");
         assert_eq!(event["failed_poll_count"], 3);
         assert_eq!(event["locked_until"], locked_until.to_rfc3339());
+    }
+
+    async fn wait_for_approve_failed_audit(db: &mongodb::Database, user_id: &str) -> AuditLog {
+        for _ in 0..20 {
+            if let Some(audit) = db
+                .collection::<AuditLog>(AUDIT_LOG)
+                .find_one(doc! {
+                    "user_id": user_id,
+                    "event_type": "device_code_approve_failed",
+                })
+                .await
+                .expect("query audit")
+            {
+                return audit;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("device_code_approve_failed audit entry was not written");
     }
 }
