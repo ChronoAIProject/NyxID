@@ -83,6 +83,7 @@ pub struct DeviceCodeApproveInput {
     pub user_code: String,
     pub org_id: Option<String>,
     pub label: Option<String>,
+    pub default_services: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]

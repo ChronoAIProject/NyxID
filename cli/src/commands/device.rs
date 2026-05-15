@@ -15,6 +15,7 @@ pub struct ApproveDeviceArgs {
     pub user_code: String,
     pub org: Option<String>,
     pub label: Option<String>,
+    pub service: Vec<String>,
     pub auth: AuthArgs,
 }
 
@@ -31,6 +32,8 @@ struct ApproveDeviceRequest {
     org_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    default_services: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -55,12 +58,14 @@ pub async fn run(command: DeviceCommands) -> Result<()> {
             user_code,
             org,
             label,
+            service,
             auth,
         } => {
             approve_cmd(ApproveDeviceArgs {
                 user_code,
                 org,
                 label,
+                service,
                 auth,
             })
             .await
@@ -83,6 +88,7 @@ pub async fn approve_cmd(args: ApproveDeviceArgs) -> Result<()> {
         user_code: normalized_user_code,
         org_id,
         label: normalize_label(args.label)?,
+        default_services: normalize_default_services(args.service)?,
     };
     let response: ApproveDeviceResponse = api.post("/devices/code/approve", &request).await?;
 
@@ -206,6 +212,23 @@ fn normalize_label(value: Option<String>) -> Result<Option<String>> {
     Ok(Some(trimmed.to_string()))
 }
 
+fn normalize_default_services(values: Vec<String>) -> Result<Option<Vec<String>>> {
+    let mut normalized = Vec::new();
+    for value in values {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            bail!("--service values must not be empty");
+        }
+        normalized.push(trimmed.to_string());
+    }
+
+    if normalized.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(normalized))
+    }
+}
+
 pub(crate) fn normalize_user_code(value: &str) -> Result<String> {
     let compact = value
         .chars()
@@ -306,6 +329,23 @@ mod tests {
         );
         assert_eq!(normalize_label(Some("  ".to_string())).unwrap(), None);
         assert!(normalize_label(Some("x".repeat(201))).is_err());
+    }
+
+    #[test]
+    fn normalize_default_services_omits_empty_list_and_trims_values() {
+        assert_eq!(normalize_default_services(Vec::new()).unwrap(), None);
+        assert_eq!(
+            normalize_default_services(vec![
+                " llm-openai ".to_string(),
+                "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            ])
+            .unwrap(),
+            Some(vec![
+                "llm-openai".to_string(),
+                "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            ])
+        );
+        assert!(normalize_default_services(vec!["  ".to_string()]).is_err());
     }
 
     #[test]

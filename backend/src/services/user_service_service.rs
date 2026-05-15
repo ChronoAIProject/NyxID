@@ -351,6 +351,58 @@ pub async fn find_by_slug(
         .await?)
 }
 
+/// Resolve a user-service identifier by UUID or slug for a specific owner.
+///
+/// UUIDs are looked up first without an ownership filter so callers get a
+/// clear forbidden error when the service exists but belongs to another owner.
+/// Slugs are first resolved within the requested owner and then checked
+/// globally to distinguish unknown slugs from cross-owner attempts.
+pub async fn resolve_service_id(
+    db: &mongodb::Database,
+    owner_user_id: &str,
+    slug_or_uuid: &str,
+) -> AppResult<String> {
+    let value = slug_or_uuid.trim();
+    if value.is_empty() {
+        return Err(AppError::ValidationError(
+            "Service identifier must not be empty".to_string(),
+        ));
+    }
+
+    let collection = db.collection::<UserService>(COLLECTION_NAME);
+    if Uuid::parse_str(value).is_ok() {
+        let service = collection
+            .find_one(doc! { "_id": value, "is_active": true })
+            .await?;
+        return match service {
+            Some(service) if service.user_id == owner_user_id => Ok(service.id),
+            Some(_) => Err(AppError::Forbidden(format!(
+                "service {value} not owned by approver"
+            ))),
+            None => Err(AppError::NotFound(format!("service {value} not found"))),
+        };
+    }
+
+    if let Some(service) = collection
+        .find_one(doc! { "user_id": owner_user_id, "slug": value, "is_active": true })
+        .await?
+    {
+        return Ok(service.id);
+    }
+
+    if collection
+        .find_one(doc! { "slug": value, "is_active": true })
+        .await?
+        .is_some()
+    {
+        return Err(AppError::Forbidden(format!(
+            "service {value} not owned by approver"
+        )));
+    }
+
+    Err(AppError::NotFound(format!("service {value} not found")))
+}
+
 /// Find a user service by catalog_service_id for a given user.
 pub async fn find_by_catalog_service_id(
     db: &mongodb::Database,

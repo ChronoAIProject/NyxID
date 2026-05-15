@@ -73,6 +73,7 @@ export const approveDeviceFormSchema = z.object({
   user_code: userCodeSchema,
   org_id: orgIdSchema,
   label: labelSchema,
+  default_services: z.array(z.string()).optional(),
 });
 export type ApproveDeviceFormData = z.input<typeof approveDeviceFormSchema>;
 export type ApproveDeviceRequest = z.output<typeof approveDeviceFormSchema>;

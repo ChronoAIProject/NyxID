@@ -64,6 +64,36 @@ describe("approveDeviceFormSchema", () => {
     });
   });
 
+  it("accepts optional default services", () => {
+    expect(
+      approveDeviceFormSchema.parse({
+        user_code: "ABCD-EFGH-JKLM",
+        org_id: null,
+        label: "",
+      }),
+    ).not.toHaveProperty("default_services");
+
+    expect(
+      approveDeviceFormSchema.parse({
+        user_code: "ABCD-EFGH-JKLM",
+        org_id: null,
+        label: "",
+        default_services: [],
+      }),
+    ).toMatchObject({ default_services: [] });
+  });
+
+  it("rejects non-string default services", () => {
+    const result = approveDeviceFormSchema.safeParse({
+      user_code: "ABCD-EFGH-JKLM",
+      org_id: null,
+      label: "",
+      default_services: ["llm-openai", 123],
+    });
+
+    expect(result.success).toBe(false);
+  });
+
   it("rejects overlong labels", () => {
     const result = approveDeviceFormSchema.safeParse({
       user_code: "ABCD-EFGH-JKLM",

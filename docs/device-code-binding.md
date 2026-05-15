@@ -123,6 +123,8 @@ Lockout triggers device failure notifications. Bind success triggers a notificat
 
 The approval service creates an API key and a device-code node stub, stores only hashes for opaque refresh material, and returns raw secrets only once on the first successful approved poll. The stub carries `metadata.provisioning_source = "device-code"` and intentionally has empty node WebSocket auth fields; device-code devices authenticate with the delivered API key, not `/api/v1/nodes/ws`. After delivery, the row transitions to `delivered` and the delivery secrets are cleared.
 
+Approvers can optionally pass `default_services` (web form: multi-select; CLI: `--service <SLUG>` repeatable) to grant the device proxy access to specific services in one step. Without it, the device's api_key is issued with no service access and must be granted scopes separately via the API Keys page.
+
 ## Endpoints
 
 ### Request a code
@@ -187,7 +189,8 @@ curl -sS -X POST "$NYXID_BASE_URL/api/v1/devices/code/approve" \
   -d '{
     "user_code": "ABCD-EFGH-JKLM",
     "org_id": null,
-    "label": "Hall camera"
+    "label": "Hall camera",
+    "default_services": ["llm-openai", "550e8400-e29b-41d4-a716-446655440000"]
   }'
 ```
 
@@ -208,7 +211,7 @@ CLI equivalent:
 
 ```bash
 nyxid device approve ABCD-EFGH-JKLM --label "Hall camera"
-nyxid device approve ABCDEFGHJKLM --org my-team --label "Lab camera"
+nyxid device approve ABCDEFGHJKLM --org my-team --label "Lab camera" --service llm-openai --service api-weather
 ```
 
 ### Poll after approval

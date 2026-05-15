@@ -1,10 +1,11 @@
-import { useEffect, useState } from "react";
-import { useForm } from "react-hook-form";
+import { useEffect, useMemo, useState } from "react";
+import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useSearch } from "@tanstack/react-router";
 import { CheckCircle2, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
 import { useApproveDevice } from "@/hooks/use-devices";
+import { useKeys } from "@/hooks/use-keys";
 import { useOrgs } from "@/hooks/use-orgs";
 import { ApiError } from "@/lib/api-client";
 import {
@@ -24,9 +25,11 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Form,
   FormControl,
+  FormDescription,
   FormField,
   FormItem,
   FormLabel,
@@ -47,6 +50,7 @@ export function DevicesBindPage() {
   const search = useSearch({ strict: false }) as { user_code?: string };
   const approveDevice = useApproveDevice();
   const { data: orgs, isLoading: isOrgsLoading } = useOrgs();
+  const { data: services, isLoading: isServicesLoading } = useKeys();
   const [approvedDevice, setApprovedDevice] =
     useState<ApproveDeviceResponse | null>(null);
   const initialUserCode =
@@ -66,13 +70,43 @@ export function DevicesBindPage() {
       user_code: initialUserCode,
       org_id: null,
       label: "",
+      default_services: [],
     },
   });
+  const selectedOwner = useWatch({
+    control: form.control,
+    name: "org_id",
+  });
+  const grantableServices = useMemo(
+    () =>
+      (services ?? []).filter((service) => {
+        if (!service.is_active || service.auto_connected) return false;
+        const source = service.credential_source;
+        if (selectedOwner) {
+          return (
+            source?.type === "org" &&
+            source.org_id === selectedOwner &&
+            source.allowed
+          );
+        }
+        return !source || source.type === "personal";
+      }),
+    [selectedOwner, services],
+  );
 
   useEffect(() => {
     if (!initialUserCode || form.formState.dirtyFields.user_code) return;
     form.setValue("user_code", initialUserCode, { shouldValidate: true });
   }, [form, initialUserCode]);
+
+  useEffect(() => {
+    const visibleIds = new Set(grantableServices.map((service) => service.id));
+    const current = form.getValues("default_services") ?? [];
+    const filtered = current.filter((serviceId) => visibleIds.has(serviceId));
+    if (filtered.length !== current.length) {
+      form.setValue("default_services", filtered, { shouldValidate: true });
+    }
+  }, [form, grantableServices]);
 
   async function handleApprove(values: ApproveDeviceRequest) {
     form.clearErrors("root");
@@ -203,6 +237,78 @@ export function DevicesBindPage() {
                   )}
                 />
 
+                <FormField
+                  control={form.control}
+                  name="default_services"
+                  render={({ field }) => {
+                    const selectedServices = Array.isArray(field.value)
+                      ? field.value
+                      : [];
+                    return (
+                      <FormItem>
+                        <FormLabel>Grant proxy access to (optional)</FormLabel>
+                        <FormDescription className="text-[12px] leading-relaxed">
+                          Pick which of your services this device should be
+                          allowed to proxy through. You can add more later from
+                          the API Keys page.
+                        </FormDescription>
+                        <div className="max-h-56 space-y-1 overflow-y-auto rounded-lg border border-border bg-muted/25 p-2">
+                          {isServicesLoading ? (
+                            <p className="px-2 py-3 text-[12px] text-muted-foreground">
+                              Loading services...
+                            </p>
+                          ) : grantableServices.length === 0 ? (
+                            <p className="px-2 py-3 text-[12px] text-muted-foreground">
+                              {selectedOwner
+                                ? "This org has no services available for device access."
+                                : "Your personal account has no services available for device access."}
+                            </p>
+                          ) : (
+                            grantableServices.map((service) => {
+                              const checkboxId = `device-bind-service-${service.id}`;
+                              const checked = selectedServices.includes(
+                                service.id,
+                              );
+                              return (
+                                <div
+                                  key={service.id}
+                                  className="flex min-h-11 items-start gap-3 rounded-md px-2 py-2 hover:bg-accent/40"
+                                >
+                                  <Checkbox
+                                    id={checkboxId}
+                                    checked={checked}
+                                    className="mt-0.5"
+                                    onCheckedChange={() =>
+                                      field.onChange(
+                                        toggleStringArray(
+                                          selectedServices,
+                                          service.id,
+                                        ),
+                                      )
+                                    }
+                                  />
+                                  <label
+                                    htmlFor={checkboxId}
+                                    className="min-w-0 flex-1 cursor-pointer"
+                                  >
+                                    <span className="block truncate text-[13px] font-medium text-foreground">
+                                      {service.label}
+                                    </span>
+                                    <span className="block truncate font-mono text-[12px] text-muted-foreground">
+                                      {service.slug}
+                                    </span>
+                                  </label>
+                                </div>
+                              );
+                            })
+                          )}
+                        </div>
+                        <FormMessage />
+                      </FormItem>
+                    );
+                  }}
+                />
+
                 <div className="flex justify-end">
                   <Button
                     className="h-11 w-full text-sm sm:w-auto"
@@ -271,6 +377,12 @@ function DetailRow({
       </dd>
     </div>
   );
+}
+
+function toggleStringArray(values: readonly string[], value: string): string[] {
+  return values.includes(value)
+    ? values.filter((item) => item !== value)
+    : [...values, value];
 }
 
 function deviceApprovalErrorMessage(error: unknown): string {

@@ -1585,6 +1585,9 @@ pub enum DeviceCommands {
         /// Device label to store on the provisioned API key and node
         #[arg(long)]
         label: Option<String>,
+        /// Service(s) to grant the device proxy access to at approve time. Repeatable. Accepts slugs or service IDs. Without this, the device gets an api_key with no service access; you'll need to grant scopes separately later.
+        #[arg(long = "service", value_name = "SLUG_OR_UUID")]
+        service: Vec<String>,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -1754,13 +1757,60 @@ mod tests {
                         user_code,
                         org,
                         label,
+                        service,
                         ..
                     },
             } => {
                 assert_eq!(user_code, "ABCD-EFGH-JKLM");
                 assert_eq!(org.as_deref(), Some("team-ai"));
                 assert_eq!(label.as_deref(), Some("Hallway camera"));
+                assert!(service.is_empty());
             }
+            _ => panic!("unexpected parse result"),
+        }
+    }
+
+    #[test]
+    fn device_approve_accepts_repeatable_service_flags() {
+        let single = Cli::try_parse_from([
+            "nyxid",
+            "device",
+            "approve",
+            "ABCD-EFGH-JKLM",
+            "--service",
+            "llm-openai",
+        ])
+        .expect("device approve should parse one service");
+
+        match single.command {
+            Commands::Device {
+                command: DeviceCommands::Approve { service, .. },
+            } => assert_eq!(service, vec!["llm-openai".to_string()]),
+            _ => panic!("unexpected parse result"),
+        }
+
+        let cli = Cli::try_parse_from([
+            "nyxid",
+            "device",
+            "approve",
+            "ABCD-EFGH-JKLM",
+            "--service",
+            "llm-openai",
+            "--service",
+            "550e8400-e29b-41d4-a716-446655440000",
+        ])
+        .expect("device approve should parse repeatable services");
+
+        match cli.command {
+            Commands::Device {
+                command: DeviceCommands::Approve { service, .. },
+            } => assert_eq!(
+                service,
+                vec![
+                    "llm-openai".to_string(),
+                    "550e8400-e29b-41d4-a716-446655440000".to_string()
+                ]
+            ),
             _ => panic!("unexpected parse result"),
         }
     }

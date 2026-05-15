@@ -10,7 +10,7 @@ use crate::models::api_key::{ApiKey, COLLECTION_NAME as API_KEYS};
 use crate::models::device_code::{COLLECTION_NAME as DEVICE_CODES, DeviceCode, DeviceCodeStatus};
 use crate::models::node::{COLLECTION_NAME as NODES, Node};
 use crate::services::node_service::DeviceNodeInput;
-use crate::services::{key_service, node_service, org_service};
+use crate::services::{key_service, node_service, org_service, user_service_service};
 
 use super::{
     DEVICE_CODE_API_KEY_SCOPES, DEVICE_CODE_DELIVERY_EXPIRES_IN_SECS, DeviceCodeApprove,
@@ -48,7 +48,8 @@ pub async fn approve(
     }
 
     let label = choose_device_label(&row, input.label.as_deref())?;
-    let empty_service_ids: Vec<String> = Vec::new();
+    let allowed_service_ids =
+        resolve_default_service_ids(db, &owner_user_id, input.default_services.as_deref()).await?;
     let empty_node_ids: Vec<String> = Vec::new();
     let created_key = key_service::create_api_key(
         db,
@@ -57,7 +58,7 @@ pub async fn approve(
         DEVICE_CODE_API_KEY_SCOPES,
         None,
         Some("Device-code provisioned device"),
-        Some(&empty_service_ids),
+        Some(&allowed_service_ids),
         Some(&empty_node_ids),
         Some(false),
         Some(false),
@@ -179,6 +180,26 @@ async fn ensure_row_approvable(
     }
 }
 
+async fn resolve_default_service_ids(
+    db: &Database,
+    owner_user_id: &str,
+    default_services: Option<&[String]>,
+) -> AppResult<Vec<String>> {
+    let Some(default_services) = default_services else {
+        return Ok(Vec::new());
+    };
+
+    let mut resolved = Vec::new();
+    for raw in default_services {
+        let service_id = user_service_service::resolve_service_id(db, owner_user_id, raw).await?;
+        if !resolved.contains(&service_id) {
+            resolved.push(service_id);
+        }
+    }
+
+    Ok(resolved)
+}
+
 async fn scope_api_key_to_node(
     db: &Database,
     owner_user_id: &str,
@@ -250,7 +271,9 @@ mod tests {
         COLLECTION_NAME as DEVICE_PUBKEY_LOCKOUTS, DevicePubkeyLockout,
     };
     use crate::models::node::NodeStatus;
+    use crate::models::ssh_auth_mode::SshAuthMode;
     use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+    use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
     use crate::services::device_code_service::DEVICE_CODE_SIGNATURE_FAILURE_LOCK_THRESHOLD;
     use crate::services::device_code_service::tests_support::{setup_pending_row, sign_poll};
     use crate::services::device_code_service::{DeviceCodePoll, DeviceCodePollInput, poll};
@@ -260,7 +283,7 @@ mod tests {
     use uuid::Uuid;
 
     #[tokio::test]
-    async fn approve_issues_scoped_api_key_node_and_poll_delivery_secret() {
+    async fn approve_without_default_services_issues_empty_service_allowlist_and_poll_secret() {
         let Some((db, response, key)) = setup_pending_row("device_code_approve_happy").await else {
             return;
         };
@@ -273,6 +296,7 @@ mod tests {
                 user_code: response.user_code.clone(),
                 org_id: None,
                 label: Some("Garage Camera".to_string()),
+                default_services: None,
             },
         )
         .await
@@ -353,6 +377,130 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn approve_allows_default_services_by_uuid_and_slug() {
+        let Some((db, response, _key)) =
+            setup_pending_row("device_code_approve_default_services").await
+        else {
+            return;
+        };
+        let actor_user_id = Uuid::new_v4().to_string();
+        let service_by_id = insert_user_service(&db, &actor_user_id, "svc-by-id").await;
+        let service_by_slug = insert_user_service(&db, &actor_user_id, "svc-by-slug").await;
+
+        let approval = approve(
+            &db,
+            &actor_user_id,
+            DeviceCodeApproveInput {
+                user_code: response.user_code,
+                org_id: None,
+                label: None,
+                default_services: Some(vec![
+                    service_by_id.id.clone(),
+                    service_by_slug.slug.clone(),
+                ]),
+            },
+        )
+        .await
+        .expect("approve with default services");
+
+        let api_key = db
+            .collection::<ApiKey>(API_KEYS)
+            .find_one(doc! { "_id": &approval.api_key_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!api_key.allow_all_services);
+        assert_eq!(
+            api_key.allowed_service_ids,
+            vec![service_by_id.id, service_by_slug.id]
+        );
+    }
+
+    #[tokio::test]
+    async fn approve_unknown_default_service_returns_not_found_without_partials() {
+        let Some((db, response, _key)) =
+            setup_pending_row("device_code_approve_default_unknown").await
+        else {
+            return;
+        };
+        let actor_user_id = Uuid::new_v4().to_string();
+
+        let error = approve(
+            &db,
+            &actor_user_id,
+            DeviceCodeApproveInput {
+                user_code: response.user_code,
+                org_id: None,
+                label: None,
+                default_services: Some(vec!["missing-svc".to_string()]),
+            },
+        )
+        .await
+        .expect_err("unknown service should fail");
+
+        assert!(matches!(error, AppError::NotFound(_)));
+        assert_no_partial_approval(&db).await;
+    }
+
+    #[tokio::test]
+    async fn approve_cross_owner_default_service_returns_forbidden_without_partials() {
+        let Some((db, response, _key)) =
+            setup_pending_row("device_code_approve_default_cross_owner").await
+        else {
+            return;
+        };
+        let actor_user_id = Uuid::new_v4().to_string();
+        let other_user_id = Uuid::new_v4().to_string();
+        let other_service = insert_user_service(&db, &other_user_id, "other-svc").await;
+
+        let error = approve(
+            &db,
+            &actor_user_id,
+            DeviceCodeApproveInput {
+                user_code: response.user_code,
+                org_id: None,
+                label: None,
+                default_services: Some(vec![other_service.id]),
+            },
+        )
+        .await
+        .expect_err("cross-owner service should fail");
+
+        assert!(matches!(
+            error,
+            AppError::Forbidden(message) if message.contains("not owned")
+        ));
+        assert_no_partial_approval(&db).await;
+    }
+
+    #[tokio::test]
+    async fn approve_mixed_valid_and_invalid_default_services_is_atomic() {
+        let Some((db, response, _key)) =
+            setup_pending_row("device_code_approve_default_mixed_invalid").await
+        else {
+            return;
+        };
+        let actor_user_id = Uuid::new_v4().to_string();
+        let valid_service = insert_user_service(&db, &actor_user_id, "valid-svc").await;
+
+        let error = approve(
+            &db,
+            &actor_user_id,
+            DeviceCodeApproveInput {
+                user_code: response.user_code,
+                org_id: None,
+                label: None,
+                default_services: Some(vec![valid_service.id, "missing-svc".to_string()]),
+            },
+        )
+        .await
+        .expect_err("mixed valid and invalid services should fail");
+
+        assert!(matches!(error, AppError::NotFound(_)));
+        assert_no_partial_approval(&db).await;
+    }
+
+    #[tokio::test]
     async fn approve_extends_near_ttl_expiry_for_delivery_window() {
         let Some((db, response, _key)) = setup_pending_row("device_code_approve_ttl_bump").await
         else {
@@ -378,6 +526,7 @@ mod tests {
                 user_code: response.user_code.clone(),
                 org_id: None,
                 label: None,
+                default_services: None,
             },
         )
         .await
@@ -413,6 +562,7 @@ mod tests {
                 user_code: response.user_code.clone(),
                 org_id: None,
                 label: None,
+                default_services: None,
             },
         )
         .await
@@ -425,6 +575,7 @@ mod tests {
                 user_code: response.user_code,
                 org_id: None,
                 label: None,
+                default_services: None,
             },
         )
         .await
@@ -458,6 +609,7 @@ mod tests {
                 user_code: response.user_code,
                 org_id: None,
                 label: None,
+                default_services: None,
             },
         )
         .await
@@ -503,6 +655,7 @@ mod tests {
                 user_code: response.user_code,
                 org_id: None,
                 label: None,
+                default_services: None,
             },
         )
         .await
@@ -532,6 +685,7 @@ mod tests {
                 user_code: response.user_code.clone(),
                 org_id: None,
                 label: None,
+                default_services: None,
             },
         )
         .await
@@ -568,6 +722,7 @@ mod tests {
                 user_code: response.user_code,
                 org_id: Some(org_user_id),
                 label: None,
+                default_services: None,
             },
         )
         .await
@@ -649,6 +804,64 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    async fn assert_no_partial_approval(db: &Database) {
+        assert_eq!(
+            db.collection::<ApiKey>(API_KEYS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.collection::<Node>(NODES)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+    }
+
+    async fn insert_user_service(db: &Database, user_id: &str, slug: &str) -> UserService {
+        let now = Utc::now();
+        let service = UserService {
+            id: Uuid::new_v4().to_string(),
+            user_id: user_id.to_string(),
+            slug: slug.to_string(),
+            endpoint_id: Uuid::new_v4().to_string(),
+            api_key_id: None,
+            auth_method: "bearer".to_string(),
+            auth_key_name: "Authorization".to_string(),
+            catalog_service_id: None,
+            node_id: None,
+            node_priority: 0,
+            service_type: "http".to_string(),
+            ssh_auth_mode: SshAuthMode::ProxyOnly,
+            ssh_node_keys_stale: false,
+            identity_propagation_mode: "none".to_string(),
+            identity_include_user_id: false,
+            identity_include_email: false,
+            identity_include_name: false,
+            identity_jwt_audience: None,
+            forward_access_token: false,
+            inject_delegation_token: false,
+            delegation_token_scope: "llm:proxy".to_string(),
+            custom_user_agent: None,
+            default_request_headers: None,
+            ws_frame_injections: Vec::new(),
+            is_active: true,
+            source: None,
+            source_id: None,
+            source_app_id: None,
+            created_at: now,
+            updated_at: now,
+        };
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(&service)
+            .await
+            .expect("insert user service");
+        service
     }
 
     fn test_pubkey_hash(pubkey: &[u8]) -> String {

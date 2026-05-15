@@ -46,6 +46,8 @@ pub struct ApproveDeviceCodeRequest {
     pub org_id: Option<String>,
     #[serde(default)]
     pub label: Option<String>,
+    #[serde(default)]
+    pub default_services: Option<Vec<String>>,
 }
 
 pub async fn request_device_code(
@@ -162,6 +164,7 @@ where
             user_code,
             org_id,
             label,
+            default_services: req.default_services,
         },
     )
     .await
@@ -517,6 +520,7 @@ mod tests {
                 user_code: response.user_code,
                 org_id: None,
                 label: Some("Kitchen cam".to_string()),
+                default_services: None,
             },
             move |_state, _user_id, _context| {
                 tokio::spawn(async move {
@@ -559,6 +563,7 @@ mod tests {
                 user_code: "abcd-efgh-jklm".to_string(),
                 org_id: None,
                 label: None,
+                default_services: None,
             },
             |_state, _user_id, _context| panic!("notification should not dispatch on failure"),
         )
