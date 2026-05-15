@@ -222,6 +222,7 @@ async fn claim_approved_delivery(
                 "$set": {
                     "status": delivered_status,
                     "failed_poll_count": 0_i64,
+                    "lock_alert_sent_at": bson::Bson::Null,
                     "last_polled_at": bson::DateTime::from_chrono(now),
                     "last_poll_timestamp": timestamp,
                     "expires_at": bson::DateTime::from_chrono(delivery_expires_at),
@@ -245,6 +246,7 @@ async fn persist_successful_poll(
 ) -> AppResult<()> {
     let mut set_doc = doc! {
         "failed_poll_count": 0_i64,
+        "lock_alert_sent_at": bson::Bson::Null,
         "last_polled_at": bson::DateTime::from_chrono(row.last_polled_at.expect("set before persist")),
         "last_poll_timestamp": row.last_poll_timestamp.expect("set before persist"),
         "user_code_history": bson::to_bson(&row.user_code_history)

@@ -104,7 +104,8 @@ fn device_pubkey_fingerprint(pubkey: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::device_code_service::tests_support::setup_pending_row;
+    use crate::services::device_code_service::tests_support::{setup_pending_row, sign_poll};
+    use crate::services::device_code_service::{DeviceCodePollInput, poll};
     use mongodb::bson::doc;
     use uuid::Uuid;
 
@@ -192,5 +193,89 @@ mod tests {
             .await
             .expect("second claim");
         assert!(second.is_none());
+    }
+
+    #[tokio::test]
+    async fn successful_poll_clears_claim_state_for_next_lockout_cycle() {
+        let Some((db, response, key)) = setup_pending_row("device_code_lockout_claim_cycle").await
+        else {
+            return;
+        };
+        let approved_by = Uuid::new_v4().to_string();
+        let locked_until = Utc::now() + Duration::hours(1);
+        db.collection::<DeviceCode>(DEVICE_CODES)
+            .update_one(
+                doc! { "device_code_hash": hash_token(&response.device_code) },
+                doc! {
+                    "$set": {
+                        "failed_poll_count": i64::from(DEVICE_CODE_SIGNATURE_FAILURE_LOCK_THRESHOLD),
+                        "locked_until": bson::DateTime::from_chrono(locked_until),
+                        "approved_by_user_id": &approved_by,
+                    }
+                },
+            )
+            .await
+            .expect("lock row");
+
+        claim_lockout_notification(&db, &response.device_code)
+            .await
+            .expect("claim")
+            .expect("claimed");
+        let duplicate_claim = claim_lockout_notification(&db, &response.device_code)
+            .await
+            .expect("duplicate claim check");
+        assert!(duplicate_claim.is_none());
+
+        db.collection::<DeviceCode>(DEVICE_CODES)
+            .update_one(
+                doc! { "device_code_hash": hash_token(&response.device_code) },
+                doc! {
+                    "$set": {
+                        "locked_until": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(1)),
+                    }
+                },
+            )
+            .await
+            .expect("expire lockout");
+
+        let timestamp = Utc::now().timestamp();
+        poll(
+            &db,
+            DeviceCodePollInput {
+                device_code: response.device_code.clone(),
+                timestamp,
+                signature: sign_poll(&response.device_code, timestamp, &key),
+            },
+        )
+        .await
+        .expect("successful poll clears lockout claim state");
+
+        let row = db
+            .collection::<DeviceCode>(DEVICE_CODES)
+            .find_one(doc! { "device_code_hash": hash_token(&response.device_code) })
+            .await
+            .expect("load row")
+            .expect("row exists");
+        assert_eq!(row.failed_poll_count, 0);
+        assert!(row.lock_alert_sent_at.is_none());
+
+        let locked_until = Utc::now() + Duration::hours(1);
+        db.collection::<DeviceCode>(DEVICE_CODES)
+            .update_one(
+                doc! { "device_code_hash": hash_token(&response.device_code) },
+                doc! {
+                    "$set": {
+                        "failed_poll_count": i64::from(DEVICE_CODE_SIGNATURE_FAILURE_LOCK_THRESHOLD),
+                        "locked_until": bson::DateTime::from_chrono(locked_until),
+                    }
+                },
+            )
+            .await
+            .expect("lock row again");
+
+        let next_claim = claim_lockout_notification(&db, &response.device_code)
+            .await
+            .expect("next cycle claim");
+        assert!(next_claim.is_some());
     }
 }
