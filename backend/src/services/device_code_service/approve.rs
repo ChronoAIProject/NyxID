@@ -48,6 +48,7 @@ pub async fn approve(
     }
 
     let label = choose_device_label(&row, input.label.as_deref())?;
+    let empty_service_ids: Vec<String> = Vec::new();
     let empty_node_ids: Vec<String> = Vec::new();
     let created_key = key_service::create_api_key(
         db,
@@ -56,9 +57,9 @@ pub async fn approve(
         DEVICE_CODE_API_KEY_SCOPES,
         None,
         Some("Device-code provisioned device"),
-        None,
+        Some(&empty_service_ids),
         Some(&empty_node_ids),
-        Some(true),
+        Some(false),
         Some(false),
         None,
         None,
@@ -289,7 +290,8 @@ mod tests {
             .unwrap();
         assert_eq!(api_key.platform.as_deref(), Some("device-code"));
         assert_eq!(api_key.scopes, DEVICE_CODE_API_KEY_SCOPES);
-        assert!(api_key.allow_all_services);
+        assert!(!api_key.allow_all_services);
+        assert!(api_key.allowed_service_ids.is_empty());
         assert!(!api_key.allow_all_nodes);
         assert_eq!(api_key.allowed_node_ids, vec![approval.node_id.clone()]);
 
@@ -563,6 +565,7 @@ mod tests {
             .await
             .expect("ensure indexes");
         let owner_user_id = Uuid::new_v4().to_string();
+        let empty_service_ids: Vec<String> = Vec::new();
         let empty_node_ids: Vec<String> = Vec::new();
         let created_key = key_service::create_api_key(
             &db,
@@ -571,9 +574,9 @@ mod tests {
             DEVICE_CODE_API_KEY_SCOPES,
             None,
             Some("Device-code provisioned device"),
-            None,
+            Some(&empty_service_ids),
             Some(&empty_node_ids),
-            Some(true),
+            Some(false),
             Some(false),
             None,
             None,
