@@ -1,8 +1,11 @@
-import { useMemo } from "react";
+import { useMemo, type ReactElement } from "react";
 import { StyleSheet, Text, View } from "react-native";
-import { radius, spacing, typeScale } from "../theme/designTokens";
+import { spacing, typeScale } from "../theme/designTokens";
 import { useTheme } from "../theme/ThemeContext";
 import type { ThemeColors } from "../theme/mobileTheme";
+import { BiometricLockIllustration } from "./icons/empty-state/BiometricLockIllustration";
+import { SmartLockIllustration } from "./icons/empty-state/SmartLockIllustration";
+import { SeoKeywordIllustration } from "./icons/empty-state/SeoKeywordIllustration";
 
 type EmptyStatePreset = "pendingEmpty" | "activeEmpty" | "historyEmpty";
 
@@ -11,86 +14,71 @@ type EmptyStateProps = {
 };
 
 type PresetConfig = {
-  icon: string;
+  Illustration: (props: { size?: number; color: string }) => ReactElement;
   title: string;
   subtitle: string;
-  colorKey: "warning" | "success" | "info";
 };
 
+// DESIGN.md §Empty state: rich SVG illustrations from `components/icons/empty-state/`,
+// "Never use a generic Lucide icon at this size". Three distinct lock/auth-themed
+// illustrations from the web's empty-state library — each tab gets its own.
+//
+//   - pendingEmpty  →  BiometricLockIllustration (web uses on pages/consents.tsx —
+//                      auth-themed; reads as "lock waiting on a challenge")
+//   - activeEmpty   →  SmartLockIllustration     (web 1:1 from pages/approval-grants.tsx)
+//   - historyEmpty  →  SeoKeywordIllustration    (web 1:1 from pages/approval-history.tsx)
 const presetConfigs: Record<EmptyStatePreset, PresetConfig> = {
   pendingEmpty: {
-    icon: "!",
+    Illustration: BiometricLockIllustration,
     title: "No pending challenges",
     subtitle: "New high-risk requests will appear here.",
-    colorKey: "warning",
   },
   activeEmpty: {
-    icon: "\u2713",
+    Illustration: SmartLockIllustration,
     title: "No active approvals",
     subtitle: "Approvals appear here after challenge decisions.",
-    colorKey: "success",
   },
   historyEmpty: {
-    icon: "\u21BA",
+    Illustration: SeoKeywordIllustration,
     title: "No decision history",
     subtitle: "Past approvals, denials, and expirations appear here.",
-    colorKey: "info",
   },
 };
-
-function getPresetColors(c: ThemeColors) {
-  return {
-    warning: { border: c.warningSoft, bg: c.primaryGlow },
-    success: { border: c.successSoft, bg: c.primaryGlow },
-    info: { border: c.infoSoft, bg: c.primaryGlow },
-  } as const;
-}
 
 export function EmptyState({ preset }: EmptyStateProps) {
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
-  const p = presetConfigs[preset];
-  const pc = getPresetColors(colors)[p.colorKey];
+  const { Illustration, title, subtitle } = presetConfigs[preset];
+
+  // DESIGN.md §Empty state recipe: centered column, illustration at 30% opacity
+  // muted-foreground, 12px font-medium muted headline, 12px supporting line.
+  // Mobile bumps the headline to 13px semibold for legibility without breaking
+  // the muted tone discipline.
   return (
     <View style={styles.container}>
-      <View style={[styles.iconWrap, { borderColor: pc.border, backgroundColor: pc.bg }]}>
-        <Text style={[styles.icon, { color: colors[p.colorKey] }]}>{p.icon}</Text>
-      </View>
-      <Text style={styles.title}>{p.title}</Text>
-      <Text style={styles.subtitle}>{p.subtitle}</Text>
+      <Illustration size={192} color={colors.textTertiary} />
+      <Text style={styles.title}>{title}</Text>
+      <Text style={styles.subtitle}>{subtitle}</Text>
     </View>
   );
 }
 
 const createStyles = (c: ThemeColors) => StyleSheet.create({
   container: {
-    borderRadius: radius.lg,
-    borderWidth: 1,
-    borderColor: c.border,
-    backgroundColor: c.card,
-    padding: spacing.xxl,
+    paddingVertical: spacing.huge + spacing.md,
+    paddingHorizontal: spacing.xxl,
     alignItems: "center",
-    gap: spacing.sm,
-  },
-  iconWrap: {
-    width: 40,
-    height: 40,
-    borderRadius: radius.full,
-    borderWidth: 1,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  icon: {
-    ...typeScale.bodyStrong,
+    gap: spacing.xs,
   },
   title: {
-    ...typeScale.title,
-    color: c.textPrimary,
+    ...typeScale.bodyStrong,
+    color: c.textMuted,
     textAlign: "center",
+    marginTop: spacing.sm,
   },
   subtitle: {
-    ...typeScale.body,
-    color: c.textMuted,
+    ...typeScale.small,
+    color: c.textTertiary,
     textAlign: "center",
   },
 });

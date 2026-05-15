@@ -64,6 +64,7 @@
     "expo-status-bar": "~55.0.5",
     "expo-task-manager": "~55.0.13",
     "expo-web-browser": "~55.0.13",
+    "lucide-react-native": "^1.16.0",
     "posthog-react-native": "^4.2.0",
     "punycode": "^2.3.1",
     "react": "19.2.0",

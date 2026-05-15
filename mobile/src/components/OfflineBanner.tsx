@@ -16,7 +16,9 @@ export function OfflineBanner({ subtitle = "Showing cached data", onRetry }: Off
 
   return (
     <View style={styles.banner}>
-      <Feather name="wifi-off" size={16} color={colors.dangerSoft} />
+      <View style={styles.iconTile}>
+        <Feather name="wifi-off" size={16} color={colors.dangerTone.text} />
+      </View>
       <View style={styles.textWrap}>
         <Text style={styles.title}>No connection</Text>
         <Text style={styles.subtitle}>{subtitle}</Text>
@@ -32,42 +34,53 @@ export function OfflineBanner({ subtitle = "Showing cached data", onRetry }: Off
 
 const createStyles = (c: ThemeColors) =>
   StyleSheet.create({
+    // DESIGN.md §Banners & callouts: rounded-xl border border-{color}/15 bg-{color}/[0.04],
+    // 36×36 icon tile, message text-[12px] text-{color}. Destructive variant —
+    // theme-aware via `dangerTone`, so both light + dark render with the right hex.
     banner: {
       flexDirection: "row",
       alignItems: "center",
-      gap: spacing.sm,
-      paddingHorizontal: spacing.lg,
-      paddingVertical: spacing.sm,
-      borderRadius: radius.md,
-      backgroundColor: c.dangerSoftBg,
+      gap: spacing.lg,
+      paddingHorizontal: spacing.xxl,
+      paddingVertical: spacing.lg,
+      borderRadius: radius.lg,
+      backgroundColor: c.dangerTone.bg,
       borderWidth: 1,
-      borderColor: c.danger,
+      borderColor: c.dangerTone.border,
       marginBottom: spacing.lg,
+    },
+    iconTile: {
+      width: 36,
+      height: 36,
+      borderRadius: radius.md,
+      backgroundColor: c.dangerTone.bg,
+      alignItems: "center",
+      justifyContent: "center",
     },
     textWrap: {
       flex: 1,
     },
     title: {
       ...typeScale.label,
-      color: c.danger,
+      color: c.dangerTone.text,
     },
     subtitle: {
-      ...typeScale.overline,
+      ...typeScale.small,
       color: c.textMuted,
       letterSpacing: 0,
       textTransform: "none",
       marginTop: 1,
     },
     retryBtn: {
-      paddingHorizontal: spacing.md,
-      paddingVertical: spacing.xs,
+      paddingHorizontal: spacing.lg,
+      paddingVertical: spacing.xs + spacing.xxs,
       borderRadius: radius.md,
       borderWidth: 1,
-      borderColor: c.danger,
-      backgroundColor: c.dangerSoftBg,
+      borderColor: c.dangerTone.border,
+      backgroundColor: c.dangerTone.bg,
     },
     retryText: {
-      ...typeScale.overline,
-      color: c.danger,
+      ...typeScale.label,
+      color: c.dangerTone.text,
     },
   });

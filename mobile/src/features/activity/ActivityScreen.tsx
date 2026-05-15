@@ -766,12 +766,14 @@ const createStyles = (c: ThemeColors) => StyleSheet.create({
     minHeight: 41,
     gap: spacing.xxs,
   },
+  // DESIGN.md §PageHeader: mobile page title is text-[22px] font-bold leading-none
+  // tracking-tight with -0.03em letter-spacing. Mobile downshift is intentional.
   title: {
-    ...typeScale.h1,
+    ...typeScale.pageHeader,
     color: c.textPrimary,
   },
   subtitle: {
-    ...typeScale.body,
+    ...typeScale.label,
     color: c.textSecondary,
     marginBottom: spacing.md,
   },
@@ -878,23 +880,25 @@ const createSheetStyles = (c: ThemeColors) => StyleSheet.create({
     color: c.textSecondary,
     letterSpacing: 0.6,
   },
+  // DESIGN.md §Banners & callouts: rounded-xl warning callout, theme-aware tint.
   stateNotice: {
-    borderRadius: radius.sm,
-    backgroundColor: c.warningSoft,
+    borderRadius: radius.lg,
+    backgroundColor: c.warningTone.bg,
     borderWidth: 1,
-    borderColor: c.warningSoft,
+    borderColor: c.warningTone.border,
     padding: spacing.lg,
   },
   stateNoticeText: {
-    ...typeScale.body,
-    color: c.warning,
+    ...typeScale.label,
+    color: c.warningTone.text,
   },
   detailCard: {
-    borderRadius: radius.md,
+    // Detail-sheet content card: rounded-xl, 50%-opacity chrome.
+    borderRadius: radius.lg,
     borderWidth: 1,
-    borderColor: c.border,
+    borderColor: c.borderSoft,
     backgroundColor: c.cardSoft,
-    padding: spacing.lg,
+    padding: spacing.xxl,
     gap: spacing.md,
   },
 });

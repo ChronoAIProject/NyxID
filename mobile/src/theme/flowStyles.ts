@@ -13,27 +13,28 @@ export function createFlowStyles(colors: ThemeColors) {
       paddingBottom: spacing.huge,
     },
     title: {
-      ...typeScale.h1,
+      ...typeScale.pageHeader,
       color: colors.textPrimary,
     },
     subtitle: {
-      ...typeScale.description,
+      ...typeScale.label,
       color: colors.textSecondary,
     },
-    // DESIGN.md §Layout: 10px (cards, panels) — uses radius.lg.
+    // DESIGN.md §Border Radius: cards/panels = rounded-xl (12px). 16px padding.
     card: {
       borderRadius: radius.lg,
       borderWidth: 1,
       borderColor: colors.border,
       backgroundColor: colors.card,
-      padding: spacing.xl,
+      padding: spacing.xxl,
       gap: spacing.md,
     },
     cardTitle: {
       ...typeScale.title,
       color: colors.textPrimary,
     },
-    // Detail row dividers use the subtler `borderSoft` per DESIGN.md.
+    // DESIGN.md §DetailRow: flex items-center justify-between px-4 py-2.5 text-[12px].
+    // Label = text-muted-foreground; value = font-medium text-foreground.
     row: {
       borderBottomWidth: 1,
       borderBottomColor: colors.borderSoft,
@@ -51,7 +52,7 @@ export function createFlowStyles(colors: ThemeColors) {
       gap: spacing.sm,
     },
     rowLabel: {
-      ...typeScale.body,
+      ...typeScale.label,
       color: colors.textMuted,
     },
     rowValue: {

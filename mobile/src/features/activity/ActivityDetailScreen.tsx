@@ -181,7 +181,7 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
           <DetailRow label="Action" value={data.action} flowStyles={flowStyles} />
           <DetailRow label="Resource" value={data.resource} flowStyles={flowStyles} />
           <DetailRow label="Client" value={data.request_context.client} flowStyles={flowStyles} />
-          <DetailRow label="Risk Level" value={data.risk_level.toUpperCase()} valueColor={riskColor} flowStyles={flowStyles} />
+          <DetailRow label="Risk Level" value={data.risk_level.charAt(0).toUpperCase() + data.risk_level.slice(1)} valueColor={riskColor} flowStyles={flowStyles} />
           <DetailRow label="Status" value={actionState.statusLabel} valueColor={colors.warning} flowStyles={flowStyles} />
           {isGrantMode && <DetailRow label="Grant Duration" value={grantDurationLabel} flowStyles={flowStyles} />}
           {data.from_org_policy ? (
@@ -234,31 +234,33 @@ const createStyles = (c: ThemeColors) => StyleSheet.create({
     color: c.textPrimary,
   },
   screenSub: {
-    ...typeScale.body,
+    ...typeScale.label,
     color: c.textSecondary,
   },
   orgContext: {
     ...typeScale.overline,
     color: c.textSecondary,
-    letterSpacing: 0.6,
+    letterSpacing: 1.5,
   },
+  // DESIGN.md §Banners & callouts: rounded-xl warning callout, theme-aware tint.
   stateNotice: {
-    borderRadius: radius.md,
-    backgroundColor: c.warningSoft,
+    borderRadius: radius.lg,
+    backgroundColor: c.warningTone.bg,
     borderWidth: 1,
-    borderColor: c.warning,
+    borderColor: c.warningTone.border,
     padding: spacing.lg,
   },
   stateNoticeText: {
-    ...typeScale.body,
-    color: c.warning,
+    ...typeScale.label,
+    color: c.warningTone.text,
   },
+  // DESIGN.md §DetailSection: rounded-xl + 50%-opacity chrome border.
   detailCard: {
     borderRadius: radius.lg,
     borderWidth: 1,
-    borderColor: c.border,
+    borderColor: c.borderSoft,
     backgroundColor: c.card,
-    padding: spacing.lg,
+    padding: spacing.xxl,
     gap: spacing.md,
   },
   errorWrap: {

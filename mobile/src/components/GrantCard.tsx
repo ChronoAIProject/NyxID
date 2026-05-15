@@ -75,11 +75,12 @@ export function GrantCard({ grant, onRevoke, isMutating = false }: GrantCardProp
 const createStyles = (c: ThemeColors) =>
   StyleSheet.create({
     card: {
+      // DESIGN.md §Border Radius: cards = rounded-xl (12px); 50%-opacity border on chrome.
       borderRadius: radius.lg,
       backgroundColor: c.card,
       borderWidth: 1,
-      borderColor: c.border,
-      padding: spacing.lg,
+      borderColor: c.borderSoft,
+      padding: spacing.xxl,
       gap: spacing.sm,
     },
     header: {
@@ -94,11 +95,12 @@ const createStyles = (c: ThemeColors) =>
     },
     title: {
       flex: 1,
-      ...typeScale.title,
+      // DESIGN.md mobile-card primary text: text-[13px] font-semibold.
+      ...typeScale.bodyStrong,
       color: c.textPrimary,
     },
     secondary: {
-      ...typeScale.body,
+      ...typeScale.label,
       color: c.textSecondary,
     },
     expiryRow: {

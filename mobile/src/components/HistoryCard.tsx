@@ -18,10 +18,11 @@ function decisionVariant(status: ChallengeStatus): "decisionApproved" | "decisio
   return "decisionExpired";
 }
 
+// DESIGN.md §Interaction Rules: status badges always Title Case.
 function decisionLabel(status: ChallengeStatus): string {
-  if (status === "APPROVED") return "APPROVED";
-  if (status === "DENIED") return "DENIED";
-  return "EXPIRED";
+  if (status === "APPROVED") return "Approved";
+  if (status === "DENIED") return "Denied";
+  return "Expired";
 }
 
 function decisionDescription(status: ChallengeStatus): string {
@@ -42,12 +43,13 @@ export function HistoryCard({ item, onPress }: HistoryCardProps) {
   const modeLabel = item.approval_mode === "grant" ? "Grant" : "Per-request";
 
   const riskVariant = item.risk_level === "high" ? "riskHigh" : item.risk_level === "medium" ? "riskMedium" : "riskLow";
+  const riskLabel = item.risk_level.charAt(0).toUpperCase() + item.risk_level.slice(1);
 
   return (
     <Pressable style={styles.card} onPress={onPress}>
       <View style={styles.chipRow}>
         <StatusBadge variant={decisionVariant(item.status)} label={decisionLabel(item.status)} />
-        <StatusBadge variant={riskVariant} label={item.risk_level.toUpperCase()} />
+        <StatusBadge variant={riskVariant} label={riskLabel} />
       </View>
       <Text style={styles.title} numberOfLines={1}>
         {item.action} {item.resource}
@@ -86,11 +88,12 @@ export function HistorySectionHeader({ title }: { title: string }) {
 const createStyles = (c: ThemeColors) =>
   StyleSheet.create({
     card: {
+      // DESIGN.md §Border Radius: cards = rounded-xl (12px); 50%-opacity border.
       borderRadius: radius.lg,
       backgroundColor: c.card,
       borderWidth: 1,
-      borderColor: c.border,
-      padding: spacing.lg,
+      borderColor: c.borderSoft,
+      padding: spacing.xxl,
       gap: spacing.xs,
       opacity: 0.85,
     },
@@ -100,11 +103,12 @@ const createStyles = (c: ThemeColors) =>
     },
     title: {
       flex: 1,
-      ...typeScale.title,
+      // DESIGN.md mobile-card primary text: text-[13px] font-semibold.
+      ...typeScale.bodyStrong,
       color: c.textPrimary,
     },
     secondary: {
-      ...typeScale.body,
+      ...typeScale.label,
       color: c.textSecondary,
     },
     meta: {
