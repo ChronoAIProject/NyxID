@@ -113,13 +113,32 @@ pub async fn approve_device_code(
     auth_user: AuthUser,
     Json(req): Json<ApproveDeviceCodeRequest>,
 ) -> AppResult<Json<DeviceCodeApprove>> {
+    approve_device_code_with_notification_dispatcher(
+        state,
+        auth_user,
+        req,
+        spawn_bind_success_notification,
+    )
+    .await
+}
+
+async fn approve_device_code_with_notification_dispatcher<F>(
+    state: AppState,
+    auth_user: AuthUser,
+    req: ApproveDeviceCodeRequest,
+    dispatch_notification: F,
+) -> AppResult<Json<DeviceCodeApprove>>
+where
+    F: FnOnce(&AppState, String, DeviceNotificationContext),
+{
     let user_code = normalize_user_code(&req.user_code)?;
     let label = normalize_label(req.label)?;
     let org_id = normalize_org_id(req.org_id)?;
+    let actor_user_id = auth_user.user_id.to_string();
 
     let response = approve(
         &state.db,
-        &auth_user.user_id.to_string(),
+        &actor_user_id,
         DeviceCodeApproveInput {
             user_code,
             org_id,
@@ -149,26 +168,42 @@ pub async fn approve_device_code(
         failed_poll_count: None,
         locked_until: None,
     };
-    if let Err(error) = notification_service::send_device_notification(
-        &state.db,
-        &state.config,
-        &state.http_client,
-        state.fcm_auth.as_deref(),
-        state.apns_auth.as_deref(),
-        &auth_user.user_id.to_string(),
-        DeviceNotificationTemplate::BindSuccess,
-        &context,
-    )
-    .await
-    {
-        tracing::warn!(
-            user_id = %auth_user.user_id,
-            error = %error,
-            "Failed to send device bind success notification"
-        );
-    }
+    dispatch_notification(&state, actor_user_id, context);
 
     Ok(Json(response))
+}
+
+fn spawn_bind_success_notification(
+    state: &AppState,
+    user_id: String,
+    context: DeviceNotificationContext,
+) {
+    let db = state.db.clone();
+    let config = state.config.clone();
+    let http_client = state.http_client.clone();
+    let fcm_auth = state.fcm_auth.clone();
+    let apns_auth = state.apns_auth.clone();
+
+    tokio::spawn(async move {
+        if let Err(error) = notification_service::send_device_notification(
+            &db,
+            &config,
+            &http_client,
+            fcm_auth.as_deref(),
+            apns_auth.as_deref(),
+            &user_id,
+            DeviceNotificationTemplate::BindSuccess,
+            &context,
+        )
+        .await
+        {
+            tracing::warn!(
+                user_id = %user_id,
+                error = %error,
+                "Failed to send device bind success notification"
+            );
+        }
+    });
 }
 
 /// Sends lockout notifications for bound device-code rows.
@@ -395,12 +430,60 @@ fn normalize_org_id(value: Option<String>) -> AppResult<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::device_code_service::tests_support::setup_pending_row;
+    use crate::test_utils::{test_app_state, test_auth_user};
+    use std::time::{Duration, Instant};
+    use tokio::sync::oneshot;
 
     #[test]
     fn decode_device_pubkey_accepts_exactly_32_base64_bytes() {
         let encoded = BASE64_STANDARD.encode([5u8; 32]);
 
         assert_eq!(decode_device_pubkey(&encoded).unwrap(), [5u8; 32]);
+    }
+
+    #[tokio::test]
+    async fn approve_handler_returns_before_slow_notification_dispatch_finishes() {
+        let Some((db, response, _key)) =
+            setup_pending_row("device_code_handler_approve_notification_async").await
+        else {
+            return;
+        };
+        let state = test_app_state(db);
+        let actor_user_id = uuid::Uuid::new_v4().to_string();
+        let auth_user = test_auth_user(&actor_user_id);
+        let (notification_done_tx, mut notification_done_rx) = oneshot::channel::<()>();
+
+        let started = Instant::now();
+        let result = approve_device_code_with_notification_dispatcher(
+            state,
+            auth_user,
+            ApproveDeviceCodeRequest {
+                user_code: response.user_code,
+                org_id: None,
+                label: Some("Kitchen cam".to_string()),
+            },
+            move |_state, _user_id, _context| {
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    let _ = notification_done_tx.send(());
+                });
+            },
+        )
+        .await;
+        let elapsed = started.elapsed();
+
+        let _ = result.expect("approve succeeds");
+        assert!(
+            elapsed < Duration::from_millis(200),
+            "approve took {elapsed:?}, expected notification dispatch not to block response"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), &mut notification_done_rx)
+                .await
+                .is_err(),
+            "slow notification task should still be running after handler returns"
+        );
     }
 
     #[test]
