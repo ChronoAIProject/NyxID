@@ -75,10 +75,6 @@ interface FlowProps {
   readonly onCancel: () => void;
 }
 
-interface UserCredentialsMetadata {
-  readonly has_credentials: boolean;
-}
-
 /**
  * Returns true when this OAuth provider expects the end user to
  * register their own OAuth app and supply the resulting client
@@ -143,6 +139,8 @@ async function createPlaceholderKey(
   nodeId?: string,
   endpointUrl?: string,
   targetOrgId?: string | null,
+  oauthClientId?: string,
+  oauthClientSecret?: string,
 ): Promise<PlaceholderKeyResponse> {
   const body: Record<string, unknown> = {
     service_slug: slug,
@@ -158,6 +156,19 @@ async function createPlaceholderKey(
   // the same behavior.
   const trimmed = endpointUrl?.trim();
   if (trimmed) body.endpoint_url = trimmed;
+  // BYO OAuth Custom App credentials (`credential_mode: "user"`
+  // providers — Lark / Feishu / Twitter). When present, the backend
+  // also encrypts them onto the new `UserApiKey` so this connection's
+  // own refresh path uses them; without this, a refresh after the
+  // first ~2h access token expiry would fail because the legacy
+  // `user_provider_credentials` table can only hold one Custom App
+  // per `(user, provider)` and the new key has no fallback.
+  const trimmedClientId = oauthClientId?.trim();
+  const trimmedClientSecret = oauthClientSecret?.trim();
+  if (trimmedClientId && trimmedClientSecret) {
+    body.oauth_client_id = trimmedClientId;
+    body.oauth_client_secret = trimmedClientSecret;
+  }
   try {
     return await api.post<PlaceholderKeyResponse>("/keys", body);
   } catch (e) {
@@ -529,7 +540,6 @@ export function OAuthFlow({
   const [phase, setPhase] = useState<
     "checking-credentials"
     | "needs-credentials"
-    | "saving-credentials"
     | "starting"
     | "waiting"
     | "done"
@@ -739,50 +749,41 @@ export function OAuthFlow({
 
   // Credential-mode pre-check. Skipped entirely when the provider
   // uses `system` credentials.
+  //
+  // Multi-connection (NyxID): for BYO providers (`credential_mode:
+  // "user"` — Lark / Feishu / Twitter) we ALWAYS show the credentials
+  // form, even when `user_provider_credentials` already has a row.
+  // The legacy `has_credentials` short-circuit was safe in the
+  // single-connection model because the one cred row in that table
+  // was reused by every new add. With multi-connection, each new
+  // `UserApiKey` needs its OWN copy of the Custom App creds for the
+  // per-connection refresh path; skipping the form leaves the wizard
+  // with no plaintext to embed in `POST /keys`, and the resulting
+  // placeholder would fail to refresh after ~2h. The link-to-existing
+  // picker (design doc §10) is the next-iteration UX that lets the
+  // user pick an existing Custom App instead of re-pasting — until
+  // it lands we err on the side of correctness (re-paste) over
+  // convenience (silent breakage).
   useEffect(() => {
     if (!needsUserOAuthCredentials(credentialMode)) return;
-    let cancel = false;
-    void (async () => {
-      try {
-        const metadata = await api.get<UserCredentialsMetadata>(
-          `/providers/${encodeURIComponent(providerId)}/credentials`,
-        );
-        if (cancel) return;
-        if (metadata.has_credentials) {
-          setPhase("starting");
-        } else {
-          setPhase("needs-credentials");
-        }
-      } catch (e) {
-        if (cancel) return;
-        setPhase("error");
-        setError(extractMessage(e));
-      }
-    })();
-    return () => {
-      cancel = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    setPhase("needs-credentials");
+  }, [credentialMode]);
 
-  async function saveUserCredentials() {
+  function saveUserCredentials() {
     if (!clientId.trim() || !clientSecret.trim()) return;
-    setPhase("saving-credentials");
+    // Multi-connection: do NOT call `PUT /providers/{id}/credentials`.
+    // The new flow writes the Custom App credentials onto the new
+    // `UserApiKey` itself (via `POST /keys` carrying `oauth_client_id`
+    // / `oauth_client_secret`). Writing them to
+    // `user_provider_credentials` here would silently overwrite the
+    // Custom App secret of any pre-existing legacy
+    // (`connection_id: null`) connection for this same `(user, provider)`
+    // — breaking the legacy refresh path which reads from that table.
+    // The `clientId` / `clientSecret` state values flow into the
+    // placeholder-create call in the next phase (see the "starting"
+    // effect's `createPlaceholderKey` call site).
     setError(null);
-    try {
-      await api.put(
-        `/providers/${encodeURIComponent(providerId)}/credentials`,
-        {
-          client_id: clientId.trim(),
-          client_secret: clientSecret.trim(),
-          label,
-        },
-      );
-      setPhase("starting");
-    } catch (e) {
-      setPhase("needs-credentials");
-      setError(extractMessage(e));
-    }
+    setPhase("starting");
   }
 
   // Placeholder + redirect + poll runs as soon as `phase === "starting"`.
@@ -822,6 +823,12 @@ export function OAuthFlow({
           // rewind safety. Without this, a cancel mid-flight would
           // read the still-`true` sent-ref and return `uncertain`,
           // even when the server later replies 4xx (no side effect).
+          // Multi-connection BYO providers: thread the just-entered
+          // `clientId` / `clientSecret` into `POST /keys` so the new
+          // `UserApiKey` carries its own encrypted copy of the Custom
+          // App credentials. `credential_mode: "system"` providers
+          // (the codex / device-code case) just pass through empty
+          // strings here and the backend ignores them.
           const createPromise = createPlaceholderKey(
             slug,
             label,
@@ -829,6 +836,8 @@ export function OAuthFlow({
             nodeId,
             endpointUrl,
             targetOrgId,
+            clientId,
+            clientSecret,
           );
           placeholderCreateInFlightRef.current = createPromise;
           try {
@@ -982,8 +991,7 @@ export function OAuthFlow({
 
   // User-OAuth-app credentials sub-step — mirrors the local wizard's
   // Step 2a / `OAuthCredentialsStep` in the frontend.
-  if (phase === "needs-credentials" || phase === "saving-credentials") {
-    const saving = phase === "saving-credentials";
+  if (phase === "needs-credentials") {
     return (
       <div className="flex flex-col gap-4">
         <div className="flex flex-col gap-1">
@@ -1040,16 +1048,12 @@ export function OAuthFlow({
         {error ? <ErrorLine message={error} /> : null}
 
         <Button
-          onClick={() => void saveUserCredentials()}
-          disabled={saving || !clientId.trim() || !clientSecret.trim()}
+          onClick={saveUserCredentials}
+          disabled={!clientId.trim() || !clientSecret.trim()}
         >
-          {saving ? "Saving..." : "Save and continue"}
+          Save and continue
         </Button>
-        <Button
-          variant="outline"
-          onClick={() => void cancelAndCleanup()}
-          disabled={saving}
-        >
+        <Button variant="outline" onClick={() => void cancelAndCleanup()}>
           Cancel
         </Button>
       </div>

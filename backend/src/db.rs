@@ -477,6 +477,34 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     oauth_states
         .create_index(IndexModel::builder().keys(doc! { "user_id": 1 }).build())
         .await?;
+    // Multi-connection: a placeholder `UserApiKey.connection_id` should
+    // back AT MOST one in-flight `OAuthState`. Two parallel initiates
+    // for the same placeholder (e.g. double-clicked "Connect" + a
+    // retry) would otherwise produce duplicate state rows; both
+    // callbacks could land valid token writes, and the second one
+    // would overwrite the first's freshly-rotated refresh_token.
+    //
+    // `OAuthState.connection_id` is `Option<String>` and serializes
+    // `None` as BSON `null` (not as a missing field), so the partial
+    // filter uses `$gt: null` rather than `$exists: true` to exclude
+    // legacy single-tenant rows from the uniqueness constraint.
+    // MongoDB orders `null < string`, so `$gt: null` selects only the
+    // string values we want covered.
+    oauth_states
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "connection_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .unique(true)
+                        .partial_filter_expression(doc! {
+                            "connection_id": { "$gt": mongodb::bson::Bson::Null }
+                        })
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
 
     // ── roles ──
     let roles = db.collection::<mongodb::bson::Document>("roles");

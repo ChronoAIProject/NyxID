@@ -263,6 +263,22 @@ pub struct CreateKeyRequest {
     /// Home Assistant that authenticate after upgrade.
     #[serde(default)]
     pub ws_frame_injections: Option<Vec<WsFrameInjection>>,
+    /// User-provided OAuth Custom App client_id for `credential_mode: "user"`
+    /// providers (Lark / Feishu / Twitter). When supplied alongside
+    /// `oauth_client_secret`, the credentials are encrypted onto the new
+    /// `UserApiKey` row itself, so this connection's authorize / exchange /
+    /// refresh paths resolve from the key rather than the single-row-per-
+    /// `(user, provider)` legacy `user_provider_credentials` table.
+    /// Mutually exclusive with `copy_oauth_client_from`.
+    pub oauth_client_id: Option<String>,
+    /// Companion secret for `oauth_client_id`. Must be supplied together
+    /// or neither.
+    pub oauth_client_secret: Option<String>,
+    /// Source `UserApiKey` id to copy `oauth_client_id` / `oauth_client_secret`
+    /// from at creation time. Server-side decrypt-then-re-encrypt; the
+    /// client never re-transmits the source secret. Mutually exclusive
+    /// with the raw `oauth_client_id` / `oauth_client_secret` pair.
+    pub copy_oauth_client_from: Option<String>,
 }
 
 impl std::fmt::Debug for CreateKeyRequest {
@@ -289,6 +305,15 @@ impl std::fmt::Debug for CreateKeyRequest {
             .field("forward_access_token", &self.forward_access_token)
             .field("inject_delegation_token", &self.inject_delegation_token)
             .field("target_org_id", &self.target_org_id)
+            .field(
+                "oauth_client_id",
+                &self.oauth_client_id.as_deref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "oauth_client_secret",
+                &self.oauth_client_secret.as_deref().map(|_| "[REDACTED]"),
+            )
+            .field("copy_oauth_client_from", &self.copy_oauth_client_from)
             .finish()
     }
 }
@@ -330,6 +355,18 @@ pub struct KeyResponse {
     pub delegation_token_scope: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub custom_user_agent: Option<String>,
+    /// Per-add OAuth connection identifier (NyxID multi-connection). Present
+    /// for multi-connection oauth2 / device_code adds; absent for legacy and
+    /// non-OAuth keys. Surfaced so the frontend can render distinct
+    /// connections to the same provider (e.g. two Lark Custom Apps) and so
+    /// audit consumers can correlate `connection_id` logs to a visible key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<String>,
+    /// Decrypted user-provided OAuth Custom App `client_id` for BYO providers
+    /// (Lark / Feishu / Twitter). Non-secret — appears in OAuth redirect URLs
+    /// — so safe to surface. The `client_secret` is never returned by the API.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oauth_client_id: Option<String>,
     /// Per-user default HTTP headers (NyxID#356). Only user-owned entries
     /// are surfaced here; catalog-level admin defaults are described on
     /// the `/catalog/{slug}` response.
@@ -440,6 +477,13 @@ pub struct UpdateKeyRequest {
     /// OpenAPI spec URL for endpoint discovery. Set to "" to clear,
     /// Some(value) to set.
     pub openapi_spec_url: Option<String>,
+    /// BYO OAuth Custom App `client_id` used when this PUT upgrades a
+    /// `auth_method: "none"` service to OAuth on a
+    /// `credential_mode: "user"` provider. Same semantics as on POST
+    /// `/keys` — see `CreateKeyRequest::oauth_client_id`.
+    pub oauth_client_id: Option<String>,
+    pub oauth_client_secret: Option<String>,
+    pub copy_oauth_client_from: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -665,6 +709,49 @@ pub async fn create_key(
         Some(s) => unified_key_service::OpenApiSpecUrlInput::Set(s),
     };
 
+    // BYO OAuth Custom App credentials (`credential_mode: "user"` providers).
+    // Three-state, mutually exclusive at the wire level — the handler
+    // enforces mutual exclusion up front so the downstream service
+    // doesn't have to defend against ambiguous combinations.
+    let raw_id = body.oauth_client_id.as_deref().map(str::trim);
+    let raw_secret = body.oauth_client_secret.as_deref().map(str::trim);
+    let copy_from = body.copy_oauth_client_from.as_deref().map(str::trim);
+    let raw_present =
+        raw_id.is_some_and(|s| !s.is_empty()) || raw_secret.is_some_and(|s| !s.is_empty());
+    let copy_present = copy_from.is_some_and(|s| !s.is_empty());
+    if raw_present && copy_present {
+        return Err(AppError::BadRequest(
+            "oauth_client_id/oauth_client_secret and copy_oauth_client_from are mutually exclusive"
+                .to_string(),
+        ));
+    }
+    let oauth_client_credentials = if copy_present {
+        unified_key_service::OauthClientCredentialsInput::CopyFrom {
+            source_key_id: copy_from.expect("copy_present"),
+        }
+    } else if raw_present {
+        // Pair gate: both halves must be supplied. We let
+        // `resolve_oauth_client_credentials_input` enforce non-empty
+        // values; here we just reject the half-pair case so the user
+        // gets a clearer message than the downstream "must be non-empty".
+        let (Some(id), Some(secret)) = (raw_id, raw_secret) else {
+            return Err(AppError::BadRequest(
+                "oauth_client_id and oauth_client_secret must be supplied together".to_string(),
+            ));
+        };
+        if id.is_empty() || secret.is_empty() {
+            return Err(AppError::BadRequest(
+                "oauth_client_id and oauth_client_secret must be supplied together".to_string(),
+            ));
+        }
+        unified_key_service::OauthClientCredentialsInput::Raw {
+            client_id: id,
+            client_secret: secret,
+        }
+    } else {
+        unified_key_service::OauthClientCredentialsInput::None
+    };
+
     let result = unified_key_service::create_key(
         &state.db,
         &state.encryption_keys,
@@ -682,6 +769,7 @@ pub async fn create_key(
         identity,
         openapi_input,
         body.ws_frame_injections.as_deref(),
+        oauth_client_credentials,
         state.config.is_production(),
     )
     .await?;
@@ -795,7 +883,8 @@ pub async fn list_keys(
     // Lazily auto-provision no-auth catalog services for the user
     unified_key_service::auto_provision_no_auth_services(&state.db, &user_id_str).await?;
 
-    let views = unified_key_service::list_keys(&state.db, &user_id_str).await?;
+    let views =
+        unified_key_service::list_keys(&state.db, &state.encryption_keys, &user_id_str).await?;
     let keys = views.into_iter().map(key_response_from_view).collect();
     Ok(Json(KeyListResponse { keys }))
 }
@@ -849,8 +938,13 @@ pub async fn get_key(
         );
     }
 
-    let mut view =
-        unified_key_service::get_key(&state.db, &access.owner_id, &access.service_id).await?;
+    let mut view = unified_key_service::get_key(
+        &state.db,
+        &state.encryption_keys,
+        &access.owner_id,
+        &access.service_id,
+    )
+    .await?;
     // Override the placeholder Personal that get_key returns; the handler is
     // the only layer that knows whether the actor is the direct owner or
     // accessing via an org membership.
@@ -901,7 +995,9 @@ pub async fn update_key(
     let key_id = access.service_id;
 
     // Load current state to find sub-resource IDs
-    let view = unified_key_service::get_key(&state.db, &user_id_str, &key_id).await?;
+    let view =
+        unified_key_service::get_key(&state.db, &state.encryption_keys, &user_id_str, &key_id)
+            .await?;
 
     if view.auto_connected {
         return Err(crate::errors::AppError::BadRequest(
@@ -1094,6 +1190,46 @@ pub async fn update_key(
         // would silently rename the service in GET responses. Raised as P3
         // by the Codex review of the NyxID#419 fix.
         let preferred_label = body.label.as_deref().unwrap_or(view.label.as_str());
+
+        // Same BYO three-state envelope as POST. Mutual-exclusion and
+        // pair-completeness are validated here so the PUT path's failure
+        // mode mirrors POST exactly. The downstream call resolves the
+        // source key (for `CopyFrom`) and enforces provider-compat.
+        let raw_id = body.oauth_client_id.as_deref().map(str::trim);
+        let raw_secret = body.oauth_client_secret.as_deref().map(str::trim);
+        let copy_from = body.copy_oauth_client_from.as_deref().map(str::trim);
+        let raw_present =
+            raw_id.is_some_and(|s| !s.is_empty()) || raw_secret.is_some_and(|s| !s.is_empty());
+        let copy_present = copy_from.is_some_and(|s| !s.is_empty());
+        if raw_present && copy_present {
+            return Err(AppError::BadRequest(
+                "oauth_client_id/oauth_client_secret and copy_oauth_client_from are mutually exclusive"
+                    .to_string(),
+            ));
+        }
+        let oauth_client_credentials = if copy_present {
+            unified_key_service::OauthClientCredentialsInput::CopyFrom {
+                source_key_id: copy_from.expect("copy_present"),
+            }
+        } else if raw_present {
+            let (Some(id), Some(secret)) = (raw_id, raw_secret) else {
+                return Err(AppError::BadRequest(
+                    "oauth_client_id and oauth_client_secret must be supplied together".to_string(),
+                ));
+            };
+            if id.is_empty() || secret.is_empty() {
+                return Err(AppError::BadRequest(
+                    "oauth_client_id and oauth_client_secret must be supplied together".to_string(),
+                ));
+            }
+            unified_key_service::OauthClientCredentialsInput::Raw {
+                client_id: id,
+                client_secret: secret,
+            }
+        } else {
+            unified_key_service::OauthClientCredentialsInput::None
+        };
+
         unified_key_service::ensure_user_api_key_for_update(
             &state.db,
             &state.encryption_keys,
@@ -1103,6 +1239,7 @@ pub async fn update_key(
             body.credential.as_deref(),
             body.node_id.as_deref(),
             preferred_label,
+            oauth_client_credentials,
         )
         .await?;
     }
@@ -1294,9 +1431,10 @@ pub async fn update_key(
     // a push on them would (a) fail those edits whenever the node is
     // offline and (b) bypass the node-ownership check since the
     // request body has no `credential` (ninth-round Codex P1).
-    let refreshed_api_key_id = unified_key_service::get_key(&state.db, &user_id_str, &key_id)
-        .await?
-        .api_key_id;
+    let refreshed_api_key_id =
+        unified_key_service::get_key(&state.db, &state.encryption_keys, &user_id_str, &key_id)
+            .await?
+            .api_key_id;
     let touches_node_delivery_field = body.node_id.is_some()
         || body.auth_method.is_some()
         || body.auth_key_name.is_some()
@@ -1417,7 +1555,7 @@ pub async fn update_key(
     // (legacy auto-connected shape).
     if let Some(ref label) = body.label {
         let refreshed_api_key_id_for_label =
-            unified_key_service::get_key(&state.db, &user_id_str, &key_id)
+            unified_key_service::get_key(&state.db, &state.encryption_keys, &user_id_str, &key_id)
                 .await?
                 .api_key_id;
         if let Some(ak_id) = refreshed_api_key_id_for_label {
@@ -1662,7 +1800,9 @@ pub async fn update_key(
     // comment at the strict push site for the full rationale).
 
     // Return refreshed view
-    let updated = unified_key_service::get_key(&state.db, &user_id_str, &key_id).await?;
+    let updated =
+        unified_key_service::get_key(&state.db, &state.encryption_keys, &user_id_str, &key_id)
+            .await?;
     let catalog_id = updated.catalog_service_id.clone();
     let catalog_slug = updated.catalog_service_slug.clone();
     let api_key_id = updated.api_key_id.clone();
@@ -1721,7 +1861,9 @@ pub async fn delete_key(
     let user_id_str = access.owner_id;
     let key_id = access.service_id;
 
-    let view = unified_key_service::get_key(&state.db, &user_id_str, &key_id).await?;
+    let view =
+        unified_key_service::get_key(&state.db, &state.encryption_keys, &user_id_str, &key_id)
+            .await?;
     if view.auto_connected {
         return Err(crate::errors::AppError::BadRequest(
             "Auto-connected services cannot be deleted".to_string(),
@@ -1813,6 +1955,18 @@ fn key_response_from_result(result: &unified_key_service::CreateKeyResult) -> Ke
         inject_delegation_token: result.service.inject_delegation_token,
         delegation_token_scope: result.service.delegation_token_scope.clone(),
         custom_user_agent: result.service.custom_user_agent.clone(),
+        connection_id: result
+            .api_key
+            .as_ref()
+            .and_then(|api_key| api_key.connection_id.clone()),
+        // The fresh-create response leaves `oauth_client_id` as `None`;
+        // the GET endpoints decrypt and surface it. Surfacing it here
+        // would either require a synchronous decrypt (mismatched with
+        // the existing sync builder shape) or echoing the user-supplied
+        // plaintext, which loses the round-trip-encryption proof. The
+        // wizard can call `GET /keys/:id` immediately after create if
+        // it needs the field rendered.
+        oauth_client_id: None,
         default_request_headers: crate::models::default_request_header::redact_list_for_response(
             result.service.default_request_headers.clone(),
         ),
@@ -1874,6 +2028,8 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
         inject_delegation_token: view.inject_delegation_token,
         delegation_token_scope: view.delegation_token_scope,
         custom_user_agent: view.custom_user_agent,
+        connection_id: view.connection_id,
+        oauth_client_id: view.oauth_client_id,
         default_request_headers: crate::models::default_request_header::redact_list_for_response(
             view.default_request_headers,
         ),
@@ -2026,6 +2182,9 @@ mod tests {
             custom_user_agent: None,
             default_request_headers: None,
             openapi_spec_url: None,
+            oauth_client_id: None,
+            oauth_client_secret: None,
+            copy_oauth_client_from: None,
         }
     }
 
@@ -2465,6 +2624,9 @@ mod tests {
             target_org_id: None,
             openapi_spec_url: None,
             ws_frame_injections: None,
+            oauth_client_id: None,
+            oauth_client_secret: None,
+            copy_oauth_client_from: None,
         };
 
         let err = super::create_key(

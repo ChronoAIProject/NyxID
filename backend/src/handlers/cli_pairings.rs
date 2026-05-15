@@ -262,7 +262,14 @@ pub async fn complete_pairing(
     Path(id): Path<String>,
     Json(req): Json<CompletePairingRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
-    cli_pairing_service::complete(&state.db, &id, &user.user_id.to_string(), req.ack).await?;
+    cli_pairing_service::complete(
+        &state.db,
+        &state.encryption_keys,
+        &id,
+        &user.user_id.to_string(),
+        req.ack,
+    )
+    .await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 

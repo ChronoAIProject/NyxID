@@ -422,6 +422,7 @@ pub async fn claim(
 /// `cli/src/wizard/mod.rs`.
 pub async fn complete(
     db: &mongodb::Database,
+    encryption_keys: &crate::crypto::aes::EncryptionKeys,
     id: &str,
     session_user_id: &str,
     ack: serde_json::Value,
@@ -511,7 +512,7 @@ pub async fn complete(
     // Storing the client-supplied values would make the CLI
     // print a proxy URL for a slug that doesn't exist.
     let ack = if record.kind == "ai-key" {
-        normalize_ai_key_ack(db, session_user_id, ack).await?
+        normalize_ai_key_ack(db, encryption_keys, session_user_id, ack).await?
     } else {
         ack
     };
@@ -563,6 +564,7 @@ pub async fn complete(
 /// that references a non-active or mis-named service.
 async fn normalize_ai_key_ack(
     db: &mongodb::Database,
+    encryption_keys: &crate::crypto::aes::EncryptionKeys,
     session_user_id: &str,
     mut ack: serde_json::Value,
 ) -> AppResult<serde_json::Value> {
@@ -579,14 +581,19 @@ async fn normalize_ai_key_ack(
     // polling on a sibling-owned pairing would still fail the
     // existing ownership check on the record above — this helper
     // just asserts the referenced credential itself is usable.
-    let view = crate::services::unified_key_service::get_key(db, session_user_id, &service_id)
-        .await
-        .map_err(|e| match e {
-            AppError::NotFound(_) => {
-                AppError::BadRequest("ai-key ack references unknown service".into())
-            }
-            other => other,
-        })?;
+    let view = crate::services::unified_key_service::get_key(
+        db,
+        encryption_keys,
+        session_user_id,
+        &service_id,
+    )
+    .await
+    .map_err(|e| match e {
+        AppError::NotFound(_) => {
+            AppError::BadRequest("ai-key ack references unknown service".into())
+        }
+        other => other,
+    })?;
 
     if !view.status.eq_ignore_ascii_case("active") {
         return Err(AppError::BadRequest(

@@ -63,6 +63,13 @@ pub struct ProxyTarget {
     /// `DownstreamService` so existing provisioned rows inherit newly-added
     /// catalog rules.
     pub ws_frame_injections: Vec<WsFrameInjection>,
+    /// Per-add OAuth `connection_id` of the `UserApiKey` backing this
+    /// service. `None` for legacy single-connection paths and non-OAuth
+    /// services. Surfaced so the proxy handler can stamp
+    /// `X-NyxID-Connection-Id` on the response and tag the audit event
+    /// `event_data` with the connection — answering "which Lark Custom
+    /// App made this call?" without a second DB read per request.
+    pub connection_id: Option<String>,
 }
 
 pub(crate) struct PreparedDelegatedRequest {
@@ -449,6 +456,8 @@ pub async fn resolve_proxy_target(
             catalog_default_headers,
             user_service_default_headers: Vec::new(),
             ws_frame_injections,
+            // Legacy single-tenant path: no per-connection multiplexing.
+            connection_id: None,
         });
     }
 
@@ -490,6 +499,7 @@ pub async fn resolve_proxy_target(
         catalog_default_headers,
         user_service_default_headers: Vec::new(),
         ws_frame_injections,
+        connection_id: None,
     })
 }
 
@@ -569,6 +579,7 @@ pub async fn resolve_proxy_target_lenient(
                 catalog_default_headers,
                 user_service_default_headers: Vec::new(),
                 ws_frame_injections,
+                connection_id: None,
             },
             has_server_credential,
         ));
@@ -626,6 +637,7 @@ pub async fn resolve_proxy_target_lenient(
             catalog_default_headers,
             user_service_default_headers: Vec::new(),
             ws_frame_injections,
+            connection_id: None,
         },
         has_credential,
     ))
@@ -1381,6 +1393,10 @@ async fn finish_resolution(
                 catalog_default_headers: catalog_default_headers.clone(),
                 user_service_default_headers: user_service_default_headers.clone(),
                 ws_frame_injections: effective_ws_frame_injections.clone(),
+                // No-auth services have no api_key and therefore no
+                // multi-connection scope; the connection_id concept
+                // doesn't apply.
+                connection_id: None,
             },
             node_id: user_service.node_id.clone(),
             user_service_id: user_service.id.clone(),
@@ -1446,6 +1462,7 @@ async fn finish_resolution(
                 catalog_default_headers: catalog_default_headers.clone(),
                 user_service_default_headers: user_service_default_headers.clone(),
                 ws_frame_injections: effective_ws_frame_injections.clone(),
+                connection_id: api_key.connection_id.clone(),
             },
             node_id: user_service.node_id.clone(),
             user_service_id: user_service.id.clone(),
@@ -1489,6 +1506,7 @@ async fn finish_resolution(
             catalog_default_headers,
             user_service_default_headers,
             ws_frame_injections: effective_ws_frame_injections,
+            connection_id: api_key.connection_id.clone(),
         },
         node_id: user_service.node_id.clone(),
         user_service_id: user_service.id.clone(),
@@ -2658,6 +2676,7 @@ mod tests {
             catalog_default_headers: Vec::new(),
             user_service_default_headers: Vec::new(),
             ws_frame_injections: Vec::new(),
+            connection_id: None,
         }
     }
 
@@ -3469,6 +3488,7 @@ mod tests {
             catalog_default_headers: Vec::new(),
             user_service_default_headers: Vec::new(),
             ws_frame_injections: Vec::new(),
+            connection_id: None,
         }
     }
 
@@ -3763,6 +3783,7 @@ mod tests {
             catalog_default_headers: Vec::new(),
             user_service_default_headers: Vec::new(),
             ws_frame_injections: Vec::new(),
+            connection_id: None,
         }
     }
 

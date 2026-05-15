@@ -570,13 +570,27 @@ pub async fn initiate_oauth_connect(
         .as_ref()
         .expect("OAuth provider configuration checked above");
 
-    let resolved = user_credentials_service::resolve_oauth_credentials(
-        db,
-        encryption_keys,
-        &provider,
-        user_id,
-    )
-    .await?;
+    // Multi-connection: if the caller threaded a `connection_id`, look for
+    // BYO Custom App credentials on that connection's `UserApiKey` first.
+    // When present they replace the single-row `user_provider_credentials`
+    // lookup — required for multi-Custom-App Lark / Feishu, since the
+    // legacy table only holds one (client_id, secret) pair per
+    // `(user, provider)`. Falls through to `resolve_oauth_credentials`
+    // for legacy connections, codex-style provider-owned device-code
+    // flows, and "both"-mode adds without BYO.
+    let resolved = if let Some(conn_id) = connection_id
+        && let Some(conn_creds) = user_credentials_service::resolve_connection_oauth_credentials(
+            db,
+            encryption_keys,
+            conn_id,
+        )
+        .await?
+    {
+        conn_creds
+    } else {
+        user_credentials_service::resolve_oauth_credentials(db, encryption_keys, &provider, user_id)
+            .await?
+    };
     let client_id = resolved.client_id;
 
     // Create state for CSRF protection
@@ -759,13 +773,23 @@ pub async fn request_device_code(
         AppError::Internal("Device code provider missing device_code_url".to_string())
     })?;
 
-    let resolved = user_credentials_service::resolve_oauth_credentials(
-        db,
-        encryption_keys,
-        &provider,
-        user_id,
-    )
-    .await?;
+    // Multi-connection: same precedence as `initiate_oauth_connect`. Codex
+    // (the only `device_code` provider today) is provider-owned, so the
+    // BYO path won't actually fire, but the branch is here so a future
+    // BYO `device_code` provider works without a second patch.
+    let resolved = if let Some(conn_id) = connection_id
+        && let Some(conn_creds) = user_credentials_service::resolve_connection_oauth_credentials(
+            db,
+            encryption_keys,
+            conn_id,
+        )
+        .await?
+    {
+        conn_creds
+    } else {
+        user_credentials_service::resolve_oauth_credentials(db, encryption_keys, &provider, user_id)
+            .await?
+    };
     let client_id = resolved.client_id;
 
     // Branch on device_code_format: "openai" uses JSON, "rfc8628" uses form-urlencoded
@@ -821,7 +845,7 @@ pub async fn request_device_code(
         );
         return Err(AppError::Internal(format!(
             "Device code request failed with status {status}: {}",
-            &resp_body[..resp_body.len().min(200)]
+            resp_body.chars().take(200).collect::<String>()
         )));
     }
 
@@ -996,13 +1020,30 @@ pub async fn poll_device_code(
         AppError::Internal("Device code provider missing device_token_url".to_string())
     })?;
 
-    let resolved = user_credentials_service::resolve_token_oauth_credentials(
-        db,
-        encryption_keys,
-        &provider,
-        oauth_state.credential_user_id.as_deref(),
-    )
-    .await?;
+    // Multi-connection: when the device-code flow was initiated against a
+    // connection (`OAuthState.connection_id`), poll-time client credentials
+    // come from THAT connection's `UserApiKey` rather than the
+    // single-row `user_provider_credentials` table. Falls back to the
+    // legacy resolution (credential_user_id-keyed) for connection-less
+    // flows.
+    let resolved = if let Some(conn_id) = oauth_state.connection_id.as_deref()
+        && let Some(conn_creds) = user_credentials_service::resolve_connection_oauth_credentials(
+            db,
+            encryption_keys,
+            conn_id,
+        )
+        .await?
+    {
+        conn_creds
+    } else {
+        user_credentials_service::resolve_token_oauth_credentials(
+            db,
+            encryption_keys,
+            &provider,
+            oauth_state.credential_user_id.as_deref(),
+        )
+        .await?
+    };
     let poll_client_id = resolved.client_id;
 
     // Branch on device_code_format
@@ -1149,9 +1190,10 @@ pub async fn poll_device_code(
         if !token_response.status().is_success() {
             let err_status = token_response.status();
             let err_body = token_response.text().await.unwrap_or_default();
+            let truncated_err_body: String = err_body.chars().take(200).collect();
             tracing::error!(
                 status = %err_status,
-                body = %&err_body[..err_body.len().min(200)],
+                body = %truncated_err_body,
                 "Device code token exchange returned error"
             );
             return Err(AppError::Internal(format!(
@@ -1431,13 +1473,32 @@ pub async fn handle_oauth_callback(
         .expect("OAuth provider configuration checked above");
 
     // Reuse the same OAuth client that was selected during initiation.
-    let resolved = user_credentials_service::resolve_token_oauth_credentials(
-        db,
-        encryption_keys,
-        &provider,
-        oauth_state.credential_user_id.as_deref(),
-    )
-    .await?;
+    //
+    // Multi-connection: the initiate path resolved client credentials from
+    // the connection's own `UserApiKey` when `connection_id` was set, so
+    // the exchange must use the same source — otherwise the authorize
+    // URL would have been signed with the Custom App's client_id but the
+    // code-exchange would carry whatever (`user_provider_credentials` or
+    // `ProviderConfig`) happened to be present, and Lark would reject
+    // the exchange with `redirect_uri_mismatch` / `invalid_client`.
+    let resolved = if let Some(conn_id) = oauth_state.connection_id.as_deref()
+        && let Some(conn_creds) = user_credentials_service::resolve_connection_oauth_credentials(
+            db,
+            encryption_keys,
+            conn_id,
+        )
+        .await?
+    {
+        conn_creds
+    } else {
+        user_credentials_service::resolve_token_oauth_credentials(
+            db,
+            encryption_keys,
+            &provider,
+            oauth_state.credential_user_id.as_deref(),
+        )
+        .await?
+    };
 
     // Use the generic callback URL (must match what was sent in initiate)
     let callback_url = format!(
@@ -1740,6 +1801,33 @@ fn oauth_token_payload(token_data: &serde_json::Value) -> &serde_json::Value {
 /// per the design intent — the next refresh attempt would fail and the
 /// row would be marked `status: "failed"`. Callers should not invoke
 /// this function concurrently for the same key.
+/// Fire-and-forget: emit a `key_refresh_failed` audit event so dashboards
+/// and operators can detect silently-broken multi-connection refreshes
+/// without waiting on a user-facing 401. Includes `connection_id`,
+/// `provider_config_id`, `api_key_id`, and a truncated error message
+/// so the root cause is visible without a second DB read.
+fn emit_key_refresh_failed_audit(
+    db: &mongodb::Database,
+    api_key: &UserApiKey,
+    truncated_error: &str,
+) {
+    crate::services::audit_service::log_async(
+        db.clone(),
+        Some(api_key.user_id.clone()),
+        "key_refresh_failed".to_string(),
+        Some(serde_json::json!({
+            "api_key_id": &api_key.id,
+            "provider_config_id": api_key.provider_config_id.as_deref(),
+            "connection_id": api_key.connection_id.as_deref(),
+            "error": truncated_error,
+        })),
+        None,
+        None,
+        None,
+        None,
+    );
+}
+
 pub async fn refresh_user_api_key_in_place(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
@@ -1837,11 +1925,28 @@ pub async fn refresh_user_api_key_in_place(
         let now = Utc::now();
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        let truncated = &body[..body.len().min(200)];
+        // Chinese error strings from Lark / Feishu (the providers most
+        // likely to hit this branch) are multi-byte UTF-8 — a naive
+        // `&body[..200]` slice panics whenever a code point straddles
+        // the boundary. Truncate by character count instead.
+        let truncated: String = body.chars().take(200).collect();
 
-        db.collection::<UserApiKey>(USER_API_KEYS)
+        // Compare-and-set guard: a concurrent successful refresh on the
+        // same key races us. If it landed first, `updated_at` has moved
+        // off `api_key.updated_at` and we must NOT clobber the
+        // freshly-active row with `failed`. The `status` predicate
+        // additionally refuses to resurrect a row the user has revoked
+        // out from under the refresh (or that a sibling already marked
+        // `failed` — same outcome, redundant write avoided).
+        let snapshot_updated_at = bson::DateTime::from_chrono(api_key.updated_at);
+        let write = db
+            .collection::<UserApiKey>(USER_API_KEYS)
             .update_one(
-                doc! { "_id": &api_key.id },
+                doc! {
+                    "_id": &api_key.id,
+                    "updated_at": &snapshot_updated_at,
+                    "status": { "$nin": ["revoked", "failed"] },
+                },
                 doc! { "$set": {
                     "status": "failed",
                     "error_message": format!("Refresh failed: {status} {truncated}"),
@@ -1849,6 +1954,31 @@ pub async fn refresh_user_api_key_in_place(
                 }},
             )
             .await?;
+
+        if write.matched_count > 0 {
+            // Surface refresh failure as an audit event so dashboards /
+            // operators can detect silently-broken connections without
+            // waiting for the user to complain about a 401. Includes
+            // `connection_id` and the truncated provider response so the
+            // root cause (revoked grant, rotated client_secret, etc.) is
+            // visible without a separate DB read.
+            emit_key_refresh_failed_audit(
+                db,
+                api_key,
+                &format!("Refresh failed: {status} {truncated}"),
+            );
+        } else {
+            // Lost the race to a concurrent write. Either a sibling
+            // refresh succeeded (and the live row is active with a
+            // fresh token), or the user revoked the key, or another
+            // failure write got there first. In all three cases the
+            // live state is more correct than ours.
+            tracing::info!(
+                api_key_id = %api_key.id,
+                connection_id = ?api_key.connection_id,
+                "Refresh failure write lost CAS — live row already updated by a concurrent operation"
+            );
+        }
 
         return Err(AppError::Internal(format!(
             "Token refresh failed with status {status}"
@@ -1878,11 +2008,21 @@ pub async fn refresh_user_api_key_in_place(
             .get("msg")
             .and_then(|m| m.as_str())
             .unwrap_or("provider returned non-zero code");
-        let truncated = &msg[..msg.len().min(200)];
+        // Same UTF-8 safety concern as the HTTP-error branch above —
+        // Lark / Feishu `msg` fields are commonly Chinese.
+        let truncated: String = msg.chars().take(200).collect();
 
-        db.collection::<UserApiKey>(USER_API_KEYS)
+        // Same CAS guard as the HTTP-error branch — see that branch's
+        // comment for the race description.
+        let snapshot_updated_at = bson::DateTime::from_chrono(api_key.updated_at);
+        let write = db
+            .collection::<UserApiKey>(USER_API_KEYS)
             .update_one(
-                doc! { "_id": &api_key.id },
+                doc! {
+                    "_id": &api_key.id,
+                    "updated_at": &snapshot_updated_at,
+                    "status": { "$nin": ["revoked", "failed"] },
+                },
                 doc! { "$set": {
                     "status": "failed",
                     "error_message": format!("Refresh failed: {truncated}"),
@@ -1890,6 +2030,17 @@ pub async fn refresh_user_api_key_in_place(
                 }},
             )
             .await?;
+
+        if write.matched_count > 0 {
+            emit_key_refresh_failed_audit(db, api_key, &format!("Refresh failed: {truncated}"));
+        } else {
+            tracing::info!(
+                api_key_id = %api_key.id,
+                connection_id = ?api_key.connection_id,
+                "Refresh failure write lost CAS — live row already updated by a concurrent operation"
+            );
+        }
+
         return Err(AppError::Internal(
             "Token refresh failed (provider returned non-zero code)".to_string(),
         ));
@@ -1933,8 +2084,21 @@ pub async fn refresh_user_api_key_in_place(
         set_doc.insert("token_scopes", scope);
     }
 
+    // Status predicate refuses to resurrect a row a sibling write has
+    // moved to a terminal state (`revoked` or `failed`). Without it, a
+    // concurrent revoke could be overwritten by this success write,
+    // re-activating a credential the user just told us to drop.
+    // Concurrent successful refreshes keep last-write-wins (see the
+    // function-level rustdoc) — both writes have valid token material,
+    // so a later one overwriting an earlier one is fine.
     db.collection::<UserApiKey>(USER_API_KEYS)
-        .update_one(doc! { "_id": &api_key.id }, doc! { "$set": set_doc })
+        .update_one(
+            doc! {
+                "_id": &api_key.id,
+                "status": { "$nin": ["revoked", "failed"] },
+            },
+            doc! { "$set": set_doc },
+        )
         .await?;
 
     let refreshed = db

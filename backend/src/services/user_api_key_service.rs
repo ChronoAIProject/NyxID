@@ -47,6 +47,16 @@ pub struct CreateApiKeyParams<'a> {
     /// callback can scope the token write to this key). `None` for
     /// non-OAuth keys (api_key / bearer / basic / ssh / node-managed).
     pub connection_id: Option<&'a str>,
+    /// User-provided OAuth Custom App client_id for BYO providers
+    /// (`credential_mode: "user"` — Lark, Feishu, Twitter/X). When
+    /// supplied, encrypted into `UserApiKey.user_oauth_client_id_encrypted`
+    /// so this connection's authorize / token-exchange / refresh paths
+    /// resolve the client credentials from the key itself instead of
+    /// `user_provider_credentials` (which is single-row per
+    /// `(user, provider)` and can't represent multiple Custom Apps).
+    /// Must be supplied together with `oauth_client_secret` or neither.
+    pub oauth_client_id: Option<&'a str>,
+    pub oauth_client_secret: Option<&'a str>,
     pub status: &'a str,
     pub source: Option<&'a str>,
     pub source_id: Option<&'a str>,
@@ -134,6 +144,24 @@ pub async fn create_api_key(
         encrypt_optional_secret(encryption_keys, access_token.unwrap_or("")).await?;
     let refresh_token_encrypted =
         encrypt_optional_secret(encryption_keys, params.refresh_token.unwrap_or("")).await?;
+
+    // BYO Custom App credentials (Lark / Feishu / Twitter multi-connection).
+    // Caller has already validated paired presence; we treat them as
+    // independent optional secrets here so `None` rows simply skip the
+    // field, preserving backward-compat with existing keys.
+    match (params.oauth_client_id, params.oauth_client_secret) {
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(AppError::ValidationError(
+                "oauth_client_id and oauth_client_secret must be supplied together".to_string(),
+            ));
+        }
+        _ => {}
+    }
+    let user_oauth_client_id_encrypted =
+        encrypt_optional_secret(encryption_keys, params.oauth_client_id.unwrap_or("")).await?;
+    let user_oauth_client_secret_encrypted =
+        encrypt_optional_secret(encryption_keys, params.oauth_client_secret.unwrap_or("")).await?;
+
     let now = Utc::now();
 
     let api_key = UserApiKey {
@@ -148,8 +176,8 @@ pub async fn create_api_key(
         expires_at: params.expires_at,
         provider_config_id: params.provider_config_id.map(str::to_string),
         connection_id: params.connection_id.map(str::to_string),
-        user_oauth_client_id_encrypted: None,
-        user_oauth_client_secret_encrypted: None,
+        user_oauth_client_id_encrypted,
+        user_oauth_client_secret_encrypted,
         status: params.status.to_string(),
         last_used_at: None,
         error_message: None,
@@ -2496,5 +2524,146 @@ mod tests {
         // does NOT fan out across a `(user, provider)` pair.
         assert_eq!(restored_b.status, "pending_auth");
         assert!(restored_b.access_token_encrypted.is_none());
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // BYO Custom App credentials (Lark / Feishu / Twitter multi-connection).
+    // These prove that `create_api_key` actually persists the user-
+    // provided OAuth client_id/secret onto the new `UserApiKey`, which
+    // `refresh_user_api_key_in_place` already knows how to read.
+    // Without this write path, multi-connection Lark refresh fails on
+    // first expiry.
+    // ──────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn create_api_key_stores_byo_oauth_client_credentials() {
+        let Some(db) = connect_test_database("user_api_key_create_with_byo_creds").await else {
+            eprintln!("skipping create_api_key BYO test: no local MongoDB available");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let provider_id = uuid::Uuid::new_v4().to_string();
+        let connection_id = uuid::Uuid::new_v4().to_string();
+
+        let key = super::create_api_key(
+            &db,
+            &encryption_keys,
+            &user_id,
+            super::CreateApiKeyParams {
+                label: "Marketing Lark",
+                credential_type: "oauth2",
+                credential: "",
+                access_token: None,
+                refresh_token: None,
+                token_scopes: None,
+                expires_at: None,
+                provider_config_id: Some(&provider_id),
+                connection_id: Some(&connection_id),
+                oauth_client_id: Some("cli_marketing_app"),
+                oauth_client_secret: Some("super-secret-marketing"),
+                status: "pending_auth",
+                source: Some("user_created"),
+                source_id: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let stored = get_key(&db, &key.id).await;
+        assert_eq!(
+            stored.connection_id.as_deref(),
+            Some(connection_id.as_str())
+        );
+        let enc_cid = stored
+            .user_oauth_client_id_encrypted
+            .expect("client_id must be persisted");
+        let enc_sec = stored
+            .user_oauth_client_secret_encrypted
+            .expect("client_secret must be persisted");
+        let dec_cid = encryption_keys.decrypt(&enc_cid).await.unwrap();
+        let dec_sec = encryption_keys.decrypt(&enc_sec).await.unwrap();
+        assert_eq!(String::from_utf8(dec_cid).unwrap(), "cli_marketing_app");
+        assert_eq!(
+            String::from_utf8(dec_sec).unwrap(),
+            "super-secret-marketing"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_api_key_rejects_unpaired_byo_credentials() {
+        let Some(db) = connect_test_database("user_api_key_create_unpaired_byo").await else {
+            eprintln!("skipping unpaired-BYO test: no local MongoDB available");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        // Only client_id supplied — missing secret half.
+        let err = super::create_api_key(
+            &db,
+            &encryption_keys,
+            &user_id,
+            super::CreateApiKeyParams {
+                label: "Bad",
+                credential_type: "oauth2",
+                credential: "",
+                access_token: None,
+                refresh_token: None,
+                token_scopes: None,
+                expires_at: None,
+                provider_config_id: None,
+                connection_id: None,
+                oauth_client_id: Some("cli_orphan"),
+                oauth_client_secret: None,
+                status: "pending_auth",
+                source: Some("user_created"),
+                source_id: None,
+            },
+        )
+        .await
+        .expect_err("unpaired BYO should be rejected");
+        assert!(matches!(err, crate::errors::AppError::ValidationError(_)));
+    }
+
+    #[tokio::test]
+    async fn create_api_key_omits_byo_when_none_supplied() {
+        // Regression guard: existing call sites that don't supply BYO
+        // creds must continue to store `None` for both encrypted halves,
+        // so legacy keys aren't accidentally tagged as BYO.
+        let Some(db) = connect_test_database("user_api_key_create_no_byo").await else {
+            eprintln!("skipping no-BYO test: no local MongoDB available");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let key = super::create_api_key(
+            &db,
+            &encryption_keys,
+            &user_id,
+            super::CreateApiKeyParams {
+                label: "Plain API key",
+                credential_type: "api_key",
+                credential: "sk-test-123",
+                access_token: None,
+                refresh_token: None,
+                token_scopes: None,
+                expires_at: None,
+                provider_config_id: None,
+                connection_id: None,
+                oauth_client_id: None,
+                oauth_client_secret: None,
+                status: "active",
+                source: Some("user_created"),
+                source_id: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let stored = get_key(&db, &key.id).await;
+        assert!(stored.user_oauth_client_id_encrypted.is_none());
+        assert!(stored.user_oauth_client_secret_encrypted.is_none());
     }
 }

@@ -524,9 +524,14 @@ describe("OAuthFlow polling integration", () => {
         throw new Error(`unexpected POST ${path}`);
       });
       mockGet.mockImplementation(async (path: string) => {
+        // The wizard now also threads the placeholder's id into the
+        // initiate URL as `&key_id=<id>` (multi-connection routing —
+        // tells the backend callback which UserApiKey to write the
+        // tokens onto). Match either shape so the test doesn't have
+        // to mirror that detail.
         if (
           path.startsWith("/providers/") &&
-          path.endsWith("/oauth?redirect_path=%2Fkeys%2Fkey-1")
+          path.includes("/oauth?redirect_path=%2Fkeys%2Fkey-1")
         ) {
           return { authorization_url: "https://example.com/oauth" };
         }

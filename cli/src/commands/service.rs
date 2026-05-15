@@ -233,6 +233,9 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             credential,
             credential_env,
             scopes,
+            oauth_client_id,
+            oauth_client_secret,
+            oauth_client_secret_env,
             org,
             openapi_spec_url,
             ws_frame_preset,
@@ -385,6 +388,73 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             let ws_frame_injections =
                 build_ws_frame_injections_body(ws_frame_preset.as_deref(), ws_frame_clear)?;
 
+            // Resolve `--oauth-client-secret` / `--oauth-client-secret-env`
+            // to plaintext exactly once, before dispatching so the flag-
+            // shape error is reported up front.
+            //  - Both supplied  -> reject (ambiguous).
+            //  - Neither supplied with `--oauth-client-id` -> reject.
+            //  - Env var unset -> reject with a clear message.
+            let resolved_oauth_client_secret = match (
+                oauth_client_secret.as_deref(),
+                oauth_client_secret_env.as_deref(),
+            ) {
+                (Some(_), Some(_)) => {
+                    bail!(
+                        "--oauth-client-secret and --oauth-client-secret-env are mutually exclusive"
+                    );
+                }
+                (Some(value), None) => Some(value.to_string()),
+                (None, Some(env_var)) => {
+                    let raw = std::env::var(env_var)
+                        .with_context(|| format!("Environment variable {env_var} not set"))?;
+                    // Empty-but-set env vars (`LARK_SECRET=` in the parent
+                    // shell) would pass through and surface as a generic
+                    // backend ValidationError. Fail at the CLI boundary so
+                    // the error message points the user at the offending
+                    // env var name.
+                    if raw.trim().is_empty() {
+                        bail!("Environment variable {env_var} is set but empty");
+                    }
+                    Some(raw)
+                }
+                (None, None) => None,
+            };
+            if oauth_client_id.is_some() && resolved_oauth_client_secret.is_none() {
+                bail!(
+                    "--oauth-client-id requires --oauth-client-secret or --oauth-client-secret-env"
+                );
+            }
+            if oauth_client_id.is_none() && resolved_oauth_client_secret.is_some() {
+                bail!(
+                    "--oauth-client-secret / --oauth-client-secret-env requires --oauth-client-id"
+                );
+            }
+            // BYO Custom App credentials are incompatible with `--via-node`.
+            // Node-routed services run their OAuth flow on the node itself
+            // (`nyxid node credentials setup`); the central CLI's `POST /keys`
+            // for a node-routed add mints a `node_managed` placeholder that
+            // would discard the BYO fields silently. Reject up front so the
+            // user gets a clear error instead of an unusable connection that
+            // refresh would later fail to recover.
+            if oauth_client_id.is_some() && via_node.is_some() {
+                bail!(
+                    "--oauth-client-id / --oauth-client-secret are not supported with --via-node \
+                     (node-routed services manage their own Custom App credentials via \
+                     `nyxid node credentials setup`)"
+                );
+            }
+            // Device-code providers today are all `credential_mode: "admin"`
+            // (codex / ChatGPT) — the backend rejects BYO for them with a
+            // generic 400. Fail at the CLI boundary instead so the user
+            // sees a more actionable message tied to the flag combination
+            // they actually typed.
+            if device_code && oauth_client_id.is_some() {
+                bail!(
+                    "--oauth-client-id / --oauth-client-secret are only used with --oauth \
+                     (device-code providers use admin-configured credentials)"
+                );
+            }
+
             // OAuth flow
             if oauth {
                 return run_oauth_add(
@@ -397,6 +467,8 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                         target_org_id: org.as_deref(),
                         openapi_spec_url: openapi_spec_url.as_deref(),
                         ws_frame_injections: ws_frame_injections.as_ref(),
+                        oauth_client_id: oauth_client_id.as_deref(),
+                        oauth_client_secret: resolved_oauth_client_secret.as_deref(),
                     },
                     &auth,
                 )
@@ -415,6 +487,14 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                         target_org_id: org.as_deref(),
                         openapi_spec_url: openapi_spec_url.as_deref(),
                         ws_frame_injections: ws_frame_injections.as_ref(),
+                        // Device-code providers today are all `credential_mode:
+                        // "admin"` (codex / ChatGPT), so BYO doesn't apply.
+                        // We still thread the resolved fields here so a future
+                        // BYO device-code provider Just Works without another
+                        // patch — the backend already supports the same input
+                        // shape on the `device-code/initiate` path.
+                        oauth_client_id: oauth_client_id.as_deref(),
+                        oauth_client_secret: resolved_oauth_client_secret.as_deref(),
                     },
                     &auth,
                 )
@@ -1201,6 +1281,22 @@ async fn run_oauth_add(
     if let Some(rules) = options.ws_frame_injections {
         key_body.insert("ws_frame_injections".into(), rules.clone());
     }
+    // Multi-connection BYO: include the user-supplied Custom App
+    // credentials so the new `UserApiKey` carries its own encrypted
+    // copy. The dispatch layer guarantees both halves are present or
+    // neither — see the validation block in `run` above.
+    if let (Some(client_id), Some(client_secret)) =
+        (options.oauth_client_id, options.oauth_client_secret)
+    {
+        key_body.insert(
+            "oauth_client_id".into(),
+            Value::String(client_id.to_string()),
+        );
+        key_body.insert(
+            "oauth_client_secret".into(),
+            Value::String(client_secret.to_string()),
+        );
+    }
     let key_result: Value = api.post("/keys", &Value::Object(key_body)).await?;
     let key_id = key_result["id"]
         .as_str()
@@ -1228,6 +1324,16 @@ async fn run_oauth_add(
         "/providers/{provider_id}/connect/oauth?redirect_path={}",
         urlencoding::encode(&redirect_path)
     );
+    // Multi-connection: thread the placeholder's id into the initiate
+    // URL so the backend's OAuth-state insert reads its `connection_id`
+    // (off the placeholder's `UserApiKey`) and stamps it onto the new
+    // `OAuthState`. The eventual callback then writes the tokens
+    // straight onto THIS `UserApiKey` instead of taking the legacy
+    // `user_provider_tokens` path. Omitting this leaves the placeholder
+    // stuck in `pending_auth` while the token aliases onto the legacy
+    // single-tenant row — the exact silent-failure mode the
+    // multi-connection branch is meant to prevent.
+    initiate_path.push_str(&format!("&key_id={}", urlencoding::encode(key_id)));
     if !options.additional_scopes.is_empty() {
         initiate_path.push_str(&format!(
             "&scope={}",
@@ -1315,6 +1421,22 @@ async fn run_device_code_add(
     if let Some(rules) = options.ws_frame_injections {
         key_body.insert("ws_frame_injections".into(), rules.clone());
     }
+    // Multi-connection BYO: see `run_oauth_add` for the rationale.
+    // No device-code provider today uses BYO (codex is provider-owned),
+    // but we forward the inputs so a future BYO device-code provider
+    // works without an additional patch.
+    if let (Some(client_id), Some(client_secret)) =
+        (options.oauth_client_id, options.oauth_client_secret)
+    {
+        key_body.insert(
+            "oauth_client_id".into(),
+            Value::String(client_id.to_string()),
+        );
+        key_body.insert(
+            "oauth_client_secret".into(),
+            Value::String(client_secret.to_string()),
+        );
+    }
     let key_result: Value = api.post("/keys", &Value::Object(key_body)).await?;
     let key_id = key_result["id"]
         .as_str()
@@ -1345,6 +1467,12 @@ async fn run_device_code_add(
         path.push('=');
         path.push_str(&urlencoding::encode(val));
     };
+    // Multi-connection: same key_id threading as `run_oauth_add` — see
+    // that function's comment for why this is required. Without it the
+    // device-code completion writes to `user_provider_tokens` (legacy
+    // path) and the just-minted multi-connection placeholder is
+    // orphaned until reconcile Pass 2 marks it `failed`.
+    append(&mut initiate_path, "key_id", key_id);
     if !options.additional_scopes.is_empty() {
         append(
             &mut initiate_path,
@@ -1689,6 +1817,13 @@ struct CatalogAddFlowOptions<'a> {
     target_org_id: Option<&'a str>,
     openapi_spec_url: Option<&'a str>,
     ws_frame_injections: Option<&'a Value>,
+    /// User-provided OAuth Custom App `client_id`. Resolved from
+    /// `--oauth-client-id`. Only meaningful for `--oauth` adds against
+    /// `credential_mode: "user"` providers.
+    oauth_client_id: Option<&'a str>,
+    /// Companion secret for `oauth_client_id`. Resolved at parse time
+    /// from `--oauth-client-secret` / `--oauth-client-secret-env`.
+    oauth_client_secret: Option<&'a str>,
 }
 
 /// Parse the `token_exchange_credential_fields` array out of a raw catalog

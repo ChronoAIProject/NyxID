@@ -609,6 +609,16 @@ pub enum CatalogCommands {
 // ---- Service (C11-C13, I21-I23) ----
 
 #[derive(Subcommand)]
+// The `Add` variant has accreted a lot of flags as catalog adds have
+// gained capabilities (org targeting, OpenAPI spec URL, WS frame
+// presets, multi-connection BYO Custom App credentials, etc.). Each
+// `Option<String>` adds ~24 bytes, which trips clippy's
+// `large_enum_variant` heuristic. Boxing variants is the standard
+// remediation but `clap` does not derive its `Args` impl for `Box<Args>`
+// fields, so we'd lose `#[command(flatten)]` on `AuthArgs`. The variant
+// is constructed at most once per CLI invocation, so the size delta is
+// not load-bearing — accept the lint here.
+#[allow(clippy::large_enum_variant)]
 pub enum ServiceCommands {
     /// Add a service from catalog or custom endpoint
     Add {
@@ -654,6 +664,25 @@ pub enum ServiceCommands {
         /// Example: --scope "contact:contact.base:readonly,contact:department.base:readonly"
         #[arg(long = "scope", value_name = "SCOPES")]
         scopes: Vec<String>,
+        /// User-provided OAuth Custom App `client_id` for providers with
+        /// `credential_mode: "user"` (Lark / Feishu / Twitter / X). Sent
+        /// alongside `--oauth-client-secret` / `--oauth-client-secret-env`
+        /// in the `POST /keys` body so this connection's `UserApiKey`
+        /// carries its own encrypted copy of the credentials — required
+        /// for per-connection refresh to keep working past the first
+        /// access-token expiry. Only used with `--oauth`.
+        #[arg(long, value_name = "CLIENT_ID")]
+        oauth_client_id: Option<String>,
+        /// Companion secret for `--oauth-client-id`. Hidden from `--help`
+        /// (matches `--credential`): prefer `--oauth-client-secret-env`
+        /// for scripted use so the value doesn't end up in shell history.
+        #[arg(long, hide = true, value_name = "CLIENT_SECRET")]
+        oauth_client_secret: Option<String>,
+        /// Read the Custom App `client_secret` from this environment
+        /// variable instead of prompting. Mutually substitutable with
+        /// `--oauth-client-secret`. Only used with `--oauth`.
+        #[arg(long, value_name = "VAR")]
+        oauth_client_secret_env: Option<String>,
         /// Create this key under the given org (you must be an admin of that org).
         /// Every member of the org will see the resulting service in their
         /// `nyxid service list` and can proxy through it using their own

@@ -227,6 +227,115 @@ pub enum OpenApiSpecUrlInput<'a> {
     Set(&'a str),
 }
 
+/// User-provided OAuth Custom App credentials for `credential_mode: "user"`
+/// providers (Lark / Feishu / Twitter). Three-state, mutually exclusive:
+///
+/// - `None`: caller did not supply BYO creds. For BYO providers this is
+///   rejected upstream (see `create_key`); for other providers it's the
+///   normal path.
+/// - `Raw`: caller submitted a fresh `client_id` + `client_secret` pair.
+///   `create_api_key` encrypts both onto the new `UserApiKey` row.
+/// - `CopyFrom`: caller pointed at an existing `UserApiKey` to copy the
+///   Custom App credentials from. Server-side decrypt-then-re-encrypt;
+///   the client never sees or re-transmits the source secret. The source
+///   must be owned by the same principal and must itself carry BYO creds
+///   (legacy / provider-owned / credential-less placeholders are rejected).
+pub enum OauthClientCredentialsInput<'a> {
+    None,
+    Raw {
+        client_id: &'a str,
+        client_secret: &'a str,
+    },
+    CopyFrom {
+        source_key_id: &'a str,
+    },
+}
+
+/// Resolve a `OauthClientCredentialsInput` into a concrete plaintext
+/// `(client_id, client_secret)` pair suitable for passing into
+/// `CreateApiKeyParams.oauth_client_id` / `oauth_client_secret`.
+///
+/// - `None` → `Ok(None)` (caller decides whether None is acceptable for
+///   this provider).
+/// - `Raw { client_id, client_secret }` → both trimmed and validated for
+///   non-emptiness; returned as-is.
+/// - `CopyFrom { source_key_id }` → loads the source `UserApiKey`,
+///   verifies it is owned by `user_id` and carries
+///   `user_oauth_client_id_encrypted` (so legacy / provider-owned /
+///   credential-less placeholders are rejected), decrypts the pair, and
+///   returns it. The plaintext stays in process memory only long enough
+///   for the caller to encrypt it onto the new row.
+async fn resolve_oauth_client_credentials_input(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    user_id: &str,
+    input: &OauthClientCredentialsInput<'_>,
+) -> AppResult<Option<(String, String)>> {
+    use zeroize::Zeroizing;
+
+    match input {
+        OauthClientCredentialsInput::None => Ok(None),
+        OauthClientCredentialsInput::Raw {
+            client_id,
+            client_secret,
+        } => {
+            let id = client_id.trim();
+            let secret = client_secret.trim();
+            if id.is_empty() || secret.is_empty() {
+                return Err(AppError::ValidationError(
+                    "oauth_client_id and oauth_client_secret must be non-empty when supplied"
+                        .to_string(),
+                ));
+            }
+            Ok(Some((id.to_string(), secret.to_string())))
+        }
+        OauthClientCredentialsInput::CopyFrom { source_key_id } => {
+            let trimmed = source_key_id.trim();
+            if trimmed.is_empty() {
+                return Err(AppError::ValidationError(
+                    "copy_oauth_client_from must not be empty".to_string(),
+                ));
+            }
+            // Ownership check is the same `(_id, user_id)` predicate used
+            // by `get_api_key`. We surface NotFound (rather than Forbidden)
+            // so existence of a foreign key is not leaked through the
+            // error type — R9 / §12 of the design doc.
+            let source = db
+                .collection::<UserApiKey>(USER_API_KEYS)
+                .find_one(doc! { "_id": trimmed, "user_id": user_id })
+                .await?
+                .ok_or_else(|| {
+                    AppError::NotFound("copy_oauth_client_from source key not found".to_string())
+                })?;
+
+            let enc_cid = source.user_oauth_client_id_encrypted.as_ref().ok_or_else(|| {
+                AppError::BadRequest(
+                    "Source key does not carry user-provided OAuth client credentials (it is legacy, provider-owned, or a credential-less placeholder)".to_string(),
+                )
+            })?;
+            let enc_sec = source
+                .user_oauth_client_secret_encrypted
+                .as_ref()
+                .ok_or_else(|| {
+                    AppError::BadRequest(
+                        "Source key is missing the OAuth client_secret half of its credentials"
+                            .to_string(),
+                    )
+                })?;
+
+            let dec_id = Zeroizing::new(encryption_keys.decrypt(enc_cid).await?);
+            let id = String::from_utf8((*dec_id).clone()).map_err(|_| {
+                AppError::Internal("Source key client_id is not valid UTF-8".to_string())
+            })?;
+            let dec_sec = Zeroizing::new(encryption_keys.decrypt(enc_sec).await?);
+            let secret = String::from_utf8((*dec_sec).clone()).map_err(|_| {
+                AppError::Internal("Source key client_secret is not valid UTF-8".to_string())
+            })?;
+            Ok(Some((id, secret)))
+        }
+    }
+}
+
 /// Resolve the final OpenAPI spec URL to store, given the caller's intent,
 /// whether the key is SSH-backed, and the catalog default (if any). Pulled
 /// out of `create_key` so the three-state behaviour is unit-testable.
@@ -301,6 +410,19 @@ pub struct KeyView {
     pub source_app_id: Option<String>,
     /// Human-readable name of the developer app (resolved from OauthClient).
     pub source_app_name: Option<String>,
+    /// Per-add OAuth connection identifier. Present for multi-connection
+    /// adds (oauth2 / device_code), `None` for legacy and non-OAuth keys.
+    /// Surfaced so the UI can distinguish multiple connections to the
+    /// same provider (e.g. two Lark Custom Apps) and so audit consumers
+    /// can correlate `connection_id` from logs back to a visible key.
+    pub connection_id: Option<String>,
+    /// User-provided OAuth Custom App `client_id`, decrypted from
+    /// `user_oauth_client_id_encrypted` when present. Returned for BYO
+    /// providers (Lark / Feishu / Twitter) so the UI can show
+    /// "App: cli_aaa…" and let users disambiguate connections without
+    /// re-typing the credential. `None` otherwise. The client_secret is
+    /// never surfaced (write-only across the API).
+    pub oauth_client_id: Option<String>,
     pub expires_at: Option<String>,
     pub last_used_at: Option<String>,
     pub error_message: Option<String>,
@@ -482,6 +604,7 @@ pub async fn create_key(
     identity: Option<user_service_service::IdentityConfig>,
     openapi_spec_url: OpenApiSpecUrlInput<'_>,
     ws_frame_injections: Option<&[WsFrameInjection]>,
+    oauth_client_credentials: OauthClientCredentialsInput<'_>,
     hosted_mode: bool,
 ) -> AppResult<CreateKeyResult> {
     let node_id = node_id.filter(|nid| !nid.is_empty());
@@ -492,6 +615,24 @@ pub async fn create_key(
     if let Some(node_id) = node_id {
         node_service::ensure_node_writable_by_actor(db, actor_user_id, node_id).await?;
     }
+
+    // BYO OAuth Custom App credentials. Resolved once up front so the
+    // server-side copy lookup happens before any side effects. The
+    // resulting plaintext pair (or `None`) is reused at every mint site
+    // below. Plaintext stays in process memory only long enough to be
+    // re-encrypted onto the new `UserApiKey` row.
+    let byo_oauth_client_creds = resolve_oauth_client_credentials_input(
+        db,
+        encryption_keys,
+        user_id,
+        &oauth_client_credentials,
+    )
+    .await?;
+    let byo_supplied = byo_oauth_client_creds.is_some();
+    let byo_oauth_client_id = byo_oauth_client_creds.as_ref().map(|(id, _)| id.as_str());
+    let byo_oauth_client_secret = byo_oauth_client_creds
+        .as_ref()
+        .map(|(_, secret)| secret.as_str());
 
     if let Some(slug) = service_slug {
         // -- Catalog path --
@@ -514,6 +655,23 @@ pub async fn create_key(
             None
         };
         let provider_type = provider.as_ref().map(|p| p.provider_type.as_str());
+        let provider_supports_byo = provider
+            .as_ref()
+            .is_some_and(crate::services::user_credentials_service::supports_user_credentials);
+        let provider_requires_byo = provider
+            .as_ref()
+            .is_some_and(|p| p.credential_mode == "user");
+
+        // BYO OAuth Custom App credentials are only meaningful for
+        // providers with `credential_mode` in {"user", "both"}. If the
+        // caller supplied them for an admin-only provider (or a
+        // catalog service with no provider config), reject with the
+        // same wording as `PUT /providers/{id}/credentials` (§16.2).
+        if byo_supplied && !provider_supports_byo {
+            return Err(AppError::BadRequest(
+                "This provider does not accept user-provided OAuth client credentials".to_string(),
+            ));
+        }
         let provider_requirement = db
             .collection::<ServiceProviderRequirement>(SERVICE_PROVIDER_REQUIREMENTS)
             .find_one(doc! { "service_id": &svc.id })
@@ -672,6 +830,28 @@ pub async fn create_key(
                 // OAuth add with an inline credential) stay connection-less
                 // and follow the legacy path.
                 let connection_id = pending_oauth.then(|| uuid::Uuid::new_v4().to_string());
+
+                // BYO Custom App credentials are REQUIRED for multi-connection
+                // `credential_mode: "user"` providers (Lark / Feishu / Twitter):
+                // without them the authorize-URL + token-exchange + refresh
+                // paths have no client_id to use, and the connection would
+                // be unusable. We enforce the gate only when we are actually
+                // minting a multi-connection placeholder (`pending_oauth`),
+                // so non-OAuth adds aren't affected.
+                if pending_oauth && provider_requires_byo && !byo_supplied {
+                    return Err(AppError::BadRequest(
+                        "This provider requires user-provided OAuth client credentials (oauth_client_id + oauth_client_secret, or copy_oauth_client_from an existing connection)".to_string(),
+                    ));
+                }
+                // Only attach BYO creds to a multi-connection mint. A
+                // legacy / inline-credential add on a "both" provider
+                // shouldn't end up with BYO creds glued onto a row that
+                // still resolves via `user_provider_credentials`.
+                let (byo_id_for_key, byo_secret_for_key) = if pending_oauth {
+                    (byo_oauth_client_id, byo_oauth_client_secret)
+                } else {
+                    (None, None)
+                };
                 Some(
                     user_api_key_service::create_api_key(
                         db,
@@ -688,6 +868,8 @@ pub async fn create_key(
                             expires_at: None,
                             provider_config_id,
                             connection_id: connection_id.as_deref(),
+                            oauth_client_id: byo_id_for_key,
+                            oauth_client_secret: byo_secret_for_key,
                             status: if pending_oauth {
                                 "pending_auth"
                             } else {
@@ -716,6 +898,8 @@ pub async fn create_key(
                         expires_at: None,
                         provider_config_id,
                         connection_id: None,
+                        oauth_client_id: None,
+                        oauth_client_secret: None,
                         status: "active",
                         source: Some("user_created"),
                         source_id: None,
@@ -955,6 +1139,8 @@ pub async fn create_key(
                 expires_at: None,
                 provider_config_id: None,
                 connection_id: None,
+                oauth_client_id: None,
+                oauth_client_secret: None,
                 status: "active",
                 source: Some("user_created"),
                 source_id: None,
@@ -1111,6 +1297,8 @@ pub async fn create_key(
                         expires_at: None,
                         provider_config_id: None,
                         connection_id: None,
+                        oauth_client_id: None,
+                        oauth_client_secret: None,
                         status: "active",
                         source: Some("user_created"),
                         source_id: None,
@@ -1735,7 +1923,11 @@ async fn reconcile_stale_auto_provisions(db: &mongodb::Database, user_id: &str) 
 /// personal ones, grouped per org. Viewer-role org services are returned with
 /// `credential_source.allowed = false` so the frontend can render them as
 /// read-only.
-pub async fn list_keys(db: &mongodb::Database, user_id: &str) -> AppResult<Vec<KeyView>> {
+pub async fn list_keys(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    user_id: &str,
+) -> AppResult<Vec<KeyView>> {
     let tagged = user_service_service::list_user_services_with_sources(db, user_id).await?;
     if tagged.is_empty() {
         return Ok(vec![]);
@@ -1809,7 +2001,7 @@ pub async fn list_keys(db: &mongodb::Database, user_id: &str) -> AppResult<Vec<K
         apps.into_iter().map(|a| (a.id, a.client_name)).collect()
     };
 
-    let views = tagged
+    let mut views: Vec<KeyView> = tagged
         .into_iter()
         .filter_map(|t| {
             let ep = ep_map.get(t.service.endpoint_id.as_str())?;
@@ -1829,12 +2021,25 @@ pub async fn list_keys(db: &mongodb::Database, user_id: &str) -> AppResult<Vec<K
         })
         .collect();
 
+    // Enrich views with the (non-secret) BYO Custom App client_id where
+    // present. Sequential await is fine — N is bounded by the user's
+    // key count and decrypt is fast.
+    for view in views.iter_mut() {
+        let enc = view
+            .api_key_id
+            .as_deref()
+            .and_then(|id| ak_map.get(id).copied())
+            .and_then(|k| k.user_oauth_client_id_encrypted.as_ref());
+        enrich_view_with_oauth_client_id(encryption_keys, view, enc).await;
+    }
+
     Ok(views)
 }
 
 /// GET /api/v1/keys/:id -- get single combined view.
 pub async fn get_key(
     db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
     user_id: &str,
     service_id: &str,
 ) -> AppResult<KeyView> {
@@ -1881,14 +2086,24 @@ pub async fn get_key(
     // for tagging the response with the actual credential_source when the
     // request was authenticated as an org member -- see resolve_key_read_owner
     // in handlers/keys.rs.
-    Ok(build_key_view(
+    let mut view = build_key_view(
         &svc,
         &ep,
         ak.as_ref(),
         &cat_map,
         &app_name_map,
         user_service_service::CredentialSource::Personal,
-    ))
+    );
+
+    enrich_view_with_oauth_client_id(
+        encryption_keys,
+        &mut view,
+        ak.as_ref()
+            .and_then(|k| k.user_oauth_client_id_encrypted.as_ref()),
+    )
+    .await;
+
+    Ok(view)
 }
 
 pub async fn reconcile_provider_key_for_service_routing(
@@ -2157,7 +2372,24 @@ pub async fn ensure_user_api_key_for_update(
     new_credential: Option<&str>,
     new_node_id: Option<&str>,
     preferred_label: &str,
+    oauth_client_credentials: OauthClientCredentialsInput<'_>,
 ) -> AppResult<Option<String>> {
+    // BYO OAuth Custom App credentials. Resolved once up front (same
+    // semantics as `create_key`) so the eventual placeholder mint
+    // below can attach them, and so the source-key lookup happens
+    // before any side effect.
+    let byo_oauth_client_creds = resolve_oauth_client_credentials_input(
+        db,
+        encryption_keys,
+        user_id,
+        &oauth_client_credentials,
+    )
+    .await?;
+    let byo_supplied = byo_oauth_client_creds.is_some();
+    let byo_oauth_client_id = byo_oauth_client_creds.as_ref().map(|(id, _)| id.as_str());
+    let byo_oauth_client_secret = byo_oauth_client_creds
+        .as_ref()
+        .map(|(_, secret)| secret.as_str());
     let service = user_service_service::get_user_service(db, user_id, service_id).await?;
 
     // Load credential_type for the classifier when an api_key is already
@@ -2239,6 +2471,20 @@ pub async fn ensure_user_api_key_for_update(
     };
     let provider_type = provider_config.as_ref().map(|p| p.provider_type.as_str());
     let deferred_auth_supported = matches!(provider_type, Some("oauth2" | "device_code"));
+    let provider_supports_byo = provider_config
+        .as_ref()
+        .is_some_and(crate::services::user_credentials_service::supports_user_credentials);
+    let provider_requires_byo = provider_config
+        .as_ref()
+        .is_some_and(|p| p.credential_mode == "user");
+
+    // BYO compatibility gate, mirroring the POST path. We do not need to
+    // reach the placeholder mint to surface a clear error.
+    if byo_supplied && !provider_supports_byo {
+        return Err(AppError::BadRequest(
+            "This provider does not accept user-provided OAuth client credentials".to_string(),
+        ));
+    }
 
     let mut action = classify_update_credential_action(
         &service.auth_method,
@@ -2398,6 +2644,20 @@ pub async fn ensure_user_api_key_for_update(
                 // threads it into the `OAuthState`, and the callback
                 // writes the token straight onto this `UserApiKey`.
                 let connection_id = is_deferred_pending.then(|| uuid::Uuid::new_v4().to_string());
+
+                // BYO requirement gate, mirroring `create_key`. A PUT
+                // upgrade to OAuth on a `credential_mode: "user"`
+                // provider must supply Custom App credentials.
+                if is_deferred_pending && provider_requires_byo && !byo_supplied {
+                    return Err(AppError::BadRequest(
+                        "This provider requires user-provided OAuth client credentials (oauth_client_id + oauth_client_secret, or copy_oauth_client_from an existing connection)".to_string(),
+                    ));
+                }
+                let (byo_id_for_key, byo_secret_for_key) = if is_deferred_pending {
+                    (byo_oauth_client_id, byo_oauth_client_secret)
+                } else {
+                    (None, None)
+                };
                 user_api_key_service::create_api_key(
                     db,
                     encryption_keys,
@@ -2412,6 +2672,8 @@ pub async fn ensure_user_api_key_for_update(
                         expires_at: None,
                         provider_config_id: catalog_provider_config_id,
                         connection_id: connection_id.as_deref(),
+                        oauth_client_id: byo_id_for_key,
+                        oauth_client_secret: byo_secret_for_key,
                         status,
                         source: Some("user_created"),
                         source_id: None,
@@ -2677,6 +2939,15 @@ fn build_key_view(
         auto_connected,
         source_app_id: svc.source_app_id.clone(),
         source_app_name,
+        // Multi-connection identifier — None for legacy / non-OAuth keys,
+        // a UUID for fresh oauth2 / device_code adds. Set straight from
+        // the api_key (plaintext, no decrypt needed).
+        connection_id: ak.and_then(|k| k.connection_id.clone()),
+        // `oauth_client_id` is decrypted in a follow-up async pass
+        // (see `enrich_view_with_oauth_client_id`) because the
+        // `EncryptionKeys` operations are async and `build_key_view`
+        // is intentionally sync.
+        oauth_client_id: None,
         expires_at: ak.and_then(|k| k.expires_at.map(|dt| dt.to_rfc3339())),
         last_used_at: ak.and_then(|k| k.last_used_at.map(|dt| dt.to_rfc3339())),
         error_message: ak.and_then(|k| k.error_message.clone()),
@@ -2691,6 +2962,39 @@ fn build_key_view(
     }
 }
 
+/// Async post-pass for `build_key_view`: decrypt
+/// `UserApiKey.user_oauth_client_id_encrypted` (BYO Custom App client_id)
+/// and place the plaintext on `view.oauth_client_id`.
+///
+/// Best-effort: on decrypt or UTF-8 failure we log and leave the field
+/// `None` rather than failing the whole list response. The client_id is
+/// non-secret (it appears in OAuth redirect URLs); the secret half is
+/// never surfaced.
+async fn enrich_view_with_oauth_client_id(
+    encryption_keys: &EncryptionKeys,
+    view: &mut KeyView,
+    encrypted_client_id: Option<&Vec<u8>>,
+) {
+    let Some(enc) = encrypted_client_id else {
+        return;
+    };
+    match encryption_keys.decrypt(enc).await {
+        Ok(plain) => match String::from_utf8(plain) {
+            Ok(s) => view.oauth_client_id = Some(s),
+            Err(e) => tracing::warn!(
+                error = %e,
+                view_id = %view.id,
+                "Failed to decode oauth_client_id as UTF-8; surfacing as None"
+            ),
+        },
+        Err(e) => tracing::warn!(
+            error = %e,
+            view_id = %view.id,
+            "Failed to decrypt oauth_client_id for key view; surfacing as None"
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -2699,9 +3003,9 @@ mod tests {
     use mongodb::bson::doc;
 
     use super::{
-        AUTO_PROVISION_SOURCE, OpenApiSpecUrlInput, SlugCollisionStrategy, SshCreateParams,
-        UpdateCredentialAction, auto_provision_source_id, build_key_view,
-        classify_update_credential_action, create_key, derive_effective_auth,
+        AUTO_PROVISION_SOURCE, OauthClientCredentialsInput, OpenApiSpecUrlInput,
+        SlugCollisionStrategy, SshCreateParams, UpdateCredentialAction, auto_provision_source_id,
+        build_key_view, classify_update_credential_action, create_key, derive_effective_auth,
         direct_credential_type_for_service, direct_credential_type_from_auth_method,
         generate_slug_from_label, identity_config_from_downstream_service,
         resolve_openapi_spec_url, resolve_unique_slug, revoke_key,
@@ -3239,6 +3543,7 @@ mod tests {
                 None,
                 OpenApiSpecUrlInput::Inherit,
                 None,
+                OauthClientCredentialsInput::None,
                 false,
             ),
             create_key(
@@ -3258,6 +3563,7 @@ mod tests {
                 None,
                 OpenApiSpecUrlInput::Inherit,
                 None,
+                OauthClientCredentialsInput::None,
                 false,
             )
         );
@@ -3309,6 +3615,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            OauthClientCredentialsInput::None,
             false,
         )
         .await
@@ -3338,6 +3645,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            OauthClientCredentialsInput::None,
             false,
         )
         .await
@@ -3426,6 +3734,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            OauthClientCredentialsInput::None,
             false,
         )
         .await
@@ -3479,6 +3788,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            OauthClientCredentialsInput::None,
             false,
         )
         .await
@@ -3520,6 +3830,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            OauthClientCredentialsInput::None,
             false,
         )
         .await
@@ -3643,6 +3954,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            OauthClientCredentialsInput::None,
             false,
         )
         .await
@@ -3702,6 +4014,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            OauthClientCredentialsInput::None,
             false,
         )
         .await
@@ -4655,6 +4968,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            OauthClientCredentialsInput::None,
             false,
         )
         .await
@@ -4866,5 +5180,397 @@ mod tests {
             key.connection_id.is_none(),
             "api_key provider reuse path stays connection-less"
         );
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // BYO Custom App credentials — end-to-end POST /keys integration.
+    // These prove the user-facing flow: a Lark-style
+    // `credential_mode: "user"` provider with user-supplied raw creds
+    // produces a multi-connection placeholder that carries its OWN
+    // encrypted Custom App credentials. Without this, refresh after
+    // the first 2h token expiry fails because the connection has no
+    // client_id to refresh against.
+    // ──────────────────────────────────────────────────────────────────
+
+    /// Variant of `multi_conn_catalog` with `credential_mode: "user"` —
+    /// the Lark / Feishu shape.
+    fn byo_user_mode_provider() -> ProviderConfig {
+        let mut p = multi_conn_provider("oauth2");
+        p.credential_mode = "user".to_string();
+        p
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn create_byo_catalog_key(
+        db: &mongodb::Database,
+        encryption_keys: &crate::crypto::aes::EncryptionKeys,
+        user_id: &str,
+        slug: &str,
+        label: &str,
+        byo: OauthClientCredentialsInput<'_>,
+    ) -> AppResult<super::CreateKeyResult> {
+        create_key(
+            db,
+            encryption_keys,
+            user_id,
+            user_id,
+            Some(slug),
+            None,
+            "",
+            label,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            OpenApiSpecUrlInput::Inherit,
+            None,
+            byo,
+            false,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn create_key_byo_lark_persists_credentials_on_new_key() {
+        let Some(db) = connect_test_database("ukey_byo_lark_persists").await else {
+            eprintln!("skipping integration test: no local MongoDB available");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let provider = byo_user_mode_provider();
+        let catalog = multi_conn_catalog(&provider);
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(&provider)
+            .await
+            .unwrap();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+
+        let result = create_byo_catalog_key(
+            &db,
+            &encryption_keys,
+            &user_id,
+            &catalog.slug,
+            "marketing-lark",
+            OauthClientCredentialsInput::Raw {
+                client_id: "cli_marketing",
+                client_secret: "super-secret",
+            },
+        )
+        .await
+        .expect("BYO add should succeed");
+
+        let key = result.api_key.expect("placeholder mints a UserApiKey");
+        assert_eq!(key.status, "pending_auth");
+        assert!(
+            key.connection_id.is_some(),
+            "new add must mint connection_id"
+        );
+        let stored_id = key
+            .user_oauth_client_id_encrypted
+            .as_ref()
+            .expect("BYO client_id must be encrypted on the key");
+        let stored_sec = key
+            .user_oauth_client_secret_encrypted
+            .as_ref()
+            .expect("BYO client_secret must be encrypted on the key");
+        let plain_id = encryption_keys.decrypt(stored_id).await.unwrap();
+        let plain_sec = encryption_keys.decrypt(stored_sec).await.unwrap();
+        assert_eq!(String::from_utf8(plain_id).unwrap(), "cli_marketing");
+        assert_eq!(String::from_utf8(plain_sec).unwrap(), "super-secret");
+    }
+
+    #[tokio::test]
+    async fn create_key_byo_lark_rejects_when_creds_missing() {
+        // `credential_mode: "user"` provider with no BYO supplied must
+        // surface a clear error rather than mint an unusable placeholder.
+        let Some(db) = connect_test_database("ukey_byo_lark_required").await else {
+            eprintln!("skipping integration test: no local MongoDB available");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let provider = byo_user_mode_provider();
+        let catalog = multi_conn_catalog(&provider);
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(&provider)
+            .await
+            .unwrap();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+
+        let err = create_byo_catalog_key(
+            &db,
+            &encryption_keys,
+            &user_id,
+            &catalog.slug,
+            "no-byo-lark",
+            OauthClientCredentialsInput::None,
+        )
+        .await
+        .err()
+        .expect("BYO-required provider should reject add without creds");
+        assert!(matches!(err, AppError::BadRequest(ref m) if m.contains("requires user-provided")));
+    }
+
+    #[tokio::test]
+    async fn create_key_byo_rejected_for_admin_mode_provider() {
+        // `credential_mode: "admin"` provider should reject BYO input
+        // with a clear message — same wording as the existing
+        // `PUT /providers/{id}/credentials` gate.
+        let Some(db) = connect_test_database("ukey_byo_admin_rejected").await else {
+            eprintln!("skipping integration test: no local MongoDB available");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let provider = multi_conn_provider("oauth2");
+        assert_eq!(provider.credential_mode, "admin");
+        let catalog = multi_conn_catalog(&provider);
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(&provider)
+            .await
+            .unwrap();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+
+        let err = create_byo_catalog_key(
+            &db,
+            &encryption_keys,
+            &user_id,
+            &catalog.slug,
+            "admin-mode-with-byo",
+            OauthClientCredentialsInput::Raw {
+                client_id: "cli_x",
+                client_secret: "sec_x",
+            },
+        )
+        .await
+        .err()
+        .expect("admin-mode provider should reject BYO");
+        assert!(
+            matches!(err, AppError::BadRequest(ref m) if m.contains("does not accept user-provided"))
+        );
+    }
+
+    #[tokio::test]
+    async fn create_key_copy_oauth_client_from_copies_source_credentials() {
+        // The link-to-existing path: create connection A with BYO creds,
+        // then create connection B with `copy_oauth_client_from = A.id`.
+        // B must end up with its own encrypted copy of A's plaintext
+        // creds — proving the server-side decrypt-then-re-encrypt
+        // (so the client never sees the source secret).
+        let Some(db) = connect_test_database("ukey_byo_copy_from").await else {
+            eprintln!("skipping integration test: no local MongoDB available");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let provider = byo_user_mode_provider();
+        let catalog = multi_conn_catalog(&provider);
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(&provider)
+            .await
+            .unwrap();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+
+        // Connection A — raw creds.
+        let result_a = create_byo_catalog_key(
+            &db,
+            &encryption_keys,
+            &user_id,
+            &catalog.slug,
+            "marketing-lark",
+            OauthClientCredentialsInput::Raw {
+                client_id: "cli_marketing",
+                client_secret: "super-secret",
+            },
+        )
+        .await
+        .expect("first BYO add should succeed");
+        let key_a = result_a.api_key.expect("placeholder");
+
+        // Connection B — copy_oauth_client_from = key_a.id.
+        let result_b = create_byo_catalog_key(
+            &db,
+            &encryption_keys,
+            &user_id,
+            &catalog.slug,
+            "support-lark",
+            OauthClientCredentialsInput::CopyFrom {
+                source_key_id: &key_a.id,
+            },
+        )
+        .await
+        .expect("copy-from add should succeed");
+        let key_b = result_b.api_key.expect("placeholder");
+
+        // Distinct connection_ids — these are independent connections,
+        // not aliases.
+        assert_ne!(
+            key_a.connection_id, key_b.connection_id,
+            "copy-from must mint a fresh connection_id"
+        );
+
+        let stored_id = key_b
+            .user_oauth_client_id_encrypted
+            .as_ref()
+            .expect("copy must encrypt client_id onto B");
+        let plain_id = encryption_keys.decrypt(stored_id).await.unwrap();
+        assert_eq!(String::from_utf8(plain_id).unwrap(), "cli_marketing");
+
+        // Independence proof: the two ciphertexts must NOT be byte-equal
+        // (AES-GCM has a fresh nonce per encrypt). Even though the
+        // plaintext is the same Custom App, the rows are independent
+        // — deleting / rotating one cannot mechanically clobber the
+        // other (§5.1 of the design doc).
+        let enc_a = key_a
+            .user_oauth_client_id_encrypted
+            .expect("A has encrypted client_id");
+        let enc_b = key_b
+            .user_oauth_client_id_encrypted
+            .expect("B has encrypted client_id");
+        assert_ne!(
+            enc_a, enc_b,
+            "encrypted ciphertexts must differ (fresh nonce per encrypt)"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_key_copy_oauth_client_from_rejects_foreign_owner() {
+        let Some(db) = connect_test_database("ukey_byo_copy_foreign").await else {
+            eprintln!("skipping integration test: no local MongoDB available");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let alice = uuid::Uuid::new_v4().to_string();
+        let bob = uuid::Uuid::new_v4().to_string();
+        let provider = byo_user_mode_provider();
+        let catalog = multi_conn_catalog(&provider);
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(&provider)
+            .await
+            .unwrap();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+
+        // Alice creates a BYO connection.
+        let alice_result = create_byo_catalog_key(
+            &db,
+            &encryption_keys,
+            &alice,
+            &catalog.slug,
+            "alice-lark",
+            OauthClientCredentialsInput::Raw {
+                client_id: "cli_alice",
+                client_secret: "alice-secret",
+            },
+        )
+        .await
+        .unwrap();
+        let alice_key_id = alice_result.api_key.unwrap().id;
+
+        // Bob attempts to copy from Alice's key. Must be rejected with
+        // NotFound so existence isn't leaked through the error type.
+        let err = create_byo_catalog_key(
+            &db,
+            &encryption_keys,
+            &bob,
+            &catalog.slug,
+            "bob-tries-alice",
+            OauthClientCredentialsInput::CopyFrom {
+                source_key_id: &alice_key_id,
+            },
+        )
+        .await
+        .err()
+        .expect("foreign-owner copy should be rejected");
+        assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn create_key_copy_oauth_client_from_rejects_credentialless_source() {
+        // The source key exists and is owned by the same user, but has
+        // no BYO creds (e.g. legacy connection-less key). Copy must
+        // be rejected with a clear message.
+        let Some(db) = connect_test_database("ukey_byo_copy_no_source_creds").await else {
+            eprintln!("skipping integration test: no local MongoDB available");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let provider = byo_user_mode_provider();
+        let catalog = multi_conn_catalog(&provider);
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(&provider)
+            .await
+            .unwrap();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+
+        // Insert a legacy-style key (no BYO encrypted blob).
+        let stripped_key_id = uuid::Uuid::new_v4().to_string();
+        let now = Utc::now();
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .insert_one(UserApiKey {
+                id: stripped_key_id.clone(),
+                user_id: user_id.clone(),
+                label: "Legacy".to_string(),
+                credential_type: "oauth2".to_string(),
+                credential_encrypted: None,
+                access_token_encrypted: None,
+                refresh_token_encrypted: None,
+                token_scopes: None,
+                expires_at: None,
+                provider_config_id: Some(provider.id.clone()),
+                connection_id: None,
+                user_oauth_client_id_encrypted: None,
+                user_oauth_client_secret_encrypted: None,
+                status: "active".to_string(),
+                last_used_at: None,
+                error_message: None,
+                source: Some("user_created".to_string()),
+                source_id: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+
+        let err = create_byo_catalog_key(
+            &db,
+            &encryption_keys,
+            &user_id,
+            &catalog.slug,
+            "copy-from-empty",
+            OauthClientCredentialsInput::CopyFrom {
+                source_key_id: &stripped_key_id,
+            },
+        )
+        .await
+        .err()
+        .expect("credential-less source should be rejected");
+        assert!(matches!(
+            err,
+            AppError::BadRequest(ref m)
+                if m.contains("does not carry user-provided OAuth client credentials")
+        ));
     }
 }

@@ -292,6 +292,7 @@ fn add_owner_user_id_if_shared(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn node_proxy_audit_event_data(
     service_id: &str,
     method: &str,
@@ -300,6 +301,7 @@ fn node_proxy_audit_event_data(
     node_id: &str,
     service_owner_user_id: &str,
     proxy_actor_user_id: &str,
+    connection_id: Option<&str>,
 ) -> serde_json::Value {
     let mut event_data = serde_json::json!({
         "service_id": service_id,
@@ -309,6 +311,9 @@ fn node_proxy_audit_event_data(
         "routed_via": "node",
         "node_id": node_id,
     });
+    if let Some(conn_id) = connection_id {
+        event_data["connection_id"] = serde_json::Value::String(conn_id.to_string());
+    }
 
     // Node-routed audits use polymorphic owner_user_id; org-routed audits use org_user_id.
     // Owner-centric audit queries must check both fields.
@@ -1971,6 +1976,7 @@ async fn execute_proxy_inner(
                             node_id,
                             service_owner_for_approval,
                             &proxy_actor_user_id,
+                            target.connection_id.as_deref(),
                         )),
                     );
 
@@ -1978,6 +1984,11 @@ async fn execute_proxy_inner(
                         && let Ok(val) = axum::http::HeaderValue::from_str(agent_id)
                     {
                         response.headers_mut().insert("x-nyxid-agent-id", val);
+                    }
+                    if let Some(ref conn_id) = target.connection_id
+                        && let Ok(val) = axum::http::HeaderValue::from_str(conn_id)
+                    {
+                        response.headers_mut().insert("x-nyxid-connection-id", val);
                     }
 
                     return Ok(response);
@@ -2161,6 +2172,7 @@ async fn execute_proxy_inner(
                 "response_status": status.as_u16(),
                 "acting_client_id": &auth_user.acting_client_id,
                 "codex_transport": true,
+                "connection_id": target.connection_id.as_deref(),
             })),
         );
 
@@ -2168,6 +2180,11 @@ async fn execute_proxy_inner(
             && let Ok(val) = axum::http::HeaderValue::from_str(agent_id)
         {
             response.headers_mut().insert("x-nyxid-agent-id", val);
+        }
+        if let Some(ref conn_id) = target.connection_id
+            && let Ok(val) = axum::http::HeaderValue::from_str(conn_id)
+        {
+            response.headers_mut().insert("x-nyxid-connection-id", val);
         }
 
         return Ok(response);
@@ -2408,6 +2425,7 @@ async fn execute_proxy_inner(
             "path": path,
             "response_status": status.as_u16(),
             "acting_client_id": &auth_user.acting_client_id,
+            "connection_id": target.connection_id.as_deref(),
         })),
     );
 
@@ -2415,6 +2433,11 @@ async fn execute_proxy_inner(
         && let Ok(val) = axum::http::HeaderValue::from_str(agent_id)
     {
         response.headers_mut().insert("x-nyxid-agent-id", val);
+    }
+    if let Some(ref conn_id) = target.connection_id
+        && let Ok(val) = axum::http::HeaderValue::from_str(conn_id)
+    {
+        response.headers_mut().insert("x-nyxid-connection-id", val);
     }
 
     Ok(response)
@@ -4416,6 +4439,7 @@ mod tests {
             catalog_default_headers: Vec::new(),
             user_service_default_headers: Vec::new(),
             ws_frame_injections: Vec::new(),
+            connection_id: None,
         }
     }
 

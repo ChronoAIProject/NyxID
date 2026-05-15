@@ -122,6 +122,19 @@ export function useInitiateOAuth() {
              * org member can proxy through it. Caller must be an org admin.
              */
             readonly targetOrgId?: string;
+            /**
+             * Multi-connection: the freshly-minted placeholder `UserService`
+             * id from a preceding `POST /keys`. The backend's OAuth-state
+             * insert reads the placeholder's `UserApiKey.connection_id` from
+             * this id and stamps it onto `OAuthState`, so the eventual
+             * callback writes the tokens straight onto that `UserApiKey`
+             * (instead of the legacy `user_provider_tokens` row). Without
+             * this, a multi-connection placeholder stays `pending_auth`
+             * forever and the token aliases onto the legacy single-tenant
+             * path — defeating the whole point of `connection_id`. Omit
+             * for legacy add-flows that don't pre-create a placeholder.
+             */
+            readonly keyId?: string;
           },
     ): Promise<OAuthInitiateResponse> => {
       const params =
@@ -135,6 +148,9 @@ export function useInitiateOAuth() {
       }
       if (params.targetOrgId) {
         query.set("target_org_id", params.targetOrgId);
+      }
+      if (params.keyId) {
+        query.set("key_id", params.keyId);
       }
       const queryString = query.toString();
       const suffix = queryString ? `?${queryString}` : "";
@@ -155,6 +171,8 @@ export function useInitiateDeviceCode() {
             readonly additionalScopes?: readonly string[];
             /** Same contract as `useInitiateOAuth`'s `targetOrgId`. */
             readonly targetOrgId?: string;
+            /** Same contract as `useInitiateOAuth`'s `keyId`. */
+            readonly keyId?: string;
           },
     ): Promise<DeviceCodeInitiateResponse> => {
       const params =
@@ -165,6 +183,9 @@ export function useInitiateDeviceCode() {
       }
       if (params.targetOrgId) {
         query.set("target_org_id", params.targetOrgId);
+      }
+      if (params.keyId) {
+        query.set("key_id", params.keyId);
       }
       const queryString = query.toString();
       const suffix = queryString ? `?${queryString}` : "";
