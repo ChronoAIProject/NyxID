@@ -379,8 +379,10 @@ const settingsRoute = createRoute({
   path: "/settings",
   getParentRoute: () => dashboardLayout,
   component: SettingsPage,
-  validateSearch: (search: Record<string, unknown>) => ({
-    tab: typeof search.tab === "string" ? search.tab : undefined,
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { tab?: string } => ({
+    ...(typeof search.tab === "string" ? { tab: search.tab } : {}),
   }),
 });
 
@@ -394,8 +396,10 @@ const consentsRoute = createRoute({
   path: "/settings/consents",
   getParentRoute: () => dashboardLayout,
   component: ConsentsPage,
-  validateSearch: (search: Record<string, unknown>) => ({
-    tab: typeof search.tab === "string" ? search.tab : undefined,
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { tab?: string } => ({
+    ...(typeof search.tab === "string" ? { tab: search.tab } : {}),
   }),
 });
 
@@ -423,12 +427,23 @@ const integrationGuideRoute = createRoute({
   path: "/integration-guide",
   getParentRoute: () => dashboardLayout,
   component: IntegrationGuidePage,
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { tab?: string } => ({
+    ...(typeof search.tab === "string" ? { tab: search.tab } : {}),
+  }),
 });
 
 const aiSetupRoute = createRoute({
   path: "/ai-setup",
   getParentRoute: () => dashboardLayout,
   component: AiSetupPage,
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { skill?: string; tool?: string } => ({
+    ...(typeof search.skill === "string" ? { skill: search.skill } : {}),
+    ...(typeof search.tool === "string" ? { tool: search.tool } : {}),
+  }),
 });
 
 const designSystemRoute = createRoute({
@@ -475,14 +490,17 @@ const keysRoute = createRoute({
   // `/keys?tab=services&slug=<catalog-slug>` needs `slug` here
   // or `useSearch()` inside `KeysPage` will never observe it and
   // the auto-open-AddKeyDialog flow silently degrades to the
-  // generic catalog grid.
+  // generic catalog grid. `action` is whitelisted for the same
+  // reason — the dashboard deep-links `/keys?action=add-service`
+  // and `/keys?action=create-key` to auto-open the add dialogs.
   validateSearch: (
     search: Record<string, unknown>,
-  ): { tab?: string; slug?: string } => ({
+  ): { tab?: string; slug?: string; action?: string } => ({
     ...(typeof search.tab === "string" ? { tab: search.tab } : {}),
     ...(typeof search.slug === "string" && search.slug.length > 0
       ? { slug: search.slug }
       : {}),
+    ...(typeof search.action === "string" ? { action: search.action } : {}),
   }),
   component: KeysPage,
 });
@@ -527,6 +545,11 @@ const orgDetailRoute = createRoute({
   path: "/orgs/$orgId",
   getParentRoute: () => dashboardLayout,
   component: OrgDetailPage,
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { tab?: string } => ({
+    ...(typeof search.tab === "string" ? { tab: search.tab } : {}),
+  }),
 });
 
 const orgServiceAccountDetailRoute = createRoute({

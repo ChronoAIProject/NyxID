@@ -502,10 +502,37 @@ function AccountPostureCard({
   readonly loading: boolean;
 }) {
   const items = [
-    { done: emailVerified, label: "Email verified", icon: <Mail className="h-3.5 w-3.5" /> },
-    { done: mfaEnabled, label: "MFA enabled", icon: <Shield className="h-3.5 w-3.5" /> },
-    { done: serviceCount > 0, label: "Service connected", icon: <Server className="h-3.5 w-3.5" /> },
-    { done: activeKeys > 0, label: "API key created", icon: <KeyRound className="h-3.5 w-3.5" /> },
+    {
+      done: emailVerified,
+      label: "Email verified",
+      icon: <Mail className="h-3.5 w-3.5" />,
+      href: "/settings",
+      cta: "Verify",
+    },
+    {
+      done: mfaEnabled,
+      label: "MFA enabled",
+      icon: <Shield className="h-3.5 w-3.5" />,
+      href: "/settings?tab=security",
+      cta: "Enable",
+    },
+    {
+      done: serviceCount > 0,
+      label: "Service connected",
+      icon: <Server className="h-3.5 w-3.5" />,
+      href: serviceCount > 0 ? "/keys" : "/keys?action=add-service",
+      cta: "Connect",
+    },
+    {
+      done: activeKeys > 0,
+      label: "API key created",
+      icon: <KeyRound className="h-3.5 w-3.5" />,
+      href:
+        activeKeys > 0
+          ? "/keys?tab=nyxid"
+          : "/keys?tab=nyxid&action=create-key",
+      cta: "Create",
+    },
   ];
   const doneCount = items.filter((i) => i.done).length;
   const score = Math.round((doneCount / items.length) * 100);
@@ -522,6 +549,8 @@ function AccountPostureCard({
       : score >= 50
         ? "text-warning"
         : "text-destructive";
+
+  const nextStep = items.find((i) => !i.done);
 
   return (
     <div className="hidden md:flex w-[280px] shrink-0 flex-col rounded-xl border border-border/50 bg-card overflow-hidden">
@@ -541,15 +570,21 @@ function AccountPostureCard({
       </div>
 
       {/* Checklist */}
-      <div className="flex-1 px-4 py-4 flex flex-col gap-3.5">
+      <div className="flex-1 px-2 py-2 flex flex-col">
         {loading ? (
-          <>
+          <div className="flex flex-col gap-3.5 px-2 py-2">
             <Skeleton className="h-4 w-full" />
             <Skeleton className="h-4 w-3/4" />
-          </>
+            <Skeleton className="h-4 w-full" />
+            <Skeleton className="h-4 w-2/3" />
+          </div>
         ) : (
           items.map((item) => (
-            <div key={item.label} className="flex items-center gap-2.5">
+            <Link
+              key={item.label}
+              to={item.href}
+              className="group flex items-center gap-2.5 rounded-md px-2 py-2 transition-colors duration-200 hover:bg-white/[0.03]"
+            >
               <span
                 className={cn(
                   "shrink-0",
@@ -560,20 +595,26 @@ function AccountPostureCard({
               </span>
               <span
                 className={cn(
-                  "text-[12px]",
-                  item.done
-                    ? "text-foreground"
-                    : "text-muted-foreground",
+                  "flex-1 truncate text-[12px]",
+                  item.done ? "text-foreground" : "text-muted-foreground",
                 )}
               >
                 {item.label}
               </span>
-            </div>
+              {item.done ? (
+                <Check className="h-3 w-3 shrink-0 text-success/60 transition-transform duration-200 group-hover:scale-110" />
+              ) : (
+                <span className="inline-flex shrink-0 items-center gap-0.5 text-[10px] font-semibold uppercase tracking-wide text-nyx-secondary-400 transition-all duration-200 group-hover:gap-1">
+                  {item.cta}
+                  <ArrowRight className="h-2.5 w-2.5" />
+                </span>
+              )}
+            </Link>
           ))
         )}
       </div>
 
-      {/* Footer with progress bar */}
+      {/* Footer with progress bar + next-step CTA */}
       <div className="border-t border-border/50 px-4 py-2.5">
         <div className="flex items-center justify-between mb-2">
           <span className="text-[11px] text-text-tertiary">
@@ -589,6 +630,17 @@ function AccountPostureCard({
             style={{ width: `${String(score)}%` }}
           />
         </div>
+        {nextStep && !loading && (
+          <Link
+            to={nextStep.href}
+            className="mt-3 group flex items-center justify-between rounded-md -mx-1 px-1 py-1 text-[11px] transition-colors duration-200 hover:bg-white/[0.03]"
+          >
+            <span className="text-muted-foreground">
+              Next: <span className="text-foreground">{nextStep.label}</span>
+            </span>
+            <ArrowRight className="h-3 w-3 text-nyx-secondary-400 transition-transform duration-200 group-hover:translate-x-0.5" />
+          </Link>
+        )}
       </div>
     </div>
   );

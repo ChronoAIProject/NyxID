@@ -27,7 +27,22 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-export const ALL_ITEMS = [
+type CommandGroup = "navigation" | "admin" | "action";
+
+export interface CommandItem {
+  readonly icon: typeof LayoutDashboard;
+  readonly label: string;
+  readonly group: CommandGroup;
+  readonly to?: string;
+  readonly search?: Record<string, string>;
+  /**
+   * Optional in-place action. Takes precedence over `to` when set, so an
+   * entry can open a modal or fire a side-effect instead of navigating.
+   */
+  readonly onSelect?: () => void;
+}
+
+export const ALL_ITEMS: readonly CommandItem[] = [
   { icon: LayoutDashboard, label: "Dashboard", to: "/dashboard", group: "navigation" },
   { icon: Cable, label: "AI Services", to: "/keys", group: "navigation" },
   { icon: Building2, label: "Organizations", to: "/orgs", group: "navigation" },
@@ -50,10 +65,22 @@ export const ALL_ITEMS = [
   { icon: Layers, label: "Groups", to: "/admin/groups", group: "admin" },
   { icon: Server, label: "Services", to: "/services", group: "admin" },
   { icon: Plug, label: "Providers", to: "/providers", group: "admin" },
-  { icon: Plus, label: "Connect a Service", to: "/keys", group: "action" },
-  { icon: KeyRound, label: "Create API key", to: "/keys?tab=nyxid", group: "action" },
+  {
+    icon: Plus,
+    label: "Connect a Service",
+    to: "/keys",
+    search: { tab: "services", action: "add-service" },
+    group: "action",
+  },
+  {
+    icon: KeyRound,
+    label: "Create API key",
+    to: "/keys",
+    search: { tab: "nyxid", action: "create-key" },
+    group: "action",
+  },
   { icon: ShieldCheck, label: "Review approvals", to: "/approvals/history", group: "action" },
-] as const;
+];
 
 export function CommandPalette({
   open,
@@ -77,15 +104,27 @@ export function CommandPalette({
     return ALL_ITEMS.filter(
       (item) =>
         item.label.toLowerCase().includes(q) ||
-        item.to.toLowerCase().includes(q),
+        (item.to?.toLowerCase().includes(q) ?? false),
     );
   }, [query]);
 
   const handleSelect = useCallback(
-    (to: string) => {
+    (item: CommandItem) => {
       onOpenChange(false);
       setQuery("");
-      void navigate({ to: to as string });
+      if (item.onSelect) {
+        item.onSelect();
+        return;
+      }
+      if (item.to) {
+        // TanStack `navigate` is typed against the route tree; cast through
+        // `never` so this generic palette can target any whitelisted route
+        // without each entry needing a literal route type.
+        void navigate({
+          to: item.to as never,
+          search: (item.search ?? {}) as never,
+        });
+      }
     },
     [navigate, onOpenChange, setQuery],
   );
@@ -110,7 +149,7 @@ export function CommandPalette({
       if (e.key === "Enter" && filtered.length > 0) {
         e.preventDefault();
         const item = filtered[selectedIndex];
-        if (item) handleSelect(item.to);
+        if (item) handleSelect(item);
       }
     }
 
@@ -169,9 +208,9 @@ export function CommandPalette({
           <div className="mt-2 rounded-2xl border border-white/[0.08] bg-[#1a1a1a] p-2 max-h-[360px] overflow-y-auto">
             {filtered.map((item, i) => (
               <button
-                key={`${item.to}-${item.label}`}
+                key={`${item.to ?? "action"}-${item.label}`}
                 type="button"
-                onClick={() => handleSelect(item.to)}
+                onClick={() => handleSelect(item)}
                 onMouseEnter={() => setSelectedIndex(i)}
                 className={cn(
                   "flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-[14px] transition-colors duration-300",

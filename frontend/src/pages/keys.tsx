@@ -30,8 +30,15 @@ import { RoleBadge } from "@/components/orgs/role-badge";
 import { OrgAvatar } from "@/components/orgs/org-avatar";
 import type { KeyInfo } from "@/types/keys";
 import type { CredentialSource } from "@/schemas/orgs";
-
-type TabValue = "services" | "nyxid";
+import {
+  KEYS_TABS,
+  KEYS_TAB_DEFAULT,
+  KEYS_ACTIONS,
+  type KeysAction,
+  type KeysTab,
+  isValidTab,
+  parseTab,
+} from "@/lib/url-tabs";
 
 function statusVariant(
   status: string,
@@ -428,7 +435,7 @@ function AddButton({
   onAddService,
   onCreateKey,
 }: {
-  readonly tab: TabValue;
+  readonly tab: KeysTab;
   readonly onAddService: () => void;
   readonly onCreateKey: () => void;
 }) {
@@ -468,8 +475,7 @@ function AutoConnectedToggle({
 export function KeysPage() {
   const search: { tab?: string; slug?: string; action?: string } = useSearch({ strict: false });
   const navigate = useNavigate();
-  const rawTab = search.tab ?? "services";
-  const tab: TabValue = rawTab === "nyxid" ? "nyxid" : "services";
+  const tab = parseTab(search.tab, KEYS_TABS, KEYS_TAB_DEFAULT);
 
   const [addServiceOpen, setAddServiceOpen] = useState(false);
   const [createKeyOpen, setCreateKeyOpen] = useState(false);
@@ -493,7 +499,9 @@ export function KeysPage() {
       return;
     }
 
-    const action = search.action ?? null;
+    const action: KeysAction | null = isValidTab(search.action, KEYS_ACTIONS)
+      ? search.action
+      : null;
     if (!action) return;
     if (appliedActionRef.current === action) return;
     appliedActionRef.current = action;

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useRouterState } from "@tanstack/react-router";
+import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { useMyConsents, useRevokeConsent } from "@/hooks/use-consents";
 import {
   type BrokerBindingExternalSubject,
@@ -10,6 +10,11 @@ import { ApiError } from "@/lib/api-client";
 import { formatDate } from "@/lib/utils";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { PageHeader } from "@/components/shared/page-header";
+import {
+  CONSENTS_TABS,
+  CONSENTS_TAB_DEFAULT,
+  parseTab,
+} from "@/lib/url-tabs";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -46,8 +51,12 @@ function formatExternalSubject(
 
 export function ConsentsPage() {
   const searchParams = useRouterState({ select: (s) => s.location.search as Record<string, unknown> });
-  const tabParam = typeof searchParams.tab === "string" ? searchParams.tab : undefined;
-  const defaultTab = tabParam === "authorizations" ? "authorizations" : "apps";
+  const navigate = useNavigate();
+  const currentTab = parseTab(searchParams.tab, CONSENTS_TABS, CONSENTS_TAB_DEFAULT);
+
+  function handleTabChange(value: string) {
+    void navigate({ to: "/settings/consents", search: { tab: value }, replace: true });
+  }
 
   return (
     <div className="space-y-8">
@@ -56,7 +65,7 @@ export function ConsentsPage() {
         description="Manage apps with access to your account and credentials held on your behalf."
       />
 
-      <Tabs defaultValue={defaultTab} className="space-y-6">
+      <Tabs value={currentTab} onValueChange={handleTabChange} className="space-y-6">
         <TabsList>
           <TabsTrigger value="apps">Authorized Apps</TabsTrigger>
           <TabsTrigger value="authorizations">Authorizations</TabsTrigger>

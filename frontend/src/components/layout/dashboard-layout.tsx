@@ -317,7 +317,7 @@ function TopBar({
               <p className="text-[11px] text-text-tertiary">{user?.email ?? ""}</p>
             </div>
             <DropdownMenuItem
-              onClick={() => void navigate({ to: "/settings" as string })}
+              onClick={() => void navigate({ to: "/settings" })}
               className="rounded-md text-[12px]"
             >
               Settings
@@ -361,7 +361,7 @@ function TopBar({
               <p className="text-[11px] text-text-tertiary">{user?.email ?? ""}</p>
             </div>
             <DropdownMenuItem
-              onClick={() => void navigate({ to: "/settings" as string })}
+              onClick={() => void navigate({ to: "/settings" })}
               className="rounded-md text-[12px]"
             >
               Settings
@@ -620,7 +620,7 @@ function MobileNav({
         <div className="flex gap-2">
           <button
             type="button"
-            onClick={() => { onClose(); void navigate({ to: "/settings" as string }); }}
+            onClick={() => { onClose(); void navigate({ to: "/settings" }); }}
             className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-white/[0.08] bg-white/[0.02] py-2.5 text-[12px] text-muted-foreground active:bg-white/[0.04]"
           >
             <Settings className="h-3.5 w-3.5" />

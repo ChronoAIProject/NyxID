@@ -1,4 +1,5 @@
 import { useCallback } from "react";
+import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -10,6 +11,11 @@ import {
   scopeRiskClass,
   scopeRiskLabel,
 } from "@/lib/constants";
+import {
+  INTEGRATION_GUIDE_TABS,
+  INTEGRATION_GUIDE_TAB_DEFAULT,
+  parseTab,
+} from "@/lib/url-tabs";
 import { PageHeader } from "@/components/shared/page-header";
 
 function CodeBlock({
@@ -129,6 +135,18 @@ const rawUserInfo = `GET /api/v1/users/me
 Authorization: Bearer ACCESS_TOKEN`;
 
 export function IntegrationGuidePage() {
+  const searchParams = useRouterState({ select: (s) => s.location.search as Record<string, unknown> });
+  const navigate = useNavigate();
+  const currentTab = parseTab(
+    searchParams.tab,
+    INTEGRATION_GUIDE_TABS,
+    INTEGRATION_GUIDE_TAB_DEFAULT,
+  );
+
+  function handleTabChange(value: string) {
+    void navigate({ to: "/integration-guide", search: { tab: value }, replace: true });
+  }
+
   return (
     <div className="space-y-8">
       <PageHeader
@@ -136,7 +154,7 @@ export function IntegrationGuidePage() {
         description="Use the official React or Core SDK (recommended), or integrate with raw OAuth endpoints for custom flows."
       />
 
-      <Tabs defaultValue="react" className="space-y-6">
+      <Tabs value={currentTab} onValueChange={handleTabChange} className="space-y-6">
         <TabsList>
           <TabsTrigger value="react">React SDK</TabsTrigger>
           <TabsTrigger value="core">Core SDK</TabsTrigger>

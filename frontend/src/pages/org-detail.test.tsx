@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { useSyncExternalStore } from "react";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { MemberResponse, OrgRole } from "@/schemas/orgs";
 
@@ -11,7 +12,32 @@ const {
   mockNavigate,
   mockToastError,
   mockToastSuccess,
-} = vi.hoisted(() => ({
+  routerState,
+} = vi.hoisted(() => {
+  const listeners = new Set<() => void>();
+  const state: { search: Record<string, unknown> } = { search: {} };
+  const routerState = {
+    get search() {
+      return state.search;
+    },
+    set: (next: Record<string, unknown>) => {
+      state.search = next;
+      listeners.forEach((l) => {
+        l();
+      });
+    },
+    subscribe: (l: () => void) => {
+      listeners.add(l);
+      return () => listeners.delete(l);
+    },
+    reset: () => {
+      state.search = {};
+      listeners.forEach((l) => {
+        l();
+      });
+    },
+  };
+  return {
   fixtures: {
     orgRole: "admin" as "admin" | "member" | "viewer",
     org: {
@@ -67,10 +93,18 @@ const {
     ],
   },
   mockCopyToClipboard: vi.fn(),
-  mockNavigate: vi.fn(),
+  mockNavigate: vi.fn(
+    (opts: { search?: Record<string, unknown> } | undefined) => {
+      if (opts && typeof opts === "object" && opts.search) {
+        routerState.set(opts.search);
+      }
+    },
+  ),
   mockToastSuccess: vi.fn(),
   mockToastError: vi.fn(),
-}));
+  routerState,
+  };
+});
 
 vi.mock("@tanstack/react-router", () => ({
   Link: ({
@@ -87,6 +121,17 @@ vi.mock("@tanstack/react-router", () => ({
   ),
   useNavigate: () => mockNavigate,
   useParams: () => ({ orgId: fixtures.org.id }),
+  useRouterState: ({
+    select,
+  }: {
+    readonly select: (s: { location: { search: Record<string, unknown> } }) => unknown;
+  }) => {
+    return useSyncExternalStore(
+      routerState.subscribe,
+      () => select({ location: { search: routerState.search } }),
+      () => select({ location: { search: {} } }),
+    );
+  },
 }));
 
 vi.mock("@/hooks/use-orgs", () => ({
@@ -235,6 +280,7 @@ describe("OrgDetailPage", () => {
     fixtures.orgRole = "admin";
     fixtures.members = [];
     mockCopyToClipboard.mockResolvedValue(undefined);
+    routerState.reset();
   });
 
   it("shows org-owned resource tabs to org admins", () => {

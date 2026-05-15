@@ -15,6 +15,11 @@ import {
 } from "@/schemas/auth";
 import { copyToClipboard, formatDate } from "@/lib/utils";
 import { openExternal } from "@/lib/navigation";
+import {
+  SETTINGS_TABS,
+  SETTINGS_TAB_DEFAULT,
+  parseTab,
+} from "@/lib/url-tabs";
 import { usePublicConfig } from "@/hooks/use-public-config";
 import { MfaSetupDialog } from "@/components/auth/mfa-setup-dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -77,8 +82,12 @@ interface DeleteAccountResponse {
 
 export function SettingsPage() {
   const searchParams = useRouterState({ select: (s) => s.location.search as Record<string, unknown> });
-  const tabParam = typeof searchParams.tab === "string" ? searchParams.tab : undefined;
-  const defaultTab = tabParam && ["profile", "security", "sessions", "mcp", "privacy"].includes(tabParam) ? tabParam : "profile";
+  const navigate = useNavigate();
+  const currentTab = parseTab(searchParams.tab, SETTINGS_TABS, SETTINGS_TAB_DEFAULT);
+
+  function handleTabChange(value: string) {
+    void navigate({ to: "/settings", search: { tab: value }, replace: true });
+  }
 
   return (
     <div className="space-y-8">
@@ -91,7 +100,7 @@ export function SettingsPage() {
         </p>
       </div>
 
-      <Tabs defaultValue={defaultTab} className="space-y-6">
+      <Tabs value={currentTab} onValueChange={handleTabChange} className="space-y-6">
         <TabsList>
           <TabsTrigger value="profile">Profile</TabsTrigger>
           <TabsTrigger value="security">Security</TabsTrigger>

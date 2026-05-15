@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useParams, useNavigate } from "@tanstack/react-router";
+import { useParams, useNavigate, useRouterState } from "@tanstack/react-router";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
@@ -64,6 +64,12 @@ import {
   formatTimeDistance,
 } from "@/lib/utils";
 import { useAuthStore } from "@/stores/auth-store";
+import {
+  ORG_DETAIL_TABS,
+  ORG_DETAIL_TAB_DEFAULT,
+  type OrgDetailTab,
+  parseTab,
+} from "@/lib/url-tabs";
 import { useOrg, useUpdateOrg, useDeleteOrg } from "@/hooks/use-orgs";
 import {
   useOrgMembers,
@@ -95,18 +101,21 @@ import { OrgAvatar } from "@/components/orgs/org-avatar";
 import { OrgDeveloperAppsTab } from "@/components/orgs/org-developer-apps-tab";
 import { OrgServiceAccountsTab } from "@/components/orgs/org-service-accounts-tab";
 
-type TabValue =
-  | "members"
-  | "role-permissions"
-  | "invites"
-  | "approvals"
-  | "service-accounts"
-  | "developer-apps"
-  | "settings";
-
 export function OrgDetailPage() {
   const { orgId } = useParams({ strict: false }) as { orgId: string };
   const navigate = useNavigate();
+  const searchParams = useRouterState({ select: (s) => s.location.search as Record<string, unknown> });
+  const tab = parseTab(searchParams.tab, ORG_DETAIL_TABS, ORG_DETAIL_TAB_DEFAULT);
+
+  function setTab(value: OrgDetailTab) {
+    void navigate({
+      to: "/orgs/$orgId",
+      params: { orgId },
+      search: { tab: value },
+      replace: true,
+    });
+  }
+
   const currentUser = useAuthStore((s) => s.user);
 
   const { data: org, isLoading, error, refetch } = useOrg(orgId);
@@ -119,8 +128,6 @@ export function OrgDetailPage() {
   const deleteOrgMutation = useDeleteOrg();
 
   useBreadcrumbLabel(org?.display_name);
-
-  const [tab, setTab] = useState<TabValue>("members");
   const [inviteOpen, setInviteOpen] = useState(false);
   const [revokeTarget, setRevokeTarget] = useState<MemberResponse | null>(null);
   const [scopeTarget, setScopeTarget] = useState<MemberResponse | null>(null);
@@ -318,7 +325,7 @@ export function OrgDetailPage() {
         actions={<RoleBadge role={org.your_role} />}
       />
 
-      <Tabs value={tab} onValueChange={(value) => setTab(value as TabValue)}>
+      <Tabs value={tab} onValueChange={(value) => setTab(value as OrgDetailTab)}>
         <TabsList>
           <TabsTrigger value="members">Members</TabsTrigger>
           <TabsTrigger value="role-permissions">Role permissions</TabsTrigger>

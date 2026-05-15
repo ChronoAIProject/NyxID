@@ -131,13 +131,13 @@ export function Header({
           <DropdownMenuLabel>My Account</DropdownMenuLabel>
 
           <DropdownMenuItem
-            onClick={() => void navigate({ to: "/settings" as string })}
+            onClick={() => void navigate({ to: "/settings" })}
           >
             <User className="h-4 w-4" aria-hidden="true" />
             Profile
           </DropdownMenuItem>
           <DropdownMenuItem
-            onClick={() => void navigate({ to: "/settings" as string })}
+            onClick={() => void navigate({ to: "/settings" })}
           >
             <Settings className="h-4 w-4" aria-hidden="true" />
             Settings

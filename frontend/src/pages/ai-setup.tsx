@@ -1,5 +1,5 @@
 import { useState, useMemo, useCallback } from "react";
-import { Link } from "@tanstack/react-router";
+import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import {
   Card,
   CardContent,
@@ -32,6 +32,12 @@ import {
   type AiTool,
   type AiToolConfigParams,
 } from "@/lib/ai-tool-configs";
+import {
+  AI_SETUP_SKILL_TABS,
+  AI_SETUP_SKILL_TAB_DEFAULT,
+  isValidTab,
+  parseTab,
+} from "@/lib/url-tabs";
 
 function CodeBlock({
   code,
@@ -77,14 +83,6 @@ function EmptyState() {
 }
 
 
-const SKILL_TOOLS: readonly AiTool[] = [
-  "claude-code",
-  "cursor",
-  "codex",
-  "openclaw",
-  "chatgpt",
-];
-
 function AiSkillSetupCard({
   baseUrl,
   dashboardUrl,
@@ -92,7 +90,23 @@ function AiSkillSetupCard({
   readonly baseUrl: string;
   readonly dashboardUrl: string;
 }) {
-  const [selectedSkillTool, setSelectedSkillTool] = useState<AiTool>("claude-code");
+  const searchParams = useRouterState({
+    select: (s) => s.location.search as Record<string, unknown>,
+  });
+  const navigate = useNavigate();
+  const selectedSkillTool: AiTool = parseTab(
+    searchParams.skill,
+    AI_SETUP_SKILL_TABS,
+    AI_SETUP_SKILL_TAB_DEFAULT,
+  );
+
+  function setSelectedSkillTool(value: AiTool) {
+    void navigate({
+      to: "/ai-setup",
+      search: (prev) => ({ ...prev, skill: value }),
+      replace: true,
+    });
+  }
 
   const setupPrompt = useMemo(
     () => generateSetupPrompt(selectedSkillTool, { baseUrl, dashboardUrl }),
@@ -126,7 +140,7 @@ function AiSkillSetupCard({
           className="space-y-4"
         >
           <TabsList>
-            {SKILL_TOOLS.map((id) => {
+            {AI_SETUP_SKILL_TABS.map((id) => {
               const tool = AI_TOOLS.find((t) => t.id === id);
               return tool ? (
                 <TabsTrigger key={id} value={id}>
@@ -136,7 +150,7 @@ function AiSkillSetupCard({
             })}
           </TabsList>
 
-          {SKILL_TOOLS.map((id) => (
+          {AI_SETUP_SKILL_TABS.map((id) => (
             <TabsContent key={id} value={id}>
               <div className="space-y-4">
                 <div className="relative">
@@ -203,8 +217,28 @@ export function AiSetupPage() {
   const { data: appsData, isLoading: appsLoading } = useDeveloperApps();
   const { data: config, isLoading: configLoading } = usePublicConfig();
 
+  const searchParams = useRouterState({
+    select: (s) => s.location.search as Record<string, unknown>,
+  });
+  const navigate = useNavigate();
+
   const [selectedClientId, setSelectedClientId] = useState<string>("");
-  const [selectedTool, setSelectedTool] = useState<AiTool>("cursor");
+
+  // AI_TOOLS lives in ai-tool-configs as the canonical source of all
+  // tool ids + metadata; we derive the URL allowlist from it rather than
+  // duplicating the list in url-tabs.
+  const aiToolIds: readonly AiTool[] = AI_TOOLS.map((t) => t.id);
+  const selectedTool: AiTool = isValidTab(searchParams.tool, aiToolIds)
+    ? searchParams.tool
+    : "cursor";
+
+  function setSelectedTool(value: AiTool) {
+    void navigate({
+      to: "/ai-setup",
+      search: (prev) => ({ ...prev, tool: value }),
+      replace: true,
+    });
+  }
 
   const clients = appsData?.clients ?? [];
   const mcpUrl = config?.mcp_url ?? `${window.location.origin}/mcp`;
