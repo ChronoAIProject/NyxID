@@ -14,7 +14,7 @@ use crate::services::{key_service, node_service, org_service};
 
 use super::{
     DEVICE_CODE_API_KEY_SCOPES, DEVICE_CODE_DELIVERY_EXPIRES_IN_SECS, DeviceCodeApprove,
-    DeviceCodeApproveInput, choose_device_label, is_locked,
+    DeviceCodeApproveInput, choose_device_label,
 };
 
 /// Approve a device using only the current displayed user-code generation.
@@ -169,10 +169,6 @@ async fn ensure_row_approvable(
         return Err(AppError::DeviceCodeExpired);
     }
 
-    if is_locked(row.locked_until, now) {
-        return Err(AppError::DeviceCodeLocked);
-    }
-
     match row.status {
         DeviceCodeStatus::Pending => Ok(()),
         DeviceCodeStatus::Denied => Err(AppError::Forbidden("Device code denied".to_string())),
@@ -250,12 +246,17 @@ async fn cleanup_partial_approval(
 mod tests {
     use super::*;
     use crate::models::device_code::UserCodeGen;
+    use crate::models::device_pubkey_lockout::{
+        COLLECTION_NAME as DEVICE_PUBKEY_LOCKOUTS, DevicePubkeyLockout,
+    };
     use crate::models::node::NodeStatus;
     use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+    use crate::services::device_code_service::DEVICE_CODE_SIGNATURE_FAILURE_LOCK_THRESHOLD;
     use crate::services::device_code_service::tests_support::{setup_pending_row, sign_poll};
     use crate::services::device_code_service::{DeviceCodePoll, DeviceCodePollInput, poll};
     use crate::test_utils::{connect_test_database, test_user};
     use chrono::Duration;
+    use sha2::{Digest, Sha256};
     use uuid::Uuid;
 
     #[tokio::test]
@@ -430,6 +431,39 @@ mod tests {
         .expect_err("second approval should fail");
 
         assert!(matches!(error, AppError::DeviceCodeAlreadyDelivered));
+    }
+
+    #[tokio::test]
+    async fn approve_allows_pubkey_locked_for_polling() {
+        let Some((db, response, key)) =
+            setup_pending_row("device_code_approve_pubkey_locked").await
+        else {
+            return;
+        };
+        db.collection::<DevicePubkeyLockout>(DEVICE_PUBKEY_LOCKOUTS)
+            .insert_one(DevicePubkeyLockout {
+                id: test_pubkey_hash(&key.verifying_key().to_bytes()),
+                failed_poll_count: DEVICE_CODE_SIGNATURE_FAILURE_LOCK_THRESHOLD,
+                locked_until: Some(Utc::now() + Duration::hours(1)),
+                last_failure_at: Utc::now(),
+                last_lockout_audited_at: None,
+            })
+            .await
+            .expect("seed pubkey lockout");
+
+        let approval = approve(
+            &db,
+            &Uuid::new_v4().to_string(),
+            DeviceCodeApproveInput {
+                user_code: response.user_code,
+                org_id: None,
+                label: None,
+            },
+        )
+        .await
+        .expect("approve should not be blocked by poll/request lockout");
+
+        assert_eq!(approval.hw_id, "esp32-p4-cam-1");
     }
 
     #[tokio::test]
@@ -615,5 +649,11 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    fn test_pubkey_hash(pubkey: &[u8]) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(pubkey);
+        hex::encode(hasher.finalize())
     }
 }

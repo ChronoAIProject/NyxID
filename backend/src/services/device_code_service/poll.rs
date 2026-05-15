@@ -15,7 +15,8 @@ use super::{
     DEVICE_CODE_DELIVERY_EXPIRES_IN_SECS, DEVICE_CODE_LOCKOUT_SECS, DEVICE_CODE_POLL_INTERVAL_SECS,
     DEVICE_CODE_SIGNATURE_FAILURE_LOCK_THRESHOLD, DEVICE_CODE_TIMESTAMP_SKEW_SECS,
     DEVICE_CODE_USER_CODE_WRITE_RETRIES, DeviceCodePoll, DeviceCodePollInput,
-    is_duplicate_key_error, is_locked,
+    is_duplicate_key_error, is_locked, is_pubkey_locked, record_pubkey_signature_failure,
+    reset_pubkey_lockout,
 };
 
 pub async fn poll(db: &Database, input: DeviceCodePollInput) -> AppResult<DeviceCodePoll> {
@@ -42,28 +43,33 @@ pub async fn poll(db: &Database, input: DeviceCodePollInput) -> AppResult<Device
         return Err(AppError::DeviceCodeExpired);
     }
 
-    if is_locked(row.locked_until, now) {
-        return Err(AppError::DeviceCodeLocked);
-    }
-
-    verify_poll_timestamp(&row, input.timestamp, now)?;
-
     let pubkey: [u8; 32] = row
         .device_pubkey
         .clone()
         .try_into()
         .map_err(|_| AppError::Internal("stored device_pubkey is not 32 bytes".to_string()))?;
+
+    if is_pubkey_locked(db, &pubkey, now).await? {
+        return Err(AppError::DeviceCodeLocked);
+    }
+
+    verify_poll_timestamp(&row, input.timestamp, now)?;
+
     if let Err(error) = verify_poll_signature(
         &pubkey,
         &input.device_code,
         input.timestamp,
         &input.signature,
     ) {
-        if record_signature_failure(&collection, &row.id, now).await? {
+        record_signature_failure(&collection, &row.id, now).await?;
+        let pubkey_lockout = record_pubkey_signature_failure(db, &pubkey, now).await?;
+        if is_locked(pubkey_lockout.locked_until, now) {
             return Err(AppError::DeviceCodeLocked);
         }
         return Err(error);
     }
+
+    reset_pubkey_lockout(db, &pubkey).await?;
 
     row.failed_poll_count = 0;
     row.last_polled_at = Some(now);
@@ -283,10 +289,14 @@ async fn persist_successful_poll(
 mod tests {
     use super::*;
     use crate::models::device_code::UserCodeGen;
+    use crate::models::device_pubkey_lockout::{
+        COLLECTION_NAME as DEVICE_PUBKEY_LOCKOUTS, DevicePubkeyLockout,
+    };
     use crate::services::device_code_service::DEVICE_CODE_ROTATE_SECS;
     use crate::services::device_code_service::tests_support::{setup_pending_row, sign_poll};
     use chrono::Duration;
     use ed25519_dalek::SigningKey;
+    use sha2::{Digest, Sha256};
     use uuid::Uuid;
 
     #[tokio::test]
@@ -408,6 +418,110 @@ mod tests {
             .unwrap();
         assert_eq!(row.failed_poll_count, 3);
         assert!(row.locked_until.is_some());
+    }
+
+    #[tokio::test]
+    async fn pubkey_failures_accumulate_across_device_code_rows_and_success_resets() {
+        let Some((db, first_response, key)) =
+            setup_pending_row("device_code_poll_pubkey_lockout").await
+        else {
+            return;
+        };
+        let second_response = crate::services::device_code_service::initiate(
+            &db,
+            crate::services::device_code_service::DeviceCodeInitiateInput {
+                device_pubkey: key.verifying_key().to_bytes(),
+                hw_id: "esp32-p4-cam-2".to_string(),
+                suggested_label: Some("Second cam".to_string()),
+                frontend_url: "https://app.example.com".to_string(),
+            },
+        )
+        .await
+        .expect("second device code for same pubkey");
+        let wrong_key = SigningKey::from_bytes(&[88u8; 32]);
+        let base_timestamp = Utc::now().timestamp();
+
+        for attempt in 0..2 {
+            let timestamp = base_timestamp + attempt;
+            let error = poll(
+                &db,
+                DeviceCodePollInput {
+                    device_code: first_response.device_code.clone(),
+                    timestamp,
+                    signature: sign_poll(&first_response.device_code, timestamp, &wrong_key),
+                },
+            )
+            .await
+            .expect_err("wrong signature should fail");
+            assert!(matches!(error, AppError::DevicePollSignatureInvalid(_)));
+        }
+
+        let timestamp = base_timestamp + 2;
+        let error = poll(
+            &db,
+            DeviceCodePollInput {
+                device_code: second_response.device_code.clone(),
+                timestamp,
+                signature: sign_poll(&second_response.device_code, timestamp, &wrong_key),
+            },
+        )
+        .await
+        .expect_err("third failure across pubkey should lock");
+        assert!(matches!(error, AppError::DeviceCodeLocked));
+
+        let second_row = db
+            .collection::<DeviceCode>(DEVICE_CODES)
+            .find_one(doc! { "device_code_hash": hash_token(&second_response.device_code) })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(second_row.failed_poll_count, 1);
+        assert!(second_row.locked_until.is_none());
+
+        let pubkey_hash = test_pubkey_hash(&key.verifying_key().to_bytes());
+        let pubkey_lockout = db
+            .collection::<DevicePubkeyLockout>(DEVICE_PUBKEY_LOCKOUTS)
+            .find_one(doc! { "_id": &pubkey_hash })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(pubkey_lockout.failed_poll_count, 3);
+        assert!(pubkey_lockout.locked_until.is_some());
+
+        db.collection::<DevicePubkeyLockout>(DEVICE_PUBKEY_LOCKOUTS)
+            .update_one(
+                doc! { "_id": &pubkey_hash },
+                doc! {
+                    "$set": {
+                        "locked_until": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(1)),
+                        "last_lockout_audited_at": bson::DateTime::from_chrono(Utc::now()),
+                    }
+                },
+            )
+            .await
+            .expect("expire pubkey lockout");
+
+        let timestamp = Utc::now().timestamp();
+        poll(
+            &db,
+            DeviceCodePollInput {
+                device_code: second_response.device_code.clone(),
+                timestamp,
+                signature: sign_poll(&second_response.device_code, timestamp, &key),
+            },
+        )
+        .await
+        .expect("successful poll after expired pubkey lockout");
+
+        let pubkey_lockout = db
+            .collection::<DevicePubkeyLockout>(DEVICE_PUBKEY_LOCKOUTS)
+            .find_one(doc! { "_id": &pubkey_hash })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(pubkey_lockout.failed_poll_count, 0);
+        assert!(pubkey_lockout.locked_until.is_none());
+        assert!(pubkey_lockout.last_lockout_audited_at.is_none());
     }
 
     #[tokio::test]
@@ -712,5 +826,11 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    fn test_pubkey_hash(pubkey: &[u8]) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(pubkey);
+        hex::encode(hasher.finalize())
     }
 }

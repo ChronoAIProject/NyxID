@@ -11,7 +11,7 @@ use crate::models::device_code::{
 use super::{
     DEVICE_CODE_EXPIRES_IN_SECS, DEVICE_CODE_POLL_INTERVAL_SECS,
     DEVICE_CODE_USER_CODE_WRITE_RETRIES, DeviceCodeInitiate, DeviceCodeInitiateInput,
-    is_duplicate_key_error,
+    is_duplicate_key_error, is_pubkey_locked,
 };
 
 pub async fn initiate(
@@ -35,6 +35,10 @@ where
         suggested_label,
         frontend_url,
     } = input;
+
+    if is_pubkey_locked(db, &device_pubkey, Utc::now()).await? {
+        return Err(AppError::DeviceCodeLocked);
+    }
 
     for attempt in 0..=DEVICE_CODE_USER_CODE_WRITE_RETRIES {
         let now = Utc::now();
@@ -114,8 +118,13 @@ fn build_verification_uris(frontend_url: &str, user_code: &str) -> AppResult<(St
 mod tests {
     use super::*;
     use crate::crypto::token::hash_token;
+    use crate::models::device_pubkey_lockout::{
+        COLLECTION_NAME as DEVICE_PUBKEY_LOCKOUTS, DevicePubkeyLockout,
+    };
+    use crate::services::device_code_service::DEVICE_CODE_SIGNATURE_FAILURE_LOCK_THRESHOLD;
     use crate::test_utils::connect_test_database;
     use mongodb::bson::doc;
+    use sha2::{Digest, Sha256};
 
     #[test]
     fn verification_uris_point_to_bind_page_and_include_user_code() {
@@ -225,5 +234,46 @@ mod tests {
                 .unwrap(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn initiate_rejects_currently_locked_pubkey() {
+        let Some(db) = connect_test_database("device_code_initiate_locked_pubkey").await else {
+            return;
+        };
+        crate::db::ensure_indexes(&db)
+            .await
+            .expect("ensure indexes");
+        let pubkey = [31u8; 32];
+        db.collection::<DevicePubkeyLockout>(DEVICE_PUBKEY_LOCKOUTS)
+            .insert_one(DevicePubkeyLockout {
+                id: test_pubkey_hash(&pubkey),
+                failed_poll_count: DEVICE_CODE_SIGNATURE_FAILURE_LOCK_THRESHOLD,
+                locked_until: Some(Utc::now() + Duration::hours(1)),
+                last_failure_at: Utc::now(),
+                last_lockout_audited_at: None,
+            })
+            .await
+            .expect("seed pubkey lockout");
+
+        let error = initiate(
+            &db,
+            DeviceCodeInitiateInput {
+                device_pubkey: pubkey,
+                hw_id: "esp32-locked".to_string(),
+                suggested_label: None,
+                frontend_url: "https://app.example.com".to_string(),
+            },
+        )
+        .await
+        .expect_err("locked pubkey should not get a new device code");
+
+        assert!(matches!(error, AppError::DeviceCodeLocked));
+    }
+
+    fn test_pubkey_hash(pubkey: &[u8]) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(pubkey);
+        hex::encode(hasher.finalize())
     }
 }

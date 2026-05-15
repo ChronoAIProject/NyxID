@@ -14,6 +14,7 @@ pub mod cli_pairing;
 pub mod consent;
 pub mod default_request_header;
 pub mod device_code;
+pub mod device_pubkey_lockout;
 pub mod downstream_service;
 pub mod group;
 pub mod invite_code;
