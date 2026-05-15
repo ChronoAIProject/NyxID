@@ -2,7 +2,11 @@ import { Suspense, useState, useEffect, useCallback, useMemo, createContext, use
 import { Outlet, Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import { Sidebar, MAIN_NAV, APPROVALS_NAV, DEVELOPER_NAV, ADMIN_NAV, isNavActive } from "@/components/dashboard/sidebar";
 import { hasAdminRead } from "@/types/api";
-import { CommandPalette, ALL_ITEMS as SEARCH_ITEMS } from "@/components/navigation/command-palette";
+import {
+  CommandPalette,
+  ALL_ITEMS as SEARCH_ITEMS,
+  type CommandItem,
+} from "@/components/navigation/command-palette";
 import { AmbientStatusLine } from "@/components/chrome/ambient-status-line";
 import { useAuthStore } from "@/stores/auth-store";
 import { useLogout } from "@/hooks/use-auth";
@@ -454,7 +458,7 @@ function MobileNav({
     return SEARCH_ITEMS.filter(
       (item) =>
         item.label.toLowerCase().includes(q) ||
-        item.to.toLowerCase().includes(q),
+        (item.to?.toLowerCase().includes(q) ?? false),
     );
   }, [searchQuery]);
 
@@ -464,9 +468,22 @@ function MobileNav({
     void navigate({ to: "/login" as string });
   }
 
-  function handleNavigate(to: string) {
+  function handleSearchSelect(item: CommandItem) {
     onClose();
-    void navigate({ to: to as string });
+    if (item.onSelect) {
+      item.onSelect();
+      return;
+    }
+    if (item.to) {
+      // Mirror the command palette: navigate with the structured `search`
+      // so deep-link actions like `?action=add-service` survive the
+      // TanStack search-param validator and the keys page can auto-open
+      // the matching dialog.
+      void navigate({
+        to: item.to as never,
+        search: (item.search ?? {}) as never,
+      });
+    }
   }
 
   return (
@@ -520,9 +537,9 @@ function MobileNav({
             <div className="flex flex-col gap-0.5">
               {searchResults.map((item) => (
                 <button
-                  key={`${item.to}-${item.label}`}
+                  key={`${item.to ?? "action"}-${item.label}`}
                   type="button"
-                  onClick={() => handleNavigate(item.to)}
+                  onClick={() => handleSearchSelect(item)}
                   className="flex items-center gap-3 rounded-xl px-4 py-3 text-[14px] text-muted-foreground active:bg-white/[0.04]"
                 >
                   <item.icon className="h-[18px] w-[18px] shrink-0 text-text-tertiary" />
