@@ -260,6 +260,18 @@ fn allowlist_for(kind: FlowKind) -> Vec<ProxyRoute> {
                     "openapi_spec_url",
                     "node_id",
                     "target_org_id",
+                    // Per-Custom-App OAuth credentials for `credential_mode:
+                    // "user"` providers (Lark / Feishu / Twitter). The wizard
+                    // collects the App ID / App Secret and forwards them so
+                    // the backend stores them on the new UserApiKey itself,
+                    // letting each multi-connection add use its own Custom
+                    // App instead of sharing a single row in
+                    // `user_provider_credentials`. `copy_oauth_client_from`
+                    // is the alternative shape — clone an existing key's
+                    // encrypted creds rather than retransmit the secret.
+                    "oauth_client_id",
+                    "oauth_client_secret",
+                    "copy_oauth_client_from",
                 ],
             },
             // Needed to poll placeholder key status during OAuth/device-code.
