@@ -1,5 +1,5 @@
 import { useState, useMemo, useCallback } from "react";
-import { Link } from "@tanstack/react-router";
+import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import {
   Card,
   CardContent,
@@ -8,7 +8,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import {
   Select,
   SelectContent,
@@ -21,6 +21,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Separator } from "@/components/ui/separator";
 import { toast } from "sonner";
 import { Copy, Plus } from "lucide-react";
+import { BrainIcon } from "@/components/icons/empty-state";
 import { useDeveloperApps } from "@/hooks/use-developer-apps";
 import { usePublicConfig } from "@/hooks/use-public-config";
 import {
@@ -31,6 +32,12 @@ import {
   type AiTool,
   type AiToolConfigParams,
 } from "@/lib/ai-tool-configs";
+import {
+  AI_SETUP_SKILL_TABS,
+  AI_SETUP_SKILL_TAB_DEFAULT,
+  isValidTab,
+  parseTab,
+} from "@/lib/url-tabs";
 
 function CodeBlock({
   code,
@@ -42,54 +49,39 @@ function CodeBlock({
   readonly onCopy: () => void;
 }) {
   return (
-    <div className="relative">
-      <div className="mb-2 flex items-center justify-between">
-        <Badge variant="outline" className="text-[10px]">
-          {label}
-        </Badge>
+    <div className="space-y-2">
+      <Badge variant="secondary" className="text-[10px]">
+        {label}
+      </Badge>
+      <div className="relative">
+        <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-12 min-h-[44px] font-mono text-xs leading-relaxed text-foreground">
+          {code}
+        </pre>
         <Button
           variant="ghost"
-          size="sm"
-          className="h-7 gap-1.5 text-xs"
+          size="icon"
+          className="absolute right-2 top-2 h-8 w-8 text-text-tertiary hover:text-foreground"
           onClick={onCopy}
+          aria-label="Copy"
         >
-          <Copy className="h-3 w-3" />
-          Copy
+          <Copy className="h-3.5 w-3.5" />
         </Button>
       </div>
-      <pre className="overflow-x-auto rounded-lg border border-border bg-muted px-4 py-3 font-mono text-xs leading-relaxed text-foreground">
-        {code}
-      </pre>
     </div>
   );
 }
 
 function EmptyState() {
   return (
-    <Card>
-      <CardContent className="flex flex-col items-center gap-4 py-12">
-        <p className="text-sm text-muted-foreground">
-          Create an OAuth client first to generate AI setup configs.
-        </p>
-        <Button asChild variant="outline" size="sm">
-          <Link to="/developer/apps">
-            <Plus className="mr-2 h-4 w-4" />
-            Create Developer App
-          </Link>
-        </Button>
-      </CardContent>
-    </Card>
+    <div className="flex flex-col items-center gap-1 py-12">
+      <BrainIcon className="h-48 w-48 text-muted-foreground/30" />
+      <p className="text-[12px] text-muted-foreground/30">
+        Create an OAuth client first to generate AI setup configs.
+      </p>
+    </div>
   );
 }
 
-
-const SKILL_TOOLS: readonly AiTool[] = [
-  "claude-code",
-  "cursor",
-  "codex",
-  "openclaw",
-  "chatgpt",
-];
 
 function AiSkillSetupCard({
   baseUrl,
@@ -98,7 +90,23 @@ function AiSkillSetupCard({
   readonly baseUrl: string;
   readonly dashboardUrl: string;
 }) {
-  const [selectedSkillTool, setSelectedSkillTool] = useState<AiTool>("claude-code");
+  const searchParams = useRouterState({
+    select: (s) => s.location.search as Record<string, unknown>,
+  });
+  const navigate = useNavigate();
+  const selectedSkillTool: AiTool = parseTab(
+    searchParams.skill,
+    AI_SETUP_SKILL_TABS,
+    AI_SETUP_SKILL_TAB_DEFAULT,
+  );
+
+  function setSelectedSkillTool(value: AiTool) {
+    void navigate({
+      to: "/ai-setup",
+      search: (prev) => ({ ...prev, skill: value }),
+      replace: true,
+    });
+  }
 
   const setupPrompt = useMemo(
     () => generateSetupPrompt(selectedSkillTool, { baseUrl, dashboardUrl }),
@@ -119,20 +127,20 @@ function AiSkillSetupCard({
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">Install AI Skills</CardTitle>
+        <CardTitle>Install AI Skills</CardTitle>
         <CardDescription>
           Install persistent NyxID skills so your AI agent automatically knows
           about NyxID in every session. No need to paste a prompt each time.
         </CardDescription>
       </CardHeader>
-      <CardContent className="space-y-5">
+      <CardContent className="space-y-6">
         <Tabs
           value={selectedSkillTool}
           onValueChange={(v) => setSelectedSkillTool(v as AiTool)}
           className="space-y-4"
         >
           <TabsList>
-            {SKILL_TOOLS.map((id) => {
+            {AI_SETUP_SKILL_TABS.map((id) => {
               const tool = AI_TOOLS.find((t) => t.id === id);
               return tool ? (
                 <TabsTrigger key={id} value={id}>
@@ -142,28 +150,28 @@ function AiSkillSetupCard({
             })}
           </TabsList>
 
-          {SKILL_TOOLS.map((id) => (
+          {AI_SETUP_SKILL_TABS.map((id) => (
             <TabsContent key={id} value={id}>
               <div className="space-y-4">
                 <div className="relative">
-                  <pre className="overflow-x-auto whitespace-pre-wrap rounded-lg border border-border bg-muted p-4 font-mono text-xs leading-relaxed">
+                  <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-xs leading-relaxed">
                     {setupPrompt}
                   </pre>
                   <Button
-                    variant="outline"
-                    size="sm"
-                    className="absolute right-2 top-2 h-7 gap-1 text-xs"
+                    variant="ghost"
+                    size="icon"
+                    className="absolute right-2 top-2 h-8 w-8 text-text-tertiary hover:text-foreground"
                     onClick={() => void handleCopy(setupPrompt)}
+                    aria-label="Copy"
                   >
-                    <Copy className="h-3 w-3" />
-                    Copy
+                    <Copy className="h-3.5 w-3.5" />
                   </Button>
                 </div>
 
                 <div className="flex items-center gap-2">
                   <Badge
                     variant={
-                      skillInfo.type === "auto-refresh" ? "default" : "outline"
+                      skillInfo.type === "auto-refresh" ? "default" : "secondary"
                     }
                     className="text-[10px]"
                   >
@@ -209,8 +217,28 @@ export function AiSetupPage() {
   const { data: appsData, isLoading: appsLoading } = useDeveloperApps();
   const { data: config, isLoading: configLoading } = usePublicConfig();
 
+  const searchParams = useRouterState({
+    select: (s) => s.location.search as Record<string, unknown>,
+  });
+  const navigate = useNavigate();
+
   const [selectedClientId, setSelectedClientId] = useState<string>("");
-  const [selectedTool, setSelectedTool] = useState<AiTool>("cursor");
+
+  // AI_TOOLS lives in ai-tool-configs as the canonical source of all
+  // tool ids + metadata; we derive the URL allowlist from it rather than
+  // duplicating the list in url-tabs.
+  const aiToolIds: readonly AiTool[] = AI_TOOLS.map((t) => t.id);
+  const selectedTool: AiTool = isValidTab(searchParams.tool, aiToolIds)
+    ? searchParams.tool
+    : "cursor";
+
+  function setSelectedTool(value: AiTool) {
+    void navigate({
+      to: "/ai-setup",
+      search: (prev) => ({ ...prev, tool: value }),
+      replace: true,
+    });
+  }
 
   const clients = appsData?.clients ?? [];
   const mcpUrl = config?.mcp_url ?? `${window.location.origin}/mcp`;
@@ -261,10 +289,10 @@ export function AiSetupPage() {
   return (
     <div className="space-y-8">
       <div>
-        <h2 className="font-display text-3xl font-normal tracking-tight md:text-5xl">
-          AI Setup
+        <h2 className="text-[28px] font-bold leading-none tracking-tight" style={{ letterSpacing: "-0.03em" }}>
+          AI Setup Guide
         </h2>
-        <p className="text-muted-foreground">
+        <p className="text-[12px] text-muted-foreground">
           Configure your AI coding assistant to work with NyxID. Pick a tool and
           an app, copy the config, done.
         </p>
@@ -275,12 +303,22 @@ export function AiSetupPage() {
       <Separator />
 
       {clients.length === 0 ? (
-        <EmptyState />
+        <div className="space-y-6">
+          <div className="flex justify-end">
+            <Button asChild variant="outline" className="text-text-tertiary hover:text-muted-foreground">
+              <Link to="/developer/apps">
+                <ButtonIcon><Plus className="h-3 w-3" /></ButtonIcon>
+                Create Developer App
+              </Link>
+            </Button>
+          </div>
+          <EmptyState />
+        </div>
       ) : (
         <div className="space-y-6">
           <Card>
             <CardHeader>
-              <CardTitle className="text-base">MCP Config Generator</CardTitle>
+              <CardTitle>MCP Config Generator</CardTitle>
               <CardDescription>
                 Select your OAuth client and AI tool to generate a
                 ready-to-paste configuration file.
@@ -289,7 +327,7 @@ export function AiSetupPage() {
             <CardContent className="space-y-6">
               {/* App selector */}
               <div className="space-y-2">
-                <label className="text-sm font-medium">OAuth Client</label>
+                <label className="text-[12px] font-medium">OAuth Client</label>
                 <Select
                   value={selectedClient?.id ?? ""}
                   onValueChange={setSelectedClientId}
@@ -302,7 +340,7 @@ export function AiSetupPage() {
                       <SelectItem key={client.id} value={client.id}>
                         <span className="flex items-center gap-2">
                           {client.client_name}
-                          <Badge variant="outline" className="text-[10px]">
+                          <Badge variant="secondary" className="text-[10px]">
                             {client.client_type}
                           </Badge>
                         </span>
@@ -330,7 +368,7 @@ export function AiSetupPage() {
                   <TabsContent key={tool.id} value={tool.id}>
                     <div className="space-y-4">
                       {tool.configFilePath && (
-                        <p className="text-sm text-muted-foreground">
+                        <p className="text-[12px] text-muted-foreground">
                           Save to{" "}
                           <code className="rounded bg-muted px-1.5 py-0.5 text-xs">
                             {tool.configFilePath}
@@ -362,20 +400,20 @@ export function AiSetupPage() {
           {selectedClient && (
             <Card>
               <CardHeader>
-                <CardTitle className="text-base">Client Details</CardTitle>
+                <CardTitle>Client Details</CardTitle>
               </CardHeader>
               <CardContent>
-                <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-2 text-sm">
+                <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-2 text-[12px]">
                   <dt className="text-muted-foreground">Client ID</dt>
-                  <dd className="font-mono text-xs">{selectedClient.id}</dd>
+                  <dd className="text-xs">{selectedClient.id}</dd>
                   <dt className="text-muted-foreground">Type</dt>
                   <dd>{selectedClient.client_type}</dd>
                   <dt className="text-muted-foreground">Redirect URIs</dt>
-                  <dd className="font-mono text-xs">
+                  <dd className="text-xs">
                     {selectedClient.redirect_uris.join(", ") || "None"}
                   </dd>
                   <dt className="text-muted-foreground">Scopes</dt>
-                  <dd className="font-mono text-xs">
+                  <dd className="text-xs">
                     {selectedClient.allowed_scopes || "openid profile email"}
                   </dd>
                 </dl>

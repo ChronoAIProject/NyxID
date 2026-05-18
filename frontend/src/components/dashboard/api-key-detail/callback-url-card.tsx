@@ -3,6 +3,7 @@ import { useUpdateApiKey } from "@/hooks/use-api-keys";
 import { ApiError } from "@/lib/api-client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
 import {
   Card,
   CardContent,
@@ -69,7 +70,7 @@ export function CallbackUrlCard({
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
           <Link2 className="h-4 w-4 text-primary" />
-          <CardTitle className="text-sm">Callback URL</CardTitle>
+          <CardTitle className="text-[15px]">Callback URL</CardTitle>
         </div>
         <CardDescription>
           Where NyxID sends channel relay messages for this agent
@@ -88,16 +89,8 @@ export function CallbackUrlCard({
               Must be HTTPS in production. Used by Channel Bot Relay to forward
               platform messages to this agent.
             </p>
-            <div className="flex gap-2">
+            <div className="flex justify-end gap-2">
               <Button
-                size="sm"
-                onClick={handleSave}
-                disabled={updateApiKey.isPending}
-              >
-                Save
-              </Button>
-              <Button
-                size="sm"
                 variant="outline"
                 onClick={() => {
                   setValue(callbackUrl ?? "");
@@ -105,6 +98,13 @@ export function CallbackUrlCard({
                 }}
               >
                 Cancel
+              </Button>
+              <Button
+                variant="primary"
+                onClick={handleSave}
+                disabled={updateApiKey.isPending}
+              >
+                Save
               </Button>
             </div>
           </div>
@@ -115,7 +115,7 @@ export function CallbackUrlCard({
                 {callbackUrl}
               </code>
             ) : (
-              <span className="text-sm text-muted-foreground">Not set</span>
+              <Badge variant="secondary">Not set</Badge>
             )}
             <div className="flex shrink-0 gap-1">
               <Button

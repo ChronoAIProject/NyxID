@@ -2,20 +2,19 @@ import * as React from "react";
 import { cva, type VariantProps } from "class-variance-authority";
 import { cn } from "@/lib/utils";
 
-/* ── VoidPortal Badge Variants ── */
+/* ── NyxID Badge Variants ── */
 const badgeVariants = cva(
-  "inline-flex items-center rounded-[10px] border px-2.5 py-1 text-[10px] font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2",
+  "inline-flex items-center rounded-md border px-2 py-0.5 text-[10px] font-medium transition-colors duration-200 focus:outline-none",
   {
     variants: {
       variant: {
-        default: "border-primary/30 bg-primary/15 text-void-300",
+        default: "border-nyx-500/30 bg-nyx-500/15 text-nyx-200",
         secondary: "border-transparent bg-muted text-muted-foreground",
         destructive: "border-destructive/30 bg-destructive/15 text-destructive",
-        outline: "border-border text-foreground",
-        success: "border-success/40 bg-transparent text-success",
-        warning: "border-warning/40 bg-transparent text-warning",
-        info: "border-info/40 bg-transparent text-info",
-        accent: "border-primary/40 bg-transparent text-void-400",
+        success: "border-success/30 bg-success/10 text-success",
+        warning: "border-warning/30 bg-warning/10 text-warning",
+        info: "border-info/30 bg-info/10 text-info",
+        accent: "border-nyx-500/30 bg-nyx-500/10 text-nyx-secondary-400",
       },
     },
     defaultVariants: {

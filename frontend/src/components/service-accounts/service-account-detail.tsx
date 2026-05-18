@@ -18,12 +18,11 @@ import { ApiError } from "@/lib/api-client";
 import { SaConnectedServices } from "@/components/dashboard/sa-connected-services";
 import type { RotateSecretResponse } from "@/types/service-accounts";
 import { PageHeader } from "@/components/shared/page-header";
-import type { BreadcrumbItem } from "@/components/shared/breadcrumb";
 import { DetailSection } from "@/components/shared/detail-section";
 import { DetailRow } from "@/components/shared/detail-row";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -58,29 +57,13 @@ type ConfirmAction = "delete" | "revoke-tokens" | null;
 interface ServiceAccountDetailProps {
   readonly saId: string;
   readonly backTo: { readonly to: string; readonly label: string };
-  /**
-   * Breadcrumb chain leading up to (but not including) the service account
-   * itself. The current SA's name is appended as the final crumb. When
-   * omitted, defaults to a single crumb derived from `backTo`.
-   */
-  readonly breadcrumbsPrefix?: readonly BreadcrumbItem[];
   readonly showProviderSections?: boolean;
-  /// Whether the viewing user has write access to this service account.
-  /// Caller responsibility: the admin route passes
-  /// `canAdminWrite(currentUser)` (platform admin only); the org route
-  /// passes whether the user is admin of the owning org. When false,
-  /// every write control (Edit / Delete / Rotate / Revoke / Connect /
-  /// Disconnect) is hidden. Defaults to `false` so a forgotten caller
-  /// fails closed rather than exposing writes to a read-only viewer.
-  readonly canWrite?: boolean;
 }
 
 export function ServiceAccountDetail({
   saId,
   backTo,
-  breadcrumbsPrefix,
   showProviderSections = true,
-  canWrite = false,
 }: ServiceAccountDetailProps) {
   const navigate = useNavigate();
 
@@ -256,7 +239,7 @@ export function ServiceAccountDetail({
         <h3 className="mb-2 text-lg font-semibold">
           Service account not found
         </h3>
-        <p className="mb-4 text-sm text-muted-foreground">
+        <p className="mb-4 text-[12px] text-muted-foreground">
           The service account you are looking for does not exist or has been
           deleted.
         </p>
@@ -273,39 +256,31 @@ export function ServiceAccountDetail({
   return (
     <div className="space-y-8">
       <PageHeader
-        breadcrumbs={[
-          ...(breadcrumbsPrefix ?? [{ label: backTo.label, to: backTo.to }]),
-          { label: sa.name },
-        ]}
         title={sa.name}
         description={sa.description ?? undefined}
         actions={
-          canWrite ? (
-            <>
-              <Button variant="outline" size="sm" onClick={openEditDialog}>
-                <Pencil className="mr-1 h-3 w-3" />
-                Edit
-              </Button>
-              <Button
-                variant="destructive"
-                size="sm"
-                onClick={() => setConfirmAction("delete")}
-              >
-                <Trash2 className="mr-1 h-3 w-3" />
-                Delete
-              </Button>
-            </>
-          ) : null
+          <>
+            <Button variant="outline" onClick={openEditDialog}>
+              <ButtonIcon><Pencil className="h-3 w-3" /></ButtonIcon>
+              Edit
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => setConfirmAction("delete")}
+            >
+              <ButtonIcon variant="destructive"><Trash2 className="h-3 w-3 text-destructive" /></ButtonIcon>
+              Delete
+            </Button>
+          </>
         }
       />
 
       <DetailSection title="Service Account Information">
-        <DetailRow label="ID" value={sa.id} copyable mono />
-        <DetailRow label="Client ID" value={sa.client_id} copyable mono />
+        <DetailRow label="ID" value={sa.id} copyable />
+        <DetailRow label="Client ID" value={sa.client_id} copyable />
         <DetailRow
           label="Secret Prefix"
           value={`${sa.secret_prefix}...`}
-          mono
         />
         <DetailRow
           label="Status"
@@ -326,7 +301,7 @@ export function ServiceAccountDetail({
               : "Default"
           }
         />
-        <DetailRow label="Created By" value={sa.created_by} mono />
+        <DetailRow label="Created By" value={sa.created_by} />
         <DetailRow label="Created" value={formatDate(sa.created_at)} />
         <DetailRow label="Updated" value={formatDate(sa.updated_at)} />
         <DetailRow
@@ -338,10 +313,10 @@ export function ServiceAccountDetail({
       <Separator />
 
       {showProviderSections ? (
-        <SaConnectedServices saId={saId} canWrite={canWrite} />
+        <SaConnectedServices saId={saId} />
       ) : (
         <DetailSection title="Provider Connections">
-          <p className="text-sm text-muted-foreground">
+          <p className="text-[12px] text-muted-foreground">
             Provider connections for org-owned service accounts aren't yet
             available here. Use the{" "}
             <code className="rounded bg-muted px-1 font-mono text-xs">
@@ -352,28 +327,23 @@ export function ServiceAccountDetail({
         </DetailSection>
       )}
 
-      {canWrite && (
-        <>
-          <Separator />
+      <Separator />
 
-          <DetailSection title="Actions">
-            <div className="flex flex-wrap gap-2">
-              <Button variant="outline" size="sm" onClick={openRotateDialog}>
-                <RefreshCw className="mr-1 h-3 w-3" />
-                Rotate Secret
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setConfirmAction("revoke-tokens")}
-              >
-                <Ban className="mr-1 h-3 w-3" />
-                Revoke Tokens
-              </Button>
-            </div>
-          </DetailSection>
-        </>
-      )}
+      <DetailSection title="Actions">
+        <div className="flex flex-wrap gap-2">
+          <Button variant="outline" onClick={openRotateDialog}>
+            <ButtonIcon><RefreshCw className="h-3 w-3" /></ButtonIcon>
+            Rotate Secret
+          </Button>
+          <Button
+            variant="outline"
+            onClick={() => setConfirmAction("revoke-tokens")}
+          >
+            <ButtonIcon><Ban className="h-3 w-3" /></ButtonIcon>
+            Revoke Tokens
+          </Button>
+        </div>
+      </DetailSection>
 
       {/* Edit Dialog */}
       <Dialog open={editOpen} onOpenChange={setEditOpen}>
@@ -390,7 +360,7 @@ export function ServiceAccountDetail({
               className="space-y-4"
             >
               {form.formState.errors.root && (
-                <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
+                <div className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive">
                   {form.formState.errors.root.message}
                 </div>
               )}
@@ -472,7 +442,7 @@ export function ServiceAccountDetail({
                 render={({ field }) => (
                   <FormItem className="flex items-center justify-between rounded-lg border p-3">
                     <div className="space-y-0.5">
-                      <FormLabel className="text-sm font-medium">
+                      <FormLabel className="text-[12px] font-medium">
                         Active
                       </FormLabel>
                       <p className="text-xs text-muted-foreground">
@@ -496,7 +466,7 @@ export function ServiceAccountDetail({
                 >
                   Cancel
                 </Button>
-                <Button type="submit" isLoading={updateMutation.isPending}>
+                <Button variant="primary" type="submit" isLoading={updateMutation.isPending} disabled={!form.formState.isDirty || updateMutation.isPending}>
                   Save Changes
                 </Button>
               </DialogFooter>
@@ -527,10 +497,10 @@ export function ServiceAccountDetail({
 
           {rotateResult ? (
             <div className="space-y-4">
-              <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3">
+              <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3">
                 <div className="flex items-start gap-2">
                   <AlertTriangle className="mt-0.5 h-4 w-4 text-amber-600" />
-                  <p className="text-sm text-amber-700 dark:text-amber-400">
+                  <p className="text-[12px] text-amber-700 dark:text-amber-400">
                     Save this secret now. It cannot be retrieved later.
                   </p>
                 </div>
@@ -541,7 +511,7 @@ export function ServiceAccountDetail({
                   New Client Secret
                 </p>
                 <div className="flex items-center gap-2">
-                  <code className="flex-1 rounded bg-muted px-2 py-1 text-sm font-mono break-all">
+                  <code className="flex-1 rounded bg-muted px-2 py-1 text-[12px] font-mono break-all">
                     {rotateResult.client_secret}
                   </code>
                   <Button
@@ -562,6 +532,7 @@ export function ServiceAccountDetail({
 
               <DialogFooter>
                 <Button
+                  variant="primary"
                   onClick={() => {
                     setRotateOpen(false);
                     setRotateResult(null);

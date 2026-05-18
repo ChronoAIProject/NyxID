@@ -43,7 +43,7 @@ function getPasswordStrength(password: string): {
 
   if (score <= 2) return { score, label: "Weak", color: "bg-destructive" };
   if (score <= 4) return { score, label: "Fair", color: "bg-amber-400" };
-  return { score, label: "Strong", color: "bg-emerald-400" };
+  return { score, label: "Strong", color: "bg-success" };
 }
 
 const INVITE_PATTERN = /^NYX-[A-Z0-9]{8,}$/;
@@ -187,9 +187,9 @@ export function AuthFlow({
   // Hide social providers whose backend credentials are not configured.
   // While publicConfig is loading, render none rather than flashing buttons
   // that may immediately disappear once the config arrives.
-  const enabledProviders = REGISTER_PROVIDERS.filter(
-    (p) => publicConfig?.social_providers.includes(p.id) ?? false,
-  );
+  const enabledProviders = publicConfig
+    ? REGISTER_PROVIDERS.filter((p) => publicConfig.social_providers.includes(p.id))
+    : [...REGISTER_PROVIDERS];
   const hasSocialProviders = enabledProviders.length > 0;
 
   // -- Slide helpers --
@@ -309,7 +309,7 @@ export function AuthFlow({
 
   return (
     <div
-      className="-m-8 overflow-hidden rounded-[10px]"
+      className="overflow-hidden"
       style={{
         opacity: fadeOpacity,
         transition: `opacity ${FADE_MS}ms ease-in-out`,
@@ -319,21 +319,13 @@ export function AuthFlow({
         /* ================================================================
            Login View
            ================================================================ */
-        <div className="px-7 pt-8 pb-7">
-          <div className="mb-7 text-center">
-            <h1
-              className="font-display text-2xl font-semibold tracking-tight"
-              style={{
-                background: "linear-gradient(180deg, #fff 30%, #a0a0a8 100%)",
-                WebkitBackgroundClip: "text",
-                WebkitTextFillColor: "transparent",
-                backgroundClip: "text",
-              }}
-            >
+        <div>
+          <div className="mb-8">
+            <h1 className="text-[28px] font-bold tracking-tight" style={{ letterSpacing: "-0.03em" }}>
               Welcome back
             </h1>
-            <p className="mt-1.5 text-[13px] text-text-tertiary">
-              Sign in to your NyxID account
+            <p className="mt-1 text-[13px] text-muted-foreground">
+              Sign in to your account
             </p>
           </div>
 
@@ -341,135 +333,137 @@ export function AuthFlow({
             <div
               role="alert"
               data-testid="social-error"
-              className="mb-4 rounded-md bg-destructive/10 p-3 text-sm text-destructive"
+              className="mb-4 rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive"
             >
               {SOCIAL_ERROR_MESSAGES[socialError] ??
                 "Social sign-in failed. Please try again."}
             </div>
           )}
 
-          {emailAuthEnabled && (
-            <>
-              <Form {...loginForm}>
-                <form
-                  onSubmit={loginForm.handleSubmit(onLoginSubmit)}
-                  className="flex flex-col gap-4"
+          {/* Social providers first */}
+          {hasSocialProviders && (
+            <div className="flex flex-col gap-2.5">
+              {enabledProviders.map((provider) => (
+                <button
+                  key={provider.id}
+                  type="button"
+                  onClick={() => {
+                    const params = new URLSearchParams();
+                    if (returnTo) params.set("return_to", returnTo);
+                    const qs = params.toString();
+                    const url = `${window.location.origin}/api/v1/auth/social/${encodeURIComponent(provider.id)}${qs ? `?${qs}` : ""}`;
+                    void openExternal(url);
+                  }}
+                  className="flex h-[46px] w-full cursor-pointer items-center gap-3 rounded-lg border border-border bg-background px-4 text-[13.5px] font-medium text-foreground transition-colors duration-300 hover:border-border/80 hover:bg-white/[0.03] active:scale-[0.99]"
                 >
-                  {loginForm.formState.errors.root && (
-                    <div
-                      role="alert"
-                      className="rounded-md bg-destructive/10 p-3 text-sm text-destructive"
-                    >
-                      {loginForm.formState.errors.root.message}
-                    </div>
-                  )}
-
-                  <FormField
-                    control={loginForm.control}
-                    name="email"
-                    render={({ field }) => (
-                      <FormItem>
-                        <FormLabel>Email</FormLabel>
-                        <FormControl>
-                          <Input
-                            type="email"
-                            placeholder="you@example.com"
-                            autoComplete="email"
-                            {...field}
-                            ref={(el) => {
-                              field.ref(el);
-                              (
-                                loginEmailRef as React.MutableRefObject<HTMLInputElement | null>
-                              ).current = el;
-                            }}
-                          />
-                        </FormControl>
-                        <FormMessage />
-                      </FormItem>
-                    )}
-                  />
-
-                  <FormField
-                    control={loginForm.control}
-                    name="password"
-                    render={({ field }) => (
-                      <FormItem>
-                        <div className="flex items-center justify-between">
-                          <FormLabel>Password</FormLabel>
-                          <Link
-                            to={"/forgot-password" as string}
-                            className="text-xs font-medium text-violet-400 hover:text-violet-300"
-                          >
-                            Forgot password?
-                          </Link>
-                        </div>
-                        <FormControl>
-                          <Input
-                            type="password"
-                            placeholder="Enter your password"
-                            autoComplete="current-password"
-                            {...field}
-                          />
-                        </FormControl>
-                        <FormMessage />
-                      </FormItem>
-                    )}
-                  />
-
-                  <Button
-                    type="submit"
-                    className="h-11 w-full bg-gradient-to-br from-violet-400 via-violet-500 to-violet-600 text-sm font-medium shadow-[0_2px_12px_rgba(139,92,246,0.2)] hover:opacity-90 hover:shadow-[0_4px_20px_rgba(139,92,246,0.3)]"
-                    isLoading={loginMutation.isPending}
-                  >
-                    Sign In
-                  </Button>
-                </form>
-              </Form>
-
-              {hasSocialProviders && (
-                <div className="my-6 flex items-center gap-4">
-                  <div className="h-px flex-1 bg-border" />
-                  <span className="text-xs text-text-tertiary">or</span>
-                  <div className="h-px flex-1 bg-border" />
-                </div>
-              )}
-            </>
+                  <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px] bg-white/[0.06]">
+                    {provider.icon}
+                  </span>
+                  {provider.label}
+                  <span className="ml-auto text-[12px] text-muted-foreground">
+                    &rsaquo;
+                  </span>
+                </button>
+              ))}
+            </div>
           )}
 
-          <div className="flex flex-col gap-2">
-            {enabledProviders.map((provider) => (
-              <button
-                key={provider.id}
-                type="button"
-                onClick={() => {
-                  const params = new URLSearchParams();
-                  if (returnTo) params.set("return_to", returnTo);
-                  const qs = params.toString();
-                  const url = `${window.location.origin}/api/v1/auth/social/${encodeURIComponent(provider.id)}${qs ? `?${qs}` : ""}`;
-                  void openExternal(url);
-                }}
-                className="flex h-[46px] cursor-pointer items-center gap-3 rounded-lg border border-border bg-background px-4 text-[13.5px] font-medium text-foreground transition-colors hover:border-border/80 hover:bg-white/[0.03] active:scale-[0.99]"
+          {/* Divider */}
+          {hasSocialProviders && emailAuthEnabled && (
+            <div className="my-6 flex items-center gap-4">
+              <div className="h-px flex-1 bg-border" />
+              <span className="text-xs text-text-tertiary">or</span>
+              <div className="h-px flex-1 bg-border" />
+            </div>
+          )}
+
+          {emailAuthEnabled && (
+            <Form {...loginForm}>
+              <form
+                onSubmit={loginForm.handleSubmit(onLoginSubmit)}
+                className="flex flex-col gap-4"
               >
-                <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-white/[0.06]">
-                  {provider.icon}
-                </span>
-                {provider.label}
-                <span className="ml-auto text-sm text-muted-foreground">
-                  &rsaquo;
-                </span>
-              </button>
-            ))}
-          </div>
+                {loginForm.formState.errors.root && (
+                  <div
+                    role="alert"
+                    className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive"
+                  >
+                    {loginForm.formState.errors.root.message}
+                  </div>
+                )}
+
+                <FormField
+                  control={loginForm.control}
+                  name="email"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Email</FormLabel>
+                      <FormControl>
+                        <Input
+                          type="email"
+                          placeholder="you@example.com"
+                          autoComplete="email"
+                          {...field}
+                          ref={(el) => {
+                            field.ref(el);
+                            (
+                              loginEmailRef as React.MutableRefObject<HTMLInputElement | null>
+                            ).current = el;
+                          }}
+                        />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+
+                <FormField
+                  control={loginForm.control}
+                  name="password"
+                  render={({ field }) => (
+                    <FormItem>
+                      <div className="flex items-center justify-between">
+                        <FormLabel>Password</FormLabel>
+                        <Link
+                          to={"/forgot-password" as string}
+                          className="text-xs font-medium text-nyx-secondary-400 hover:text-nyx-300"
+                        >
+                          Forgot password?
+                        </Link>
+                      </div>
+                      <FormControl>
+                        <Input
+                          type="password"
+                          placeholder="Enter your password"
+                          autoComplete="current-password"
+                          {...field}
+                        />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+
+                <Button
+                  type="submit"
+                  className="mt-1 h-[44px] w-full nyx-gradient-vivid text-[13px] font-medium shadow-[0_2px_12px_rgba(90,42,241,0.25)] hover:opacity-90 hover:shadow-[0_4px_20px_rgba(90,42,241,0.35)]"
+                  isLoading={loginMutation.isPending}
+                >
+                  Sign in
+                </Button>
+              </form>
+            </Form>
+          )}
 
           {/* Footer */}
-          <div className="mt-6 border-t border-border pt-5 text-center text-[13px] text-muted-foreground">
+          <div className="mt-8 text-center text-[13px] text-muted-foreground">
             Don&apos;t have an account?{" "}
             <button
               type="button"
               onClick={() => slideToPanel(1)}
-              className="cursor-pointer font-medium text-violet-400 hover:text-violet-300"
+              className="cursor-pointer font-medium text-foreground underline underline-offset-2 hover:text-nyx-secondary-400"
             >
-              Create account
+              Sign up
             </button>
           </div>
         </div>
@@ -483,20 +477,12 @@ export function AuthFlow({
           style={{ transform: showEmailForm ? "translateX(-50%)" : "translateX(0)" }}
         >
         {/* Register Panel 1 — Method Selection */}
-        <div className="w-1/2 shrink-0 px-7 pt-8 pb-7">
-          <div className="mb-7 text-center">
-            <h1
-              className="font-display text-2xl font-semibold tracking-tight"
-              style={{
-                background: "linear-gradient(180deg, #fff 30%, #a0a0a8 100%)",
-                WebkitBackgroundClip: "text",
-                WebkitTextFillColor: "transparent",
-                backgroundClip: "text",
-              }}
-            >
+        <div className="w-1/2 shrink-0">
+          <div className="mb-8">
+            <h1 className="text-[28px] font-bold tracking-tight" style={{ letterSpacing: "-0.03em" }}>
               Create your account
             </h1>
-            <p className="mt-1.5 text-[13px] text-text-tertiary">
+            <p className="mt-1 text-[13px] text-muted-foreground">
               Start securing your digital identity
             </p>
           </div>
@@ -505,12 +491,12 @@ export function AuthFlow({
           {inviteRequired && (
           <Form {...registerForm}>
             <div className="relative mb-6 pl-9">
-              <div className="absolute left-[11px] top-7 bottom-[-12px] w-px bg-gradient-to-b from-violet-500/10 to-transparent" />
+              <div className="absolute left-[11px] top-7 bottom-[-12px] w-px bg-gradient-to-b from-nyx-500/10 to-transparent" />
               <div
-                className={`absolute left-0 top-0 flex h-6 w-6 items-center justify-center rounded-full border text-[11px] font-semibold transition-colors ${
+                className={`absolute left-0 top-0 flex h-6 w-6 items-center justify-center rounded-full border text-[11px] font-semibold transition-colors duration-300 ${
                   isInviteValid
-                    ? "border-transparent bg-gradient-to-br from-violet-400 via-violet-500 to-violet-600 text-white"
-                    : "border-violet-500/15 bg-violet-500/10 text-violet-400"
+                    ? "border-transparent nyx-gradient-vivid text-white"
+                    : "border-nyx-500/15 bg-nyx-500/10 text-nyx-secondary-400"
                 }`}
               >
                 {isInviteValid ? (
@@ -547,7 +533,7 @@ export function AuthFlow({
                         spellCheck={false}
                         className={`h-12 font-mono text-base tracking-wider ${
                           isInviteValid
-                            ? "border-emerald-400/40 shadow-[0_0_0_3px_rgba(52,211,153,0.08)]"
+                            ? "border-success/40 shadow-[0_0_0_3px_rgba(52,211,153,0.08)]"
                             : ""
                         }`}
                         {...field}
@@ -578,7 +564,7 @@ export function AuthFlow({
                   href="https://discord.gg/QMvcs8UQBW"
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="cursor-pointer font-medium text-violet-400 hover:text-violet-300"
+                  className="cursor-pointer font-medium text-nyx-secondary-400 hover:text-nyx-300"
                 >
                   Join our Discord
                 </a>{" "}
@@ -591,7 +577,7 @@ export function AuthFlow({
           {/* Step 2: Choose Method (becomes Step 1 when invite not required) */}
           <div className={`relative ${inviteRequired ? "pl-9" : ""}`}>
             {inviteRequired && (
-            <div className="absolute left-0 top-0 flex h-6 w-6 items-center justify-center rounded-full border border-violet-500/15 bg-violet-500/10 text-[11px] font-semibold text-violet-400">
+            <div className="absolute left-0 top-0 flex h-6 w-6 items-center justify-center rounded-full border border-nyx-500/15 bg-nyx-500/10 text-[11px] font-semibold text-nyx-secondary-400">
               2
             </div>
             )}
@@ -599,21 +585,16 @@ export function AuthFlow({
               Choose how to sign up
             </p>
 
-            <div className="flex flex-col gap-2">
+            <div className="flex flex-col gap-2.5">
               {enabledProviders.map((provider) => (
                 <button
                   key={provider.id}
                   type="button"
                   onClick={() => handleRegisterSocialLogin(provider.id)}
-                  className="flex h-[46px] cursor-pointer items-center gap-3 rounded-lg border border-border bg-background px-4 text-[13.5px] font-medium text-foreground transition-colors hover:border-border/80 hover:bg-white/[0.03] active:scale-[0.99]"
+                  className="flex h-[44px] w-full cursor-pointer items-center justify-center gap-2.5 rounded-lg border border-border bg-transparent text-[13px] font-medium text-foreground transition-colors duration-200 hover:border-white/[0.15] hover:bg-white/[0.03] active:scale-[0.99]"
                 >
-                  <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-white/[0.06]">
-                    {provider.icon}
-                  </span>
+                  {provider.icon}
                   {provider.label}
-                  <span className="ml-auto text-sm text-muted-foreground">
-                    &rsaquo;
-                  </span>
                 </button>
               ))}
 
@@ -621,38 +602,33 @@ export function AuthFlow({
                 <button
                   type="button"
                   onClick={() => { if (requireInviteCode()) slideToPanel(2); }}
-                  className="flex h-[46px] cursor-pointer items-center gap-3 rounded-lg border border-border bg-background px-4 text-[13.5px] font-medium text-foreground transition-colors hover:border-border/80 hover:bg-white/[0.03] active:scale-[0.99]"
+                  className="flex h-[44px] w-full cursor-pointer items-center justify-center gap-2.5 rounded-lg border border-border bg-transparent text-[13px] font-medium text-foreground transition-colors duration-200 hover:border-white/[0.15] hover:bg-white/[0.03] active:scale-[0.99]"
                 >
-                  <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-violet-500/10">
-                    <svg
-                      className="h-4 w-4 text-violet-400"
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="1.8"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    >
-                      <rect x="2" y="4" width="20" height="16" rx="2" />
-                      <path d="M22 7l-10 6L2 7" />
-                    </svg>
-                  </span>
+                  <svg
+                    className="h-4 w-4"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.8"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <rect x="2" y="4" width="20" height="16" rx="2" />
+                    <path d="M22 7l-10 6L2 7" />
+                  </svg>
                   Continue with Email
-                  <span className="ml-auto text-sm text-muted-foreground">
-                    &rsaquo;
-                  </span>
                 </button>
               )}
             </div>
           </div>
 
           {/* Footer */}
-          <div className="mt-6 border-t border-border pt-5 text-center text-[13px] text-muted-foreground">
+          <div className="mt-8 text-center text-[13px] text-muted-foreground">
             Already have an account?{" "}
             <button
               type="button"
               onClick={() => slideToPanel(0)}
-              className="cursor-pointer font-medium text-violet-400 hover:text-violet-300"
+              className="cursor-pointer font-medium text-foreground underline underline-offset-2 hover:text-nyx-secondary-400"
             >
               Sign in
             </button>
@@ -661,7 +637,7 @@ export function AuthFlow({
 
         {/* Register Panel 2 — Email Registration */}
         <div
-          className="w-1/2 shrink-0 px-7 pt-8 pb-7"
+          className="w-1/2 shrink-0"
           onKeyDown={(e) => {
             if (e.key === "Escape") slideToPanel(1);
           }}
@@ -671,7 +647,7 @@ export function AuthFlow({
             <button
               type="button"
               onClick={() => slideToPanel(1)}
-              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border bg-transparent text-muted-foreground transition-colors hover:border-border/80 hover:bg-white/[0.03] hover:text-foreground"
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border bg-transparent text-muted-foreground transition-colors duration-300 hover:border-border/80 hover:bg-white/[0.03] hover:text-foreground"
               aria-label="Back to sign-up methods"
             >
               <svg
@@ -698,9 +674,9 @@ export function AuthFlow({
 
           {/* Invite code mirror (only when invite gate is enabled) */}
           {inviteRequired && (
-          <div className="mb-5 flex items-center gap-2.5 rounded-lg border border-violet-500/10 bg-violet-500/10 px-3.5 py-2.5">
+          <div className="mb-5 flex items-center gap-2.5 rounded-lg border border-nyx-500/10 bg-nyx-500/10 px-3.5 py-2.5">
             <svg
-              className="h-3.5 w-3.5 shrink-0 text-violet-400"
+              className="h-3.5 w-3.5 shrink-0 text-nyx-secondary-400"
               viewBox="0 0 16 16"
               fill="none"
               stroke="currentColor"
@@ -711,13 +687,13 @@ export function AuthFlow({
               <rect x="3" y="7" width="10" height="7" rx="1.5" />
               <path d="M5 7V5a3 3 0 016 0v2" />
             </svg>
-            <span className="font-mono text-[13px] font-medium tracking-wider text-violet-400">
+            <span className="font-mono text-[13px] font-medium tracking-wider text-nyx-secondary-400">
               {inviteCode.trim().toUpperCase() || "NYX-XXXXXXXX"}
             </span>
             <button
               type="button"
               onClick={() => slideToPanel(1)}
-              className="ml-auto border-0 bg-transparent text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground"
+              className="ml-auto border-0 bg-transparent text-[11px] font-medium text-muted-foreground transition-colors duration-300 hover:text-foreground"
             >
               Edit
             </button>
@@ -733,7 +709,7 @@ export function AuthFlow({
               {registerForm.formState.errors.root && (
                 <div
                   role="alert"
-                  className="rounded-md bg-destructive/10 p-3 text-sm text-destructive"
+                  className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive"
                 >
                   {registerForm.formState.errors.root.message}
                 </div>
@@ -854,7 +830,7 @@ export function AuthFlow({
 
               <Button
                 type="submit"
-                className="mt-0.5 h-11 w-full bg-gradient-to-br from-violet-400 via-violet-500 to-violet-600 text-sm font-medium shadow-[0_2px_12px_rgba(139,92,246,0.2)] hover:opacity-90 hover:shadow-[0_4px_20px_rgba(139,92,246,0.3)]"
+                className="mt-1 h-[44px] w-full nyx-gradient-vivid text-[13px] font-medium shadow-[0_2px_12px_rgba(90,42,241,0.25)] hover:opacity-90 hover:shadow-[0_4px_20px_rgba(90,42,241,0.35)]"
                 isLoading={registerMutation.isPending}
               >
                 Create Account
@@ -863,12 +839,12 @@ export function AuthFlow({
           </Form>
 
           {/* Footer */}
-          <div className="mt-6 border-t border-border pt-5 text-center text-[13px] text-muted-foreground">
+          <div className="mt-8 text-center text-[13px] text-muted-foreground">
             Already have an account?{" "}
             <button
               type="button"
               onClick={() => slideToPanel(0)}
-              className="cursor-pointer font-medium text-violet-400 hover:text-violet-300"
+              className="cursor-pointer font-medium text-foreground underline underline-offset-2 hover:text-nyx-secondary-400"
             >
               Sign in
             </button>

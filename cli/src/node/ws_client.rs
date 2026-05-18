@@ -3096,6 +3096,40 @@ fn process_credential_update(
                 backend,
             )
         }
+        "aws_sigv4" | "gcp_service_account" => {
+            // Cloud-billing credential push (NyxID#716 + Codex review
+            // BLOCKER 6). The credential payload is a JSON blob carried
+            // in `header_value`; the node config stores it on the
+            // `header_value_encrypted` field via the cloud-specific
+            // CredentialConfig constructors, so proxy_executor can later
+            // re-parse it at signing time.
+            let credential_json = match parsed["header_value"].as_str() {
+                Some(v) => v,
+                None => {
+                    tracing::warn!(
+                        slug = %service_slug,
+                        method = %injection_method,
+                        "credential_update missing header_value for cloud billing method"
+                    );
+                    return Some(build_credential_ack(
+                        request_id,
+                        service_slug,
+                        "error",
+                        Some("missing header_value"),
+                    ));
+                }
+            };
+            let target_url = parsed["target_url"].as_str();
+            update_cloud_billing_credential(
+                service_slug,
+                injection_method,
+                credential_json,
+                target_url,
+                credential_sender,
+                config_path,
+                backend,
+            )
+        }
         "none" => {
             // No-auth placeholder push: drops any stored secret for
             // this slug but preserves `target_url`, so the proxy
@@ -3273,6 +3307,52 @@ fn update_no_auth_credential(
 ) -> Result<()> {
     let mut config = NodeConfig::load(config_path)?;
     config.set_no_auth_via(service_slug, target_url, backend)?;
+    config.save(config_path)?;
+
+    let new_store = CredentialStore::from_config_with_backend(&config, backend)?;
+    credential_sender.update(new_store);
+
+    Ok(())
+}
+
+/// Persist an `aws_sigv4` or `gcp_service_account` credential blob
+/// pushed by the backend. `injection_method` selects which
+/// `CredentialConfig` constructor runs; the credential JSON itself is
+/// opaque to the node until proxy_executor re-parses it at signing
+/// time. NyxID#716 + Codex review BLOCKER 6.
+fn update_cloud_billing_credential(
+    service_slug: &str,
+    injection_method: &str,
+    credential_json: &str,
+    target_url: Option<&str>,
+    credential_sender: &Arc<SharedCredentialsSender>,
+    config_path: &std::path::Path,
+    backend: &SecretBackend,
+) -> Result<()> {
+    let mut config = NodeConfig::load(config_path)?;
+    match injection_method {
+        "aws_sigv4" => {
+            config.add_aws_sigv4_credential_via(
+                service_slug,
+                credential_json,
+                target_url,
+                backend,
+            )?;
+        }
+        "gcp_service_account" => {
+            config.add_gcp_service_account_credential_via(
+                service_slug,
+                credential_json,
+                target_url,
+                backend,
+            )?;
+        }
+        other => {
+            return Err(super::error::Error::Config(format!(
+                "update_cloud_billing_credential called with non-cloud injection_method '{other}'"
+            )));
+        }
+    }
     config.save(config_path)?;
 
     let new_store = CredentialStore::from_config_with_backend(&config, backend)?;

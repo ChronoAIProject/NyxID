@@ -47,7 +47,7 @@ export function ClientSecretDialog({
               <p className="text-xs uppercase tracking-wide text-text-tertiary">
                 Client ID
               </p>
-              <div className="flex items-center gap-2 rounded-md border border-border bg-muted px-3 py-2">
+              <div className="flex items-center gap-2 rounded-lg border border-border bg-muted px-3 py-2">
                 <p className="min-w-0 flex-1 truncate font-mono text-xs">
                   {clientId}
                 </p>
@@ -67,7 +67,7 @@ export function ClientSecretDialog({
             <p className="text-xs uppercase tracking-wide text-text-tertiary">
               Client Secret
             </p>
-            <div className="flex items-center gap-2 rounded-md border border-border bg-muted px-3 py-2">
+            <div className="flex items-center gap-2 rounded-lg border border-border bg-muted px-3 py-2">
               <p className="min-w-0 flex-1 truncate font-mono text-xs">
                 {clientSecret}
               </p>
@@ -84,7 +84,7 @@ export function ClientSecretDialog({
           </div>
         </div>
         <DialogFooter>
-          <Button type="button" onClick={() => onOpenChange(false)}>
+          <Button variant="primary" type="button" onClick={() => onOpenChange(false)}>
             I have saved it
           </Button>
         </DialogFooter>

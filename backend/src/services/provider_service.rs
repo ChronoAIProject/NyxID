@@ -1503,6 +1503,187 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
+    // Cloud billing providers (NyxID#716). Pair with the
+    // aws-cost-explorer / gcp-cloud-billing / gcp-bigquery-billing
+    // service seeds below. The credential is stored directly on
+    // UserApiKey (not provider-delegated), so these providers are
+    // mostly catalog metadata + install-instructions for the user.
+    if !slug_exists!("aws-billing") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "aws-billing".to_string(),
+            name: "AWS Billing".to_string(),
+            description: Some(
+                "AWS Cost Explorer and related billing APIs from the management \
+                 (payer) account in an AWS Organization. Credentials must be from \
+                 the management account — linked-account keys cannot read \
+                 consolidated billing."
+                    .to_string(),
+            ),
+            provider_type: "api_key".to_string(),
+            authorization_url: None,
+            token_url: None,
+            revocation_url: None,
+            default_scopes: None,
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: Some(
+                "Create an IAM user in the AWS Organization management account with \
+                 a policy granting `ce:GetCostAndUsage` and \
+                 `ce:GetCostAndUsageWithResources`. Generate an access key for \
+                 that user and supply it as JSON: \
+                 {\"access_key_id\":\"AKIA...\",\"secret_access_key\":\"...\",\
+                 \"region\":\"us-east-1\",\"service\":\"ce\"}. \
+                 The IAM policy itself enforces read-only — NyxID does not \
+                 mediate that boundary."
+                    .to_string(),
+            ),
+            api_key_url: Some(
+                "https://console.aws.amazon.com/iam/home#/users".to_string(),
+            ),
+            icon_url: None,
+            documentation_url: Some(
+                "https://docs.aws.amazon.com/aws-cost-management/latest/APIReference/API_GetCostAndUsage.html"
+                    .to_string(),
+            ),
+            is_active: true,
+            credential_mode: "user".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            requires_gateway_url: false,
+            created_by: "system".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = "aws-billing", "Seeded default provider: AWS Billing");
+        seeded_count += 1;
+    }
+
+    if !slug_exists!("gcp-billing") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "gcp-billing".to_string(),
+            name: "GCP Cloud Billing".to_string(),
+            description: Some(
+                "GCP Cloud Billing API — billing account metadata, project \
+                 associations, SKU catalog. Authenticates via a service-account \
+                 JSON key."
+                    .to_string(),
+            ),
+            provider_type: "api_key".to_string(),
+            authorization_url: None,
+            token_url: None,
+            revocation_url: None,
+            default_scopes: None,
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: Some(
+                "Create a service account with `roles/billing.viewer` (org or \
+                 billing-account scope) plus `roles/bigquery.dataViewer` on the \
+                 billing export dataset and `roles/bigquery.jobUser` on the \
+                 project. Generate a JSON key and paste its entire content as \
+                 the credential. The SA's IAM roles enforce read-only — NyxID \
+                 does not mediate that boundary."
+                    .to_string(),
+            ),
+            api_key_url: Some(
+                "https://console.cloud.google.com/iam-admin/serviceaccounts".to_string(),
+            ),
+            icon_url: None,
+            documentation_url: Some(
+                "https://cloud.google.com/billing/docs/how-to/export-data-bigquery-tables/standard-usage"
+                    .to_string(),
+            ),
+            is_active: true,
+            credential_mode: "user".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            requires_gateway_url: false,
+            created_by: "system".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        collection.insert_one(&provider).await?;
+        tracing::info!(
+            slug = "gcp-billing",
+            "Seeded default provider: GCP Cloud Billing"
+        );
+        seeded_count += 1;
+    }
+
+    if !slug_exists!("gcp-bigquery") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "gcp-bigquery".to_string(),
+            name: "GCP BigQuery (Billing Export)".to_string(),
+            description: Some(
+                "GCP BigQuery — used here to query the billing export dataset \
+                 for line-item cost data. Same SA-JSON credential shape as \
+                 gcp-billing; the dataset itself must already be created via \
+                 GCP's billing-export setup."
+                    .to_string(),
+            ),
+            provider_type: "api_key".to_string(),
+            authorization_url: None,
+            token_url: None,
+            revocation_url: None,
+            default_scopes: None,
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: Some(
+                "Reuse the service-account JSON key from gcp-billing (the IAM \
+                 roles needed include `roles/billing.viewer` plus \
+                 `roles/bigquery.dataViewer` on the billing export dataset and \
+                 `roles/bigquery.jobUser` on the host project). Paste the \
+                 full JSON content as the credential."
+                    .to_string(),
+            ),
+            api_key_url: Some(
+                "https://console.cloud.google.com/iam-admin/serviceaccounts".to_string(),
+            ),
+            icon_url: None,
+            documentation_url: Some(
+                "https://cloud.google.com/billing/docs/how-to/bq-examples".to_string(),
+            ),
+            is_active: true,
+            credential_mode: "user".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            requires_gateway_url: false,
+            created_by: "system".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        collection.insert_one(&provider).await?;
+        tracing::info!(
+            slug = "gcp-bigquery",
+            "Seeded default provider: GCP BigQuery"
+        );
+        seeded_count += 1;
+    }
+
     if seeded_count > 0 {
         tracing::info!(count = seeded_count, "Default provider seeding complete");
     }
@@ -2010,6 +2191,66 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         service_auth_method: None,
         service_auth_key_name: None,
         description: None,
+        default_request_headers: None,
+    },
+    // Cloud-billing catalog entries (NyxID#716). All three use direct
+    // (non-delegated) credential injection so no ServiceProviderRequirement
+    // is created — the proxy signs requests with the stored IAM access
+    // key (AWS) or service-account JSON (GCP).
+    DefaultServiceSeed {
+        provider_slug: "aws-billing",
+        service_slug: "aws-cost-explorer",
+        service_name: "AWS Cost Explorer",
+        // Cost Explorer is a single-region service — every request
+        // goes to us-east-1 regardless of where the workload runs.
+        base_url: "https://ce.us-east-1.amazonaws.com",
+        injection_method: "header",
+        injection_key: "Authorization",
+        service_auth_method: Some("aws_sigv4"),
+        service_auth_key_name: None,
+        description: Some(
+            "AWS Cost Explorer (GetCostAndUsage / GetCostAndUsageWithResources) for \
+             consolidated billing visibility across the AWS Organization. Must be \
+             called with management/payer account credentials — linked-account \
+             keys return AccessDenied. Costs $0.01 per paginated request, so \
+             cache aggressively.",
+        ),
+        default_request_headers: None,
+    },
+    DefaultServiceSeed {
+        provider_slug: "gcp-billing",
+        service_slug: "gcp-cloud-billing",
+        service_name: "GCP Cloud Billing API",
+        base_url: "https://cloudbilling.googleapis.com",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: Some("gcp_service_account"),
+        service_auth_key_name: None,
+        description: Some(
+            "GCP Cloud Billing REST API — billing-account metadata, project-to-\
+             billing-account associations, SKUs, and pricing catalog. NOTE: this \
+             API does NOT expose historical cost data; for spend-by-project / day \
+             queries use gcp-bigquery-billing against the billing export dataset.",
+        ),
+        default_request_headers: None,
+    },
+    DefaultServiceSeed {
+        provider_slug: "gcp-bigquery",
+        service_slug: "gcp-bigquery-billing",
+        service_name: "GCP BigQuery (Billing Export)",
+        base_url: "https://bigquery.googleapis.com",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: Some("gcp_service_account"),
+        service_auth_key_name: None,
+        description: Some(
+            "GCP BigQuery — used to query the billing export dataset \
+             (gcp_billing_export_v1_<billing_account_id>) for actual cost line \
+             items grouped by project / label / SKU / day. POST SQL queries to \
+             /bigquery/v2/projects/<project_id>/queries; the same service-account \
+             credential as gcp-cloud-billing works for both because the default \
+             token scopes cover both APIs.",
+        ),
         default_request_headers: None,
     },
 ];

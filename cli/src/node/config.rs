@@ -289,6 +289,63 @@ impl CredentialConfig {
             oauth_client_id_param_name: None,
         }
     }
+
+    /// Create an AWS SigV4 credential config. The encrypted JSON blob
+    /// (access_key_id / secret_access_key / region / service) lives in
+    /// `header_value_encrypted` to reuse the existing TOML schema; on
+    /// the keychain backend `credential_json_encrypted` is `None` and
+    /// the credential lives in the OS keyring. NyxID#716.
+    pub fn new_aws_sigv4(
+        credential_json_encrypted: Option<String>,
+        target_url: Option<String>,
+    ) -> Self {
+        Self {
+            injection_method: "aws_sigv4".to_string(),
+            target_url,
+            header_name: None,
+            header_value_encrypted: credential_json_encrypted,
+            param_name: None,
+            param_value_encrypted: None,
+            oauth_managed: false,
+            oauth_token_url: None,
+            oauth_access_token_encrypted: None,
+            oauth_refresh_token_encrypted: None,
+            oauth_token_expires_at: None,
+            oauth_client_id_encrypted: None,
+            oauth_client_secret_encrypted: None,
+            oauth_scopes: None,
+            oauth_token_endpoint_auth_method: None,
+            oauth_client_id_param_name: None,
+        }
+    }
+
+    /// Create a GCP service-account credential config. The encrypted SA
+    /// JSON key file content lives in `header_value_encrypted` for
+    /// file-backed nodes; on the keychain backend the value is `None`
+    /// and the credential lives in the OS keyring. NyxID#716.
+    pub fn new_gcp_service_account(
+        credential_json_encrypted: Option<String>,
+        target_url: Option<String>,
+    ) -> Self {
+        Self {
+            injection_method: "gcp_service_account".to_string(),
+            target_url,
+            header_name: None,
+            header_value_encrypted: credential_json_encrypted,
+            param_name: None,
+            param_value_encrypted: None,
+            oauth_managed: false,
+            oauth_token_url: None,
+            oauth_access_token_encrypted: None,
+            oauth_refresh_token_encrypted: None,
+            oauth_token_expires_at: None,
+            oauth_client_id_encrypted: None,
+            oauth_client_secret_encrypted: None,
+            oauth_scopes: None,
+            oauth_token_endpoint_auth_method: None,
+            oauth_client_id_param_name: None,
+        }
+    }
 }
 
 impl NodeConfig {
@@ -510,6 +567,46 @@ impl NodeConfig {
             )));
         }
         backend.delete_credential(service_slug)?;
+        Ok(())
+    }
+
+    /// Add an AWS SigV4 credential using the configured secret
+    /// backend. The encrypted blob is the JSON credential payload —
+    /// see `nyxid_cloud_auth::aws_sigv4::AwsCredentials`. NyxID#716 +
+    /// Codex review BLOCKER 6.
+    pub fn add_aws_sigv4_credential_via(
+        &mut self,
+        service_slug: &str,
+        credential_json: &str,
+        target_url: Option<&str>,
+        backend: &SecretBackend,
+    ) -> Result<()> {
+        let encrypted = backend.store_credential_value(service_slug, credential_json)?;
+        let resolved_target_url = self.resolve_target_url(service_slug, target_url);
+        self.credentials.insert(
+            service_slug.to_string(),
+            CredentialConfig::new_aws_sigv4(encrypted, resolved_target_url),
+        );
+        Ok(())
+    }
+
+    /// Add a GCP service-account credential using the configured
+    /// secret backend. The encrypted blob is the SA JSON key file
+    /// content — see `nyxid_cloud_auth::gcp_oauth::GcpServiceAccountKey`.
+    /// NyxID#716 + Codex review BLOCKER 6.
+    pub fn add_gcp_service_account_credential_via(
+        &mut self,
+        service_slug: &str,
+        credential_json: &str,
+        target_url: Option<&str>,
+        backend: &SecretBackend,
+    ) -> Result<()> {
+        let encrypted = backend.store_credential_value(service_slug, credential_json)?;
+        let resolved_target_url = self.resolve_target_url(service_slug, target_url);
+        self.credentials.insert(
+            service_slug.to_string(),
+            CredentialConfig::new_gcp_service_account(encrypted, resolved_target_url),
+        );
         Ok(())
     }
 

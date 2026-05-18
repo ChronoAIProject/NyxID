@@ -11,7 +11,7 @@ import {
 import { ApiError, api } from "@/lib/api-client";
 import { hardRedirect } from "@/lib/navigation";
 import { copyToClipboard } from "@/lib/utils";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { OrgScopeSelect } from "@/components/shared/org-scope-select";
@@ -20,6 +20,7 @@ import {
   Dialog,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
@@ -87,8 +88,75 @@ const AUTH_METHOD_DEFAULTS: Record<string, string> = {
   body: "app_secret",
   bot_bearer: "Authorization",
   token_exchange: "",
+  aws_sigv4: "",
+  gcp_service_account: "",
   none: "",
 };
+
+// AWS SigV4 credential is a JSON object with these fields, stored on
+// the backend as the encrypted `credential` blob. `session_token` is
+// optional for callers using STS temporary credentials (Codex review
+// REC 9). Default region+service cover the AWS Cost Explorer common
+// case; users with other AWS services can override.
+interface AwsSigv4Fields {
+  readonly access_key_id: string;
+  readonly secret_access_key: string;
+  readonly region: string;
+  readonly service: string;
+  readonly session_token: string;
+}
+
+const AWS_SIGV4_DEFAULTS: AwsSigv4Fields = {
+  access_key_id: "",
+  secret_access_key: "",
+  region: "us-east-1",
+  service: "ce",
+  session_token: "",
+};
+
+function parseAwsSigv4Credential(credential: string): AwsSigv4Fields {
+  if (!credential) return AWS_SIGV4_DEFAULTS;
+  try {
+    const parsed = JSON.parse(credential);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return {
+        access_key_id: typeof parsed.access_key_id === "string" ? parsed.access_key_id : "",
+        secret_access_key:
+          typeof parsed.secret_access_key === "string" ? parsed.secret_access_key : "",
+        region: typeof parsed.region === "string" ? parsed.region : AWS_SIGV4_DEFAULTS.region,
+        service: typeof parsed.service === "string" ? parsed.service : AWS_SIGV4_DEFAULTS.service,
+        session_token:
+          typeof parsed.session_token === "string" ? parsed.session_token : "",
+      };
+    }
+  } catch {
+    // Fall through to defaults on parse error.
+  }
+  return AWS_SIGV4_DEFAULTS;
+}
+
+function composeAwsSigv4Credential(fields: AwsSigv4Fields): string {
+  const trimmedToken = fields.session_token.trim();
+  const anyPresent =
+    fields.access_key_id.trim() ||
+    fields.secret_access_key.trim() ||
+    fields.region.trim() !== AWS_SIGV4_DEFAULTS.region ||
+    fields.service.trim() !== AWS_SIGV4_DEFAULTS.service ||
+    trimmedToken;
+  if (!anyPresent) return "";
+  const payload: Record<string, string> = {
+    access_key_id: fields.access_key_id.trim(),
+    secret_access_key: fields.secret_access_key.trim(),
+    region: fields.region.trim() || AWS_SIGV4_DEFAULTS.region,
+    service: fields.service.trim() || AWS_SIGV4_DEFAULTS.service,
+  };
+  // Only include `session_token` when the user typed one — STS
+  // temporary credentials need it, long-lived IAM users don't.
+  if (trimmedToken) {
+    payload.session_token = trimmedToken;
+  }
+  return JSON.stringify(payload);
+}
 
 // Derive a user-friendly credential field label/placeholder from the auth
 // method + key name. Prevents confusing "API Key / Credential" + "sk-..." for
@@ -114,6 +182,18 @@ function getCredentialFieldMeta(
   }
   if (authMethod === "basic") {
     return { label: "Username:Password", placeholder: "user:pass" };
+  }
+  if (authMethod === "aws_sigv4") {
+    return {
+      label: "AWS Credentials",
+      placeholder: "Use the structured fields below",
+    };
+  }
+  if (authMethod === "gcp_service_account") {
+    return {
+      label: "Service Account JSON",
+      placeholder: "Paste the full service-account JSON key",
+    };
   }
   return { label: "API Key / Credential", placeholder: "sk-..." };
 }
@@ -168,7 +248,9 @@ function shouldShowAuthKeyName(authMethod: string): boolean {
     authMethod !== "oidc" &&
     authMethod !== "oauth2" &&
     authMethod !== "bot_bearer" &&
-    authMethod !== "token_exchange"
+    authMethod !== "token_exchange" &&
+    authMethod !== "aws_sigv4" &&
+    authMethod !== "gcp_service_account"
   );
 }
 
@@ -205,7 +287,7 @@ function CopyableCode({ children }: { readonly children: string }) {
 
   return (
     <div className="relative">
-      <pre className="overflow-x-auto rounded-lg bg-muted p-3 pr-10 font-mono text-xs leading-relaxed">
+      <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-xs leading-relaxed">
         {children}
       </pre>
       <Button
@@ -260,11 +342,11 @@ function CatalogGrid({
         />
       </div>
 
-      <div className="grid max-h-[380px] grid-cols-2 gap-3 overflow-y-auto pr-1 sm:grid-cols-3">
+      <div className="grid grid-cols-2 gap-3 md:max-h-[380px] md:overflow-y-auto md:pr-1 sm:grid-cols-3">
         <button
           type="button"
           onClick={onCustom}
-          className="flex min-h-[7.5rem] flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-border p-4 text-center transition-colors hover:border-primary/40 hover:bg-accent/40"
+          className="flex min-h-[7.5rem] flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-border p-4 text-center transition-colors duration-300 hover:border-white/[0.15] hover:bg-accent/40"
         >
           <Globe className="h-5 w-5 text-muted-foreground" />
           <span className="text-xs font-medium">Custom Endpoint</span>
@@ -273,7 +355,7 @@ function CatalogGrid({
         <button
           type="button"
           onClick={onCustomSsh}
-          className="flex min-h-[7.5rem] flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-border p-4 text-center transition-colors hover:border-primary/40 hover:bg-accent/40"
+          className="flex min-h-[7.5rem] flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-border p-4 text-center transition-colors duration-300 hover:border-white/[0.15] hover:bg-accent/40"
         >
           <Terminal className="h-5 w-5 text-muted-foreground" />
           <span className="text-xs font-medium">Custom SSH</span>
@@ -284,9 +366,9 @@ function CatalogGrid({
             key={entry.slug}
             type="button"
             onClick={() => onSelect(entry)}
-            className="flex min-h-[7.5rem] flex-col items-start gap-1.5 rounded-lg border border-border p-4 text-left transition-colors hover:border-primary/40 hover:bg-accent/40"
+            className="flex min-h-[7.5rem] flex-col items-start gap-1.5 rounded-lg border border-border p-4 text-left transition-colors duration-300 hover:border-white/[0.15] hover:bg-accent/40"
           >
-            <span className="line-clamp-1 w-full text-sm font-medium">
+            <span className="line-clamp-1 w-full text-[12px] font-medium">
               {entry.name}
             </span>
             <span className="line-clamp-2 w-full text-[11px] leading-snug text-muted-foreground">
@@ -299,7 +381,7 @@ function CatalogGrid({
                 </Badge>
               )}
               {entry.requires_gateway_url && (
-                <Badge variant="outline" className="text-[10px]">
+                <Badge variant="secondary" className="text-[10px]">
                   URL required
                 </Badge>
               )}
@@ -366,7 +448,7 @@ function RoutingStep({
 
       {catalogEntry && (
         <div className="rounded-lg border border-border bg-muted/50 p-3">
-          <p className="text-sm font-medium">{catalogEntry.name}</p>
+          <p className="text-[12px] font-medium">{catalogEntry.name}</p>
           {catalogEntry.description && (
             <p className="text-xs text-muted-foreground">
               {catalogEntry.description}
@@ -386,10 +468,10 @@ function RoutingStep({
                 setRoutingChoice("direct");
                 onChange({ nodeId: "" });
               }}
-              className={`flex flex-col items-center gap-2 rounded-lg border-2 p-4 text-center transition-colors ${
+              className={`flex flex-col items-center gap-2 rounded-lg border-2 p-4 text-center transition-colors duration-300 ${
                 routingChoice === "direct"
                   ? "border-primary bg-primary/5"
-                  : "border-border hover:border-primary/40"
+                  : "border-border hover:border-white/[0.15]"
               }`}
             >
               <Globe className="h-5 w-5" />
@@ -401,10 +483,10 @@ function RoutingStep({
             <button
               type="button"
               onClick={() => setRoutingChoice("node")}
-              className={`flex flex-col items-center gap-2 rounded-lg border-2 p-4 text-center transition-colors ${
+              className={`flex flex-col items-center gap-2 rounded-lg border-2 p-4 text-center transition-colors duration-300 ${
                 routingChoice === "node"
                   ? "border-primary bg-primary/5"
-                  : "border-border hover:border-primary/40"
+                  : "border-border hover:border-white/[0.15]"
               }`}
             >
               <Server className="h-5 w-5" />
@@ -415,7 +497,7 @@ function RoutingStep({
             </button>
           </div>
         ) : (
-          <p className="text-sm text-muted-foreground">
+          <p className="text-[12px] text-muted-foreground">
             SSH services must be routed through a credential node.
           </p>
         )}
@@ -456,6 +538,7 @@ function RoutingStep({
       </div>
 
       <Button
+        variant="primary"
         className="w-full"
         onClick={handleNext}
         disabled={routingChoice === "node" && !form.nodeId}
@@ -508,7 +591,7 @@ function KeyForm({
 
       {catalogEntry && (
         <div className="rounded-lg border border-border bg-muted/50 p-3">
-          <p className="text-sm font-medium">{catalogEntry.name}</p>
+          <p className="text-[12px] font-medium">{catalogEntry.name}</p>
           {catalogEntry.description && (
             <p className="text-xs text-muted-foreground">
               {catalogEntry.description}
@@ -596,6 +679,104 @@ function KeyForm({
               </>
             );
           })()
+        ) : form.authMethod === "aws_sigv4" ? (
+          (() => {
+            const fields = parseAwsSigv4Credential(form.credential);
+            const update = (patch: Partial<AwsSigv4Fields>) =>
+              onChange({
+                credential: composeAwsSigv4Credential({ ...fields, ...patch }),
+              });
+            return (
+              <>
+                <div className="space-y-1.5">
+                  <Label htmlFor="add-key-aws-akid">
+                    Access Key ID
+                    {requiresCredential && <span className="text-destructive"> *</span>}
+                  </Label>
+                  <Input
+                    id="add-key-aws-akid"
+                    placeholder="AKIA..."
+                    value={fields.access_key_id}
+                    onChange={(e) => update({ access_key_id: e.target.value })}
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="add-key-aws-secret">
+                    Secret Access Key
+                    {requiresCredential && <span className="text-destructive"> *</span>}
+                  </Label>
+                  <Input
+                    id="add-key-aws-secret"
+                    type="password"
+                    placeholder="40-character secret"
+                    value={fields.secret_access_key}
+                    onChange={(e) => update({ secret_access_key: e.target.value })}
+                  />
+                  <p className="text-[11px] text-muted-foreground">
+                    Stored encrypted. The IAM policy attached to this key
+                    enforces read-only — NyxID never elevates it.
+                  </p>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="add-key-aws-region">Region</Label>
+                    <Input
+                      id="add-key-aws-region"
+                      placeholder="us-east-1"
+                      value={fields.region}
+                      onChange={(e) => update({ region: e.target.value })}
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="add-key-aws-service">Service</Label>
+                    <Input
+                      id="add-key-aws-service"
+                      placeholder="ce"
+                      value={fields.service}
+                      onChange={(e) => update({ service: e.target.value })}
+                    />
+                  </div>
+                </div>
+                <p className="text-[11px] text-muted-foreground">
+                  Cost Explorer is single-region (us-east-1, service=ce).
+                  For other AWS services, change `service` to match
+                  (e.g. `s3`, `dynamodb`).
+                </p>
+                <div className="space-y-1.5">
+                  <Label htmlFor="add-key-aws-session-token">
+                    Session Token <span className="text-text-tertiary">(optional, for STS temporary credentials)</span>
+                  </Label>
+                  <Input
+                    id="add-key-aws-session-token"
+                    type="password"
+                    placeholder="Leave blank for long-lived IAM user credentials"
+                    value={fields.session_token}
+                    onChange={(e) => update({ session_token: e.target.value })}
+                  />
+                </div>
+              </>
+            );
+          })()
+        ) : form.authMethod === "gcp_service_account" ? (
+          <div className="space-y-1.5">
+            <Label htmlFor="add-key-gcp-json">
+              Service Account JSON
+              {requiresCredential && <span className="text-destructive"> *</span>}
+            </Label>
+            <textarea
+              id="add-key-gcp-json"
+              className="flex min-h-[160px] w-full rounded-[10px] border border-input bg-transparent px-[14px] py-2 font-mono text-[12px] text-foreground ring-offset-background transition-colors placeholder:text-text-tertiary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+              placeholder='{ "type": "service_account", "project_id": "...", "private_key": "-----BEGIN ...", "client_email": "..." }'
+              value={form.credential}
+              onChange={(e) => onChange({ credential: e.target.value })}
+              spellCheck={false}
+            />
+            <p className="text-[11px] text-muted-foreground">
+              Paste the entire JSON content of the service-account key file.
+              Stored encrypted; NyxID mints short-lived access tokens from it
+              on demand and caches them in memory.
+            </p>
+          </div>
         ) : (
           <div className="space-y-1.5">
             <Label htmlFor="add-key-credential">
@@ -724,18 +905,21 @@ function KeyForm({
         )}
       </div>
 
-      <Button
-        className="w-full"
-        onClick={onSubmit}
-        disabled={
-          isPending ||
-          !form.label.trim() ||
-          (requiresCredential && !form.credential.trim()) ||
-          (requiresEndpoint && !form.endpointUrl.trim())
-        }
-      >
-        {isPending ? "Creating..." : "Create Service"}
-      </Button>
+      <DialogFooter>
+        <Button
+          variant="primary"
+          className="w-full"
+          onClick={onSubmit}
+          disabled={
+            isPending ||
+            !form.label.trim() ||
+            (requiresCredential && !form.credential.trim()) ||
+            (requiresEndpoint && !form.endpointUrl.trim())
+          }
+        >
+          {isPending ? "Creating..." : "Create Service"}
+        </Button>
+      </DialogFooter>
     </div>
   );
 }
@@ -949,7 +1133,7 @@ function NodeSetupStep({
       <div className="rounded-lg border border-border bg-muted/50 p-4 space-y-3">
         <div className="flex items-center gap-2">
           <Terminal className="h-4 w-4 text-primary" />
-          <p className="text-sm font-medium">Node Setup Instructions</p>
+          <p className="text-[12px] font-medium">Node Setup Instructions</p>
         </div>
 
         {isSsh ? (
@@ -992,20 +1176,23 @@ function NodeSetupStep({
         )}
       </div>
 
-      <Button
-        className="w-full"
-        onClick={onSubmit}
-        disabled={
-          isPending ||
-          !form.label.trim() ||
-          (isCustom &&
-            isSsh &&
-            form.sshCertificateAuth &&
-            !form.sshPrincipals.trim())
-        }
-      >
-        {isPending ? "Creating..." : "Create Service"}
-      </Button>
+      <DialogFooter>
+        <Button
+          variant="primary"
+          className="w-full"
+          onClick={onSubmit}
+          disabled={
+            isPending ||
+            !form.label.trim() ||
+            (isCustom &&
+              isSsh &&
+              form.sshCertificateAuth &&
+              !form.sshPrincipals.trim())
+          }
+        >
+          {isPending ? "Creating..." : "Create Service"}
+        </Button>
+      </DialogFooter>
     </div>
   );
 }
@@ -1102,7 +1289,7 @@ function OAuthStep({
       </button>
 
       <div className="rounded-lg border border-border bg-muted/50 p-3">
-        <p className="text-sm font-medium">{catalogEntry.name}</p>
+        <p className="text-[12px] font-medium">{catalogEntry.name}</p>
         {catalogEntry.description && (
           <p className="text-xs text-muted-foreground">
             {catalogEntry.description}
@@ -1110,7 +1297,7 @@ function OAuthStep({
         )}
       </div>
 
-      <p className="text-sm text-muted-foreground">
+      <p className="text-[12px] text-muted-foreground">
         This service uses OAuth to authenticate. Click the button below to
         connect your account.
       </p>
@@ -1134,24 +1321,25 @@ function OAuthStep({
       </div>
 
       {error && (
-        <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
+        <div className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive">
           {error}
         </div>
       )}
 
       <Button
+        variant="primary"
         className="w-full"
         onClick={() => void handleConnect()}
         disabled={initiateOAuth.isPending}
       >
         {initiateOAuth.isPending ? (
           <>
-            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            <ButtonIcon><Loader2 className="h-3 w-3 animate-spin" /></ButtonIcon>
             Connecting...
           </>
         ) : (
           <>
-            <ExternalLink className="mr-2 h-4 w-4" />
+            <ButtonIcon><ExternalLink className="h-4 w-4" /></ButtonIcon>
             Connect with {catalogEntry.name}
           </>
         )}
@@ -1414,7 +1602,7 @@ function DeviceCodeStep({
         </button>
 
         <div className="rounded-lg border border-border bg-muted/50 p-3">
-          <p className="text-sm font-medium">{catalogEntry.name}</p>
+          <p className="text-[12px] font-medium">{catalogEntry.name}</p>
           {catalogEntry.description && (
             <p className="text-xs text-muted-foreground">
               {catalogEntry.description}
@@ -1422,7 +1610,7 @@ function DeviceCodeStep({
           )}
         </div>
 
-        <p className="text-sm text-muted-foreground">
+        <p className="text-[12px] text-muted-foreground">
           This service uses a device code to authenticate. Click continue to
           request a code.
         </p>
@@ -1452,7 +1640,7 @@ function DeviceCodeStep({
           </p>
         )}
 
-        <Button className="w-full" onClick={() => void handleInitiate()}>
+        <Button variant="primary" className="w-full" onClick={() => void handleInitiate()}>
           Continue
         </Button>
       </div>
@@ -1472,7 +1660,7 @@ function DeviceCodeStep({
         </button>
         <div className="flex flex-col items-center gap-3 py-8">
           <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-          <p className="text-sm text-muted-foreground">
+          <p className="text-[12px] text-muted-foreground">
             Requesting code from {catalogEntry.name}...
           </p>
         </div>
@@ -1484,12 +1672,13 @@ function DeviceCodeStep({
     return (
       <div className="space-y-4">
         <div className="flex flex-col items-center gap-3 py-4">
-          <CheckCircle2 className="h-10 w-10 text-success" />
-          <p className="text-sm text-center text-muted-foreground">
+          <CheckCircle2 className="h-8 w-8 text-success" />
+          <p className="text-[12px] text-center text-muted-foreground">
             Your {catalogEntry.name} account has been connected successfully.
           </p>
         </div>
         <Button
+          variant="primary"
           className="w-full"
           onClick={() => {
             if (createdKeyId) {
@@ -1516,14 +1705,14 @@ function DeviceCodeStep({
           Back
         </button>
         <div className="flex flex-col items-center gap-3 py-4">
-          <AlertCircle className="h-10 w-10 text-destructive" />
-          <p className="text-sm text-destructive text-center">{errorMessage}</p>
+          <AlertCircle className="h-8 w-8 text-destructive" />
+          <p className="text-[12px] text-destructive text-center">{errorMessage}</p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex justify-end gap-2">
           <Button variant="outline" className="flex-1" onClick={onBack}>
             Cancel
           </Button>
-          <Button className="flex-1" onClick={handleRetry}>
+          <Button variant="primary" className="flex-1" onClick={handleRetry}>
             Try Again
           </Button>
         </div>
@@ -1554,7 +1743,6 @@ function DeviceCodeStep({
           <Button
             type="button"
             variant="ghost"
-            size="sm"
             onClick={handleCopyCode}
             className="h-8 w-8 p-0"
             title="Copy code"
@@ -1567,13 +1755,13 @@ function DeviceCodeStep({
       <div className="flex justify-center">
         <Button type="button" variant="default" size="lg" asChild>
           <a href={verificationUri} target="_blank" rel="noopener noreferrer">
-            <ExternalLink className="mr-2 h-4 w-4" />
+            <ButtonIcon><ExternalLink className="h-4 w-4" /></ButtonIcon>
             Open {catalogEntry.name} Authentication
           </a>
         </Button>
       </div>
 
-      <div className="rounded-md bg-muted p-3 text-sm text-muted-foreground">
+      <div className="rounded-lg bg-muted p-3 text-[12px] text-muted-foreground">
         <ol className="list-decimal list-inside space-y-1">
           <li>Click the link above to open the authentication page</li>
           <li>Enter the code shown above</li>
@@ -1646,7 +1834,7 @@ function OAuthCredentialsStep({
       </button>
 
       <div className="rounded-lg border border-border bg-muted/50 p-3">
-        <p className="text-sm font-medium">{catalogEntry.name}</p>
+        <p className="text-[12px] font-medium">{catalogEntry.name}</p>
         <p className="text-xs text-muted-foreground">
           This service requires your own OAuth app credentials.
         </p>
@@ -1667,7 +1855,7 @@ function OAuthCredentialsStep({
       <TwitterOAuthGuidance slug={catalogEntry.slug} />
 
       {error && (
-        <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
+        <div className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive">
           {error}
         </div>
       )}
@@ -1700,6 +1888,7 @@ function OAuthCredentialsStep({
       </div>
 
       <Button
+        variant="primary"
         className="w-full"
         onClick={handleSave}
         disabled={!clientId.trim()}
@@ -1832,7 +2021,7 @@ export function AddKeyDialog({
     if (!match) return;
     appliedPrefillRef.current = prefillSlug;
     handleSelectCatalog(match);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- handleSelectCatalog is stable via the ref guard
   }, [open, prefillSlug, catalogEntries]);
 
   function handleSelectCustom() {
@@ -2097,7 +2286,7 @@ export function AddKeyDialog({
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent className="max-w-lg">
+      <DialogContent>
         <DialogHeader>
           <DialogTitle>{dialogTitle()}</DialogTitle>
           <DialogDescription>{dialogDescription()}</DialogDescription>

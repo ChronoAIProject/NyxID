@@ -6,10 +6,11 @@ interface RoleBadgeProps {
   readonly className?: string;
 }
 
-const ROLE_LABEL: Record<OrgRole, string> = {
+const ROLE_LABEL: Record<string, string> = {
   admin: "Admin",
   member: "Member",
   viewer: "Viewer",
+  owner: "Owner",
 };
 
 /**
@@ -17,16 +18,21 @@ const ROLE_LABEL: Record<OrgRole, string> = {
  * they adapt to light/dark themes.
  */
 export function RoleBadge({ role, className }: RoleBadgeProps) {
-  const variant: "info" | "success" | "secondary" =
-    role === "admin"
-      ? "info"
-      : role === "member"
-        ? "success"
-        : "secondary";
+  const label = ROLE_LABEL[role] ?? role;
+  if (!label) return null;
+
+  const variant: "accent" | "info" | "success" | "secondary" =
+    role === "owner"
+      ? "accent"
+      : role === "admin"
+        ? "info"
+        : role === "member"
+          ? "success"
+          : "secondary";
 
   return (
     <Badge variant={variant} className={className}>
-      {ROLE_LABEL[role]}
+      {label}
     </Badge>
   );
 }

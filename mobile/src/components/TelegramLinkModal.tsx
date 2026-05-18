@@ -10,6 +10,7 @@ import {
 } from "react-native";
 import * as Clipboard from "expo-clipboard";
 import Svg, { Path } from "react-native-svg";
+import { Copy, Check } from "lucide-react-native";
 import { useTheme } from "../theme/ThemeContext";
 import type { ThemeColors } from "../theme/mobileTheme";
 import { TOUCH_TARGET, radius, spacing, typeScale } from "../theme/designTokens";
@@ -25,27 +26,11 @@ type TelegramLinkModalProps = {
 const POLL_INTERVAL_MS = 3000;
 const POLL_TIMEOUT_MS = 60000;
 
+// Telegram remains a custom brand-icon SVG — lucide doesn't ship brand logos.
 function TelegramIcon() {
   return (
     <Svg width={18} height={18} viewBox="0 0 24 24" fill="#FFFFFF">
       <Path d="M11.944 0A12 12 0 1 0 24 12.056A12.014 12.014 0 0 0 11.944 0Zm5.654 8.22l-1.69 7.955c-.128.574-.462.713-.937.444l-2.586-1.906l-1.248 1.2a.65.65 0 0 1-.52.254l.186-2.632l4.789-4.326c.208-.186-.045-.29-.324-.103L9.3 13.264l-2.548-.795c-.554-.174-.565-.554.116-.82l9.952-3.836c.462-.166.866.113.716.82Z" />
-    </Svg>
-  );
-}
-
-function CopyIcon({ color }: { color: string }) {
-  return (
-    <Svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-      <Path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" />
-      <Path d="M15 2H9a1 1 0 0 0-1 1v2a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V3a1 1 0 0 0-1-1Z" />
-    </Svg>
-  );
-}
-
-function CheckIcon({ color }: { color: string }) {
-  return (
-    <Svg width={18} height={18} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round">
-      <Path d="M20 6L9 17l-5-5" />
     </Svg>
   );
 }
@@ -191,7 +176,7 @@ export function TelegramLinkModal({ visible, onDismiss, onConnected }: TelegramL
           {/* Connected state */}
           {connected && (
             <View style={styles.centerWrap}>
-              <CheckIcon color={colors.success} />
+              <Check size={18} color={colors.successTone.text} strokeWidth={2.5} />
               <Text style={styles.successText}>Telegram connected!</Text>
             </View>
           )}
@@ -226,7 +211,7 @@ export function TelegramLinkModal({ visible, onDismiss, onConnected }: TelegramL
               <View style={styles.codeRow}>
                 <Text style={styles.codeText} selectable>/start {linkInfo.link_code}</Text>
                 <Pressable style={styles.copyBtn} onPress={() => void handleCopy()}>
-                  {copied ? <CheckIcon color={colors.success} /> : <CopyIcon color={colors.textSecondary} />}
+                  {copied ? <Check size={14} color={colors.successTone.text} strokeWidth={2.5} /> : <Copy size={14} color={colors.textSecondary} strokeWidth={2} />}
                 </Pressable>
               </View>
 
@@ -263,13 +248,14 @@ const createStyles = (c: ThemeColors) =>
       alignItems: "center",
       paddingHorizontal: spacing.huge + spacing.xs,
     },
+    // DESIGN.md §Dialogs: rounded-xl (12px), p-5, gap-4; 50%-opacity chrome border.
     card: {
       width: "100%",
       maxWidth: 320,
       backgroundColor: c.card,
       borderRadius: radius.lg,
       borderWidth: 1,
-      borderColor: c.border,
+      borderColor: c.borderSoft,
       padding: spacing.xxl,
       gap: spacing.lg,
     },

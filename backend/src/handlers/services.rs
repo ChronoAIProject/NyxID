@@ -757,6 +757,8 @@ pub async fn create_service(
             "path",
             "oidc",
             "none",
+            "aws_sigv4",
+            "gcp_service_account",
         ];
         if !valid_methods.contains(&auth_method.as_str()) {
             return Err(AppError::ValidationError(format!(

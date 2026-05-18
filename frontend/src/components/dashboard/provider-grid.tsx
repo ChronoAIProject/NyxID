@@ -23,7 +23,8 @@ import {
   getProviderConnectHint,
   needsUserCredentials,
 } from "@/lib/constants";
-import { Building2, KeyRound } from "lucide-react";
+import { Building2 } from "lucide-react";
+import { DishAntennaIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
 import { ApiError } from "@/lib/api-client";
 import { hardRedirect } from "@/lib/navigation";
@@ -198,15 +199,18 @@ export function ProviderGrid() {
     return (
       <>
         {scopeSelector}
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-          <KeyRound className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
-            {targetOrgId
-              ? selectedOrgName
-                ? `No provider tokens for ${selectedOrgName}.`
-                : "No org provider tokens connected."
-              : "No providers available. An admin needs to configure providers first."}
-          </p>
+        <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+          <DishAntennaIcon className="h-64 w-64 text-muted-foreground/30" />
+          <div className="space-y-1">
+            <p className="text-[12px] font-medium text-muted-foreground/30">No Provider Tokens</p>
+            <p className="text-xs text-muted-foreground/30">
+              {targetOrgId
+                ? selectedOrgName
+                  ? `No provider tokens for ${selectedOrgName}.`
+                  : "No org provider tokens connected."
+                : "No providers available. An admin needs to configure providers first."}
+            </p>
+          </div>
         </div>
       </>
     );

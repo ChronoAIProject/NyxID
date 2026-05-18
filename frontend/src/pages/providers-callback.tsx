@@ -34,7 +34,7 @@ export function ProvidersCallbackPage() {
           {isSuccess ? (
             <>
               <CheckCircle className="h-12 w-12 text-success" />
-              <p className="text-sm text-muted-foreground text-center">
+              <p className="text-[12px] text-muted-foreground text-center">
                 Your provider has been connected successfully.
               </p>
               <Button onClick={() => void navigate({ to: "/providers" })}>
@@ -44,7 +44,7 @@ export function ProvidersCallbackPage() {
           ) : (
             <>
               <XCircle className="h-12 w-12 text-destructive" />
-              <p className="text-sm text-destructive text-center break-words">
+              <p className="text-[12px] text-destructive text-center">
                 {errorMessage}
               </p>
               <Button

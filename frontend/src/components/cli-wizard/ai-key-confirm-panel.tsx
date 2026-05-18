@@ -241,7 +241,7 @@ export function AiKeyConfirm({
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
         <h2 className="font-serif text-[28px] font-normal">{title}</h2>
-        <p className="text-sm text-muted-foreground">{subtitle}</p>
+        <p className="text-[12px] text-muted-foreground">{subtitle}</p>
       </div>
 
       <OwnerPicker value={targetOrgId} onChange={setTargetOrgId} />
@@ -564,7 +564,7 @@ function CustomServiceForm({
                 setAuthKeyName(defaultAuthKeyName(next));
               }
             }}
-            className="flex h-10 w-full rounded-[10px] border border-input bg-transparent px-[14px] py-2 text-[13px] text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            className="flex h-10 w-full rounded-lg border border-input bg-transparent px-[14px] py-2 text-[13px] text-foreground focus-visible:outline-none"
             aria-required="true"
           >
             <option value="bearer">bearer (Authorization: Bearer …)</option>
@@ -634,7 +634,7 @@ function CustomServiceForm({
           // which agent will receive the pushed credential. The node
           // id is locked at this point — to change it the user
           // re-runs the CLI with a different `--via-node`.
-          <div className="rounded-[10px] border border-border bg-muted/40 px-3 py-2">
+          <div className="rounded-lg border border-border bg-muted/40 px-3 py-2">
             <p className="text-xs font-medium text-foreground">Routed via node</p>
             <code className="font-mono text-[11px] text-muted-foreground">
               {viaNode}
@@ -669,7 +669,7 @@ function CustomServiceForm({
         <Button variant="outline" onClick={onBack} disabled={loading}>
           ← Back
         </Button>
-        <Button onClick={() => void submit()} disabled={submitDisabled}>
+        <Button variant="primary" onClick={() => void submit()} disabled={submitDisabled}>
           {loading ? "Connecting…" : "Connect service"}
         </Button>
       </div>
@@ -825,7 +825,7 @@ function CatalogConfirmForm({
   if (entry.service_type === "ssh") {
     return (
       <div className="flex flex-col gap-3">
-        <p className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm">
+        <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[12px]">
           {entry.name} is an SSH service. Use{" "}
           <code>nyxid service add-ssh</code> from your CLI instead
           (certificate-based auth, not a credential binding).
@@ -834,7 +834,7 @@ function CatalogConfirmForm({
           variant="outline"
           onClick={() => void cancelThenNavigate(null)}
         >
-          Go back
+          Go Back
         </Button>
       </div>
     );
@@ -855,13 +855,14 @@ function CatalogConfirmForm({
       `/keys?tab=services&slug=${encodeURIComponent(entry.slug)}`;
     return (
       <div className="flex flex-col gap-3">
-        <p className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm">
+        <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[12px]">
           {entry.name} uses <code>{entry.auth_method}</code> auth,
           which isn't supported via remote pairing. Complete setup on
           the main Keys page. Your CLI will receive a cancel and
           print a "finish in browser" hint.
         </p>
         <Button
+          variant="primary"
           onClick={() => void cancelThenNavigate(href)}
           className="justify-center gap-2"
         >
@@ -888,7 +889,6 @@ function CatalogConfirmForm({
         providerId={entry.provider_config_id}
         slug={entry.slug}
         label={label}
-        providerName={entry.name}
         nodeId={prefill.via_node}
         targetOrgId={targetOrgId}
         endpointUrl={effectiveEndpointUrl}
@@ -908,7 +908,6 @@ function CatalogConfirmForm({
         providerId={entry.provider_config_id}
         slug={entry.slug}
         label={label}
-        providerName={entry.name}
         nodeId={prefill.via_node}
         targetOrgId={targetOrgId}
         endpointUrl={effectiveEndpointUrl}
@@ -929,7 +928,7 @@ function CatalogConfirmForm({
     if (shape === "oauth") return "Continue with provider sign-in";
     if (shape === "device-code") return "Get device code";
     if (shape === "no-auth") return "Connect";
-    return "Create service";
+    return "Create Service";
   })();
 
   // Submit is disabled until all required inputs are filled. The
@@ -959,7 +958,7 @@ function CatalogConfirmForm({
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex items-start gap-3 rounded-md border bg-muted/30 p-3">
+      <div className="flex items-start gap-3 rounded-lg border bg-muted/30 p-3">
         {entry.icon_url ? (
           <img
             src={entry.icon_url}
@@ -1053,7 +1052,7 @@ function CatalogConfirmForm({
           : null}
 
         {viaNode ? (
-          <div className="rounded-[10px] border border-border bg-muted/40 px-3 py-2">
+          <div className="rounded-lg border border-border bg-muted/40 px-3 py-2">
             <p className="text-xs font-medium text-foreground">Routed via node</p>
             <code className="font-mono text-[11px] text-muted-foreground">
               {viaNode}
@@ -1075,7 +1074,7 @@ function CatalogConfirmForm({
 
       {error ? <ErrorLine message={error} /> : null}
 
-      <Button onClick={handleSubmit} disabled={submitDisabled}>
+      <Button variant="primary" onClick={handleSubmit} disabled={submitDisabled}>
         {submitLabel}
       </Button>
     </div>
@@ -1101,7 +1100,7 @@ function Field({
 
 function ErrorLine({ message }: { readonly message: string }) {
   return (
-    <p className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+    <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-[12px] text-destructive">
       {message}
     </p>
   );

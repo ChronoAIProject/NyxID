@@ -134,11 +134,40 @@ nyxid proxy request api-github /user/repos -m GET
 nyxid proxy request api-twitter /tweets -m POST \
   -d '{"text":"Hello from NyxID"}'
 
+# AWS Cost Explorer (base: https://ce.us-east-1.amazonaws.com) -- JSON-RPC
+# POST to / with X-Amz-Target picking the operation. NyxID injects SigV4
+# from the stored access-key JSON. See `nyxid catalog show aws-cost-explorer`
+# for IAM requirements (must be a management-account credential).
+nyxid proxy request aws-cost-explorer / -m POST \
+  -H "Content-Type: application/x-amz-json-1.1" \
+  -H "X-Amz-Target: AWSInsightsServiceV20210101.GetCostAndUsage" \
+  -d '{"TimePeriod":{"Start":"2026-04-13","End":"2026-05-13"},"Granularity":"DAILY","Metrics":["UnblendedCost"],"GroupBy":[{"Type":"DIMENSION","Key":"LINKED_ACCOUNT"},{"Type":"TAG","Key":"project"}]}'
+
+# GCP Cloud Billing (base: https://cloudbilling.googleapis.com) -- list
+# billing accounts. NyxID mints + caches a Google OAuth token from the
+# stored service-account JSON.
+nyxid proxy request gcp-cloud-billing /v1/billingAccounts -m GET
+
+# GCP BigQuery billing export (base: https://bigquery.googleapis.com) --
+# query the billing export dataset for spend-by-project. Replace
+# `<PROJECT>` / `<DATASET>` / `<BILLING_ACCOUNT_ID>` with the actual
+# values from GCP's billing-export setup.
+nyxid proxy request gcp-bigquery-billing /bigquery/v2/projects/<PROJECT>/queries -m POST \
+  -d '{"useLegacySql":false,"query":"SELECT DATE(usage_start_time) AS day, project.id AS project, SUM(cost) - SUM((SELECT IFNULL(SUM(c.amount),0) FROM UNNEST(credits) c)) AS net_cost FROM `<PROJECT>.<DATASET>.gcp_billing_export_v1_<BILLING_ACCOUNT_ID>` WHERE DATE(usage_start_time) >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY) GROUP BY day, project ORDER BY day DESC, net_cost DESC"}'
+
 # Discover all available proxy services
 nyxid proxy discover --output json
 ```
 
 NyxID injects the user's credentials automatically. Do not ask for or log raw downstream credentials.
+
+For the cloud-billing services above, identical proxy bodies in a short
+window are served from an in-process response cache (default 5 min TTL,
+env `CLOUD_RESPONSE_CACHE_TTL_SECS`). AWS Cost Explorer charges $0.01
+per paginated request and BigQuery billing data only updates every few
+hours, so the cache saves both budget and latency for `/daily`-style
+polling. Successful (2xx) responses only — error responses are passed
+through so permission-misconfig errors aren't masked.
 
 ## WebSocket-authenticated services
 

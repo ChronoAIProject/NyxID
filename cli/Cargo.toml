@@ -70,6 +70,11 @@ sigstore = { version = "0.13", default-features = false, features = ["bundle", "
 webpki = { package = "rustls-webpki", version = "0.103", default-features = false, features = ["std"] }
 x509-cert = "0.2"
 
+# Shared cloud-billing signing primitives (NyxID#716). Used by the node
+# agent's proxy executor to sign requests with AWS SigV4 / GCP service-
+# account JWT when credentials live on the node rather than NyxID.
+nyxid-cloud-auth = { path = "../cloud-auth" }
+
 # Wizard v2 (CLI-served local browser UI). See docs/CLI_WIZARD_V2.md
 axum = { workspace = true }
 tower = "0.5"

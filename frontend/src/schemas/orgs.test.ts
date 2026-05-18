@@ -23,7 +23,7 @@ describe("orgRoleSchema", () => {
   });
 
   it("rejects unknown roles", () => {
-    expect(orgRoleSchema.safeParse("owner").success).toBe(false);
+    expect(orgRoleSchema.safeParse("superadmin").success).toBe(false);
     expect(orgRoleSchema.safeParse("Admin").success).toBe(false);
   });
 });

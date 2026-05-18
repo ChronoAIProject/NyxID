@@ -43,6 +43,13 @@ const VALID_AUTH_METHODS: &[&str] = &[
     "body",
     "token_exchange",
     "path",
+    // Cloud-billing methods. Credential is a JSON blob (see
+    // `nyxid_cloud_auth::aws_sigv4::AwsCredentials` and
+    // `nyxid_cloud_auth::gcp_oauth::GcpServiceAccountKey`); signing /
+    // token-mint happens at the proxy boundary. `auth_key_name` is
+    // unused for both. NyxID#716.
+    "aws_sigv4",
+    "gcp_service_account",
     "none",
 ];
 

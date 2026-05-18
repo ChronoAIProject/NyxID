@@ -580,6 +580,7 @@ fn resolve_social_login(
         created_at: now,
         updated_at: now,
         last_login_at: Some(now),
+        profile_config: Default::default(),
     };
 
     Ok(SocialLoginOutcome::CreateNew(new_user))
@@ -845,6 +846,9 @@ mod tests {
             channel_event_rate_limit_burst: 200,
             channel_event_dedup_capacity: 32_768,
             channel_event_dedup_ttl_secs: 300,
+            cloud_response_cache_ttl_secs: 0,
+            cloud_response_cache_max_entry_bytes: 1024 * 1024,
+            cloud_response_cache_max_entries: 256,
             invite_code_required: true,
             email_auth_enabled: false,
             auto_verify_email: false,
@@ -960,6 +964,7 @@ mod tests {
             created_at: now,
             updated_at: now,
             last_login_at: None,
+            profile_config: Default::default(),
         }
     }
 

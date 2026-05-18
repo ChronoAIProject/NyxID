@@ -69,7 +69,7 @@ export function ApiKeyDialog({
 
         <form onSubmit={handleSubmit} className="space-y-4">
           {provider.api_key_instructions && (
-            <div className="rounded-md bg-muted p-3 text-sm text-muted-foreground">
+            <div className="rounded-lg bg-muted p-3 text-[12px] text-muted-foreground">
               {provider.api_key_instructions}
             </div>
           )}
@@ -79,7 +79,7 @@ export function ApiKeyDialog({
               href={provider.api_key_url}
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-flex items-center gap-1.5 text-sm text-primary hover:underline"
+              className="inline-flex items-center gap-1.5 text-[12px] text-primary hover:underline"
             >
               Get your API key
               <ExternalLink className="h-3 w-3" />
@@ -146,7 +146,7 @@ export function ApiKeyDialog({
             >
               Cancel
             </Button>
-            <Button type="submit" disabled={!canSubmit} isLoading={isPending}>
+            <Button variant="primary" type="submit" disabled={!canSubmit} isLoading={isPending}>
               {isPending ? "Validating..." : "Connect"}
             </Button>
           </DialogFooter>

@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
@@ -32,17 +32,17 @@ import {
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import { AddCtaButton } from "@/components/shared/add-cta-button";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import {
-  Plus,
   Copy,
   Check,
-  Calendar,
   Shield,
   Server,
 } from "lucide-react";
+import { DatePicker } from "@/components/ui/date-picker";
 import { toast } from "sonner";
 
 function toggleInArray(
@@ -54,12 +54,21 @@ function toggleInArray(
     : [...items, item];
 }
 
-export function ApiKeyCreateDialog() {
-  const [open, setOpen] = useState(false);
+export function ApiKeyCreateDialog({
+  externalOpen,
+  onExternalOpenChange,
+  hideTrigger,
+}: {
+  readonly externalOpen?: boolean;
+  readonly onExternalOpenChange?: (open: boolean) => void;
+  readonly hideTrigger?: boolean;
+} = {}) {
+  const [internalOpen, setInternalOpen] = useState(false);
+  const open = externalOpen ?? internalOpen;
+  const setOpen = onExternalOpenChange ?? setInternalOpen;
   const [createdKey, setCreatedKey] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const createMutation = useCreateApiKey();
-  const expiryInputRef = useRef<HTMLInputElement | null>(null);
 
   const { data: services } = useKeys();
   const { data: nodes } = useNodes();
@@ -72,16 +81,6 @@ export function ApiKeyCreateDialog() {
     () => (orgs ?? []).filter((o) => o.your_role === "admin"),
     [orgs],
   );
-
-  function openDatePicker() {
-    const input = expiryInputRef.current;
-    if (!input) return;
-    try {
-      input.showPicker?.();
-    } catch {
-      input.focus();
-    }
-  }
 
   const form = useForm<CreateApiKeyFormData>({
     resolver: zodResolver(createApiKeySchema),
@@ -136,13 +135,12 @@ export function ApiKeyCreateDialog() {
       open={open}
       onOpenChange={(o) => (o ? setOpen(true) : handleClose())}
     >
-      <DialogTrigger asChild>
-        <Button>
-          <Plus className="mr-2 h-4 w-4" />
-          Create API Key
-        </Button>
-      </DialogTrigger>
-      <DialogContent className="max-h-[85vh] overflow-y-auto">
+      {!hideTrigger && (
+        <DialogTrigger asChild>
+          <AddCtaButton label="Create API Key" onClick={() => {}} />
+        </DialogTrigger>
+      )}
+      <DialogContent>
         {createdKey ? (
           <>
             <DialogHeader>
@@ -152,7 +150,7 @@ export function ApiKeyCreateDialog() {
               </DialogDescription>
             </DialogHeader>
             <div className="flex items-center gap-2">
-              <code className="flex-1 rounded-md bg-muted p-3 font-mono text-sm break-all">
+              <code className="flex-1 rounded-lg bg-muted p-3 font-mono text-[12px] break-all">
                 {createdKey}
               </code>
               <Button
@@ -168,7 +166,7 @@ export function ApiKeyCreateDialog() {
               </Button>
             </div>
             <DialogFooter>
-              <Button onClick={handleClose}>Done</Button>
+              <Button variant="primary" onClick={handleClose}>Done</Button>
             </DialogFooter>
           </>
         ) : (
@@ -186,7 +184,7 @@ export function ApiKeyCreateDialog() {
                 className="space-y-4"
               >
                 {form.formState.errors.root && (
-                  <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
+                  <div className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive">
                     {form.formState.errors.root.message}
                   </div>
                 )}
@@ -252,7 +250,7 @@ export function ApiKeyCreateDialog() {
                           return (
                             <Badge
                               key={scope}
-                              variant={isSelected ? "default" : "outline"}
+                              variant={isSelected ? "default" : "secondary"}
                               className="cursor-pointer"
                               onClick={() =>
                                 field.onChange(
@@ -276,49 +274,25 @@ export function ApiKeyCreateDialog() {
                 <FormField
                   control={form.control}
                   name="expires_at"
-                  render={({ field }) => {
-                    const { ref: rhfRef, ...fieldRest } = field;
-                    return (
-                      <FormItem>
-                        <FormLabel>
-                          Expiry Date{" "}
-                          <span className="text-muted-foreground">
-                            (optional)
-                          </span>
-                        </FormLabel>
-                        <FormControl>
-                          <div className="relative">
-                            <Input
-                              type="date"
-                              min={new Date().toISOString().slice(0, 10)}
-                              className="cursor-pointer pr-10 [&::-webkit-calendar-picker-indicator]:opacity-0"
-                              {...fieldRest}
-                              ref={(el) => {
-                                rhfRef(el);
-                                expiryInputRef.current = el;
-                              }}
-                              value={field.value ?? ""}
-                              onChange={(e) =>
-                                field.onChange(e.target.value || null)
-                              }
-                              onClick={openDatePicker}
-                              onFocus={openDatePicker}
-                            />
-                            <button
-                              type="button"
-                              aria-label="Open date picker"
-                              tabIndex={-1}
-                              onClick={openDatePicker}
-                              className="absolute inset-y-0 right-0 flex items-center px-3 text-muted-foreground hover:text-foreground"
-                            >
-                              <Calendar className="h-4 w-4" />
-                            </button>
-                          </div>
-                        </FormControl>
-                        <FormMessage />
-                      </FormItem>
-                    );
-                  }}
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>
+                        Expiry Date{" "}
+                        <span className="text-muted-foreground">
+                          (optional)
+                        </span>
+                      </FormLabel>
+                      <FormControl>
+                        <DatePicker
+                          value={field.value ?? null}
+                          onChange={(v) => field.onChange(v)}
+                          minDate={new Date().toISOString().slice(0, 10)}
+                          placeholder="No expiry"
+                        />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
                 />
 
                 <FormField
@@ -353,40 +327,42 @@ export function ApiKeyCreateDialog() {
 
                 {/* Access scope section */}
                 <div className="space-y-3 rounded-lg border border-border p-4">
-                  <p className="text-sm font-medium">Access Scope</p>
+                  <p className="text-[12px] font-medium">Access Scope</p>
                   <p className="text-xs text-muted-foreground">
                     Restrict which services and nodes this key can access via proxy.
                   </p>
 
                   {/* Service scope */}
                   <div className="space-y-2">
-                    <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
-                      <Shield className="h-3.5 w-3.5" />
-                      Services
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-1.5 text-[12px] font-medium text-muted-foreground">
+                        <Shield className="h-3.5 w-3.5" />
+                        Services
+                      </div>
+                      <FormField
+                        control={form.control}
+                        name="allow_all_services"
+                        render={({ field }) => (
+                          <FormItem>
+                            <div className="flex items-center gap-2">
+                              <Checkbox
+                                id="allow-all-services"
+                                checked={field.value}
+                                onCheckedChange={(checked) =>
+                                  field.onChange(checked === true)
+                                }
+                              />
+                              <Label
+                                htmlFor="allow-all-services"
+                                className="text-[12px]"
+                              >
+                                Allow all
+                              </Label>
+                            </div>
+                          </FormItem>
+                        )}
+                      />
                     </div>
-                    <FormField
-                      control={form.control}
-                      name="allow_all_services"
-                      render={({ field }) => (
-                        <FormItem>
-                          <div className="flex items-center gap-2">
-                            <Checkbox
-                              id="allow-all-services"
-                              checked={field.value}
-                              onCheckedChange={(checked) =>
-                                field.onChange(checked === true)
-                              }
-                            />
-                            <Label
-                              htmlFor="allow-all-services"
-                              className="text-sm"
-                            >
-                              Allow all services
-                            </Label>
-                          </div>
-                        </FormItem>
-                      )}
-                    />
 
                     {!watchAllServices && (
                       <FormField
@@ -413,7 +389,7 @@ export function ApiKeyCreateDialog() {
                           );
                           return (
                             <FormItem>
-                              <div className="space-y-2 rounded-md border border-border bg-muted/30 p-3">
+                              <div className="space-y-2 rounded-lg border border-border bg-muted/30 p-3">
                                 <p className="text-xs text-muted-foreground">
                                   Select allowed services:
                                 </p>
@@ -466,33 +442,35 @@ export function ApiKeyCreateDialog() {
 
                   {/* Node scope */}
                   <div className="space-y-2">
-                    <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
-                      <Server className="h-3.5 w-3.5" />
-                      Nodes
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-1.5 text-[12px] font-medium text-muted-foreground">
+                        <Server className="h-3.5 w-3.5" />
+                        Nodes
+                      </div>
+                      <FormField
+                        control={form.control}
+                        name="allow_all_nodes"
+                        render={({ field }) => (
+                          <FormItem>
+                            <div className="flex items-center gap-2">
+                              <Checkbox
+                                id="allow-all-nodes"
+                                checked={field.value}
+                                onCheckedChange={(checked) =>
+                                  field.onChange(checked === true)
+                                }
+                              />
+                              <Label
+                                htmlFor="allow-all-nodes"
+                                className="text-[12px]"
+                              >
+                                Allow all
+                              </Label>
+                            </div>
+                          </FormItem>
+                        )}
+                      />
                     </div>
-                    <FormField
-                      control={form.control}
-                      name="allow_all_nodes"
-                      render={({ field }) => (
-                        <FormItem>
-                          <div className="flex items-center gap-2">
-                            <Checkbox
-                              id="allow-all-nodes"
-                              checked={field.value}
-                              onCheckedChange={(checked) =>
-                                field.onChange(checked === true)
-                              }
-                            />
-                            <Label
-                              htmlFor="allow-all-nodes"
-                              className="text-sm"
-                            >
-                              Allow all nodes
-                            </Label>
-                          </div>
-                        </FormItem>
-                      )}
-                    />
 
                     {!watchAllNodes && (
                       <FormField
@@ -500,7 +478,7 @@ export function ApiKeyCreateDialog() {
                         name="allowed_node_ids"
                         render={({ field }) => (
                           <FormItem>
-                            <div className="space-y-2 rounded-md border border-border bg-muted/30 p-3">
+                            <div className="space-y-2 rounded-lg border border-border bg-muted/30 p-3">
                               <p className="text-xs text-muted-foreground">
                                 Select allowed nodes:
                               </p>
@@ -560,8 +538,13 @@ export function ApiKeyCreateDialog() {
                   <Button type="button" variant="outline" onClick={handleClose}>
                     Cancel
                   </Button>
-                  <Button type="submit" isLoading={createMutation.isPending}>
-                    Create key
+                  <Button
+                    variant="primary"
+                    type="submit"
+                    isLoading={createMutation.isPending}
+                    disabled={!form.watch("name").trim()}
+                  >
+                    Create Key
                   </Button>
                 </DialogFooter>
               </form>

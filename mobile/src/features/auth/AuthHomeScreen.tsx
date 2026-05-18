@@ -4,6 +4,7 @@ import * as WebBrowser from "expo-web-browser";
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { ActivityIndicator, Linking, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import Svg, { Path, Defs, LinearGradient, Stop } from "react-native-svg";
+import { LinearGradient as ExpoLinearGradient } from "expo-linear-gradient";
 import type { RootStackParamList } from "../../app/AppNavigator";
 
 import { ScreenContainer } from "../../components/ScreenContainer";
@@ -395,17 +396,25 @@ export function AuthHomeScreen({ navigation }: Props) {
             secureTextEntry
             autoComplete="current-password"
           />
+          {/* DESIGN.md §Buttons: primary CTA uses `nyx-gradient-vivid`. */}
           <Pressable
             onPress={() => void handleEmailLogin()}
             disabled={isEmailAuthPending || !email.trim() || !password}
-            style={[styles.signInButton, (isEmailAuthPending || !email.trim() || !password) && styles.buttonDisabled]}
+            style={[styles.signInButtonWrap, (isEmailAuthPending || !email.trim() || !password) && styles.buttonDisabled]}
           >
-            <View style={styles.socialAuthContent}>
-              {isEmailAuthPending ? (
-                <ActivityIndicator size="small" color={colors.onPrimary} />
-              ) : null}
-              <Text style={styles.signInButtonText}>{isEmailAuthPending ? "Signing in..." : "Sign In"}</Text>
-            </View>
+            <ExpoLinearGradient
+              colors={[colors.gradientStart, colors.gradientEnd]}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 0 }}
+              style={styles.signInButton}
+            >
+              <View style={styles.socialAuthContent}>
+                {isEmailAuthPending ? (
+                  <ActivityIndicator size="small" color={colors.onPrimary} />
+                ) : null}
+                <Text style={styles.signInButtonText}>{isEmailAuthPending ? "Signing in..." : "Sign In"}</Text>
+              </View>
+            </ExpoLinearGradient>
           </Pressable>
 
           {/* Divider */}
@@ -506,8 +515,9 @@ const createStyles = (c: ThemeColors) => StyleSheet.create({
     marginBottom: spacing.sm,
     paddingTop: spacing.huge,
   },
+  // DESIGN.md §PageHeader: mobile page titles ship at text-[22px] font-bold.
   heroTitle: {
-    ...typeScale.h1,
+    ...typeScale.pageHeader,
     color: c.textPrimary,
     marginTop: spacing.sm,
   },
@@ -516,9 +526,10 @@ const createStyles = (c: ThemeColors) => StyleSheet.create({
     color: c.textMuted,
     textAlign: "center",
   },
+  // DESIGN.md §Inputs: rounded-lg (8px) with 50%-opacity chrome.
   input: {
     backgroundColor: c.cardSoft,
-    borderColor: c.border,
+    borderColor: c.borderSoft,
     borderWidth: 1,
     borderRadius: radius.md,
     paddingVertical: spacing.md,
@@ -526,19 +537,22 @@ const createStyles = (c: ThemeColors) => StyleSheet.create({
     color: c.textPrimary,
     ...typeScale.description,
   },
+  signInButtonWrap: {
+    borderRadius: radius.md,
+    overflow: "hidden",
+    // Soft purple ambient matching the web `shadow-[0_0_12px_rgba(90,42,241,0.25)]`.
+    shadowColor: c.primary,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 12,
+    elevation: 6,
+  },
   signInButton: {
-    backgroundColor: c.primary,
     borderRadius: radius.md,
     paddingVertical: spacing.lg,
     minHeight: 44,
     alignItems: "center",
     justifyContent: "center",
-    // Matches PrimaryButton — brand CTAs carry a soft purple ambient.
-    shadowColor: c.primary,
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.35,
-    shadowRadius: 16,
-    elevation: 6,
   },
   signInButtonText: {
     color: c.onPrimary,
@@ -547,12 +561,13 @@ const createStyles = (c: ThemeColors) => StyleSheet.create({
   buttonDisabled: {
     opacity: 0.5,
   },
+  // DESIGN.md §Banners & callouts: rounded-xl with theme-aware destructive tint.
   errorBanner: {
-    backgroundColor: c.dangerSoftBg,
+    backgroundColor: c.dangerTone.bg,
     borderWidth: 1,
-    borderColor: c.riskHigh.border,
-    borderRadius: radius.sm,
-    paddingVertical: spacing.sm,
+    borderColor: c.dangerTone.border,
+    borderRadius: radius.lg,
+    paddingVertical: spacing.lg,
     paddingHorizontal: spacing.lg,
   },
   errorText: {
@@ -581,7 +596,7 @@ const createStyles = (c: ThemeColors) => StyleSheet.create({
   },
   socialAuthButton: {
     backgroundColor: c.cardSoft,
-    borderColor: c.border,
+    borderColor: c.borderSoft,
     borderWidth: 1,
     borderRadius: radius.md,
     paddingVertical: spacing.md,

@@ -113,11 +113,6 @@ export const AdminServiceAccountDetailPage = lazy(() =>
 export const ConsentsPage = lazy(() =>
   import("@/pages/consents").then((m) => ({ default: m.ConsentsPage })),
 );
-export const AuthorizationsPage = lazy(() =>
-  import("@/pages/authorizations").then((m) => ({
-    default: m.AuthorizationsPage,
-  })),
-);
 export const DeveloperAppsPage = lazy(() =>
   import("@/pages/developer-apps").then((m) => ({
     default: m.DeveloperAppsPage,
@@ -238,4 +233,7 @@ export const BlogDetailPage = lazy(() =>
 );
 export const BlogPreviewPage = lazy(() =>
   import("@/pages/blog-preview").then((m) => ({ default: m.BlogPreviewPage })),
+);
+export const DesignSystemPage = lazy(() =>
+  import("@/pages/design-system").then((m) => ({ default: m.DesignSystemPage })),
 );

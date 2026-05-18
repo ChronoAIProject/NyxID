@@ -29,7 +29,7 @@ export function BetaAccess() {
             href={DISCORD_URL}
             target="_blank"
             rel="noopener noreferrer"
-            className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-primary py-3.5 font-semibold text-white transition-colors hover:bg-void-400"
+            className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-primary py-3.5 font-semibold text-white transition-colors hover:bg-nyx-400"
           >
             <svg
               width="20"

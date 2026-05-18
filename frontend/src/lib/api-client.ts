@@ -101,6 +101,14 @@ export async function apiClient<T>(
   endpoint: string,
   options: RequestOptions = {},
 ): Promise<T> {
+  if (import.meta.env.DEV) {
+    const { isMockMode, getMockResponse } = await import("./mock-data");
+    if (isMockMode()) {
+      const mock = getMockResponse(endpoint);
+      if (mock !== undefined) return mock as T;
+    }
+  }
+
   const config = buildFetchConfig(options);
   const url = `${BASE_URL}${endpoint}`;
 

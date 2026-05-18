@@ -14,7 +14,7 @@
  *   --panel       → bg-card
  *   --border      → border-border
  *   --muted       → text-muted-foreground
- *   --wordmark    → text-void-300
+ *   --wordmark    → text-nyx-200
  *   --primary     → text-primary
  */
 
@@ -38,7 +38,7 @@ export function WizardShell({ step, context, localOrigin, children }: WizardShel
           <img src="/nyxid-wordmark.svg" alt="NyxID" className="h-9 w-auto" />
         </div>
         {step ? (
-          <div className="text-sm text-muted-foreground">{formatStepLabel(step)}</div>
+          <div className="text-[12px] text-muted-foreground">{formatStepLabel(step)}</div>
         ) : null}
       </header>
       <main className="flex-1 min-h-0 overflow-y-auto overscroll-contain rounded-xl border border-border bg-card p-8">

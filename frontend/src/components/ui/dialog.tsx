@@ -8,7 +8,7 @@ const DialogTrigger = DialogPrimitive.Trigger;
 const DialogPortal = DialogPrimitive.Portal;
 const DialogClose = DialogPrimitive.Close;
 
-/* ── VoidPortal Dialog ── */
+/* ── NyxID Dialog ── */
 const DialogOverlay = React.forwardRef<
   React.ComponentRef<typeof DialogPrimitive.Overlay>,
   React.ComponentPropsWithoutRef<typeof DialogPrimitive.Overlay>
@@ -33,13 +33,32 @@ const DialogContent = React.forwardRef<
     <DialogPrimitive.Content
       ref={ref}
       className={cn(
-        "fixed left-[50%] top-[50%] z-50 grid w-full max-w-lg translate-x-[-50%] translate-y-[-50%] gap-6 border border-border bg-surface p-7 shadow-xl shadow-primary/5 duration-300 ease-out data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 rounded-[14px]",
+        // Mobile: full-screen scrollable shell
+        "fixed inset-0 z-50 overflow-y-auto border-0 bg-surface duration-200 ease-out",
+        "data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
+        "data-[state=closed]:slide-out-to-bottom data-[state=open]:slide-in-from-bottom",
+        // Desktop: centered modal
+        "md:inset-auto md:left-[50%] md:top-[50%] md:translate-x-[-50%] md:translate-y-[-50%] md:rounded-xl md:border md:border-border md:shadow-xl md:shadow-primary/5 md:w-full md:max-w-lg md:overflow-y-auto md:max-h-[85vh] md:p-5 md:pt-5",
+        "md:data-[state=closed]:slide-out-to-bottom-0 md:data-[state=open]:slide-in-from-bottom-0 md:data-[state=closed]:zoom-out-95 md:data-[state=open]:zoom-in-95",
         className,
       )}
       {...props}
     >
-      {children}
-      <DialogPrimitive.Close className="absolute right-4 top-4 rounded-sm opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:pointer-events-none data-[state=open]:bg-accent data-[state=open]:text-muted-foreground">
+      <div
+        className={cn(
+          "flex min-h-dvh flex-col gap-4 px-5",
+          "pt-[max(1.25rem,var(--sat,env(safe-area-inset-top)))]",
+          // Forms must also flex-grow so mt-auto on DialogFooter reaches bottom
+          "[&>form]:flex-1 [&>form]:flex [&>form]:flex-col",
+          "md:min-h-0 md:px-0 md:pt-0 md:[&>form]:flex-initial md:[&>form]:block",
+        )}
+      >
+        {children}
+      </div>
+      <DialogPrimitive.Close
+        className="absolute right-4 rounded-sm opacity-70 transition-opacity hover:opacity-100 focus:outline-none disabled:pointer-events-none data-[state=open]:bg-accent data-[state=open]:text-muted-foreground"
+        style={{ top: "max(1rem, var(--sat, env(safe-area-inset-top, 0px)))" }}
+      >
         <X className="h-4 w-4" />
         <span className="sr-only">Close</span>
       </DialogPrimitive.Close>
@@ -54,7 +73,7 @@ const DialogHeader = ({
 }: React.HTMLAttributes<HTMLDivElement>) => (
   <div
     className={cn(
-      "flex flex-col space-y-1.5 text-center sm:text-left",
+      "flex flex-col space-y-1.5 text-left",
       className,
     )}
     {...props}
@@ -64,13 +83,19 @@ DialogHeader.displayName = "DialogHeader";
 
 const DialogFooter = ({
   className,
+  style,
   ...props
 }: React.HTMLAttributes<HTMLDivElement>) => (
   <div
     className={cn(
-      "flex flex-col-reverse gap-2 sm:gap-0 sm:flex-row sm:justify-end sm:space-x-2",
+      "mt-auto shrink-0 sticky bottom-0 z-10 -mx-5 bg-surface px-5 pt-4 flex flex-row gap-2 [&>button]:flex-1",
+      "md:mt-0 md:shrink md:static md:z-auto md:mx-0 md:bg-transparent md:px-0 md:pt-0 md:gap-0 md:flex-row md:justify-end md:space-x-2 md:[&>button]:flex-none",
       className,
     )}
+    style={{
+      paddingBottom: "max(1.25rem, var(--sab, env(safe-area-inset-bottom, 0px)))",
+      ...style,
+    }}
     {...props}
   />
 );
@@ -83,7 +108,7 @@ const DialogTitle = React.forwardRef<
   <DialogPrimitive.Title
     ref={ref}
     className={cn(
-      "font-display text-lg font-semibold leading-none tracking-tight",
+      "text-[15px] font-semibold leading-none tracking-tight",
       className,
     )}
     {...props}

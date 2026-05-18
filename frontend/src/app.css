@@ -2,55 +2,72 @@
 @import "tw-animate-css";
 
 @theme {
-  /* ── Void Portal Palette ── */
-  --color-void-50: #f5f3ff;
-  --color-void-100: #ede9fe;
-  --color-void-200: #ddd6fe;
-  --color-void-300: #c4b5fd;
-  --color-void-400: #a78bfa;
-  --color-void-500: #8b5cf6;
-  --color-void-600: #7c3aed;
-  --color-void-700: #6d28d9;
-  --color-void-800: #5b21b6;
-  --color-void-900: #4c1d95;
-  --color-void-950: #2e1065;
+  /* ── NyxID Brand Primary ── */
+  --color-nyx-50: #EDE5FE;
+  --color-nyx-100: #D9C7FD;
+  --color-nyx-200: #B894FB;
+  --color-nyx-300: #9761F8;
+  --color-nyx-400: #7845F5;
+  --color-nyx-500: #5A2AF1;
+  --color-nyx-600: #4A1FD4;
+  --color-nyx-700: #3A16B0;
+  --color-nyx-800: #2B0F8C;
+  --color-nyx-900: #1E0A68;
+  --color-nyx-950: #120545;
 
-  /* ── Semantic Surfaces ── */
-  --color-background: #09090b;
-  --color-foreground: #f0eeff;
-  --color-card: #0a0a10;
-  --color-card-foreground: #f0eeff;
-  --color-popover: #0d0b14;
-  --color-popover-foreground: #f0eeff;
-  --color-sidebar: #06060a;
-  --color-surface: #0d0b14;
+  /* ── NyxID Brand Secondary ── */
+  --color-nyx-secondary-50: #F3EAFE;
+  --color-nyx-secondary-100: #E4D2FD;
+  --color-nyx-secondary-200: #CDA9FC;
+  --color-nyx-secondary-300: #B98DFB;
+  --color-nyx-secondary-400: #A672FB;
+  --color-nyx-secondary-500: #9555F5;
+  --color-nyx-secondary-600: #7D3EDB;
+  --color-nyx-secondary-700: #642CB7;
+  --color-nyx-secondary-800: #4C1E93;
+  --color-nyx-secondary-900: #36136F;
+  --color-nyx-secondary-950: #220B4B;
+
+  /* ── Semantic Surfaces (dark mode – default) ── */
+  --color-background: #0D0D0D;
+  --color-foreground: #FAFAFA;
+  --color-card: #171717;
+  --color-card-foreground: #FAFAFA;
+  --color-popover: #171717;
+  --color-popover-foreground: #FAFAFA;
+  --color-sidebar: #0D0D0D;
+  --color-surface: #171717;
 
   /* ── Primary / Accent ── */
-  --color-primary: #8b5cf6;
-  --color-primary-foreground: #ffffff;
-  --color-secondary: #8b5cf610;
-  --color-secondary-foreground: #9b95b0;
-  --color-accent: #8b5cf615;
-  --color-accent-foreground: #f0eeff;
+  --color-primary: #5A2AF1;
+  --color-primary-foreground: #FFFFFF;
+  --color-secondary: #A672FB10;
+  --color-secondary-foreground: #A3A3A3;
+  --color-accent: #A672FB15;
+  --color-accent-foreground: #FAFAFA;
 
   /* ── Muted ── */
-  --color-muted: #1e1b2e;
-  --color-muted-foreground: #9b95b0;
+  --color-muted: #262626;
+  --color-muted-foreground: #A3A3A3;
 
   /* ── Destructive ── */
-  --color-destructive: #f87171;
-  --color-destructive-foreground: #ffffff;
+  --color-destructive: #EF4444;
+  --color-destructive-foreground: #FFFFFF;
 
   /* ── Borders & Input ── */
-  --color-border: #1e1b2e;
-  --color-input: #1e1b2e;
-  --color-ring: #8b5cf6;
+  --color-border: #262626;
+  --color-input: #262626;
+  --color-ring: #5A2AF1;
 
-  /* ── Status ── */
-  --color-success: #34d399;
-  --color-warning: #f59e0b;
-  --color-info: #60a5fa;
-  --color-text-tertiary: #6b6580;
+  /* ── Status (Brand Spec) ── */
+  --color-success: #10B981;
+  --color-warning: #F59E0B;
+  --color-error: #EF4444;
+  --color-info: #3B82F6;
+  --color-text-tertiary: #525252;
+
+  /* ── Accent (NyxID Orange) ── */
+  --color-nyx-orange: #F0924C;
 
   /* ── Radius ── */
   --radius-sm: 0.375rem;
@@ -58,18 +75,23 @@
   --radius-lg: 0.75rem;
   --radius-xl: 0.875rem;
 
-  /* ── Typography ── */
-  --font-sans: "Manrope", system-ui, sans-serif;
-  --font-display: "Space Grotesk", system-ui, sans-serif;
+  /* ── Typography (Mona Sans — closest to brand "Mono Sans") ── */
+  --font-sans: "Mona Sans", system-ui, -apple-system, sans-serif;
+  --font-display: "Mona Sans", system-ui, -apple-system, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, monospace;
-  --font-logo: "Playfair Display", Georgia, serif;
-  --font-serif: "DM Serif Display", serif;
+
+  /* ── Chart Colors ── */
+  --chart-1: #A672FB;
+  --chart-2: #5A2AF1;
+  --chart-3: #7C4DFF;
+  --chart-4: #B388FF;
+  --chart-5: #6200EA;
 
   /* ── Landing Page Surfaces ── */
-  --color-landing-bg: #0a0a0f;
-  --color-landing-surface: #111118;
-  --color-landing-surface-raised: #18181f;
-  --color-landing-border-subtle: rgba(139, 92, 246, 0.15);
+  --color-landing-bg: #0D0D0D;
+  --color-landing-surface: #171717;
+  --color-landing-surface-raised: #262626;
+  --color-landing-border-subtle: rgba(90, 42, 241, 0.15);
 }
 
 @layer base {
@@ -86,6 +108,17 @@ body {
 
 body {
   font-family: var(--font-sans);
+  line-height: 1.4;
+}
+
+/* Label-to-input spacing */
+label + input,
+label + textarea,
+label + select,
+label + [role="combobox"],
+label + button,
+label + div {
+  margin-top: 0.75rem;
 }
 
 /* ── Safe area CSS vars for layout components ── */
@@ -115,11 +148,31 @@ body {
   background: var(--color-muted-foreground);
 }
 
+/* Hide scrollbar on elements with .scrollbar-none */
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}
+.scrollbar-none {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
 /* ── Touch-friendly: ensure hover-only elements are visible on touch ── */
 @media (hover: none) {
   .group-hover\:opacity-100 {
     opacity: 1 !important;
   }
+}
+
+/* ── Hide native number spinner ── */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+input[type="number"] {
+  -moz-appearance: textfield;
 }
 
 /* ── iOS zoom prevention: force 16px on inputs to prevent auto-zoom ── */
@@ -131,10 +184,141 @@ body {
   }
 }
 
-/* ── Portal Mark logo wordmark (VoidPortal) ── */
-.logo-wordmark {
-  font-family: var(--font-logo);
-  font-weight: 400;
-  letter-spacing: 1px;
-  color: var(--color-void-300);
+/* ── Brand gradient utilities ── */
+.nyx-gradient-vivid {
+  background: linear-gradient(to right, #A672FB 0%, #5E00F5 100%);
+}
+
+.nyx-gradient-sunset {
+  background: linear-gradient(to right, #A672FB 0%, #F0924C 100%);
+}
+
+.nyx-gradient-text {
+  background: linear-gradient(to right, #A672FB 0%, #5E00F5 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.nyx-gradient-text-sunset {
+  background: linear-gradient(to right, #A672FB 0%, #F0924C 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* ── Glassmorphism surfaces ── */
+.glass-surface {
+  background: rgba(23, 23, 23, 0.6);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(38, 38, 38, 0.8);
+}
+
+.glass-elevated {
+  background: rgba(23, 23, 23, 0.9);
+  backdrop-filter: blur(40px);
+  -webkit-backdrop-filter: blur(40px);
+  border: 1px solid rgba(166, 114, 251, 0.1);
+  box-shadow:
+    0 8px 32px rgba(0, 0, 0, 0.3),
+    inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+/* ── Rim-light borders ── */
+.rim-light-top {
+  border-top: 1px solid rgba(166, 114, 251, 0.25);
+}
+
+.rim-light-left {
+  border-left: 2px solid rgba(90, 42, 241, 0.3);
+}
+
+/* ── Ambient glow backgrounds ── */
+.ambient-glow {
+  background: radial-gradient(
+    ellipse at 50% 80%,
+    rgba(90, 42, 241, 0.05) 0%,
+    transparent 60%
+  );
+}
+
+.ambient-glow-success {
+  background: radial-gradient(
+    ellipse at 50% 80%,
+    rgba(16, 185, 129, 0.04) 0%,
+    transparent 60%
+  );
+}
+
+.ambient-glow-warning {
+  background: radial-gradient(
+    ellipse at 50% 80%,
+    rgba(245, 158, 11, 0.04) 0%,
+    transparent 60%
+  );
+}
+
+.ambient-glow-critical {
+  background: radial-gradient(
+    ellipse at 50% 80%,
+    rgba(239, 68, 68, 0.04) 0%,
+    transparent 60%
+  );
+}
+
+/* ── Animations ── */
+@keyframes pulse-subtle {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+.animate-pulse-subtle {
+  animation: pulse-subtle 3s ease-in-out infinite;
+}
+
+@keyframes score-draw {
+  from {
+    stroke-dashoffset: var(--circumference);
+  }
+  to {
+    stroke-dashoffset: var(--target-offset);
+  }
+}
+
+.animate-score-draw {
+  animation: score-draw 1.5s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-up {
+  animation: fade-up 0.4s ease-out forwards;
+  opacity: 0;
+}
+
+/* ── Card hover glow ── */
+.hover-glow {
+  transition:
+    border-color 200ms ease-out,
+    box-shadow 200ms ease-out;
+}
+
+.hover-glow:hover {
+  border-color: rgba(255, 255, 255, 0.15);
+  box-shadow: 0 0 24px rgba(255, 255, 255, 0.03);
 }

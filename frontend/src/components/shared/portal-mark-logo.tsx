@@ -1,7 +1,7 @@
 import { useId } from "react";
 
 /**
- * Portal Mark — pixel-accurate replica of VoidPortal.pen:
+ * Portal Mark — pixel-accurate replica of NyxID.pen:
  * radial glow, three gradient-stroke arc ellipses (partial arcs),
  * Void Moon crescent path, four particle dots.
  *

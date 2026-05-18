@@ -1,5 +1,6 @@
 import { useMemo } from "react";
-import { Pressable, StyleSheet, Text } from "react-native";
+import { Pressable, StyleSheet, Text, View } from "react-native";
+import { LinearGradient } from "expo-linear-gradient";
 import { useTheme } from "../theme/ThemeContext";
 import type { ThemeColors } from "../theme/mobileTheme";
 import { TOUCH_TARGET, radius, spacing, typeScale } from "../theme/designTokens";
@@ -7,6 +8,11 @@ import { TOUCH_TARGET, radius, spacing, typeScale } from "../theme/designTokens"
 type PrimaryButtonProps = {
   label: string;
   onPress: () => void;
+  /**
+   * - `primary`: `nyx-gradient-vivid` gradient — the dominant CTA per DESIGN.md.
+   * - `ghost`: bordered ghost button for secondary actions.
+   * - `danger`: destructive action (soft red fill + red border).
+   */
   kind?: "primary" | "ghost" | "danger";
   disabled?: boolean;
 };
@@ -20,6 +26,37 @@ export function PrimaryButton({
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
 
+  if (kind === "primary") {
+    return (
+      <Pressable
+        onPress={onPress}
+        disabled={disabled}
+        style={({ pressed }) => [
+          styles.gradientWrap,
+          disabled && styles.disabled,
+          pressed && !disabled && styles.primaryPressed,
+        ]}
+      >
+        {({ pressed }) => (
+          <LinearGradient
+            colors={
+              pressed && !disabled
+                ? [colors.gradientStartPressed, colors.gradientEndPressed]
+                : [colors.gradientStart, colors.gradientEnd]
+            }
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 0 }}
+            style={styles.gradientInner}
+          >
+            <Text style={[styles.label, disabled && styles.labelDisabled]}>
+              {label}
+            </Text>
+          </LinearGradient>
+        )}
+      </Pressable>
+    );
+  }
+
   return (
     <Pressable
       onPress={onPress}
@@ -28,7 +65,7 @@ export function PrimaryButton({
         styles.base,
         kind === "ghost" && styles.ghost,
         kind === "danger" && styles.danger,
-        pressed && !disabled && (kind === "primary" ? styles.basePressed : styles.softPressed),
+        pressed && !disabled && styles.softPressed,
         disabled && styles.disabled,
       ]}
     >
@@ -49,7 +86,6 @@ export function PrimaryButton({
 const createStyles = (c: ThemeColors) =>
   StyleSheet.create({
     base: {
-      backgroundColor: c.primary,
       borderRadius: radius.md,
       paddingHorizontal: spacing.xxl,
       minHeight: TOUCH_TARGET,
@@ -57,33 +93,37 @@ const createStyles = (c: ThemeColors) =>
       justifyContent: "center",
       borderWidth: 1,
       borderColor: "transparent",
-      // DESIGN.md §Color → Primary Accent: brand CTAs carry a soft
-      // purple ambient. iOS uses the colored shadow stack; Android
-      // honors elevation only.
+    },
+    gradientWrap: {
+      borderRadius: radius.md,
+      overflow: "hidden",
+      // DESIGN.md §Buttons: primary CTA carries a soft purple glow.
+      // Matches the web `shadow-[0_0_12px_rgba(90,42,241,0.25)]` recipe.
       shadowColor: c.primary,
-      shadowOffset: { width: 0, height: 6 },
-      shadowOpacity: 0.35,
-      shadowRadius: 16,
+      shadowOffset: { width: 0, height: 4 },
+      shadowOpacity: 0.3,
+      shadowRadius: 12,
       elevation: 6,
     },
-    basePressed: {
-      backgroundColor: c.primaryDim,
+    gradientInner: {
+      minHeight: TOUCH_TARGET,
+      paddingHorizontal: spacing.xxl,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    primaryPressed: {
+      shadowOpacity: 0.45,
     },
     softPressed: {
       opacity: 0.7,
     },
     ghost: {
-      backgroundColor: c.ghostBg,
+      backgroundColor: "rgba(255,255,255,0.03)",
       borderColor: c.border,
-      // Ghost + danger variants are not brand CTAs — clear the purple glow.
-      shadowOpacity: 0,
-      elevation: 0,
     },
     danger: {
       backgroundColor: c.dangerSoftBg,
       borderColor: c.danger,
-      shadowOpacity: 0,
-      elevation: 0,
     },
     disabled: {
       opacity: 0.5,

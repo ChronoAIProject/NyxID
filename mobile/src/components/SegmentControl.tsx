@@ -75,22 +75,25 @@ const createStyles = (c: ThemeColors) =>
   StyleSheet.create({
     container: {
       flexDirection: "row",
+      // DESIGN.md: chrome uses 50%-opacity borders.
       backgroundColor: c.cardSoft,
       borderWidth: 1,
-      borderColor: c.border,
+      borderColor: c.borderSoft,
       borderRadius: radius.md,
       padding: 2,
       marginBottom: spacing.xxl,
       position: "relative",
     },
-    // Active tab pill uses purple per DESIGN.md — purple marks identity + interaction.
+    // DESIGN.md §Tabs: active state is subtle, not a filled pill. Mobile uses
+    // the same `navActive` token as BottomNavV2 so segment controls and bottom
+    // nav share one visual language for "selected".
     highlight: {
       position: "absolute",
       top: 2,
       left: 2,
       bottom: 2,
-      borderRadius: radius.sm,
-      backgroundColor: c.primary,
+      borderRadius: radius.xs + 2, // 6 — visually nested inside the 8px container
+      backgroundColor: c.navActive,
     },
     item: {
       flex: 1,
@@ -105,29 +108,36 @@ const createStyles = (c: ThemeColors) =>
     },
     label: {
       ...typeScale.label,
-      color: c.textSecondary,
+      color: c.textMuted,
     },
+    // Active label color matches BottomNavV2 — the textPrimary swap signals selection.
     labelActive: {
-      color: c.onPrimary,
+      color: c.textPrimary,
     },
     countBadge: {
       minWidth: 18,
       height: 18,
-      borderRadius: radius.pill,
-      backgroundColor: c.primaryGlow,
+      // DESIGN.md §Badges: rounded-md (6px), purple accent variant. Theme-aware
+      // via `primaryTone`, so both light + dark render correctly.
+      borderRadius: radius.sm,
+      backgroundColor: c.primaryTone.bg,
+      borderWidth: 1,
+      borderColor: c.primaryTone.border,
       alignItems: "center",
       justifyContent: "center",
       paddingHorizontal: spacing.xs,
     },
     countBadgeActive: {
-      backgroundColor: "rgba(255,255,255,0.20)",
+      // Same chip shape; same color family. The active-segment surface change
+      // already signals selection — no need to escalate the count badge fill.
+      backgroundColor: c.primaryTone.bg,
+      borderColor: c.primaryTone.border,
     },
     countText: {
-      ...typeScale.overline,
-      color: c.primary,
-      letterSpacing: 0,
+      ...typeScale.badge,
+      color: c.primaryOnTint,
     },
     countTextActive: {
-      color: c.onPrimary,
+      color: c.primaryOnTint,
     },
   });

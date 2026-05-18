@@ -45,7 +45,7 @@ export function MemberScopeDialog({
 }: MemberScopeDialogProps) {
   return (
     <Dialog open={member !== null} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-lg">
+      <DialogContent>
         {member && (
           // Key by membership id so reopening the dialog for a different
           // member fully resets the local form state. This avoids the
@@ -160,7 +160,7 @@ function MemberScopeForm({
               className="mt-1"
             />
             <span className="space-y-1">
-              <span className="block text-sm font-medium text-foreground">
+              <span className="block text-[12px] font-medium text-foreground">
                 Inherit from role default
               </span>
               <span className="block text-xs text-muted-foreground">
@@ -181,7 +181,7 @@ function MemberScopeForm({
               className="mt-1"
             />
             <span className="space-y-1">
-              <span className="block text-sm font-medium text-foreground">
+              <span className="block text-[12px] font-medium text-foreground">
                 Customize for this member
               </span>
               <span className="block text-xs text-muted-foreground">
@@ -209,7 +209,7 @@ function MemberScopeForm({
             <div className="space-y-1">
               <Label
                 htmlFor="member-scope-allow-all"
-                className="cursor-pointer text-sm font-medium"
+                className="cursor-pointer text-[12px] font-medium"
               >
                 Allow all org services
               </Label>
@@ -256,7 +256,7 @@ function MemberScopeForm({
                         htmlFor={id}
                         className="flex-1 cursor-pointer space-y-0.5"
                       >
-                        <span className="block text-sm font-medium text-foreground">
+                        <span className="block text-[12px] font-medium text-foreground">
                           {service.label}
                         </span>
                         <span className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -265,7 +265,7 @@ function MemberScopeForm({
                           ) : (
                             <Globe className="h-3 w-3" aria-hidden />
                           )}
-                          <span className="font-mono">{service.slug}</span>
+                          <span>{service.slug}</span>
                         </span>
                       </Label>
                     </div>
@@ -291,6 +291,7 @@ function MemberScopeForm({
           Cancel
         </Button>
         <Button
+          variant="primary"
           onClick={() => void handleSave()}
           isLoading={updateMutation.isPending}
         >

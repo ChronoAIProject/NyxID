@@ -74,7 +74,7 @@ export function RateLimitCard({
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
           <Gauge className="h-4 w-4 text-primary" />
-          <CardTitle className="text-sm">Rate Limits</CardTitle>
+          <CardTitle className="text-[15px]">Rate Limits</CardTitle>
         </div>
         <CardDescription>
           Per-agent request rate limits (overrides user-level defaults)
@@ -103,21 +103,21 @@ export function RateLimitCard({
                 placeholder="Use user default"
               />
             </div>
-            <div className="flex gap-2">
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={handleCancel}>
+                Cancel
+              </Button>
               <Button
-                size="sm"
+                variant="primary"
                 onClick={handleSave}
-                disabled={updateApiKey.isPending}
+                disabled={updateApiKey.isPending || (rps === (rateLimitPerSecond?.toString() ?? "") && burst === (rateLimitBurst?.toString() ?? ""))}
               >
                 Save
-              </Button>
-              <Button size="sm" variant="outline" onClick={handleCancel}>
-                Cancel
               </Button>
             </div>
           </div>
         ) : (
-          <div className="space-y-2">
+          <div className="flex items-center justify-between">
             <div className="grid grid-cols-2 gap-2 text-xs">
               <div>
                 <span className="text-muted-foreground">Per second: </span>
@@ -133,12 +133,12 @@ export function RateLimitCard({
               </div>
             </div>
             <Button
-              size="sm"
-              variant="outline"
+              size="icon"
+              variant="ghost"
+              className="h-6 w-6 shrink-0"
               onClick={() => setEditing(true)}
             >
-              <Pencil className="mr-2 h-3 w-3" />
-              Edit Limits
+              <Pencil className="h-3 w-3" />
             </Button>
           </div>
         )}

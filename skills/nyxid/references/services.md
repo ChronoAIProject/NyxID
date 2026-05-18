@@ -47,6 +47,7 @@ nyxid service add --custom                                # add custom endpoint 
 
 > For API key services, just run `nyxid service add <slug>` without flags. The CLI securely prompts for the key (input hidden). Never ask the user to paste secrets into chat or set environment variables manually.
 > For automation/scripting only: `--credential-env <VAR>` reads from an environment variable.
+> For multi-field credentials (AWS access-key JSON, GCP service-account JSON): `--credential-file <PATH>` reads the credential bytes from a file. Pass `-` to read from stdin.
 
 ## Slug rules for `service add`
 
@@ -221,7 +222,7 @@ Terminal (scripted stdin-prompt) mode is selected when **any** of the following 
 
 - `--terminal` (alias `--no-wizard`) is passed on the command line -- **per-invocation override**, useful for a one-off scripted call on a GUI machine.
 - `NYXID_NO_WIZARD=1` is set in the environment -- **sticky** across all invocations. Right choice for CI runners, Dockerfiles, and systemd units that want the pre-wizard behavior.
-- A **scripted flag** is present (tells the CLI the caller already decided the flow): `--oauth`, `--device-code`, `--credential-env`, `--credential`, `--custom`, `--slug`, `--auth-method`, `--auth-key-name`, `--scope`, `--openapi-spec-url`, or `--output json` (unless combined with `--no-wait`, which always uses remote pairing). Note: `--org` is **not** in this list -- it is a wizard prefill, so `nyxid service add --org chronoai` opens the wizard with the org pre-selected as owner.
+- A **scripted flag** is present (tells the CLI the caller already decided the flow): `--oauth`, `--device-code`, `--credential-env`, `--credential`, `--credential-file`, `--custom`, `--slug`, `--auth-method`, `--auth-key-name`, `--scope`, `--openapi-spec-url`, or `--output json` (unless combined with `--no-wait`, which always uses remote pairing). Note: `--org` is **not** in this list -- it is a wizard prefill, so `nyxid service add --org chronoai` opens the wizard with the org pre-selected as owner.
 - stdin is a TTY **and** stdout is piped / redirected -- the user is clearly scripting output (`nyxid api-key create > key.txt`, `| jq`), so the CLI respects that and uses the stdin-prompt path.
 
 Note: fully-headless environments (agents, SSH without display, CI containers) NO LONGER fall through to stdin-prompt mode. They route through remote pairing (Mode B) or the local wizard (Mode A via `open`/`xdg-open`/`start`) depending on whether a local browser can actually launch — see the transport-selection table above. Set `NYXID_NO_WIZARD=1` to opt out if a caller genuinely wants the stdin-prompt behavior on a headless box (rare — usually means all args are supplied via flags).
@@ -288,6 +289,59 @@ When users need API keys, direct them to the right place:
 | Groq | https://console.groq.com/keys | `GROQ_KEY` |
 
 For services not listed here, check `nyxid catalog show <slug> --output json` for the provider's documentation URL.
+
+### Cloud-billing services: AWS Cost Explorer + GCP Cloud Billing / BigQuery
+
+Three catalog entries surface cloud cost data for `/daily`-style P&L
+work (NyxID#716):
+
+| Slug | What it proxies | Credential shape |
+|------|-----------------|------------------|
+| `aws-cost-explorer` | AWS Cost Explorer JSON-RPC API (`ce.us-east-1.amazonaws.com`). Use `X-Amz-Target` to pick the operation (e.g. `AWSInsightsServiceV20210101.GetCostAndUsage`). | JSON: `{"access_key_id","secret_access_key","region","service"}` |
+| `gcp-cloud-billing` | GCP Cloud Billing REST (`cloudbilling.googleapis.com`) — billing-account metadata, projects, SKUs. **No historical cost data here.** | The full service-account JSON key file |
+| `gcp-bigquery-billing` | GCP BigQuery — the only path to spend-by-project / day. SQL queries against `gcp_billing_export_v1_<billing_account_id>`. | Same SA JSON as `gcp-cloud-billing` (default scopes cover both) |
+
+Auth methods used (`aws_sigv4` / `gcp_service_account`) take their
+credential as a JSON blob on the existing `credential` field — pass it
+in via `--credential-file`:
+
+```bash
+# AWS — write the access-key JSON to a temp file (or pipe via stdin: -)
+cat > /tmp/aws-cred.json <<'EOF'
+{"access_key_id":"AKIA...","secret_access_key":"...","region":"us-east-1","service":"ce"}
+EOF
+nyxid service add aws-cost-explorer --credential-file /tmp/aws-cred.json
+rm /tmp/aws-cred.json
+
+# GCP — service-account JSON downloaded from the Cloud Console
+nyxid service add gcp-cloud-billing --credential-file ~/Downloads/sa-key.json
+nyxid service add gcp-bigquery-billing --credential-file ~/Downloads/sa-key.json
+```
+
+**Required IAM (enforced by the cloud, not NyxID):**
+
+- AWS: the IAM user / role must be in the AWS **Organization management
+  (payer) account** — linked-account credentials return `AccessDenied`.
+  Minimum policy: `ce:GetCostAndUsage`, `ce:GetCostAndUsageWithResources`.
+- GCP: `roles/billing.viewer` (org or billing-account scope) + on the
+  BigQuery host project `roles/bigquery.dataViewer` (billing-export
+  dataset) + `roles/bigquery.jobUser`. None of these grant spend-money
+  capability.
+
+**Operational requirements before this works end-to-end:**
+
+- AWS cost allocation tags activated for the dimensions you want to
+  group by (e.g. `project`, `namespace`) — `GroupBy: TAG:project` returns
+  empty data otherwise.
+- GCP billing-export to BigQuery must already be enabled and the
+  dataset name known. See `nyxid catalog show gcp-bigquery-billing
+  --output json` for the upstream documentation link.
+
+**Caching:** these two auth methods share an in-process response cache
+(default TTL 5 min, env `CLOUD_RESPONSE_CACHE_TTL_SECS`). Identical
+proxy bodies in a short window replay from memory — AWS Cost Explorer
+charges $0.01 per paginated request and BigQuery billing data only
+updates every few hours, so the cache saves both budget and latency.
 
 ### Tips for non-technical users
 

@@ -33,7 +33,7 @@ export function ScrollFab() {
         progress > 0.95
           ? "border-primary/50 fab-glow-full"
           : "border-primary/30 shadow-lg shadow-primary/20"
-      } hover:border-primary/50 hover:fab-glow-hover`}
+      } hover:border-white/[0.15] hover:fab-glow-hover`}
       style={{
         bottom: 24,
         right: 24,

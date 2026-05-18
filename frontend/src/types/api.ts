@@ -19,6 +19,20 @@ export interface User {
   readonly role?: PlatformRole;
   readonly is_active: boolean;
   readonly created_at: string;
+  /// User-scoped config / preferences. Older backends omit this; callers
+  /// must treat `undefined` as "unknown" and fail open (never trap a user).
+  readonly profile_config?: ProfileConfig;
+}
+
+/// First-run onboarding flags. Timestamps are rfc3339 strings; `null`
+/// means the flow has not been completed (or skipped) yet.
+export interface OnboardingState {
+  readonly ai_services_completed_at: string | null;
+}
+
+/// User-scoped configuration surfaced on `GET /users/me`.
+export interface ProfileConfig {
+  readonly onboarding: OnboardingState;
 }
 
 /// Resolve the effective platform role for a user payload returned by the

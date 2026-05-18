@@ -22,10 +22,11 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Link2, Unlink, Server, KeyRound, Cable } from "lucide-react";
+import { MagnetIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
 import { ApiError } from "@/lib/api-client";
 import { CredentialDialog } from "./credential-dialog";
@@ -131,11 +132,14 @@ export function ConnectionGrid() {
 
   if (connectableServices.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center py-12 text-center">
-        <Server className="mb-4 h-12 w-12 text-muted-foreground/50" />
-        <p className="text-sm text-muted-foreground">
-          No connectable services available. Create a service first.
-        </p>
+      <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+        <MagnetIcon className="h-64 w-64 text-muted-foreground/30" />
+        <div className="space-y-1">
+          <p className="text-[12px] font-medium text-muted-foreground/30">No Services</p>
+          <p className="text-xs text-muted-foreground/30">
+            No connectable services available. Create a service first.
+          </p>
+        </div>
       </div>
     );
   }
@@ -161,19 +165,19 @@ export function ConnectionGrid() {
               className={
                 isConnected
                   ? "border-primary/30 bg-primary/5"
-                  : "transition-colors hover:border-border/80"
+                  : "transition-colors duration-300 hover:border-white/[0.15]"
               }
             >
               <CardHeader className="pb-3">
                 <div className="flex items-center justify-between">
                   <div className="flex min-w-0 flex-1 items-center gap-3">
                     <div
-                      className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg ${
+                      className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${
                         isConnected ? "bg-primary/20" : "bg-muted"
                       }`}
                     >
                       <Server
-                        className={`h-5 w-5 ${
+                        className={`h-4 w-4 ${
                           isConnected ? "text-primary" : "text-muted-foreground"
                         }`}
                       />
@@ -191,7 +195,7 @@ export function ConnectionGrid() {
                     <Badge variant={isConnected ? "success" : "secondary"}>
                       {isConnected ? "Connected" : "Available"}
                     </Badge>
-                    <Badge variant="outline" className="text-[10px]">
+                    <Badge variant="secondary" className="text-[10px]">
                       {SERVICE_CATEGORY_LABELS[service.service_category] ??
                         service.service_category}
                     </Badge>
@@ -233,11 +237,10 @@ export function ConnectionGrid() {
                             </span>
                           ))}
                       </div>
-                      <div className="flex gap-1.5">
+                      <div className="flex justify-end gap-1.5">
                         {canRepairCredential && (
                           <Button
                             variant="outline"
-                            size="sm"
                             onClick={() =>
                               setCredentialDialog({
                                 service,
@@ -246,17 +249,16 @@ export function ConnectionGrid() {
                             }
                             disabled={updateCredentialMutation.isPending}
                           >
-                            <KeyRound className="mr-1.5 h-3 w-3" />
+                            <ButtonIcon><KeyRound className="h-3 w-3" /></ButtonIcon>
                             Update Key
                           </Button>
                         )}
                         <Button
                           variant="outline"
-                          size="sm"
                           onClick={() => void handleDisconnect(service.id)}
                           disabled={disconnectMutation.isPending}
                         >
-                          <Unlink className="mr-1.5 h-3 w-3" />
+                          <ButtonIcon><Unlink className="h-3 w-3" /></ButtonIcon>
                           Disconnect
                         </Button>
                       </div>
@@ -266,25 +268,24 @@ export function ConnectionGrid() {
                       <span className="text-xs text-muted-foreground">
                         Not connected
                       </span>
-                      <div className="flex gap-1.5">
+                      <div className="flex justify-end gap-1.5">
                         {service.requires_user_credential &&
                           nodeRouteSet.has(service.id) && (
                             <Button
-                              size="sm"
                               variant="outline"
                               onClick={() => void handleConnect(service, true)}
                               disabled={connectMutation.isPending}
                             >
-                              <Cable className="mr-1.5 h-3 w-3" />
+                              <ButtonIcon><Cable className="h-3 w-3" /></ButtonIcon>
                               Via Node
                             </Button>
                           )}
                         <Button
-                          size="sm"
+                          variant="primary"
                           onClick={() => void handleConnect(service)}
                           disabled={connectMutation.isPending}
                         >
-                          <Link2 className="mr-1.5 h-3 w-3" />
+                          <ButtonIcon><Link2 className="h-3 w-3" /></ButtonIcon>
                           {service.requires_user_credential
                             ? "Connect"
                             : "Enable"}

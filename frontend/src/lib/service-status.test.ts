@@ -10,7 +10,7 @@ describe("deriveServiceBadge", () => {
       hasCredential: true,
     });
     expect(result).toEqual({
-      variant: "default",
+      variant: "success",
       label: "Active",
       credentialBlocked: false,
     });
@@ -52,7 +52,7 @@ describe("deriveServiceBadge", () => {
       hasCredential: true,
     });
     expect(result).toEqual({
-      variant: "outline",
+      variant: "secondary",
       label: "Unavailable",
       credentialBlocked: true,
     });
@@ -82,7 +82,7 @@ describe("deriveServiceBadge", () => {
       hasCredential: false,
     });
     expect(result).toEqual({
-      variant: "default",
+      variant: "success",
       label: "Active",
       credentialBlocked: false,
     });

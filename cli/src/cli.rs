@@ -658,6 +658,12 @@ pub enum ServiceCommands {
         /// Read credential from this environment variable instead of prompting
         #[arg(long)]
         credential_env: Option<String>,
+        /// Read credential bytes from this file. Use for multi-field credentials
+        /// like `aws_sigv4` (JSON: access_key_id/secret_access_key/region/service)
+        /// or `gcp_service_account` (the full SA JSON key file). Pass `-` to
+        /// read from stdin.
+        #[arg(long, value_name = "PATH")]
+        credential_file: Option<String>,
         /// Additional OAuth scopes to request on top of the provider's defaults
         /// (repeatable, comma- or space-separated). Only used with --oauth or
         /// --device-code. The upstream provider decides whether to grant them.

@@ -42,7 +42,7 @@ describe("EndpointFormDialog", () => {
       />,
     );
 
-    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    await user.click(screen.getByRole("button", { name: "Save Changes" }));
 
     await waitFor(() => {
       expect(onSubmit).toHaveBeenCalledWith({

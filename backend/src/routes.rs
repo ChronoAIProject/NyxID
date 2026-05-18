@@ -67,6 +67,10 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
         .route("/me", put(handlers::users::update_me))
         .route("/me", delete(handlers::users::delete_me))
         .route(
+            "/me/onboarding/complete",
+            post(handlers::users::complete_onboarding),
+        )
+        .route(
             "/me/broker-bindings",
             get(handlers::broker_bindings::list_my_broker_bindings),
         )

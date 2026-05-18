@@ -21,12 +21,15 @@ use crate::models::user_service_connection::{
     COLLECTION_NAME as USER_SERVICE_CONNECTIONS, UserServiceConnection,
 };
 use crate::models::ws_frame_injection::WsFrameInjection;
+use crate::services::cloud_response_cache::{self, CloudResponseCache};
 use crate::services::delegation_service::DelegatedCredential;
 use crate::services::node_ws_manager::NodeWsManager;
 use crate::services::provider_token_exchange_service::{self, TokenExchangeCache};
 use crate::services::{
     agent_binding_service, user_api_key_service, user_service_service, user_token_service,
 };
+use nyxid_cloud_auth::aws_sigv4::{self, AwsCredentials};
+use nyxid_cloud_auth::gcp_oauth::{DEFAULT_GCP_SCOPES, GcpTokenCache};
 
 /// Default User-Agent injected at the proxy boundary when neither the
 /// caller nor the resolved service supplies one. Resolved at compile
@@ -109,7 +112,21 @@ const ALLOWED_FORWARD_HEADERS: &[&str] = &[
 ///
 /// Headers under `x-openclaw-*` are caller-supplied OpenClaw routing / scope
 /// hints; the gateway owns their semantics, so NyxID must not strip them.
-const ALLOWED_FORWARD_HEADER_PREFIXES: &[&str] = &["x-openclaw-"];
+///
+/// Headers under `x-amz-*` are AWS-namespace headers. Most callers will
+/// use them as routing hints — notably `X-Amz-Target` for JSON-RPC
+/// services like Cost Explorer, which dispatches operations entirely
+/// via that header rather than a URL path. We forward those through.
+/// The signer-managed subset (`Authorization`, `X-Amz-Date`,
+/// `X-Amz-Content-Sha256`, `X-Amz-Security-Token`) is stripped from
+/// `outbound_headers` later in `forward_request` (search for "BLOCKER 8"
+/// in the auth dispatch) before the signer adds its own canonical
+/// values, so duplicate-injection on the wire is impossible.
+///
+/// Headers under `x-goog-*` are GCP-namespace headers (e.g.
+/// `X-Goog-User-Project` for billing-quota project selection on BigQuery
+/// calls against the billing-export dataset). NyxID#716.
+const ALLOWED_FORWARD_HEADER_PREFIXES: &[&str] = &["x-openclaw-", "x-amz-", "x-goog-"];
 
 /// Returns `true` when the header name is in the allowlist or matches an
 /// allowlisted prefix. Caller must lowercase the name before calling.
@@ -142,7 +159,15 @@ pub(crate) fn credential_header_name(target: &ProxyTarget) -> Option<String> {
                 Some(trimmed.to_string())
             }
         }
-        "bearer" | "bot_bearer" | "basic" => Some("authorization".to_string()),
+        "bearer" | "bot_bearer" | "basic" | "gcp_service_account" => {
+            Some("authorization".to_string())
+        }
+        // SigV4 sets Authorization plus several `X-Amz-*` headers; the only
+        // one a caller-supplied or catalog default header could collide with
+        // is `Authorization`, so we strip just that. The `X-Amz-*` headers
+        // are added unconditionally by sign_request and are not expected
+        // from upstream sources.
+        "aws_sigv4" => Some("authorization".to_string()),
         "token_exchange" => target
             .service
             .token_exchange_config
@@ -1949,6 +1974,10 @@ pub async fn forward_request(
     caller_token: Option<&str>,
     // Shared generic token exchange cache (used by `token_exchange`).
     token_exchange_cache: &TokenExchangeCache,
+    // GCP service-account access-token cache (used by `gcp_service_account`).
+    gcp_token_cache: &GcpTokenCache,
+    // In-memory response cache for cloud-billing auth methods (NyxID#716).
+    cloud_response_cache: &CloudResponseCache,
 ) -> AppResult<reqwest::Response> {
     let mut all_delegated = delegated_credentials;
     extend_with_path_credential(&mut all_delegated, target);
@@ -2072,6 +2101,22 @@ pub async fn forward_request(
     if target.service.forward_access_token && caller_token.is_some() {
         outbound_headers.retain(|(n, _)| !n.eq_ignore_ascii_case("authorization"));
     }
+    // SigV4 attaches its own X-Amz-Date / X-Amz-Content-Sha256 / X-Amz-
+    // Security-Token after the auth dispatch. `reqwest::header()` appends
+    // rather than replaces, so a caller-supplied value for any of these
+    // would ride alongside the signer's value on the wire — AWS rejects
+    // the request with a signature-mismatch error and the body hash
+    // disagreement is a latent integrity bug regardless. Codex review
+    // BLOCKER 8: strip them from `outbound_headers` before attaching.
+    if target.auth_method == "aws_sigv4" {
+        outbound_headers.retain(|(n, _)| {
+            let lower = n.to_ascii_lowercase();
+            !matches!(
+                lower.as_str(),
+                "x-amz-date" | "x-amz-content-sha256" | "x-amz-security-token" | "authorization"
+            )
+        });
+    }
 
     for (name, value) in &outbound_headers {
         request = request.header(name, value);
@@ -2113,6 +2158,56 @@ pub async fn forward_request(
     } else {
         body
     };
+
+    // Pre-flight cache lookup for billing-API auth methods (NyxID#716).
+    // Done after the body has been finalized but before signing or
+    // sending — a cache hit saves the SigV4 HMAC chain + the outbound
+    // network call. The key is scoped per (auth_method, credential
+    // fingerprint, base_url, method, path+query, response-affecting
+    // headers, body), so two users hitting the same catalog endpoint
+    // with different credentials get different entries (Codex review
+    // BLOCKER 1) and two AWS JSON-RPC operations with the same body
+    // but different `x-amz-target` headers don't replay each other
+    // (BLOCKER 2).
+    let cache_key: Option<String> =
+        if cloud_response_cache::is_cacheable_auth_method(&target.auth_method) {
+            let body_bytes_for_key: &[u8] = match &body {
+                ProxyBody::Buffered(Some(b)) => b.as_ref(),
+                ProxyBody::Buffered(None) => &[][..],
+            };
+            let path_and_query = match prepared.query.as_deref() {
+                Some(q) => format!("{}?{}", prepared.path, q),
+                None => prepared.path.clone(),
+            };
+            // Headers that have actually been attached to the outgoing
+            // request, plus any prepared delegated headers. Both feed
+            // the cache key's header digest.
+            let mut key_headers: Vec<(String, String)> = outbound_headers.to_vec();
+            for (n, v) in &prepared.delegated_headers {
+                key_headers.push((n.clone(), v.clone()));
+            }
+            let fingerprint = CloudResponseCache::credential_fingerprint(&target.credential);
+            let key = CloudResponseCache::key(
+                &target.auth_method,
+                &fingerprint,
+                &target.base_url,
+                method.as_str(),
+                &path_and_query,
+                &key_headers,
+                body_bytes_for_key,
+            );
+            if let Some(cached) = cloud_response_cache.get(&key) {
+                tracing::debug!(
+                    auth_method = %target.auth_method,
+                    base_url = %target.base_url,
+                    "cloud_response_cache hit"
+                );
+                return Ok(cached);
+            }
+            Some(key)
+        } else {
+            None
+        };
 
     // Inject credentials based on auth method
     match target.auth_method.as_str() {
@@ -2190,6 +2285,46 @@ pub async fn forward_request(
                 &token,
             )?;
         }
+        "aws_sigv4" => {
+            // AWS Signature V4. Used by Cost Explorer (and any other AWS
+            // service NyxID later proxies). The signature covers method +
+            // URL + signed headers + body hash, so we hand `sign_request`
+            // exactly the bytes that will be sent. `prepared.delegated_headers`
+            // are typically empty for cloud-billing services but signed if
+            // present for consistency with the direct-header path.
+            let mut signed_input: Vec<(String, String)> = outbound_headers.clone();
+            for (name, value) in &prepared.delegated_headers {
+                signed_input.push((name.clone(), value.clone()));
+            }
+            let body_bytes: &[u8] = match &body {
+                ProxyBody::Buffered(Some(b)) => b.as_ref(),
+                ProxyBody::Buffered(None) => &[][..],
+            };
+            let creds = AwsCredentials::from_json(&target.credential).map_err(|e| {
+                AppError::Internal(format!(
+                    "aws_sigv4 credential is malformed: {e}. Expected JSON with access_key_id, secret_access_key, region, service."
+                ))
+            })?;
+            let signed_headers =
+                aws_sigv4::sign_request(method.as_str(), &url, &signed_input, body_bytes, &creds)
+                    .map_err(|e| AppError::Internal(format!("aws_sigv4 signing failed: {e}")))?;
+            for header in signed_headers {
+                request = request.header(&header.name, &header.value);
+            }
+        }
+        "gcp_service_account" => {
+            // GCP service-account JWT-bearer OAuth. Token cache lives in
+            // AppState; refreshes 5 min before expiry. Same access token
+            // is shared across `gcp-cloud-billing` and `gcp-bigquery-billing`
+            // because the default scopes cover both.
+            let token = gcp_token_cache
+                .access_token(client, &target.credential, DEFAULT_GCP_SCOPES)
+                .await
+                .map_err(|e| {
+                    AppError::Internal(format!("gcp_service_account token mint failed: {e}"))
+                })?;
+            request = request.bearer_auth(token.as_ref());
+        }
         _ => {
             return Err(AppError::Internal(format!(
                 "Unknown auth method: {}",
@@ -2248,6 +2383,35 @@ pub async fn forward_request(
         tracing::error!("Proxy request to {} failed: {e}", target.base_url);
         AppError::Internal("Proxy request failed".to_string())
     })?;
+
+    // GCP-specific: if the upstream rejects our bearer token as
+    // expired / revoked (401 or 403), drop the cached access token so
+    // the next request mints a fresh one instead of replaying the
+    // stale one until natural TTL expiry. Codex review REC 8.
+    if target.auth_method == "gcp_service_account"
+        && matches!(response.status().as_u16(), 401 | 403)
+    {
+        gcp_token_cache.invalidate(&target.credential, DEFAULT_GCP_SCOPES);
+        tracing::warn!(
+            base_url = %target.base_url,
+            status = response.status().as_u16(),
+            "gcp_service_account: upstream rejected token, invalidated cached access token"
+        );
+    }
+
+    // Cache successful billing-API responses so a follow-up request
+    // with the same body replays from memory. Non-2xx responses are
+    // passed through unchanged by `insert_and_replay`.
+    if let Some(key) = cache_key {
+        let replayed = cloud_response_cache
+            .insert_and_replay(key, response)
+            .await
+            .map_err(|e| {
+                tracing::error!("cloud_response_cache buffer failed: {e}");
+                AppError::Internal("Failed to buffer cacheable response".to_string())
+            })?;
+        return Ok(replayed);
+    }
 
     Ok(response)
 }
@@ -2404,6 +2568,16 @@ mod tests {
     /// `provider_token_exchange_service::tests`.
     fn empty_token_cache() -> TokenExchangeCache {
         TokenExchangeCache::new()
+    }
+
+    fn empty_gcp_cache() -> GcpTokenCache {
+        GcpTokenCache::new()
+    }
+
+    fn empty_response_cache() -> CloudResponseCache {
+        // TTL=0 disables storage; tests covering cacheable paths
+        // construct a separate instance with a real TTL.
+        CloudResponseCache::new(0)
     }
 
     #[tokio::test]
@@ -2712,6 +2886,8 @@ mod tests {
             vec![],
             None,
             &empty_token_cache(),
+            &empty_gcp_cache(),
+            &empty_response_cache(),
         )
         .await
         .expect("proxy request should succeed");
@@ -2760,6 +2936,8 @@ mod tests {
             vec![],
             None,
             &empty_token_cache(),
+            &empty_gcp_cache(),
+            &empty_response_cache(),
         )
         .await
         .expect("proxy request should succeed");
@@ -2811,6 +2989,8 @@ mod tests {
             vec![],
             None,
             &empty_token_cache(),
+            &empty_gcp_cache(),
+            &empty_response_cache(),
         )
         .await
         .expect("proxy request should succeed");
@@ -2865,6 +3045,8 @@ mod tests {
             vec![],
             None,
             &empty_token_cache(),
+            &empty_gcp_cache(),
+            &empty_response_cache(),
         )
         .await
         .expect("proxy request should succeed");
@@ -2913,6 +3095,8 @@ mod tests {
             }],
             None,
             &empty_token_cache(),
+            &empty_gcp_cache(),
+            &empty_response_cache(),
         )
         .await
         .expect("proxy request should succeed");
@@ -2982,6 +3166,8 @@ mod tests {
             vec![],
             None,
             &empty_token_cache(),
+            &empty_gcp_cache(),
+            &empty_response_cache(),
         )
         .await
         .expect_err("backslash in requested path should be rejected");
@@ -3036,6 +3222,8 @@ mod tests {
                 vec![],
                 None,
                 &empty_token_cache(),
+                &empty_gcp_cache(),
+                &empty_response_cache(),
             )
             .await
             .expect_err("percent-encoded requested path breaker should be rejected");
@@ -3074,6 +3262,8 @@ mod tests {
             vec![],
             None,
             &empty_token_cache(),
+            &empty_gcp_cache(),
+            &empty_response_cache(),
         )
         .await
         .expect("non-segment dot sequences should be allowed");
@@ -3105,6 +3295,8 @@ mod tests {
             }],
             None,
             &empty_token_cache(),
+            &empty_gcp_cache(),
+            &empty_response_cache(),
         )
         .await
         .expect_err("invalid path credential should be rejected");
@@ -3135,6 +3327,8 @@ mod tests {
                 }],
                 None,
                 &empty_token_cache(),
+                &empty_gcp_cache(),
+                &empty_response_cache(),
             )
             .await
             .expect_err("blank or whitespace path credential should be rejected");
@@ -3165,6 +3359,8 @@ mod tests {
             }],
             None,
             &empty_token_cache(),
+            &empty_gcp_cache(),
+            &empty_response_cache(),
         )
         .await
         .expect_err("invalid path prefix should be rejected");
@@ -3195,6 +3391,8 @@ mod tests {
                 }],
                 None,
                 &empty_token_cache(),
+                &empty_gcp_cache(),
+                &empty_response_cache(),
             )
             .await
             .expect_err("blank or whitespace path prefix should be rejected");
@@ -3225,6 +3423,8 @@ mod tests {
             }],
             None,
             &empty_token_cache(),
+            &empty_gcp_cache(),
+            &empty_response_cache(),
         )
         .await
         .expect_err("percent-encoded path credential should be rejected");
@@ -3280,6 +3480,8 @@ mod tests {
             }],
             None,
             &empty_token_cache(),
+            &empty_gcp_cache(),
+            &empty_response_cache(),
         )
         .await
         .expect_err("percent-encoded path prefix should be rejected");
@@ -3532,6 +3734,8 @@ mod tests {
             vec![],
             None,
             &cache,
+            &empty_gcp_cache(),
+            &empty_response_cache(),
         )
         .await
         .expect("lark proxy request should succeed");
@@ -3565,6 +3769,8 @@ mod tests {
             vec![],
             None,
             &cache,
+            &empty_gcp_cache(),
+            &empty_response_cache(),
         )
         .await
         .expect("first call");
@@ -3582,6 +3788,8 @@ mod tests {
             vec![],
             None,
             &cache,
+            &empty_gcp_cache(),
+            &empty_response_cache(),
         )
         .await
         .expect("second call");
@@ -3612,6 +3820,8 @@ mod tests {
             vec![],
             None,
             &TokenExchangeCache::new(),
+            &empty_gcp_cache(),
+            &empty_response_cache(),
         )
         .await
         .expect_err("malformed credential should error");
@@ -3814,6 +4024,8 @@ mod tests {
             vec![],
             None,
             &empty_token_cache(),
+            &empty_gcp_cache(),
+            &empty_response_cache(),
         )
         .await
         .expect("GET with body auth should forward without body injection");
@@ -3888,6 +4100,8 @@ mod tests {
             vec![],
             None,
             &empty_token_cache(),
+            &empty_gcp_cache(),
+            &empty_response_cache(),
         )
         .await
         .expect("POST with body auth should merge credential into JSON body");
@@ -3925,5 +4139,264 @@ mod tests {
         assert_eq!(svc.auth_method, "body");
         assert_eq!(svc.auth_key_name, "app_secret");
         assert!(svc.token_exchange_config.is_none());
+    }
+
+    // ─── cloud-billing smoke tests (NyxID#716) ─────────────────────────
+    //
+    // These spin up a local axum mock at a random port and exercise
+    // forward_request end-to-end: SigV4 / GCP OAuth signing happens
+    // against the mock, then the mock asserts the on-wire shape. They
+    // are integration-flavor — slower than the pure-unit aws_sigv4
+    // tests in the cloud-auth crate — but they're the only place that
+    // proves the signing + injection + cache pipeline composes
+    // correctly when wired through `forward_request`.
+
+    fn make_billing_proxy_target(
+        base_url: String,
+        auth_method: &str,
+        credential: String,
+    ) -> ProxyTarget {
+        let now = Utc::now();
+        ProxyTarget {
+            base_url: base_url.clone(),
+            auth_method: auth_method.to_string(),
+            auth_key_name: String::new(),
+            credential,
+            service: DownstreamService {
+                id: uuid::Uuid::new_v4().to_string(),
+                name: "Cloud Billing Test".to_string(),
+                slug: "test-cloud-billing".to_string(),
+                description: None,
+                base_url,
+                auth_method: auth_method.to_string(),
+                auth_key_name: String::new(),
+                credential_encrypted: vec![],
+                auth_type: None,
+                openapi_spec_url: None,
+                asyncapi_spec_url: None,
+                streaming_supported: false,
+                ssh_config: None,
+                service_type: "http".to_string(),
+                visibility: "public".to_string(),
+                oauth_client_id: None,
+                service_category: "connection".to_string(),
+                requires_user_credential: true,
+                is_active: true,
+                created_by: "test".to_string(),
+                identity_propagation_mode: "none".to_string(),
+                identity_include_user_id: false,
+                identity_include_email: false,
+                identity_include_name: false,
+                identity_jwt_audience: None,
+                forward_access_token: false,
+                inject_delegation_token: false,
+                delegation_token_scope: "proxy:*".to_string(),
+                provider_config_id: None,
+                homepage_url: None,
+                repository_url: None,
+                issues_url: None,
+                capabilities: None,
+                auth_notes: None,
+                known_limitations: None,
+                required_permissions: None,
+                recommended_skills: None,
+                examples_url: None,
+                custom_user_agent: None,
+                default_request_headers: None,
+                ws_frame_injections: Vec::new(),
+                developer_app_ids: None,
+                token_exchange_config: None,
+                created_at: now,
+                updated_at: now,
+            },
+            catalog_default_headers: Vec::new(),
+            user_service_default_headers: Vec::new(),
+            ws_frame_injections: Vec::new(),
+            connection_id: None,
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct AwsMockState {
+        captured_authorization: Arc<std::sync::Mutex<Option<String>>>,
+        captured_amz_date: Arc<std::sync::Mutex<Option<String>>>,
+        captured_amz_content_sha256: Arc<std::sync::Mutex<Option<String>>>,
+        captured_body: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
+        request_count: Arc<AtomicUsize>,
+    }
+
+    async fn aws_mock_handler(
+        State(state): State<AwsMockState>,
+        headers: HeaderMap,
+        body: Bytes,
+    ) -> Json<serde_json::Value> {
+        state.request_count.fetch_add(1, Ordering::SeqCst);
+        *state.captured_authorization.lock().unwrap() = headers
+            .get(reqwest::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .map(ToString::to_string);
+        *state.captured_amz_date.lock().unwrap() = headers
+            .get("x-amz-date")
+            .and_then(|v| v.to_str().ok())
+            .map(ToString::to_string);
+        *state.captured_amz_content_sha256.lock().unwrap() = headers
+            .get("x-amz-content-sha256")
+            .and_then(|v| v.to_str().ok())
+            .map(ToString::to_string);
+        *state.captured_body.lock().unwrap() = Some(body.to_vec());
+        Json(serde_json::json!({
+            "ResultsByTime": [],
+            "GroupDefinitions": [],
+        }))
+    }
+
+    async fn start_aws_mock() -> (String, AwsMockState, tokio::task::JoinHandle<()>) {
+        let state = AwsMockState::default();
+        let app = Router::new()
+            .route("/", post(aws_mock_handler))
+            .with_state(state.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+        (format!("http://{addr}"), state, server)
+    }
+
+    /// End-to-end: forward_request with `auth_method=aws_sigv4` produces
+    /// a request whose Authorization header is a well-formed SigV4
+    /// signature, X-Amz-Date / X-Amz-Content-Sha256 are present, and
+    /// the body reaches the downstream unmodified.
+    #[tokio::test]
+    async fn aws_sigv4_smoke_signs_and_forwards_request() {
+        let (base_url, mock, server) = start_aws_mock().await;
+        let creds_json = r#"{"access_key_id":"AKIDEXAMPLE","secret_access_key":"wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY","region":"us-east-1","service":"ce"}"#;
+        let target = make_billing_proxy_target(base_url, "aws_sigv4", creds_json.to_string());
+
+        let mut req_headers = reqwest::header::HeaderMap::new();
+        req_headers.insert(
+            reqwest::header::CONTENT_TYPE,
+            "application/x-amz-json-1.1".parse().unwrap(),
+        );
+        req_headers.insert(
+            "x-amz-target",
+            "AWSInsightsServiceV20210101.GetCostAndUsage"
+                .parse()
+                .unwrap(),
+        );
+
+        let body =
+            br#"{"TimePeriod":{"Start":"2026-04-13","End":"2026-05-13"},"Granularity":"MONTHLY","Metrics":["BlendedCost"]}"#;
+
+        let resp = forward_request(
+            &Client::new(),
+            &target,
+            reqwest::Method::POST,
+            "",
+            None,
+            req_headers,
+            ProxyBody::Buffered(Some(bytes::Bytes::copy_from_slice(body))),
+            vec![],
+            vec![],
+            None,
+            &empty_token_cache(),
+            &empty_gcp_cache(),
+            &empty_response_cache(),
+        )
+        .await
+        .expect("aws_sigv4 proxy call");
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(mock.request_count.load(Ordering::SeqCst), 1);
+
+        let auth = mock.captured_authorization.lock().unwrap().clone().unwrap();
+        assert!(
+            auth.starts_with("AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/"),
+            "authorization header malformed: {auth}"
+        );
+        assert!(
+            auth.contains("/us-east-1/ce/aws4_request"),
+            "credential scope wrong: {auth}"
+        );
+        // x-amz-target was caller-supplied so it MUST be in SignedHeaders.
+        assert!(
+            auth.contains("x-amz-target"),
+            "x-amz-target should be signed: {auth}"
+        );
+        assert!(auth.contains("Signature="));
+
+        let amz_date = mock.captured_amz_date.lock().unwrap().clone().unwrap();
+        // ISO 8601 basic format: 20260513T123456Z
+        assert!(
+            amz_date.len() == 16 && amz_date.ends_with('Z') && amz_date.contains('T'),
+            "x-amz-date format wrong: {amz_date}"
+        );
+
+        // Body hash matches what AWS expects: hex SHA256 of the request body.
+        let expected_hash = {
+            use sha2::Digest;
+            let mut h = sha2::Sha256::new();
+            h.update(body);
+            hex::encode(h.finalize())
+        };
+        assert_eq!(
+            mock.captured_amz_content_sha256
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap(),
+            expected_hash
+        );
+
+        // Body wasn't mutated.
+        assert_eq!(
+            mock.captured_body.lock().unwrap().clone().unwrap(),
+            body.to_vec()
+        );
+
+        server.abort();
+    }
+
+    /// Cache integration: with a non-zero-TTL CloudResponseCache, two
+    /// identical aws_sigv4 calls hit the upstream only once.
+    #[tokio::test]
+    async fn aws_sigv4_smoke_response_cache_replays_second_call() {
+        let (base_url, mock, server) = start_aws_mock().await;
+        let creds_json = r#"{"access_key_id":"AKIDEXAMPLE","secret_access_key":"secret","region":"us-east-1","service":"ce"}"#;
+        let target = make_billing_proxy_target(base_url, "aws_sigv4", creds_json.to_string());
+        let cache = CloudResponseCache::new(60);
+
+        let body = bytes::Bytes::from_static(
+            br#"{"TimePeriod":{"Start":"2026-04-13","End":"2026-05-13"}}"#,
+        );
+
+        for _ in 0..2 {
+            let resp = forward_request(
+                &Client::new(),
+                &target,
+                reqwest::Method::POST,
+                "",
+                None,
+                reqwest::header::HeaderMap::new(),
+                ProxyBody::Buffered(Some(body.clone())),
+                vec![],
+                vec![],
+                None,
+                &empty_token_cache(),
+                &empty_gcp_cache(),
+                &cache,
+            )
+            .await
+            .expect("call");
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+
+        assert_eq!(
+            mock.request_count.load(Ordering::SeqCst),
+            1,
+            "second call should have been served from the response cache"
+        );
+
+        server.abort();
     }
 }

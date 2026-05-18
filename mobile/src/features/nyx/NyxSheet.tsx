@@ -310,7 +310,7 @@ const createStyles = (c: ThemeColors) => StyleSheet.create({
     borderTopRightRadius: 24,
     borderWidth: 1,
     borderBottomWidth: 0,
-    borderColor: c.border,
+    borderColor: c.borderSoft,
     shadowColor: "#000",
     shadowOffset: { width: 0, height: -10 },
     shadowOpacity: 0.4,
@@ -425,25 +425,25 @@ const createStyles = (c: ThemeColors) => StyleSheet.create({
     lineHeight: 19.5,
     color: c.textPrimary,
   },
+  // DESIGN.md §Badges: rounded-md (6px), 10px font-medium, purple-accent variant.
+  // Theme-aware via `primaryTone` / `primaryOnTint`.
   scopeBadge: {
     flexDirection: "row",
     alignItems: "center",
     gap: 4,
-    paddingVertical: 3,
+    paddingVertical: 2,
     paddingHorizontal: 8,
-    borderRadius: 10,
-    backgroundColor: "rgba(139,92,246,0.1)",
+    borderRadius: 6,
+    backgroundColor: c.primaryTone.bg,
     borderWidth: 1,
-    borderColor: "rgba(139,92,246,0.2)",
+    borderColor: c.primaryTone.border,
     alignSelf: "flex-start",
     marginTop: 4,
   },
   scopeText: {
-    fontSize: 9,
-    fontWeight: "700",
-    color: c.primary,
-    letterSpacing: 0.3,
-    textTransform: "uppercase",
+    fontSize: 10,
+    fontWeight: "500",
+    color: c.primaryOnTint,
   },
   chips: {
     flexDirection: "row",
@@ -451,12 +451,13 @@ const createStyles = (c: ThemeColors) => StyleSheet.create({
     gap: 6,
     marginTop: 6,
   },
+  // DESIGN.md: chrome border uses 50%-opacity tint.
   chip: {
     paddingVertical: 5,
     paddingHorizontal: 12,
     borderRadius: 20,
     borderWidth: 1,
-    borderColor: c.border,
+    borderColor: c.borderSoft,
     backgroundColor: "rgba(255,255,255,0.03)",
   },
   chipText: {
@@ -477,7 +478,7 @@ const createStyles = (c: ThemeColors) => StyleSheet.create({
     paddingHorizontal: 14,
     borderRadius: radius.pill,
     borderWidth: 1,
-    borderColor: c.border,
+    borderColor: c.borderSoft,
     backgroundColor: c.cardSoft,
   },
   inputText: {
@@ -491,7 +492,8 @@ const createStyles = (c: ThemeColors) => StyleSheet.create({
     borderRadius: 15,
     backgroundColor: c.primary,
     borderWidth: 1,
-    borderColor: "rgba(139,92,246,0.5)",
+    // Brand `#9775fa` violet (NOT Tailwind violet-500).
+    borderColor: "rgba(151,117,250,0.5)",
     alignItems: "center",
     justifyContent: "center",
   },

@@ -26,11 +26,11 @@ import { formatDate, formatRelativeTime } from "@/lib/utils";
 import { ApiError } from "@/lib/api-client";
 import { resolvePlatformRole, canAdminWrite, type PlatformRole } from "@/types/api";
 import { PageHeader } from "@/components/shared/page-header";
+import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
 import { DetailSection } from "@/components/shared/detail-section";
 import { DetailRow } from "@/components/shared/detail-row";
-import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
   Dialog,
@@ -75,6 +75,7 @@ import {
   LogOut,
   AlertCircle,
 } from "lucide-react";
+import { BiometricIdentityIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
 
 type ConfirmAction =
@@ -119,6 +120,8 @@ export function AdminUserDetailPage() {
   const canWrite = canAdminWrite(currentUser);
   const sessions = sessionsData?.sessions ?? [];
 
+  useBreadcrumbLabel(user?.display_name ?? user?.email);
+
   const form = useForm<UpdateUserFormData>({
     resolver: zodResolver(updateUserSchema),
     defaultValues: {
@@ -160,11 +163,9 @@ export function AdminUserDetailPage() {
       toast.success("User updated successfully");
       setEditOpen(false);
     } catch (err) {
-      if (err instanceof ApiError) {
-        form.setError("root", { message: err.message });
-      } else {
-        toast.error("Failed to update user");
-      }
+      toast.error(
+        err instanceof ApiError ? err.message : "Failed to update user",
+      );
     }
   }
 
@@ -295,26 +296,21 @@ export function AdminUserDetailPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        breadcrumbs={[
-          { label: "User Management", to: "/admin/users" },
-          { label: user.email },
-        ]}
         title={user.display_name ?? user.email}
         description={user.display_name ? user.email : undefined}
         actions={
           canWrite ? (
             <>
-              <Button variant="outline" size="sm" onClick={openEditDialog}>
-                <Pencil className="mr-1 h-3 w-3" />
+              <Button variant="outline" onClick={openEditDialog}>
+                <ButtonIcon><Pencil className="h-3 w-3" /></ButtonIcon>
                 Edit
               </Button>
               {!isSelf && (
                 <Button
                   variant="destructive"
-                  size="sm"
                   onClick={() => setConfirmAction("delete")}
                 >
-                  <Trash2 className="mr-1 h-3 w-3" />
+                  <ButtonIcon variant="destructive"><Trash2 className="h-3 w-3 text-destructive" /></ButtonIcon>
                   Delete
                 </Button>
               )}
@@ -324,7 +320,7 @@ export function AdminUserDetailPage() {
       />
 
       <DetailSection title="User Information">
-        <DetailRow label="ID" value={user.id} copyable mono />
+        <DetailRow label="ID" value={user.id} copyable />
         <DetailRow label="Email" value={user.email} copyable />
         <DetailRow
           label="Display Name"
@@ -367,10 +363,8 @@ export function AdminUserDetailPage() {
 
       {canWrite && (
         <>
-          <Separator />
-
           <DetailSection title="Actions">
-            <div className="flex flex-wrap items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2 px-4 py-3">
               {!isSelf && (
                 <>
                   <div className="flex items-center gap-2">
@@ -384,7 +378,7 @@ export function AdminUserDetailPage() {
                         setConfirmAction("set-role");
                       }}
                     >
-                      <SelectTrigger className="h-9 w-[180px]">
+                      <SelectTrigger className="h-8 w-[180px]">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
@@ -398,42 +392,40 @@ export function AdminUserDetailPage() {
                   </div>
                   <Button
                     variant="outline"
-                    size="sm"
                     onClick={() => setConfirmAction("toggle-status")}
                   >
-                    {user.is_active ? (
-                      <UserX className="mr-1 h-3 w-3" />
-                    ) : (
-                      <UserCheck className="mr-1 h-3 w-3" />
-                    )}
-                    {user.is_active ? "Disable User" : "Enable User"}
+                    <ButtonIcon>
+                      {user.is_active ? (
+                        <UserX className="h-3 w-3" />
+                      ) : (
+                        <UserCheck className="h-3 w-3" />
+                      )}
+                    </ButtonIcon>
+                    {user.is_active ? "Disable" : "Enable"}
                   </Button>
                 </>
               )}
               {!user.email_verified && (
                 <Button
                   variant="outline"
-                  size="sm"
                   onClick={() => setConfirmAction("verify-email")}
                 >
-                  <MailCheck className="mr-1 h-3 w-3" />
+                  <ButtonIcon><MailCheck className="h-3 w-3" /></ButtonIcon>
                   Verify Email
                 </Button>
               )}
               <Button
                 variant="outline"
-                size="sm"
                 onClick={() => setConfirmAction("reset-password")}
               >
-                <KeyRound className="mr-1 h-3 w-3" />
+                <ButtonIcon><KeyRound className="h-3 w-3" /></ButtonIcon>
                 Reset Password
               </Button>
               <Button
                 variant="outline"
-                size="sm"
                 onClick={() => setConfirmAction("revoke-sessions")}
               >
-                <LogOut className="mr-1 h-3 w-3" />
+                <ButtonIcon><LogOut className="h-3 w-3" /></ButtonIcon>
                 Revoke Sessions
               </Button>
             </div>
@@ -441,65 +433,60 @@ export function AdminUserDetailPage() {
         </>
       )}
 
-      <Separator />
-
       <UserRolesSection userId={userId} canWrite={canWrite} />
-
-      <Separator />
 
       <UserGroupsSection userId={userId} />
 
-      <Separator />
-
       <DetailSection title="Sessions">
         {sessions.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No sessions found.</p>
-        ) : (
-          <div className="rounded-xl border border-border">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>IP Address</TableHead>
-                  <TableHead>User Agent</TableHead>
-                  <TableHead>Created</TableHead>
-                  <TableHead>Expires</TableHead>
-                  <TableHead>Last Active</TableHead>
-                  <TableHead>Status</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {sessions.map((session) => (
-                  <TableRow key={session.id}>
-                    <TableCell className="font-mono text-xs">
-                      {session.ip_address ?? "--"}
-                    </TableCell>
-                    <TableCell
-                      className="max-w-[200px] truncate text-xs"
-                      title={session.user_agent ?? undefined}
-                    >
-                      {session.user_agent ?? "--"}
-                    </TableCell>
-                    <TableCell className="text-muted-foreground text-xs">
-                      {formatRelativeTime(session.created_at)}
-                    </TableCell>
-                    <TableCell className="text-muted-foreground text-xs">
-                      {formatDate(session.expires_at)}
-                    </TableCell>
-                    <TableCell className="text-muted-foreground text-xs">
-                      {formatRelativeTime(session.last_active_at)}
-                    </TableCell>
-                    <TableCell>
-                      <Badge
-                        variant={session.revoked ? "destructive" : "success"}
-                      >
-                        {session.revoked ? "Revoked" : "Active"}
-                      </Badge>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+          <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
+            <BiometricIdentityIcon className="h-48 w-48 text-muted-foreground/30" />
+            <p className="text-[12px] text-muted-foreground/30">No sessions found.</p>
           </div>
+        ) : (
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>IP Address</TableHead>
+                <TableHead>User Agent</TableHead>
+                <TableHead>Created</TableHead>
+                <TableHead>Expires</TableHead>
+                <TableHead>Last Active</TableHead>
+                <TableHead>Status</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {sessions.map((session) => (
+                <TableRow key={session.id}>
+                  <TableCell className="font-mono text-xs">
+                    {session.ip_address ?? "--"}
+                  </TableCell>
+                  <TableCell
+                    className="max-w-[200px] truncate text-xs"
+                    title={session.user_agent ?? undefined}
+                  >
+                    {session.user_agent ?? "--"}
+                  </TableCell>
+                  <TableCell className="text-muted-foreground text-xs">
+                    {formatRelativeTime(session.created_at)}
+                  </TableCell>
+                  <TableCell className="text-muted-foreground text-xs">
+                    {formatDate(session.expires_at)}
+                  </TableCell>
+                  <TableCell className="text-muted-foreground text-xs">
+                    {formatRelativeTime(session.last_active_at)}
+                  </TableCell>
+                  <TableCell>
+                    <Badge
+                      variant={session.revoked ? "destructive" : "success"}
+                    >
+                      {session.revoked ? "Revoked" : "Active"}
+                    </Badge>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
         )}
       </DetailSection>
 
@@ -517,11 +504,6 @@ export function AdminUserDetailPage() {
               onSubmit={form.handleSubmit((data) => void handleEdit(data))}
               className="space-y-4"
             >
-              {form.formState.errors.root && (
-                <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
-                  {form.formState.errors.root.message}
-                </div>
-              )}
               <FormField
                 control={form.control}
                 name="display_name"
@@ -569,7 +551,7 @@ export function AdminUserDetailPage() {
                 >
                   Cancel
                 </Button>
-                <Button type="submit" isLoading={updateMutation.isPending}>
+                <Button type="submit" variant="primary" isLoading={updateMutation.isPending}>
                   Save Changes
                 </Button>
               </DialogFooter>
@@ -582,15 +564,6 @@ export function AdminUserDetailPage() {
       {pendingRole &&
         (() => {
           const currentRole = resolvePlatformRole(user);
-          // Going down (admin → operator/user, operator → user) is the
-          // dangerous direction; flag it as destructive so the confirm
-          // button gets a red treatment and the admin slows down.
-          const rank: Record<PlatformRole, number> = {
-            user: 0,
-            operator: 1,
-            admin: 2,
-          };
-          const isDowngrade = rank[pendingRole] < rank[currentRole];
           return (
             <ConfirmDialog
               open={confirmAction === "set-role"}
@@ -603,7 +576,7 @@ export function AdminUserDetailPage() {
               title={`Change role to ${ROLE_LABEL[pendingRole]}`}
               description={`Are you sure you want to change ${user.email} from ${ROLE_LABEL[currentRole]} to ${ROLE_LABEL[pendingRole]}?`}
               confirmLabel={`Change to ${ROLE_LABEL[pendingRole]}`}
-              variant={isDowngrade ? "destructive" : "default"}
+              variant="destructive"
               isPending={roleMutation.isPending}
               onConfirm={() => void handleSetRole()}
             />
@@ -622,7 +595,7 @@ export function AdminUserDetailPage() {
             : `Are you sure you want to enable ${user.email}?`
         }
         confirmLabel={user.is_active ? "Disable" : "Enable"}
-        variant={user.is_active ? "destructive" : "default"}
+        variant="destructive"
         isPending={statusMutation.isPending}
         onConfirm={() => void handleToggleStatus()}
       />
@@ -661,7 +634,7 @@ export function AdminUserDetailPage() {
         title="Force Password Reset"
         description={`Send a password reset email to ${user.email}? Their current sessions will be revoked.`}
         confirmLabel="Reset Password"
-        variant="default"
+        variant="destructive"
         isPending={passwordResetMutation.isPending}
         onConfirm={() => void handlePasswordReset()}
       />
@@ -674,7 +647,7 @@ export function AdminUserDetailPage() {
         title="Verify Email"
         description={`Manually verify the email address for ${user.email}?`}
         confirmLabel="Verify Email"
-        variant="default"
+        variant="destructive"
         isPending={verifyEmailMutation.isPending}
         onConfirm={() => void handleVerifyEmail()}
       />
@@ -739,77 +712,79 @@ function UserRolesSection({
 
   return (
     <DetailSection title="Roles">
-      {canWrite && (
-        <div className="mb-3">
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => setAssignOpen(true)}
-          >
-            Assign Role
-          </Button>
-        </div>
-      )}
-
-      {directRoles.length > 0 && (
-        <div className="mb-3">
-          <p className="mb-1 text-xs font-medium text-muted-foreground">
-            Direct Roles
-          </p>
-          <div className="flex flex-wrap gap-2">
-            {directRoles.map((role) => (
-              <Badge key={role.id} variant="default" className="gap-1">
-                {role.name}
-                {canWrite && !role.is_system && (
-                  <button
-                    type="button"
-                    className="ml-1 rounded-full hover:bg-primary-foreground/20 disabled:opacity-50"
-                    onClick={() => void handleRevoke(role.id)}
-                    disabled={revokeMutation.isPending}
-                    aria-label={`Revoke ${role.name}`}
-                  >
-                    x
-                  </button>
-                )}
-              </Badge>
-            ))}
+      <div className="space-y-3 px-4 py-3">
+        {canWrite && (
+          <div>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setAssignOpen(true)}
+            >
+              Assign Role
+            </Button>
           </div>
-        </div>
-      )}
+        )}
 
-      {inheritedRoles.length > 0 && (
-        <div className="mb-3">
-          <p className="mb-1 text-xs font-medium text-muted-foreground">
-            Inherited from Groups
-          </p>
-          <div className="flex flex-wrap gap-2">
-            {inheritedRoles.map((role) => (
-              <Badge key={role.id} variant="secondary">
-                {role.name}
-              </Badge>
-            ))}
+        {directRoles.length > 0 && (
+          <div>
+            <p className="mb-1 text-xs font-medium text-muted-foreground">
+              Direct Roles
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {directRoles.map((role) => (
+                <Badge key={role.id} variant="default" className="gap-1">
+                  {role.name}
+                  {canWrite && !role.is_system && (
+                    <button
+                      type="button"
+                      className="ml-1 rounded-full hover:bg-primary-foreground/20 disabled:opacity-50"
+                      onClick={() => void handleRevoke(role.id)}
+                      disabled={revokeMutation.isPending}
+                      aria-label={`Revoke ${role.name}`}
+                    >
+                      x
+                    </button>
+                  )}
+                </Badge>
+              ))}
+            </div>
           </div>
-        </div>
-      )}
+        )}
 
-      {effectivePermissions.length > 0 && (
-        <div>
-          <p className="mb-1 text-xs font-medium text-muted-foreground">
-            Effective Permissions
-          </p>
-          <div className="flex flex-wrap gap-1">
-            {effectivePermissions.map((perm) => (
-              <Badge key={perm} variant="outline" className="font-mono text-xs">
-                {perm}
-              </Badge>
-            ))}
+        {inheritedRoles.length > 0 && (
+          <div>
+            <p className="mb-1 text-xs font-medium text-muted-foreground">
+              Inherited from Groups
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {inheritedRoles.map((role) => (
+                <Badge key={role.id} variant="secondary">
+                  {role.name}
+                </Badge>
+              ))}
+            </div>
           </div>
-        </div>
-      )}
+        )}
 
-      {directRoles.length === 0 && inheritedRoles.length === 0 && (
-        <p className="text-sm text-muted-foreground">No roles assigned.</p>
-      )}
+        {effectivePermissions.length > 0 && (
+          <div>
+            <p className="mb-1 text-xs font-medium text-muted-foreground">
+              Effective Permissions
+            </p>
+            <div className="flex flex-wrap gap-1">
+              {effectivePermissions.map((perm) => (
+                <Badge key={perm} variant="secondary" className="font-mono text-xs">
+                  {perm}
+                </Badge>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {directRoles.length === 0 && inheritedRoles.length === 0 && (
+          <p className="text-sm text-muted-foreground/30">No roles assigned.</p>
+        )}
+      </div>
 
       <Dialog open={assignOpen} onOpenChange={setAssignOpen}>
         <DialogContent>
@@ -868,22 +843,24 @@ function UserGroupsSection({ userId }: { readonly userId: string }) {
 
   return (
     <DetailSection title="Groups">
-      {groups.length === 0 ? (
-        <p className="text-sm text-muted-foreground">No group memberships.</p>
-      ) : (
-        <div className="flex flex-wrap gap-2">
-          {groups.map((group) => (
-            <Badge key={group.id} variant="outline">
-              {group.name}
-              {group.roles.length > 0 && (
-                <span className="ml-1 text-muted-foreground">
-                  ({group.roles.map((r) => r.name).join(", ")})
-                </span>
-              )}
-            </Badge>
-          ))}
-        </div>
-      )}
+      <div className="px-4 py-3">
+        {groups.length === 0 ? (
+          <p className="text-sm text-muted-foreground/30">No group memberships.</p>
+        ) : (
+          <div className="flex flex-wrap gap-2">
+            {groups.map((group) => (
+              <Badge key={group.id} variant="secondary">
+                {group.name}
+                {group.roles.length > 0 && (
+                  <span className="ml-1 text-muted-foreground">
+                    ({group.roles.map((r) => r.name).join(", ")})
+                  </span>
+                )}
+              </Badge>
+            ))}
+          </div>
+        )}
+      </div>
     </DetailSection>
   );
 }

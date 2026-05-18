@@ -232,6 +232,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             auth_key_name,
             credential,
             credential_env,
+            credential_file,
             scopes,
             oauth_client_id,
             oauth_client_secret,
@@ -291,7 +292,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             };
             let interactive_output = matches!(auth.output, OutputFormat::Table);
             let explicit_scripted = is_explicit_scripted(
-                credential.is_some(),
+                credential.is_some() || credential_file.is_some(),
                 credential_env.is_some(),
                 oauth,
                 device_code,
@@ -648,6 +649,8 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 } else if let Some(env_var) = &credential_env {
                     std::env::var(env_var)
                         .with_context(|| format!("Environment variable {env_var} not set"))?
+                } else if let Some(path) = credential_file.as_deref() {
+                    read_credential_file(path)?
                 } else if let Some(fields) = token_exchange_fields.as_ref() {
                     // Declarative token_exchange services advertise their
                     // credential fields via the catalog. Prompt for each
@@ -661,7 +664,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 };
                 if cred_value.is_empty() {
                     bail!(
-                        "Credential is required. Pass --credential, --credential-env, or enter interactively."
+                        "Credential is required. Pass --credential, --credential-env, --credential-file, or enter interactively."
                     );
                 }
                 body.insert("credential".into(), Value::String(cred_value));
@@ -1359,7 +1362,7 @@ async fn run_oauth_add(
     eprintln!("  {authorization_url}");
     eprintln!();
 
-    let _ = open::that(authorization_url);
+    let _ = crate::browser::open_browser(authorization_url);
 
     let final_key = wait_for_authorized_key(api, key_id).await?;
     print_add_result(api, &final_key, auth.output)?;
@@ -1506,7 +1509,7 @@ async fn run_device_code_add(
     eprintln!();
     eprintln!("Enter the code at the URL above, then wait for authorization...");
 
-    let _ = open::that(verification_uri);
+    let _ = crate::browser::open_browser(verification_uri);
 
     // Poll for completion
     let poll_body = serde_json::json!({ "state": state });
@@ -1681,6 +1684,37 @@ fn prompt_password(prompt: &str, flag: &str) -> Result<String> {
     Ok(rpassword::prompt_password(prompt)?)
 }
 
+/// Read credential bytes from `path`, or from stdin when `path == "-"`.
+///
+/// Used for multi-field credential payloads (aws_sigv4 access-key JSON,
+/// gcp_service_account SA JSON) where typing into rpassword would be
+/// error-prone. Trims surrounding whitespace so a trailing newline from
+/// the file doesn't produce a JSON-parse error on the server. Also
+/// strips a UTF-8 BOM if present (Codex review NIT 3) — JSON parsers
+/// reject U+FEFF in leading position.
+fn read_credential_file(path: &str) -> Result<String> {
+    use std::io::Read;
+    let raw = if path == "-" {
+        let mut buf = String::new();
+        std::io::stdin()
+            .read_to_string(&mut buf)
+            .context("Reading credential from stdin")?;
+        buf
+    } else {
+        std::fs::read_to_string(path).with_context(|| format!("Reading credential file {path}"))?
+    };
+    let without_bom = raw.strip_prefix('\u{feff}').unwrap_or(&raw);
+    let trimmed = without_bom.trim();
+    if trimmed.is_empty() {
+        if path == "-" {
+            bail!("Credential read from stdin is empty");
+        } else {
+            bail!("Credential file {path} is empty");
+        }
+    }
+    Ok(trimmed.to_string())
+}
+
 /// Returns true when the CLI is running somewhere we can't reasonably
 /// open a local browser for the wizard. In those cases `service add`
 /// falls through to the pre-wizard rpassword path so SSH / CI / remote
@@ -1689,7 +1723,8 @@ fn prompt_password(prompt: &str, flag: &str) -> Result<String> {
 /// Checks, in order:
 /// - `NYXID_NO_WIZARD` set to anything → explicit opt-out
 /// - `SSH_CONNECTION` / `SSH_TTY` set → SSH session (no local display)
-/// - Linux-only: both `DISPLAY` and `WAYLAND_DISPLAY` unset → no X/Wayland
+/// - Linux-only: both `DISPLAY` and `WAYLAND_DISPLAY` unset → no X/Wayland,
+///   *unless* running under WSL, which bridges to the Windows browser
 ///
 /// We intentionally skip this detection on macOS / Windows when not in
 /// SSH — there's always a GUI available, so the wizard should run.
@@ -1708,7 +1743,10 @@ fn is_headless_environment() -> bool {
     }
     #[cfg(target_os = "linux")]
     {
-        if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        if !crate::browser::is_wsl()
+            && std::env::var_os("DISPLAY").is_none()
+            && std::env::var_os("WAYLAND_DISPLAY").is_none()
+        {
             return true;
         }
     }
@@ -2371,6 +2409,8 @@ mod tests {
             "SSH_TTY",
             "DISPLAY",
             "WAYLAND_DISPLAY",
+            "WSL_INTEROP",
+            "WSL_DISTRO_NAME",
         ]);
 
         // Explicit opt-out wins.
@@ -2389,12 +2429,16 @@ mod tests {
 
         // Linux-only: no display at all means headless. On non-Linux
         // we don't gate on display vars (macOS always has a GUI, Windows
-        // similar), so just assert the fallback.
+        // similar), so just assert the fallback. WSL is also exempt — it
+        // bridges to the Windows browser — and `is_wsl` reads `/proc`,
+        // which env stashing can't neutralize, so skip there.
         #[cfg(target_os = "linux")]
         {
-            assert!(is_headless_environment());
-            guard.set("DISPLAY", ":0");
-            assert!(!is_headless_environment());
+            if !crate::browser::is_wsl() {
+                assert!(is_headless_environment());
+                guard.set("DISPLAY", ":0");
+                assert!(!is_headless_environment());
+            }
         }
         #[cfg(not(target_os = "linux"))]
         {

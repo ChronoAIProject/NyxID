@@ -90,7 +90,7 @@ export function Hero() {
         <img
           src="/nyxid-wordmark.svg"
           alt="NyxID"
-          className="mb-8 h-12 w-auto drop-shadow-[0_0_24px_rgba(139,92,246,0.45)] md:h-14"
+          className="mb-8 h-12 w-auto drop-shadow-[0_0_24px_rgba(90,42,241,0.45)] md:h-14"
         />
         <h1 className="max-w-[700px] text-center font-serif text-[32px] leading-tight text-white md:text-5xl lg:text-6xl">
           {t("hero.eyebrow")}
@@ -107,7 +107,7 @@ export function Hero() {
         <div className="mt-10 flex flex-col items-center gap-3 sm:flex-row sm:gap-4">
           <a
             href={`/register${typeof window !== "undefined" ? window.location.search : ""}`}
-            className="inline-flex items-center gap-2 rounded-xl bg-primary px-8 py-4 text-lg font-semibold text-white transition-all hover:bg-void-400 hover:shadow-lg hover:shadow-primary/25"
+            className="inline-flex items-center gap-2 rounded-xl bg-primary px-8 py-4 text-lg font-semibold text-white transition-all hover:bg-nyx-400 hover:shadow-lg hover:shadow-primary/25"
           >
             {t("hero.ctaRegister")}
             <svg

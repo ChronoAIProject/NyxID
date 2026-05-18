@@ -4,20 +4,65 @@ import { cn } from "@/lib/utils";
 
 const Tabs = TabsPrimitive.Root;
 
-/* ── VoidPortal Tabs ── */
 const TabsList = React.forwardRef<
   React.ComponentRef<typeof TabsPrimitive.List>,
   React.ComponentPropsWithoutRef<typeof TabsPrimitive.List>
->(({ className, ...props }, ref) => (
-  <TabsPrimitive.List
-    ref={ref}
-    className={cn(
-      "inline-flex h-10 items-center justify-center gap-1 border-b border-border bg-transparent p-0 text-muted-foreground",
-      className,
-    )}
-    {...props}
-  />
-));
+>(({ className, children, ...props }, ref) => {
+  const listRef = React.useRef<HTMLDivElement | null>(null);
+  const [indicator, setIndicator] = React.useState({ left: 0, width: 0 });
+  const [hasActive, setHasActive] = React.useState(false);
+
+  const updateIndicator = React.useCallback(() => {
+    const list = listRef.current;
+    if (!list) return;
+    const active = list.querySelector<HTMLElement>("[data-state=active]");
+    if (active) {
+      const listRect = list.getBoundingClientRect();
+      const activeRect = active.getBoundingClientRect();
+      setIndicator({
+        left: activeRect.left - listRect.left + list.scrollLeft,
+        width: activeRect.width,
+      });
+      setHasActive(true);
+    }
+  }, []);
+
+  React.useEffect(() => {
+    updateIndicator();
+    const list = listRef.current;
+    if (!list) return;
+    const observer = new MutationObserver(updateIndicator);
+    observer.observe(list, { attributes: true, subtree: true, attributeFilter: ["data-state"] });
+    list.addEventListener("scroll", updateIndicator);
+    return () => {
+      observer.disconnect();
+      list.removeEventListener("scroll", updateIndicator);
+    };
+  }, [updateIndicator]);
+
+  return (
+    <TabsPrimitive.List
+      ref={(node) => {
+        listRef.current = node;
+        if (typeof ref === "function") ref(node);
+        else if (ref) ref.current = node;
+      }}
+      className={cn(
+        "relative flex h-8 w-fit items-center gap-1 border-b border-border bg-transparent p-0 text-muted-foreground overflow-x-auto overflow-y-hidden scrollbar-none",
+        className,
+      )}
+      {...props}
+    >
+      {children}
+      {hasActive && (
+        <span
+          className="absolute bottom-0 h-[2px] bg-primary transition-all duration-300 ease-out"
+          style={{ left: indicator.left, width: indicator.width }}
+        />
+      )}
+    </TabsPrimitive.List>
+  );
+});
 TabsList.displayName = TabsPrimitive.List.displayName;
 
 const TabsTrigger = React.forwardRef<
@@ -27,7 +72,7 @@ const TabsTrigger = React.forwardRef<
   <TabsPrimitive.Trigger
     ref={ref}
     className={cn(
-      "inline-flex items-center justify-center whitespace-nowrap px-5 py-3 text-sm font-normal text-text-tertiary ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 border-b-2 border-transparent -mb-px data-[state=active]:border-primary data-[state=active]:text-foreground data-[state=active]:font-medium data-[state=active]:shadow-none",
+      "inline-flex shrink-0 items-center justify-center whitespace-nowrap px-3 py-2 text-[12px] font-normal text-text-tertiary transition-colors duration-300 focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50 -mb-px data-[state=active]:text-foreground data-[state=active]:font-medium",
       className,
     )}
     {...props}
@@ -42,7 +87,7 @@ const TabsContent = React.forwardRef<
   <TabsPrimitive.Content
     ref={ref}
     className={cn(
-      "mt-4 ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+      "mt-3 focus-visible:outline-none",
       className,
     )}
     {...props}

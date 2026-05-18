@@ -27,7 +27,7 @@ import {
   FormLabel,
   FormMessage,
 } from "@/components/ui/form";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { TwitterOAuthGuidance } from "@/components/shared/twitter-oauth-guidance";
@@ -106,7 +106,7 @@ export function UserCredentialsDialog({
 
   return (
     <Dialog open onOpenChange={onClose}>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="md:max-w-md">
         <DialogHeader>
           <DialogTitle>
             {hasExisting ? "Manage" : "Setup"} OAuth App for {provider.name}
@@ -118,7 +118,7 @@ export function UserCredentialsDialog({
         </DialogHeader>
 
         {isLoading ? (
-          <div className="py-8 text-center text-sm text-muted-foreground">
+          <div className="py-8 text-center text-[12px] text-muted-foreground">
             Loading...
           </div>
         ) : (
@@ -132,7 +132,7 @@ export function UserCredentialsDialog({
                 href={provider.documentation_url}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="inline-flex items-center gap-1.5 text-sm text-primary hover:underline"
+                className="inline-flex items-center gap-1.5 text-[12px] text-primary hover:underline"
               >
                 How to create an OAuth app
                 <ExternalLink className="h-3 w-3" />
@@ -145,7 +145,7 @@ export function UserCredentialsDialog({
                 className="space-y-4"
               >
                 {form.formState.errors.root && (
-                  <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
+                  <div className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive">
                     {form.formState.errors.root.message}
                   </div>
                 )}
@@ -209,16 +209,15 @@ export function UserCredentialsDialog({
                   )}
                 />
 
-                <DialogFooter className="flex-col gap-2 sm:flex-row">
+                <DialogFooter>
                   {hasExisting && !confirmDelete && (
                     <Button
                       type="button"
                       variant="destructive"
-                      size="sm"
                       onClick={() => setConfirmDelete(true)}
                       className="mr-auto"
                     >
-                      <Trash2 className="mr-1 h-3 w-3" />
+                      <ButtonIcon variant="destructive"><Trash2 className="h-3 w-3 text-destructive" /></ButtonIcon>
                       Remove
                     </Button>
                   )}
@@ -228,7 +227,6 @@ export function UserCredentialsDialog({
                       <Button
                         type="button"
                         variant="destructive"
-                        size="sm"
                         onClick={() => void handleDelete()}
                         isLoading={deleteMutation.isPending}
                       >
@@ -237,7 +235,6 @@ export function UserCredentialsDialog({
                       <Button
                         type="button"
                         variant="ghost"
-                        size="sm"
                         onClick={() => setConfirmDelete(false)}
                       >
                         Cancel
@@ -253,7 +250,7 @@ export function UserCredentialsDialog({
                   >
                     Cancel
                   </Button>
-                  <Button type="submit" isLoading={setMutation.isPending}>
+                  <Button variant="primary" type="submit" isLoading={setMutation.isPending} disabled={!form.formState.isValid || setMutation.isPending}>
                     {hasExisting ? "Update" : "Save"}
                   </Button>
                 </DialogFooter>
@@ -274,7 +271,7 @@ function ExistingCredentialsInfo({
   if (!credentials?.has_credentials) return null;
 
   return (
-    <div className="flex items-center gap-2 rounded-md bg-muted p-3 text-sm">
+    <div className="flex items-center gap-2 rounded-lg bg-muted p-3 text-[12px]">
       <Badge variant="success">Configured</Badge>
       <div className="flex flex-col gap-0.5 text-xs text-muted-foreground">
         {credentials.label && <span>{credentials.label}</span>}

@@ -488,7 +488,7 @@ export function AccountSettingsScreen({ navigation }: Props) {
           </View>
           <View style={[styles.statusBadge, isOffline && styles.statusBadgeOffline]}>
             <Text style={[styles.statusBadgeText, isOffline && styles.statusBadgeTextOffline]}>
-              {isOffline ? "OFFLINE" : "ACTIVE"}
+              {isOffline ? "Offline" : "Active"}
             </Text>
           </View>
         </View>
@@ -746,31 +746,34 @@ const createStyles = (c: ThemeColors) => StyleSheet.create({
     color: c.textMuted,
     marginTop: 1,
   },
+  // DESIGN.md §Badges: rounded-md (6px), px-2 py-0.5, text-[10px] font-medium.
+  // Theme-aware via `successTone` / `dangerTone` so light + dark both render correctly.
   statusBadge: {
-    paddingHorizontal: spacing.md,
-    paddingVertical: 3,
-    borderRadius: radius.pill,
-    backgroundColor: c.successSoft,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 2,
+    borderRadius: radius.sm,
+    backgroundColor: c.successTone.bg,
     borderWidth: 1,
-    borderColor: c.success,
+    borderColor: c.successTone.border,
   },
   statusBadgeOffline: {
-    backgroundColor: c.dangerSoftBg,
-    borderColor: c.danger,
+    backgroundColor: c.dangerTone.bg,
+    borderColor: c.dangerTone.border,
   },
   statusBadgeText: {
-    ...typeScale.overline,
-    color: c.success,
+    ...typeScale.badge,
+    color: c.successTone.text,
   },
   statusBadgeTextOffline: {
-    color: c.danger,
+    color: c.dangerTone.text,
   },
+  // DESIGN.md cards: rounded-xl (12px), 50%-opacity chrome, p-4 standard.
   card: {
     borderRadius: radius.lg,
     borderWidth: 1,
     borderColor: c.borderSoft,
     backgroundColor: c.card,
-    padding: spacing.xl,
+    padding: spacing.xxl,
     gap: 0,
     marginBottom: spacing.xl,
   },
@@ -813,43 +816,51 @@ const createStyles = (c: ThemeColors) => StyleSheet.create({
     gap: spacing.sm,
     flex: 1,
   },
+  // DESIGN.md §Badges (`default`/`accent` purple variant): rounded-md, text-[10px]
+  // font-medium. `primaryTone` carries the theme-aware bg/border, `primaryOnTint`
+  // is the legible text color (light wordmark hex on dark; saturated brand purple
+  // on light — the pale lavender disappears on a white card).
   connectedPill: {
     flexDirection: "row",
     alignItems: "center",
     gap: spacing.xs,
-    backgroundColor: c.primaryGlow,
+    backgroundColor: c.primaryTone.bg,
     borderWidth: 1,
-    borderColor: c.primary,
-    borderRadius: radius.pill,
+    borderColor: c.primaryTone.border,
+    borderRadius: radius.sm,
     paddingHorizontal: spacing.sm,
     paddingVertical: 2,
   },
   connectedPillText: {
-    ...typeScale.overline,
-    color: c.primary,
+    ...typeScale.badge,
+    color: c.primaryOnTint,
   },
   linkPill: {
-    backgroundColor: c.primaryGlow,
+    backgroundColor: c.primaryTone.bg,
     borderWidth: 1,
-    borderColor: c.primary,
-    borderRadius: radius.pill,
-    paddingHorizontal: spacing.md,
-    paddingVertical: 3,
+    borderColor: c.primaryTone.border,
+    borderRadius: radius.sm,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 2,
   },
   linkPillText: {
-    ...typeScale.overline,
-    color: c.primary,
+    ...typeScale.badge,
+    color: c.primaryOnTint,
   },
   channelHint: {
     ...typeScale.small,
     color: c.textMuted,
     marginTop: spacing.xs,
   },
+  // Same visual treatment as SegmentControl and BottomNavV2 — one selected-state
+  // language across the app: rounded-lg container, navActive highlight, sentence-case.
   themeToggleWrap: {
     flexDirection: "row",
-    borderRadius: radius.sm,
+    borderRadius: radius.md,
     borderWidth: 1,
     borderColor: c.borderSoft,
+    backgroundColor: c.cardSoft,
+    padding: 2,
     overflow: "hidden",
     marginTop: spacing.sm,
   },
@@ -859,21 +870,21 @@ const createStyles = (c: ThemeColors) => StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     gap: spacing.xs + spacing.xxs,
-    paddingVertical: spacing.lg,
+    paddingVertical: spacing.md,
+    borderRadius: radius.sm,
   },
   themeToggleHalfActive: {
-    backgroundColor: c.primaryGlow,
+    backgroundColor: c.navActive,
   },
   themeToggleDivider: {
-    width: 1,
-    backgroundColor: c.borderSoft,
+    width: 0,
   },
   themeToggleLabel: {
     ...typeScale.label,
     color: c.textMuted,
   },
   themeToggleLabelActive: {
-    color: c.primary,
+    color: c.textPrimary,
   },
   systemRow: {
     flexDirection: "row",

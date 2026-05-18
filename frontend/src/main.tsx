@@ -83,7 +83,9 @@ function Root() {
     useAuthStore
       .getState()
       .checkAuth()
-      .finally(() => setReady(true));
+      .finally(() => {
+        setReady(true);
+      });
   }, []);
 
   // Initialize telemetry once:

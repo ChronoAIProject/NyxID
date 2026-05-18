@@ -47,10 +47,10 @@ export function DisplayOncePanel({
       <div className="flex flex-col gap-2">
         <div className="flex items-center gap-2 text-amber-600 dark:text-amber-500">
           <Lock className="h-4 w-4" />
-          <span className="text-sm font-medium">Shown once — save it now</span>
+          <span className="text-[12px] font-medium">Shown once — save it now</span>
         </div>
         <h2 className="font-serif text-[28px] font-normal">{title}</h2>
-        <p className="text-sm text-muted-foreground">{description}</p>
+        <p className="text-[12px] text-muted-foreground">{description}</p>
       </div>
 
       <SecretField label="Secret" value={secret} />
@@ -59,7 +59,7 @@ export function DisplayOncePanel({
       ) : null}
 
       <div className="flex flex-col gap-2">
-        <Button onClick={onAcknowledge} disabled={isAcknowledging} className="w-full">
+        <Button variant="primary" onClick={onAcknowledge} disabled={isAcknowledging} className="w-full">
           {isAcknowledging ? "Notifying CLI..." : ackButtonLabel}
         </Button>
         <p className="text-xs text-muted-foreground">
@@ -209,7 +209,7 @@ function SecretField({ label, value }: { readonly label: string; readonly value:
         {label}
       </label>
       <div className="flex items-center gap-2">
-        <code className="flex-1 overflow-x-auto rounded-md border bg-muted/40 px-3 py-2 font-mono text-sm">
+        <code className="flex-1 overflow-x-auto rounded-lg border bg-muted/40 px-3 py-2 font-mono text-[12px]">
           {revealed ? value : masked}
         </code>
         <Button

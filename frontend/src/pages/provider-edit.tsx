@@ -30,7 +30,7 @@ import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { AlertCircle } from "lucide-react";
+import { ErrorBanner } from "@/components/shared/error-banner";
 import { toast } from "sonner";
 
 const PROVIDER_TYPE_LABELS: Readonly<Record<string, string>> = {
@@ -61,7 +61,7 @@ export function ProviderEditPage() {
     providerId: string;
   };
   const navigate = useNavigate();
-  const { data: provider, isLoading, error } = useProvider(providerId);
+  const { data: provider, isLoading, error, refetch } = useProvider(providerId);
   const updateMutation = useUpdateProvider(providerId);
 
   const form = useForm<UpdateProviderFormData>({
@@ -170,21 +170,12 @@ export function ProviderEditPage() {
 
   if (error || !provider) {
     return (
-      <div className="flex flex-col items-center justify-center py-16 text-center">
-        <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
-        <h3 className="mb-2 font-display text-lg font-semibold">
-          Provider not found
-        </h3>
-        <p className="mb-4 text-sm text-muted-foreground">
-          The provider you are trying to edit does not exist or has been
-          deleted.
-        </p>
-        <Button
-          variant="outline"
-          onClick={() => void navigate({ to: "/providers/manage" })}
-        >
-          Back to Providers
-        </Button>
+      <div className="space-y-8">
+        <PageHeader title="Provider Not Found" />
+        <ErrorBanner
+          message={error instanceof ApiError ? error.message : "The provider you are trying to edit does not exist or has been deleted."}
+          onRetry={refetch}
+        />
       </div>
     );
   }
@@ -197,14 +188,6 @@ export function ProviderEditPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        breadcrumbs={[
-          { label: "Manage Providers", to: "/providers/manage" },
-          {
-            label: provider.name,
-            to: `/providers/${providerId}`,
-          },
-          { label: "Edit" },
-        ]}
         title={`Edit ${provider.name}`}
       />
 
@@ -212,7 +195,7 @@ export function ProviderEditPage() {
         <Form {...form}>
           <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
             {form.formState.errors.root && (
-              <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
+              <div className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive">
                 {form.formState.errors.root.message}
               </div>
             )}
@@ -232,7 +215,7 @@ export function ProviderEditPage() {
             />
 
             <div>
-              <p className="text-sm font-medium mb-1">Slug</p>
+              <p className="text-[12px] font-medium mb-1">Slug</p>
               <Badge variant="secondary">{provider.slug}</Badge>
               <p className="text-xs text-muted-foreground mt-1">
                 Slug cannot be changed after creation.
@@ -240,7 +223,7 @@ export function ProviderEditPage() {
             </div>
 
             <div>
-              <p className="text-sm font-medium mb-1">Provider Type</p>
+              <p className="text-[12px] font-medium mb-1">Provider Type</p>
               <Badge variant="secondary">
                 {PROVIDER_TYPE_LABELS[provider.provider_type] ??
                   provider.provider_type}
@@ -258,7 +241,7 @@ export function ProviderEditPage() {
                   <FormLabel>Description</FormLabel>
                   <FormControl>
                     <textarea
-                      className="flex min-h-[80px] w-full rounded-[10px] border border-input bg-transparent px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                      className="flex min-h-[80px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-[12px] placeholder:text-muted-foreground focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
                       placeholder="Optional description"
                       {...field}
                     />
@@ -356,7 +339,7 @@ export function ProviderEditPage() {
             {isOAuth && (
               <>
                 <Separator className="my-2" />
-                <h3 className="text-sm font-semibold">
+                <h3 className="text-[13px] font-semibold">
                   OAuth 2.0 Configuration
                 </h3>
                 <p className="text-xs text-muted-foreground">
@@ -498,7 +481,7 @@ export function ProviderEditPage() {
             {isDeviceCode && (
               <>
                 <Separator className="my-2" />
-                <h3 className="text-sm font-semibold">
+                <h3 className="text-[13px] font-semibold">
                   Device Code Configuration (RFC 8628)
                 </h3>
                 <p className="text-xs text-muted-foreground">
@@ -639,7 +622,7 @@ export function ProviderEditPage() {
             {isTelegram && (
               <>
                 <Separator className="my-2" />
-                <h3 className="text-sm font-semibold">
+                <h3 className="text-[13px] font-semibold">
                   Telegram Widget Configuration
                 </h3>
                 <p className="text-xs text-muted-foreground">
@@ -657,7 +640,7 @@ export function ProviderEditPage() {
                       </FormControl>
                       <p className="text-xs text-muted-foreground">
                         Enter the BotFather username. A leading
-                        <span className="font-mono"> @</span> is optional.
+                        <span> @</span> is optional.
                       </p>
                       <FormMessage />
                     </FormItem>
@@ -690,7 +673,7 @@ export function ProviderEditPage() {
             {isApiKey && (
               <>
                 <Separator className="my-2" />
-                <h3 className="text-sm font-semibold">API Key Configuration</h3>
+                <h3 className="text-[13px] font-semibold">API Key Configuration</h3>
 
                 <FormField
                   control={form.control}
@@ -700,7 +683,7 @@ export function ProviderEditPage() {
                       <FormLabel>API Key Instructions</FormLabel>
                       <FormControl>
                         <textarea
-                          className="flex min-h-[80px] w-full rounded-[10px] border border-input bg-transparent px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                          className="flex min-h-[80px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-[12px] placeholder:text-muted-foreground focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
                           placeholder="Instructions for users to obtain an API key"
                           {...field}
                         />
@@ -732,9 +715,9 @@ export function ProviderEditPage() {
               </>
             )}
 
-            <div className="flex items-center gap-3 pt-4">
-              <Button type="submit" isLoading={updateMutation.isPending}>
-                Save changes
+            <div className="flex items-center justify-end gap-3 pt-4">
+              <Button variant="primary" type="submit" isLoading={updateMutation.isPending} disabled={!form.formState.isDirty}>
+                Save Changes
               </Button>
               <Button
                 type="button"

@@ -37,7 +37,7 @@ export function LandingNavbar() {
           </a>
           <a
             href={registerHref}
-            className="hidden rounded-lg bg-primary px-5 py-2 text-sm font-semibold text-white transition-colors hover:bg-void-400 md:inline-block"
+            className="hidden rounded-lg bg-primary px-5 py-2 text-sm font-semibold text-white transition-colors hover:bg-nyx-400 md:inline-block"
           >
             {t("nav.register")}
           </a>

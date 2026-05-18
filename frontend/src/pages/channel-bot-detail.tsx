@@ -25,11 +25,13 @@ import {
 import { ApiError } from "@/lib/api-client";
 import { formatDate, formatRelativeTime } from "@/lib/utils";
 import { PageHeader } from "@/components/shared/page-header";
+import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
+import { ErrorBanner } from "@/components/shared/error-banner";
 import { DetailSection } from "@/components/shared/detail-section";
 import { DetailRow } from "@/components/shared/detail-row";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
@@ -57,14 +59,20 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import {
-  Bot,
-  Check,
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
   ExternalLink,
   MessageSquare,
-  Plus,
+  MoreVertical,
   ShieldCheck,
   Trash2,
 } from "lucide-react";
+import { ArticleIcon, RoadBarrierIcon } from "@/components/icons/empty-state";
+import { AddCtaButton } from "@/components/shared/add-cta-button";
 import { toast } from "sonner";
 import type {
   ChannelBotDetail,
@@ -88,6 +96,23 @@ function statusBadgeVariant(
       return "secondary";
     default:
       return "secondary";
+  }
+}
+
+function statusLabel(status: ChannelBotStatus): string {
+  switch (status) {
+    case "active":
+      return "Active";
+    case "pending":
+      return "Pending";
+    case "pending_webhook":
+      return "Pending Webhook";
+    case "failed":
+      return "Failed";
+    case "invalid":
+      return "Invalid";
+    default:
+      return status;
   }
 }
 
@@ -138,20 +163,20 @@ function ConversationRow({
 
   return (
     <TableRow>
-      <TableCell className="font-mono text-xs">
+      <TableCell className="text-xs">
         {conversation.platform_conversation_id ||
           conversation.platform_sender_id ||
           "-"}
       </TableCell>
       <TableCell>
-        <Badge variant="outline">
+        <Badge variant="secondary">
           {conversationTypeLabel(conversation.platform_conversation_type)}
         </Badge>
       </TableCell>
       <TableCell className="font-medium">{agentName}</TableCell>
       <TableCell>
         {conversation.default_agent ? (
-          <Badge variant="success">Default</Badge>
+          <Badge variant="info">Default</Badge>
         ) : (
           <span className="text-xs text-muted-foreground">-</span>
         )}
@@ -168,24 +193,32 @@ function ConversationRow({
           ? formatRelativeTime(conversation.last_message_at)
           : "Never"}
       </TableCell>
-      <TableCell className="w-[100px]">
-        <div className="flex items-center gap-1">
-          <Link
-            to={`/channel-bots/${botId}/conversations/${conversation.id}` as string}
-          >
-            <Button variant="ghost" size="icon" className="h-8 w-8">
-              <MessageSquare className="h-4 w-4 text-muted-foreground" />
+      <TableCell className="w-10">
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button variant="ghost" size="icon" className="h-7 w-7">
+              <MoreVertical className="h-3.5 w-3.5" aria-hidden="true" />
+              <span className="sr-only">Actions</span>
             </Button>
-          </Link>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-8 w-8"
-            onClick={() => onDelete(conversation.id)}
-          >
-            <Trash2 className="h-4 w-4 text-muted-foreground" />
-          </Button>
-        </div>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuItem asChild>
+              <Link
+                to={`/channel-bots/${botId}/conversations/${conversation.id}` as string}
+              >
+                <MessageSquare className="mr-2 h-4 w-4" aria-hidden="true" />
+                View messages
+              </Link>
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onClick={() => onDelete(conversation.id)}
+              className="text-destructive focus:text-destructive"
+            >
+              <Trash2 className="mr-2 h-4 w-4 text-destructive" aria-hidden="true" />
+              Delete
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </TableCell>
     </TableRow>
   );
@@ -212,21 +245,16 @@ function ConversationsSection({
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0">
           <h3 className="text-lg font-medium">Conversation Routes</h3>
-          <p className="text-sm text-muted-foreground">
+          <p className="text-[12px] text-muted-foreground">
             Map conversations to AI agents for message relay.
           </p>
         </div>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => setAddOpen(true)}
-        >
-          <Plus className="mr-2 h-4 w-4" />
-          Add Route
-        </Button>
+        <div className="shrink-0">
+          <AddCtaButton label="Add Route" onClick={() => setAddOpen(true)} />
+        </div>
       </div>
 
       {isLoading ? (
@@ -236,40 +264,85 @@ function ConversationsSection({
           ))}
         </div>
       ) : !conversations || conversations.length === 0 ? (
-        <div className="flex flex-col items-center justify-center rounded-xl border border-border py-8 text-center">
-          <MessageSquare className="mb-3 h-8 w-8 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
+        <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
+          <ArticleIcon className="h-48 w-48 text-muted-foreground/30" />
+          <p className="text-[12px] text-muted-foreground/30">
             No conversation routes configured. Add a route to start relaying
             messages to an AI agent.
           </p>
         </div>
       ) : (
-        <div className="rounded-xl border border-border">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Conversation ID</TableHead>
-                <TableHead>Type</TableHead>
-                <TableHead>Agent</TableHead>
-                <TableHead>Default</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead>Last Message</TableHead>
-                <TableHead className="w-[100px]" />
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {conversations.map((conv) => (
-                <ConversationRow
-                  key={conv.id}
-                  conversation={conv}
-                  apiKeyNames={apiKeyNames}
-                  botId={botId}
-                  onDelete={setDeleteTarget}
-                />
-              ))}
-            </TableBody>
-          </Table>
-        </div>
+        <>
+          {/* Mobile card view */}
+          <div className="flex flex-col gap-3 md:hidden">
+            {conversations.map((conv) => {
+              const agentName = apiKeyNames.get(conv.agent_api_key_id) ?? conv.agent_api_key_id.slice(0, 8);
+              return (
+                <div key={conv.id} className="relative rounded-xl border border-border/50 bg-card p-4">
+                  <div className="absolute right-3 top-3" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button variant="ghost" size="icon" className="h-7 w-7">
+                          <MoreVertical className="h-3.5 w-3.5" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        <DropdownMenuItem asChild>
+                          <Link to={`/channel-bots/${botId}/conversations/${conv.id}` as string}>
+                            <MessageSquare className="mr-2 h-4 w-4" /> View messages
+                          </Link>
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => setDeleteTarget(conv.id)} className="text-destructive focus:text-destructive">
+                          <Trash2 className="mr-2 h-4 w-4 text-destructive" /> Delete
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </div>
+                  <p className="pr-10 text-[13px] font-semibold text-foreground truncate">
+                    {conv.platform_conversation_id || conv.platform_sender_id || "—"}
+                  </p>
+                  <p className="text-[11px] text-muted-foreground">Agent: {agentName}</p>
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    <Badge variant="secondary">{conversationTypeLabel(conv.platform_conversation_type)}</Badge>
+                    {conv.is_active ? <Badge variant="success">Active</Badge> : <Badge variant="secondary">Inactive</Badge>}
+                    {conv.default_agent && <Badge variant="info">Default</Badge>}
+                  </div>
+                  <div className="mt-3 text-[11px] text-muted-foreground">
+                    {conv.last_message_at ? `Last message ${formatRelativeTime(conv.last_message_at)}` : "No messages"}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Desktop table view */}
+          <div className="hidden md:block rounded-xl border border-border/50 bg-card overflow-hidden">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Conversation ID</TableHead>
+                  <TableHead>Type</TableHead>
+                  <TableHead>Agent</TableHead>
+                  <TableHead>Default</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead>Last Message</TableHead>
+                  <TableHead className="w-10">Actions</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {conversations.map((conv) => (
+                  <ConversationRow
+                    key={conv.id}
+                    conversation={conv}
+                    apiKeyNames={apiKeyNames}
+                    botId={botId}
+                    onDelete={setDeleteTarget}
+                  />
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        </>
       )}
 
       <AddRouteDialog
@@ -355,7 +428,7 @@ function AddRouteDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="md:max-w-md">
         <DialogHeader>
           <DialogTitle>Add Conversation Route</DialogTitle>
           <DialogDescription>
@@ -369,8 +442,8 @@ function AddRouteDialog({
           <div className="space-y-2">
             <Label htmlFor="agent_api_key_id">Agent (API Key)</Label>
             {keysWithCallback.length === 0 && activeApiKeys.length > 0 ? (
-              <div className="rounded-md border border-border bg-muted/50 p-3">
-                <p className="text-sm text-muted-foreground">
+              <div className="rounded-lg border border-border bg-muted/50 p-3">
+                <p className="text-[12px] text-muted-foreground">
                   None of your agent keys have a callback URL set.
                   Go to{" "}
                   <a href="/keys?tab=nyxid" className="text-primary underline">
@@ -450,7 +523,7 @@ function AddRouteDialog({
               checked={defaultAgent}
               onCheckedChange={setDefaultAgent}
             />
-            <Label htmlFor="default_agent" className="text-sm">
+            <Label htmlFor="default_agent" className="text-[12px]">
               Set as default agent for this bot
             </Label>
           </div>
@@ -463,7 +536,7 @@ function AddRouteDialog({
             >
               Cancel
             </Button>
-            <Button type="submit" disabled={createConversation.isPending}>
+            <Button variant="primary" type="submit" disabled={createConversation.isPending}>
               {createConversation.isPending ? "Adding..." : "Add Route"}
             </Button>
           </DialogFooter>
@@ -500,7 +573,7 @@ function DeleteRouteDialog({
 
   return (
     <Dialog open={routeId !== null} onOpenChange={() => onClose()}>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="md:max-w-md">
         <DialogHeader>
           <DialogTitle>Remove Conversation Route</DialogTitle>
           <DialogDescription>
@@ -538,7 +611,7 @@ function DeleteBotDialog({
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="md:max-w-md">
         <DialogHeader>
           <DialogTitle>Delete Channel Bot</DialogTitle>
           <DialogDescription>
@@ -585,7 +658,7 @@ function LarkPermissionSetupSection({
 
   return (
     <DetailSection title="Configure Permissions">
-      <p className="text-sm text-muted-foreground">
+      <p className="text-[12px] text-muted-foreground">
         Open this link to grant the scopes NyxID's adapter needs in the
         Lark/Feishu developer console. The required scopes are
         pre-selected — confirm and bulk-enable them to finish setup.
@@ -598,7 +671,7 @@ function LarkPermissionSetupSection({
           <ul className="mt-2 flex flex-wrap gap-2">
             {scopes.map((scope) => (
               <li key={scope}>
-                <Badge variant="outline" className="font-mono text-xs">
+                <Badge variant="secondary" className="text-xs">
                   {scope}
                 </Badge>
               </li>
@@ -607,14 +680,14 @@ function LarkPermissionSetupSection({
         </div>
       )}
       <div className="mt-4">
-        <Button asChild size="sm">
+        <Button variant="primary" asChild>
           <a
             href={bot.permission_setup_url}
             target="_blank"
             rel="noopener noreferrer"
           >
             Open Permissions Page
-            <ExternalLink className="ml-2 h-4 w-4" />
+            <ButtonIcon variant="primary"><ExternalLink className="h-3 w-3" /></ButtonIcon>
           </a>
         </Button>
       </div>
@@ -701,7 +774,7 @@ function EditVerificationSection({
           <div className="flex items-center justify-between gap-3">
             <Label htmlFor="verification_token">Verification Token</Label>
             {bot.lark_verification_token_configured && (
-              <Badge variant="outline" className="text-[10px] uppercase tracking-wide">
+              <Badge variant="secondary" className="text-[10px] uppercase tracking-wide">
                 Configured
               </Badge>
             )}
@@ -727,7 +800,7 @@ function EditVerificationSection({
           <div className="flex items-center justify-between gap-3">
             <Label htmlFor="encrypt_key">Encrypt Key</Label>
             {bot.lark_encrypt_key_configured && (
-              <Badge variant="outline" className="text-[10px] uppercase tracking-wide">
+              <Badge variant="secondary" className="text-[10px] uppercase tracking-wide">
                 Configured
               </Badge>
             )}
@@ -765,7 +838,7 @@ function EditVerificationSection({
           <div className="flex items-center justify-between gap-3">
             <Label htmlFor="app_secret">App Secret</Label>
             {bot.app_secret_configured && (
-              <Badge variant="outline" className="text-[10px] uppercase tracking-wide">
+              <Badge variant="secondary" className="text-[10px] uppercase tracking-wide">
                 Configured
               </Badge>
             )}
@@ -784,7 +857,7 @@ function EditVerificationSection({
         </div>
 
         <div className="flex justify-end">
-          <Button type="submit" disabled={updateBot.isPending || !isDirty}>
+          <Button variant="primary" type="submit" disabled={updateBot.isPending || !isDirty}>
             {updateBot.isPending ? "Saving..." : "Save Verification Settings"}
           </Button>
         </div>
@@ -799,7 +872,7 @@ export function ChannelBotDetailPage() {
   const currentUserId = useAuthStore((s) => s.user?.id ?? null);
   const { data: orgs } = useOrgs();
 
-  const { data: bot, isLoading, error } = useChannelBot(botId);
+  const { data: bot, isLoading, error, refetch } = useChannelBot(botId);
 
   // The bot's owner is an org when `bot.user_id` doesn't match the
   // current user's id. We pass that org id (a user_id in the backend
@@ -813,6 +886,8 @@ export function ChannelBotDetailPage() {
   const { data: apiKeys } = useApiKeys({ orgId: ownerOrgId });
   const deleteMutation = useDeleteChannelBot();
   const verifyMutation = useVerifyChannelBot();
+
+  useBreadcrumbLabel(bot?.label);
 
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
 
@@ -863,18 +938,16 @@ export function ChannelBotDetailPage() {
 
   if (error || !bot) {
     return (
-      <div className="flex flex-col items-center justify-center py-12 text-center">
-        <Bot className="mb-4 h-12 w-12 text-muted-foreground/50" />
-        <p className="text-sm text-muted-foreground">
-          Bot not found or failed to load.
-        </p>
-        <Button
-          variant="outline"
-          className="mt-4"
-          onClick={() => void navigate({ to: "/channel-bots" })}
-        >
-          Back to Channel Bots
-        </Button>
+      <div className="space-y-8">
+        <PageHeader title="Bot Not Found" />
+        <ErrorBanner
+          message={
+            error instanceof ApiError
+              ? error.message
+              : "Bot not found or failed to load."
+          }
+          onRetry={refetch}
+        />
       </div>
     );
   }
@@ -882,29 +955,24 @@ export function ChannelBotDetailPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        breadcrumbs={[
-          { label: "Channel Bots", to: "/channel-bots" },
-          { label: bot.label },
-        ]}
         title={bot.label}
         description="Manage bot settings and conversation routes."
         actions={
           <div className="flex gap-2">
             <Button
               variant="outline"
-              size="sm"
+              className="text-text-tertiary hover:text-muted-foreground"
               onClick={() => void handleVerify()}
               disabled={verifyMutation.isPending}
             >
-              <ShieldCheck className="mr-2 h-4 w-4" />
+              <ButtonIcon><ShieldCheck className="h-3 w-3" /></ButtonIcon>
               {verifyMutation.isPending ? "Verifying..." : "Verify Bot"}
             </Button>
             <Button
               variant="destructive"
-              size="sm"
               onClick={() => setShowDeleteDialog(true)}
             >
-              <Trash2 className="mr-2 h-4 w-4" />
+              <ButtonIcon variant="destructive"><Trash2 className="h-3 w-3 text-destructive" /></ButtonIcon>
               Delete
             </Button>
           </div>
@@ -912,11 +980,12 @@ export function ChannelBotDetailPage() {
       />
 
       {bot.status === "pending_webhook" && (
-        <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-4">
-          <p className="text-sm font-medium text-foreground">
+        <div className="flex flex-col items-center gap-3 rounded-xl border border-amber-500/30 bg-amber-500/10 p-6 text-center">
+          <RoadBarrierIcon className="h-48 w-48 text-muted-foreground/30" />
+          <p className="text-[12px] font-medium text-foreground">
             Pending webhook verification
           </p>
-          <p className="mt-1 text-sm text-muted-foreground">
+          <p className="mt-1 text-[12px] text-muted-foreground/30">
             {bot.platform === "lark" || bot.platform === "feishu"
               ? bot.lark_verification_token_configured
                 ? "Once Lark/Feishu delivers a verified inbound message, this bot will automatically move to Active."
@@ -932,25 +1001,12 @@ export function ChannelBotDetailPage() {
           label="Platform"
           value={platformLabel(bot.platform)}
           badge
-          badgeVariant="outline"
+          badgeVariant="secondary"
         />
-        <DetailRow label="Bot Username" value={bot.platform_bot_username || "-"} mono />
-        <DetailRow label="Platform Bot ID" value={bot.platform_bot_id || "-"} mono copyable />
-        <div className="flex items-center justify-between border-b border-border py-2 text-sm last:border-b-0">
-          <span className="text-text-tertiary">Status</span>
-          <Badge variant={statusBadgeVariant(bot.status)}>{bot.status}</Badge>
-        </div>
-        <div className="flex items-center justify-between border-b border-border py-2 text-sm last:border-b-0">
-          <span className="text-text-tertiary">Webhook</span>
-          {bot.webhook_registered ? (
-            <div className="flex items-center gap-1">
-              <Check className="h-3 w-3 text-success" />
-              <span className="text-foreground">Registered</span>
-            </div>
-          ) : (
-            <span className="text-muted-foreground">Not registered</span>
-          )}
-        </div>
+        <DetailRow label="Bot Username" value={bot.platform_bot_username || "-"} />
+        <DetailRow label="Platform Bot ID" value={bot.platform_bot_id || "-"} copyable />
+        <DetailRow label="Status" value={statusLabel(bot.status)} badge badgeVariant={statusBadgeVariant(bot.status)} />
+        <DetailRow label="Webhook" value={bot.webhook_registered ? "Registered" : "Not registered"} />
         <DetailRow label="Owner" value={ownerLabel} />
         <DetailRow label="Created" value={formatDate(bot.created_at)} />
         <DetailRow label="Updated" value={formatRelativeTime(bot.updated_at)} />

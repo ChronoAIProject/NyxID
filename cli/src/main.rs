@@ -1,5 +1,6 @@
 mod api;
 mod auth;
+mod browser;
 mod cli;
 mod commands;
 mod error_format;

@@ -73,6 +73,25 @@ impl PlatformRole {
     }
 }
 
+/// User-scoped configuration and preferences. Embedded sub-document on
+/// `User`; extend by adding new preference groups as fields here.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserProfileConfig {
+    #[serde(default)]
+    pub onboarding: OnboardingState,
+}
+
+/// Tracks which first-run onboarding flows the user has completed (or
+/// skipped). Timestamps rather than bools record *when*; `None` is the
+/// signal the post-login wizard redirect keys off.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OnboardingState {
+    /// Set when the user finishes or skips the AI-services wizard.
+    /// `None` => wizard not yet seen => eligible for the redirect.
+    #[serde(default, with = "bson_datetime::optional")]
+    pub ai_services_completed_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct User {
     #[serde(rename = "_id")]
@@ -125,6 +144,10 @@ pub struct User {
     pub updated_at: DateTime<Utc>,
     #[serde(default, with = "bson_datetime::optional")]
     pub last_login_at: Option<DateTime<Utc>>,
+    /// User-scoped config / preferences (onboarding state, etc.). Legacy
+    /// rows without this field deserialize as `UserProfileConfig::default()`.
+    #[serde(default)]
+    pub profile_config: UserProfileConfig,
 }
 
 #[cfg(test)]
@@ -162,6 +185,7 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             last_login_at: None,
+            profile_config: UserProfileConfig::default(),
         }
     }
 

@@ -345,7 +345,7 @@ pub async fn run_authorization_code_flow(
     println!("  {authorization_url}");
     println!();
 
-    let _ = open::that(&authorization_url);
+    let _ = crate::browser::open_browser(&authorization_url);
 
     let code = wait_for_authorization_code(listener, &state).await?;
     exchange_authorization_code(

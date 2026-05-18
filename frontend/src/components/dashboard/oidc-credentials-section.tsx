@@ -8,7 +8,7 @@ import { copyToClipboard } from "@/lib/utils";
 import { DetailRow } from "@/components/shared/detail-row";
 import { DiscoveryEndpoints } from "./discovery-endpoints";
 import { RedirectUriEditor } from "./redirect-uri-editor";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { Copy, Eye, EyeOff, RefreshCw, AlertTriangle } from "lucide-react";
 import { toast } from "sonner";
@@ -66,29 +66,29 @@ export function OidcCredentialsSection({
   return (
     <div className="space-y-3">
       {oauthClientId && (
-        <DetailRow label="Client ID" value={oauthClientId} copyable mono />
+        <DetailRow label="Client ID" value={oauthClientId} copyable />
       )}
 
       {!showCredentials ? (
         <div className="pt-2">
           <Button
             variant="outline"
-            size="sm"
+            className="text-text-tertiary hover:text-muted-foreground"
             onClick={() => setShowCredentials(true)}
           >
-            <Eye className="mr-1 h-3 w-3" />
-            Reveal credentials
+            <ButtonIcon><Eye className="h-3 w-3" /></ButtonIcon>
+            Reveal Credentials
           </Button>
           <p className="mt-1 text-xs text-muted-foreground">
             Credentials should be stored securely and never shared publicly.
           </p>
         </div>
       ) : credentialsLoading ? (
-        <p className="text-sm text-muted-foreground">Loading credentials...</p>
+        <p className="text-[12px] text-muted-foreground">Loading credentials...</p>
       ) : credentials ? (
         <div className="space-y-3">
-          <div className="rounded-md border border-warning/30 bg-warning/5 p-3">
-            <div className="flex items-center gap-2 text-sm font-medium text-warning">
+          <div className="rounded-lg border border-warning/30 bg-warning/5 p-3">
+            <div className="flex items-center gap-2 text-[12px] font-medium text-warning">
               <AlertTriangle className="h-4 w-4" />
               Store this secret securely
             </div>
@@ -152,7 +152,7 @@ export function OidcCredentialsSection({
                 <p className="mb-1 text-xs font-medium text-muted-foreground">
                   Delegation Scopes
                 </p>
-                <p className="text-sm">{credentials.delegation_scopes}</p>
+                <p className="text-[12px]">{credentials.delegation_scopes}</p>
                 <p className="mt-1 text-xs text-muted-foreground">
                   Scopes this client can request via token exchange (RFC 8693).
                   Empty means token exchange is disabled.
@@ -177,25 +177,23 @@ export function OidcCredentialsSection({
             {!confirmRegenerate ? (
               <Button
                 variant="destructive"
-                size="sm"
                 onClick={() => setConfirmRegenerate(true)}
               >
-                <RefreshCw className="mr-1 h-3 w-3" />
+                <ButtonIcon><RefreshCw className="h-3 w-3" /></ButtonIcon>
                 Regenerate secret
               </Button>
             ) : (
-              <div className="space-y-2 rounded-md border border-destructive/30 bg-destructive/5 p-3">
-                <p className="text-sm font-medium text-destructive">
+              <div className="space-y-2 rounded-lg border border-destructive/30 bg-destructive/5 p-3">
+                <p className="text-[12px] font-medium text-destructive">
                   This will invalidate the current secret immediately.
                 </p>
                 <p className="text-xs text-muted-foreground">
                   All existing integrations using the current secret will stop
                   working until updated with the new secret.
                 </p>
-                <div className="flex gap-2">
+                <div className="flex justify-end gap-2">
                   <Button
                     variant="destructive"
-                    size="sm"
                     onClick={() => void handleRegenerate()}
                     isLoading={regenerateMutation.isPending}
                   >
@@ -203,7 +201,6 @@ export function OidcCredentialsSection({
                   </Button>
                   <Button
                     variant="outline"
-                    size="sm"
                     onClick={() => setConfirmRegenerate(false)}
                   >
                     Cancel

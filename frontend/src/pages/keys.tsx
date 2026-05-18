@@ -3,25 +3,34 @@ import { Link, useSearch, useNavigate } from "@tanstack/react-router";
 import { useKeys } from "@/hooks/use-keys";
 import { useUserServices } from "@/hooks/use-user-services";
 import { PageHeader } from "@/components/shared/page-header";
+import { AddCtaButton } from "@/components/shared/add-cta-button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { ErrorBanner } from "@/components/shared/error-banner";
 import { Card, CardContent } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
-  Plus,
+  Table,
+  TableHeader,
+  TableBody,
+  TableRow,
+  TableHead,
+  TableCell,
+} from "@/components/ui/table";
+import {
   Globe,
   KeyRound,
+  KeySquare,
   Server,
   Router,
   Terminal,
   Zap,
-  Building2,
-  Lock,
 } from "lucide-react";
+import { MagicKeyIcon } from "@/components/icons/empty-state";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { useNodes } from "@/hooks/use-nodes";
+import { ViewToggle, useViewMode, type ViewMode } from "@/components/shared/view-toggle";
 import { AddKeyDialog } from "@/components/dashboard/add-key-dialog";
 import { ApiKeyTable } from "@/components/dashboard/api-key-table";
 import { ApiKeyCreateDialog } from "@/components/dashboard/api-key-create-dialog";
@@ -30,15 +39,22 @@ import { RoleBadge } from "@/components/orgs/role-badge";
 import { OrgAvatar } from "@/components/orgs/org-avatar";
 import type { KeyInfo } from "@/types/keys";
 import type { CredentialSource } from "@/schemas/orgs";
-
-type TabValue = "services" | "nyxid";
+import {
+  KEYS_TABS,
+  KEYS_TAB_DEFAULT,
+  KEYS_ACTIONS,
+  type KeysAction,
+  type KeysTab,
+  isValidTab,
+  parseTab,
+} from "@/lib/url-tabs";
 
 function statusVariant(
   status: string,
-): "default" | "secondary" | "destructive" | "outline" {
+): "success" | "secondary" | "destructive" {
   switch (status) {
     case "active":
-      return "default";
+      return "success";
     case "expired":
       return "secondary";
     case "revoked":
@@ -46,7 +62,7 @@ function statusVariant(
     case "refresh_failed":
       return "destructive";
     default:
-      return "outline";
+      return "secondary";
   }
 }
 
@@ -84,61 +100,50 @@ function KeyCardContent({ keyInfo, source }: KeyCardProps) {
 
   return (
     <Card
-      className={`transition-colors ${
+      className={`h-full transition-colors duration-300 ${
         isBlocked
           ? "opacity-60"
-          : "hover:border-primary/30 hover:bg-accent/30"
+          : "hover:border-white/[0.15] hover:bg-accent/30"
       }`}
       aria-disabled={isBlocked ? true : undefined}
     >
-      <CardContent className="flex flex-col gap-3 p-5">
-        <div className="flex items-start justify-between gap-2">
-          <div className="min-w-0">
-            <p className="truncate text-sm font-medium text-foreground">
-              {keyInfo.label}
+      <CardContent className="flex h-full min-h-[140px] flex-col gap-3 p-4">
+        <div className="min-w-0">
+          <p className="truncate text-[12px] font-medium text-foreground">
+            {keyInfo.label}
+          </p>
+          {keyInfo.catalog_service_name && (
+            <p className="truncate text-xs text-muted-foreground">
+              {keyInfo.catalog_service_name}
             </p>
-            {keyInfo.catalog_service_name && (
-              <p className="text-xs text-muted-foreground">
-                {keyInfo.catalog_service_name}
-              </p>
-            )}
-          </div>
-          <div className="flex shrink-0 items-center gap-2">
-            {isOrgInherited && (
-              <Badge variant="info" className="gap-1">
-                <Building2 className="h-3 w-3" />
-                Org
-              </Badge>
-            )}
-            {isBlocked && (
-              <Badge variant="secondary" className="gap-1">
-                <Lock className="h-3 w-3" />
-                Read-only
-              </Badge>
-            )}
-            {isReadOnly && !isBlocked && (
-              <Badge variant="secondary" className="gap-1">
-                <Lock className="h-3 w-3" />
-                View-only
-              </Badge>
-            )}
-            {keyInfo.auto_connected && (
-              <Badge variant="secondary">
-                {keyInfo.source_app_name
-                  ? `Via ${keyInfo.source_app_name}`
-                  : "Auto-connected"}
-              </Badge>
-            )}
-            {isSsh && <Badge variant="outline">SSH</Badge>}
-            <Badge variant={statusVariant(keyInfo.status)}>
-              {keyInfo.status}
+          )}
+        </div>
+        <div className="flex flex-wrap items-center gap-1.5">
+          {isOrgInherited && (
+            <Badge variant="info">Org</Badge>
+          )}
+          {isBlocked && (
+            <Badge variant="secondary">Read-Only</Badge>
+          )}
+          {isReadOnly && !isBlocked && (
+            <Badge variant="secondary">View-Only</Badge>
+          )}
+          <Badge variant={statusVariant(keyInfo.status)}>
+            {keyInfo.status.charAt(0).toUpperCase() + keyInfo.status.slice(1)}
+          </Badge>
+          {isSsh && <Badge variant="secondary">SSH</Badge>}
+          {keyInfo.auto_connected && (
+            <Badge variant="secondary">
+              {keyInfo.source_app_name
+                ? `Via ${keyInfo.source_app_name}`
+                : "Auto-connected"}
             </Badge>
-            {!keyInfo.is_active && <Badge variant="outline">Inactive</Badge>}
-          </div>
+          )}
+          {!keyInfo.is_active && <Badge variant="secondary">Inactive</Badge>}
         </div>
 
-        <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs text-muted-foreground">
-          <div className="flex items-center gap-1.5">
+        <div className="mt-auto grid grid-cols-2 gap-x-4 gap-y-3 text-xs text-muted-foreground">
+          <div className="flex min-w-0 items-center gap-1.5">
             {isSsh ? (
               <Terminal className="h-3 w-3 shrink-0" />
             ) : (
@@ -146,13 +151,13 @@ function KeyCardContent({ keyInfo, source }: KeyCardProps) {
             )}
             <span className="truncate">{displayUrl}</span>
           </div>
-          <div className="flex items-center gap-1.5">
+          <div className="flex min-w-0 items-center justify-end gap-1.5">
             {keyInfo.auto_connected ? (
               <Zap className="h-3 w-3 shrink-0" />
             ) : (
               <KeyRound className="h-3 w-3 shrink-0" />
             )}
-            <span>
+            <span className="truncate">
               {keyInfo.auto_connected
                 ? "No auth required"
                 : isSsh
@@ -162,13 +167,13 @@ function KeyCardContent({ keyInfo, source }: KeyCardProps) {
                   : keyInfo.credential_type}
             </span>
           </div>
-          <div className="flex items-center gap-1.5">
+          <div className="flex min-w-0 items-center gap-1.5">
             <Server className="h-3 w-3 shrink-0" />
-            <span className="font-mono">
+            <span className="truncate">
               {isSsh ? keyInfo.slug : `/proxy/s/${keyInfo.slug}`}
             </span>
           </div>
-          <div className="flex items-center gap-1.5">
+          <div className="flex min-w-0 items-center justify-end gap-1.5">
             <Router className="h-3 w-3 shrink-0" />
             <span className="truncate">
               {nodeName ? `→ ${nodeName}` : "Direct"}
@@ -193,9 +198,140 @@ function KeyCard({ keyInfo, source }: KeyCardProps) {
   //   role) don't even appear in the listing because
   //   `list_user_services_with_sources` drops them.
   return (
-    <Link to="/keys/$keyId" params={{ keyId: keyInfo.id }}>
+    <Link to="/keys/$keyId" params={{ keyId: keyInfo.id }} className="h-full">
       <KeyCardContent keyInfo={keyInfo} source={source} />
     </Link>
+  );
+}
+
+function ServiceTableRow({
+  keyInfo,
+  source,
+}: KeyCardProps) {
+  const navigate = useNavigate();
+  const isSsh = keyInfo.service_type === "ssh";
+  const hasSshCertificateAuth = isSsh && keyInfo.ssh_ca_public_key !== null;
+  const { data: nodes } = useNodes();
+  const nodeName = keyInfo.node_id
+    ? (nodes?.find((n) => n.id === keyInfo.node_id)?.name ??
+      keyInfo.node_id.slice(0, 8))
+    : null;
+
+  const isOrgInherited = source?.type === "org";
+  const isBlocked = source?.type === "org" && !source.allowed;
+  const isReadOnly =
+    source?.type === "org" && source.allowed && source.role !== "admin";
+
+  const displayUrl = isSsh
+    ? `${keyInfo.ssh_host ?? "unknown"}:${keyInfo.ssh_port ?? 22}`
+    : keyInfo.endpoint_url;
+
+  const authLabel = keyInfo.auto_connected
+    ? "No auth"
+    : isSsh
+      ? hasSshCertificateAuth
+        ? "certificate"
+        : "ssh tunnel"
+      : keyInfo.credential_type;
+
+  return (
+    <TableRow
+      className={`border-border/30 cursor-pointer hover:bg-white/[0.03] ${isBlocked ? "opacity-60" : ""}`}
+      onClick={() => void navigate({ to: "/keys/$keyId", params: { keyId: keyInfo.id } })}
+    >
+      <TableCell className="h-[60px]">
+        <p className="truncate font-medium text-foreground">{keyInfo.label}</p>
+        <p className="truncate text-[11px] text-text-tertiary mt-0.5">
+          {keyInfo.catalog_service_name ?? " "}
+        </p>
+      </TableCell>
+
+      <TableCell className="h-[60px]">
+        <span className="truncate text-muted-foreground text-[11px] font-mono">
+          {displayUrl}
+        </span>
+      </TableCell>
+
+      <TableCell className="h-[60px] text-muted-foreground">{authLabel}</TableCell>
+
+      <TableCell className="h-[60px]">
+        <span className="truncate text-muted-foreground text-[11px] font-mono">
+          {isSsh ? keyInfo.slug : `/proxy/s/${keyInfo.slug}`}
+        </span>
+      </TableCell>
+
+      <TableCell className="h-[60px] text-muted-foreground">
+        {nodeName ? `→ ${nodeName}` : "Direct"}
+      </TableCell>
+
+      <TableCell className="h-[60px]">
+        <div className="flex flex-wrap gap-1">
+          {isOrgInherited && <Badge variant="info">Org</Badge>}
+          {isBlocked && <Badge variant="secondary">Read-Only</Badge>}
+          {isReadOnly && !isBlocked && <Badge variant="secondary">View-Only</Badge>}
+          <Badge variant={statusVariant(keyInfo.status)}>
+            {keyInfo.status.charAt(0).toUpperCase() + keyInfo.status.slice(1)}
+          </Badge>
+          {isSsh && <Badge variant="secondary">SSH</Badge>}
+        </div>
+      </TableCell>
+    </TableRow>
+  );
+}
+
+function ServiceTableView({
+  groups,
+}: {
+  readonly groups: readonly ServiceGroup[];
+}) {
+  return (
+    <div className="space-y-8">
+      {groups.map((group) => (
+        <section key={group.key} className="space-y-3">
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2">
+              {group.icon === "org" ? (
+                <OrgAvatar
+                  avatarUrl={group.avatarUrl}
+                  displayName={group.title}
+                  className="h-6 w-6 text-[0.625rem]"
+                />
+              ) : (
+                <Globe className="h-4 w-4 text-muted-foreground" />
+              )}
+              <h3 className="text-[13px] font-semibold text-foreground">
+                {group.title}
+              </h3>
+            </div>
+            {group.role && <RoleBadge role={group.role} />}
+            {group.subtitle && (
+              <span className="text-xs text-muted-foreground">
+                {group.subtitle}
+              </span>
+            )}
+          </div>
+          <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
+            <Table>
+              <TableHeader>
+                <TableRow className="border-border/50 hover:bg-transparent">
+                  <TableHead className="w-[20%]">Name</TableHead>
+                  <TableHead className="w-[22%]">Endpoint</TableHead>
+                  <TableHead className="w-[10%]">Auth</TableHead>
+                  <TableHead className="w-[20%]">Proxy Slug</TableHead>
+                  <TableHead className="w-[10%]">Routing</TableHead>
+                  <TableHead className="w-[18%]">Status</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {group.keys.map(({ keyInfo, source }) => (
+                  <ServiceTableRow key={keyInfo.id} keyInfo={keyInfo} source={source} />
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        </section>
+      ))}
+    </div>
   );
 }
 
@@ -203,7 +339,7 @@ interface ServiceGroup {
   readonly key: string;
   readonly title: string;
   readonly subtitle: string | null;
-  readonly role: "admin" | "member" | "viewer" | null;
+  readonly role: "owner" | "admin" | "member" | "viewer" | null;
   readonly icon: "personal" | "org";
   /**
    * Org avatar URL when `icon === "org"`. Surfaced via `credential_source`
@@ -231,7 +367,7 @@ function groupKeysBySource(
 ): readonly ServiceGroup[] {
   const personal: ServiceGroup = {
     key: "personal",
-    title: "My services",
+    title: "My Services",
     subtitle: null,
     role: null,
     icon: "personal",
@@ -288,32 +424,17 @@ function groupKeysBySource(
 
 function ServicesEmptyState({ onAdd }: { readonly onAdd: () => void }) {
   return (
-    <Card>
-      <CardContent className="flex flex-col items-center gap-4 py-16">
-        <div className="flex h-14 w-14 items-center justify-center rounded-full border border-border">
-          <KeyRound className="h-6 w-6 text-muted-foreground" />
-        </div>
-        <div className="max-w-md space-y-2 text-center">
-          <p className="text-sm font-medium">No AI services yet</p>
-          <p className="text-xs text-muted-foreground">
-            Connect a downstream service (OpenAI, GitHub, Anthropic, etc.) so your
-            AI agents can call it through NyxID without ever seeing the raw key.
-          </p>
-          <p className="text-xs text-muted-foreground">
-            Connect a service <span className="font-medium">before</span> wiring
-            up MCP &mdash; otherwise your AI agent will only see NyxID&apos;s{" "}
-            <code className="rounded bg-muted px-1 py-0.5 text-[0.7rem]">
-              nyx__&hellip;
-            </code>{" "}
-            meta-tools and proxy requests will look broken.
-          </p>
-        </div>
-        <Button size="sm" onClick={onAdd}>
-          <Plus className="mr-2 h-4 w-4" />
-          Add Service
-        </Button>
-      </CardContent>
-    </Card>
+    <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+      <MagicKeyIcon className="h-64 w-64 text-muted-foreground/30" />
+      <div className="space-y-1">
+        <p className="text-[12px] font-medium text-muted-foreground/30">No AI services yet</p>
+        <p className="text-xs text-muted-foreground/30">
+          Connect a downstream service (OpenAI, GitHub, Anthropic, etc.) so your
+          AI agents can call it through NyxID without ever seeing the raw key.
+        </p>
+      </div>
+      <AddCtaButton label="Add Service" onClick={onAdd} />
+    </div>
   );
 }
 
@@ -330,11 +451,13 @@ function LoadingSkeleton() {
 function ExternalServicesTab({
   onAdd,
   showAutoConnected,
+  viewMode,
 }: {
   readonly onAdd: () => void;
   readonly showAutoConnected: boolean;
+  readonly viewMode: ViewMode;
 }) {
-  const { data: keys, isLoading, error } = useKeys();
+  const { data: keys, isLoading, error, refetch } = useKeys();
   // user-services carries credential_source for both personal and
   // org-inherited items. When the backend augments /keys directly in a
   // future change, the `credential_source` field on KeyInfo will take
@@ -353,11 +476,7 @@ function ExternalServicesTab({
 
   if (error) {
     return (
-      <Card>
-        <CardContent className="py-8 text-center text-sm text-destructive">
-          Failed to load services. Please try again.
-        </CardContent>
-      </Card>
+      <ErrorBanner message="Failed to load services. Please try again." onRetry={refetch} />
     );
   }
 
@@ -374,6 +493,10 @@ function ExternalServicesTab({
   }
 
   const groups = groupKeysBySource(visibleKeys, sourceById);
+
+  if (viewMode === "table") {
+    return <ServiceTableView groups={groups} />;
+  }
 
   // If only personal services exist, skip section headers to preserve the
   // current flat-grid look-and-feel.
@@ -401,9 +524,9 @@ function ExternalServicesTab({
                   className="h-6 w-6 text-[0.625rem]"
                 />
               ) : (
-                <KeyRound className="h-4 w-4 text-muted-foreground" />
+                <Globe className="h-4 w-4 text-muted-foreground" />
               )}
-              <h3 className="text-sm font-semibold text-foreground">
+              <h3 className="text-[13px] font-semibold text-foreground">
                 {group.title}
               </h3>
             </div>
@@ -425,16 +548,30 @@ function ExternalServicesTab({
   );
 }
 
-function NyxIdApiKeysTab() {
+function NyxIdApiKeysTab({
+  createKeyOpen,
+  onCreateKeyOpenChange,
+  viewMode,
+}: {
+  readonly createKeyOpen?: boolean;
+  readonly onCreateKeyOpenChange?: (open: boolean) => void;
+  readonly viewMode: ViewMode;
+}) {
   return (
-    <div className="space-y-4">
-      <ApiKeyUsageDashboard />
-      <div className="flex justify-end">
-        <ApiKeyCreateDialog />
+    <div className="space-y-6">
+      <div className="space-y-3">
+        <div className="flex items-center gap-2">
+          <KeySquare className="h-4 w-4 text-muted-foreground" />
+          <h3 className="text-[13px] font-semibold text-foreground">Agent Keys</h3>
+        </div>
+        <ApiKeyTable viewMode={viewMode} />
       </div>
-      <div className="rounded-xl border border-border">
-        <ApiKeyTable />
-      </div>
+      <ApiKeyUsageDashboard viewMode={viewMode} />
+      <ApiKeyCreateDialog
+        externalOpen={createKeyOpen}
+        onExternalOpenChange={onCreateKeyOpenChange}
+        hideTrigger
+      />
     </div>
   );
 }
@@ -442,20 +579,16 @@ function NyxIdApiKeysTab() {
 function AddButton({
   tab,
   onAddService,
+  onCreateKey,
 }: {
-  readonly tab: TabValue;
+  readonly tab: KeysTab;
   readonly onAddService: () => void;
+  readonly onCreateKey: () => void;
 }) {
   if (tab === "services") {
-    return (
-      <Button size="sm" onClick={onAddService}>
-        <Plus className="mr-2 h-4 w-4" />
-        Add Service
-      </Button>
-    );
+    return <AddCtaButton label="Add Service" onClick={onAddService} />;
   }
-  // "nyxid" tab -- the ApiKeyCreateDialog has its own trigger button
-  return null;
+  return <AddCtaButton label="Create API Key" onClick={onCreateKey} />;
 }
 
 function AutoConnectedToggle({
@@ -467,18 +600,17 @@ function AutoConnectedToggle({
   readonly onCheckedChange: (checked: boolean) => void;
   readonly count: number;
 }) {
-  if (count === 0) return null;
-
   return (
     <div className="flex items-center gap-2">
       <Switch
         id="show-auto-connected"
         checked={checked}
         onCheckedChange={onCheckedChange}
+        disabled={count === 0}
       />
       <Label
         htmlFor="show-auto-connected"
-        className="text-sm text-muted-foreground"
+        className="text-[12px] text-muted-foreground"
       >
         Show auto-connected ({count})
       </Label>
@@ -487,39 +619,53 @@ function AutoConnectedToggle({
 }
 
 export function KeysPage() {
-  const search: { tab?: string; slug?: string } = useSearch({ strict: false });
+  const search: { tab?: string; slug?: string; action?: string } = useSearch({ strict: false });
   const navigate = useNavigate();
-  const rawTab = search.tab ?? "services";
-  const tab: TabValue = rawTab === "nyxid" ? "nyxid" : "services";
+  const tab = parseTab(search.tab, KEYS_TABS, KEYS_TAB_DEFAULT);
 
   const [addServiceOpen, setAddServiceOpen] = useState(false);
+  const [createKeyOpen, setCreateKeyOpen] = useState(false);
   const [showAutoConnected, setShowAutoConnected] = useState(false);
-  // Consume `?slug=X` once on mount and hold it in component state
-  // so it survives the URL replace below. If we derived
-  // `prefillSlug` from `search.slug` directly, the `navigate(...,
-  // replace)` call would wipe it from the URL before `AddKeyDialog`
-  // mounts and reads the prop, so the dialog's auto-select effect
-  // would never see the slug and the user would land on the generic
-  // catalog picker. Keeping it in state decouples "UI intent" from
-  // "current URL" — the URL gets cleaned up immediately so a
-  // refresh doesn't re-open the dialog, but the slug stays
-  // addressable until the dialog closes and we reset it.
+  const [servicesViewMode, setServicesViewMode] = useViewMode("keys-services");
+  const [agentKeysViewMode, setAgentKeysViewMode] = useViewMode("keys-agent");
   const [pendingPrefillSlug, setPendingPrefillSlug] = useState<string | null>(null);
   const appliedSlugRef = useRef<string | null>(null);
+  const appliedActionRef = useRef<string | null>(null);
+
   useEffect(() => {
     const slug = search.slug ?? null;
-    if (!slug) return;
-    if (appliedSlugRef.current === slug) return;
-    appliedSlugRef.current = slug;
-    setPendingPrefillSlug(slug);
-    setAddServiceOpen(true);
+    if (slug) {
+      if (appliedSlugRef.current === slug) return;
+      appliedSlugRef.current = slug;
+      setPendingPrefillSlug(slug);
+      setAddServiceOpen(true);
+      void navigate({
+        to: "/keys",
+        search: { tab: "services" },
+        replace: true,
+      });
+      return;
+    }
+
+    const action: KeysAction | null = isValidTab(search.action, KEYS_ACTIONS)
+      ? search.action
+      : null;
+    if (!action) return;
+    if (appliedActionRef.current === action) return;
+    appliedActionRef.current = action;
+
+    if (action === "add-service") {
+      setAddServiceOpen(true);
+    } else if (action === "create-key") {
+      setCreateKeyOpen(true);
+    }
     void navigate({
       to: "/keys",
-      search: { tab: "services" },
+      search: { tab: search.tab },
       replace: true,
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [search.slug]);
+  }, [search.slug, search.action]);
 
   // Clear the stashed slug AND reset the once-per-slug guard when
   // the dialog closes. Resetting `appliedSlugRef` lets a subsequent
@@ -533,6 +679,14 @@ export function KeysPage() {
     if (!next) {
       setPendingPrefillSlug(null);
       appliedSlugRef.current = null;
+      appliedActionRef.current = null;
+    }
+  }
+
+  function handleCreateKeyOpenChange(next: boolean) {
+    setCreateKeyOpen(next);
+    if (!next) {
+      appliedActionRef.current = null;
     }
   }
 
@@ -546,10 +700,17 @@ export function KeysPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title="AI Services"
+        title="Services & Credentials"
         description="Manage your AI service credentials and agent keys."
-        actions={
-          <div className="flex items-center gap-4">
+      />
+
+      <Tabs value={tab} onValueChange={setTab}>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between sm:gap-4">
+          <TabsList className="min-w-0">
+            <TabsTrigger value="services">External Services</TabsTrigger>
+            <TabsTrigger value="nyxid">Agent Keys</TabsTrigger>
+          </TabsList>
+          <div className="flex shrink-0 items-center justify-between gap-4 sm:pb-1">
             {tab === "services" && (
               <AutoConnectedToggle
                 checked={showAutoConnected}
@@ -557,29 +718,32 @@ export function KeysPage() {
                 count={autoCount}
               />
             )}
+            <ViewToggle
+              viewMode={tab === "services" ? servicesViewMode : agentKeysViewMode}
+              onViewModeChange={tab === "services" ? setServicesViewMode : setAgentKeysViewMode}
+            />
             <AddButton
               tab={tab}
               onAddService={() => setAddServiceOpen(true)}
+              onCreateKey={() => setCreateKeyOpen(true)}
             />
           </div>
-        }
-      />
-
-      <Tabs value={tab} onValueChange={setTab}>
-        <TabsList>
-          <TabsTrigger value="services">External Services</TabsTrigger>
-          <TabsTrigger value="nyxid">Agent Keys</TabsTrigger>
-        </TabsList>
+        </div>
 
         <TabsContent value="services" className="mt-6">
           <ExternalServicesTab
             onAdd={() => setAddServiceOpen(true)}
             showAutoConnected={showAutoConnected}
+            viewMode={servicesViewMode}
           />
         </TabsContent>
 
         <TabsContent value="nyxid" className="mt-6">
-          <NyxIdApiKeysTab />
+          <NyxIdApiKeysTab
+            createKeyOpen={createKeyOpen}
+            onCreateKeyOpenChange={handleCreateKeyOpenChange}
+            viewMode={agentKeysViewMode}
+          />
         </TabsContent>
       </Tabs>
 

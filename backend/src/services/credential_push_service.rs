@@ -612,6 +612,31 @@ fn build_credential_params_from_fields(
             param_value: None,
             target_url,
         },
+        // Cloud-billing auth methods (NyxID#716 + Codex review BLOCKER 6):
+        // the JSON credential blob rides on `header_value` (mirroring
+        // the node-side `CredentialConfig::new_aws_sigv4` /
+        // `new_gcp_service_account` constructors that reuse the
+        // `header_value_encrypted` TOML field). The node agent's
+        // ws_client + credential_store re-parse the JSON inside
+        // proxy_executor at signing time.
+        "aws_sigv4" => CredentialUpdateParams {
+            service_slug: service_slug.to_string(),
+            injection_method: "aws_sigv4".to_string(),
+            header_name: None,
+            header_value: Some(credential.to_string()),
+            param_name: None,
+            param_value: None,
+            target_url,
+        },
+        "gcp_service_account" => CredentialUpdateParams {
+            service_slug: service_slug.to_string(),
+            injection_method: "gcp_service_account".to_string(),
+            header_name: None,
+            header_value: Some(credential.to_string()),
+            param_name: None,
+            param_value: None,
+            target_url,
+        },
         _ => CredentialUpdateParams {
             service_slug: service_slug.to_string(),
             injection_method: "header".to_string(),

@@ -20,10 +20,9 @@
  * availability truth the proxy will act on.
  */
 export type ServiceBadgeVariant =
-  | "default"
+  | "success"
   | "secondary"
-  | "destructive"
-  | "outline";
+  | "destructive";
 
 export interface ServiceBadgeInput {
   readonly isActive: boolean;
@@ -60,7 +59,7 @@ export function deriveServiceBadge(
     return { variant: "secondary", label: "Inactive", credentialBlocked };
   }
   if (credentialBlocked) {
-    return { variant: "outline", label: "Unavailable", credentialBlocked };
+    return { variant: "secondary", label: "Unavailable", credentialBlocked };
   }
-  return { variant: "default", label: "Active", credentialBlocked };
+  return { variant: "success", label: "Active", credentialBlocked };
 }

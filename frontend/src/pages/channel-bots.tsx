@@ -17,6 +17,7 @@ import {
 } from "@/schemas/channels";
 import { ApiError } from "@/lib/api-client";
 import { formatDate } from "@/lib/utils";
+import { ErrorBanner } from "@/components/shared/error-banner";
 import { PageHeader } from "@/components/shared/page-header";
 import { OrgScopeSelect } from "@/components/shared/org-scope-select";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -24,7 +25,6 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Card, CardContent } from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
@@ -48,7 +48,10 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Bot, Check, Copy, Cpu, Plus, Trash2 } from "lucide-react";
+import { Check, Copy, Trash2 } from "lucide-react";
+import { RobotIcon, SmartSpeakerIcon } from "@/components/icons/empty-state";
+import { AddCtaButton } from "@/components/shared/add-cta-button";
+import { type ViewMode, ViewToggle, useViewMode } from "@/components/shared/view-toggle";
 import { toast } from "sonner";
 import type {
   ChannelBotItem,
@@ -103,19 +106,19 @@ function BotRow({
 
   return (
     <TableRow
-      className="cursor-pointer"
+      className="cursor-pointer hover:bg-white/[0.03]"
       onClick={() => void navigate({ to: "/channel-bots/$botId", params: { botId: bot.id } })}
     >
       <TableCell>
-        <Badge variant="outline">{platformLabel(bot.platform)}</Badge>
+        <Badge variant="secondary">{platformLabel(bot.platform)}</Badge>
       </TableCell>
-      <TableCell className="font-mono text-xs">
+      <TableCell className="text-xs">
         {bot.platform_bot_username || "-"}
       </TableCell>
       <TableCell className="font-medium">{bot.label}</TableCell>
       <TableCell>
         <Badge variant={statusBadgeVariant(bot.status)}>
-          {bot.status}
+          {bot.status.split("_").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ")}
         </Badge>
       </TableCell>
       <TableCell>
@@ -141,63 +144,121 @@ function BotRow({
             onDelete(bot.id);
           }}
         >
-          <Trash2 className="h-4 w-4 text-muted-foreground" />
+          <Trash2 className="h-4 w-4 text-destructive" />
         </Button>
       </TableCell>
     </TableRow>
   );
 }
 
-function BotsTable({
-  bots,
+function BotCard({
+  bot,
   onDelete,
 }: {
-  readonly bots: readonly ChannelBotItem[];
+  readonly bot: ChannelBotItem;
   readonly onDelete: (id: string) => void;
 }) {
+  const navigate = useNavigate();
+
   return (
-    <div className="rounded-xl border border-border">
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>Platform</TableHead>
-            <TableHead>Bot Username</TableHead>
-            <TableHead>Label</TableHead>
-            <TableHead>Status</TableHead>
-            <TableHead>Webhook</TableHead>
-            <TableHead>Created</TableHead>
-            <TableHead className="w-[60px]" />
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {bots.map((bot) => (
-            <BotRow key={bot.id} bot={bot} onDelete={onDelete} />
-          ))}
-        </TableBody>
-      </Table>
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={() => void navigate({ to: "/channel-bots/$botId", params: { botId: bot.id } })}
+      onKeyDown={(e) => { if (e.key === "Enter") void navigate({ to: "/channel-bots/$botId", params: { botId: bot.id } }); }}
+      className="relative rounded-xl border border-border/50 bg-card p-4 transition-colors hover:bg-white/[0.03] cursor-pointer"
+    >
+      <div className="absolute right-3 top-3" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-7 w-7"
+          onClick={() => onDelete(bot.id)}
+        >
+          <Trash2 className="h-3.5 w-3.5 text-destructive" />
+        </Button>
+      </div>
+      <p className="pr-10 text-[13px] font-semibold text-foreground truncate">{bot.label}</p>
+      <p className="text-[11px] text-muted-foreground">{bot.platform_bot_username || "No username"}</p>
+      <div className="mt-2 flex flex-wrap gap-1.5">
+        <Badge variant="secondary">{platformLabel(bot.platform)}</Badge>
+        <Badge variant={statusBadgeVariant(bot.status)}>
+          {bot.status.split("_").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ")}
+        </Badge>
+      </div>
+      <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+        <span>{bot.webhook_registered ? "Webhook registered" : "No webhook"}</span>
+        <span>{formatDate(bot.created_at)}</span>
+      </div>
     </div>
   );
 }
 
-function EmptyState({ onAdd }: { readonly onAdd: () => void }) {
+function BotsTable({
+  bots,
+  onDelete,
+  viewMode,
+}: {
+  readonly bots: readonly ChannelBotItem[];
+  readonly onDelete: (id: string) => void;
+  readonly viewMode: ViewMode;
+}) {
   return (
-    <Card>
-      <CardContent className="flex flex-col items-center gap-4 py-16">
-        <div className="flex h-14 w-14 items-center justify-center rounded-full border border-border">
-          <Bot className="h-6 w-6 text-muted-foreground" />
+    <>
+      {/* Mobile card view (always cards) */}
+      <div className="flex flex-col gap-3 md:hidden">
+        {bots.map((bot) => (
+          <BotCard key={bot.id} bot={bot} onDelete={onDelete} />
+        ))}
+      </div>
+
+      {/* Desktop grid view */}
+      {viewMode === "grid" && (
+        <div className="hidden md:grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+          {bots.map((bot) => (
+            <BotCard key={bot.id} bot={bot} onDelete={onDelete} />
+          ))}
         </div>
-        <div className="text-center">
-          <p className="text-sm font-medium">No channel bots yet</p>
-          <p className="text-xs text-muted-foreground">
-            Add a messaging platform bot to relay conversations to your AI agents.
-          </p>
+      )}
+
+      {/* Desktop table view */}
+      {viewMode === "table" && (
+        <div className="hidden md:block rounded-xl border border-border/50 bg-card overflow-hidden">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Platform</TableHead>
+                <TableHead>Bot Username</TableHead>
+                <TableHead>Label</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead>Webhook</TableHead>
+                <TableHead>Created</TableHead>
+                <TableHead className="w-[60px]">Actions</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {bots.map((bot) => (
+                <BotRow key={bot.id} bot={bot} onDelete={onDelete} />
+              ))}
+            </TableBody>
+          </Table>
         </div>
-        <Button size="sm" onClick={onAdd}>
-          <Plus className="mr-2 h-4 w-4" />
-          Add Bot
-        </Button>
-      </CardContent>
-    </Card>
+      )}
+    </>
+  );
+}
+
+function EmptyState() {
+  return (
+    <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+      <RobotIcon className="h-64 w-64 text-muted-foreground/30" />
+      <div className="space-y-1">
+        <p className="text-[12px] font-medium text-muted-foreground/30">No channel bots yet</p>
+        <p className="text-xs text-muted-foreground/30">
+          Add a messaging platform bot to relay conversations to your AI agents.
+        </p>
+      </div>
+    </div>
   );
 }
 
@@ -280,7 +341,7 @@ function CreateBotDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="md:max-w-md">
         <DialogHeader>
           <DialogTitle>Add Channel Bot</DialogTitle>
           <DialogDescription>
@@ -392,7 +453,7 @@ function CreateBotDialog({
               </div>
               <div className="rounded-lg border border-border/70 bg-muted/30 p-4">
                 <div className="space-y-1">
-                  <p className="text-sm font-medium">Lark webhook verification</p>
+                  <p className="text-[12px] font-medium">Lark webhook verification</p>
                   <p className="text-xs text-muted-foreground">
                     In Lark/Feishu Event Subscriptions, copy the
                     Verification Token from Security settings. Encrypt Key is
@@ -488,7 +549,7 @@ function CreateBotDialog({
             >
               Cancel
             </Button>
-            <Button type="submit" disabled={createBot.isPending}>
+            <Button variant="primary" type="submit" disabled={createBot.isPending}>
               {createBot.isPending ? "Creating..." : "Add Bot"}
             </Button>
           </DialogFooter>
@@ -523,7 +584,7 @@ function DeleteBotDialog({
 
   return (
     <Dialog open={botId !== null} onOpenChange={() => onClose()}>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="md:max-w-md">
         <DialogHeader>
           <DialogTitle>Delete Channel Bot</DialogTitle>
           <DialogDescription>
@@ -648,7 +709,7 @@ function CreateDeviceChannelDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="md:max-w-md">
         <DialogHeader>
           <DialogTitle>Add Device Channel</DialogTitle>
           <DialogDescription>
@@ -741,13 +802,72 @@ function CreateDeviceChannelDialog({
             >
               Cancel
             </Button>
-            <Button type="submit" disabled={createDevice.isPending}>
+            <Button variant="primary" type="submit" disabled={createDevice.isPending}>
               {createDevice.isPending ? "Creating..." : "Create Device Channel"}
             </Button>
           </DialogFooter>
         </form>
       </DialogContent>
     </Dialog>
+  );
+}
+
+function DeviceChannelCard({
+  conversation,
+  onDelete,
+}: {
+  readonly conversation: ChannelConversationItem;
+  readonly onDelete: (id: string) => void;
+}) {
+  async function copyRowId() {
+    try {
+      await navigator.clipboard.writeText(conversation.id);
+      toast.success("Channel ID copied");
+    } catch {
+      toast.error("Could not copy — your browser blocked clipboard access");
+    }
+  }
+
+  return (
+    <div className="relative rounded-xl border border-border/50 bg-card p-4">
+      <div className="absolute right-3 top-3">
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-7 w-7"
+          onClick={() => onDelete(conversation.id)}
+        >
+          <Trash2 className="h-3.5 w-3.5 text-destructive" />
+        </Button>
+      </div>
+      <p className="pr-10 text-[13px] font-semibold text-foreground truncate">
+        {conversation.platform_conversation_id}
+      </p>
+      <div className="mt-1 flex items-center gap-2">
+        <code className="font-mono text-[10px] text-muted-foreground" title={conversation.id}>
+          {conversation.id.slice(0, 8)}…
+        </code>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-5 w-5"
+          onClick={() => void copyRowId()}
+          title="Copy full channel ID"
+        >
+          <Copy className="h-2.5 w-2.5 text-muted-foreground" />
+        </Button>
+      </div>
+      <div className="mt-2 flex flex-wrap gap-1.5">
+        <Badge variant="secondary">{conversation.platform_conversation_type}</Badge>
+        <Badge variant={conversation.is_active ? "success" : "secondary"}>
+          {conversation.is_active ? "Active" : "Inactive"}
+        </Badge>
+      </div>
+      <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+        <span>Agent: {conversation.agent_api_key_id.slice(0, 8)}…</span>
+        <span>{formatDate(conversation.created_at)}</span>
+      </div>
+    </div>
   );
 }
 
@@ -788,18 +908,18 @@ function DeviceChannelRow({
           </Button>
         </div>
       </TableCell>
-      <TableCell className="font-mono text-xs">
+      <TableCell className="text-xs">
         {conversation.platform_conversation_id}
       </TableCell>
       <TableCell>
-        <Badge variant="outline">{conversation.platform_conversation_type}</Badge>
+        <Badge variant="secondary">{conversation.platform_conversation_type}</Badge>
       </TableCell>
-      <TableCell className="font-mono text-xs text-muted-foreground">
+      <TableCell className="text-xs text-muted-foreground">
         {conversation.agent_api_key_id.slice(0, 8)}…
       </TableCell>
       <TableCell>
         <Badge variant={conversation.is_active ? "success" : "secondary"}>
-          {conversation.is_active ? "active" : "inactive"}
+          {conversation.is_active ? "Active" : "Inactive"}
         </Badge>
       </TableCell>
       <TableCell className="text-xs text-muted-foreground">
@@ -812,7 +932,7 @@ function DeviceChannelRow({
           className="h-8 w-8"
           onClick={() => onDelete(conversation.id)}
         >
-          <Trash2 className="h-4 w-4 text-muted-foreground" />
+          <Trash2 className="h-4 w-4 text-destructive" />
         </Button>
       </TableCell>
     </TableRow>
@@ -822,9 +942,11 @@ function DeviceChannelRow({
 function DeviceChannelsSection({
   orgId,
   onAdd,
+  viewMode,
 }: {
   readonly orgId: string | null;
   readonly onAdd: () => void;
+  readonly viewMode: ViewMode;
 }) {
   const { data: conversations, isLoading } = useChannelConversations({ orgId });
   const deleteConversation = useDeleteChannelConversation();
@@ -849,62 +971,88 @@ function DeviceChannelsSection({
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0">
           <h2 className="text-lg font-semibold">Device Channels</h2>
-          <p className="text-sm text-muted-foreground">
+          <p className="text-[12px] text-muted-foreground">
             HTTP Event Gateway channels for analyzers, sensors, and other
             non-bot event sources.
           </p>
         </div>
-        <Button size="sm" variant="outline" onClick={onAdd}>
-          <Plus className="mr-2 h-4 w-4" />
-          Add Device Channel
-        </Button>
+        <div className="shrink-0">
+          <AddCtaButton label="Add Device Channel" onClick={onAdd} />
+        </div>
       </div>
 
       {isLoading ? (
         <LoadingSkeleton />
       ) : devices.length === 0 ? (
-        <Card>
-          <CardContent className="flex flex-col items-center gap-3 py-10">
-            <div className="flex h-12 w-12 items-center justify-center rounded-full border border-border">
-              <Cpu className="h-5 w-5 text-muted-foreground" />
-            </div>
-            <p className="text-sm font-medium">No device channels yet</p>
-            <p className="text-xs text-muted-foreground">
+        <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+          <SmartSpeakerIcon className="h-64 w-64 text-muted-foreground/30" />
+          <div className="space-y-1">
+            <p className="text-[12px] font-medium text-muted-foreground/30">No device channels yet</p>
+            <p className="text-xs text-muted-foreground/30">
               Create one to let devices push events into the channel relay
               pipeline.
             </p>
-          </CardContent>
-        </Card>
+          </div>
+        </div>
       ) : (
-        <div className="rounded-xl border border-border">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead title="NyxID conversation _id — path parameter for POST /api/v1/channel-events/{id}">
-                  ID
-                </TableHead>
-                <TableHead>Channel Name</TableHead>
-                <TableHead>Type</TableHead>
-                <TableHead>Agent Key</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead>Created</TableHead>
-                <TableHead className="w-[60px]" />
-              </TableRow>
-            </TableHeader>
-            <TableBody>
+        <>
+          {/* Mobile card view (always cards) */}
+          <div className="flex flex-col gap-3 md:hidden">
+            {devices.map((conversation) => (
+              <DeviceChannelCard
+                key={conversation.id}
+                conversation={conversation}
+                onDelete={handleDelete}
+              />
+            ))}
+          </div>
+
+          {/* Desktop grid view */}
+          {viewMode === "grid" && (
+            <div className="hidden md:grid gap-4 md:grid-cols-2 lg:grid-cols-3">
               {devices.map((conversation) => (
-                <DeviceChannelRow
+                <DeviceChannelCard
                   key={conversation.id}
                   conversation={conversation}
                   onDelete={handleDelete}
                 />
               ))}
-            </TableBody>
-          </Table>
-        </div>
+            </div>
+          )}
+
+          {/* Desktop table view */}
+          {viewMode === "table" && (
+            <div className="hidden md:block rounded-xl border border-border/50 bg-card overflow-hidden">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead title="NyxID conversation _id — path parameter for POST /api/v1/channel-events/{id}">
+                      ID
+                    </TableHead>
+                    <TableHead>Channel Name</TableHead>
+                    <TableHead>Type</TableHead>
+                    <TableHead>Agent Key</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead>Created</TableHead>
+                    <TableHead className="w-[60px]">Actions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {devices.map((conversation) => (
+                    <DeviceChannelRow
+                      key={conversation.id}
+                      conversation={conversation}
+                      onDelete={handleDelete}
+                    />
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          )}
+        </>
       )}
     </div>
   );
@@ -912,10 +1060,11 @@ function DeviceChannelsSection({
 
 export function ChannelBotsPage() {
   const [scopeOrgId, setScopeOrgId] = useState<string | null>(null);
-  const { data: bots, isLoading, error } = useChannelBots({ orgId: scopeOrgId });
+  const { data: bots, isLoading, error, refetch } = useChannelBots({ orgId: scopeOrgId });
   const [createOpen, setCreateOpen] = useState(false);
   const [createDeviceOpen, setCreateDeviceOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useViewMode("channel-bots");
 
   return (
     <div className="space-y-8">
@@ -923,39 +1072,31 @@ export function ChannelBotsPage() {
         title="Channel Bots"
         description="Manage messaging platform bots for agent relay."
         actions={
-          <Button size="sm" onClick={() => setCreateOpen(true)}>
-            <Plus className="mr-2 h-4 w-4" />
-            Add Bot
-          </Button>
+          <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+            <span className="text-xs text-muted-foreground">Scope</span>
+            <div className="w-36 sm:w-48">
+              <OrgScopeSelect value={scopeOrgId} onChange={setScopeOrgId} />
+            </div>
+            <ViewToggle viewMode={viewMode} onViewModeChange={setViewMode} />
+            <AddCtaButton label="Add Bot" onClick={() => setCreateOpen(true)} />
+          </div>
         }
       />
-
-      <div className="flex items-center gap-3">
-        <Label htmlFor="bots-scope" className="text-sm font-medium">
-          Scope
-        </Label>
-        <div className="w-60">
-          <OrgScopeSelect value={scopeOrgId} onChange={setScopeOrgId} />
-        </div>
-      </div>
 
       {isLoading ? (
         <LoadingSkeleton />
       ) : error ? (
-        <Card>
-          <CardContent className="py-8 text-center text-sm text-destructive">
-            Failed to load channel bots. Please try again.
-          </CardContent>
-        </Card>
+        <ErrorBanner message="Failed to load channel bots. Please try again." onRetry={refetch} />
       ) : !bots || bots.length === 0 ? (
-        <EmptyState onAdd={() => setCreateOpen(true)} />
+        <EmptyState />
       ) : (
-        <BotsTable bots={bots} onDelete={setDeleteTarget} />
+        <BotsTable bots={bots} onDelete={setDeleteTarget} viewMode={viewMode} />
       )}
 
       <DeviceChannelsSection
         orgId={scopeOrgId}
         onAdd={() => setCreateDeviceOpen(true)}
+        viewMode={viewMode}
       />
 
       <CreateBotDialog

@@ -60,9 +60,9 @@ export function SshServiceInstructions({
   return (
     <div className="space-y-6">
       {/* Client Setup */}
-      <div className="space-y-3 rounded-[10px] border border-border bg-muted/20 p-3">
+      <div className="space-y-3 rounded-lg border border-border bg-muted/20 p-3">
         <div className="space-y-1">
-          <h4 className="text-sm font-semibold">Client Setup</h4>
+          <h4 className="text-[13px] font-semibold">Client Setup</h4>
           <p className="text-xs text-muted-foreground">
             Install the NyxID CLI on your local machine and authenticate.
           </p>
@@ -70,7 +70,6 @@ export function SshServiceInstructions({
         <CopyableField
           label="1. Install CLI"
           value={installCommand}
-          size="sm"
         />
         <div className="space-y-1">
           <p className="text-xs font-medium text-muted-foreground">
@@ -80,12 +79,10 @@ export function SshServiceInstructions({
         <CopyableField
           label="Option A: Browser login (recommended)"
           value={loginCommand}
-          size="sm"
         />
         <CopyableField
           label="Option B: API key"
           value={apiKeyCommand}
-          size="sm"
         />
         <CopyableField
           label="3. Connect"
@@ -94,7 +91,6 @@ export function SshServiceInstructions({
               ? certificateCommand
               : transportCommand
           }
-          size="sm"
         />
         {sshConfig.certificate_auth_enabled && (
           <>
@@ -108,7 +104,6 @@ export function SshServiceInstructions({
             <CopyableField
               label="Optional: Generate SSH config stanza"
               value={configCommand}
-              size="sm"
             />
           </>
         )}
@@ -116,9 +111,9 @@ export function SshServiceInstructions({
 
       {/* Target Machine Setup (passwordless) */}
       {sshConfig.certificate_auth_enabled && (
-        <div className="space-y-3 rounded-[10px] border border-border bg-muted/20 p-3">
+        <div className="space-y-3 rounded-lg border border-border bg-muted/20 p-3">
           <div className="space-y-1">
-            <h4 className="text-sm font-semibold">
+            <h4 className="text-[13px] font-semibold">
               Target Machine Setup (Passwordless Login)
             </h4>
             <p className="text-xs text-muted-foreground">
@@ -131,27 +126,22 @@ export function SshServiceInstructions({
           <CopyableField
             label="1. Install NyxID CA public key"
             value={trustedCaCommand}
-            size="sm"
           />
           <CopyableField
             label="2. Configure sshd to trust NyxID CA"
             value={sshdConfigCommand}
-            size="sm"
           />
           <CopyableField
             label="3. Create authorized principals for each user"
             value={principalsCommand}
-            size="sm"
           />
           <CopyableField
             label="4. Restart SSH daemon (Linux)"
             value={restartSshdLinux}
-            size="sm"
           />
           <CopyableField
             label="4. Restart SSH daemon (macOS)"
             value={restartSshdMac}
-            size="sm"
           />
           <p className="text-xs text-muted-foreground">
             macOS: ensure Remote Login is enabled in System Settings &gt;
@@ -189,9 +179,9 @@ export function SshServiceInstructions({
       )}
 
       {/* Node-Agent Setup (for unreachable targets) */}
-      <div className="space-y-3 rounded-[10px] border border-border bg-muted/20 p-3">
+      <div className="space-y-3 rounded-lg border border-border bg-muted/20 p-3">
         <div className="space-y-1">
-          <h4 className="text-sm font-semibold">Node Agent (Required)</h4>
+          <h4 className="text-[13px] font-semibold">Node Agent (Required)</h4>
           <p className="text-xs text-muted-foreground">
             A node agent is required for web terminal, command execution
             (API/MCP), and SSH tunneling. Deploy a node agent on a machine that
@@ -204,7 +194,6 @@ export function SshServiceInstructions({
         <CopyableField
           label="1. Install node agent"
           value={nodeInstallCommand}
-          size="sm"
         />
         <p className="text-xs text-muted-foreground">
           2. Generate a registration token from the{" "}
@@ -216,12 +205,10 @@ export function SshServiceInstructions({
         <CopyableField
           label="3. On the node machine: register"
           value={nodeRegisterCommand}
-          size="sm"
         />
         <CopyableField
           label="4. Start the agent"
           value={nodeStartCommand}
-          size="sm"
         />
         <p className="text-xs text-muted-foreground">
           5. Bind this SSH service to the node from the{" "}

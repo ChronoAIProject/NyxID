@@ -51,7 +51,8 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
-import { Plus, Plug, Shield } from "lucide-react";
+import { Plus, Plug } from "lucide-react";
+import { DishAntennaIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
 
 const PROVIDER_TYPE_LABELS: Readonly<Record<string, string>> = {
@@ -125,22 +126,27 @@ export function ProviderListPage() {
     <div className="space-y-8">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h2 className="font-display text-3xl font-normal tracking-tight md:text-5xl">
+          <h2 className="text-[28px] font-bold leading-none tracking-tight" style={{ letterSpacing: "-0.03em" }}>
             Manage Providers
           </h2>
-          <p className="text-sm text-muted-foreground">
+          <p className="text-[12px] text-muted-foreground">
             Create and manage OAuth, Telegram, device code, and API key
             providers.
           </p>
         </div>
         <Dialog open={createOpen} onOpenChange={setCreateOpen}>
           <DialogTrigger asChild>
-            <Button className="w-fit">
-              <Plus className="mr-2 h-4 w-4" />
+            <button
+              type="button"
+              className="flex h-8 items-center gap-2 rounded-lg border border-white/[0.08] px-3 text-[12px] text-text-tertiary transition-all duration-300 hover:border-white/[0.15] hover:text-muted-foreground"
+            >
+              <span className="flex h-[22px] w-[22px] items-center justify-center rounded-[6px] border border-white/[0.08] bg-white/[0.04]">
+                <Plus className="h-3 w-3" />
+              </span>
               Add Provider
-            </Button>
+            </button>
           </DialogTrigger>
-          <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg">
+          <DialogContent>
             <DialogHeader>
               <DialogTitle>Add Provider</DialogTitle>
               <DialogDescription>
@@ -154,7 +160,7 @@ export function ProviderListPage() {
                 className="space-y-4"
               >
                 {form.formState.errors.root && (
-                  <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
+                  <div className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive">
                     {form.formState.errors.root.message}
                   </div>
                 )}
@@ -198,7 +204,7 @@ export function ProviderListPage() {
                       <FormLabel>Description</FormLabel>
                       <FormControl>
                         <textarea
-                          className="flex min-h-[60px] w-full rounded-[10px] border border-input bg-transparent px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                          className="flex min-h-[60px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-[12px] placeholder:text-muted-foreground focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
                           placeholder="Optional description"
                           {...field}
                         />
@@ -332,7 +338,7 @@ export function ProviderListPage() {
                 {watchedProviderType === "oauth2" && (
                   <>
                     <Separator />
-                    <h4 className="text-sm font-semibold">
+                    <h4 className="text-[13px] font-semibold">
                       OAuth 2.0 Configuration
                     </h4>
 
@@ -478,7 +484,7 @@ export function ProviderListPage() {
                 {watchedProviderType === "device_code" && (
                   <>
                     <Separator />
-                    <h4 className="text-sm font-semibold">
+                    <h4 className="text-[13px] font-semibold">
                       Device Code Configuration (RFC 8628)
                     </h4>
 
@@ -624,7 +630,7 @@ export function ProviderListPage() {
                 {watchedProviderType === "telegram_widget" && (
                   <>
                     <Separator />
-                    <h4 className="text-sm font-semibold">
+                    <h4 className="text-[13px] font-semibold">
                       Telegram Widget Configuration
                     </h4>
 
@@ -639,7 +645,7 @@ export function ProviderListPage() {
                           </FormControl>
                           <p className="text-xs text-muted-foreground">
                             Enter the BotFather username. A leading
-                            <span className="font-mono"> @</span> is optional.
+                            <span> @</span> is optional.
                           </p>
                           <FormMessage />
                         </FormItem>
@@ -673,7 +679,7 @@ export function ProviderListPage() {
                 {watchedProviderType === "api_key" && (
                   <>
                     <Separator />
-                    <h4 className="text-sm font-semibold">
+                    <h4 className="text-[13px] font-semibold">
                       API Key Configuration
                     </h4>
 
@@ -685,7 +691,7 @@ export function ProviderListPage() {
                           <FormLabel>API Key Instructions</FormLabel>
                           <FormControl>
                             <textarea
-                              className="flex min-h-[60px] w-full rounded-[10px] border border-input bg-transparent px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                              className="flex min-h-[60px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-[12px] placeholder:text-muted-foreground focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
                               placeholder="Instructions for users to obtain an API key"
                               {...field}
                             />
@@ -725,8 +731,8 @@ export function ProviderListPage() {
                   >
                     Cancel
                   </Button>
-                  <Button type="submit" isLoading={createMutation.isPending}>
-                    Create provider
+                  <Button variant="primary" type="submit" isLoading={createMutation.isPending} disabled={!form.formState.isValid || createMutation.isPending}>
+                    Create Provider
                   </Button>
                 </DialogFooter>
               </form>
@@ -742,18 +748,21 @@ export function ProviderListPage() {
           ))}
         </div>
       ) : !providers || providers.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-          <Shield className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
-            No providers configured yet. Add a provider to get started.
-          </p>
+        <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+          <DishAntennaIcon className="h-64 w-64 text-muted-foreground/30" />
+          <div className="space-y-1">
+            <p className="text-[12px] font-medium text-muted-foreground/30">No Providers</p>
+            <p className="text-xs text-muted-foreground/30">
+              Add a provider to get started.
+            </p>
+          </div>
         </div>
       ) : (
         <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
           {providers.map((provider) => (
             <Card
               key={provider.id}
-              className="cursor-pointer transition-colors hover:border-border/80"
+              className="cursor-pointer transition-colors duration-300 hover:border-white/[0.15]"
               onClick={() =>
                 void navigate({
                   to: "/providers/$providerId",
@@ -763,11 +772,11 @@ export function ProviderListPage() {
             >
               <CardHeader className="flex flex-row items-start justify-between space-y-0 pb-3">
                 <div className="flex items-center gap-3">
-                  <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10">
-                    <Plug className="h-5 w-5 text-primary" />
+                  <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10">
+                    <Plug className="h-4 w-4 text-primary" />
                   </div>
                   <div>
-                    <CardTitle className="text-base">{provider.name}</CardTitle>
+                    <CardTitle>{provider.name}</CardTitle>
                     <CardDescription className="text-xs">
                       {provider.slug}
                     </CardDescription>

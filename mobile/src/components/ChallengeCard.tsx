@@ -38,6 +38,8 @@ export function ChallengeCard({
   const styles = useMemo(() => createStyles(colors), [colors]);
 
   const riskVariant = challenge.risk_level === "high" ? "riskHigh" : challenge.risk_level === "medium" ? "riskMedium" : "riskLow";
+  // DESIGN.md §Interaction Rules: status badges always Title Case.
+  const riskLabel = challenge.risk_level.charAt(0).toUpperCase() + challenge.risk_level.slice(1);
   const modeLabel = challenge.approval_mode === "grant" ? "Grant mode" : "Per-request";
   const durationLabel = challenge.approval_mode === "grant" ? ` · ${grantDurationLabel}` : "";
   const timeAgo = formatTimeAgo(challenge.created_at);
@@ -56,7 +58,7 @@ export function ChallengeCard({
         {showOrgChip ? (
           <StatusBadge variant="orgChip" label={orgChipLabel} />
         ) : null}
-        <StatusBadge variant={riskVariant} label={challenge.risk_level.toUpperCase()} />
+        <StatusBadge variant={riskVariant} label={riskLabel} />
         <StatusBadge variant="modeChip" label={modeLabel} />
       </View>
       <Text style={styles.title} numberOfLines={1}>
@@ -91,19 +93,21 @@ export function ChallengeCard({
 const createStyles = (c: ThemeColors) =>
   StyleSheet.create({
     card: {
-      // DESIGN.md: 10px radius for cards/panels
+      // DESIGN.md §Border Radius: cards = rounded-xl (12px); 50%-opacity border on chrome.
       borderRadius: radius.lg,
       backgroundColor: c.card,
       borderWidth: 1,
-      borderColor: c.border,
-      // Pending approval gets a purple left-border accent per DESIGN.md
+      borderColor: c.borderSoft,
+      // Pending approval gets a purple left-border accent (mobile-only affordance,
+      // analogous to the desktop active-state purple identity rule).
       borderLeftWidth: 2,
       borderLeftColor: c.primary,
-      padding: spacing.lg,
+      padding: spacing.xxl,
       gap: spacing.xs,
     },
+    // DESIGN.md §List page → mobile-card anatomy: primary text text-[13px] font-semibold.
     title: {
-      ...typeScale.title,
+      ...typeScale.bodyStrong,
       color: c.textPrimary,
     },
     chipRow: {
@@ -111,9 +115,10 @@ const createStyles = (c: ThemeColors) =>
       gap: spacing.xs,
     },
     resource: {
-      ...typeScale.body,
+      ...typeScale.label,
       color: c.textSecondary,
     },
+    // Mobile-card metadata rows: text-[11px].
     meta: {
       ...typeScale.small,
       color: c.textMuted,

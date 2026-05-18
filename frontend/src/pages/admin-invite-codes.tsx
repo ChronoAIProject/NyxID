@@ -16,6 +16,7 @@ import { cn, copyToClipboard, formatDate } from "@/lib/utils";
 import { canAdminWrite } from "@/types/api";
 import { useAuthStore } from "@/stores/auth-store";
 import { PageHeader } from "@/components/shared/page-header";
+import { AddCtaButton } from "@/components/shared/add-cta-button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -51,7 +52,14 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Ticket, Plus, Copy, Check, Ban, Link2 } from "lucide-react";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Copy, Check, Ban, Link2, MoreVertical } from "lucide-react";
+import { MysteryBoxIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
 import type { InviteCode } from "@/types/admin";
 
@@ -68,7 +76,7 @@ export function AdminInviteCodesPage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [createdCode, setCreatedCode] = useState<InviteCode | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
-  const [copiedLinkId, setCopiedLinkId] = useState<string | null>(null);
+  const [, setCopiedLinkId] = useState<string | null>(null);
   const [deactivateTarget, setDeactivateTarget] = useState<InviteCode | null>(
     null,
   );
@@ -133,11 +141,9 @@ export function AdminInviteCodesPage() {
       setCreatedCode(created);
       toast.success("Invite code created");
     } catch (err) {
-      if (err instanceof ApiError) {
-        createForm.setError("root", { message: err.message });
-      } else {
-        toast.error("Failed to create invite code");
-      }
+      toast.error(
+        err instanceof ApiError ? err.message : "Failed to create invite code",
+      );
     }
   }
 
@@ -226,16 +232,12 @@ export function AdminInviteCodesPage() {
       <PageHeader
         title="Invite Codes"
         description="Create and manage invite codes that gate new user registration. Each code can grant a bounded number of registrations and can be deactivated at any time."
+        actions={
+          canWrite ? (
+            <AddCtaButton label="Create Invite Code" onClick={openCreateDialog} />
+          ) : null
+        }
       />
-
-      {canWrite && (
-        <div className="flex items-center justify-end">
-          <Button size="sm" onClick={openCreateDialog}>
-            <Plus className="mr-1 h-4 w-4" />
-            Create Invite Code
-          </Button>
-        </div>
-      )}
 
       {isLoading ? (
         <div className="space-y-2">
@@ -247,21 +249,111 @@ export function AdminInviteCodesPage() {
           ))}
         </div>
       ) : error ? (
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-          <Ticket className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
-            Failed to load invite codes. Please try again.
-          </p>
+        <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+          <MysteryBoxIcon className="h-64 w-64 text-muted-foreground/30" />
+          <div className="space-y-1">
+            <p className="text-[12px] font-medium text-muted-foreground/30">Failed to load invite codes</p>
+            <p className="text-xs text-muted-foreground/30">Please try again later.</p>
+          </div>
         </div>
       ) : inviteCodes.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-          <Ticket className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
-            No invite codes yet. Create one to allow a new user to register.
-          </p>
+        <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+          <MysteryBoxIcon className="h-64 w-64 text-muted-foreground/30" />
+          <div className="space-y-1">
+            <p className="text-[12px] font-medium text-muted-foreground/30">No invite codes found</p>
+            <p className="text-xs text-muted-foreground/30">Create one to allow a new user to register.</p>
+          </div>
         </div>
       ) : (
-        <div className="rounded-xl border border-border">
+        <>
+        {/* Mobile cards */}
+        <div className="flex flex-col gap-3 md:hidden">
+          {inviteCodes.map((ic) => (
+            <div
+              key={ic.id}
+              className={cn(
+                "rounded-xl border border-border/50 bg-card p-4 transition-colors hover:bg-white/[0.03] cursor-pointer",
+                isSaving && "pointer-events-none opacity-60",
+              )}
+              onClick={() => {
+                if (isSaving) return;
+                setSelectedCodeId(ic.id);
+              }}
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-medium font-mono text-foreground truncate">
+                    {ic.code}
+                  </p>
+                </div>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  {getStatusBadge(ic)}
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7 text-muted-foreground hover:text-foreground"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <MoreVertical className="h-3 w-3" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end">
+                      <DropdownMenuItem
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void handleCopyCode(ic.code, ic.id);
+                        }}
+                      >
+                        <Copy className="h-3 w-3" />
+                        Copy code
+                      </DropdownMenuItem>
+                      <DropdownMenuItem
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void handleCopyLink(ic.code, ic.id);
+                        }}
+                      >
+                        <Link2 className="h-3 w-3" />
+                        Copy invite link
+                      </DropdownMenuItem>
+                      {canWrite && ic.is_active && (
+                        <DropdownMenuItem
+                          className="text-destructive focus:text-destructive"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setDeactivateTarget(ic);
+                          }}
+                        >
+                          <Ban className="h-3 w-3" />
+                          Deactivate
+                        </DropdownMenuItem>
+                      )}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </div>
+              </div>
+              <div className="mt-2 text-xs text-muted-foreground">
+                <span className="tabular-nums">
+                  {String(ic.used_count)}/{String(ic.max_uses)} uses
+                </span>
+                {ic.note && (
+                  <>
+                    <span className="text-border mx-1.5">|</span>
+                    <span className="truncate">{ic.note}</span>
+                  </>
+                )}
+              </div>
+              <div className="mt-1.5 text-xs text-muted-foreground">
+                <span>Created {formatDate(ic.created_at)}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Desktop table */}
+        <div className="hidden md:block rounded-xl border border-border/50 bg-card overflow-hidden">
           <Table>
             <TableHeader>
               <TableRow>
@@ -299,7 +391,7 @@ export function AdminInviteCodesPage() {
                   <TableCell>{getStatusBadge(ic)}</TableCell>
                   <TableCell>
                     {ic.note ? (
-                      <span className="text-sm text-muted-foreground">
+                      <span className="text-[11px] text-text-tertiary">
                         {ic.note}
                       </span>
                     ) : (
@@ -310,67 +402,57 @@ export function AdminInviteCodesPage() {
                     {formatDate(ic.created_at)}
                   </TableCell>
                   <TableCell>
-                    <div className="flex items-center gap-1">
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-8 w-8 text-muted-foreground hover:text-foreground"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          void handleCopyCode(ic.code, ic.id);
-                        }}
-                        aria-label={`Copy ${ic.code} to clipboard`}
-                      >
-                        {copiedId === ic.id ? (
-                          <Check
-                            className="h-4 w-4 text-success"
-                            aria-hidden="true"
-                          />
-                        ) : (
-                          <Copy className="h-4 w-4" aria-hidden="true" />
-                        )}
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-8 w-8 text-muted-foreground hover:text-foreground"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          void handleCopyLink(ic.code, ic.id);
-                        }}
-                        aria-label={`Copy invite link for ${ic.code}`}
-                        title="Copy invite link"
-                      >
-                        {copiedLinkId === ic.id ? (
-                          <Check
-                            className="h-4 w-4 text-success"
-                            aria-hidden="true"
-                          />
-                        ) : (
-                          <Link2 className="h-4 w-4" aria-hidden="true" />
-                        )}
-                      </Button>
-                      {canWrite && ic.is_active && (
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
                         <Button
                           variant="ghost"
                           size="icon"
-                          className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                          className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <MoreVertical className="h-3 w-3" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        <DropdownMenuItem
                           onClick={(e) => {
                             e.stopPropagation();
-                            setDeactivateTarget(ic);
+                            void handleCopyCode(ic.code, ic.id);
                           }}
-                          aria-label={`Deactivate ${ic.code}`}
                         >
-                          <Ban className="h-4 w-4" aria-hidden="true" />
-                        </Button>
-                      )}
-                    </div>
+                          <Copy className="h-3 w-3" />
+                          Copy code
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void handleCopyLink(ic.code, ic.id);
+                          }}
+                        >
+                          <Link2 className="h-3 w-3" />
+                          Copy invite link
+                        </DropdownMenuItem>
+                        {canWrite && ic.is_active && (
+                          <DropdownMenuItem
+                            className="text-destructive focus:text-destructive"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setDeactivateTarget(ic);
+                            }}
+                          >
+                            <Ban className="h-3 w-3" />
+                            Deactivate
+                          </DropdownMenuItem>
+                        )}
+                      </DropdownMenuContent>
+                    </DropdownMenu>
                   </TableCell>
                 </TableRow>
               ))}
             </TableBody>
           </Table>
         </div>
+        </>
       )}
 
       {/* Create Invite Code Dialog */}
@@ -415,14 +497,14 @@ export function AdminInviteCodesPage() {
                     {copiedId === createdCode.id ? (
                       <>
                         <Check
-                          className="mr-1 h-4 w-4 text-success"
+                          className="h-3 w-3 text-success"
                           aria-hidden="true"
                         />
                         Copied
                       </>
                     ) : (
                       <>
-                        <Copy className="mr-1 h-4 w-4" aria-hidden="true" />
+                        <Copy className="h-3 w-3" aria-hidden="true" />
                         Copy
                       </>
                     )}
@@ -444,11 +526,6 @@ export function AdminInviteCodesPage() {
                 )}
                 className="space-y-4"
               >
-                {createForm.formState.errors.root && (
-                  <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
-                    {createForm.formState.errors.root.message}
-                  </div>
-                )}
                 <FormField
                   control={createForm.control}
                   name="max_uses"
@@ -507,7 +584,7 @@ export function AdminInviteCodesPage() {
                   >
                     Cancel
                   </Button>
-                  <Button type="submit" isLoading={createMutation.isPending}>
+                  <Button type="submit" variant="primary" isLoading={createMutation.isPending}>
                     Create Invite Code
                   </Button>
                 </DialogFooter>
@@ -685,7 +762,7 @@ export function AdminInviteCodesPage() {
                   </span>
                 </div>
                 {selectedCode.usages.length === 0 ? (
-                  <div className="rounded-md border border-dashed border-border py-8 text-center text-sm text-muted-foreground">
+                  <div className="rounded-md border border-dashed border-border py-8 text-center text-[11px] text-text-tertiary">
                     No redemptions yet.
                   </div>
                 ) : (

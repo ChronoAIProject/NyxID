@@ -1,0 +1,41 @@
+[package]
+name = "nyxid-cloud-auth"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared AWS SigV4 + GCP service-account signing primitives for the NyxID backend and node agent."
+
+[lib]
+name = "nyxid_cloud_auth"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true }
+hex = "0.4"
+sha2 = "0.10"
+http = "1.4"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+# AWS SigV4 signing primitives. Mature, narrowly scoped, used by the
+# AWS SDK for Rust. Lighter than pulling in `aws-sdk-costexplorer`
+# because we only want the signer, not the typed client.
+aws-sigv4 = { version = "1.4", default-features = false, features = ["sign-http", "http1"] }
+# Credential type that `aws_sigv4::sign::v4::SigningParams::builder()`
+# expects as its `identity`. Already a transitive dep of aws-sigv4
+# (via `aws-smithy-runtime-api`), declared explicitly so we get a
+# stable import path.
+aws-credential-types = "1.2"
+# GCP service-account auth. `aws-lc-rs` feature pins the rustls crypto
+# provider so we don't enable both `ring` and `aws-lc-rs` via feature
+# unification (the same trap documented in `cli/Cargo.toml`).
+gcp_auth = { version = "0.12", default-features = false, features = ["aws-lc-rs"] }
+thiserror = "2"
+dashmap = "6"
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

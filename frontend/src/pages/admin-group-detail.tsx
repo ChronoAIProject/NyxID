@@ -17,11 +17,11 @@ import { canAdminWrite } from "@/types/api";
 import { useAuthStore } from "@/stores/auth-store";
 import { formatDate } from "@/lib/utils";
 import { PageHeader } from "@/components/shared/page-header";
+import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
 import { DetailSection } from "@/components/shared/detail-section";
 import { DetailRow } from "@/components/shared/detail-row";
-import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import {
@@ -49,6 +49,8 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Pencil, Trash2, AlertCircle, UserPlus, UserMinus } from "lucide-react";
+import { BenchesIcon } from "@/components/icons/empty-state";
+import { AddCtaButton } from "@/components/shared/add-cta-button";
 import { toast } from "sonner";
 
 export function AdminGroupDetailPage() {
@@ -73,6 +75,8 @@ export function AdminGroupDetailPage() {
 
   const members = membersData?.members ?? [];
   const availableRoles = rolesData?.roles ?? [];
+
+  useBreadcrumbLabel(group?.name);
 
   const form = useForm<UpdateGroupFormData>({
     resolver: zodResolver(updateGroupSchema),
@@ -118,11 +122,9 @@ export function AdminGroupDetailPage() {
       toast.success("Group updated successfully");
       setEditOpen(false);
     } catch (err) {
-      if (err instanceof ApiError) {
-        form.setError("root", { message: err.message });
-      } else {
-        toast.error("Failed to update group");
-      }
+      toast.error(
+        err instanceof ApiError ? err.message : "Failed to update group",
+      );
     }
   }
 
@@ -206,25 +208,20 @@ export function AdminGroupDetailPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        breadcrumbs={[
-          { label: "Group Management", to: "/admin/groups" },
-          { label: group.name },
-        ]}
         title={group.name}
         description={group.description ?? undefined}
         actions={
           canWrite ? (
             <>
-              <Button variant="outline" size="sm" onClick={openEditDialog}>
-                <Pencil className="mr-1 h-3 w-3" />
+              <Button variant="outline" onClick={openEditDialog}>
+                <ButtonIcon><Pencil className="h-3 w-3" /></ButtonIcon>
                 Edit
               </Button>
               <Button
                 variant="destructive"
-                size="sm"
                 onClick={() => setDeleteOpen(true)}
               >
-                <Trash2 className="mr-1 h-3 w-3" />
+                <ButtonIcon variant="destructive"><Trash2 className="h-3 w-3 text-destructive" /></ButtonIcon>
                 Delete
               </Button>
             </>
@@ -233,97 +230,86 @@ export function AdminGroupDetailPage() {
       />
 
       <DetailSection title="Group Information">
-        <DetailRow label="ID" value={group.id} copyable mono />
+        <DetailRow label="ID" value={group.id} copyable />
         <DetailRow label="Name" value={group.name} />
-        <DetailRow label="Slug" value={group.slug} copyable mono />
+        <DetailRow label="Slug" value={group.slug} copyable />
         <DetailRow label="Members" value={String(group.member_count)} />
         {group.parent_group_id && (
           <DetailRow
             label="Parent Group"
             value={group.parent_group_id}
             copyable
-            mono
           />
         )}
         <DetailRow label="Created" value={formatDate(group.created_at)} />
         <DetailRow label="Updated" value={formatDate(group.updated_at)} />
       </DetailSection>
 
-      <Separator />
-
       <DetailSection title="Inherited Roles">
-        {group.roles.length === 0 ? (
-          <p className="text-sm text-muted-foreground">
-            No roles assigned to this group.
-          </p>
-        ) : (
-          <div className="flex flex-wrap gap-2">
-            {group.roles.map((role) => (
-              <Badge key={role.id} variant="outline">
-                {role.name}
-              </Badge>
-            ))}
-          </div>
-        )}
+        <div className="px-4 py-3">
+          {group.roles.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              No roles assigned to this group.
+            </p>
+          ) : (
+            <div className="flex flex-wrap gap-2">
+              {group.roles.map((role) => (
+                <Badge key={role.id} variant="secondary">
+                  {role.name}
+                </Badge>
+              ))}
+            </div>
+          )}
+        </div>
       </DetailSection>
-
-      <Separator />
 
       <DetailSection title="Members">
         {canWrite && (
-          <div className="mb-3">
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => setAddMemberOpen(true)}
-            >
-              <UserPlus className="mr-1 h-4 w-4" />
-              Add Member
-            </Button>
+          <div className="px-4 py-3">
+            <AddCtaButton label="Add Member" onClick={() => setAddMemberOpen(true)} icon={UserPlus} />
           </div>
         )}
         {members.length === 0 ? (
-          <p className="text-sm text-muted-foreground">
-            No members in this group.
-          </p>
-        ) : (
-          <div className="rounded-xl border border-border">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Email</TableHead>
-                  <TableHead>Name</TableHead>
-                  <TableHead className="w-[60px]" />
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {members.map((member) => (
-                  <TableRow key={member.id}>
-                    <TableCell className="font-medium">
-                      {member.email}
-                    </TableCell>
-                    <TableCell>
-                      {member.display_name ?? (
-                        <span className="text-muted-foreground">--</span>
-                      )}
-                    </TableCell>
-                    <TableCell>
-                      {canWrite && (
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-8 w-8"
-                          onClick={() => setRemoveMemberId(member.id)}
-                        >
-                          <UserMinus className="h-4 w-4 text-muted-foreground" />
-                        </Button>
-                      )}
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+          <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
+            <BenchesIcon className="h-48 w-48 text-muted-foreground/30" />
+            <p className="text-[12px] text-muted-foreground/30">No members in this group.</p>
           </div>
+        ) : (
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Email</TableHead>
+                <TableHead>Name</TableHead>
+                <TableHead className="w-[60px]" />
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {members.map((member) => (
+                <TableRow key={member.id}>
+                  <TableCell className="font-medium">
+                    {member.email}
+                  </TableCell>
+                  <TableCell>
+                    {member.display_name ?? (
+                      <span className="text-muted-foreground">--</span>
+                    )}
+                  </TableCell>
+                  <TableCell>
+                    {canWrite && (
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8"
+                        onClick={() => setRemoveMemberId(member.id)}
+                      >
+                        <UserMinus className="h-3 w-3 text-muted-foreground" />
+                      </Button>
+                    )}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
         )}
       </DetailSection>
 
@@ -341,11 +327,6 @@ export function AdminGroupDetailPage() {
               onSubmit={form.handleSubmit((data) => void handleEdit(data))}
               className="space-y-4"
             >
-              {form.formState.errors.root && (
-                <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
-                  {form.formState.errors.root.message}
-                </div>
-              )}
               <FormField
                 control={form.control}
                 name="name"
@@ -393,7 +374,7 @@ export function AdminGroupDetailPage() {
                     <FormLabel>Roles</FormLabel>
                     <FormControl>
                       <select
-                        className="flex w-full rounded-[10px] border border-input bg-popover px-3 py-2 text-[13px] text-foreground shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring [&_option]:bg-popover [&_option]:text-foreground [&_option:checked]:bg-primary/20"
+                        className="flex w-full rounded-lg border border-input bg-popover px-3 py-1.5 text-[12px] text-foreground shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring [&_option]:bg-popover [&_option]:text-foreground [&_option:checked]:bg-primary/20"
                         multiple
                         value={
                           field.value
@@ -431,7 +412,7 @@ export function AdminGroupDetailPage() {
                 >
                   Cancel
                 </Button>
-                <Button type="submit" isLoading={updateMutation.isPending}>
+                <Button type="submit" variant="primary" isLoading={updateMutation.isPending}>
                   Save Changes
                 </Button>
               </DialogFooter>

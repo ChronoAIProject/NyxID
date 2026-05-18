@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Animated, LayoutChangeEvent, Pressable, StyleSheet, Text, View } from "react-native";
-import Svg, { Path, Circle } from "react-native-svg";
+// `lucide-react-native` mirrors the lucide-react icon set used by the web app
+// (frontend/src/components/dashboard/sidebar.tsx). One vocabulary across both
+// platforms: `User` for the account icon, `ShieldCheck` for the approvals icon.
+import { ShieldCheck, User } from "lucide-react-native";
 import { useTheme } from "../theme/ThemeContext";
 import type { ThemeColors } from "../theme/mobileTheme";
 import { radius, spacing, typeScale } from "../theme/designTokens";
@@ -12,24 +15,6 @@ type BottomNavV2Props = {
   onTabPress: (tab: BottomNavV2Tab) => void;
   onFabPress?: () => void;
 };
-
-function ShieldCheckIcon({ color }: { color: string }) {
-  return (
-    <Svg width={18} height={18} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-      <Path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-      <Path d="M9 12l2 2 4-4" />
-    </Svg>
-  );
-}
-
-function PersonIcon({ color }: { color: string }) {
-  return (
-    <Svg width={18} height={18} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-      <Path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
-      <Circle cx={12} cy={7} r={4} />
-    </Svg>
-  );
-}
 
 const PADDING = spacing.xs + spacing.xxs; // 6
 const GAP = spacing.xs + spacing.xxs; // 6
@@ -91,7 +76,7 @@ export function BottomNavV2({ active, onTabPress, onFabPress }: BottomNavV2Props
         style={styles.item}
         onPress={() => onTabPress("activity")}
       >
-        <ShieldCheckIcon color={active === "activity" ? colors.textPrimary : colors.textMuted} />
+        <ShieldCheck size={18} color={active === "activity" ? colors.textPrimary : colors.textMuted} strokeWidth={2} />
         <Text style={[styles.text, active === "activity" && styles.textActive]}>Activity</Text>
       </Pressable>
 
@@ -105,7 +90,7 @@ export function BottomNavV2({ active, onTabPress, onFabPress }: BottomNavV2Props
         style={styles.item}
         onPress={() => onTabPress("account")}
       >
-        <PersonIcon color={active === "account" ? colors.textPrimary : colors.textMuted} />
+        <User size={18} color={active === "account" ? colors.textPrimary : colors.textMuted} strokeWidth={2} />
         <Text style={[styles.text, active === "account" && styles.textActive]}>Account</Text>
       </Pressable>
     </View>
@@ -116,9 +101,10 @@ const createStyles = (c: ThemeColors) =>
   StyleSheet.create({
     wrap: {
       backgroundColor: c.card,
-      borderRadius: radius.xl,
+      // DESIGN.md §Border Radius: cards = rounded-xl (12px). 50%-opacity border on chrome.
+      borderRadius: radius.lg,
       borderWidth: 1,
-      borderColor: c.border,
+      borderColor: c.borderSoft,
       padding: PADDING,
       flexDirection: "row",
       gap: GAP,
@@ -129,7 +115,9 @@ const createStyles = (c: ThemeColors) =>
       top: PADDING,
       left: PADDING,
       bottom: PADDING,
+      // Nav items = rounded-lg (8px) per DESIGN.md.
       borderRadius: radius.md,
+      // DESIGN.md: active nav item bg-white/[0.06] — already encoded in navActive token.
       backgroundColor: c.navActive,
     },
     item: {
@@ -149,17 +137,21 @@ const createStyles = (c: ThemeColors) =>
       paddingBottom: 2,
       zIndex: 1,
     },
+    // DESIGN.md §Interaction Rules: status labels are Title Case, not UPPERCASE.
+    // Mobile nav labels follow the same case discipline as the rest of the app.
     text: {
-      ...typeScale.overline,
+      ...typeScale.small,
       color: c.textMuted,
-      letterSpacing: 0.6,
+      letterSpacing: 0,
+      textTransform: "none",
     },
     textActive: {
       color: c.textPrimary,
     },
     fabLabel: {
-      ...typeScale.overline,
+      ...typeScale.small,
       color: c.primary,
-      letterSpacing: 0.6,
+      letterSpacing: 0,
+      textTransform: "none",
     },
   });

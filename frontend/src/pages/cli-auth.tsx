@@ -56,10 +56,10 @@ export function CliAuthPage() {
       <div className="flex min-h-screen items-center justify-center">
         <div className="flex max-w-sm flex-col items-center gap-4 text-center">
           <AlertCircle className="h-12 w-12 text-muted-foreground/50" />
-          <h2 className="font-display text-lg font-semibold">
+          <h2 className="text-lg font-semibold">
             Invalid CLI Auth Request
           </h2>
-          <p className="text-sm text-muted-foreground">
+          <p className="text-[12px] text-muted-foreground">
             This page is used by the NyxID CLI. Run{" "}
             <code className="rounded bg-muted px-1.5 py-0.5 text-xs">
               nyxid login
@@ -78,10 +78,10 @@ export function CliAuthPage() {
     <div className="flex min-h-screen items-center justify-center">
       <div className="flex max-w-sm flex-col items-center gap-4 text-center">
         <Terminal className="h-12 w-12 text-primary/60" />
-        <h2 className="font-display text-lg font-semibold">
+        <h2 className="text-lg font-semibold">
           CLI Authentication
         </h2>
-        <p className="text-sm text-muted-foreground">
+        <p className="text-[12px] text-muted-foreground">
           Sending credentials to the NyxID CLI...
         </p>
         <p className="text-xs text-muted-foreground">

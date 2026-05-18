@@ -40,23 +40,24 @@ const createStyles = (c: ThemeColors) =>
       paddingHorizontal: spacing.xxl,
       paddingBottom: 72,
     },
+    // DESIGN.md: cards = rounded-xl (12px) with 50%-opacity chrome border.
     card: {
       width: "100%",
       borderRadius: radius.lg,
       borderWidth: 1,
-      borderColor: c.border,
+      borderColor: c.borderSoft,
       backgroundColor: c.card,
       paddingVertical: spacing.xxl,
-      paddingHorizontal: spacing.xl,
+      paddingHorizontal: spacing.xxl,
       alignItems: "center",
       gap: spacing.sm,
     },
     title: {
-      ...typeScale.title,
+      ...typeScale.bodyStrong,
       color: c.textPrimary,
     },
     subtitle: {
-      ...typeScale.body,
+      ...typeScale.small,
       color: c.textMuted,
       textAlign: "center",
     },

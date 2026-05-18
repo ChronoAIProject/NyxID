@@ -1,5 +1,5 @@
 [workspace]
-members = ["backend", "cli", "mcp-demo"]
+members = ["backend", "cli", "cloud-auth", "mcp-demo"]
 resolver = "3"
 
 [workspace.package]

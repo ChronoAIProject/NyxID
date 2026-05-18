@@ -38,13 +38,16 @@ jobs:
   # `if:` guards on every other job.
   #
   # Filter conventions:
-  #   - `backend` = backend crate OR shared workspace files (root
-  #                 Cargo.toml/Cargo.lock/nextest config)
-  #   - `cli`     = cli crate OR shared workspace files
-  #     => a Cargo.lock change fires BOTH `backend` and `cli`, since they
-  #        are members of the same `[workspace]` and share the lock file.
-  #   - `rust`    = backend OR cli OR shared workspace files (workspace-wide
-  #                 fmt + clippy)
+  #   - `backend`    = backend crate OR shared workspace files (root
+  #                    Cargo.toml/Cargo.lock/nextest config) OR
+  #                    `cloud-auth` (depended on by backend, NyxID#716)
+  #   - `cli`        = cli crate OR shared workspace files OR `cloud-auth`
+  #                    (also depended on by the CLI's node agent)
+  #     => a Cargo.lock or cloud-auth change fires BOTH `backend` and
+  #        `cli`, since they are members of the same `[workspace]` and
+  #        share the lock file + the cloud-auth dependency.
+  #   - `rust`       = backend OR cli OR shared workspace files (workspace-wide
+  #                    fmt + clippy)
   #   - `wizard`  = anything that could change the committed wizard bundle
   #                 hash (frontend sources, .node-version, cli wizard glue)
   #   - `ci`      = this workflow itself; forces a full run when changed
@@ -74,6 +77,7 @@ jobs:
           filters: |
             backend:
               - 'backend/**'
+              - 'cloud-auth/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
@@ -81,17 +85,21 @@ jobs:
               - '.config/nextest.toml'
             cli:
               - 'cli/**'
+              - 'cloud-auth/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
               - '.cargo/**'
               - '.config/nextest.toml'
             rust:
-              # `mcp-demo` is the third workspace member; workspace-wide
+              # `mcp-demo` is the fourth workspace member; workspace-wide
               # fmt + clippy must re-run on changes there even though no
-              # job currently builds or tests it directly.
+              # job currently builds or tests it directly. `cloud-auth`
+              # is depended on by backend + cli (NyxID#716) so it also
+              # needs to trigger workspace-wide checks.
               - 'backend/**'
               - 'cli/**'
+              - 'cloud-auth/**'
               - 'mcp-demo/**'
               - 'Cargo.toml'
               - 'Cargo.lock'

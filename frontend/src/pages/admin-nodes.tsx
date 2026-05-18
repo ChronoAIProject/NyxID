@@ -36,14 +36,22 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import {
-  HardDrive,
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
   Search,
   ChevronLeft,
   ChevronRight,
   Unplug,
   Trash2,
+  MoreVertical,
 } from "lucide-react";
+import { MagicBoxIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
+import { Badge } from "@/components/ui/badge";
 import { NodeStatusBadge } from "@/components/shared/node-status-badge";
 import type { AdminNodeInfo } from "@/types/nodes";
 
@@ -113,7 +121,7 @@ export function AdminNodesPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title="Node Management"
+        title="Node Registry"
         description="View and manage all credential nodes across all users."
       />
 
@@ -175,24 +183,110 @@ export function AdminNodesPage() {
           ))}
         </div>
       ) : error ? (
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-          <HardDrive className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
-            Failed to load nodes. Please try again.
-          </p>
+        <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+          <MagicBoxIcon className="h-64 w-64 text-muted-foreground/30" />
+          <div className="space-y-1">
+            <p className="text-[12px] font-medium text-muted-foreground/30">Failed to load nodes</p>
+            <p className="text-xs text-muted-foreground/30">Please try again later.</p>
+          </div>
         </div>
       ) : nodes.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-          <HardDrive className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
-            {search || statusFilter
-              ? "No nodes match your filters."
-              : "No credential nodes registered."}
-          </p>
+        <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+          <MagicBoxIcon className="h-64 w-64 text-muted-foreground/30" />
+          <div className="space-y-1">
+            <p className="text-[12px] font-medium text-muted-foreground/30">No nodes found</p>
+            <p className="text-xs text-muted-foreground/30">
+              {search || statusFilter
+                ? "No nodes match your filters."
+                : "No credential nodes registered."}
+            </p>
+          </div>
         </div>
       ) : (
         <>
-          <div className="rounded-xl border border-border">
+          {/* Mobile card view */}
+          <div className="flex flex-col gap-3 md:hidden">
+            {nodes.map((node) => (
+              <div
+                key={node.id}
+                className="rounded-xl border border-border/50 bg-card p-4 transition-colors hover:bg-white/[0.03]"
+              >
+                <div className="relative">
+                  {canWrite && (
+                    <div className="absolute right-0 top-0">
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-7 w-7 text-muted-foreground hover:text-foreground"
+                          >
+                            <MoreVertical className="h-3 w-3" />
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end">
+                          {node.is_connected && (
+                            <DropdownMenuItem
+                              onClick={() =>
+                                setActionTarget({
+                                  node,
+                                  action: "disconnect",
+                                })
+                              }
+                            >
+                              <Unplug className="h-3 w-3" />
+                              Disconnect
+                            </DropdownMenuItem>
+                          )}
+                          <DropdownMenuItem
+                            className="text-destructive focus:text-destructive"
+                            onClick={() =>
+                              setActionTarget({ node, action: "delete" })
+                            }
+                          >
+                            <Trash2 className="h-3 w-3" />
+                            Delete
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    </div>
+                  )}
+
+                  <div className="pr-8">
+                    <p className="text-[13px] font-semibold text-foreground truncate">
+                      {node.name}
+                      {node.metadata?.agent_version && (
+                        <span className="ml-2 text-[11px] font-normal text-muted-foreground">
+                          v{node.metadata.agent_version}
+                        </span>
+                      )}
+                    </p>
+                    <p className="text-[11px] font-mono text-muted-foreground truncate">
+                      {node.id}
+                    </p>
+                  </div>
+
+                  <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                    <NodeStatusBadge
+                      status={node.status}
+                      isConnected={node.is_connected}
+                    />
+                    <Badge variant="secondary">
+                      {node.user_email ?? node.user_id}
+                    </Badge>
+                  </div>
+
+                  <div className="mt-3 text-[11px] text-muted-foreground">
+                    Last seen:{" "}
+                    {formatRelativeTime(node.last_heartbeat_at) ?? "Never"}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Desktop table view */}
+          <div className="hidden md:block rounded-xl border border-border/50 bg-card overflow-hidden">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -222,7 +316,7 @@ export function AdminNodesPage() {
                       </div>
                     </TableCell>
                     <TableCell>
-                      <span className="text-sm text-muted-foreground">
+                      <span className="text-[11px] text-text-tertiary">
                         {node.user_email ?? node.user_id}
                       </span>
                     </TableCell>
@@ -254,37 +348,41 @@ export function AdminNodesPage() {
                     </TableCell>
                     <TableCell>
                       {canWrite && (
-                        <div className="flex items-center gap-1">
-                          {node.is_connected && (
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
                             <Button
                               variant="ghost"
                               size="icon"
-                              className="h-8 w-8 text-muted-foreground hover:text-warning"
+                              className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                            >
+                              <MoreVertical className="h-3 w-3" />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end">
+                            {node.is_connected && (
+                              <DropdownMenuItem
+                                onClick={() =>
+                                  setActionTarget({
+                                    node,
+                                    action: "disconnect",
+                                  })
+                                }
+                              >
+                                <Unplug className="h-3 w-3" />
+                                Disconnect
+                              </DropdownMenuItem>
+                            )}
+                            <DropdownMenuItem
+                              className="text-destructive focus:text-destructive"
                               onClick={() =>
-                                setActionTarget({
-                                  node,
-                                  action: "disconnect",
-                                })
+                                setActionTarget({ node, action: "delete" })
                               }
                             >
-                              <Unplug className="h-4 w-4" />
-                              <span className="sr-only">
-                                Disconnect {node.name}
-                              </span>
-                            </Button>
-                          )}
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                            onClick={() =>
-                              setActionTarget({ node, action: "delete" })
-                            }
-                          >
-                            <Trash2 className="h-4 w-4" />
-                            <span className="sr-only">Delete {node.name}</span>
-                          </Button>
-                        </div>
+                              <Trash2 className="h-3 w-3" />
+                              Delete
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
                       )}
                     </TableCell>
                   </TableRow>
@@ -294,7 +392,7 @@ export function AdminNodesPage() {
           </div>
 
           <div className="flex items-center justify-between">
-            <p className="text-sm text-muted-foreground">
+            <p className="text-[11px] text-text-tertiary">
               Showing {String((page - 1) * PER_PAGE + 1)}-
               {String(Math.min(page * PER_PAGE, total))} of {String(total)}{" "}
               nodes
@@ -302,24 +400,24 @@ export function AdminNodesPage() {
             <div className="flex items-center gap-2">
               <Button
                 variant="outline"
-                size="sm"
+                size="icon"
                 disabled={page <= 1}
                 onClick={() => setPage((p) => Math.max(1, p - 1))}
+                aria-label="Previous page"
               >
-                <ChevronLeft className="h-4 w-4" />
-                Previous
+                <ChevronLeft className="h-3 w-3" />
               </Button>
-              <span className="text-sm text-muted-foreground">
+              <span className="text-[11px] text-text-tertiary">
                 Page {String(page)} of {String(totalPages)}
               </span>
               <Button
                 variant="outline"
-                size="sm"
+                size="icon"
                 disabled={page >= totalPages}
                 onClick={() => setPage((p) => p + 1)}
+                aria-label="Next page"
               >
-                Next
-                <ChevronRight className="h-4 w-4" />
+                <ChevronRight className="h-3 w-3" />
               </Button>
             </div>
           </div>
@@ -351,9 +449,7 @@ export function AdminNodesPage() {
               Cancel
             </Button>
             <Button
-              variant={
-                actionTarget?.action === "delete" ? "destructive" : "default"
-              }
+              variant="destructive"
               onClick={() => void handleAction()}
               isLoading={
                 disconnectMutation.isPending || deleteMutation.isPending

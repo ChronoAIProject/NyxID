@@ -1,18 +1,26 @@
 import { useState } from "react";
-import { useParams, useNavigate } from "@tanstack/react-router";
+import { useParams, useNavigate, useRouterState } from "@tanstack/react-router";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
-  Building2,
+  Camera,
   Check,
   Copy,
   Globe,
   KeyRound,
-  Plus,
   Trash2,
+  X,
 } from "lucide-react";
+import { BenchesIcon, MailSendingIcon } from "@/components/icons/empty-state";
+import { ErrorBanner } from "@/components/shared/error-banner";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+import { AddCtaButton } from "@/components/shared/add-cta-button";
 import { toast } from "sonner";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -46,6 +54,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { PageHeader } from "@/components/shared/page-header";
+import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
 import { ApiError } from "@/lib/api-client";
 import { buildOrgInviteJoinUrl } from "@/lib/org-invite-links";
 import {
@@ -55,6 +64,12 @@ import {
   formatTimeDistance,
 } from "@/lib/utils";
 import { useAuthStore } from "@/stores/auth-store";
+import {
+  ORG_DETAIL_TABS,
+  ORG_DETAIL_TAB_DEFAULT,
+  type OrgDetailTab,
+  parseTab,
+} from "@/lib/url-tabs";
 import { useOrg, useUpdateOrg, useDeleteOrg } from "@/hooks/use-orgs";
 import {
   useOrgMembers,
@@ -86,21 +101,24 @@ import { OrgAvatar } from "@/components/orgs/org-avatar";
 import { OrgDeveloperAppsTab } from "@/components/orgs/org-developer-apps-tab";
 import { OrgServiceAccountsTab } from "@/components/orgs/org-service-accounts-tab";
 
-type TabValue =
-  | "members"
-  | "role-permissions"
-  | "invites"
-  | "approvals"
-  | "service-accounts"
-  | "developer-apps"
-  | "settings";
-
 export function OrgDetailPage() {
   const { orgId } = useParams({ strict: false }) as { orgId: string };
   const navigate = useNavigate();
+  const searchParams = useRouterState({ select: (s) => s.location.search as Record<string, unknown> });
+  const tab = parseTab(searchParams.tab, ORG_DETAIL_TABS, ORG_DETAIL_TAB_DEFAULT);
+
+  function setTab(value: OrgDetailTab) {
+    void navigate({
+      to: "/orgs/$orgId",
+      params: { orgId },
+      search: { tab: value },
+      replace: true,
+    });
+  }
+
   const currentUser = useAuthStore((s) => s.user);
 
-  const { data: org, isLoading, error } = useOrg(orgId);
+  const { data: org, isLoading, error, refetch } = useOrg(orgId);
   const { data: members, isLoading: membersLoading } = useOrgMembers(orgId);
   const { data: invites, isLoading: invitesLoading } = useOrgInvites(orgId);
 
@@ -109,12 +127,15 @@ export function OrgDetailPage() {
   const cancelInviteMutation = useCancelInvite();
   const deleteOrgMutation = useDeleteOrg();
 
-  const [tab, setTab] = useState<TabValue>("members");
+  useBreadcrumbLabel(org?.display_name);
   const [inviteOpen, setInviteOpen] = useState(false);
   const [revokeTarget, setRevokeTarget] = useState<MemberResponse | null>(null);
   const [scopeTarget, setScopeTarget] = useState<MemberResponse | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [copiedInviteId, setCopiedInviteId] = useState<string | null>(null);
+  const [avatarPopoverOpen, setAvatarPopoverOpen] = useState(false);
+  const [avatarUrlInput, setAvatarUrlInput] = useState("");
+  const avatarUpdateMutation = useUpdateOrg();
 
   if (isLoading) {
     return (
@@ -127,25 +148,19 @@ export function OrgDetailPage() {
 
   if (error || !org) {
     return (
-      <Card>
-        <CardContent className="flex flex-col items-center gap-4 py-16">
-          <Building2 className="h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
-            Failed to load organization. It may have been deleted or you no
-            longer have access.
-          </p>
-          <Button
-            variant="outline"
-            onClick={() => void navigate({ to: "/orgs" })}
-          >
-            Back to organizations
-          </Button>
-        </CardContent>
-      </Card>
+      <div className="space-y-4">
+        <ErrorBanner message="Failed to load organization. It may have been deleted or you no longer have access." onRetry={refetch} />
+        <Button
+          variant="outline"
+          onClick={() => void navigate({ to: "/orgs" })}
+        >
+          Back to organizations
+        </Button>
+      </div>
     );
   }
 
-  const isAdmin = org.your_role === "admin";
+  const isAdmin = org.your_role === "admin" || org.your_role === "owner";
   const orgName = org.display_name ?? "Untitled org";
   const activeAdminCount = (members ?? []).filter(
     (member) => member.role === "admin" && member.revoked_at === null,
@@ -237,10 +252,6 @@ export function OrgDetailPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        breadcrumbs={[
-          { label: "Organizations", to: "/orgs" },
-          { label: org.display_name ?? "Untitled org" },
-        ]}
         title={org.display_name ?? "Untitled org"}
         description={
           org.contact_email
@@ -248,16 +259,73 @@ export function OrgDetailPage() {
             : `${String(org.member_count)} member${org.member_count === 1 ? "" : "s"}`
         }
         leading={
-          <OrgAvatar
-            avatarUrl={org.avatar_url}
-            displayName={org.display_name}
-            className="h-14 w-14"
-          />
+          isAdmin ? (
+            <Popover open={avatarPopoverOpen} onOpenChange={(open) => {
+              setAvatarPopoverOpen(open);
+              if (open) setAvatarUrlInput(org.avatar_url ?? "");
+            }}>
+              <PopoverTrigger asChild>
+                <button type="button" className="group relative rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50">
+                  <OrgAvatar avatarUrl={org.avatar_url} displayName={org.display_name} className="h-14 w-14" />
+                  <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-black/50 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
+                    <Camera className="h-5 w-5 text-white" />
+                  </div>
+                </button>
+              </PopoverTrigger>
+              <PopoverContent side="bottom" align="start" className="w-[280px] p-3 space-y-3">
+                <p className="text-[12px] font-medium text-foreground">Change avatar</p>
+                <div className="flex gap-2">
+                  <Input
+                    value={avatarUrlInput}
+                    onChange={(e) => setAvatarUrlInput(e.target.value)}
+                    placeholder="https://..."
+                    className="flex-1"
+                  />
+                  <Button
+                    variant="primary"
+                    disabled={avatarUrlInput === (org.avatar_url ?? "")}
+                    isLoading={avatarUpdateMutation.isPending}
+                    onClick={async () => {
+                      try {
+                        await avatarUpdateMutation.mutateAsync({ orgId, body: { avatar_url: avatarUrlInput } });
+                        toast.success("Avatar updated");
+                        setAvatarPopoverOpen(false);
+                      } catch {
+                        toast.error("Failed to update avatar");
+                      }
+                    }}
+                  >
+                    Save
+                  </Button>
+                </div>
+                {org.avatar_url && (
+                  <button
+                    type="button"
+                    className="flex items-center gap-1 text-[11px] text-destructive hover:underline"
+                    onClick={async () => {
+                      try {
+                        await avatarUpdateMutation.mutateAsync({ orgId, body: { avatar_url: "" } });
+                        toast.success("Avatar removed");
+                        setAvatarPopoverOpen(false);
+                      } catch {
+                        toast.error("Failed to remove avatar");
+                      }
+                    }}
+                  >
+                    <X className="h-3 w-3" />
+                    Remove avatar
+                  </button>
+                )}
+              </PopoverContent>
+            </Popover>
+          ) : (
+            <OrgAvatar avatarUrl={org.avatar_url} displayName={org.display_name} className="h-14 w-14" />
+          )
         }
         actions={<RoleBadge role={org.your_role} />}
       />
 
-      <Tabs value={tab} onValueChange={(value) => setTab(value as TabValue)}>
+      <Tabs value={tab} onValueChange={(value) => setTab(value as OrgDetailTab)}>
         <TabsList>
           <TabsTrigger value="members">Members</TabsTrigger>
           <TabsTrigger value="role-permissions">Role permissions</TabsTrigger>
@@ -275,64 +343,110 @@ export function OrgDetailPage() {
         <TabsContent value="members" className="mt-6 space-y-4">
           {isAdmin && (
             <div className="flex justify-end">
-              <Button size="sm" onClick={() => setInviteOpen(true)}>
-                <Plus className="mr-2 h-4 w-4" />
-                Invite member
-              </Button>
+              <AddCtaButton label="Invite Member" onClick={() => setInviteOpen(true)} />
             </div>
           )}
 
           {membersLoading ? (
             <Skeleton className="h-40 w-full" />
           ) : !members || members.length === 0 ? (
-            <Card>
-              <CardContent className="py-8 text-center text-sm text-muted-foreground">
-                No members yet.
-              </CardContent>
-            </Card>
-          ) : (
-            <div className="rounded-xl border border-border">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Member</TableHead>
-                    <TableHead>Role</TableHead>
-                    <TableHead>Services</TableHead>
-                    <TableHead>Joined</TableHead>
-                    <TableHead className="w-[100px] text-right">
-                      <span className="sr-only">Actions</span>
-                    </TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {members.map((member) => (
-                    <MemberRow
-                      key={member.membership_id}
-                      member={member}
-                      canManage={isAdmin}
-                      isSelf={member.user_id === currentUser?.id}
-                      isLastAdmin={
-                        member.role === "admin" &&
-                        member.revoked_at === null &&
-                        activeAdminCount <= 1
-                      }
-                      isUpdating={
-                        updateMemberMutation.isPending ||
-                        removeMemberMutation.isPending
-                      }
-                      onChangeRole={(id, role) =>
-                        void handleChangeRole(id, role)
-                      }
-                      onRevoke={(target) => setRevokeTarget(target)}
-                      onEditScope={(target) => setScopeTarget(target)}
-                      onResetScope={(target) =>
-                        void handleResetMemberScope(target)
-                      }
-                    />
-                  ))}
-                </TableBody>
-              </Table>
+            <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+              <BenchesIcon className="h-64 w-64 text-muted-foreground/30" />
+              <div className="space-y-1">
+                <p className="text-[12px] font-medium text-muted-foreground/30">No Members</p>
+                <p className="text-xs text-muted-foreground/30">No members yet.</p>
+              </div>
             </div>
+          ) : (
+            <>
+              {/* Mobile card view */}
+              <div className="flex flex-col gap-3 md:hidden">
+                {members.map((member) => {
+                  const displayName = member.display_name ?? member.email ?? member.user_id;
+                  const isSelf = member.user_id === currentUser?.id;
+                  const scopeList = member.effective_allowed_service_ids;
+                  const scopeLabel = scopeList == null ? "All services" : scopeList.length === 0 ? "No services" : `${String(scopeList.length)} service${scopeList.length === 1 ? "" : "s"}`;
+                  return (
+                    <div key={member.membership_id} className="relative rounded-xl border border-border/50 bg-card p-4">
+                      {isAdmin && (
+                        <div className="absolute right-3 top-3">
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-7 w-7"
+                            onClick={() => setRevokeTarget(member)}
+                            disabled={member.role === "admin" && member.revoked_at === null && activeAdminCount <= 1}
+                          >
+                            <Trash2 className="h-3.5 w-3.5 text-destructive" />
+                          </Button>
+                        </div>
+                      )}
+                      <p className="pr-10 text-[13px] font-semibold text-foreground truncate">
+                        {displayName}
+                        {isSelf && <span className="ml-1 text-[11px] font-normal text-muted-foreground">(you)</span>}
+                      </p>
+                      {member.email && member.display_name && (
+                        <p className="text-[11px] text-muted-foreground truncate">{member.email}</p>
+                      )}
+                      <div className="mt-2 flex flex-wrap gap-1.5">
+                        <RoleBadge role={member.role} />
+                        <Badge variant={scopeList != null ? "info" : "secondary"} className="text-xs">{scopeLabel}</Badge>
+                        {member.scope_source === "override" && <Badge variant="info" className="text-xs">Custom scope</Badge>}
+                      </div>
+                      <div className="mt-3 text-[11px] text-muted-foreground">
+                        Joined {formatRelativeTime(member.created_at) ?? "—"}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Desktop table view */}
+              <div className="hidden md:block rounded-xl border border-border/50 bg-card overflow-hidden">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Member</TableHead>
+                      <TableHead>Role</TableHead>
+                      <TableHead>Services</TableHead>
+                      <TableHead>Joined</TableHead>
+                      {isAdmin && (
+                        <TableHead className="w-[100px] text-right">
+                          Actions
+                        </TableHead>
+                      )}
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {members.map((member) => (
+                      <MemberRow
+                        key={member.membership_id}
+                        member={member}
+                        canManage={isAdmin}
+                        isSelf={member.user_id === currentUser?.id}
+                        isLastAdmin={
+                          member.role === "admin" &&
+                          member.revoked_at === null &&
+                          activeAdminCount <= 1
+                        }
+                        isUpdating={
+                          updateMemberMutation.isPending ||
+                          removeMemberMutation.isPending
+                        }
+                        onChangeRole={(id, role) =>
+                          void handleChangeRole(id, role)
+                        }
+                        onRevoke={(target) => setRevokeTarget(target)}
+                        onEditScope={(target) => setScopeTarget(target)}
+                        onResetScope={(target) =>
+                          void handleResetMemberScope(target)
+                        }
+                      />
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            </>
           )}
         </TabsContent>
 
@@ -341,7 +455,7 @@ export function OrgDetailPage() {
             <RolePermissionsPanel orgId={orgId} />
           ) : (
             <Card>
-              <CardContent className="py-6 text-center text-sm text-muted-foreground">
+              <CardContent className="py-6 text-center text-[12px] text-muted-foreground">
                 Only admins can manage role permissions.
               </CardContent>
             </Card>
@@ -351,14 +465,11 @@ export function OrgDetailPage() {
         <TabsContent value="invites" className="mt-6 space-y-4">
           {isAdmin ? (
             <div className="flex justify-end">
-              <Button size="sm" onClick={() => setInviteOpen(true)}>
-                <Plus className="mr-2 h-4 w-4" />
-                Create invite
-              </Button>
+              <AddCtaButton label="Create Invite" onClick={() => setInviteOpen(true)} />
             </div>
           ) : (
             <Card>
-              <CardContent className="py-6 text-center text-sm text-muted-foreground">
+              <CardContent className="py-6 text-center text-[12px] text-muted-foreground">
                 Only admins can manage invites.
               </CardContent>
             </Card>
@@ -370,123 +481,163 @@ export function OrgDetailPage() {
                 <Skeleton className="h-40 w-full" />
               ) : !invites || invites.length === 0 ? (
                 <Card>
-                  <CardContent className="py-8 text-center text-sm text-muted-foreground">
-                    No pending invites.
+                  <CardContent className="flex flex-col items-center justify-center gap-1 py-8 text-center">
+                    <MailSendingIcon className="h-48 w-48 text-muted-foreground/30" />
+                    <p className="text-[12px] text-muted-foreground/30">No pending invites.</p>
                   </CardContent>
                 </Card>
               ) : (
-                <div className="rounded-xl border border-border">
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead>Nonce</TableHead>
-                        <TableHead>Role</TableHead>
-                        <TableHead>Status</TableHead>
-                        <TableHead>Used by</TableHead>
-                        <TableHead>Timeline</TableHead>
-                        <TableHead className="w-[112px]" />
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {invites.map((invite) => {
-                        const isRedeemed = invite.redeemed_at !== null;
-                        const isExpired =
-                          !isRedeemed &&
-                          new Date(invite.expires_at).getTime() < Date.now();
-                        // For redeemed rows, show the user that consumed the
-                        // invite (issue #409). Prefer email because that's
-                        // the primary auth identifier; fall back to display
-                        // name, then raw user id, then a dash.
-                        const usedBy = isRedeemed
-                          ? (invite.redeemed_by_email ??
-                            invite.redeemed_by_display_name ??
-                            invite.redeemed_by ??
-                            "-")
-                          : "-";
-                        // Status-aware timeline text (issue #408): pending
-                        // rows count down to expiry, expired/redeemed rows
-                        // count up from the lifecycle event that actually
-                        // ended the invite's usefulness.
-                        let timeline: string;
-                        let timelineTooltip: string | undefined;
-                        if (isRedeemed && invite.redeemed_at) {
-                          timeline = `Redeemed ${formatRelativeTime(invite.redeemed_at)}`;
-                          timelineTooltip = `Original expiry ${formatDate(invite.expires_at)}`;
-                        } else if (isExpired) {
-                          timeline = `Expired ${formatRelativeTime(invite.expires_at)}`;
-                        } else {
-                          timeline = `Expires ${formatTimeDistance(invite.expires_at)}`;
-                        }
-                        return (
-                          <TableRow key={invite.id}>
-                            <TableCell>
-                              <span className="break-all font-mono text-xs text-foreground">
-                                {invite.nonce}
-                              </span>
-                            </TableCell>
-                            <TableCell>
-                              <RoleBadge role={invite.role} />
-                            </TableCell>
-                            <TableCell>
-                              {isRedeemed ? (
-                                <Badge variant="success">Redeemed</Badge>
-                              ) : isExpired ? (
-                                <Badge variant="warning">Expired</Badge>
-                              ) : (
-                                <Badge variant="info">Pending</Badge>
+                <>
+                  {/* Mobile card view */}
+                  <div className="flex flex-col gap-3 md:hidden">
+                    {invites.map((invite) => {
+                      const isRedeemed = invite.redeemed_at !== null;
+                      const isExpired = !isRedeemed && new Date(invite.expires_at).getTime() < Date.now();
+                      const usedBy = isRedeemed ? (invite.redeemed_by_email ?? invite.redeemed_by_display_name ?? invite.redeemed_by ?? "—") : null;
+                      let timeline: string;
+                      if (isRedeemed && invite.redeemed_at) {
+                        timeline = `Redeemed ${formatRelativeTime(invite.redeemed_at)}`;
+                      } else if (isExpired) {
+                        timeline = `Expired ${formatRelativeTime(invite.expires_at)}`;
+                      } else {
+                        timeline = `Expires ${formatTimeDistance(invite.expires_at)}`;
+                      }
+                      return (
+                        <div key={invite.id} className="relative rounded-xl border border-border/50 bg-card p-4">
+                          {!isRedeemed && !isExpired && (
+                            <div className="absolute right-3 top-3 flex gap-1">
+                              <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => void handleCopyInviteLink(invite.id, invite.nonce)} title="Copy invite link">
+                                {copiedInviteId === invite.id ? <Check className="h-3.5 w-3.5 text-success" /> : <Copy className="h-3.5 w-3.5" />}
+                              </Button>
+                              <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => void handleCancelInvite(invite.id)}>
+                                <Trash2 className="h-3.5 w-3.5 text-destructive" />
+                              </Button>
+                            </div>
+                          )}
+                          <p className="pr-20 text-[12px] font-mono text-foreground break-all">{invite.nonce}</p>
+                          <div className="mt-2 flex flex-wrap gap-1.5">
+                            <RoleBadge role={invite.role} />
+                            {isRedeemed ? <Badge variant="success">Redeemed</Badge> : isExpired ? <Badge variant="warning">Expired</Badge> : <Badge variant="info">Pending</Badge>}
+                          </div>
+                          <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+                            <span>{timeline}</span>
+                            {usedBy && <span>Used by {usedBy}</span>}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* Desktop table view */}
+                  <div className="hidden md:block rounded-xl border border-border/50 bg-card overflow-hidden">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Nonce</TableHead>
+                          <TableHead>Role</TableHead>
+                          <TableHead>Status</TableHead>
+                          <TableHead>Used by</TableHead>
+                          <TableHead>Timeline</TableHead>
+                          {invites.some((inv) => inv.redeemed_at === null && new Date(inv.expires_at).getTime() >= Date.now()) && (
+                            <TableHead className="w-[112px]">Actions</TableHead>
+                          )}
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {invites.map((invite) => {
+                          const isRedeemed = invite.redeemed_at !== null;
+                          const isExpired =
+                            !isRedeemed &&
+                            new Date(invite.expires_at).getTime() < Date.now();
+                          const usedBy = isRedeemed
+                            ? (invite.redeemed_by_email ??
+                              invite.redeemed_by_display_name ??
+                              invite.redeemed_by ??
+                              "-")
+                            : "-";
+                          let timeline: string;
+                          let timelineTooltip: string | undefined;
+                          if (isRedeemed && invite.redeemed_at) {
+                            timeline = `Redeemed ${formatRelativeTime(invite.redeemed_at)}`;
+                            timelineTooltip = `Original expiry ${formatDate(invite.expires_at)}`;
+                          } else if (isExpired) {
+                            timeline = `Expired ${formatRelativeTime(invite.expires_at)}`;
+                          } else {
+                            timeline = `Expires ${formatTimeDistance(invite.expires_at)}`;
+                          }
+                          return (
+                            <TableRow key={invite.id}>
+                              <TableCell>
+                                <span className="break-all text-xs text-foreground">
+                                  {invite.nonce}
+                                </span>
+                              </TableCell>
+                              <TableCell>
+                                <RoleBadge role={invite.role} />
+                              </TableCell>
+                              <TableCell>
+                                {isRedeemed ? (
+                                  <Badge variant="success">Redeemed</Badge>
+                                ) : isExpired ? (
+                                  <Badge variant="warning">Expired</Badge>
+                                ) : (
+                                  <Badge variant="info">Pending</Badge>
+                                )}
+                              </TableCell>
+                              <TableCell className="break-all text-xs text-muted-foreground">
+                                {usedBy}
+                              </TableCell>
+                              <TableCell
+                                className="text-muted-foreground"
+                                title={timelineTooltip}
+                              >
+                                {timeline}
+                              </TableCell>
+                              {invites.some((inv) => inv.redeemed_at === null && new Date(inv.expires_at).getTime() >= Date.now()) && (
+                                <TableCell>
+                                  {!isRedeemed && !isExpired && (
+                                    <div className="flex items-center justify-end gap-1">
+                                      <Button
+                                        variant="ghost"
+                                        size="icon"
+                                        className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                                        onClick={() =>
+                                          void handleCopyInviteLink(
+                                            invite.id,
+                                            invite.nonce,
+                                          )
+                                        }
+                                        aria-label={`Copy invite link ${invite.nonce}`}
+                                        title="Copy invite link"
+                                      >
+                                        {copiedInviteId === invite.id ? (
+                                          <Check className="h-4 w-4 text-success" />
+                                        ) : (
+                                          <Copy className="h-4 w-4" />
+                                        )}
+                                      </Button>
+                                      <Button
+                                        variant="ghost"
+                                        size="icon"
+                                        className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                                        onClick={() =>
+                                          void handleCancelInvite(invite.id)
+                                        }
+                                        aria-label="Cancel invite"
+                                      >
+                                        <Trash2 className="h-4 w-4 text-destructive" />
+                                      </Button>
+                                    </div>
+                                  )}
+                                </TableCell>
                               )}
-                            </TableCell>
-                            <TableCell className="break-all text-xs text-muted-foreground">
-                              {usedBy}
-                            </TableCell>
-                            <TableCell
-                              className="text-muted-foreground"
-                              title={timelineTooltip}
-                            >
-                              {timeline}
-                            </TableCell>
-                            <TableCell>
-                              {!isRedeemed && !isExpired && (
-                                <div className="flex items-center justify-end gap-1">
-                                  <Button
-                                    variant="ghost"
-                                    size="icon"
-                                    className="h-8 w-8 text-muted-foreground hover:text-foreground"
-                                    onClick={() =>
-                                      void handleCopyInviteLink(
-                                        invite.id,
-                                        invite.nonce,
-                                      )
-                                    }
-                                    aria-label={`Copy invite link ${invite.nonce}`}
-                                    title="Copy invite link"
-                                  >
-                                    {copiedInviteId === invite.id ? (
-                                      <Check className="h-4 w-4 text-success" />
-                                    ) : (
-                                      <Copy className="h-4 w-4" />
-                                    )}
-                                  </Button>
-                                  <Button
-                                    variant="ghost"
-                                    size="icon"
-                                    className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                                    onClick={() =>
-                                      void handleCancelInvite(invite.id)
-                                    }
-                                    aria-label="Cancel invite"
-                                  >
-                                    <Trash2 className="h-4 w-4" />
-                                  </Button>
-                                </div>
-                              )}
-                            </TableCell>
-                          </TableRow>
-                        );
-                      })}
-                    </TableBody>
-                  </Table>
-                </div>
+                            </TableRow>
+                          );
+                        })}
+                      </TableBody>
+                    </Table>
+                  </div>
+                </>
               )}
             </>
           )}
@@ -497,7 +648,7 @@ export function OrgDetailPage() {
             <OrgApprovalConfigs orgId={orgId} />
           ) : (
             <Card>
-              <CardContent className="py-6 text-center text-sm text-muted-foreground">
+              <CardContent className="py-6 text-center text-[12px] text-muted-foreground">
                 Only admins can manage org approval policies.
               </CardContent>
             </Card>
@@ -528,7 +679,7 @@ export function OrgDetailPage() {
             />
           ) : (
             <Card>
-              <CardContent className="py-6 text-center text-sm text-muted-foreground">
+              <CardContent className="py-6 text-center text-[12px] text-muted-foreground">
                 Only admins can edit organization settings.
               </CardContent>
             </Card>
@@ -589,7 +740,7 @@ export function OrgDetailPage() {
       <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Delete organization</DialogTitle>
+            <DialogTitle>Delete Organization</DialogTitle>
             <DialogDescription>
               Delete{" "}
               <span className="font-medium text-foreground">
@@ -609,7 +760,7 @@ export function OrgDetailPage() {
               onClick={() => void handleDeleteOrg()}
               isLoading={deleteOrgMutation.isPending}
             >
-              Delete organization
+              Delete Organization
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -738,10 +889,10 @@ function RolePermissionCard({
 
   return (
     <Card>
-      <CardContent className="space-y-4 p-5">
+      <CardContent className="space-y-4 p-4">
         <div className="flex items-start justify-between gap-3">
           <div>
-            <p className="text-sm font-semibold text-foreground">
+            <p className="text-[13px] font-semibold text-foreground">
               {roleLabel(role)}
             </p>
             <p className="text-xs text-muted-foreground">
@@ -758,7 +909,7 @@ function RolePermissionCard({
         <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-muted/30 p-3">
           <Label
             htmlFor={`role-scope-full-${role}`}
-            className="text-sm font-medium"
+            className="text-[12px] font-medium"
           >
             Full access
           </Label>
@@ -801,7 +952,7 @@ function RolePermissionCard({
                       htmlFor={id}
                       className="flex-1 cursor-pointer space-y-0.5"
                     >
-                      <span className="block text-sm font-medium text-foreground">
+                      <span className="block text-[12px] font-medium text-foreground">
                         {service.label}
                       </span>
                       <span className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -810,7 +961,7 @@ function RolePermissionCard({
                         ) : (
                           <Globe className="h-3 w-3" aria-hidden />
                         )}
-                        <span className="font-mono">{service.slug}</span>
+                        <span>{service.slug}</span>
                       </span>
                     </Label>
                   </div>
@@ -823,14 +974,13 @@ function RolePermissionCard({
         <div className="flex items-center justify-end gap-2 border-t border-border pt-3">
           <Button
             variant="ghost"
-            size="sm"
             onClick={reset}
             disabled={!dirty || pending}
           >
             Reset
           </Button>
           <Button
-            size="sm"
+            variant="primary"
             onClick={save}
             disabled={!dirty}
             isLoading={pending}
@@ -997,14 +1147,14 @@ function SettingsPanel({
               />
 
               {form.formState.errors.root && (
-                <p className="text-sm text-destructive">
+                <p className="text-[12px] text-destructive">
                   {form.formState.errors.root.message}
                 </p>
               )}
 
               <div className="flex justify-end">
-                <Button type="submit" isLoading={updateMutation.isPending}>
-                  Save changes
+                <Button variant="primary" type="submit" isLoading={updateMutation.isPending} disabled={!form.formState.isDirty}>
+                  Save Changes
                 </Button>
               </div>
             </form>
@@ -1013,9 +1163,9 @@ function SettingsPanel({
       </Card>
 
       <Card>
-        <CardContent className="flex flex-col gap-4 p-6">
+        <CardContent className="flex flex-col gap-4 p-4">
           <div>
-            <p className="text-sm font-medium text-foreground">Danger zone</p>
+            <p className="text-[12px] font-medium text-foreground">Danger zone</p>
             <p className="text-xs text-muted-foreground">
               Deleting the organization removes memberships and invites. Shared
               services stay in place so admins can rescue credentials.
@@ -1023,8 +1173,8 @@ function SettingsPanel({
           </div>
           <div className="flex justify-end">
             <Button variant="destructive" onClick={onDelete}>
-              <Trash2 className="mr-2 h-4 w-4" />
-              Delete organization
+              <ButtonIcon variant="destructive"><Trash2 className="h-4 w-4 text-destructive" /></ButtonIcon>
+              Delete Organization
             </Button>
           </div>
         </CardContent>

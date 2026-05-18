@@ -78,7 +78,7 @@ export function NodeScopeCard({
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
           <HardDrive className="h-4 w-4 text-primary" />
-          <CardTitle className="text-sm">Node Scope</CardTitle>
+          <CardTitle className="text-[15px]">Node Scope</CardTitle>
         </div>
         <CardDescription>
           Which nodes this key can route through
@@ -93,7 +93,7 @@ export function NodeScopeCard({
                 checked={allowAll}
                 onCheckedChange={(checked) => setAllowAll(checked === true)}
               />
-              <Label htmlFor="allow-all-nodes" className="text-sm">
+              <Label htmlFor="allow-all-nodes" className="text-[12px]">
                 Allow all nodes
               </Label>
             </div>
@@ -132,44 +132,44 @@ export function NodeScopeCard({
               </div>
             )}
 
-            <div className="flex gap-2">
+            <div className="flex justify-end gap-2">
               <Button
-                size="sm"
+                variant="primary"
                 onClick={handleSave}
                 disabled={updateApiKey.isPending}
               >
                 Save
               </Button>
-              <Button size="sm" variant="outline" onClick={handleCancel}>
+              <Button variant="outline" onClick={handleCancel}>
                 Cancel
               </Button>
             </div>
           </div>
         ) : (
-          <div className="space-y-2">
-            {allowAllNodes ? (
-              <Badge variant="outline">All nodes</Badge>
-            ) : allowedNodes.length > 0 ? (
-              <div className="flex flex-wrap gap-1">
-                {allowedNodes.map((n) => (
-                  <Badge key={n.id} variant="secondary" className="text-xs">
-                    {n.name}
-                  </Badge>
-                ))}
-              </div>
-            ) : (
-              <Badge variant="outline">Direct only (no nodes)</Badge>
-            )}
+          <div className="flex items-center justify-between">
             <div>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => setEditing(true)}
-              >
-                <Pencil className="mr-2 h-3 w-3" />
-                Edit Scope
-              </Button>
+              {allowAllNodes ? (
+                <Badge variant="secondary">All nodes</Badge>
+              ) : allowedNodes.length > 0 ? (
+                <div className="flex flex-wrap gap-1">
+                  {allowedNodes.map((n) => (
+                    <Badge key={n.id} variant="secondary" className="text-xs">
+                      {n.name}
+                    </Badge>
+                  ))}
+                </div>
+              ) : (
+                <Badge variant="secondary">Direct only (no nodes)</Badge>
+              )}
             </div>
+            <Button
+              size="icon"
+              variant="ghost"
+              className="h-6 w-6 shrink-0"
+              onClick={() => setEditing(true)}
+            >
+              <Pencil className="h-3 w-3" />
+            </Button>
           </div>
         )}
       </CardContent>

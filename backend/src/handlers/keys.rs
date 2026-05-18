@@ -8,16 +8,84 @@ use utoipa::ToSchema;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
+use crate::models::downstream_service::{
+    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
+};
 use crate::models::ssh_auth_mode::SshAuthMode;
 use crate::models::user_api_key::UserApiKey;
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
 use crate::models::ws_frame_injection::WsFrameInjection;
 use crate::mw::auth::AuthUser;
 use crate::services::{
-    catalog_service, credential_push_service, lark_permission, node_service, org_service,
-    unified_key_service, user_api_key_service, user_endpoint_service, user_service_service,
+    catalog_service, cloud_credential_verify, credential_push_service, lark_permission,
+    node_service, org_service, unified_key_service, user_api_key_service, user_endpoint_service,
+    user_service_service,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
+
+/// At-creation probe for cloud-billing auth methods. Resolves the
+/// effective `(auth_method, base_url)` for the create request — from
+/// the catalog if a `service_slug` is supplied, else from the inline
+/// `auth_method` + `endpoint_url` overrides — and pings the upstream
+/// once. Hard-fails on 4xx with a hint pointing the user at the
+/// likely IAM gap; lets 5xx / network / timeout through so a flaky
+/// cloud doesn't block credential adds. NyxID#716.
+async fn verify_cloud_credential_against_catalog(
+    state: &AppState,
+    body: &CreateKeyRequest,
+    credential: &str,
+) -> AppResult<()> {
+    // Resolve auth_method + base_url from the catalog entry (if a slug
+    // was supplied) or from the inline overrides. We need both to
+    // probe — auth_method picks the verifier, base_url is the target.
+    let (auth_method, base_url) = match (body.service_slug.as_deref(), body.auth_method.as_deref())
+    {
+        (Some(slug), explicit_method) => {
+            let Some(svc) = state
+                .db
+                .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+                .find_one(doc! { "slug": slug, "is_active": true })
+                .await?
+            else {
+                // Catalog lookup miss: let `unified_key_service::create_key`
+                // produce the canonical "not found" error.
+                return Ok(());
+            };
+            let method = explicit_method.unwrap_or(svc.auth_method.as_str());
+            let url = body
+                .endpoint_url
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(svc.base_url.as_str())
+                .to_string();
+            (method.to_string(), url)
+        }
+        (None, Some(method)) => {
+            let Some(url) = body.endpoint_url.as_deref().filter(|s| !s.is_empty()) else {
+                return Ok(());
+            };
+            (method.to_string(), url.to_string())
+        }
+        _ => return Ok(()),
+    };
+
+    match auth_method.as_str() {
+        "aws_sigv4" => {
+            cloud_credential_verify::verify_aws_sigv4(&state.http_client, credential, &base_url)
+                .await
+        }
+        "gcp_service_account" => {
+            cloud_credential_verify::verify_gcp_service_account(
+                &state.http_client,
+                &state.gcp_token_cache,
+                credential,
+                &base_url,
+            )
+            .await
+        }
+        _ => Ok(()),
+    }
+}
 
 /// Resolve a `/keys/{id_or_slug}` path component to a UserService row,
 /// walking org membership in the same priority order as the proxy's
@@ -649,6 +717,15 @@ pub async fn create_key(
     let credential = body.credential.as_deref().unwrap_or("");
     if let Some(ref rules) = body.ws_frame_injections {
         crate::services::ws_frame_injector::validate_rules(rules)?;
+    }
+
+    // Cloud-billing credentials: probe the upstream once at add-time so
+    // a malformed access key / wrong AWS account / missing GCP role
+    // fails fast here instead of an hour later when a `/daily` skill
+    // runs. Skipped for node-routed creates (credential won't land on
+    // the backend) and when no credential was supplied (OAuth flows).
+    if body.node_id.as_deref().is_none_or(|n| n.is_empty()) && !credential.is_empty() {
+        verify_cloud_credential_against_catalog(&state, &body, credential).await?;
     }
 
     // Build SSH params if SSH-specific fields are present

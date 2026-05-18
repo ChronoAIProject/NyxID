@@ -5,13 +5,14 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { toast } from "sonner";
 import {
   AlertTriangle,
-  Bot,
   ChevronLeft,
   ChevronRight,
   Copy,
   Plus,
   Search,
 } from "lucide-react";
+import { RoboticArmIcon } from "@/components/icons/empty-state";
+import { ErrorBanner } from "@/components/shared/error-banner";
 import {
   useCreateServiceAccount,
   useServiceAccounts,
@@ -23,7 +24,7 @@ import {
 import { ApiError } from "@/lib/api-client";
 import { copyToClipboard, formatDate } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -72,7 +73,7 @@ export function OrgServiceAccountsTab({
   const [createdResult, setCreatedResult] =
     useState<CreateServiceAccountResponse | null>(null);
 
-  const { data, isLoading, error } = useServiceAccounts(
+  const { data, isLoading, error, refetch } = useServiceAccounts(
     page,
     PER_PAGE,
     search,
@@ -162,14 +163,13 @@ export function OrgServiceAccountsTab({
               className="pl-9"
             />
           </div>
-          <Button type="submit" variant="outline" size="sm">
+          <Button type="submit" variant="outline">
             Search
           </Button>
           {search && (
             <Button
               type="button"
               variant="ghost"
-              size="sm"
               onClick={() => {
                 setSearchInput("");
                 setSearch("");
@@ -180,8 +180,8 @@ export function OrgServiceAccountsTab({
             </Button>
           )}
         </form>
-        <Button size="sm" onClick={openCreateDialog}>
-          <Plus className="mr-1 h-4 w-4" />
+        <Button variant="primary" onClick={openCreateDialog}>
+          <ButtonIcon><Plus className="h-4 w-4" /></ButtonIcon>
           Create Service Account
         </Button>
       </div>
@@ -196,24 +196,26 @@ export function OrgServiceAccountsTab({
           ))}
         </div>
       ) : error ? (
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-          <Bot className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
-            Failed to load service accounts owned by {orgName}.
-          </p>
+        <div className="py-12">
+          <ErrorBanner message={`Failed to load service accounts owned by ${orgName}.`} onRetry={refetch} />
         </div>
       ) : accounts.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-          <Bot className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
-            {search
-              ? `No service accounts owned by ${orgName} match your search.`
-              : `No service accounts owned by ${orgName}.`}
-          </p>
+        <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+          <RoboticArmIcon className="h-64 w-64 text-muted-foreground/30" />
+          <div className="space-y-1">
+            <p className="text-[12px] font-medium text-muted-foreground/30">
+              {search ? "No Results" : "No Service Accounts"}
+            </p>
+            <p className="text-xs text-muted-foreground/30">
+              {search
+                ? `No service accounts owned by ${orgName} match your search.`
+                : `No service accounts owned by ${orgName}.`}
+            </p>
+          </div>
         </div>
       ) : (
         <>
-          <div className="rounded-md border">
+          <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -249,7 +251,7 @@ export function OrgServiceAccountsTab({
                     }}
                   >
                     <TableCell className="font-medium">{sa.name}</TableCell>
-                    <TableCell className="font-mono text-xs">
+                    <TableCell className="text-xs">
                       {sa.client_id}
                     </TableCell>
                     <TableCell>
@@ -276,7 +278,7 @@ export function OrgServiceAccountsTab({
           </div>
 
           <div className="flex items-center justify-between">
-            <p className="text-sm text-muted-foreground">
+            <p className="text-[11px] text-text-tertiary">
               Showing {String((page - 1) * PER_PAGE + 1)}-
               {String(Math.min(page * PER_PAGE, total))} of {String(total)}{" "}
               service accounts
@@ -284,19 +286,17 @@ export function OrgServiceAccountsTab({
             <div className="flex items-center gap-2">
               <Button
                 variant="outline"
-                size="sm"
                 disabled={page <= 1}
                 onClick={() => setPage((current) => Math.max(1, current - 1))}
               >
                 <ChevronLeft className="h-4 w-4" />
                 Previous
               </Button>
-              <span className="text-sm text-muted-foreground">
+              <span className="text-[11px] text-text-tertiary">
                 Page {String(page)} of {String(totalPages)}
               </span>
               <Button
                 variant="outline"
-                size="sm"
                 disabled={page >= totalPages}
                 onClick={() => setPage((current) => current + 1)}
               >
@@ -320,10 +320,10 @@ export function OrgServiceAccountsTab({
           {createdResult ? (
             <div className="space-y-4">
               <OrgReadOnlyRow orgName={orgName} />
-              <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3">
+              <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3">
                 <div className="flex items-start gap-2">
                   <AlertTriangle className="mt-0.5 h-4 w-4 text-amber-600" />
-                  <p className="text-sm text-amber-700 dark:text-amber-400">
+                  <p className="text-[12px] text-amber-700 dark:text-amber-400">
                     Save these credentials now. The client secret cannot be
                     retrieved later.
                   </p>
@@ -342,7 +342,7 @@ export function OrgServiceAccountsTab({
               />
 
               <DialogFooter>
-                <Button onClick={closeCreateDialog}>Done</Button>
+                <Button variant="primary" onClick={closeCreateDialog}>Done</Button>
               </DialogFooter>
             </div>
           ) : (
@@ -355,7 +355,7 @@ export function OrgServiceAccountsTab({
               >
                 <OrgReadOnlyRow orgName={orgName} />
                 {createForm.formState.errors.root && (
-                  <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
+                  <div className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive">
                     {createForm.formState.errors.root.message}
                   </div>
                 )}
@@ -441,7 +441,7 @@ export function OrgServiceAccountsTab({
                   >
                     Cancel
                   </Button>
-                  <Button type="submit" isLoading={createMutation.isPending}>
+                  <Button variant="primary" type="submit" isLoading={createMutation.isPending} disabled={!createForm.formState.isValid || createMutation.isPending}>
                     Create
                   </Button>
                 </DialogFooter>
@@ -467,7 +467,7 @@ function CredentialRow({
     <div>
       <p className="mb-1 text-xs font-medium text-muted-foreground">{label}</p>
       <div className="flex items-center gap-2">
-        <code className="flex-1 break-all rounded bg-muted px-2 py-1 font-mono text-sm">
+        <code className="flex-1 break-all rounded bg-muted px-2 py-1 font-mono text-[12px]">
           {value}
         </code>
         <Button

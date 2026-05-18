@@ -41,7 +41,6 @@ import {
   AdminGroupDetailPage,
   AdminServiceAccountsPage,
   AdminServiceAccountDetailPage,
-  AuthorizationsPage,
   ConsentsPage,
   DeveloperAppsPage,
   DeveloperAppDetailPage,
@@ -74,13 +73,14 @@ import {
   BlogIndexPage,
   BlogDetailPage,
   BlogPreviewPage,
+  DesignSystemPage,
 } from "@/pages/lazy";
 
 // ── Route tree ──
 
 const rootRoute = createRootRoute({
   component: () => (
-    <TooltipProvider>
+    <TooltipProvider delayDuration={200}>
       <ChunkErrorBoundary>
         <Suspense>
           <Outlet />
@@ -226,7 +226,17 @@ const sshTerminalRoute = createRoute({
 const dashboardLayout = createRoute({
   id: "dashboard",
   getParentRoute: () => rootRoute,
-  beforeLoad: () => {
+  beforeLoad: async () => {
+    if (import.meta.env.DEV) {
+      const { isMockMode, getMockUser } = await import("./lib/mock-data");
+      if (isMockMode()) {
+        const store = useAuthStore.getState();
+        if (!store.user) {
+          store.setUser(getMockUser() as import("./types/api").User);
+        }
+        return;
+      }
+    }
     const { isAuthenticated, isLoading } = useAuthStore.getState();
     if (!isAuthenticated && !isLoading) {
       // Preserve the deep link (e.g. `/orgs/join/<nonce>`) so sign-in can
@@ -252,6 +262,9 @@ const landingRoute = createRoute({
   path: "/",
   getParentRoute: () => rootRoute,
   beforeLoad: () => {
+    if (import.meta.env.DEV && new URLSearchParams(window.location.search).has("mock")) {
+      throw redirect({ to: "/dashboard", search: { mock: "" } });
+    }
     const { isAuthenticated, isLoading } = useAuthStore.getState();
     if (isAuthenticated && !isLoading) {
       throw redirect({ to: "/dashboard" });
@@ -366,6 +379,11 @@ const settingsRoute = createRoute({
   path: "/settings",
   getParentRoute: () => dashboardLayout,
   component: SettingsPage,
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { tab?: string } => ({
+    ...(typeof search.tab === "string" ? { tab: search.tab } : {}),
+  }),
 });
 
 const guideRoute = createRoute({
@@ -378,12 +396,19 @@ const consentsRoute = createRoute({
   path: "/settings/consents",
   getParentRoute: () => dashboardLayout,
   component: ConsentsPage,
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { tab?: string } => ({
+    ...(typeof search.tab === "string" ? { tab: search.tab } : {}),
+  }),
 });
 
-const authorizationsRoute = createRoute({
+const authorizationsRedirectRoute = createRoute({
   path: "/settings/authorizations",
   getParentRoute: () => dashboardLayout,
-  component: AuthorizationsPage,
+  beforeLoad: () => {
+    throw redirect({ to: "/settings/consents", search: { tab: "authorizations" } });
+  },
 });
 
 const developerAppsRoute = createRoute({
@@ -402,12 +427,29 @@ const integrationGuideRoute = createRoute({
   path: "/integration-guide",
   getParentRoute: () => dashboardLayout,
   component: IntegrationGuidePage,
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { tab?: string } => ({
+    ...(typeof search.tab === "string" ? { tab: search.tab } : {}),
+  }),
 });
 
 const aiSetupRoute = createRoute({
   path: "/ai-setup",
   getParentRoute: () => dashboardLayout,
   component: AiSetupPage,
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { skill?: string; tool?: string } => ({
+    ...(typeof search.skill === "string" ? { skill: search.skill } : {}),
+    ...(typeof search.tool === "string" ? { tool: search.tool } : {}),
+  }),
+});
+
+const designSystemRoute = createRoute({
+  path: "/design-system",
+  getParentRoute: () => rootRoute,
+  component: DesignSystemPage,
 });
 
 const notificationSettingsRoute = createRoute({
@@ -448,14 +490,17 @@ const keysRoute = createRoute({
   // `/keys?tab=services&slug=<catalog-slug>` needs `slug` here
   // or `useSearch()` inside `KeysPage` will never observe it and
   // the auto-open-AddKeyDialog flow silently degrades to the
-  // generic catalog grid.
+  // generic catalog grid. `action` is whitelisted for the same
+  // reason — the dashboard deep-links `/keys?action=add-service`
+  // and `/keys?action=create-key` to auto-open the add dialogs.
   validateSearch: (
     search: Record<string, unknown>,
-  ): { tab?: string; slug?: string } => ({
+  ): { tab?: string; slug?: string; action?: string } => ({
     ...(typeof search.tab === "string" ? { tab: search.tab } : {}),
     ...(typeof search.slug === "string" && search.slug.length > 0
       ? { slug: search.slug }
       : {}),
+    ...(typeof search.action === "string" ? { action: search.action } : {}),
   }),
   component: KeysPage,
 });
@@ -500,6 +545,11 @@ const orgDetailRoute = createRoute({
   path: "/orgs/$orgId",
   getParentRoute: () => dashboardLayout,
   component: OrgDetailPage,
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { tab?: string } => ({
+    ...(typeof search.tab === "string" ? { tab: search.tab } : {}),
+  }),
 });
 
 const orgServiceAccountDetailRoute = createRoute({
@@ -617,6 +667,7 @@ const routeTree = rootRoute.addChildren([
   cliAuthRoute,
   cliPairRoute,
   sshTerminalRoute,
+  designSystemRoute,
   dashboardLayout.addChildren([
     dashboardIndexRoute,
     apiKeysRedirectRoute,
@@ -635,7 +686,7 @@ const routeTree = rootRoute.addChildren([
     ]),
     settingsRoute,
     consentsRoute,
-    authorizationsRoute,
+    authorizationsRedirectRoute,
     guideRoute,
     developerAppsRoute,
     developerAppDetailRoute,

@@ -24,6 +24,8 @@ import {
 import { parseAllowedPrincipals } from "@/lib/ssh";
 import { ApiError } from "@/lib/api-client";
 import { ServiceCard } from "@/components/dashboard/service-card";
+import { PageHeader } from "@/components/shared/page-header";
+import { AddCtaButton } from "@/components/shared/add-cta-button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import {
@@ -33,7 +35,6 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
 } from "@/components/ui/dialog";
 import {
   Form,
@@ -53,7 +54,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import { Plus, Server } from "lucide-react";
+import { BrickWallIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
 
 export function ServiceListPage() {
@@ -129,11 +130,9 @@ export function ServiceListPage() {
         params: { serviceId: created.id },
       });
     } catch (error) {
-      if (error instanceof ApiError) {
-        form.setError("root", { message: error.message });
-      } else {
-        toast.error("Failed to create service");
-      }
+      toast.error(
+        error instanceof ApiError ? error.message : "Failed to create service",
+      );
     }
   }
 
@@ -151,22 +150,15 @@ export function ServiceListPage() {
 
   return (
     <div className="space-y-8">
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <h2 className="font-display text-3xl font-normal tracking-tight md:text-5xl">
-            Services
-          </h2>
-          <p className="text-sm text-muted-foreground">
-            Manage downstream services and their authentication.
-          </p>
-        </div>
-        <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-          <DialogTrigger asChild>
-            <Button className="w-fit">
-              <Plus className="mr-2 h-4 w-4" />
-              Create Service
-            </Button>
-          </DialogTrigger>
+      <PageHeader
+        title="Services"
+        description="Manage downstream services and their authentication."
+        actions={
+          <AddCtaButton label="Create Service" onClick={() => setCreateOpen(true)} />
+        }
+      />
+
+      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
           <DialogContent>
             <DialogHeader>
               <DialogTitle>Create Service</DialogTitle>
@@ -181,11 +173,6 @@ export function ServiceListPage() {
                 onSubmit={form.handleSubmit(onSubmit)}
                 className="space-y-4"
               >
-                {form.formState.errors.root && (
-                  <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
-                    {form.formState.errors.root.message}
-                  </div>
-                )}
 
                 <FormField
                   control={form.control}
@@ -247,7 +234,7 @@ export function ServiceListPage() {
                       <FormLabel>Description</FormLabel>
                       <FormControl>
                         <textarea
-                          className="flex min-h-[60px] w-full rounded-[10px] border border-input bg-transparent px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                          className="flex min-h-[60px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-[12px] placeholder:text-muted-foreground focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
                           placeholder="Optional description"
                           {...field}
                         />
@@ -297,10 +284,10 @@ export function ServiceListPage() {
                       />
                     </div>
 
-                    <div className="flex items-center justify-between rounded-[10px] border border-border p-3">
+                    <div className="flex items-center justify-between rounded-lg border border-border p-3">
                       <Label
                         htmlFor="create-ssh-cert-auth"
-                        className="text-sm font-normal"
+                        className="text-[12px] font-normal"
                       >
                         Enable short-lived SSH certificates
                       </Label>
@@ -543,15 +530,14 @@ export function ServiceListPage() {
                   >
                     Cancel
                   </Button>
-                  <Button type="submit" isLoading={createMutation.isPending}>
+                  <Button variant="primary" type="submit" isLoading={createMutation.isPending}>
                     Create service
                   </Button>
                 </DialogFooter>
               </form>
             </Form>
           </DialogContent>
-        </Dialog>
-      </div>
+      </Dialog>
 
       {isLoading ? (
         <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
@@ -560,11 +546,14 @@ export function ServiceListPage() {
           ))}
         </div>
       ) : !services || services.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-          <Server className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
-            No services yet. Add a service to get started.
-          </p>
+        <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+          <BrickWallIcon className="h-64 w-64 text-muted-foreground/30" />
+          <div className="space-y-1">
+            <p className="text-[12px] font-medium text-muted-foreground/30">No services yet</p>
+            <p className="text-xs text-muted-foreground/30">
+              Add a service to get started.
+            </p>
+          </div>
         </div>
       ) : (
         <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">

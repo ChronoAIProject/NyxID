@@ -51,7 +51,7 @@ export function DisconnectBanner({
     <div
       role="alert"
       aria-live="polite"
-      className="mb-4 flex items-start gap-3 rounded-[10px] border border-destructive/50 bg-destructive/10 px-4 py-3 text-[13px] text-foreground"
+      className="mb-4 flex items-start gap-3 rounded-lg border border-destructive/50 bg-destructive/10 px-4 py-3 text-[12px] text-foreground"
     >
       <Icon
         className={
