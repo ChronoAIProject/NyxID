@@ -1359,7 +1359,10 @@ function DeviceCodeStep({
   catalogEntry,
   ensureKey,
   onKeyCleared,
-  onBack,
+  // Renamed locally so the in-component `onBack` (defined below) can wrap it
+  // with placeholder cleanup. Every existing `onClick={onBack}` in the JSX
+  // below now goes through the wrapper without further changes (NyxID#706).
+  onBack: parentOnBack,
   onComplete,
   targetOrgId,
 }: {
@@ -1382,9 +1385,17 @@ function DeviceCodeStep({
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const countdownTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const isMountedRef = useRef(true);
+  // Mirrors `createdKeyId` for the unmount-time DELETE. The closure inside
+  // useEffect's cleanup can only see values captured at mount, so a ref is the
+  // only way to reach the *current* placeholder id at teardown (NyxID#706).
+  const createdKeyIdRef = useRef<string | null>(null);
 
   const initiateMutation = useInitiateDeviceCode();
   const pollMutation = usePollDeviceCode();
+
+  useEffect(() => {
+    createdKeyIdRef.current = createdKeyId;
+  }, [createdKeyId]);
 
   useEffect(() => {
     isMountedRef.current = true;
@@ -1398,8 +1409,58 @@ function DeviceCodeStep({
         clearInterval(countdownTimerRef.current);
         countdownTimerRef.current = null;
       }
+      // Fire-and-forget cleanup of any still-pending placeholder. The
+      // `?only_if_pending=true` guard makes this a no-op if the user happened
+      // to complete authorization in the same tick (the `complete` poll
+      // branch clears the ref so the typical success path skips it entirely).
+      const orphan = createdKeyIdRef.current;
+      if (orphan) {
+        createdKeyIdRef.current = null;
+        void api
+          .delete<void>(
+            `/keys/${encodeURIComponent(orphan)}?only_if_pending=true`,
+          )
+          .catch(() => {
+            // Best effort only.
+          });
+      }
     };
   }, []);
+
+  // User-driven exit paths (Back / Cancel buttons, `expired`/`denied` poll
+  // outcomes). Awaits the DELETE so the parent's `authKey` state is consistent
+  // before the user can re-enter the step; the unmount cleanup is the
+  // backstop for tab-close / dialog-X.
+  //
+  // Wrapped in `useCallback` so `schedulePoll` (which references it inside its
+  // poll-success switch) doesn't see a fresh identity every render. The deps
+  // intentionally exclude `createdKeyId` — we read the ref-mirrored value
+  // first, so the callback stays stable across in-flight setState updates.
+  const cleanupAndForgetKey = useCallback(async () => {
+    const id = createdKeyIdRef.current;
+    if (!id) return;
+    createdKeyIdRef.current = null;
+    if (isMountedRef.current) {
+      setCreatedKeyId(null);
+    }
+    onKeyCleared();
+    try {
+      await api.delete<void>(
+        `/keys/${encodeURIComponent(id)}?only_if_pending=true`,
+      );
+    } catch {
+      // Best effort only — the lazy reconciler in the backend will catch
+      // any orphan that survives this call.
+    }
+  }, [onKeyCleared]);
+
+  // Wrapper around the parent's `onBack` that first cleans up the
+  // `pending_auth` placeholder. Named `onBack` so the existing JSX
+  // (`onClick={onBack}`) picks it up without further edits.
+  function onBack() {
+    void cleanupAndForgetKey();
+    parentOnBack();
+  }
 
   useEffect(() => {
     if (flowStep !== "show_code" || secondsRemaining <= 0) return;
@@ -1469,13 +1530,20 @@ function DeviceCodeStep({
                   );
                   break;
                 case "complete":
+                  // Suppress unmount cleanup — placeholder is now `active`.
+                  createdKeyIdRef.current = null;
                   setFlowStep("success");
                   break;
                 case "expired":
+                  // Tear down the placeholder so a "Try Again" mints a fresh
+                  // one instead of reusing a row whose `OAuthState` the
+                  // backend already deleted (NyxID#706).
+                  void cleanupAndForgetKey();
                   setErrorMessage("Authentication expired. Please try again.");
                   setFlowStep("error");
                   break;
                 case "denied":
+                  void cleanupAndForgetKey();
                   setErrorMessage("Authentication was denied.");
                   setFlowStep("error");
                   break;
@@ -1490,7 +1558,12 @@ function DeviceCodeStep({
         );
       }, interval * 1000);
     },
-    [pollMutation],
+    // `cleanupAndForgetKey` is wrapped in `useCallback` above with stable
+    // deps (`onKeyCleared`), so `schedulePoll` stays stable as long as the
+    // parent doesn't swap that prop. Listed here to satisfy
+    // react-hooks/exhaustive-deps now that the poll-success switch invokes
+    // it (NyxID#706).
+    [pollMutation, cleanupAndForgetKey],
   );
 
   // Keep the ref in sync with the latest `schedulePoll` identity so recursive

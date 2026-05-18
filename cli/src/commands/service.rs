@@ -1392,6 +1392,24 @@ fn parse_device_code_deadline(initiate: &Value) -> std::time::Instant {
     std::time::Instant::now() + std::time::Duration::from_secs(15 * 60)
 }
 
+/// Single in-flight device-code session. A new one is minted on every renewal
+/// so the user always sees a fresh `user_code` + deadline.
+struct DeviceCodeSession {
+    state: String,
+    deadline: std::time::Instant,
+    interval: u64,
+    user_code: String,
+    verification_uri: String,
+}
+
+/// Terminal outcome of one round of polling. The caller decides whether to
+/// renew (Expired in TTY mode) or bail (everything else).
+enum PollOutcome {
+    Authorized,
+    Expired,
+    Denied,
+}
+
 async fn run_device_code_add(
     api: &mut ApiClient,
     slug: Option<String>,
@@ -1441,9 +1459,10 @@ async fn run_device_code_add(
         );
     }
     let key_result: Value = api.post("/keys", &Value::Object(key_body)).await?;
-    let key_id = key_result["id"]
+    let key_id: String = key_result["id"]
         .as_str()
-        .ok_or_else(|| anyhow::anyhow!("Created key response did not include an id"))?;
+        .ok_or_else(|| anyhow::anyhow!("Created key response did not include an id"))?
+        .to_string();
 
     if options.via_node.is_some() {
         print_add_result(api, &key_result, auth.output)?;
@@ -1454,13 +1473,123 @@ async fn run_device_code_add(
         return Ok(());
     }
 
-    let provider_id = catalog["provider_config_id"]
+    let provider_id: String = catalog["provider_config_id"]
         .as_str()
-        .ok_or_else(|| anyhow::anyhow!("No provider found for slug: {slug}"))?;
+        .ok_or_else(|| anyhow::anyhow!("No provider found for slug: {slug}"))?
+        .to_string();
 
-    // Initiate device code flow. Include `target_org_id` when present so the
-    // provider token lands under the org's user_id (see the OAuth branch
-    // above for the invariant).
+    // Race the device-code flow against SIGINT so a ctrl+C while the user is
+    // staring at an unredeemed code (or just gave up) routes through the
+    // single cleanup path below instead of orphaning the `pending_auth`
+    // placeholder (NyxID#706).
+    let flow_outcome = tokio::select! {
+        biased;
+        _ = tokio::signal::ctrl_c() => {
+            clear_status_line(std::io::stderr().is_terminal());
+            eprintln!("Cancelled. Cleaning up...");
+            Err(anyhow::anyhow!("Device code authorization cancelled"))
+        }
+        r = run_device_code_flow(
+            api,
+            &provider_id,
+            &key_id,
+            options.additional_scopes,
+            options.target_org_id,
+        ) => r,
+    };
+
+    match flow_outcome {
+        Ok(()) => {
+            eprintln!("Authorization successful!");
+            eprintln!();
+            let key_result: Value = api.get(&format!("/keys/{key_id}")).await?;
+            match auth.output {
+                crate::cli::OutputFormat::Json => {
+                    println!("{}", serde_json::to_string_pretty(&key_result)?);
+                }
+                crate::cli::OutputFormat::Table => {
+                    print_add_result(api, &key_result, auth.output)?;
+                }
+            }
+            Ok(())
+        }
+        Err(e) => {
+            cleanup_pending_key(api, &key_id).await;
+            Err(e)
+        }
+    }
+}
+
+/// Drives one or more device-code sessions until the user either authorizes,
+/// is denied, declines renewal, or runs out of attempts. The placeholder
+/// `UserApiKey` is reused across renewals — only the `OAuthState` is fresh
+/// each iteration.
+async fn run_device_code_flow(
+    api: &mut ApiClient,
+    provider_id: &str,
+    key_id: &str,
+    additional_scopes: &[String],
+    target_org_id: Option<&str>,
+) -> Result<()> {
+    let is_tty = std::io::stderr().is_terminal();
+    let mut iteration = 0_u8;
+
+    loop {
+        let session =
+            issue_device_code(api, provider_id, key_id, additional_scopes, target_org_id).await?;
+
+        if iteration == 0 {
+            eprintln!("Device Code Authorization");
+        } else {
+            eprintln!();
+            eprintln!("Requesting a new device code...");
+        }
+        iteration = iteration.saturating_add(1);
+        eprintln!();
+        eprintln!("  Code: {}", session.user_code);
+        eprintln!("  URL:  {}", session.verification_uri);
+        eprintln!();
+        eprintln!("Enter the code at the URL above, then wait for authorization...");
+
+        let _ = crate::browser::open_browser(&session.verification_uri);
+
+        match poll_device_code_loop(api, provider_id, &session, is_tty).await? {
+            PollOutcome::Authorized => return Ok(()),
+            PollOutcome::Expired => {
+                clear_status_line(is_tty);
+                if !is_tty {
+                    bail!(
+                        "Device code authorization expired before completion. \
+                         Re-run the command to start a new authorization."
+                    );
+                }
+                let renew = tokio::task::spawn_blocking(prompt_renew_blocking)
+                    .await
+                    .context("renewal prompt task panicked")??;
+                if !renew {
+                    bail!("Device code authorization aborted.");
+                }
+                // Loop iterates with a fresh code.
+            }
+            PollOutcome::Denied => {
+                clear_status_line(is_tty);
+                bail!("Device code authorization was denied on the provider side.");
+            }
+        }
+    }
+}
+
+/// POST the device-code initiate endpoint and pack the response into a
+/// session. Threads `key_id` through so the eventual completion writes onto
+/// THIS `UserApiKey` (multi-connection path) instead of aliasing onto the
+/// legacy `user_provider_tokens` row.
+async fn issue_device_code(
+    api: &mut ApiClient,
+    provider_id: &str,
+    key_id: &str,
+    additional_scopes: &[String],
+    target_org_id: Option<&str>,
+) -> Result<DeviceCodeSession> {
     let mut initiate_path = format!("/providers/{provider_id}/connect/device-code/initiate");
     let mut first_param = true;
     let mut append = |path: &mut String, key: &str, val: &str| {
@@ -1470,53 +1599,57 @@ async fn run_device_code_add(
         path.push('=');
         path.push_str(&urlencoding::encode(val));
     };
-    // Multi-connection: same key_id threading as `run_oauth_add` — see
-    // that function's comment for why this is required. Without it the
-    // device-code completion writes to `user_provider_tokens` (legacy
-    // path) and the just-minted multi-connection placeholder is
-    // orphaned until reconcile Pass 2 marks it `failed`.
     append(&mut initiate_path, "key_id", key_id);
-    if !options.additional_scopes.is_empty() {
-        append(
-            &mut initiate_path,
-            "scope",
-            &options.additional_scopes.join(","),
-        );
+    if !additional_scopes.is_empty() {
+        append(&mut initiate_path, "scope", &additional_scopes.join(","));
     }
-    if let Some(org_id) = options.target_org_id {
+    if let Some(org_id) = target_org_id {
         append(&mut initiate_path, "target_org_id", org_id);
     }
     let initiate: Value = api.post(&initiate_path, &serde_json::json!({})).await?;
 
-    let user_code = initiate["user_code"].as_str().unwrap_or("-");
+    let user_code = initiate["user_code"].as_str().unwrap_or("-").to_string();
     let verification_uri = initiate["verification_uri"]
         .as_str()
         .or(initiate["verification_url"].as_str())
-        .unwrap_or("-");
+        .unwrap_or("-")
+        .to_string();
     let state = initiate["state"]
         .as_str()
-        .ok_or_else(|| anyhow::anyhow!("Device code initiate response did not include state"))?;
-    let mut interval = initiate["interval"]
+        .ok_or_else(|| anyhow::anyhow!("Device code initiate response did not include state"))?
+        .to_string();
+    let interval = initiate["interval"]
         .as_u64()
         .or_else(|| initiate["interval"].as_str().and_then(|s| s.parse().ok()))
         .unwrap_or(5);
     let deadline = parse_device_code_deadline(&initiate);
 
-    eprintln!("Device Code Authorization");
-    eprintln!();
-    eprintln!("  Code: {user_code}");
-    eprintln!("  URL:  {verification_uri}");
-    eprintln!();
-    eprintln!("Enter the code at the URL above, then wait for authorization...");
+    Ok(DeviceCodeSession {
+        state,
+        deadline,
+        interval,
+        user_code,
+        verification_uri,
+    })
+}
 
-    let _ = crate::browser::open_browser(verification_uri);
-
-    // Poll for completion
-    let poll_body = serde_json::json!({ "state": state });
+async fn poll_device_code_loop(
+    api: &mut ApiClient,
+    provider_id: &str,
+    session: &DeviceCodeSession,
+    is_tty: bool,
+) -> Result<PollOutcome> {
+    let poll_body = serde_json::json!({ "state": &session.state });
     let poll_path = format!("/providers/{provider_id}/connect/device-code/poll");
+    let mut interval = session.interval;
     let mut consecutive_poll_errors = 0_u8;
 
-    while std::time::Instant::now() < deadline {
+    loop {
+        if std::time::Instant::now() >= session.deadline {
+            return Ok(PollOutcome::Expired);
+        }
+        redraw_status_line(is_tty, session.deadline);
+
         tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
 
         match api.post::<Value, _>(&poll_path, &poll_body).await {
@@ -1527,25 +1660,14 @@ async fn run_device_code_add(
                     || status == "authorized"
                     || result["access_token"].is_string()
                 {
-                    eprintln!("Authorization successful!");
-                    eprintln!();
-                    let key_result: Value = api.get(&format!("/keys/{key_id}")).await?;
-
-                    match auth.output {
-                        crate::cli::OutputFormat::Json => {
-                            println!("{}", serde_json::to_string_pretty(&key_result)?);
-                        }
-                        crate::cli::OutputFormat::Table => {
-                            print_add_result(api, &key_result, auth.output)?;
-                        }
-                    }
-                    return Ok(());
+                    clear_status_line(is_tty);
+                    return Ok(PollOutcome::Authorized);
                 }
                 if status == "expired" {
-                    bail!("Device code authentication expired before completion");
+                    return Ok(PollOutcome::Expired);
                 }
                 if status == "denied" {
-                    bail!("Device code authentication was denied");
+                    return Ok(PollOutcome::Denied);
                 }
                 if status == "slow_down" {
                     interval = result["interval"]
@@ -1553,27 +1675,80 @@ async fn run_device_code_add(
                         .or_else(|| result["interval"].as_str().and_then(|s| s.parse().ok()))
                         .unwrap_or(interval + 5);
                 }
-                // Still pending, continue polling
-                eprint!(".");
-                std::io::stderr().flush()?;
+                // Still pending — loop continues; redraw refreshes next tick.
             }
             Err(_) => {
                 consecutive_poll_errors += 1;
-                eprint!(".");
-                std::io::stderr().flush()?;
                 if consecutive_poll_errors >= 30 {
-                    eprintln!();
+                    clear_status_line(is_tty);
                     bail!("device code polling failed repeatedly — check your network and re-run");
                 }
+                // Transient network blip — loop continues silently.
             }
         }
     }
+}
 
-    eprintln!();
-    bail!(
-        "Device code authorization timed out (the code may have expired or the request was denied).\n\
-         Re-run the command to start a new authorization."
-    );
+/// Redraw the countdown status line in-place via `\r` so it doesn't accumulate
+/// dots across hundreds of polls. No-op in non-TTY to avoid garbling piped
+/// output (CI logs, fixtures).
+fn redraw_status_line(is_tty: bool, deadline: std::time::Instant) {
+    if !is_tty {
+        return;
+    }
+    let remaining = deadline
+        .saturating_duration_since(std::time::Instant::now())
+        .as_secs();
+    let mins = remaining / 60;
+    let secs = remaining % 60;
+    eprint!("\rWaiting for authorization... (expires in {mins}:{secs:02})\x1b[K");
+    let _ = std::io::stderr().flush();
+}
+
+/// Move the cursor back to column 0 and clear the line so the next output
+/// starts fresh instead of overwriting the redraw line's tail.
+fn clear_status_line(is_tty: bool) {
+    if !is_tty {
+        return;
+    }
+    eprint!("\r\x1b[K");
+    let _ = std::io::stderr().flush();
+}
+
+/// Blocking Y/n prompt for renewal (`stdin().read_line` would otherwise pin
+/// the tokio runtime). Default-Y on empty input so a user who hit return out
+/// of habit keeps going. Runs inside `spawn_blocking`.
+///
+/// Note on ctrl+C while at this prompt: `spawn_blocking` is not cancellable,
+/// so the read-line thread remains parked on stdin until the OS reaps it on
+/// process exit. The outer `tokio::select!` in `run_device_code_add` still
+/// wins the race and drives cleanup; the orphaned thread is cosmetic and
+/// disappears with the process.
+fn prompt_renew_blocking() -> Result<bool> {
+    eprint!("Device code expired. Request a new one? [Y/n] ");
+    std::io::stderr().flush()?;
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    let trimmed = input.trim().to_lowercase();
+    Ok(trimmed.is_empty() || trimmed == "y" || trimmed == "yes")
+}
+
+/// Best-effort cleanup of a `pending_auth` placeholder on any terminal-failure
+/// path. The `?only_if_pending=true` guard at `backend/src/handlers/keys.rs`
+/// makes this race-safe: if the user happened to complete authorization
+/// concurrently the placeholder is already `active` and the call returns
+/// `deleted: false` (200) without touching the row.
+async fn cleanup_pending_key(api: &mut ApiClient, key_id: &str) {
+    if let Err(e) = api
+        .delete_empty(&format!("/keys/{key_id}?only_if_pending=true"))
+        .await
+    {
+        // Don't surface to the user — the lazy reconciler in the backend
+        // will catch the placeholder on the next `GET /keys/{id}` poll.
+        // Log at debug so a 5xx during cleanup is distinguishable from a
+        // successful no-op when triaging support tickets.
+        tracing::debug!(key_id = %key_id, error = %e, "device-code: best-effort placeholder cleanup failed");
+    }
 }
 
 async fn wait_for_authorized_key(api: &mut ApiClient, key_id: &str) -> Result<Value> {
