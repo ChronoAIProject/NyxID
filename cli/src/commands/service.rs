@@ -1595,6 +1595,18 @@ async fn wait_for_authorized_key(api: &mut ApiClient, key_id: &str) -> Result<Va
                 eprintln!();
                 return Ok(key);
             }
+            "failed" => {
+                // The backend stores an actionable reason on the credential
+                // (issue #651, e.g. an account-mismatch message). Surface it
+                // verbatim instead of swallowing it under a generic status
+                // string -- issue #695.
+                eprintln!();
+                let msg = key["error_message"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("OAuth authorization failed");
+                bail!("{msg}");
+            }
             other => {
                 eprintln!();
                 bail!("OAuth flow finished with unexpected key status: {other}");
