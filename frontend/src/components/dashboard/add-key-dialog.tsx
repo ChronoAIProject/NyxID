@@ -2348,10 +2348,17 @@ export function AddKeyDialog({
             onComplete={(clientId, clientSecret) => {
               // Multi-connection: cache the user-typed Custom App
               // credentials on the parent so the eventual `POST /keys`
-              // for this add can include them. The legacy PUT to
-              // `/providers/{id}/credentials` still happens inside
-              // `OAuthCredentialsStep` so single-connection flows
-              // and admin tooling keep working.
+              // for this add can include them as `oauth_client_id` /
+              // `oauth_client_secret`. `OAuthCredentialsStep` itself
+              // intentionally does NOT call
+              // `PUT /providers/{id}/credentials` (see the doc on the
+              // `onComplete` prop at line 1798) — that legacy endpoint
+              // writes to the single-row-per-`(user, provider)`
+              // `user_provider_credentials` table, so PUT-ing from a
+              // new BYO add would silently overwrite any pre-existing
+              // single-connection user's Custom App secret. Refresh
+              // for multi-connection keys reads BYO straight off the
+              // `UserApiKey`, so the legacy table is left untouched.
               setByoOAuthClientId(clientId);
               setByoOAuthClientSecret(clientSecret);
               handleCredentialsSaved();
