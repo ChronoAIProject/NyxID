@@ -903,14 +903,40 @@ export function OAuthFlow({
       }
     })();
     return () => {
+      // Local cancel flag aborts THIS async run if the effect re-fires
+      // (e.g. user retries via setPhase("starting") again).
+      //
+      // CRITICAL: do NOT set `cancelledRef.current = true` here.
+      // The async function above does `setPhase("waiting")` followed
+      // by `await pollUntilActive(...)`. setPhase triggers a re-render
+      // which fires this cleanup BEFORE pollUntilActive's first GET
+      // (after the initial 2s sleep). If we set the shared
+      // cancelledRef = true here, polling sees it on its first
+      // post-sleep iteration and exits without making a single GET
+      // request — that's why the wizard never polls /keys and appears
+      // to hang on "Waiting for provider authorization…" (issue #653;
+      // re-applied here after the UI consistency sweep in #733 / 5f9a67e
+      // dropped the original fix). The component-unmount-only effect
+      // below is the correct place to flip cancelledRef for the
+      // "user closed the tab / navigated away" case.
       cancel = true;
-      cancelledRef.current = true;
     };
     // Runs when `phase` transitions to "starting" — i.e. either on
     // initial mount for `system` providers or after the user OAuth
     // credentials sub-step finishes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase]);
+
+  // Component-unmount cleanup: this is the only place that should set
+  // `cancelledRef.current = true`. Empty-deps so it ONLY fires on
+  // unmount, never on phase change. Stops the polling loop and any
+  // in-flight `completeWithKey` from running their state-update
+  // callbacks after the component is gone.
+  useEffect(() => {
+    return () => {
+      cancelledRef.current = true;
+    };
+  }, []);
 
   async function pollUntilActive(keyId: string) {
     await pollOAuthKeyUntilActive({

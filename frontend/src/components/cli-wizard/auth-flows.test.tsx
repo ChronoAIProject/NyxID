@@ -387,12 +387,13 @@ describe("OAuthFlow polling integration", () => {
     resetFlowMocks();
   });
 
-  // Skipped: the UI consistency sweep (5f9a67e) reverted the
-  // cancelledRef-in-cleanup fix from PR #723. The effect cleanup now
-  // sets cancelledRef.current = true on phase change, which aborts
-  // polling before the first GET fires. Re-enable once the production
-  // fix for issue #653 is re-applied.
-  it.skip(
+  // Regression guard: the UI consistency sweep (5f9a67e / PR #733)
+  // reverted the cancelledRef-in-cleanup fix from PR #723 (issue #653
+  // root cause). The fix is restored on this branch — the [phase]-deps
+  // useEffect cleanup must NOT flip `cancelledRef.current` (only the
+  // unmount-only effect does), otherwise setPhase("waiting") aborts
+  // polling before the first GET fires.
+  it(
     "actually fires GET /keys/<id> while the placeholder is pending_auth (issue #653 root cause)",
     async () => {
       // Override defaults: POST /keys returns pending_auth so the
