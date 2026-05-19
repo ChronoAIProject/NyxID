@@ -36,6 +36,11 @@ const OUT_HASH = path.join(OUT_META_DIR, "index.hash")
 const STATIC_ASSETS = [
   ["frontend/public/nyxid-wordmark.svg", "nyxid-wordmark.svg"],
   ["frontend/public/favicon.ico", "favicon.ico"],
+  // SVG app icon for the wizard's `<link rel="icon" type="image/svg+xml">`.
+  // Scales for any DPR and matches the dashboard's favicon source. Without
+  // copying it here the wizard would fall back to the static .ico only
+  // (NyxID#706 follow-up).
+  ["frontend/public/nyxid-app-icon.svg", "nyxid-app-icon.svg"],
 ]
 
 const EXTRAS = [

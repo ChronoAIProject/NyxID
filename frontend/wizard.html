@@ -4,6 +4,14 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light dark" />
+    <!--
+      Responsive (scalable + DPR-aware) SVG favicon, matching the main
+      dashboard's `index.html`. The .ico fallback is implicit: browsers
+      that don't support SVG favicons hit `/favicon.ico` automatically,
+      which is served by the wizard's static-asset router.
+    -->
+    <link rel="icon" type="image/svg+xml" href="/nyxid-app-icon.svg" />
+    <link rel="alternate icon" type="image/x-icon" href="/favicon.ico" />
     <title>NyxID CLI Wizard</title>
   </head>
   <body>

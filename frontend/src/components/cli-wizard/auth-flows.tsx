@@ -100,6 +100,11 @@ interface DeviceCodeInitiateResponse {
   readonly verification_uri: string;
   readonly state: string;
   readonly interval: number;
+  // Upstream code lifetime in seconds. Used both for the countdown chip
+  // and to derive the client-side polling deadline (NyxID#706 follow-up).
+  // The backend always returns this; the wizard's local interface was
+  // missing it.
+  readonly expires_in: number;
 }
 
 interface DeviceCodePollResponse {
@@ -1114,6 +1119,11 @@ export function DeviceCodeFlow({
   >("starting");
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  // Drives the MM:SS chip in the code box. Seeded from `init.expires_in`
+  // when a session starts; ticks once per second while `phase === "waiting"`.
+  // Mirrors the dashboard's `add-key-dialog.tsx::DeviceCodeStep` for the same
+  // UX (NyxID#706 follow-up — the wizard path was the actual user-visible gap).
+  const [secondsRemaining, setSecondsRemaining] = useState(0);
   // Bumped on refresh to kill in-flight poll loops.
   const genRef = useRef(0);
   const keyIdRef = useRef<string | null>(null);
@@ -1257,6 +1267,26 @@ export function DeviceCodeFlow({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Single interval that lives for the duration of the `waiting` phase and
+  // is torn down whenever the phase transitions away (expired / error / done
+  // / starting on renew). Decrements once per second; clamps at zero so a
+  // stale render after expiry doesn't dip negative.
+  useEffect(() => {
+    if (phase !== "waiting") return;
+    const id = window.setInterval(() => {
+      setSecondsRemaining((prev) => (prev > 0 ? prev - 1 : 0));
+    }, 1000);
+    return () => {
+      window.clearInterval(id);
+    };
+  }, [phase]);
+
+  function formatRemaining(seconds: number): string {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${String(mins)}:${String(secs).padStart(2, "0")}`;
+  }
+
   async function startSession() {
     const myGen = ++genRef.current;
     setPhase("starting");
@@ -1346,11 +1376,37 @@ export function DeviceCodeFlow({
 
       setCode(init.user_code);
       setVerifyUrl(init.verification_uri);
+      // Seed the countdown from the upstream's advertised lifetime (Codex
+      // returns ~900s; RFC 8628 providers vary). Default to a 15-minute
+      // fallback so a buggy initiate response that omits the field doesn't
+      // freeze the chip at 00:00. The client-side deadline below is derived
+      // from the same value so both stay in sync (NyxID#706).
+      //
+      // QA hook: `?expires_in_override=N` in the wizard URL clamps the
+      // lifetime to N seconds so testers can exercise expiry → renew in
+      // a short loop. The CLI forwards `NYXID_DEVICE_CODE_DEADLINE_SECS`
+      // as this query param (see `cli/src/wizard/server.rs`); manually
+      // editing the URL works the same way. Ignored when missing or
+      // unparseable.
+      const override_ =
+        typeof window !== "undefined"
+          ? Number(
+              new URLSearchParams(window.location.search).get(
+                "expires_in_override",
+              ),
+            )
+          : NaN;
+      const lifetimeSecs = Number.isFinite(override_) && override_ > 0
+        ? override_
+        : Number(init.expires_in) > 0
+          ? Number(init.expires_in)
+          : 15 * 60;
+      setSecondsRemaining(lifetimeSecs);
       setPhase("waiting");
 
       let interval = Number(init.interval) || 5;
       const pollPath = `/providers/${encodeURIComponent(providerId)}/connect/device-code/poll`;
-      const deadline = Date.now() + 10 * 60 * 1000;
+      const deadline = Date.now() + lifetimeSecs * 1000;
       while (Date.now() < deadline) {
         if (myGen !== genRef.current || cancelledRef.current) return;
         await sleep(interval * 1000);
@@ -1385,10 +1441,21 @@ export function DeviceCodeFlow({
           return;
         }
         if (status === "expired") {
+          // Drop the placeholder before showing the renew UI so the user
+          // walking away doesn't leave a `pending_auth` row behind. The
+          // "Request a new code" button below calls `startSession()` again,
+          // which mints a fresh placeholder when `keyIdRef.current` is null
+          // (releaseServerState nulls it). NyxID#706.
+          await releaseServerState();
+          if (myGen !== genRef.current) return;
           setPhase("expired");
           return;
         }
         if (status === "denied") {
+          // Denied is terminal — no renew UI, just an error. Free the
+          // placeholder so it doesn't linger in `nyxid service list`.
+          await releaseServerState();
+          if (myGen !== genRef.current) return;
           setPhase("error");
           setError("Authorization denied on the provider side.");
           return;
@@ -1398,6 +1465,10 @@ export function DeviceCodeFlow({
         }
       }
       if (myGen === genRef.current) {
+        // Client-side deadline reached without a terminal poll response —
+        // same cleanup as the server-side `expired` arm.
+        await releaseServerState();
+        if (myGen !== genRef.current) return;
         setPhase("expired");
       }
     } catch (e) {
@@ -1444,9 +1515,16 @@ export function DeviceCodeFlow({
       ) : phase === "waiting" && code && verifyUrl ? (
         <div className="flex flex-col gap-3 rounded-lg border bg-muted/30 p-4">
           <div className="flex flex-col gap-1">
-            <span className="text-xs uppercase tracking-wide text-muted-foreground">
-              Code
-            </span>
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs uppercase tracking-wide text-muted-foreground">
+                Code
+              </span>
+              {secondsRemaining > 0 ? (
+                <span className="text-xs tabular-nums text-muted-foreground">
+                  Expires in {formatRemaining(secondsRemaining)}
+                </span>
+              ) : null}
+            </div>
             <div className="flex items-center gap-2">
               <code className="rounded bg-background px-3 py-1.5 font-mono text-lg">
                 {code}

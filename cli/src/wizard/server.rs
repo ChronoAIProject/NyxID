@@ -1967,6 +1967,13 @@ pub async fn run_flow(
             "/nyxid-wordmark.svg",
             get(|| async { embedded_asset_response("nyxid-wordmark.svg") }),
         )
+        // Responsive SVG app icon for the wizard's `<link rel="icon">`.
+        // Scales for any DPR and inherits the SVG's own light/dark
+        // behavior. Matches the dashboard's favicon (NyxID#706 follow-up).
+        .route(
+            "/nyxid-app-icon.svg",
+            get(|| async { embedded_asset_response("nyxid-app-icon.svg") }),
+        )
         .route(
             "/favicon.ico",
             get(|| async { embedded_asset_response("favicon.ico") }),
@@ -1984,11 +1991,24 @@ pub async fn run_flow(
         // after the lifecycle routes so exact matches win.
         .route("/api/proxy/{*rest}", any(handle_proxy))
         .with_state(state.clone());
-    let url = format!(
+    let mut url = format!(
         "http://127.0.0.1:{}/wizard{}",
         addr.port(),
         prefill_query(&prefill),
     );
+    // Forward NYXID_DEVICE_CODE_DEADLINE_SECS to the wizard SPA so the
+    // device-code countdown / renewal paths can be exercised in seconds
+    // instead of waiting ~15 min for a real provider expiry. Only takes
+    // effect in the wizard's DeviceCodeFlow; ignored everywhere else
+    // (NyxID#706 follow-up).
+    if let Ok(secs) = std::env::var("NYXID_DEVICE_CODE_DEADLINE_SECS")
+        && !secs.is_empty()
+    {
+        let separator = if url.contains('?') { '&' } else { '?' };
+        url.push(separator);
+        url.push_str("expires_in_override=");
+        url.push_str(&urlencoding::encode(&secs));
+    }
 
     let shutdown_rx = shutdown.clone();
     let server_handle = tokio::spawn(async move {
@@ -2215,6 +2235,20 @@ mod tests {
                 .get(header::CONTENT_TYPE)
                 .and_then(|value| value.to_str().ok()),
             Some("image/x-icon")
+        );
+
+        // NyxID#706 follow-up — the SVG app icon referenced by the
+        // wizard HTML's `<link rel="icon" type="image/svg+xml">`.
+        // Without this asset the modern (DPR-aware) favicon path
+        // 404s and browsers silently fall back to the .ico.
+        let app_icon = embedded_asset_response("nyxid-app-icon.svg");
+        assert_eq!(app_icon.status(), StatusCode::OK);
+        assert_eq!(
+            app_icon
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("image/svg+xml")
         );
     }
 

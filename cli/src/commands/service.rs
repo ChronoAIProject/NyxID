@@ -1375,6 +1375,16 @@ async fn run_oauth_add(
 fn parse_device_code_deadline(initiate: &Value) -> std::time::Instant {
     use chrono::DateTime;
 
+    // Test hook: clamp the client-side deadline so QA can exercise the
+    // expiry → renew-prompt / non-TTY-bail paths in seconds instead of
+    // waiting ~15 min for a real provider expiry. No effect when unset;
+    // production code never reads it. NyxID#706 verification.
+    if let Ok(s) = std::env::var("NYXID_DEVICE_CODE_DEADLINE_SECS")
+        && let Ok(secs) = s.parse::<u64>()
+    {
+        return std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    }
+
     if let Some(s) = initiate["expires_at"].as_str()
         && let Ok(at) = DateTime::parse_from_rfc3339(s)
     {
@@ -1641,8 +1651,15 @@ async fn poll_device_code_loop(
 ) -> Result<PollOutcome> {
     let poll_body = serde_json::json!({ "state": &session.state });
     let poll_path = format!("/providers/{provider_id}/connect/device-code/poll");
-    let mut interval = session.interval;
+    let mut interval_secs = session.interval;
     let mut consecutive_poll_errors = 0_u8;
+    // Inner loop redraws the countdown every second so the MM:SS readout
+    // visibly ticks down; the HTTP poll is throttled separately to honor
+    // the provider's `interval` (5s+ for Codex / RFC 8628). Without the
+    // decoupling, redraws happened only after each poll RTT and the timer
+    // appeared to jump 5–8 seconds at a time (NyxID#706 follow-up).
+    let mut next_poll_at =
+        std::time::Instant::now() + std::time::Duration::from_secs(interval_secs);
 
     loop {
         if std::time::Instant::now() >= session.deadline {
@@ -1650,7 +1667,12 @@ async fn poll_device_code_loop(
         }
         redraw_status_line(is_tty, session.deadline);
 
-        tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+        if std::time::Instant::now() < next_poll_at {
+            continue;
+        }
+        next_poll_at = std::time::Instant::now() + std::time::Duration::from_secs(interval_secs);
 
         match api.post::<Value, _>(&poll_path, &poll_body).await {
             Ok(result) => {
@@ -1670,10 +1692,12 @@ async fn poll_device_code_loop(
                     return Ok(PollOutcome::Denied);
                 }
                 if status == "slow_down" {
-                    interval = result["interval"]
+                    interval_secs = result["interval"]
                         .as_u64()
                         .or_else(|| result["interval"].as_str().and_then(|s| s.parse().ok()))
-                        .unwrap_or(interval + 5);
+                        .unwrap_or(interval_secs + 5);
+                    next_poll_at =
+                        std::time::Instant::now() + std::time::Duration::from_secs(interval_secs);
                 }
                 // Still pending — loop continues; redraw refreshes next tick.
             }
