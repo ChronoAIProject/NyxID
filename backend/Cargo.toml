@@ -87,7 +87,7 @@ rustls = { version = "0.23", default-features = false, features = ["std", "tls12
 aws-config = { version = "1", optional = true }
 aws-sdk-kms = { version = "1", optional = true }
 google-cloud-kms = { version = "0.6", optional = true }
-russh = "0.58.0"
+russh = "0.60.3"
 tempfile = "3.27.0"
 pty-process = { version = "0.5.3", features = ["async"] }
 nix = { version = "0.31.2", features = ["term"] }
