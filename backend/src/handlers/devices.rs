@@ -84,6 +84,7 @@ pub async fn poll_device_code(
     let user_agent = extract_user_agent(&headers);
     let response = match poll(
         &state.db,
+        &state.encryption_keys,
         DeviceCodePollInput {
             device_code: device_code.clone(),
             timestamp: req.timestamp,
@@ -159,6 +160,7 @@ where
 
     let response = match approve(
         &state.db,
+        &state.encryption_keys,
         &actor_user_id,
         DeviceCodeApproveInput {
             user_code,

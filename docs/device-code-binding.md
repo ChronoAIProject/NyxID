@@ -66,6 +66,8 @@ Important fields:
 | `approved_org_id` | Optional org user id | Target org owner, if any |
 | `issued_api_key_id` | Optional API key id | Credential id retained after delivery |
 | `issued_node_id` | Optional node id | Node id retained after delivery |
+| `delivery_api_key_encrypted` | Optional encrypted bytes | One-time API key delivery secret, envelope-encrypted and unset after delivery |
+| `delivery_refresh_token_encrypted` | Optional encrypted bytes | One-time refresh-token delivery secret, envelope-encrypted and unset after delivery |
 | `refresh_token_hash` | Optional SHA-256 hex | Raw refresh token is returned once |
 | `failed_poll_count` | Number | Consecutive signature failures |
 | `locked_until` | Optional BSON datetime | Set after repeated signature failures |
@@ -300,3 +302,7 @@ On first boot, firmware should:
 Firmware should treat `device_code` and `refresh_token` as secrets. `device_code` is short lived, but it is still part of the signed poll identity during provisioning.
 
 The firmware-facing credential interface can remain stable: code that reads NyxID credentials from NVS after provisioning does not need to know whether those credentials came from factory burn-in or device-code binding.
+
+## Migration Notes
+
+This feature has not shipped with production data. Local development MongoDBs that contain pre-fix test rows with plaintext `delivery_api_key` or `delivery_refresh_token` fields should wipe those `device_codes` rows before testing current builds.

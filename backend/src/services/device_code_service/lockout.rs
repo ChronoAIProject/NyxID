@@ -222,6 +222,7 @@ mod tests {
     use super::*;
     use crate::services::device_code_service::tests_support::{setup_pending_row, sign_poll};
     use crate::services::device_code_service::{DeviceCodePollInput, poll};
+    use crate::test_utils::test_encryption_keys;
     use mongodb::bson::doc;
     use uuid::Uuid;
 
@@ -369,8 +370,10 @@ mod tests {
             .expect("expire lockout");
 
         let timestamp = Utc::now().timestamp();
+        let encryption_keys = test_encryption_keys();
         poll(
             &db,
+            &encryption_keys,
             DeviceCodePollInput {
                 device_code: response.device_code.clone(),
                 timestamp,

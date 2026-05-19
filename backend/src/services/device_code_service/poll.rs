@@ -5,6 +5,7 @@ use mongodb::{
     options::ReturnDocument,
 };
 
+use crate::crypto::aes::EncryptionKeys;
 use crate::crypto::device_code::{generate_user_code, verify_poll_signature};
 use crate::crypto::token::hash_token;
 use crate::errors::{AppError, AppResult};
@@ -19,7 +20,11 @@ use super::{
     reset_pubkey_lockout,
 };
 
-pub async fn poll(db: &Database, input: DeviceCodePollInput) -> AppResult<DeviceCodePoll> {
+pub async fn poll(
+    db: &Database,
+    encryption_keys: &EncryptionKeys,
+    input: DeviceCodePollInput,
+) -> AppResult<DeviceCodePoll> {
     let now = Utc::now();
     let collection = db.collection::<DeviceCode>(DEVICE_CODES);
     let mut row = collection
@@ -87,14 +92,18 @@ pub async fn poll(db: &Database, input: DeviceCodePollInput) -> AppResult<Device
             let claimed = claim_approved_delivery(&collection, &row.id, now, input.timestamp)
                 .await?
                 .ok_or(AppError::DeviceCodeAlreadyDelivered)?;
-            let api_key = claimed.delivery_api_key.clone().ok_or_else(|| {
-                AppError::Internal("approved device code missing delivery api key".to_string())
-            })?;
-            let refresh_token = claimed.delivery_refresh_token.clone().ok_or_else(|| {
-                AppError::Internal(
-                    "approved device code missing delivery refresh token".to_string(),
-                )
-            })?;
+            let api_key = decrypt_delivery_secret(
+                encryption_keys,
+                claimed.delivery_api_key_encrypted.as_deref(),
+                "api key",
+            )
+            .await?;
+            let refresh_token = decrypt_delivery_secret(
+                encryption_keys,
+                claimed.delivery_refresh_token_encrypted.as_deref(),
+                "refresh token",
+            )
+            .await?;
             let node_id = claimed.issued_node_id.clone().ok_or_else(|| {
                 AppError::Internal("approved device code missing issued node id".to_string())
             })?;
@@ -110,6 +119,22 @@ pub async fn poll(db: &Database, input: DeviceCodePollInput) -> AppResult<Device
         DeviceCodeStatus::Expired => Err(AppError::DeviceCodeExpired),
         DeviceCodeStatus::Delivered => Err(AppError::DeviceCodeAlreadyDelivered),
     }
+}
+
+async fn decrypt_delivery_secret(
+    encryption_keys: &EncryptionKeys,
+    encrypted: Option<&[u8]>,
+    label: &str,
+) -> AppResult<String> {
+    let encrypted = encrypted.ok_or_else(|| {
+        AppError::Internal(format!("approved device code missing delivery {label}"))
+    })?;
+    let plaintext = encryption_keys.decrypt(encrypted).await?;
+    String::from_utf8(plaintext).map_err(|_| {
+        AppError::Internal(format!(
+            "approved device code delivery {label} is not valid UTF-8"
+        ))
+    })
 }
 
 fn verify_poll_timestamp(row: &DeviceCode, timestamp: i64, now: DateTime<Utc>) -> AppResult<()> {
@@ -234,8 +259,8 @@ async fn claim_approved_delivery(
                     "expires_at": bson::DateTime::from_chrono(delivery_expires_at),
                 },
                 "$unset": {
-                    "delivery_api_key": "",
-                    "delivery_refresh_token": "",
+                    "delivery_api_key_encrypted": "",
+                    "delivery_refresh_token_encrypted": "",
                 },
             },
         )
@@ -271,8 +296,8 @@ async fn persist_successful_poll(
         doc! {
             "$set": set_doc,
             "$unset": {
-                "delivery_api_key": "",
-                "delivery_refresh_token": "",
+                "delivery_api_key_encrypted": "",
+                "delivery_refresh_token_encrypted": "",
             },
         }
     } else {
@@ -294,6 +319,7 @@ mod tests {
     };
     use crate::services::device_code_service::DEVICE_CODE_ROTATE_SECS;
     use crate::services::device_code_service::tests_support::{setup_pending_row, sign_poll};
+    use crate::test_utils::test_encryption_keys;
     use chrono::Duration;
     use ed25519_dalek::SigningKey;
     use sha2::{Digest, Sha256};
@@ -306,7 +332,7 @@ mod tests {
         };
         let timestamp = Utc::now().timestamp();
 
-        let poll_response = poll(
+        let poll_response = poll_for_test(
             &db,
             DeviceCodePollInput {
                 device_code: response.device_code.clone(),
@@ -336,7 +362,7 @@ mod tests {
 
         for attempt in 0..3 {
             let timestamp = Utc::now().timestamp() + attempt;
-            let error = poll(
+            let error = poll_for_test(
                 &db,
                 DeviceCodePollInput {
                     device_code: response.device_code.clone(),
@@ -392,7 +418,8 @@ mod tests {
             signature: sign_poll(&response.device_code, second_timestamp, &wrong_key),
         };
 
-        let (first_result, second_result) = tokio::join!(poll(&db, first), poll(&db, second));
+        let (first_result, second_result) =
+            tokio::join!(poll_for_test(&db, first), poll_for_test(&db, second));
         let results = [first_result, second_result];
 
         assert_eq!(
@@ -443,7 +470,7 @@ mod tests {
 
         for attempt in 0..2 {
             let timestamp = base_timestamp + attempt;
-            let error = poll(
+            let error = poll_for_test(
                 &db,
                 DeviceCodePollInput {
                     device_code: first_response.device_code.clone(),
@@ -457,7 +484,7 @@ mod tests {
         }
 
         let timestamp = base_timestamp + 2;
-        let error = poll(
+        let error = poll_for_test(
             &db,
             DeviceCodePollInput {
                 device_code: second_response.device_code.clone(),
@@ -502,7 +529,7 @@ mod tests {
             .expect("expire pubkey lockout");
 
         let timestamp = Utc::now().timestamp();
-        poll(
+        poll_for_test(
             &db,
             DeviceCodePollInput {
                 device_code: second_response.device_code.clone(),
@@ -532,7 +559,7 @@ mod tests {
         let timestamp = Utc::now().timestamp();
         let signature = sign_poll(&response.device_code, timestamp, &key);
 
-        poll(
+        poll_for_test(
             &db,
             DeviceCodePollInput {
                 device_code: response.device_code.clone(),
@@ -543,7 +570,7 @@ mod tests {
         .await
         .expect("first poll");
 
-        let error = poll(
+        let error = poll_for_test(
             &db,
             DeviceCodePollInput {
                 device_code: response.device_code.clone(),
@@ -564,7 +591,7 @@ mod tests {
         };
         let timestamp = Utc::now().timestamp() - 30;
 
-        let error = poll(
+        let error = poll_for_test(
             &db,
             DeviceCodePollInput {
                 device_code: response.device_code.clone(),
@@ -593,7 +620,7 @@ mod tests {
             .expect("age row");
 
         let timestamp = Utc::now().timestamp();
-        let poll_response = poll(
+        let poll_response = poll_for_test(
             &db,
             DeviceCodePollInput {
                 device_code: response.device_code.clone(),
@@ -694,7 +721,7 @@ mod tests {
             .expect("expire row");
         let timestamp = Utc::now().timestamp();
 
-        let error = poll(
+        let error = poll_for_test(
             &db,
             DeviceCodePollInput {
                 device_code: response.device_code.clone(),
@@ -712,6 +739,8 @@ mod tests {
         let Some((db, response, key)) = setup_pending_row("device_code_poll_approved").await else {
             return;
         };
+        let api_key_encrypted = encrypt_for_test("nyx_secret").await;
+        let refresh_token_encrypted = encrypt_for_test("refresh_secret").await;
         db.collection::<DeviceCode>(DEVICE_CODES)
             .update_one(
                 doc! { "device_code_hash": hash_token(&response.device_code) },
@@ -719,8 +748,14 @@ mod tests {
                     "$set": {
                         "status": "approved",
                         "issued_node_id": "node-1",
-                        "delivery_api_key": "nyx_secret",
-                        "delivery_refresh_token": "refresh_secret",
+                        "delivery_api_key_encrypted": bson::Binary {
+                            subtype: bson::spec::BinarySubtype::Generic,
+                            bytes: api_key_encrypted,
+                        },
+                        "delivery_refresh_token_encrypted": bson::Binary {
+                            subtype: bson::spec::BinarySubtype::Generic,
+                            bytes: refresh_token_encrypted,
+                        },
                         "refresh_token_hash": hash_token("refresh_secret"),
                     }
                 },
@@ -729,7 +764,7 @@ mod tests {
             .expect("approve row");
         let timestamp = Utc::now().timestamp();
 
-        let poll_response = poll(
+        let poll_response = poll_for_test(
             &db,
             DeviceCodePollInput {
                 device_code: response.device_code.clone(),
@@ -757,11 +792,11 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(row.status, DeviceCodeStatus::Delivered);
-        assert!(row.delivery_api_key.is_none());
-        assert!(row.delivery_refresh_token.is_none());
+        assert!(row.delivery_api_key_encrypted.is_none());
+        assert!(row.delivery_refresh_token_encrypted.is_none());
 
         let next_timestamp = timestamp + 1;
-        let error = poll(
+        let error = poll_for_test(
             &db,
             DeviceCodePollInput {
                 device_code: response.device_code.clone(),
@@ -781,6 +816,8 @@ mod tests {
         else {
             return;
         };
+        let api_key_encrypted = encrypt_for_test("nyx_secret").await;
+        let refresh_token_encrypted = encrypt_for_test("refresh_secret").await;
         db.collection::<DeviceCode>(DEVICE_CODES)
             .update_one(
                 doc! { "device_code_hash": hash_token(&response.device_code) },
@@ -788,8 +825,14 @@ mod tests {
                     "$set": {
                         "status": "approved",
                         "issued_node_id": "node-1",
-                        "delivery_api_key": "nyx_secret",
-                        "delivery_refresh_token": "refresh_secret",
+                        "delivery_api_key_encrypted": bson::Binary {
+                            subtype: bson::spec::BinarySubtype::Generic,
+                            bytes: api_key_encrypted,
+                        },
+                        "delivery_refresh_token_encrypted": bson::Binary {
+                            subtype: bson::spec::BinarySubtype::Generic,
+                            bytes: refresh_token_encrypted,
+                        },
                         "refresh_token_hash": hash_token("refresh_secret"),
                     }
                 },
@@ -809,7 +852,8 @@ mod tests {
             signature: sign_poll(&response.device_code, second_timestamp, &key),
         };
 
-        let (first_result, second_result) = tokio::join!(poll(&db, first), poll(&db, second));
+        let (first_result, second_result) =
+            tokio::join!(poll_for_test(&db, first), poll_for_test(&db, second));
         let results = [first_result, second_result];
 
         assert_eq!(
@@ -832,5 +876,17 @@ mod tests {
         let mut hasher = Sha256::new();
         hasher.update(pubkey);
         hex::encode(hasher.finalize())
+    }
+
+    async fn poll_for_test(db: &Database, input: DeviceCodePollInput) -> AppResult<DeviceCodePoll> {
+        let encryption_keys = test_encryption_keys();
+        poll(db, &encryption_keys, input).await
+    }
+
+    async fn encrypt_for_test(secret: &str) -> Vec<u8> {
+        test_encryption_keys()
+            .encrypt(secret.as_bytes())
+            .await
+            .expect("encrypt test delivery secret")
     }
 }

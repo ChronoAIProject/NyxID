@@ -4,6 +4,7 @@ use mongodb::{
     bson::{self, doc},
 };
 
+use crate::crypto::aes::EncryptionKeys;
 use crate::crypto::token::hash_token;
 use crate::errors::{AppError, AppResult};
 use crate::models::api_key::{ApiKey, COLLECTION_NAME as API_KEYS};
@@ -24,6 +25,7 @@ use super::{
 /// preserve the anti-shoulder-surfing value of 30-second rotation.
 pub async fn approve(
     db: &Database,
+    encryption_keys: &EncryptionKeys,
     actor_user_id: &str,
     input: DeviceCodeApproveInput,
 ) -> AppResult<DeviceCodeApprove> {
@@ -101,6 +103,26 @@ pub async fn approve(
 
     let refresh_token = hex::encode(rand::random::<[u8; 32]>());
     let refresh_token_hash = hash_token(&refresh_token);
+    let delivery_api_key_encrypted = match encryption_keys
+        .encrypt(created_key.full_key.as_bytes())
+        .await
+    {
+        Ok(encrypted) => encrypted,
+        Err(error) => {
+            cleanup_partial_approval(db, &owner_user_id, Some(&created_key.id), Some(&node.id))
+                .await;
+            return Err(error);
+        }
+    };
+    let delivery_refresh_token_encrypted =
+        match encryption_keys.encrypt(refresh_token.as_bytes()).await {
+            Ok(encrypted) => encrypted,
+            Err(error) => {
+                cleanup_partial_approval(db, &owner_user_id, Some(&created_key.id), Some(&node.id))
+                    .await;
+                return Err(error);
+            }
+        };
     let approved_status = bson::to_bson(&DeviceCodeStatus::Approved)
         .map_err(|e| AppError::Internal(format!("serialize device code status: {e}")))?;
     let now = Utc::now();
@@ -119,8 +141,14 @@ pub async fn approve(
                     "approved_org_id": input.org_id.clone(),
                     "issued_api_key_id": &created_key.id,
                     "issued_node_id": &node.id,
-                    "delivery_api_key": &created_key.full_key,
-                    "delivery_refresh_token": &refresh_token,
+                    "delivery_api_key_encrypted": bson::Binary {
+                        subtype: bson::spec::BinarySubtype::Generic,
+                        bytes: delivery_api_key_encrypted,
+                    },
+                    "delivery_refresh_token_encrypted": bson::Binary {
+                        subtype: bson::spec::BinarySubtype::Generic,
+                        bytes: delivery_refresh_token_encrypted,
+                    },
                     "refresh_token_hash": &refresh_token_hash,
                     "expires_at": bson::DateTime::from_chrono(delivery_expires_at),
                 }
@@ -277,7 +305,7 @@ mod tests {
     use crate::services::device_code_service::DEVICE_CODE_SIGNATURE_FAILURE_LOCK_THRESHOLD;
     use crate::services::device_code_service::tests_support::{setup_pending_row, sign_poll};
     use crate::services::device_code_service::{DeviceCodePoll, DeviceCodePollInput, poll};
-    use crate::test_utils::{connect_test_database, test_user};
+    use crate::test_utils::{connect_test_database, test_encryption_keys, test_user};
     use chrono::Duration;
     use sha2::{Digest, Sha256};
     use uuid::Uuid;
@@ -289,7 +317,7 @@ mod tests {
         };
         let actor_user_id = Uuid::new_v4().to_string();
 
-        let approval = approve(
+        let approval = approve_for_test(
             &db,
             &actor_user_id,
             DeviceCodeApproveInput {
@@ -345,12 +373,40 @@ mod tests {
             row.issued_node_id.as_deref(),
             Some(approval.node_id.as_str())
         );
-        assert!(row.delivery_api_key.is_some());
-        assert!(row.delivery_refresh_token.is_some());
+        assert!(row.delivery_api_key_encrypted.is_some());
+        assert!(row.delivery_refresh_token_encrypted.is_some());
         assert!(row.refresh_token_hash.is_some());
+        let encryption_keys = test_encryption_keys();
+        let decrypted_api_key = String::from_utf8(
+            encryption_keys
+                .decrypt(
+                    row.delivery_api_key_encrypted
+                        .as_deref()
+                        .expect("encrypted api key"),
+                )
+                .await
+                .expect("decrypt api key"),
+        )
+        .expect("api key utf8");
+        let decrypted_refresh_token = String::from_utf8(
+            encryption_keys
+                .decrypt(
+                    row.delivery_refresh_token_encrypted
+                        .as_deref()
+                        .expect("encrypted refresh token"),
+                )
+                .await
+                .expect("decrypt refresh token"),
+        )
+        .expect("refresh token utf8");
+        assert!(decrypted_api_key.starts_with("nyxid_ag_"));
+        assert_eq!(
+            hash_token(&decrypted_refresh_token),
+            row.refresh_token_hash.unwrap()
+        );
 
         let timestamp = Utc::now().timestamp();
-        let delivery = poll(
+        let delivery = poll_for_test(
             &db,
             DeviceCodePollInput {
                 device_code: response.device_code.clone(),
@@ -370,9 +426,9 @@ mod tests {
         else {
             panic!("expected approved");
         };
-        assert!(api_key.starts_with("nyxid_ag_"));
+        assert_eq!(api_key, decrypted_api_key);
         assert_eq!(node_id, approval.node_id);
-        assert_eq!(refresh_token.len(), 64);
+        assert_eq!(refresh_token, decrypted_refresh_token);
         assert_eq!(expires_in, DEVICE_CODE_DELIVERY_EXPIRES_IN_SECS);
     }
 
@@ -387,7 +443,7 @@ mod tests {
         let service_by_id = insert_user_service(&db, &actor_user_id, "svc-by-id").await;
         let service_by_slug = insert_user_service(&db, &actor_user_id, "svc-by-slug").await;
 
-        let approval = approve(
+        let approval = approve_for_test(
             &db,
             &actor_user_id,
             DeviceCodeApproveInput {
@@ -425,7 +481,7 @@ mod tests {
         };
         let actor_user_id = Uuid::new_v4().to_string();
 
-        let error = approve(
+        let error = approve_for_test(
             &db,
             &actor_user_id,
             DeviceCodeApproveInput {
@@ -453,7 +509,7 @@ mod tests {
         let other_user_id = Uuid::new_v4().to_string();
         let other_service = insert_user_service(&db, &other_user_id, "other-svc").await;
 
-        let error = approve(
+        let error = approve_for_test(
             &db,
             &actor_user_id,
             DeviceCodeApproveInput {
@@ -483,7 +539,7 @@ mod tests {
         let actor_user_id = Uuid::new_v4().to_string();
         let valid_service = insert_user_service(&db, &actor_user_id, "valid-svc").await;
 
-        let error = approve(
+        let error = approve_for_test(
             &db,
             &actor_user_id,
             DeviceCodeApproveInput {
@@ -519,7 +575,7 @@ mod tests {
             .expect("move row close to TTL expiry");
 
         let before_approve = Utc::now();
-        approve(
+        approve_for_test(
             &db,
             &Uuid::new_v4().to_string(),
             DeviceCodeApproveInput {
@@ -555,7 +611,7 @@ mod tests {
         };
         let actor_user_id = Uuid::new_v4().to_string();
 
-        approve(
+        approve_for_test(
             &db,
             &actor_user_id,
             DeviceCodeApproveInput {
@@ -568,7 +624,7 @@ mod tests {
         .await
         .expect("first approval");
 
-        let error = approve(
+        let error = approve_for_test(
             &db,
             &actor_user_id,
             DeviceCodeApproveInput {
@@ -602,7 +658,7 @@ mod tests {
             .await
             .expect("seed pubkey lockout");
 
-        let approval = approve(
+        let approval = approve_for_test(
             &db,
             &Uuid::new_v4().to_string(),
             DeviceCodeApproveInput {
@@ -648,7 +704,7 @@ mod tests {
             .await
             .expect("set stale history");
 
-        let error = approve(
+        let error = approve_for_test(
             &db,
             &Uuid::new_v4().to_string(),
             DeviceCodeApproveInput {
@@ -678,7 +734,7 @@ mod tests {
             .await
             .expect("expire row");
 
-        let error = approve(
+        let error = approve_for_test(
             &db,
             &Uuid::new_v4().to_string(),
             DeviceCodeApproveInput {
@@ -715,7 +771,7 @@ mod tests {
             .await
             .expect("insert org");
 
-        let error = approve(
+        let error = approve_for_test(
             &db,
             &actor_user_id,
             DeviceCodeApproveInput {
@@ -821,6 +877,20 @@ mod tests {
                 .unwrap(),
             0
         );
+    }
+
+    async fn approve_for_test(
+        db: &Database,
+        actor_user_id: &str,
+        input: DeviceCodeApproveInput,
+    ) -> AppResult<DeviceCodeApprove> {
+        let encryption_keys = test_encryption_keys();
+        approve(db, &encryption_keys, actor_user_id, input).await
+    }
+
+    async fn poll_for_test(db: &Database, input: DeviceCodePollInput) -> AppResult<DeviceCodePoll> {
+        let encryption_keys = test_encryption_keys();
+        poll(db, &encryption_keys, input).await
     }
 
     async fn insert_user_service(db: &Database, user_id: &str, slug: &str) -> UserService {
