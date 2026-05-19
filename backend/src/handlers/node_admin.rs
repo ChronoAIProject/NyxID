@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
 };
@@ -16,14 +16,25 @@ use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
 };
 use crate::models::node::NodeMetadata;
+use crate::models::node_pending_credential::InjectionMethod;
 use crate::mw::auth::AuthUser;
-use crate::services::{audit_service, node_routing_service, node_service};
+use crate::services::{
+    audit_service, node_pending_credential_service, node_routing_service, node_service, org_service,
+};
+use crate::telemetry::{
+    context::{TelemetryContext, emit_event},
+    sampling::hash_short_id,
+    schema::TelemetryEvent,
+};
+
+// NodeCredentialConfigured is emitted from the nyxid CLI, not backend -- see TELEMETRY.md §6.5
 
 // --- Request types ---
 
 #[derive(Debug, Deserialize)]
 pub struct CreateRegistrationTokenRequest {
     pub name: String,
+    pub owner_user_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -34,6 +45,25 @@ pub struct CreateBindingRequest {
 #[derive(Debug, Deserialize)]
 pub struct UpdateBindingRequest {
     pub priority: Option<i32>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TransferNodeRequest {
+    pub new_owner_user_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PushPendingCredentialRequest {
+    pub service_slug: String,
+    pub injection_method: InjectionMethod,
+    pub field_name: String,
+    pub target_url: Option<String>,
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct PendingCredentialListQuery {
+    pub include_history: Option<bool>,
 }
 
 // --- Response types ---
@@ -70,6 +100,7 @@ pub struct NodeMetricsInfo {
 pub struct NodeInfo {
     pub id: String,
     pub name: String,
+    pub owner: node_service::NodeOwnerInfo,
     pub status: String,
     pub is_connected: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -115,6 +146,47 @@ pub struct CreateBindingResponse {
     pub message: String,
 }
 
+#[derive(Debug, Serialize)]
+pub struct NodeAdminsResponse {
+    pub admins: Vec<node_service::NodeAdminInfo>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TransferNodeResponse {
+    pub node_id: String,
+    pub previous_owner: node_service::NodeOwnerInfo,
+    pub new_owner: node_service::NodeOwnerInfo,
+    pub deactivated_bindings_count: u64,
+    pub cleared_user_service_count: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PendingCredentialInfo {
+    pub id: String,
+    pub node_id: String,
+    pub service_slug: String,
+    pub injection_method: String,
+    pub field_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    pub created_by_user_id: String,
+    pub owner_user_id: String,
+    pub created_at: String,
+    pub expires_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consumed_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub declined_at: Option<String>,
+    pub is_active: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PendingCredentialListResponse {
+    pub pending_credentials: Vec<PendingCredentialInfo>,
+}
+
 // --- Helpers ---
 
 /// Build NodeMetricsInfo from the embedded metrics on a Node model.
@@ -137,6 +209,43 @@ pub fn build_metrics_info(metrics: &crate::models::node::NodeMetrics) -> NodeMet
     }
 }
 
+fn audit_event_data_with_owner(
+    actor_user_id: &str,
+    owner_user_id: &str,
+    mut event_data: serde_json::Value,
+) -> serde_json::Value {
+    if actor_user_id != owner_user_id
+        && let serde_json::Value::Object(ref mut object) = event_data
+    {
+        object.insert(
+            "owner_user_id".to_string(),
+            serde_json::Value::String(owner_user_id.to_string()),
+        );
+    }
+    event_data
+}
+
+fn pending_credential_info(
+    pending: crate::models::node_pending_credential::NodePendingCredential,
+) -> PendingCredentialInfo {
+    PendingCredentialInfo {
+        id: pending.id,
+        node_id: pending.node_id,
+        service_slug: pending.service_slug,
+        injection_method: pending.injection_method.as_str().to_string(),
+        field_name: pending.field_name,
+        target_url: pending.target_url,
+        label: pending.label,
+        created_by_user_id: pending.created_by_user_id,
+        owner_user_id: pending.owner_user_id,
+        created_at: pending.created_at.to_rfc3339(),
+        expires_at: pending.expires_at.to_rfc3339(),
+        consumed_at: pending.consumed_at.map(|dt| dt.to_rfc3339()),
+        declined_at: pending.declined_at.map(|dt| dt.to_rfc3339()),
+        is_active: pending.is_active,
+    }
+}
+
 // --- Handlers ---
 
 /// POST /api/v1/nodes/register-token
@@ -146,27 +255,50 @@ pub async fn create_registration_token(
     Json(body): Json<CreateRegistrationTokenRequest>,
 ) -> AppResult<Json<CreateRegistrationTokenResponse>> {
     let user_id_str = auth_user.user_id.to_string();
+    let owner_user_id = body.owner_user_id.as_deref().unwrap_or(&user_id_str);
+
+    if let Some(requested_owner) = body.owner_user_id.as_deref() {
+        let access =
+            org_service::resolve_owner_access(&state.db, &user_id_str, requested_owner).await?;
+        if !matches!(
+            access,
+            org_service::OwnerAccess::Direct | org_service::OwnerAccess::AsOrgAdmin { .. }
+        ) {
+            return Err(AppError::Forbidden(
+                "Only org admins can create registration tokens for that owner".to_string(),
+            ));
+        }
+    }
 
     let (token_id, raw_token, expires_at): (String, String, chrono::DateTime<chrono::Utc>) =
         node_service::create_registration_token(
             &state.db,
-            &user_id_str,
+            owner_user_id,
             &body.name,
             state.config.node_max_per_user,
             state.config.node_registration_token_ttl_secs,
         )
         .await?;
-
-    audit_service::log_async(
-        state.db.clone(),
-        Some(user_id_str),
-        "node_registration_token_created".to_string(),
-        Some(serde_json::json!({
+    let owner_differs = owner_user_id != user_id_str;
+    let owner_user_id_for_audit = owner_user_id.to_string();
+    let event_data = if owner_differs {
+        serde_json::json!({
             "token_id": &token_id,
             "name": &body.name,
-        })),
-        None,
-        None,
+            "owner_user_id": &owner_user_id_for_audit,
+        })
+    } else {
+        serde_json::json!({
+            "token_id": &token_id,
+            "name": &body.name,
+        })
+    };
+
+    audit_service::log_for_user(
+        state.db.clone(),
+        &auth_user,
+        "node_registration_token_created",
+        Some(event_data),
     );
 
     Ok(Json(CreateRegistrationTokenResponse {
@@ -191,7 +323,7 @@ pub async fn list_nodes(
     } else {
         let node_id_array: bson::Array = nodes
             .iter()
-            .map(|n| bson::Bson::String(n.id.clone()))
+            .map(|n| bson::Bson::String(n.node.id.clone()))
             .collect();
         let pipeline = vec![
             doc! { "$match": { "node_id": { "$in": node_id_array }, "is_active": true } },
@@ -222,17 +354,21 @@ pub async fn list_nodes(
 
     let node_infos: Vec<NodeInfo> = nodes
         .iter()
-        .map(|node| NodeInfo {
-            id: node.id.clone(),
-            name: node.name.clone(),
-            status: node.status.as_str().to_string(),
-            is_connected: state.node_ws_manager.is_connected(&node.id),
-            last_heartbeat_at: node.last_heartbeat_at.map(|dt| dt.to_rfc3339()),
-            connected_at: node.connected_at.map(|dt| dt.to_rfc3339()),
-            metadata: node.metadata.clone(),
-            metrics: Some(build_metrics_info(&node.metrics)),
-            binding_count: binding_counts.get(&node.id).copied().unwrap_or(0),
-            created_at: node.created_at.to_rfc3339(),
+        .map(|node_with_owner| {
+            let node = &node_with_owner.node;
+            NodeInfo {
+                id: node.id.clone(),
+                name: node.name.clone(),
+                owner: node_with_owner.owner.clone(),
+                status: node.status.as_str().to_string(),
+                is_connected: state.node_ws_manager.is_connected(&node.id),
+                last_heartbeat_at: node.last_heartbeat_at.map(|dt| dt.to_rfc3339()),
+                connected_at: node.connected_at.map(|dt| dt.to_rfc3339()),
+                metadata: node.metadata.clone(),
+                metrics: Some(build_metrics_info(&node.metrics)),
+                binding_count: binding_counts.get(&node.id).copied().unwrap_or(0),
+                created_at: node.created_at.to_rfc3339(),
+            }
         })
         .collect();
 
@@ -247,6 +383,7 @@ pub async fn get_node(
 ) -> AppResult<Json<NodeInfo>> {
     let user_id_str = auth_user.user_id.to_string();
     let node = node_service::get_node(&state.db, &user_id_str, &node_id).await?;
+    let owner = node_service::owner_info_for_node(&state.db, &node).await?;
 
     let binding_count = state
         .db
@@ -257,6 +394,7 @@ pub async fn get_node(
     Ok(Json(NodeInfo {
         id: node.id.clone(),
         name: node.name,
+        owner,
         status: node.status.as_str().to_string(),
         is_connected: state.node_ws_manager.is_connected(&node.id),
         last_heartbeat_at: node.last_heartbeat_at.map(|dt| dt.to_rfc3339()),
@@ -272,9 +410,11 @@ pub async fn get_node(
 pub async fn delete_node(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     Path(node_id): Path<String>,
 ) -> AppResult<impl IntoResponse> {
     let user_id_str = auth_user.user_id.to_string();
+    let node = node_service::get_node(&state.db, &user_id_str, &node_id).await?;
 
     node_service::delete_node(&state.db, &user_id_str, &node_id).await?;
 
@@ -286,13 +426,27 @@ pub async fn delete_node(
             .await;
     }
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(user_id_str),
-        "node_deleted".to_string(),
-        Some(serde_json::json!({ "node_id": &node_id })),
-        None,
-        None,
+        &auth_user,
+        "node_deleted",
+        Some(audit_event_data_with_owner(
+            &user_id_str,
+            &node.user_id,
+            serde_json::json!({ "node_id": &node_id }),
+        )),
+    );
+
+    emit_event(
+        state.telemetry.as_deref(),
+        &user_id_str,
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::NodeDeleted {
+            // Raw UUID would be scrubbed to `[UUID_REDACTED]`; hash keeps
+            // per-node granularity without leaking the UUID.
+            node_id: hash_short_id(&node_id),
+        },
     );
 
     Ok(StatusCode::NO_CONTENT)
@@ -305,6 +459,7 @@ pub async fn rotate_token(
     Path(node_id): Path<String>,
 ) -> AppResult<Json<RotateTokenResponse>> {
     let user_id_str = auth_user.user_id.to_string();
+    let node = node_service::get_node(&state.db, &user_id_str, &node_id).await?;
 
     let (raw_token, raw_signing_secret) =
         node_service::rotate_auth_token(&state.db, &state.encryption_keys, &user_id_str, &node_id)
@@ -324,13 +479,15 @@ pub async fn rotate_token(
         .await?;
     }
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(user_id_str),
-        "node_token_rotated".to_string(),
-        Some(serde_json::json!({ "node_id": &node_id })),
-        None,
-        None,
+        &auth_user,
+        "node_token_rotated",
+        Some(audit_event_data_with_owner(
+            &user_id_str,
+            &node.user_id,
+            serde_json::json!({ "node_id": &node_id }),
+        )),
     );
 
     Ok(Json(RotateTokenResponse {
@@ -340,6 +497,171 @@ pub async fn rotate_token(
             "Auth token and signing secret rotated. The node must reconnect with the new token."
                 .to_string(),
     }))
+}
+
+/// GET /api/v1/nodes/{node_id}/admins
+pub async fn list_admins(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(node_id): Path<String>,
+) -> AppResult<Json<NodeAdminsResponse>> {
+    let user_id_str = auth_user.user_id.to_string();
+    let admins = node_service::list_node_admins(&state.db, &user_id_str, &node_id).await?;
+
+    Ok(Json(NodeAdminsResponse { admins }))
+}
+
+/// POST /api/v1/nodes/{node_id}/transfer
+pub async fn transfer_node(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(node_id): Path<String>,
+    Json(body): Json<TransferNodeRequest>,
+) -> AppResult<Json<TransferNodeResponse>> {
+    let user_id_str = auth_user.user_id.to_string();
+    let node = node_service::get_node(&state.db, &user_id_str, &node_id).await?;
+    let previous_owner = node_service::owner_info_for_node(&state.db, &node).await?;
+
+    let result = node_service::transfer_node_owner(
+        &state.db,
+        &user_id_str,
+        &node_id,
+        &body.new_owner_user_id,
+        state.config.node_max_per_user,
+    )
+    .await?;
+
+    let mut transferred_node = node.clone();
+    transferred_node.user_id = result.new_owner_user_id.clone();
+    let new_owner = node_service::owner_info_for_node(&state.db, &transferred_node).await?;
+
+    audit_service::log_for_user(
+        state.db.clone(),
+        &auth_user,
+        "node_transferred",
+        Some(audit_event_data_with_owner(
+            &user_id_str,
+            &result.new_owner_user_id,
+            serde_json::json!({
+                "actor_user_id": &user_id_str,
+                "node_id": &result.node_id,
+                "previous_owner_user_id": &result.previous_owner_user_id,
+                "new_owner_user_id": &result.new_owner_user_id,
+                "deactivated_bindings_count": result.deactivated_bindings_count,
+                "cleared_user_service_count": result.cleared_user_service_count,
+                "deactivated_pending_credentials_count": result.deactivated_pending_credentials_count,
+            }),
+        )),
+    );
+
+    Ok(Json(TransferNodeResponse {
+        node_id: result.node_id,
+        previous_owner,
+        new_owner,
+        deactivated_bindings_count: result.deactivated_bindings_count,
+        cleared_user_service_count: result.cleared_user_service_count,
+    }))
+}
+
+/// POST /api/v1/nodes/{node_id}/credentials/push
+pub async fn push_pending_credential(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(node_id): Path<String>,
+    Json(body): Json<PushPendingCredentialRequest>,
+) -> AppResult<Json<PendingCredentialInfo>> {
+    let user_id_str = auth_user.user_id.to_string();
+    let pending = node_pending_credential_service::create_pending_credential(
+        &state.db,
+        &user_id_str,
+        &node_id,
+        node_pending_credential_service::CreatePendingCredentialInput {
+            service_slug: body.service_slug,
+            injection_method: body.injection_method,
+            field_name: body.field_name,
+            target_url: body.target_url,
+            label: body.label,
+            ttl_secs: state.config.node_pending_credential_ttl_secs,
+        },
+    )
+    .await?;
+
+    audit_service::log_for_user(
+        state.db.clone(),
+        &auth_user,
+        "node_credential_push_created",
+        Some(serde_json::json!({
+            "node_id": &pending.node_id,
+            "service_slug": &pending.service_slug,
+            "injection_method": pending.injection_method.as_str(),
+            "owner_user_id": &pending.owner_user_id,
+        })),
+    );
+
+    if state.node_ws_manager.is_connected(&node_id)
+        && let Err(err) = state
+            .node_ws_manager
+            .send_pending_credentials_available(&node_id)
+    {
+        tracing::warn!(
+            node_id = %node_id,
+            error = %err,
+            "Failed to nudge node about pending credential"
+        );
+    }
+
+    Ok(Json(pending_credential_info(pending)))
+}
+
+/// GET /api/v1/nodes/{node_id}/credentials/pending
+pub async fn list_pending_credentials(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(node_id): Path<String>,
+    Query(query): Query<PendingCredentialListQuery>,
+) -> AppResult<Json<PendingCredentialListResponse>> {
+    let user_id_str = auth_user.user_id.to_string();
+    let pending = node_pending_credential_service::list_pending_credentials_for_admin(
+        &state.db,
+        &user_id_str,
+        &node_id,
+        query.include_history.unwrap_or(false),
+    )
+    .await?;
+
+    Ok(Json(PendingCredentialListResponse {
+        pending_credentials: pending.into_iter().map(pending_credential_info).collect(),
+    }))
+}
+
+/// DELETE /api/v1/nodes/{node_id}/credentials/pending/{pending_id}
+pub async fn cancel_pending_credential(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path((node_id, pending_id)): Path<(String, String)>,
+) -> AppResult<impl IntoResponse> {
+    let user_id_str = auth_user.user_id.to_string();
+    let pending = node_pending_credential_service::cancel_pending_credential(
+        &state.db,
+        &user_id_str,
+        &node_id,
+        &pending_id,
+    )
+    .await?;
+
+    audit_service::log_for_user(
+        state.db.clone(),
+        &auth_user,
+        "node_credential_push_canceled",
+        Some(serde_json::json!({
+            "node_id": &pending.node_id,
+            "pending_credential_id": &pending.id,
+            "service_slug": &pending.service_slug,
+            "owner_user_id": &pending.owner_user_id,
+        })),
+    );
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// GET /api/v1/nodes/{node_id}/bindings
@@ -417,17 +739,19 @@ pub async fn create_binding(
     let binding =
         node_service::create_binding(&state.db, &user_id_str, &node_id, &body.service_id).await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(user_id_str),
-        "node_binding_created".to_string(),
-        Some(serde_json::json!({
-            "binding_id": &binding.id,
-            "node_id": &node_id,
-            "service_id": &body.service_id,
-        })),
-        None,
-        None,
+        &auth_user,
+        "node_binding_created",
+        Some(audit_event_data_with_owner(
+            &user_id_str,
+            &binding.user_id,
+            serde_json::json!({
+                "binding_id": &binding.id,
+                "node_id": &node_id,
+                "service_id": &body.service_id,
+            }),
+        )),
     );
 
     Ok(Json(CreateBindingResponse {
@@ -446,6 +770,7 @@ pub async fn update_binding(
     Json(body): Json<UpdateBindingRequest>,
 ) -> AppResult<impl IntoResponse> {
     let user_id_str = auth_user.user_id.to_string();
+    let node = node_service::get_node(&state.db, &user_id_str, &node_id).await?;
 
     if let Some(priority) = body.priority {
         node_service::update_binding_priority(
@@ -458,17 +783,19 @@ pub async fn update_binding(
         .await?;
     }
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(user_id_str),
-        "node_binding_updated".to_string(),
-        Some(serde_json::json!({
-            "binding_id": &binding_id,
-            "node_id": &node_id,
-            "priority": body.priority,
-        })),
-        None,
-        None,
+        &auth_user,
+        "node_binding_updated",
+        Some(audit_event_data_with_owner(
+            &user_id_str,
+            &node.user_id,
+            serde_json::json!({
+                "binding_id": &binding_id,
+                "node_id": &node_id,
+                "priority": body.priority,
+            }),
+        )),
     );
 
     Ok(StatusCode::NO_CONTENT)
@@ -481,16 +808,22 @@ pub async fn delete_binding(
     Path((node_id, binding_id)): Path<(String, String)>,
 ) -> AppResult<impl IntoResponse> {
     let user_id_str = auth_user.user_id.to_string();
+    let node = node_service::get_node(&state.db, &user_id_str, &node_id).await?;
 
     node_service::delete_binding(&state.db, &user_id_str, &node_id, &binding_id).await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(user_id_str),
-        "node_binding_deleted".to_string(),
-        Some(serde_json::json!({ "binding_id": &binding_id })),
-        None,
-        None,
+        &auth_user,
+        "node_binding_deleted",
+        Some(audit_event_data_with_owner(
+            &user_id_str,
+            &node.user_id,
+            serde_json::json!({
+                "binding_id": &binding_id,
+                "node_id": &node_id,
+            }),
+        )),
     );
 
     Ok(StatusCode::NO_CONTENT)
@@ -519,4 +852,987 @@ pub async fn list_my_bound_services(
     .await?;
 
     Ok(Json(MyBoundServicesResponse { service_ids }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};
+    use crate::models::node::{COLLECTION_NAME as NODES, Node, NodeMetrics, NodeStatus};
+    use crate::models::node_registration_token::{
+        COLLECTION_NAME as NODE_REG_TOKENS, NodeRegistrationToken,
+    };
+    use crate::models::node_service_binding::{
+        COLLECTION_NAME as NODE_SERVICE_BINDINGS, NodeServiceBinding,
+    };
+    use crate::models::org_membership::{
+        COLLECTION_NAME as ORG_MEMBERSHIPS, OrgMembership, OrgRole,
+    };
+    use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+    use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
+    use crate::test_utils::{
+        connect_test_database, test_app_state, test_auth_user, test_membership, test_user,
+        test_user_service,
+    };
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    fn test_node(owner_id: &str, name: &str) -> Node {
+        let now = Utc::now();
+        Node {
+            id: Uuid::new_v4().to_string(),
+            user_id: owner_id.to_string(),
+            name: name.to_string(),
+            status: NodeStatus::Offline,
+            auth_token_hash: "auth-hash".to_string(),
+            signing_secret_encrypted: None,
+            signing_secret_hash: "signing-hash".to_string(),
+            last_heartbeat_at: None,
+            connected_at: None,
+            metadata: None,
+            metrics: NodeMetrics::default(),
+            is_active: true,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn test_binding(owner_id: &str, node_id: &str, service_id: &str) -> NodeServiceBinding {
+        let now = Utc::now();
+        NodeServiceBinding {
+            id: Uuid::new_v4().to_string(),
+            node_id: node_id.to_string(),
+            user_id: owner_id.to_string(),
+            service_id: service_id.to_string(),
+            is_active: true,
+            priority: 0,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    async fn wait_for_transfer_audit(db: &mongodb::Database, node_id: &str) -> Option<AuditLog> {
+        for _ in 0..20 {
+            let found = db
+                .collection::<AuditLog>(AUDIT_LOG)
+                .find_one(doc! {
+                    "event_type": "node_transferred",
+                    "event_data.node_id": node_id,
+                })
+                .await
+                .expect("query audit log");
+            if found.is_some() {
+                return found;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        None
+    }
+
+    async fn insert_users(db: &mongodb::Database, users: Vec<User>) {
+        db.collection::<User>(USERS)
+            .insert_many(users)
+            .await
+            .expect("insert users");
+    }
+
+    #[tokio::test]
+    async fn create_registration_token_accepts_explicit_direct_owner_scope() {
+        let Some(db) = connect_test_database("node_token_direct").await else {
+            eprintln!("skipping node handler test: no local MongoDB available");
+            return;
+        };
+
+        let actor_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&actor_id, UserType::Person))
+            .await
+            .expect("insert user");
+
+        let state = test_app_state(db.clone());
+        let Json(response) = create_registration_token(
+            State(state),
+            test_auth_user(&actor_id),
+            Json(CreateRegistrationTokenRequest {
+                name: "direct-node".to_string(),
+                owner_user_id: Some(actor_id.clone()),
+            }),
+        )
+        .await
+        .expect("explicit direct owner should be allowed");
+
+        let stored = db
+            .collection::<NodeRegistrationToken>(NODE_REG_TOKENS)
+            .find_one(doc! { "_id": &response.token_id })
+            .await
+            .expect("query token")
+            .expect("token exists");
+        assert_eq!(stored.user_id, actor_id);
+        assert_eq!(stored.name, "direct-node");
+    }
+
+    #[tokio::test]
+    async fn create_registration_token_accepts_org_admin_owner_scope() {
+        let Some(db) = connect_test_database("node_token_org_admin").await else {
+            eprintln!("skipping node handler test: no local MongoDB available");
+            return;
+        };
+
+        let admin_id = Uuid::new_v4().to_string();
+        let org_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_many([
+                test_user(&admin_id, UserType::Person),
+                test_user(&org_id, UserType::Org),
+            ])
+            .await
+            .expect("insert users");
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(&org_id, &admin_id, OrgRole::Admin, None))
+            .await
+            .expect("insert membership");
+
+        let state = test_app_state(db.clone());
+        let Json(response) = create_registration_token(
+            State(state),
+            test_auth_user(&admin_id),
+            Json(CreateRegistrationTokenRequest {
+                name: "org-node".to_string(),
+                owner_user_id: Some(org_id.clone()),
+            }),
+        )
+        .await
+        .expect("org admin can create owner-scoped token");
+
+        let stored = db
+            .collection::<NodeRegistrationToken>(NODE_REG_TOKENS)
+            .find_one(doc! { "_id": &response.token_id })
+            .await
+            .expect("query token")
+            .expect("token exists");
+        assert_eq!(stored.user_id, org_id);
+        assert_eq!(stored.name, "org-node");
+    }
+
+    #[tokio::test]
+    async fn create_registration_token_rejects_non_admin_owner_scope() {
+        let Some(db) = connect_test_database("node_token_non_admin").await else {
+            eprintln!("skipping node handler test: no local MongoDB available");
+            return;
+        };
+
+        let member_id = Uuid::new_v4().to_string();
+        let org_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_many([
+                test_user(&member_id, UserType::Person),
+                test_user(&org_id, UserType::Org),
+            ])
+            .await
+            .expect("insert users");
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(&org_id, &member_id, OrgRole::Member, None))
+            .await
+            .expect("insert membership");
+
+        let state = test_app_state(db);
+        let err = create_registration_token(
+            State(state),
+            test_auth_user(&member_id),
+            Json(CreateRegistrationTokenRequest {
+                name: "org-node".to_string(),
+                owner_user_id: Some(org_id),
+            }),
+        )
+        .await
+        .expect_err("org member cannot create owner-scoped token");
+
+        assert!(matches!(err, AppError::Forbidden(_)));
+    }
+
+    #[tokio::test]
+    async fn create_registration_token_counts_nodes_against_requested_owner_not_actor() {
+        let Some(db) = connect_test_database("node_token_owner_cap").await else {
+            eprintln!("skipping node handler test: no local MongoDB available");
+            return;
+        };
+
+        let admin_id = Uuid::new_v4().to_string();
+        let org_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_many([
+                test_user(&admin_id, UserType::Person),
+                test_user(&org_id, UserType::Org),
+            ])
+            .await
+            .expect("insert users");
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(&org_id, &admin_id, OrgRole::Admin, None))
+            .await
+            .expect("insert membership");
+
+        let actor_nodes: Vec<Node> = (0..10)
+            .map(|idx| test_node(&admin_id, &format!("actor-node-{idx}")))
+            .collect();
+        db.collection::<Node>(NODES)
+            .insert_many(actor_nodes)
+            .await
+            .expect("insert actor nodes at personal cap");
+
+        let state = test_app_state(db.clone());
+        let Json(response) = create_registration_token(
+            State(state),
+            test_auth_user(&admin_id),
+            Json(CreateRegistrationTokenRequest {
+                name: "org-node".to_string(),
+                owner_user_id: Some(org_id.clone()),
+            }),
+        )
+        .await
+        .expect("actor personal cap should not block org-owned token");
+
+        let stored = db
+            .collection::<NodeRegistrationToken>(NODE_REG_TOKENS)
+            .find_one(doc! { "_id": &response.token_id })
+            .await
+            .expect("query token")
+            .expect("token exists");
+        assert_eq!(stored.user_id, org_id);
+    }
+
+    #[tokio::test]
+    async fn list_nodes_returns_owner_metadata_for_personal_and_org_nodes() {
+        let Some(db) = connect_test_database("node_list_owner_metadata").await else {
+            eprintln!("skipping node handler test: no local MongoDB available");
+            return;
+        };
+
+        let actor_id = Uuid::new_v4().to_string();
+        let org_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_many([
+                test_user(&actor_id, UserType::Person),
+                test_user(&org_id, UserType::Org),
+            ])
+            .await
+            .expect("insert users");
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(&org_id, &actor_id, OrgRole::Admin, None))
+            .await
+            .expect("insert membership");
+
+        let personal_node = test_node(&actor_id, "personal-node");
+        let org_node = test_node(&org_id, "org-node");
+        db.collection::<Node>(NODES)
+            .insert_many([personal_node.clone(), org_node.clone()])
+            .await
+            .expect("insert nodes");
+
+        let state = test_app_state(db);
+        let Json(response) = list_nodes(State(state), test_auth_user(&actor_id))
+            .await
+            .expect("list nodes");
+
+        let personal = response
+            .nodes
+            .iter()
+            .find(|node| node.id == personal_node.id)
+            .expect("personal node listed");
+        assert_eq!(personal.owner.kind, node_service::NodeOwnerKind::User);
+        assert_eq!(personal.owner.id, actor_id);
+
+        let org = response
+            .nodes
+            .iter()
+            .find(|node| node.id == org_node.id)
+            .expect("org node listed");
+        assert_eq!(org.owner.kind, node_service::NodeOwnerKind::Org);
+        assert_eq!(org.owner.id, org_id);
+        assert_eq!(org.owner.display_name, "Test Org");
+    }
+
+    #[tokio::test]
+    async fn get_node_returns_owner_metadata_for_org_member() {
+        let Some(db) = connect_test_database("node_get_owner_metadata").await else {
+            eprintln!("skipping node handler test: no local MongoDB available");
+            return;
+        };
+
+        let member_id = Uuid::new_v4().to_string();
+        let org_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_many([
+                test_user(&member_id, UserType::Person),
+                test_user(&org_id, UserType::Org),
+            ])
+            .await
+            .expect("insert users");
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(&org_id, &member_id, OrgRole::Member, None))
+            .await
+            .expect("insert membership");
+        let org_node = test_node(&org_id, "org-node");
+        db.collection::<Node>(NODES)
+            .insert_one(org_node.clone())
+            .await
+            .expect("insert node");
+
+        let state = test_app_state(db);
+        let Json(response) = get_node(
+            State(state),
+            test_auth_user(&member_id),
+            Path(org_node.id.clone()),
+        )
+        .await
+        .expect("get org node");
+
+        assert_eq!(response.id, org_node.id);
+        assert_eq!(response.owner.kind, node_service::NodeOwnerKind::Org);
+        assert_eq!(response.owner.id, org_id);
+    }
+
+    #[tokio::test]
+    async fn transfer_personal_node_to_admin_org_succeeds_and_detaches_old_routes() {
+        let Some(db) = connect_test_database("node_transfer_personal_to_org").await else {
+            eprintln!("skipping node handler test: no local MongoDB available");
+            return;
+        };
+
+        let admin_id = Uuid::new_v4().to_string();
+        let org_id = Uuid::new_v4().to_string();
+        insert_users(
+            &db,
+            vec![
+                test_user(&admin_id, UserType::Person),
+                test_user(&org_id, UserType::Org),
+            ],
+        )
+        .await;
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(&org_id, &admin_id, OrgRole::Admin, None))
+            .await
+            .expect("insert membership");
+
+        let node = test_node(&admin_id, "edge-node");
+        let binding = test_binding(&admin_id, &node.id, "svc-old");
+        let old_service = test_user_service(
+            &Uuid::new_v4().to_string(),
+            &admin_id,
+            "old-service",
+            &Uuid::new_v4().to_string(),
+            Some("svc-old"),
+            Some(&node.id),
+        );
+        let new_owner_service = test_user_service(
+            &Uuid::new_v4().to_string(),
+            &org_id,
+            "org-service",
+            &Uuid::new_v4().to_string(),
+            Some("svc-org"),
+            Some(&node.id),
+        );
+        db.collection::<Node>(NODES)
+            .insert_one(node.clone())
+            .await
+            .expect("insert node");
+        db.collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
+            .insert_one(binding.clone())
+            .await
+            .expect("insert binding");
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_many([old_service.clone(), new_owner_service.clone()])
+            .await
+            .expect("insert user services");
+
+        let state = test_app_state(db.clone());
+        let Json(response) = transfer_node(
+            State(state),
+            test_auth_user(&admin_id),
+            Path(node.id.clone()),
+            Json(TransferNodeRequest {
+                new_owner_user_id: org_id.clone(),
+            }),
+        )
+        .await
+        .expect("transfer succeeds");
+
+        assert_eq!(response.node_id, node.id);
+        assert_eq!(response.previous_owner.id, admin_id);
+        assert_eq!(response.new_owner.id, org_id);
+        assert_eq!(response.deactivated_bindings_count, 1);
+        assert_eq!(response.cleared_user_service_count, 1);
+
+        let transferred = db
+            .collection::<Node>(NODES)
+            .find_one(doc! { "_id": &node.id })
+            .await
+            .expect("query node")
+            .expect("node exists");
+        assert_eq!(transferred.user_id, org_id);
+
+        let updated_binding = db
+            .collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
+            .find_one(doc! { "_id": &binding.id })
+            .await
+            .expect("query binding")
+            .expect("binding exists");
+        assert!(!updated_binding.is_active);
+
+        let old_service_after = db
+            .collection::<UserService>(USER_SERVICES)
+            .find_one(doc! { "_id": &old_service.id })
+            .await
+            .expect("query old service")
+            .expect("old service exists");
+        assert_eq!(old_service_after.node_id, None);
+
+        let new_owner_service_after = db
+            .collection::<UserService>(USER_SERVICES)
+            .find_one(doc! { "_id": &new_owner_service.id })
+            .await
+            .expect("query new owner service")
+            .expect("new owner service exists");
+        assert_eq!(
+            new_owner_service_after.node_id.as_deref(),
+            Some(node.id.as_str())
+        );
+
+        let audit = wait_for_transfer_audit(&db, &node.id)
+            .await
+            .expect("transfer audit");
+        let data = audit.event_data.expect("audit data");
+        assert_eq!(
+            data.get("previous_owner_user_id").and_then(|v| v.as_str()),
+            Some(admin_id.as_str())
+        );
+        assert_eq!(
+            data.get("new_owner_user_id").and_then(|v| v.as_str()),
+            Some(org_id.as_str())
+        );
+        assert_eq!(
+            data.get("deactivated_bindings_count")
+                .and_then(|v| v.as_u64()),
+            Some(1)
+        );
+        assert_eq!(
+            data.get("cleared_user_service_count")
+                .and_then(|v| v.as_u64()),
+            Some(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn transfer_org_node_between_administered_orgs_succeeds() {
+        let Some(db) = connect_test_database("node_transfer_org_to_org").await else {
+            eprintln!("skipping node handler test: no local MongoDB available");
+            return;
+        };
+
+        let admin_id = Uuid::new_v4().to_string();
+        let org_a_id = Uuid::new_v4().to_string();
+        let org_b_id = Uuid::new_v4().to_string();
+        insert_users(
+            &db,
+            vec![
+                test_user(&admin_id, UserType::Person),
+                test_user(&org_a_id, UserType::Org),
+                test_user(&org_b_id, UserType::Org),
+            ],
+        )
+        .await;
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_many([
+                test_membership(&org_a_id, &admin_id, OrgRole::Admin, None),
+                test_membership(&org_b_id, &admin_id, OrgRole::Admin, None),
+            ])
+            .await
+            .expect("insert memberships");
+        let node = test_node(&org_a_id, "shared-node");
+        db.collection::<Node>(NODES)
+            .insert_one(node.clone())
+            .await
+            .expect("insert node");
+
+        let state = test_app_state(db.clone());
+        let _ = transfer_node(
+            State(state),
+            test_auth_user(&admin_id),
+            Path(node.id.clone()),
+            Json(TransferNodeRequest {
+                new_owner_user_id: org_b_id.clone(),
+            }),
+        )
+        .await
+        .expect("transfer succeeds");
+
+        let transferred = db
+            .collection::<Node>(NODES)
+            .find_one(doc! { "_id": &node.id })
+            .await
+            .expect("query node")
+            .expect("node exists");
+        assert_eq!(transferred.user_id, org_b_id);
+    }
+
+    #[tokio::test]
+    async fn transfer_org_node_by_member_returns_not_found() {
+        let Some(db) = connect_test_database("node_transfer_member_denied").await else {
+            eprintln!("skipping node handler test: no local MongoDB available");
+            return;
+        };
+
+        let member_id = Uuid::new_v4().to_string();
+        let org_id = Uuid::new_v4().to_string();
+        insert_users(
+            &db,
+            vec![
+                test_user(&member_id, UserType::Person),
+                test_user(&org_id, UserType::Org),
+            ],
+        )
+        .await;
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(&org_id, &member_id, OrgRole::Member, None))
+            .await
+            .expect("insert membership");
+        let node = test_node(&org_id, "member-denied-node");
+        db.collection::<Node>(NODES)
+            .insert_one(node.clone())
+            .await
+            .expect("insert node");
+
+        let state = test_app_state(db);
+        let err = transfer_node(
+            State(state),
+            test_auth_user(&member_id),
+            Path(node.id),
+            Json(TransferNodeRequest {
+                new_owner_user_id: member_id,
+            }),
+        )
+        .await
+        .expect_err("member cannot transfer org node");
+
+        assert!(matches!(err, AppError::NodeNotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn transfer_to_same_owner_returns_bad_request() {
+        let Some(db) = connect_test_database("node_transfer_same_owner").await else {
+            eprintln!("skipping node handler test: no local MongoDB available");
+            return;
+        };
+
+        let owner_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&owner_id, UserType::Person))
+            .await
+            .expect("insert owner");
+        let node = test_node(&owner_id, "same-owner-node");
+        db.collection::<Node>(NODES)
+            .insert_one(node.clone())
+            .await
+            .expect("insert node");
+
+        let state = test_app_state(db);
+        let err = transfer_node(
+            State(state),
+            test_auth_user(&owner_id),
+            Path(node.id),
+            Json(TransferNodeRequest {
+                new_owner_user_id: owner_id,
+            }),
+        )
+        .await
+        .expect_err("same-owner transfer rejected");
+
+        assert!(
+            matches!(err, AppError::BadRequest(message) if message == "node already belongs to that owner")
+        );
+    }
+
+    #[tokio::test]
+    async fn transfer_name_collision_returns_explicit_bad_request() {
+        let Some(db) = connect_test_database("node_transfer_name_collision").await else {
+            eprintln!("skipping node handler test: no local MongoDB available");
+            return;
+        };
+
+        let admin_id = Uuid::new_v4().to_string();
+        let org_id = Uuid::new_v4().to_string();
+        insert_users(
+            &db,
+            vec![
+                test_user(&admin_id, UserType::Person),
+                test_user(&org_id, UserType::Org),
+            ],
+        )
+        .await;
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(&org_id, &admin_id, OrgRole::Admin, None))
+            .await
+            .expect("insert membership");
+        let source_node = test_node(&admin_id, "duplicate-node");
+        let colliding_node = test_node(&org_id, "duplicate-node");
+        db.collection::<Node>(NODES)
+            .insert_many([source_node.clone(), colliding_node])
+            .await
+            .expect("insert nodes");
+
+        let state = test_app_state(db);
+        let err = transfer_node(
+            State(state),
+            test_auth_user(&admin_id),
+            Path(source_node.id),
+            Json(TransferNodeRequest {
+                new_owner_user_id: org_id,
+            }),
+        )
+        .await
+        .expect_err("name collision rejected");
+
+        assert!(
+            matches!(err, AppError::BadRequest(message) if message.contains("An active node named 'duplicate-node' already exists for the destination owner"))
+        );
+    }
+
+    #[tokio::test]
+    async fn transfer_destination_at_node_cap_returns_bad_request() {
+        let Some(db) = connect_test_database("node_transfer_cap").await else {
+            eprintln!("skipping node handler test: no local MongoDB available");
+            return;
+        };
+
+        let admin_id = Uuid::new_v4().to_string();
+        let org_id = Uuid::new_v4().to_string();
+        insert_users(
+            &db,
+            vec![
+                test_user(&admin_id, UserType::Person),
+                test_user(&org_id, UserType::Org),
+            ],
+        )
+        .await;
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(&org_id, &admin_id, OrgRole::Admin, None))
+            .await
+            .expect("insert membership");
+
+        let source_node = test_node(&admin_id, "source-node");
+        let mut nodes = vec![source_node.clone()];
+        nodes.extend((0..10).map(|idx| test_node(&org_id, &format!("org-node-{idx}"))));
+        db.collection::<Node>(NODES)
+            .insert_many(nodes)
+            .await
+            .expect("insert nodes");
+
+        let state = test_app_state(db);
+        let err = transfer_node(
+            State(state),
+            test_auth_user(&admin_id),
+            Path(source_node.id),
+            Json(TransferNodeRequest {
+                new_owner_user_id: org_id,
+            }),
+        )
+        .await
+        .expect_err("cap rejected");
+
+        assert!(
+            matches!(err, AppError::BadRequest(message) if message == "Maximum of 10 nodes per user reached")
+        );
+    }
+
+    #[tokio::test]
+    async fn transfer_updates_list_visibility_for_previous_and_new_owner_members() {
+        let Some(db) = connect_test_database("node_transfer_list_visibility").await else {
+            eprintln!("skipping node handler test: no local MongoDB available");
+            return;
+        };
+
+        let admin_id = Uuid::new_v4().to_string();
+        let org_a_member_id = Uuid::new_v4().to_string();
+        let org_b_member_id = Uuid::new_v4().to_string();
+        let org_a_id = Uuid::new_v4().to_string();
+        let org_b_id = Uuid::new_v4().to_string();
+        insert_users(
+            &db,
+            vec![
+                test_user(&admin_id, UserType::Person),
+                test_user(&org_a_member_id, UserType::Person),
+                test_user(&org_b_member_id, UserType::Person),
+                test_user(&org_a_id, UserType::Org),
+                test_user(&org_b_id, UserType::Org),
+            ],
+        )
+        .await;
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_many([
+                test_membership(&org_a_id, &admin_id, OrgRole::Admin, None),
+                test_membership(&org_b_id, &admin_id, OrgRole::Admin, None),
+                test_membership(&org_a_id, &org_a_member_id, OrgRole::Member, None),
+                test_membership(&org_b_id, &org_b_member_id, OrgRole::Member, None),
+            ])
+            .await
+            .expect("insert memberships");
+        let node = test_node(&org_a_id, "moving-node");
+        db.collection::<Node>(NODES)
+            .insert_one(node.clone())
+            .await
+            .expect("insert node");
+
+        let state = test_app_state(db.clone());
+        let _ = transfer_node(
+            State(state.clone()),
+            test_auth_user(&admin_id),
+            Path(node.id.clone()),
+            Json(TransferNodeRequest {
+                new_owner_user_id: org_b_id,
+            }),
+        )
+        .await
+        .expect("transfer succeeds");
+
+        let Json(previous_response) =
+            list_nodes(State(state.clone()), test_auth_user(&org_a_member_id))
+                .await
+                .expect("previous owner member can list nodes");
+        assert!(
+            !previous_response
+                .nodes
+                .iter()
+                .any(|item| item.id == node.id)
+        );
+
+        let Json(new_response) = list_nodes(State(state), test_auth_user(&org_b_member_id))
+            .await
+            .expect("new owner member can list nodes");
+        assert!(new_response.nodes.iter().any(|item| item.id == node.id));
+    }
+
+    #[tokio::test]
+    async fn transfer_orders_cleanup_before_ownership_flip() {
+        let Some(db) = connect_test_database("node_transfer_cleanup_order").await else {
+            eprintln!("skipping node handler test: no local MongoDB available");
+            return;
+        };
+
+        let actor_id = Uuid::new_v4().to_string();
+        let other_old_owner_id = Uuid::new_v4().to_string();
+        let org_id = Uuid::new_v4().to_string();
+        insert_users(
+            &db,
+            vec![
+                test_user(&actor_id, UserType::Person),
+                test_user(&other_old_owner_id, UserType::Person),
+                test_user(&org_id, UserType::Org),
+            ],
+        )
+        .await;
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(&org_id, &actor_id, OrgRole::Admin, None))
+            .await
+            .expect("insert membership");
+
+        let node = test_node(&actor_id, "edge-node");
+        let binding = test_binding(&actor_id, &node.id, "svc-old");
+        let actor_service = test_user_service(
+            &Uuid::new_v4().to_string(),
+            &actor_id,
+            "actor-service",
+            &Uuid::new_v4().to_string(),
+            Some("svc-old"),
+            Some(&node.id),
+        );
+        let orphaned_service = test_user_service(
+            &Uuid::new_v4().to_string(),
+            &other_old_owner_id,
+            "orphaned-service",
+            &Uuid::new_v4().to_string(),
+            Some("svc-orphaned"),
+            Some(&node.id),
+        );
+        let destination_service = test_user_service(
+            &Uuid::new_v4().to_string(),
+            &org_id,
+            "destination-service",
+            &Uuid::new_v4().to_string(),
+            Some("svc-destination"),
+            Some(&node.id),
+        );
+        db.collection::<Node>(NODES)
+            .insert_one(node.clone())
+            .await
+            .expect("insert node");
+        db.collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
+            .insert_one(binding.clone())
+            .await
+            .expect("insert binding");
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_many([actor_service, orphaned_service, destination_service])
+            .await
+            .expect("insert user services");
+
+        let state = test_app_state(db.clone());
+        let _ = transfer_node(
+            State(state),
+            test_auth_user(&actor_id),
+            Path(node.id.clone()),
+            Json(TransferNodeRequest {
+                new_owner_user_id: org_id.clone(),
+            }),
+        )
+        .await
+        .expect("transfer succeeds");
+
+        let cross_owner_routes = db
+            .collection::<UserService>(USER_SERVICES)
+            .count_documents(doc! {
+                "node_id": &node.id,
+                "user_id": { "$ne": &org_id },
+                "is_active": true,
+            })
+            .await
+            .expect("count cross-owner routes");
+        assert_eq!(cross_owner_routes, 0);
+
+        let active_bindings = db
+            .collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
+            .count_documents(doc! { "node_id": &node.id, "is_active": true })
+            .await
+            .expect("count active bindings");
+        assert_eq!(active_bindings, 0);
+
+        let transferred = db
+            .collection::<Node>(NODES)
+            .find_one(doc! { "_id": &node.id })
+            .await
+            .expect("query node")
+            .expect("node exists");
+        assert_eq!(transferred.user_id, org_id);
+
+        let audit = wait_for_transfer_audit(&db, &node.id)
+            .await
+            .expect("transfer audit");
+        let data = audit.event_data.expect("audit data");
+        assert_eq!(
+            data.get("actor_user_id").and_then(|v| v.as_str()),
+            Some(actor_id.as_str())
+        );
+        assert_eq!(
+            data.get("owner_user_id").and_then(|v| v.as_str()),
+            Some(org_id.as_str())
+        );
+        assert_eq!(
+            data.get("deactivated_bindings_count")
+                .and_then(|v| v.as_u64()),
+            Some(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn list_admins_returns_personal_owner() {
+        let Some(db) = connect_test_database("node_admins_personal").await else {
+            eprintln!("skipping node handler test: no local MongoDB available");
+            return;
+        };
+
+        let owner_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&owner_id, UserType::Person))
+            .await
+            .expect("insert owner");
+        let node = test_node(&owner_id, "personal-node");
+        db.collection::<Node>(NODES)
+            .insert_one(node.clone())
+            .await
+            .expect("insert node");
+
+        let state = test_app_state(db);
+        let Json(response) = list_admins(
+            State(state),
+            test_auth_user(&owner_id),
+            Path(node.id.clone()),
+        )
+        .await
+        .expect("list admins");
+
+        assert_eq!(response.admins.len(), 1);
+        assert_eq!(response.admins[0].user_id, owner_id);
+        assert_eq!(response.admins[0].role, node_service::NodeAdminRole::Owner);
+    }
+
+    #[tokio::test]
+    async fn list_admins_returns_org_admins_for_readable_org_node() {
+        let Some(db) = connect_test_database("node_admins_org").await else {
+            eprintln!("skipping node handler test: no local MongoDB available");
+            return;
+        };
+
+        let admin_a_id = Uuid::new_v4().to_string();
+        let admin_b_id = Uuid::new_v4().to_string();
+        let member_id = Uuid::new_v4().to_string();
+        let org_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_many([
+                test_user(&admin_a_id, UserType::Person),
+                test_user(&admin_b_id, UserType::Person),
+                test_user(&member_id, UserType::Person),
+                test_user(&org_id, UserType::Org),
+            ])
+            .await
+            .expect("insert users");
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_many([
+                test_membership(&org_id, &admin_a_id, OrgRole::Admin, None),
+                test_membership(&org_id, &admin_b_id, OrgRole::Admin, None),
+                test_membership(&org_id, &member_id, OrgRole::Member, None),
+            ])
+            .await
+            .expect("insert memberships");
+        let node = test_node(&org_id, "org-node");
+        db.collection::<Node>(NODES)
+            .insert_one(node.clone())
+            .await
+            .expect("insert node");
+
+        let state = test_app_state(db);
+        let Json(response) = list_admins(
+            State(state),
+            test_auth_user(&member_id),
+            Path(node.id.clone()),
+        )
+        .await
+        .expect("member can list node admins");
+
+        let mut admin_ids: Vec<&str> = response
+            .admins
+            .iter()
+            .map(|admin| admin.user_id.as_str())
+            .collect();
+        admin_ids.sort_unstable();
+        let mut expected = vec![admin_a_id.as_str(), admin_b_id.as_str()];
+        expected.sort_unstable();
+        assert_eq!(admin_ids, expected);
+        assert!(
+            response
+                .admins
+                .iter()
+                .all(|admin| admin.role == node_service::NodeAdminRole::Admin)
+        );
+    }
+
+    #[test]
+    fn audit_event_data_with_owner_adds_owner_only_when_shared() {
+        let personal =
+            audit_event_data_with_owner("user-1", "user-1", serde_json::json!({ "node_id": "n1" }));
+        assert!(personal.get("owner_user_id").is_none());
+
+        let shared =
+            audit_event_data_with_owner("user-1", "org-1", serde_json::json!({ "node_id": "n1" }));
+        assert_eq!(
+            shared.get("owner_user_id").and_then(|v| v.as_str()),
+            Some("org-1")
+        );
+    }
 }

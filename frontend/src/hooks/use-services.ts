@@ -1,13 +1,15 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import type {
+  CreateServicePayload,
   DownstreamService,
   OidcCredentials,
   RedirectUrisResponse,
   RegenerateSecretResponse,
+  UpdateServicePayload,
   UserServiceConnection,
 } from "@/types/api";
-import type { CreateServiceFormData, UpdateServiceFormData } from "@/schemas/services";
+import type { SshAuthMode } from "@/schemas/services";
 
 export function useServices() {
   return useQuery({
@@ -36,7 +38,7 @@ export function useCreateService() {
 
   return useMutation({
     mutationFn: async (
-      data: CreateServiceFormData,
+      data: CreateServicePayload,
     ): Promise<DownstreamService> => {
       return api.post<DownstreamService>("/services", data);
     },
@@ -55,7 +57,7 @@ export function useUpdateService() {
       data,
     }: {
       readonly serviceId: string;
-      readonly data: UpdateServiceFormData;
+      readonly data: UpdateServicePayload;
     }): Promise<DownstreamService> => {
       return api.put<DownstreamService>(`/services/${serviceId}`, data);
     },
@@ -77,6 +79,50 @@ export function useDeleteService() {
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["services"] });
+    },
+  });
+}
+
+export function useUpdateSshAuthMode() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async ({
+      userServiceId,
+      mode,
+    }: {
+      readonly userServiceId: string;
+      readonly mode: SshAuthMode;
+    }): Promise<void> => {
+      return api.patch<void>(`/user-services/${userServiceId}/ssh-auth-mode`, {
+        mode,
+      });
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["services"] });
+      void queryClient.invalidateQueries({ queryKey: ["keys"] });
+      void queryClient.invalidateQueries({ queryKey: ["user-services"] });
+    },
+  });
+}
+
+export function useTestSshConnection() {
+  return useMutation({
+    mutationFn: async ({
+      serviceId,
+      principal,
+    }: {
+      readonly serviceId: string;
+      readonly principal: string;
+    }): Promise<{ readonly exit_code: number; readonly stderr?: string }> => {
+      return api.post<{ readonly exit_code: number; readonly stderr?: string }>(
+        `/ssh/${serviceId}/exec`,
+        {
+          principal,
+          command: "true",
+          timeout_secs: 10,
+        },
+      );
     },
   });
 }
@@ -168,13 +214,10 @@ export function useConnectService() {
     mutationFn: async (
       params: ConnectServiceParams,
     ): Promise<ConnectResponse> => {
-      return api.post<ConnectResponse>(
-        `/connections/${params.serviceId}`,
-        {
-          credential: params.credential,
-          credential_label: params.credentialLabel,
-        },
-      );
+      return api.post<ConnectResponse>(`/connections/${params.serviceId}`, {
+        credential: params.credential,
+        credential_label: params.credentialLabel,
+      });
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["connections"] });

@@ -3,6 +3,10 @@ use serde::{Deserialize, Serialize};
 
 pub const COLLECTION_NAME: &str = "roles";
 
+pub const PLATFORM_ADMIN_ROLE_SLUG: &str = "admin";
+pub const PLATFORM_OPERATOR_ROLE_SLUG: &str = "operator";
+pub const PLATFORM_USER_ROLE_SLUG: &str = "user";
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Role {
     #[serde(rename = "_id")]

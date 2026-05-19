@@ -3,13 +3,19 @@ import { api } from "@/lib/api-client";
 import type {
   NodeInfo,
   NodeListResponse,
-  NodeBindingInfo,
-  BindingListResponse,
+  NodeAdminInfo,
+  NodeAdminsResponse,
   CreateRegistrationTokenResponse,
   RotateNodeTokenResponse,
-  CreateBindingResponse,
+  TransferNodeResponse,
+  NodePendingCredentialInfo,
+  NodePendingCredentialsResponse,
 } from "@/types/nodes";
-import type { CreateRegistrationTokenFormData } from "@/schemas/nodes";
+import type {
+  CreateRegistrationTokenFormData,
+  TransferNodeFormData,
+  PushNodeCredentialFormData,
+} from "@/schemas/nodes";
 
 // --- Query hooks ---
 
@@ -47,16 +53,27 @@ export function useNode(nodeId: string) {
   });
 }
 
-export function useNodeBindings(nodeId: string) {
+export function useNodeAdmins(nodeId: string) {
   return useQuery({
-    queryKey: ["nodes", nodeId, "bindings"],
-    queryFn: async (): Promise<readonly NodeBindingInfo[]> => {
-      const res = await api.get<BindingListResponse>(
-        `/nodes/${nodeId}/bindings`,
-      );
-      return res.bindings;
+    queryKey: ["nodes", nodeId, "admins"],
+    queryFn: async (): Promise<readonly NodeAdminInfo[]> => {
+      const res = await api.get<NodeAdminsResponse>(`/nodes/${nodeId}/admins`);
+      return res.admins;
     },
     enabled: Boolean(nodeId),
+  });
+}
+
+export function useNodePendingCredentials(nodeId: string, enabled = true) {
+  return useQuery({
+    queryKey: ["nodes", nodeId, "pending-credentials"],
+    queryFn: async (): Promise<readonly NodePendingCredentialInfo[]> => {
+      const res = await api.get<NodePendingCredentialsResponse>(
+        `/nodes/${nodeId}/credentials/pending`,
+      );
+      return res.pending_credentials;
+    },
+    enabled: enabled && Boolean(nodeId),
   });
 }
 
@@ -106,73 +123,69 @@ export function useRotateNodeToken() {
   });
 }
 
-export function useCreateBinding() {
+export function useTransferNode() {
   const queryClient = useQueryClient();
 
   return useMutation({
     mutationFn: async ({
       nodeId,
-      serviceId,
+      data,
     }: {
       readonly nodeId: string;
-      readonly serviceId: string;
-    }): Promise<CreateBindingResponse> => {
-      return api.post<CreateBindingResponse>(`/nodes/${nodeId}/bindings`, {
-        service_id: serviceId,
-      });
+      readonly data: TransferNodeFormData;
+    }): Promise<TransferNodeResponse> => {
+      return api.post<TransferNodeResponse>(
+        `/nodes/${nodeId}/transfer`,
+        data,
+      );
     },
     onSuccess: (_data, variables) => {
-      void queryClient.invalidateQueries({
-        queryKey: ["nodes", variables.nodeId, "bindings"],
-      });
       void queryClient.invalidateQueries({ queryKey: ["nodes"] });
+      void queryClient.invalidateQueries({
+        queryKey: ["nodes", variables.nodeId],
+      });
+      void queryClient.invalidateQueries({
+        queryKey: ["nodes", variables.nodeId, "admins"],
+      });
+      void queryClient.invalidateQueries({ queryKey: ["keys"] });
     },
   });
 }
 
-export function useUpdateBinding() {
+export function usePushNodeCredential(nodeId: string) {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: async ({
-      nodeId,
-      bindingId,
-      priority,
-    }: {
-      readonly nodeId: string;
-      readonly bindingId: string;
-      readonly priority: number;
-    }): Promise<void> => {
-      return api.patch<void>(`/nodes/${nodeId}/bindings/${bindingId}`, {
-        priority,
-      });
+    mutationFn: async (
+      data: PushNodeCredentialFormData,
+    ): Promise<NodePendingCredentialInfo> => {
+      return api.post<NodePendingCredentialInfo>(
+        `/nodes/${nodeId}/credentials/push`,
+        data,
+      );
     },
-    onSuccess: (_data, variables) => {
+    onSuccess: () => {
       void queryClient.invalidateQueries({
-        queryKey: ["nodes", variables.nodeId, "bindings"],
+        queryKey: ["nodes", nodeId, "pending-credentials"],
       });
     },
   });
 }
 
-export function useDeleteBinding() {
+export function useCancelNodePendingCredential(nodeId: string) {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: async ({
-      nodeId,
-      bindingId,
-    }: {
-      readonly nodeId: string;
-      readonly bindingId: string;
-    }): Promise<void> => {
-      return api.delete<void>(`/nodes/${nodeId}/bindings/${bindingId}`);
+    mutationFn: async (pendingCredentialId: string): Promise<void> => {
+      return api.delete<void>(
+        `/nodes/${nodeId}/credentials/pending/${pendingCredentialId}`,
+      );
     },
-    onSuccess: (_data, variables) => {
+    onSuccess: () => {
       void queryClient.invalidateQueries({
-        queryKey: ["nodes", variables.nodeId, "bindings"],
+        queryKey: ["nodes", nodeId, "pending-credentials"],
       });
-      void queryClient.invalidateQueries({ queryKey: ["nodes"] });
     },
   });
 }
+

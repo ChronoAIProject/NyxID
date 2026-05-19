@@ -1,6 +1,8 @@
-# nyxid-node Agent
+# nyxid node Agent
 
-`nyxid-node` is a lightweight Rust binary that runs on your infrastructure as a credential node agent. It connects to a NyxID server via WebSocket, receives proxy requests, injects locally stored credentials, and forwards requests to downstream services. Credentials never leave your infrastructure.
+> The node agent is part of the `nyxid` CLI. All commands below use `nyxid node <command>`. The former standalone `nyxid-node` binary has been removed.
+
+The `nyxid node` subcommand is a lightweight credential node agent built into the `nyxid` CLI. It runs on your infrastructure, connects to a NyxID server via WebSocket, receives proxy requests, injects locally stored credentials, and forwards requests to downstream services. Credentials never leave your infrastructure.
 
 ---
 
@@ -16,6 +18,7 @@
 - [Configuration File](#configuration-file)
 - [HMAC Request Signing](#hmac-request-signing)
 - [Streaming Proxy Responses](#streaming-proxy-responses)
+- [Serving SSH Tunnels](#serving-ssh-tunnels)
 - [Reconnection and Resilience](#reconnection-and-resilience)
 - [Graceful Shutdown](#graceful-shutdown)
 - [Security](#security)
@@ -26,19 +29,19 @@
 
 ## Installation
 
-Build from source (requires Rust 2024 edition):
+The node agent is included in the `nyxid` CLI. Build from source (requires Rust 2024 edition):
 
 ```bash
 # From the project root
-cargo build --release -p nyxid-node
+cargo build --release -p nyxid-cli
 
-# Binary is at target/release/nyxid-node
+# Binary is at target/release/nyxid
 ```
 
 Or install directly:
 
 ```bash
-cargo install --path node-agent
+cargo install --path cli
 ```
 
 ---
@@ -63,7 +66,7 @@ The response includes a `nyx_nreg_...` token that expires after 1 hour (configur
 ### Step 2: Register the Agent
 
 ```bash
-nyxid-node register --token nyx_nreg_<64_hex_chars>
+nyxid node register --token nyx_nreg_<64_hex_chars>
 ```
 
 The agent connects to the NyxID server via WebSocket, exchanges the registration token for a permanent auth token and HMAC signing secret, and saves the encrypted configuration to `~/.nyxid-node/config.toml`.
@@ -80,7 +83,7 @@ The agent connects to the NyxID server via WebSocket, exchanges the registration
 For production, use WSS:
 
 ```bash
-nyxid-node register \
+nyxid node register \
   --token nyx_nreg_... \
   --url wss://auth.example.com/api/v1/nodes/ws
 ```
@@ -88,7 +91,7 @@ nyxid-node register \
 To use the OS keychain (macOS Keychain, Windows Credential Manager, Linux Secret Service) instead of file-based encryption:
 
 ```bash
-nyxid-node register \
+nyxid node register \
   --token nyx_nreg_... \
   --url wss://auth.example.com/api/v1/nodes/ws \
   --keychain
@@ -103,7 +106,7 @@ Node registered successfully.
   Config:   /home/user/.nyxid-node/config.toml
 
 Start the agent with:
-  nyxid-node start
+  nyxid node start
 ```
 
 ---
@@ -111,7 +114,7 @@ Start the agent with:
 ## Starting the Agent
 
 ```bash
-nyxid-node start
+nyxid node start
 ```
 
 The agent:
@@ -121,7 +124,7 @@ The agent:
 3. Loads all stored credentials from the configured backend
 4. Connects to the NyxID server via WebSocket
 5. Authenticates with its node ID and auth token
-6. Begins serving proxy requests and responding to heartbeats
+6. Begins serving proxy requests, SSH tunnel requests, and responding to heartbeats
 
 #### Options
 
@@ -138,10 +141,22 @@ The agent runs until terminated. Use `--log-level debug` for detailed connection
 
 Credentials are stored locally using the configured storage backend -- either AES-256-GCM encrypted in the config file (default) or in the OS keychain. The agent loads them at startup and holds decrypted values in memory.
 
+### Preferred: Setup from the NyxID Catalog
+
+For catalog-backed services, the easiest path is:
+
+```bash
+nyxid node credentials setup --service llm-openai
+```
+
+`credentials setup` fetches the service metadata from NyxID, detects whether the service needs an API key, bearer token, gateway URL, device-code OAuth, or authorization-code OAuth, and stores the resulting credential locally on the node.
+
+For node-routed provider-backed services, the OAuth token stays on the node. NyxID stores only the routed AI service metadata and does not keep the provider credential.
+
 ### Add a Credential (Header Injection)
 
 ```bash
-nyxid-node credentials add \
+nyxid node credentials add \
   --service openai \
   --header "Authorization: Bearer sk-proj-..."
 ```
@@ -149,7 +164,7 @@ nyxid-node credentials add \
 ### Add a Credential (Query Parameter Injection)
 
 ```bash
-nyxid-node credentials add \
+nyxid node credentials add \
   --service stripe \
   --query-param "api_key=sk_live_..."
 ```
@@ -157,7 +172,7 @@ nyxid-node credentials add \
 ### List Credentials
 
 ```bash
-nyxid-node credentials list
+nyxid node credentials list
 ```
 
 Output:
@@ -171,7 +186,7 @@ Configured credentials:
 ### Remove a Credential
 
 ```bash
-nyxid-node credentials remove --service openai
+nyxid node credentials remove --service openai
 ```
 
 ### Service Slug Matching
@@ -183,7 +198,7 @@ The `--service` value must match the **slug** of the downstream service in NyxID
 ## Checking Status
 
 ```bash
-nyxid-node status
+nyxid node status
 ```
 
 Output:
@@ -211,7 +226,7 @@ The agent supports two backends for storing secrets (auth token, signing secret,
 Secrets are encrypted with AES-256-GCM and stored in `config.toml`. A 32-byte encryption key is generated at `~/.nyxid-node/.keyfile` (mode `0600`). This works on all platforms including headless servers and Docker containers.
 
 ```bash
-nyxid-node register --token nyx_nreg_...
+nyxid node register --token nyx_nreg_...
 ```
 
 ### Keychain Backend
@@ -225,7 +240,7 @@ Secrets are stored in the OS keychain:
 The TOML config file retains only non-secret metadata (server URL, node ID, injection method, header/param names). No encrypted values are written to disk.
 
 ```bash
-nyxid-node register --token nyx_nreg_... --keychain
+nyxid node register --token nyx_nreg_... --keychain
 ```
 
 Keychain entries use `nyxid-node` as the service name, with `{node_id}/auth_token`, `{node_id}/signing_secret`, and `{node_id}/cred/{service_slug}` as account identifiers. Multiple nodes on the same machine do not collide.
@@ -240,10 +255,10 @@ To migrate an existing node from file-based storage to OS keychain (or vice vers
 
 ```bash
 # Migrate from file to keychain
-nyxid-node migrate --to keychain
+nyxid node migrate --to keychain
 
 # Migrate from keychain back to file
-nyxid-node migrate --to file
+nyxid node migrate --to file
 ```
 
 The `migrate` command:
@@ -368,10 +383,32 @@ The agent supports streaming proxy responses for SSE (Server-Sent Events) endpoi
 ### Streaming Protocol
 
 1. The agent sends `proxy_response_start` with status and headers
-2. The agent sends `proxy_response_chunk` messages with base64-encoded data (max 64KB per chunk)
+2. The agent sends streaming data chunks, preferably as WebSocket binary frames with a 36-byte `request_id` prefix; when the server does not advertise `auth_ok.capabilities.proxy_binary_chunks`, it falls back to legacy `proxy_response_chunk` JSON messages with base64-encoded data
 3. The agent sends `proxy_response_end` when the stream completes
 
 NyxID reconstructs the streaming response and forwards it to the client as a standard SSE stream. This enables real-time streaming from LLM APIs (e.g., OpenAI chat completions with `stream=true`) through the node proxy.
+
+---
+
+## Serving SSH Tunnels
+
+The agent also participates in NyxID's SSH-over-WebSocket flow when a bound service has SSH tunneling enabled.
+
+### SSH Tunnel Flow
+
+1. NyxID sends `ssh_tunnel_open` with a `session_id`, `host`, and `port`
+2. The agent opens a TCP connection to `host:port` from the node's network
+3. The agent acknowledges success with `ssh_tunnel_opened`
+4. SSH payload bytes move in both directions through `ssh_tunnel_data`
+5. Either side ends the session with `ssh_tunnel_close` or `ssh_tunnel_closed`
+
+### Operational Notes
+
+- No SSH private keys are stored on the node for this feature; the node only bridges TCP
+- The target SSH service must be reachable from the node host
+- If the TCP connect attempt fails, the agent returns `ssh_tunnel_closed` with an error payload and NyxID records an SSH connect failure audit event
+
+For end-user setup, certificate issuance, and OpenSSH `ProxyCommand` examples, see [SSH_TUNNELING.md](./SSH_TUNNELING.md).
 
 ---
 
@@ -444,7 +481,7 @@ In-flight requests are tracked with an atomic counter that increments when a req
 ## CLI Reference
 
 ```
-nyxid-node <COMMAND> [OPTIONS]
+nyxid node <COMMAND> [OPTIONS]
 
 COMMANDS:
   register      Register this node with a NyxID server
@@ -452,6 +489,7 @@ COMMANDS:
   status        Show node connection status
   rekey         Update auth token and signing secret after server-side rotation
   credentials   Manage local credentials
+  openclaw      OpenClaw convenience commands
   migrate       Migrate secret storage between backends
   version       Show version information
 
@@ -476,15 +514,38 @@ REKEY OPTIONS:
   --config <PATH>           Path to config directory
 
 CREDENTIALS SUBCOMMANDS:
-  add     Add a credential for a service
-  list    List configured credentials
-  remove  Remove a credential for a service
+  setup      Set up a catalog-backed service locally (preferred)
+  add        Add a credential for a service
+  add-oauth  Run a local OAuth flow for a service
+  list       List configured credentials
+  remove     Remove a credential for a service
+
+CREDENTIALS SETUP OPTIONS:
+  --service <SLUG>          Catalog service slug (e.g., "llm-openai")
+  --api-url <URL>           NyxID base URL (auto-derived from node config when omitted)
+  --access-token <TOKEN>    NyxID access token (or use `nyxid login` / NYXID_ACCESS_TOKEN)
+  --config <PATH>           Path to config directory
 
 CREDENTIALS ADD OPTIONS:
   --service <SLUG>          Service slug (e.g., "openai")
   --header <HEADER>         Header to inject (e.g., "Authorization: Bearer sk-...")
   --query-param <PARAM>     Query parameter to inject (e.g., "api_key=sk-...")
   --config <PATH>           Path to config directory
+
+CREDENTIALS ADD-OAUTH OPTIONS:
+  --service <SLUG>          Service slug
+  --from-catalog            Fetch OAuth metadata from the NyxID catalog
+  --client-id <ID>          OAuth client ID (or use catalog-provided shared client ID)
+  --client-secret <SECRET>  OAuth client secret when required
+  --authorization-url <URL> OAuth authorization URL for manual setup
+  --token-url <URL>         OAuth token URL for manual setup
+  --device-code-url <URL>   OAuth device-code URL for manual setup
+  --config <PATH>           Path to config directory
+
+OPENCLAW SUBCOMMANDS:
+  connect     Store the OpenClaw credential locally and optionally create/check the routed AI service in NyxID
+  status      Show local OpenClaw credential status
+  disconnect  Remove the local OpenClaw credential
 
 CREDENTIALS REMOVE OPTIONS:
   --service <SLUG>          Service slug to remove
@@ -501,7 +562,7 @@ MIGRATE OPTIONS:
 
 ### "Config error: Failed to read config"
 
-The config file does not exist. Run `nyxid-node register` first.
+The config file does not exist. Run `nyxid node register` first.
 
 ### "Authentication failed" on start
 
@@ -512,7 +573,7 @@ The auth token may have been rotated. Re-register the node with a new registrati
 The service slug in the proxy request does not match any entry in the local credential store. Add the credential with:
 
 ```bash
-nyxid-node credentials add --service <slug> --header "Authorization: Bearer ..."
+nyxid node credentials add --service <slug> --header "Authorization: Bearer ..."
 ```
 
 ### Agent keeps reconnecting

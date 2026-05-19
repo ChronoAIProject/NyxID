@@ -14,7 +14,7 @@ import { SaDeviceCodeDialog } from "@/components/dashboard/sa-device-code-dialog
 import type { ProviderConfig } from "@/types/api";
 import { DetailSection } from "@/components/shared/detail-section";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
   Table,
@@ -30,7 +30,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Plug, Unlink, KeyRound, Globe, Smartphone } from "lucide-react";
+import { Plug, Unlink, KeyRound, Globe, Smartphone, MessageCircle } from "lucide-react";
 import { toast } from "sonner";
 
 interface SaConnectedProvidersProps {
@@ -38,18 +38,26 @@ interface SaConnectedProvidersProps {
 }
 
 export function SaConnectedProviders({ saId }: SaConnectedProvidersProps) {
-  const { data: saProviders, isLoading: providersLoading } = useSaProviders(saId);
+  const { data: saProviders, isLoading: providersLoading } =
+    useSaProviders(saId);
   const { data: allProviders } = useProviders();
   const connectApiKeyMutation = useConnectApiKeyForSa();
   const disconnectMutation = useDisconnectSaProvider();
   const initiateOAuthMutation = useInitiateOAuthForSa();
 
-  const [connectDialogProvider, setConnectDialogProvider] = useState<ProviderConfig | null>(null);
-  const [deviceCodeDialogProvider, setDeviceCodeDialogProvider] = useState<ProviderConfig | null>(null);
+  const [connectDialogProvider, setConnectDialogProvider] =
+    useState<ProviderConfig | null>(null);
+  const [deviceCodeDialogProvider, setDeviceCodeDialogProvider] =
+    useState<ProviderConfig | null>(null);
 
-  const connectedProviderIds = new Set(saProviders?.map((t) => t.provider_id) ?? []);
+  const connectedProviderIds = new Set(
+    saProviders?.map((t) => t.provider_id) ?? [],
+  );
   const availableProviders = (allProviders ?? []).filter(
-    (p) => p.is_active && !connectedProviderIds.has(p.id),
+    (p) =>
+      p.is_active &&
+      p.provider_type !== "telegram_widget" &&
+      !connectedProviderIds.has(p.id),
   );
 
   async function handleConnectApiKey(apiKey: string, label?: string) {
@@ -117,7 +125,7 @@ export function SaConnectedProviders({ saId }: SaConnectedProvidersProps) {
         {providersLoading ? (
           <Skeleton className="h-24 w-full" />
         ) : saProviders && saProviders.length > 0 ? (
-          <div className="rounded-md border">
+          <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -126,21 +134,27 @@ export function SaConnectedProviders({ saId }: SaConnectedProvidersProps) {
                   <TableHead>Status</TableHead>
                   <TableHead>Label</TableHead>
                   <TableHead>Connected</TableHead>
-                  <TableHead />
+                  <TableHead>Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {saProviders.map((token) => (
                   <TableRow key={token.provider_id}>
-                    <TableCell className="font-medium">{token.provider_name}</TableCell>
+                    <TableCell className="font-medium">
+                      {token.provider_name}
+                    </TableCell>
                     <TableCell>
-                      <Badge variant="outline">
+                      <Badge variant="secondary">
                         {providerTypeLabel(token.provider_type)}
                       </Badge>
                     </TableCell>
                     <TableCell>
-                      <Badge variant={token.status === "active" ? "success" : "secondary"}>
-                        {token.status}
+                      <Badge
+                        variant={
+                          token.status === "active" ? "success" : "secondary"
+                        }
+                      >
+                        {token.status.charAt(0).toUpperCase() + token.status.slice(1)}
                       </Badge>
                     </TableCell>
                     <TableCell className="text-muted-foreground">
@@ -152,11 +166,12 @@ export function SaConnectedProviders({ saId }: SaConnectedProvidersProps) {
                     <TableCell>
                       <Button
                         variant="ghost"
-                        size="sm"
-                        onClick={() => void handleDisconnectSaProvider(token.provider_id)}
+                        onClick={() =>
+                          void handleDisconnectSaProvider(token.provider_id)
+                        }
                         disabled={disconnectMutation.isPending}
                       >
-                        <Unlink className="mr-1 h-3 w-3" />
+                        <ButtonIcon><Unlink className="h-3 w-3" /></ButtonIcon>
                         Disconnect
                       </Button>
                     </TableCell>
@@ -166,7 +181,7 @@ export function SaConnectedProviders({ saId }: SaConnectedProvidersProps) {
             </Table>
           </div>
         ) : (
-          <p className="text-sm text-muted-foreground">
+          <p className="text-[12px] text-muted-foreground">
             No providers connected to this service account.
           </p>
         )}
@@ -204,12 +219,14 @@ export function SaConnectedProviders({ saId }: SaConnectedProvidersProps) {
 function ProviderTypeIcon({ type }: { readonly type: string }) {
   if (type === "api_key") return <KeyRound className="mr-2 h-4 w-4" />;
   if (type === "oauth2") return <Globe className="mr-2 h-4 w-4" />;
+  if (type === "telegram_widget") return <MessageCircle className="mr-2 h-4 w-4" />;
   return <Smartphone className="mr-2 h-4 w-4" />;
 }
 
 function providerTypeLabel(type: string): string {
   if (type === "api_key") return "API Key";
   if (type === "oauth2") return "OAuth";
+  if (type === "telegram_widget") return "Telegram";
   return "Device Code";
 }
 
@@ -223,17 +240,17 @@ function ConnectProviderDropdown({
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant="outline" size="sm">
-          <Plug className="mr-1 h-3 w-3" />
+        <Button variant="outline" className="text-text-tertiary hover:text-muted-foreground">
+          <ButtonIcon><Plug className="h-3 w-3" /></ButtonIcon>
           Connect Provider
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent>
+      <DropdownMenuContent style={{ maxHeight: "16rem", overflowY: "auto" }}>
         {providers.map((p) => (
           <DropdownMenuItem key={p.id} onClick={() => onSelect(p)}>
             <ProviderTypeIcon type={p.provider_type} />
             <span>{p.name}</span>
-            <Badge variant="outline" className="ml-auto text-xs">
+            <Badge variant="secondary" className="ml-auto text-xs">
               {providerTypeLabel(p.provider_type)}
             </Badge>
           </DropdownMenuItem>

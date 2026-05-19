@@ -14,6 +14,8 @@ pub struct EndpointInput {
     pub path: String,
     pub parameters: Option<serde_json::Value>,
     pub request_body_schema: Option<serde_json::Value>,
+    pub request_content_type: Option<String>,
+    pub request_body_required: bool,
     pub response_description: Option<String>,
 }
 
@@ -25,6 +27,8 @@ pub struct EndpointUpdate {
     pub path: Option<String>,
     pub parameters: Option<Option<serde_json::Value>>,
     pub request_body_schema: Option<Option<serde_json::Value>>,
+    pub request_content_type: Option<Option<String>>,
+    pub request_body_required: Option<bool>,
     pub response_description: Option<Option<String>>,
     pub is_active: Option<bool>,
 }
@@ -60,6 +64,8 @@ pub async fn create_endpoint(
         path: input.path,
         parameters: input.parameters,
         request_body_schema: input.request_body_schema,
+        request_content_type: input.request_content_type,
+        request_body_required: input.request_body_required,
         response_description: input.response_description,
         is_active: true,
         created_at: now,
@@ -121,6 +127,19 @@ pub async fn update_endpoint(
                 set_doc.insert("request_body_schema", bson::Bson::Null);
             }
         };
+    }
+    if let Some(request_content_type) = updates.request_content_type {
+        match request_content_type {
+            Some(content_type) => {
+                set_doc.insert("request_content_type", content_type);
+            }
+            None => {
+                set_doc.insert("request_content_type", bson::Bson::Null);
+            }
+        };
+    }
+    if let Some(request_body_required) = updates.request_body_required {
+        set_doc.insert("request_body_required", request_body_required);
     }
     if let Some(response_description) = updates.response_description {
         match response_description {
@@ -209,6 +228,13 @@ pub async fn bulk_upsert_endpoints(
                 set_doc.insert("request_body_schema", bson::Bson::Null);
             }
 
+            if let Some(ref content_type) = input.request_content_type {
+                set_doc.insert("request_content_type", content_type.as_str());
+            } else {
+                set_doc.insert("request_content_type", bson::Bson::Null);
+            }
+            set_doc.insert("request_body_required", input.request_body_required);
+
             if let Some(ref desc) = input.response_description {
                 set_doc.insert("response_description", desc.as_str());
             } else {
@@ -228,6 +254,8 @@ pub async fn bulk_upsert_endpoints(
                 path: input.path,
                 parameters: input.parameters,
                 request_body_schema: input.request_body_schema,
+                request_content_type: input.request_content_type,
+                request_body_required: input.request_body_required,
                 response_description: input.response_description,
                 is_active: true,
                 created_at: existing.created_at,
@@ -245,6 +273,8 @@ pub async fn bulk_upsert_endpoints(
                 path: input.path,
                 parameters: input.parameters,
                 request_body_schema: input.request_body_schema,
+                request_content_type: input.request_content_type,
+                request_body_required: input.request_body_required,
                 response_description: input.response_description,
                 is_active: true,
                 created_at: now,

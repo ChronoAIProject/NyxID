@@ -12,7 +12,9 @@ import type {
   RevokeSessionsResponse,
   CreateUserRequest,
   CreateUserResponse,
+  AdminAuditLogListResponse,
 } from "@/types/admin";
+import type { PlatformRole } from "@/types/api";
 
 export function useAdminUsers(page: number, perPage: number, search?: string) {
   return useQuery({
@@ -23,7 +25,9 @@ export function useAdminUsers(page: number, perPage: number, search?: string) {
         per_page: String(perPage),
       });
       if (search) params.set("search", search);
-      return api.get<AdminUserListResponse>(`/admin/users?${params.toString()}`);
+      return api.get<AdminUserListResponse>(
+        `/admin/users?${params.toString()}`,
+      );
     },
   });
 }
@@ -47,6 +51,34 @@ export function useAdminUserSessions(userId: string) {
       );
     },
     enabled: userId.length > 0,
+  });
+}
+
+export function useAdminAuditLog(
+  page: number,
+  perPage: number,
+  filters?: {
+    readonly userId?: string;
+    readonly apiKeyId?: string;
+  },
+) {
+  return useQuery({
+    queryKey: ["admin", "audit-log", page, perPage, filters?.userId, filters?.apiKeyId],
+    queryFn: async (): Promise<AdminAuditLogListResponse> => {
+      const params = new URLSearchParams({
+        page: String(page),
+        per_page: String(perPage),
+      });
+      if (filters?.userId) {
+        params.set("user_id", filters.userId);
+      }
+      if (filters?.apiKeyId) {
+        params.set("api_key_id", filters.apiKeyId);
+      }
+      return api.get<AdminAuditLogListResponse>(
+        `/admin/audit-log?${params.toString()}`,
+      );
+    },
   });
 }
 
@@ -93,13 +125,13 @@ export function useSetUserRole() {
   return useMutation({
     mutationFn: async ({
       userId,
-      isAdmin,
+      role,
     }: {
       readonly userId: string;
-      readonly isAdmin: boolean;
+      readonly role: PlatformRole;
     }): Promise<RoleUpdateResponse> => {
       return api.patch<RoleUpdateResponse>(`/admin/users/${userId}/role`, {
-        is_admin: isAdmin,
+        role,
       });
     },
     onSuccess: (_, { userId }) => {
@@ -139,9 +171,7 @@ export function useForcePasswordReset() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: async (
-      userId: string,
-    ): Promise<AdminActionResponse> => {
+    mutationFn: async (userId: string): Promise<AdminActionResponse> => {
       return api.post<AdminActionResponse>(
         `/admin/users/${userId}/reset-password`,
       );

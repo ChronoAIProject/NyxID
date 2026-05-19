@@ -156,6 +156,34 @@ const PROVIDER_BRANDS: Readonly<Record<string, ProviderBrand>> = {
     textClass: "text-[#FF4500]",
     initial: "Re",
   },
+  telegram: {
+    label: "Telegram",
+    color: "#26A5E4",
+    bgClass: "bg-[#26A5E4]/15",
+    textClass: "text-[#26A5E4]",
+    initial: "Tg",
+  },
+  "telegram-bot": {
+    label: "Telegram Bot",
+    color: "#26A5E4",
+    bgClass: "bg-[#26A5E4]/15",
+    textClass: "text-[#26A5E4]",
+    initial: "Tb",
+  },
+  lark: {
+    label: "Lark",
+    color: "#3370FF",
+    bgClass: "bg-[#3370FF]/15",
+    textClass: "text-[#3370FF]",
+    initial: "Lk",
+  },
+  feishu: {
+    label: "Feishu",
+    color: "#3370FF",
+    bgClass: "bg-[#3370FF]/15",
+    textClass: "text-[#3370FF]",
+    initial: "Fs",
+  },
 };
 
 const DEFAULT_BRAND: ProviderBrand = {

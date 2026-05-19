@@ -230,6 +230,8 @@ fn log_exchange_failure(
         })),
         None,
         None,
+        None,
+        None,
     );
 }
 

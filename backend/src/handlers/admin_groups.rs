@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::errors::AppResult;
-use crate::handlers::admin_helpers::{extract_ip, extract_user_agent, require_admin};
+use crate::handlers::admin_helpers::{require_admin, require_admin_or_operator};
 use crate::models::role::Role;
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::AuthUser;
@@ -151,7 +151,7 @@ pub async fn list_groups(
     State(state): State<AppState>,
     auth_user: AuthUser,
 ) -> AppResult<Json<GroupListResponse>> {
-    require_admin(&state, &auth_user).await?;
+    require_admin_or_operator(&state, &auth_user, "admin.groups.list").await?;
 
     let groups = group_service::list_groups(&state.db).await?;
     let mut items = Vec::with_capacity(groups.len());
@@ -166,7 +166,7 @@ pub async fn list_groups(
 pub async fn create_group(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Json(body): Json<CreateGroupRequest>,
 ) -> AppResult<Json<GroupResponse>> {
     require_admin(&state, &auth_user).await?;
@@ -187,16 +187,14 @@ pub async fn create_group(
     )
     .await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "admin.group.created".to_string(),
+        &auth_user,
+        "admin.group.created",
         Some(serde_json::json!({
             "group_id": &group.id,
             "group_slug": &group.slug,
         })),
-        extract_ip(&headers),
-        extract_user_agent(&headers),
     );
 
     let response = build_group_response(&state.db, group).await?;
@@ -209,7 +207,7 @@ pub async fn get_group(
     auth_user: AuthUser,
     Path(group_id): Path<String>,
 ) -> AppResult<Json<GroupResponse>> {
-    require_admin(&state, &auth_user).await?;
+    require_admin_or_operator(&state, &auth_user, "admin.groups.get").await?;
 
     let group = group_service::get_group(&state.db, &group_id).await?;
     let response = build_group_response(&state.db, group).await?;
@@ -220,7 +218,7 @@ pub async fn get_group(
 pub async fn update_group(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Path(group_id): Path<String>,
     Json(body): Json<UpdateGroupRequest>,
 ) -> AppResult<Json<GroupResponse>> {
@@ -242,16 +240,14 @@ pub async fn update_group(
     )
     .await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "admin.group.updated".to_string(),
+        &auth_user,
+        "admin.group.updated",
         Some(serde_json::json!({
             "group_id": &group_id,
             "group_slug": &group.slug,
         })),
-        extract_ip(&headers),
-        extract_user_agent(&headers),
     );
 
     let response = build_group_response(&state.db, group).await?;
@@ -262,20 +258,18 @@ pub async fn update_group(
 pub async fn delete_group(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Path(group_id): Path<String>,
 ) -> AppResult<Json<GroupMembershipResponse>> {
     require_admin(&state, &auth_user).await?;
 
     group_service::delete_group(&state.db, &group_id).await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "admin.group.deleted".to_string(),
+        &auth_user,
+        "admin.group.deleted",
         Some(serde_json::json!({ "group_id": &group_id })),
-        extract_ip(&headers),
-        extract_user_agent(&headers),
     );
 
     Ok(Json(GroupMembershipResponse {
@@ -289,7 +283,7 @@ pub async fn get_members(
     auth_user: AuthUser,
     Path(group_id): Path<String>,
 ) -> AppResult<Json<GroupMembersResponse>> {
-    require_admin(&state, &auth_user).await?;
+    require_admin_or_operator(&state, &auth_user, "admin.groups.members.list").await?;
 
     let members = group_service::get_members(&state.db, &group_id).await?;
     let total = members.len() as u64;
@@ -313,23 +307,21 @@ pub async fn get_members(
 pub async fn add_member(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Path((group_id, user_id)): Path<(String, String)>,
 ) -> AppResult<Json<GroupMembershipResponse>> {
     require_admin(&state, &auth_user).await?;
 
     group_service::add_member(&state.db, &group_id, &user_id).await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "admin.group.member_added".to_string(),
+        &auth_user,
+        "admin.group.member_added",
         Some(serde_json::json!({
             "group_id": &group_id,
             "target_user_id": &user_id,
         })),
-        extract_ip(&headers),
-        extract_user_agent(&headers),
     );
 
     Ok(Json(GroupMembershipResponse {
@@ -341,23 +333,21 @@ pub async fn add_member(
 pub async fn remove_member(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Path((group_id, user_id)): Path<(String, String)>,
 ) -> AppResult<Json<GroupMembershipResponse>> {
     require_admin(&state, &auth_user).await?;
 
     group_service::remove_member(&state.db, &group_id, &user_id).await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "admin.group.member_removed".to_string(),
+        &auth_user,
+        "admin.group.member_removed",
         Some(serde_json::json!({
             "group_id": &group_id,
             "target_user_id": &user_id,
         })),
-        extract_ip(&headers),
-        extract_user_agent(&headers),
     );
 
     Ok(Json(GroupMembershipResponse {
@@ -371,7 +361,7 @@ pub async fn get_user_groups(
     auth_user: AuthUser,
     Path(user_id): Path<String>,
 ) -> AppResult<Json<UserGroupsResponse>> {
-    require_admin(&state, &auth_user).await?;
+    require_admin_or_operator(&state, &auth_user, "admin.users.groups.list").await?;
 
     let groups = group_service::get_user_groups(&state.db, &user_id).await?;
     let mut items = Vec::with_capacity(groups.len());

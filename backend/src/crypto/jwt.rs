@@ -63,6 +63,87 @@ pub struct Claims {
     /// True if this token was issued to a service account.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sa: Option<bool>,
+    /// RFC 7800 confirmation claim for sender-constrained access tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cnf: Option<Cnf>,
+    /// True if this token was issued for channel relay callbacks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay: Option<bool>,
+    /// Agent key ID that triggered the relay (for scope inheritance).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_api_key_id: Option<String>,
+    /// Agent key name (for audit attribution).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_api_key_name: Option<String>,
+    /// Inherited scope: allowed service IDs from the agent key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_allowed_service_ids: Option<Vec<String>>,
+    /// Inherited scope: allowed node IDs from the agent key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_allowed_node_ids: Option<Vec<String>>,
+    /// Inherited scope: allow all services flag from the agent key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_allow_all_services: Option<bool>,
+    /// Inherited scope: allow all nodes flag from the agent key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_allow_all_nodes: Option<bool>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Cnf {
+    /// SHA-256 thumbprint of the DPoP proof JWK (RFC 7638).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jkt: Option<String>,
+    /// SHA-256 thumbprint of the client certificate DER (RFC 8705).
+    #[serde(default, rename = "x5t#S256", skip_serializing_if = "Option::is_none")]
+    pub x5t_s256: Option<String>,
+}
+
+pub const RELAY_REPLY_AUDIENCE: &str = "channel-relay/reply";
+pub const RELAY_REPLY_TOKEN_TYPE: &str = "relay_reply";
+const RELAY_REPLY_CLOCK_SKEW_SECS: i64 = 60;
+pub const RELAY_CALLBACK_AUDIENCE: &str = "channel-relay/callback";
+pub const RELAY_CALLBACK_TOKEN_TYPE: &str = "relay_callback";
+#[cfg(test)]
+const RELAY_CALLBACK_CLOCK_SKEW_SECS: i64 = 60;
+
+/// Dedicated claims for `/api/v1/channel-relay/reply`.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RelayReplyClaims {
+    /// Issuer
+    pub iss: String,
+    /// Audience
+    pub aud: String,
+    /// Expiration time (Unix timestamp)
+    pub exp: i64,
+    /// Issued at (Unix timestamp)
+    pub iat: i64,
+    /// JWT ID (unique per token)
+    pub jti: String,
+    /// Token type: always "relay_reply"
+    pub token_type: String,
+    /// Agent API key bound to this reply attempt.
+    pub api_key_id: String,
+    /// Conversation bound to this reply attempt.
+    pub conversation_id: String,
+    /// Inbound message bound to this reply attempt.
+    pub inbound_message_id: String,
+    /// Platform bound to this reply attempt.
+    pub platform: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RelayCallbackClaims {
+    pub iss: String,
+    pub aud: String,
+    pub exp: i64,
+    pub iat: i64,
+    pub jti: String,
+    pub token_type: String,
+    pub api_key_id: String,
+    pub message_id: String,
+    pub platform: String,
+    pub body_sha256: String,
 }
 
 /// Actor claim per RFC 8693 Section 4.1.
@@ -208,12 +289,85 @@ pub struct RbacClaimData {
 }
 
 /// Generate an access token for the given user.
+// Access token issuance carries optional TTL, RBAC, DPoP, and mTLS knobs.
+// Keeping these explicit avoids hiding security-sensitive claim inputs.
+#[allow(clippy::too_many_arguments)]
 pub fn generate_access_token(
     keys: &JwtKeys,
     config: &AppConfig,
     user_id: &Uuid,
     scope: &str,
     rbac: Option<&RbacClaimData>,
+    ttl_override_secs: Option<i64>,
+    dpop_jkt: Option<&str>,
+    mtls_x5t_s256: Option<&str>,
+) -> Result<String, AppError> {
+    let now = Utc::now().timestamp();
+    let cnf = if dpop_jkt.is_some() || mtls_x5t_s256.is_some() {
+        Some(Cnf {
+            jkt: dpop_jkt.map(String::from),
+            x5t_s256: mtls_x5t_s256.map(String::from),
+        })
+    } else {
+        None
+    };
+
+    let claims = Claims {
+        sub: user_id.to_string(),
+        iss: config.jwt_issuer.clone(),
+        aud: config.base_url.clone(),
+        exp: now + ttl_override_secs.unwrap_or(config.jwt_access_ttl_secs),
+        iat: now,
+        jti: Uuid::new_v4().to_string(),
+        scope: scope.to_string(),
+        token_type: "access".to_string(),
+        roles: rbac.and_then(|r| r.roles.clone()),
+        groups: rbac.and_then(|r| r.groups.clone()),
+        permissions: rbac.and_then(|r| r.permissions.clone()),
+        sid: rbac.and_then(|r| r.sid.clone()),
+        act: None,
+        delegated: None,
+        sa: None,
+        cnf,
+        relay: None,
+        relay_api_key_id: None,
+        relay_api_key_name: None,
+        relay_allowed_service_ids: None,
+        relay_allowed_node_ids: None,
+        relay_allow_all_services: None,
+        relay_allow_all_nodes: None,
+    };
+
+    let mut header = Header::new(Algorithm::RS256);
+    header.kid = Some(keys.kid.clone());
+
+    encode(&header, &claims, &keys.encoding)
+        .map_err(|e| AppError::Internal(format!("Failed to encode access token: {e}")))
+}
+
+/// Agent key scope data to embed in relay tokens.
+pub struct RelayAgentScope {
+    pub api_key_id: String,
+    pub api_key_name: String,
+    pub allowed_service_ids: Vec<String>,
+    pub allowed_node_ids: Vec<String>,
+    pub allow_all_services: bool,
+    pub allow_all_nodes: bool,
+}
+
+/// Generate an access token for channel relay callbacks.
+///
+/// Sets `relay: true` and embeds the agent key's scope restrictions so
+/// the auth middleware enforces the same service/node access rules as
+/// if the request came directly from the agent key.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_relay_access_token(
+    keys: &JwtKeys,
+    config: &AppConfig,
+    user_id: &Uuid,
+    scope: &str,
+    rbac: Option<&RbacClaimData>,
+    agent_scope: &RelayAgentScope,
 ) -> Result<String, AppError> {
     let now = Utc::now().timestamp();
 
@@ -233,13 +387,84 @@ pub fn generate_access_token(
         act: None,
         delegated: None,
         sa: None,
+        cnf: None,
+        relay: Some(true),
+        relay_api_key_id: Some(agent_scope.api_key_id.clone()),
+        relay_api_key_name: Some(agent_scope.api_key_name.clone()),
+        relay_allowed_service_ids: Some(agent_scope.allowed_service_ids.clone()),
+        relay_allowed_node_ids: Some(agent_scope.allowed_node_ids.clone()),
+        relay_allow_all_services: Some(agent_scope.allow_all_services),
+        relay_allow_all_nodes: Some(agent_scope.allow_all_nodes),
     };
 
     let mut header = Header::new(Algorithm::RS256);
     header.kid = Some(keys.kid.clone());
 
     encode(&header, &claims, &keys.encoding)
-        .map_err(|e| AppError::Internal(format!("Failed to encode access token: {e}")))
+        .map_err(|e| AppError::Internal(format!("Failed to encode relay access token: {e}")))
+}
+
+/// Generate a short-lived reply token scoped to a single inbound callback.
+pub fn generate_relay_reply_token(
+    keys: &JwtKeys,
+    config: &AppConfig,
+    api_key_id: &str,
+    conversation_id: &str,
+    inbound_message_id: &str,
+    platform: &str,
+) -> Result<String, AppError> {
+    let now = Utc::now().timestamp();
+
+    let claims = RelayReplyClaims {
+        iss: config.jwt_issuer.clone(),
+        aud: RELAY_REPLY_AUDIENCE.to_string(),
+        exp: now + config.jwt_relay_reply_ttl_secs,
+        iat: now,
+        jti: Uuid::new_v4().to_string(),
+        token_type: RELAY_REPLY_TOKEN_TYPE.to_string(),
+        api_key_id: api_key_id.to_string(),
+        conversation_id: conversation_id.to_string(),
+        inbound_message_id: inbound_message_id.to_string(),
+        platform: platform.to_string(),
+    };
+
+    let mut header = Header::new(Algorithm::RS256);
+    header.kid = Some(keys.kid.clone());
+
+    encode(&header, &claims, &keys.encoding)
+        .map_err(|e| AppError::Internal(format!("Failed to encode relay reply token: {e}")))
+}
+
+/// Generate a short-lived callback token for an inbound relay delivery.
+pub fn generate_relay_callback_token(
+    keys: &JwtKeys,
+    config: &AppConfig,
+    jti: &str,
+    api_key_id: &str,
+    message_id: &str,
+    platform: &str,
+    body_sha256: &str,
+) -> Result<String, AppError> {
+    let now = Utc::now().timestamp();
+
+    let claims = RelayCallbackClaims {
+        iss: config.jwt_issuer.clone(),
+        aud: RELAY_CALLBACK_AUDIENCE.to_string(),
+        exp: now + config.jwt_relay_callback_ttl_secs,
+        iat: now,
+        jti: jti.to_string(),
+        token_type: RELAY_CALLBACK_TOKEN_TYPE.to_string(),
+        api_key_id: api_key_id.to_string(),
+        message_id: message_id.to_string(),
+        platform: platform.to_string(),
+        body_sha256: body_sha256.to_string(),
+    };
+
+    let mut header = Header::new(Algorithm::RS256);
+    header.kid = Some(keys.kid.clone());
+
+    encode(&header, &claims, &keys.encoding)
+        .map_err(|e| AppError::Internal(format!("Failed to encode relay callback token: {e}")))
 }
 
 /// Generate a refresh token for the given user.
@@ -267,6 +492,14 @@ pub fn generate_refresh_token(
         act: None,
         delegated: None,
         sa: None,
+        cnf: None,
+        relay: None,
+        relay_api_key_id: None,
+        relay_api_key_name: None,
+        relay_allowed_service_ids: None,
+        relay_allowed_node_ids: None,
+        relay_allow_all_services: None,
+        relay_allow_all_nodes: None,
     };
 
     let mut header = Header::new(Algorithm::RS256);
@@ -306,6 +539,14 @@ pub fn reissue_refresh_token(
         act: None,
         delegated: None,
         sa: None,
+        cnf: None,
+        relay: None,
+        relay_api_key_id: None,
+        relay_api_key_name: None,
+        relay_allowed_service_ids: None,
+        relay_allowed_node_ids: None,
+        relay_allow_all_services: None,
+        relay_allow_all_nodes: None,
     };
 
     let mut header = Header::new(Algorithm::RS256);
@@ -358,6 +599,14 @@ pub fn generate_delegated_access_token(
         }),
         delegated: Some(true),
         sa: None,
+        cnf: None,
+        relay: None,
+        relay_api_key_id: None,
+        relay_api_key_name: None,
+        relay_allowed_service_ids: None,
+        relay_allowed_node_ids: None,
+        relay_allow_all_services: None,
+        relay_allow_all_nodes: None,
     };
 
     let mut header = Header::new(Algorithm::RS256);
@@ -488,6 +737,14 @@ pub fn generate_service_account_token(
         act: None,
         delegated: None,
         sa: Some(true),
+        cnf: None,
+        relay: None,
+        relay_api_key_id: None,
+        relay_api_key_name: None,
+        relay_allowed_service_ids: None,
+        relay_allowed_node_ids: None,
+        relay_allow_all_services: None,
+        relay_allow_all_nodes: None,
     };
 
     let mut header = Header::new(Algorithm::RS256);
@@ -514,10 +771,158 @@ pub fn verify_token(keys: &JwtKeys, config: &AppConfig, token: &str) -> Result<C
     Ok(token_data.claims)
 }
 
+/// Verify and decode a relay reply token.
+pub fn validate_relay_reply_token(
+    keys: &JwtKeys,
+    config: &AppConfig,
+    token: &str,
+) -> Result<RelayReplyClaims, AppError> {
+    let mut validation = Validation::new(Algorithm::RS256);
+    // Expiry, audience, and required-claim enforcement is done manually below
+    // against `RelayReplyClaims` so the ordering matches the locked design in
+    // issue #469 and we can apply a symmetric clock-skew window to `exp`.
+    validation.validate_exp = false;
+    validation.validate_nbf = false;
+    validation.validate_aud = false;
+    validation.required_spec_claims.clear();
+
+    let token_data = decode::<RelayReplyClaims>(token, &keys.decoding, &validation)
+        .map_err(|_| AppError::Unauthorized("Invalid relay reply token".to_string()))?;
+
+    let claims = token_data.claims;
+    let now = Utc::now().timestamp();
+
+    if claims.exp + RELAY_REPLY_CLOCK_SKEW_SECS <= now {
+        return Err(AppError::TokenExpired);
+    }
+    if claims.iat > now + RELAY_REPLY_CLOCK_SKEW_SECS {
+        return Err(AppError::Unauthorized(
+            "Invalid relay reply token".to_string(),
+        ));
+    }
+    if claims.exp < claims.iat
+        || claims.exp - claims.iat > config.jwt_relay_reply_ttl_secs + RELAY_REPLY_CLOCK_SKEW_SECS
+    {
+        return Err(AppError::Unauthorized(
+            "Invalid relay reply token".to_string(),
+        ));
+    }
+
+    if claims.token_type != RELAY_REPLY_TOKEN_TYPE
+        || claims.aud != RELAY_REPLY_AUDIENCE
+        || claims.iss != config.jwt_issuer
+    {
+        return Err(AppError::Unauthorized(
+            "Invalid relay reply token".to_string(),
+        ));
+    }
+
+    Ok(claims)
+}
+
+/// Verify and decode a relay callback token.
+///
+/// NyxID itself never validates these tokens in production — downstream
+/// consumers (e.g. Aevatar) do so via the public JWKS. This helper exists
+/// for round-trip tests, so it is compiled only under `cfg(test)`.
+#[cfg(test)]
+pub fn validate_relay_callback_token(
+    keys: &JwtKeys,
+    config: &AppConfig,
+    token: &str,
+) -> Result<RelayCallbackClaims, AppError> {
+    let mut validation = Validation::new(Algorithm::RS256);
+    // Expiry, audience, and required-claim enforcement is done manually below
+    // against `RelayCallbackClaims` so we can apply the callback-specific
+    // clock-skew and TTL limits.
+    validation.validate_exp = false;
+    validation.validate_nbf = false;
+    validation.validate_aud = false;
+    validation.required_spec_claims.clear();
+
+    let token_data = decode::<RelayCallbackClaims>(token, &keys.decoding, &validation)
+        .map_err(|_| AppError::Unauthorized("Invalid relay callback token".to_string()))?;
+
+    let claims = token_data.claims;
+    let now = Utc::now().timestamp();
+
+    if claims.exp + RELAY_CALLBACK_CLOCK_SKEW_SECS <= now {
+        return Err(AppError::TokenExpired);
+    }
+    if claims.iat > now + RELAY_CALLBACK_CLOCK_SKEW_SECS {
+        return Err(AppError::Unauthorized(
+            "Invalid relay callback token".to_string(),
+        ));
+    }
+    if claims.exp < claims.iat
+        || claims.exp - claims.iat
+            > config.jwt_relay_callback_ttl_secs + RELAY_CALLBACK_CLOCK_SKEW_SECS
+    {
+        return Err(AppError::Unauthorized(
+            "Invalid relay callback token".to_string(),
+        ));
+    }
+
+    if claims.token_type != RELAY_CALLBACK_TOKEN_TYPE
+        || claims.aud != RELAY_CALLBACK_AUDIENCE
+        || claims.iss != config.jwt_issuer
+    {
+        return Err(AppError::Unauthorized(
+            "Invalid relay callback token".to_string(),
+        ));
+    }
+
+    Ok(claims)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use rsa::pkcs1::EncodeRsaPrivateKey;
+
+    fn reply_claims(config: &AppConfig) -> RelayReplyClaims {
+        let now = Utc::now().timestamp();
+        RelayReplyClaims {
+            iss: config.jwt_issuer.clone(),
+            aud: RELAY_REPLY_AUDIENCE.to_string(),
+            exp: now + config.jwt_relay_reply_ttl_secs,
+            iat: now,
+            jti: Uuid::new_v4().to_string(),
+            token_type: RELAY_REPLY_TOKEN_TYPE.to_string(),
+            api_key_id: Uuid::new_v4().to_string(),
+            conversation_id: Uuid::new_v4().to_string(),
+            inbound_message_id: Uuid::new_v4().to_string(),
+            platform: "lark".to_string(),
+        }
+    }
+
+    fn callback_claims(config: &AppConfig) -> RelayCallbackClaims {
+        let now = Utc::now().timestamp();
+        RelayCallbackClaims {
+            iss: config.jwt_issuer.clone(),
+            aud: RELAY_CALLBACK_AUDIENCE.to_string(),
+            exp: now + config.jwt_relay_callback_ttl_secs,
+            iat: now,
+            jti: Uuid::new_v4().to_string(),
+            token_type: RELAY_CALLBACK_TOKEN_TYPE.to_string(),
+            api_key_id: Uuid::new_v4().to_string(),
+            message_id: Uuid::new_v4().to_string(),
+            platform: "lark".to_string(),
+            body_sha256: hex::encode(Sha256::digest(b"{\"message_id\":\"test\"}")),
+        }
+    }
+
+    fn encode_reply_claims(keys: &JwtKeys, claims: &RelayReplyClaims) -> String {
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some(keys.kid.clone());
+        encode(&header, claims, &keys.encoding).expect("encode relay reply claims")
+    }
+
+    fn encode_callback_claims(keys: &JwtKeys, claims: &RelayCallbackClaims) -> String {
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some(keys.kid.clone());
+        encode(&header, claims, &keys.encoding).expect("encode relay callback claims")
+    }
 
     /// Generate a test RSA key pair (2048-bit for speed) and return JwtKeys + AppConfig.
     fn test_keys_and_config() -> (JwtKeys, AppConfig) {
@@ -555,6 +960,8 @@ mod tests {
             jwt_public_key_path: "keys/public.pem".to_string(),
             jwt_issuer: "http://localhost:3001".to_string(),
             jwt_access_ttl_secs: 900,
+            jwt_relay_reply_ttl_secs: 1800,
+            jwt_relay_callback_ttl_secs: 300,
             jwt_refresh_ttl_secs: 604800,
             google_client_id: None,
             google_client_secret: None,
@@ -573,7 +980,13 @@ mod tests {
             encryption_key_previous: None,
             rate_limit_per_second: 10,
             rate_limit_burst: 30,
+            trusted_proxy_ips: vec![],
+            mtls_client_cert_header: None,
+            cli_pairing_hmac_key: None,
             sa_token_ttl_secs: 3600,
+            telemetry_dsn: None,
+            telemetry_host: None,
+            share_analytics: false,
             cookie_domain: None,
             telegram_bot_token: None,
             telegram_webhook_secret: None,
@@ -593,14 +1006,37 @@ mod tests {
             gcp_kms_key_name: None,
             gcp_kms_key_name_previous: None,
             cors_allowed_origins: vec![],
+            csrf_trusted_origins: vec![],
             node_heartbeat_interval_secs: 30,
             node_heartbeat_timeout_secs: 90,
             node_proxy_timeout_secs: 30,
             node_registration_token_ttl_secs: 3600,
+            node_pending_credential_ttl_secs: 86_400,
             node_max_per_user: 10,
             node_max_ws_connections: 100,
             node_max_stream_duration_secs: 300,
             node_hmac_signing_enabled: true,
+            proxy_max_body_size: 100 * 1024 * 1024,
+            proxy_stream_idle_timeout_secs: 60,
+            ssh_max_sessions_per_user: 4,
+            ssh_connect_timeout_secs: 10,
+            ssh_max_tunnel_duration_secs: 3600,
+            ws_passthrough_max_connections: 200,
+            channel_relay_callback_timeout_secs: 30,
+            channel_relay_max_bots_per_user: 5,
+            channel_relay_message_ttl_days: 30,
+            channel_relay_edit_rate_limit_per_second: 10,
+            channel_relay_edit_rate_limit_burst: 20,
+            channel_event_rate_limit_per_second: 100,
+            channel_event_rate_limit_burst: 200,
+            channel_event_dedup_capacity: 32_768,
+            channel_event_dedup_ttl_secs: 300,
+            cloud_response_cache_ttl_secs: 0,
+            cloud_response_cache_max_entry_bytes: 1024 * 1024,
+            cloud_response_cache_max_entries: 256,
+            invite_code_required: true,
+            email_auth_enabled: false,
+            auto_verify_email: false,
         };
 
         (keys, config)
@@ -610,14 +1046,43 @@ mod tests {
     fn generate_and_verify_access_token() {
         let (keys, config) = test_keys_and_config();
         let user_id = Uuid::new_v4();
-        let token =
-            generate_access_token(&keys, &config, &user_id, "openid profile", None).unwrap();
+        let token = generate_access_token(
+            &keys,
+            &config,
+            &user_id,
+            "openid profile",
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
 
         let claims = verify_token(&keys, &config, &token).unwrap();
         assert_eq!(claims.sub, user_id.to_string());
         assert_eq!(claims.token_type, "access");
         assert_eq!(claims.scope, "openid profile");
         assert_eq!(claims.iss, "http://localhost:3001");
+    }
+
+    #[test]
+    fn access_token_respects_ttl_override() {
+        let (keys, config) = test_keys_and_config();
+        let user_id = Uuid::new_v4();
+        let token = generate_access_token(
+            &keys,
+            &config,
+            &user_id,
+            "openid",
+            None,
+            Some(300),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let claims = verify_token(&keys, &config, &token).unwrap();
+        assert_eq!(claims.exp - claims.iat, 300);
     }
 
     #[test]
@@ -675,6 +1140,14 @@ mod tests {
             act: None,
             delegated: None,
             sa: None,
+            cnf: None,
+            relay: None,
+            relay_api_key_id: None,
+            relay_api_key_name: None,
+            relay_allowed_service_ids: None,
+            relay_allowed_node_ids: None,
+            relay_allow_all_services: None,
+            relay_allow_all_nodes: None,
         };
 
         let mut header = Header::new(Algorithm::RS256);
@@ -689,7 +1162,9 @@ mod tests {
     fn access_token_has_kid_header() {
         let (keys, config) = test_keys_and_config();
         let user_id = Uuid::new_v4();
-        let token = generate_access_token(&keys, &config, &user_id, "openid", None).unwrap();
+        let token =
+            generate_access_token(&keys, &config, &user_id, "openid", None, None, None, None)
+                .unwrap();
 
         // Decode header without validation to check kid
         let header = jsonwebtoken::decode_header(&token).unwrap();
@@ -730,7 +1205,9 @@ mod tests {
     fn generate_id_token_with_at_hash() {
         let (keys, config) = test_keys_and_config();
         let user_id = Uuid::new_v4();
-        let access_token = generate_access_token(&keys, &config, &user_id, "openid", None).unwrap();
+        let access_token =
+            generate_access_token(&keys, &config, &user_id, "openid", None, None, None, None)
+                .unwrap();
 
         let id_token = generate_id_token(
             &keys,
@@ -772,6 +1249,14 @@ mod tests {
             act: None,
             delegated: None,
             sa: None,
+            cnf: None,
+            relay: None,
+            relay_api_key_id: None,
+            relay_api_key_name: None,
+            relay_allowed_service_ids: None,
+            relay_allowed_node_ids: None,
+            relay_allow_all_services: None,
+            relay_allow_all_nodes: None,
         };
         let json = serde_json::to_string(&claims).unwrap();
         let restored: Claims = serde_json::from_str(&json).unwrap();
@@ -821,7 +1306,9 @@ mod tests {
         // Verify that tokens without act/delegated fields still deserialize
         let (keys, config) = test_keys_and_config();
         let user_id = Uuid::new_v4();
-        let token = generate_access_token(&keys, &config, &user_id, "openid", None).unwrap();
+        let token =
+            generate_access_token(&keys, &config, &user_id, "openid", None, None, None, None)
+                .unwrap();
 
         let claims = verify_token(&keys, &config, &token).unwrap();
         assert!(claims.act.is_none());
@@ -898,7 +1385,9 @@ mod tests {
     fn sa_claim_skipped_when_none() {
         let (keys, config) = test_keys_and_config();
         let user_id = Uuid::new_v4();
-        let token = generate_access_token(&keys, &config, &user_id, "openid", None).unwrap();
+        let token =
+            generate_access_token(&keys, &config, &user_id, "openid", None, None, None, None)
+                .unwrap();
 
         let claims = verify_token(&keys, &config, &token).unwrap();
         assert!(claims.sa.is_none());
@@ -906,5 +1395,201 @@ mod tests {
         // Verify the JSON doesn't include "sa" when None
         let json = serde_json::to_string(&claims).unwrap();
         assert!(!json.contains("\"sa\""));
+    }
+
+    #[test]
+    fn generate_and_validate_relay_reply_token_round_trip() {
+        let (keys, config) = test_keys_and_config();
+        let api_key_id = Uuid::new_v4().to_string();
+        let conversation_id = Uuid::new_v4().to_string();
+        let inbound_message_id = Uuid::new_v4().to_string();
+
+        let token = generate_relay_reply_token(
+            &keys,
+            &config,
+            &api_key_id,
+            &conversation_id,
+            &inbound_message_id,
+            "telegram",
+        )
+        .unwrap();
+
+        let claims = validate_relay_reply_token(&keys, &config, &token).unwrap();
+        assert_eq!(claims.api_key_id, api_key_id);
+        assert_eq!(claims.conversation_id, conversation_id);
+        assert_eq!(claims.inbound_message_id, inbound_message_id);
+        assert_eq!(claims.platform, "telegram");
+        assert_eq!(claims.aud, RELAY_REPLY_AUDIENCE);
+        assert_eq!(claims.token_type, RELAY_REPLY_TOKEN_TYPE);
+    }
+
+    #[test]
+    fn relay_reply_token_rejects_wrong_audience() {
+        let (keys, config) = test_keys_and_config();
+        let mut claims = reply_claims(&config);
+        claims.aud = config.base_url.clone();
+        let token = encode_reply_claims(&keys, &claims);
+
+        let result = validate_relay_reply_token(&keys, &config, &token);
+        assert!(matches!(result, Err(AppError::Unauthorized(_))));
+    }
+
+    #[test]
+    fn relay_reply_token_rejects_wrong_signature() {
+        let (_other_keys, config) = test_keys_and_config();
+        let (keys_a, _) = test_keys_and_config();
+        let (keys_b, _) = test_keys_and_config();
+        let claims = reply_claims(&config);
+        let token = encode_reply_claims(&keys_a, &claims);
+
+        let result = validate_relay_reply_token(&keys_b, &config, &token);
+        assert!(matches!(result, Err(AppError::Unauthorized(_))));
+    }
+
+    #[test]
+    fn relay_reply_token_rejects_expired_token() {
+        let (keys, config) = test_keys_and_config();
+        let now = Utc::now().timestamp();
+        // Past the clock-skew tolerance window, so it's unambiguously expired.
+        let claims = RelayReplyClaims {
+            exp: now - RELAY_REPLY_CLOCK_SKEW_SECS - 5,
+            iat: now - RELAY_REPLY_CLOCK_SKEW_SECS - 15,
+            ..reply_claims(&config)
+        };
+        let token = encode_reply_claims(&keys, &claims);
+
+        let result = validate_relay_reply_token(&keys, &config, &token);
+        assert!(matches!(result, Err(AppError::TokenExpired)));
+    }
+
+    #[test]
+    fn relay_reply_token_accepts_within_clock_skew_of_exp() {
+        let (keys, config) = test_keys_and_config();
+        let now = Utc::now().timestamp();
+        let claims = RelayReplyClaims {
+            exp: now - 1,
+            iat: now - 10,
+            ..reply_claims(&config)
+        };
+        let token = encode_reply_claims(&keys, &claims);
+
+        validate_relay_reply_token(&keys, &config, &token)
+            .expect("token just past exp but within skew should still validate");
+    }
+
+    #[test]
+    fn relay_reply_token_rejects_wrong_token_type() {
+        let (keys, config) = test_keys_and_config();
+        let mut claims = reply_claims(&config);
+        claims.token_type = "access".to_string();
+        let token = encode_reply_claims(&keys, &claims);
+
+        let result = validate_relay_reply_token(&keys, &config, &token);
+        assert!(matches!(result, Err(AppError::Unauthorized(_))));
+    }
+
+    #[test]
+    fn generate_and_validate_relay_callback_token_round_trip() {
+        let (keys, config) = test_keys_and_config();
+        let jti = Uuid::new_v4().to_string();
+        let api_key_id = Uuid::new_v4().to_string();
+        let message_id = Uuid::new_v4().to_string();
+        let body_sha256 = hex::encode(Sha256::digest(b"{\"message_id\":\"callback\"}"));
+
+        let token = generate_relay_callback_token(
+            &keys,
+            &config,
+            &jti,
+            &api_key_id,
+            &message_id,
+            "telegram",
+            &body_sha256,
+        )
+        .unwrap();
+
+        let claims = validate_relay_callback_token(&keys, &config, &token).unwrap();
+        assert_eq!(claims.jti, jti);
+        assert_eq!(claims.api_key_id, api_key_id);
+        assert_eq!(claims.message_id, message_id);
+        assert_eq!(claims.platform, "telegram");
+        assert_eq!(claims.body_sha256, body_sha256);
+        assert_eq!(claims.aud, RELAY_CALLBACK_AUDIENCE);
+        assert_eq!(claims.token_type, RELAY_CALLBACK_TOKEN_TYPE);
+        assert_eq!(claims.iss, config.jwt_issuer);
+    }
+
+    #[test]
+    fn relay_callback_token_has_kid_header() {
+        let (keys, config) = test_keys_and_config();
+        let claims = callback_claims(&config);
+        let token = encode_callback_claims(&keys, &claims);
+
+        let header = jsonwebtoken::decode_header(&token).unwrap();
+        assert_eq!(header.kid, Some(keys.kid.clone()));
+        assert_eq!(header.alg, Algorithm::RS256);
+    }
+
+    #[test]
+    fn relay_callback_token_rejects_wrong_audience() {
+        let (keys, config) = test_keys_and_config();
+        let mut claims = callback_claims(&config);
+        claims.aud = config.base_url.clone();
+        let token = encode_callback_claims(&keys, &claims);
+
+        let result = validate_relay_callback_token(&keys, &config, &token);
+        assert!(matches!(result, Err(AppError::Unauthorized(_))));
+    }
+
+    #[test]
+    fn relay_callback_token_rejects_wrong_signature() {
+        let (_other_keys, config) = test_keys_and_config();
+        let (keys_a, _) = test_keys_and_config();
+        let (keys_b, _) = test_keys_and_config();
+        let claims = callback_claims(&config);
+        let token = encode_callback_claims(&keys_a, &claims);
+
+        let result = validate_relay_callback_token(&keys_b, &config, &token);
+        assert!(matches!(result, Err(AppError::Unauthorized(_))));
+    }
+
+    #[test]
+    fn relay_callback_token_rejects_expired_token() {
+        let (keys, config) = test_keys_and_config();
+        let now = Utc::now().timestamp();
+        let claims = RelayCallbackClaims {
+            exp: now - RELAY_CALLBACK_CLOCK_SKEW_SECS - 5,
+            iat: now - RELAY_CALLBACK_CLOCK_SKEW_SECS - 15,
+            ..callback_claims(&config)
+        };
+        let token = encode_callback_claims(&keys, &claims);
+
+        let result = validate_relay_callback_token(&keys, &config, &token);
+        assert!(matches!(result, Err(AppError::TokenExpired)));
+    }
+
+    #[test]
+    fn relay_callback_token_accepts_within_clock_skew_of_exp() {
+        let (keys, config) = test_keys_and_config();
+        let now = Utc::now().timestamp();
+        let claims = RelayCallbackClaims {
+            exp: now - 1,
+            iat: now - 10,
+            ..callback_claims(&config)
+        };
+        let token = encode_callback_claims(&keys, &claims);
+
+        validate_relay_callback_token(&keys, &config, &token)
+            .expect("token just past exp but within skew should still validate");
+    }
+
+    #[test]
+    fn relay_callback_token_rejects_wrong_token_type() {
+        let (keys, config) = test_keys_and_config();
+        let mut claims = callback_claims(&config);
+        claims.token_type = "access".to_string();
+        let token = encode_callback_claims(&keys, &claims);
+
+        let result = validate_relay_callback_token(&keys, &config, &token);
+        assert!(matches!(result, Err(AppError::Unauthorized(_))));
     }
 }

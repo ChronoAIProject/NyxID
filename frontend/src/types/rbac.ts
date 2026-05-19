@@ -102,6 +102,17 @@ export interface RoleAssignmentResponse {
   readonly message: string;
 }
 
+export interface BulkAssignRequest {
+  readonly all?: boolean;
+  readonly user_ids?: readonly string[];
+}
+
+export interface BulkAssignResponse {
+  readonly assigned_count: number;
+  readonly already_assigned_count: number;
+  readonly message: string;
+}
+
 export interface GroupMembershipResponse {
   readonly message: string;
 }

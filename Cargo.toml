@@ -1,20 +1,77 @@
 [workspace]
-members = ["backend", "node-agent"]
-resolver = "2"
+members = ["backend", "cli", "cloud-auth", "mcp-demo"]
+resolver = "3"
 
 [workspace.package]
-license = "MIT"
+license = "Apache-2.0"
 repository = "https://github.com/ChronoAIProject/NyxID"
+rust-version = "1.93"
 
 [workspace.dependencies]
 axum = { version = "0.8.8", features = ["macros", "ws"] }
-tokio = { version = "1.49", features = ["full"] }
-mongodb = "3.5"
+tokio = { version = "1.51", features = ["full"] }
+mongodb = "3.5.2"
 bson = { version = "2.15", features = ["uuid-1", "chrono-0_4"] }
 futures = "0.3.31"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
-uuid = { version = "1.20", features = ["v4", "serde"] }
+uuid = { version = "1.23", features = ["v4", "serde"] }
 chrono = { version = "0.4.43", features = ["serde"] }
 tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.22", features = ["env-filter", "json"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+
+[workspace.metadata.dist]
+cargo-dist-version = "0.30.0"
+allow-dirty = ["ci"]
+ci = "github"
+# Windows is intentionally omitted: pty-process / nix / rustix are Unix-only
+# and the SSH/PTY paths in cli/src/node/ws_client.rs aren't yet cfg-gated for
+# Windows. Tracking the proper Windows port as a follow-up; until then,
+# Windows users should run nyxid under WSL (see docs/WINDOWS_SETUP.md).
+installers = ["shell"]
+unix-archive = ".tar.gz"
+targets = [
+    "aarch64-apple-darwin",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+]
+packages = ["nyxid-cli"]
+install-path = "~/.local/bin"
+hosting = "github"
+install-updater = false
+
+[workspace.metadata.dist.github-custom-runners]
+aarch64-apple-darwin = "macos-latest"
+aarch64-unknown-linux-gnu = "ubuntu-24.04-arm"
+x86_64-apple-darwin = "macos-latest"
+x86_64-unknown-linux-gnu = "ubuntu-24.04"
+global = "ubuntu-24.04"
+
+[workspace.metadata.dist.dependencies.apt]
+libdbus-1-dev = "*"
+pkg-config = "*"
+
+# Pure-Rust RSA keygen and big-int math are catastrophically slow when compiled
+# without optimizations (a single 4096-bit keypair can take 30-120s in `cargo
+# test`'s default debug profile). Compile just these crates with full opts so
+# tests that mint JWT keys finish in seconds while the rest of the workspace
+# stays in fast-link debug.
+[profile.dev.package.rsa]
+opt-level = 3
+
+[profile.dev.package.num-bigint-dig]
+opt-level = 3
+
+[profile.test.package.rsa]
+opt-level = 3
+
+[profile.test.package.num-bigint-dig]
+opt-level = 3
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
+strip = true
+codegen-units = 1

@@ -1,6 +1,6 @@
 use aes_gcm::{
     Aes256Gcm, Nonce,
-    aead::{Aead, KeyInit},
+    aead::{Aead, KeyInit, Payload},
 };
 use rand::RngCore;
 use serde::Serialize;
@@ -306,6 +306,62 @@ impl EncryptionKeys {
         Ok(result)
     }
 
+    /// Like `encrypt` but binds the ciphertext to `aad` via AES-GCM Additional
+    /// Authenticated Data. Decryption requires the same AAD; tampering with
+    /// either the ciphertext or the AAD fails the auth-tag check.
+    ///
+    /// Used by the OAuth broker to bind each `refresh_token_encrypted` blob
+    /// to its owning `binding_hash`, preventing ciphertext-substitution
+    /// attacks from a database-write adversary.
+    pub async fn encrypt_with_aad(
+        &self,
+        plaintext: &[u8],
+        aad: &[u8],
+    ) -> Result<Vec<u8>, AppError> {
+        // Generate random 32-byte DEK
+        let mut dek = Zeroizing::new([0u8; 32]);
+        rand::thread_rng().fill_bytes(dek.as_mut());
+
+        // Encrypt plaintext with DEK (AES-256-GCM)
+        let data_cipher = Aes256Gcm::new_from_slice(dek.as_ref())
+            .map_err(|e| AppError::Internal(format!("Failed to create DEK cipher: {e}")))?;
+        let mut data_nonce_bytes = [0u8; NONCE_SIZE];
+        rand::thread_rng().fill_bytes(&mut data_nonce_bytes);
+        let data_nonce = Nonce::from_slice(&data_nonce_bytes);
+        let data_ciphertext = data_cipher
+            .encrypt(
+                data_nonce,
+                Payload {
+                    msg: plaintext,
+                    aad,
+                },
+            )
+            .map_err(|e| AppError::Internal(format!("AES data encryption failed: {e}")))?;
+
+        // Wrap DEK with current KEK via provider
+        let wrapped = self.provider.wrap_dek(dek.as_ref()).await?;
+        if wrapped.ciphertext.len() > MAX_WRAPPED_DEK_SIZE {
+            return Err(AppError::Internal(
+                "Wrapped DEK exceeds maximum size".to_string(),
+            ));
+        }
+        let wrapped_dek_len = wrapped.ciphertext.len() as u16;
+
+        // Assemble v2 envelope
+        let total_size =
+            V2_HEADER_SIZE + wrapped_dek_len as usize + NONCE_SIZE + data_ciphertext.len();
+        let mut result = Vec::with_capacity(total_size);
+        result.push(VERSION_V2);
+        result.push(wrapped.key_id);
+        result.extend_from_slice(&wrapped_dek_len.to_be_bytes());
+        result.extend_from_slice(&wrapped.ciphertext);
+        result.extend_from_slice(&data_nonce_bytes);
+        result.extend_from_slice(&data_ciphertext);
+
+        // DEK is automatically zeroized when `dek` drops
+        Ok(result)
+    }
+
     /// Decrypt ciphertext, trying the fallback chain:
     ///
     /// 1. If it looks like v2: try v2 envelope with current KEK, then previous KEK
@@ -483,6 +539,183 @@ impl EncryptionKeys {
         ))
     }
 
+    /// Like `decrypt` but verifies the ciphertext was produced with the same
+    /// `aad`. Returns an error if AAD doesn't match (indistinguishable from
+    /// any other tag failure to the caller -- by design).
+    pub async fn decrypt_with_aad(
+        &self,
+        ciphertext: &[u8],
+        aad: &[u8],
+    ) -> Result<Vec<u8>, AppError> {
+        let mut unknown_key_id = None;
+        let current_key_id = self.provider.current_key_id();
+
+        // -- v2 envelope encryption --
+        if looks_like_v2(ciphertext) {
+            let kek_id = ciphertext[1];
+            let wrapped_dek_len = u16::from_be_bytes([ciphertext[2], ciphertext[3]]) as usize;
+            let required_len = V2_HEADER_SIZE + wrapped_dek_len + NONCE_SIZE + TAG_SIZE;
+
+            // Treat oversized wrapped-DEK lengths as a malformed v2 parse and
+            // fall through to the legacy v1/v0 chain. Random nonce bytes from
+            // valid v0 ciphertexts can look like a v2 header.
+            if wrapped_dek_len <= MAX_WRAPPED_DEK_SIZE
+                && wrapped_dek_len > 0
+                && ciphertext.len() >= required_len
+            {
+                let wrapped_dek = &ciphertext[V2_HEADER_SIZE..V2_HEADER_SIZE + wrapped_dek_len];
+                let data_payload = &ciphertext[V2_HEADER_SIZE + wrapped_dek_len..];
+
+                let wrapped = WrappedKey {
+                    key_id: kek_id,
+                    ciphertext: Zeroizing::new(wrapped_dek.to_vec()),
+                };
+
+                match self.provider.unwrap_dek(&wrapped).await {
+                    Ok(dek_bytes) => {
+                        // dek_bytes is Zeroizing<Vec<u8>> -- automatically
+                        // scrubbed from memory when this scope exits.
+
+                        // Track which counter to bump based on kek_id
+                        if kek_id == current_key_id {
+                            self.counters.v2_current.fetch_add(1, Ordering::Relaxed);
+                        } else {
+                            self.counters.v2_previous.fetch_add(1, Ordering::Relaxed);
+                            self.log_once(
+                                &self.counters.logged_v2_previous,
+                                "Decrypted v2 envelope with ENCRYPTION_KEY_PREVIOUS; old-key ciphertexts are still in active use",
+                            );
+                        }
+
+                        // Decrypt data with DEK
+                        let dek =
+                            Zeroizing::new(<[u8; 32]>::try_from(dek_bytes.as_slice()).map_err(
+                                |_| AppError::Internal("Unwrapped DEK is not 32 bytes".to_string()),
+                            )?);
+                        return decrypt_raw_with_aad(data_payload, dek.as_ref(), aad);
+                    }
+                    Err(_) => {
+                        // Primary provider could not unwrap; try fallback provider
+                        if let Some(ref fallback) = self.fallback_provider
+                            && fallback.has_key_id(kek_id)
+                            && let Ok(dek_bytes) = fallback.unwrap_dek(&wrapped).await
+                        {
+                            self.counters.v2_fallback.fetch_add(1, Ordering::Relaxed);
+                            self.log_once(
+                                &self.counters.logged_v2_fallback,
+                                "Decrypted v2 envelope via fallback provider; migration from previous provider is still in progress",
+                            );
+
+                            let dek = Zeroizing::new(
+                                <[u8; 32]>::try_from(dek_bytes.as_slice()).map_err(|_| {
+                                    AppError::Internal("Unwrapped DEK is not 32 bytes".to_string())
+                                })?,
+                            );
+                            return decrypt_raw_with_aad(data_payload, dek.as_ref(), aad);
+                        }
+
+                        // Provider could not unwrap; if it is not the current or
+                        // previous key, record the unknown key id for the error
+                        // message later.
+                        if !self.provider.has_key_id(kek_id) {
+                            unknown_key_id = Some(kek_id);
+                        }
+                        // Fall through to v1/v0 fallback
+                    }
+                }
+            }
+        }
+
+        // -- v1 versioned format --
+        if looks_like_v1(ciphertext) {
+            let key_id = ciphertext[1];
+            let payload = &ciphertext[V1_HEADER_SIZE..];
+
+            if let Some(legacy) = self.legacy.as_ref() {
+                if key_id == legacy.current_id {
+                    if let Ok(plain) = decrypt_raw_with_aad(payload, legacy.current.as_ref(), aad) {
+                        self.counters.v1_current.fetch_add(1, Ordering::Relaxed);
+                        return Ok(plain);
+                    }
+                } else if legacy.previous_id == Some(key_id) {
+                    if let Some(ref prev) = legacy.previous
+                        && let Ok(plain) = decrypt_raw_with_aad(payload, prev.as_ref(), aad)
+                    {
+                        self.counters.v1_previous.fetch_add(1, Ordering::Relaxed);
+                        self.log_once(
+                            &self.counters.logged_v1_previous,
+                            "Decrypted ciphertext with ENCRYPTION_KEY_PREVIOUS; old-key ciphertexts are still in active use",
+                        );
+                        return Ok(plain);
+                    }
+                } else if key_id == DRAFT_KEY_ID_CURRENT || key_id == DRAFT_KEY_ID_PREVIOUS {
+                    if let Ok(plain) = decrypt_raw_with_aad(payload, legacy.current.as_ref(), aad) {
+                        self.counters.v1_current.fetch_add(1, Ordering::Relaxed);
+                        return Ok(plain);
+                    }
+
+                    if let Some(ref prev) = legacy.previous
+                        && let Ok(plain) = decrypt_raw_with_aad(payload, prev.as_ref(), aad)
+                    {
+                        self.counters.v1_previous.fetch_add(1, Ordering::Relaxed);
+                        self.log_once(
+                            &self.counters.logged_v1_previous,
+                            "Decrypted draft Phase 1 ciphertext with ENCRYPTION_KEY_PREVIOUS; old-key ciphertexts are still in active use",
+                        );
+                        return Ok(plain);
+                    }
+                } else {
+                    unknown_key_id = Some(key_id);
+                }
+            } else {
+                unknown_key_id = Some(key_id);
+            }
+        }
+
+        if let Some(legacy) = self.legacy.as_ref() {
+            // Try v0 format (full ciphertext is nonce || encrypted || tag) with current key
+            if let Ok(plain) = decrypt_raw_with_aad(ciphertext, legacy.current.as_ref(), aad) {
+                self.counters.v0_current.fetch_add(1, Ordering::Relaxed);
+                self.log_once(
+                    &self.counters.logged_v0_current,
+                    "Decrypted legacy v0 ciphertext with ENCRYPTION_KEY; re-encryption is still pending",
+                );
+                return Ok(plain);
+            }
+
+            // Try v0 with previous key
+            if let Some(ref prev) = legacy.previous
+                && let Ok(plain) = decrypt_raw_with_aad(ciphertext, prev.as_ref(), aad)
+            {
+                self.counters.v0_previous.fetch_add(1, Ordering::Relaxed);
+                self.log_once(
+                    &self.counters.logged_v0_previous,
+                    "Decrypted legacy v0 ciphertext with ENCRYPTION_KEY_PREVIOUS; old-key ciphertexts are still in active use",
+                );
+                return Ok(plain);
+            }
+        }
+
+        if let Some(key_id) = unknown_key_id {
+            self.counters
+                .unknown_key_id_failures
+                .fetch_add(1, Ordering::Relaxed);
+            self.log_once(
+                &self.counters.logged_unknown_key_id,
+                &format!(
+                    "Encountered versioned ciphertext with unknown key id 0x{key_id:02x}; the data was likely encrypted with a key that is no longer configured"
+                ),
+            );
+        }
+
+        self.counters
+            .decrypt_failures
+            .fetch_add(1, Ordering::Relaxed);
+        Err(AppError::Internal(
+            "AES decryption failed: no key could decrypt the data".to_string(),
+        ))
+    }
+
     /// Re-wrap a v2 ciphertext's DEK from the previous KEK to the current KEK.
     ///
     /// Only the wrapped DEK portion changes; the encrypted data is untouched.
@@ -580,6 +813,31 @@ fn decrypt_raw(data: &[u8], key: &[u8]) -> Result<Vec<u8>, AppError> {
 
     cipher
         .decrypt(nonce, encrypted)
+        .map_err(|e| AppError::Internal(format!("AES decryption failed: {e}")))
+}
+
+/// Low-level AES-256-GCM decryption with AAD: expects `nonce(12) || ciphertext || tag`.
+fn decrypt_raw_with_aad(data: &[u8], key: &[u8], aad: &[u8]) -> Result<Vec<u8>, AppError> {
+    if data.len() < NONCE_SIZE {
+        return Err(AppError::Internal(
+            "Ciphertext too short to contain nonce".to_string(),
+        ));
+    }
+
+    let (nonce_bytes, encrypted) = data.split_at(NONCE_SIZE);
+    let nonce = Nonce::from_slice(nonce_bytes);
+
+    let cipher = Aes256Gcm::new_from_slice(key)
+        .map_err(|e| AppError::Internal(format!("Failed to create AES cipher: {e}")))?;
+
+    cipher
+        .decrypt(
+            nonce,
+            Payload {
+                msg: encrypted,
+                aad,
+            },
+        )
         .map_err(|e| AppError::Internal(format!("AES decryption failed: {e}")))
 }
 
@@ -699,6 +957,8 @@ mod tests {
             jwt_public_key_path: "keys/public.pem".to_string(),
             jwt_issuer: "http://localhost:3001".to_string(),
             jwt_access_ttl_secs: 900,
+            jwt_relay_reply_ttl_secs: 1800,
+            jwt_relay_callback_ttl_secs: 300,
             jwt_refresh_ttl_secs: 604800,
             google_client_id: None,
             google_client_secret: None,
@@ -717,7 +977,13 @@ mod tests {
             encryption_key_previous: prev_hex.map(String::from),
             rate_limit_per_second: 10,
             rate_limit_burst: 30,
+            trusted_proxy_ips: vec![],
+            mtls_client_cert_header: None,
+            cli_pairing_hmac_key: None,
             sa_token_ttl_secs: 3600,
+            telemetry_dsn: None,
+            telemetry_host: None,
+            share_analytics: false,
             cookie_domain: None,
             telegram_bot_token: None,
             telegram_webhook_secret: None,
@@ -737,14 +1003,37 @@ mod tests {
             gcp_kms_key_name: None,
             gcp_kms_key_name_previous: None,
             cors_allowed_origins: vec![],
+            csrf_trusted_origins: vec![],
             node_heartbeat_interval_secs: 30,
             node_heartbeat_timeout_secs: 90,
             node_proxy_timeout_secs: 30,
             node_registration_token_ttl_secs: 3600,
+            node_pending_credential_ttl_secs: 86_400,
             node_max_per_user: 10,
             node_max_ws_connections: 100,
             node_max_stream_duration_secs: 300,
             node_hmac_signing_enabled: true,
+            proxy_max_body_size: 100 * 1024 * 1024,
+            proxy_stream_idle_timeout_secs: 60,
+            ssh_max_sessions_per_user: 4,
+            ssh_connect_timeout_secs: 10,
+            ssh_max_tunnel_duration_secs: 3600,
+            ws_passthrough_max_connections: 200,
+            channel_relay_callback_timeout_secs: 30,
+            channel_relay_max_bots_per_user: 5,
+            channel_relay_message_ttl_days: 30,
+            channel_relay_edit_rate_limit_per_second: 10,
+            channel_relay_edit_rate_limit_burst: 20,
+            channel_event_rate_limit_per_second: 100,
+            channel_event_rate_limit_burst: 200,
+            channel_event_dedup_capacity: 32_768,
+            channel_event_dedup_ttl_secs: 300,
+            cloud_response_cache_ttl_secs: 0,
+            cloud_response_cache_max_entry_bytes: 1024 * 1024,
+            cloud_response_cache_max_entries: 256,
+            invite_code_required: true,
+            email_auth_enabled: false,
+            auto_verify_email: false,
         }
     }
 
@@ -1248,6 +1537,43 @@ mod tests {
 
         let decrypted = keys.decrypt(&encrypted).await.unwrap();
         assert_eq!(decrypted, plaintext);
+    }
+
+    #[tokio::test]
+    async fn aad_roundtrip_succeeds() {
+        let config = test_config(&"ab".repeat(32), None);
+        let keys = EncryptionKeys::from_config(&config);
+        let aad = b"binding-hash-A";
+
+        let blob = keys.encrypt_with_aad(b"secret-payload", aad).await.unwrap();
+        let plaintext = keys.decrypt_with_aad(&blob, aad).await.unwrap();
+
+        assert_eq!(plaintext, b"secret-payload");
+    }
+
+    #[tokio::test]
+    async fn aad_mismatch_fails_decryption() {
+        let config = test_config(&"ab".repeat(32), None);
+        let keys = EncryptionKeys::from_config(&config);
+
+        let blob = keys
+            .encrypt_with_aad(b"payload", b"binding-A")
+            .await
+            .unwrap();
+        let result = keys.decrypt_with_aad(&blob, b"binding-B").await;
+
+        assert!(result.is_err(), "decryption with wrong AAD must fail");
+    }
+
+    #[tokio::test]
+    async fn no_aad_blob_fails_aad_decrypt() {
+        let config = test_config(&"ab".repeat(32), None);
+        let keys = EncryptionKeys::from_config(&config);
+
+        let blob = keys.encrypt(b"payload").await.unwrap();
+        let result = keys.decrypt_with_aad(&blob, b"any-aad").await;
+
+        assert!(result.is_err(), "AAD decrypt must fail on non-AAD blob");
     }
 
     #[tokio::test]

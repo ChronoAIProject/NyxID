@@ -6,12 +6,73 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
-use crate::errors::AppResult;
+use crate::errors::{AppError, AppResult};
 use crate::handlers::admin::AdminActionResponse;
-use crate::handlers::admin_helpers::{extract_ip, extract_user_agent, require_admin};
+use crate::handlers::admin_helpers::{require_admin, require_admin_or_operator};
 use crate::models::service_account::ServiceAccount;
 use crate::mw::auth::AuthUser;
-use crate::services::{audit_service, service_account_service};
+use crate::services::{audit_service, org_service, service_account_service};
+use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
+
+/// Gate access to a service account by either global admin OR admin of
+/// the SA's owning org. Org-owned SAs (`owner_user_id` points at a
+/// `user_type = org` user) can be managed by any admin of that org;
+/// admin-created personal SAs still require global admin.
+///
+/// Returns the effective `created_by` value to pass through to the
+/// service layer for downstream queries that filter by creator.
+async fn require_admin_or_owning_org_admin(
+    state: &AppState,
+    auth_user: &AuthUser,
+    sa: &ServiceAccount,
+) -> AppResult<()> {
+    // Global admin always allowed.
+    if require_admin(state, auth_user).await.is_ok() {
+        return Ok(());
+    }
+
+    // Otherwise the SA must be org-owned and the caller must be admin of
+    // that org. `effective_owner_user_id` falls back to created_by for
+    // pre-owner-field records.
+    let owner = sa.effective_owner_user_id();
+    let actor = auth_user.user_id.to_string();
+    let access = org_service::resolve_owner_access(&state.db, &actor, owner).await?;
+    if access.can_write() {
+        return Ok(());
+    }
+
+    Err(AppError::Forbidden(
+        "admin access required (global or owning org)".to_string(),
+    ))
+}
+
+/// Read-only variant of [`require_admin_or_owning_org_admin`]. Allows the
+/// platform `operator` role through the global path so strategy /
+/// share-ops accounts can inspect service accounts without write
+/// privileges.
+async fn require_admin_read_or_owning_org_admin(
+    state: &AppState,
+    auth_user: &AuthUser,
+    sa: &ServiceAccount,
+) -> AppResult<()> {
+    if require_admin_or_operator(state, auth_user, "admin.service_accounts.get")
+        .await
+        .is_ok()
+    {
+        return Ok(());
+    }
+
+    let owner = sa.effective_owner_user_id();
+    let actor = auth_user.user_id.to_string();
+    let access = org_service::resolve_owner_access(&state.db, &actor, owner).await?;
+    if access.can_write() {
+        return Ok(());
+    }
+
+    Err(AppError::Forbidden(
+        "admin access required (global or owning org)".to_string(),
+    ))
+}
 
 // --- Request types ---
 
@@ -22,6 +83,12 @@ pub struct CreateServiceAccountRequest {
     pub allowed_scopes: String,
     pub role_ids: Option<Vec<String>>,
     pub rate_limit_override: Option<u64>,
+    /// When set, create this service account under the given org. The
+    /// SA's `created_by` and `owner_user_id` are both set to the org's
+    /// user_id, making the SA manageable by every admin of that org.
+    /// Caller must be an admin of the target org. When omitted, falls
+    /// back to the legacy global-admin path (caller must be a NyxID admin).
+    pub target_org_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -29,6 +96,11 @@ pub struct ServiceAccountListQuery {
     pub page: Option<u64>,
     pub per_page: Option<u64>,
     pub search: Option<String>,
+    /// When set, list service accounts owned by the given org instead of
+    /// the global list. The caller must be an admin of that org. Without
+    /// this filter the endpoint requires global admin and returns every
+    /// service account in the system.
+    pub org_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -121,12 +193,33 @@ fn sa_to_item(sa: ServiceAccount) -> ServiceAccountItem {
 pub async fn create_service_account(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    headers: HeaderMap,
+    tele: TelemetryContext,
+    _headers: HeaderMap,
     Json(body): Json<CreateServiceAccountRequest>,
 ) -> AppResult<Json<CreateServiceAccountResponse>> {
-    require_admin(&state, &auth_user).await?;
+    let actor = auth_user.user_id.to_string();
 
-    let admin_id = auth_user.user_id.to_string();
+    // Determine the effective owner. Two paths:
+    // - target_org_id set: caller must be an admin of that org. The SA is
+    //   created with owner = org user_id, so every admin of that org can
+    //   manage it via the same endpoints (gated by
+    //   `require_admin_or_owning_org_admin`).
+    // - target_org_id not set: legacy admin-created SA, caller must be a
+    //   global NyxID admin.
+    let effective_owner = if let Some(target_org_id) = body.target_org_id.as_deref() {
+        let access = org_service::resolve_owner_access(&state.db, &actor, target_org_id).await?;
+        if !access.can_write() {
+            return Err(AppError::OrgRoleInsufficient(
+                "you must be an admin of the target org to create service accounts under it"
+                    .to_string(),
+            ));
+        }
+        target_org_id.to_string()
+    } else {
+        require_admin(&state, &auth_user).await?;
+        actor
+    };
+
     let role_ids = body.role_ids.unwrap_or_default();
 
     let (sa, raw_secret) = service_account_service::create_service_account(
@@ -136,21 +229,27 @@ pub async fn create_service_account(
         &body.allowed_scopes,
         &role_ids,
         body.rate_limit_override,
-        &admin_id,
+        &effective_owner,
     )
     .await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(admin_id),
-        "admin.sa.created".to_string(),
+        &auth_user,
+        "admin.sa.created",
         Some(serde_json::json!({
             "target_sa_id": &sa.id,
             "client_id": &sa.client_id,
             "name": &sa.name,
         })),
-        extract_ip(&headers),
-        extract_user_agent(&headers),
+    );
+
+    emit_event(
+        state.telemetry.as_deref(),
+        &auth_user.user_id.to_string(),
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::AdminServiceAccountCreated,
     );
 
     Ok(Json(CreateServiceAccountResponse {
@@ -174,7 +273,34 @@ pub async fn list_service_accounts(
     auth_user: AuthUser,
     Query(query): Query<ServiceAccountListQuery>,
 ) -> AppResult<Json<ServiceAccountListResponse>> {
-    require_admin(&state, &auth_user).await?;
+    let actor = auth_user.user_id.to_string();
+
+    // Two listing modes:
+    // - org_id unset: legacy global listing. Requires global admin or
+    //   operator (read-only). Audited via the helper.
+    // - org_id set: org-scoped listing. Allow global admin/operator
+    //   through first (otherwise an operator can list every SA but gets
+    //   denied when narrowing to one org — backwards). Then fall back to
+    //   org-admin write access for the target org.
+    let owner_filter = if let Some(target_org_id) = query.org_id.as_deref() {
+        if require_admin_or_operator(&state, &auth_user, "admin.service_accounts.list.org")
+            .await
+            .is_err()
+        {
+            let access =
+                org_service::resolve_owner_access(&state.db, &actor, target_org_id).await?;
+            if !access.can_write() {
+                return Err(AppError::OrgRoleInsufficient(
+                    "admin access to the target org is required to list its service accounts"
+                        .to_string(),
+                ));
+            }
+        }
+        Some(target_org_id.to_string())
+    } else {
+        require_admin_or_operator(&state, &auth_user, "admin.service_accounts.list").await?;
+        None
+    };
 
     let page = query.page.unwrap_or(1).max(1);
     let per_page = query.per_page.unwrap_or(50).min(100);
@@ -184,6 +310,7 @@ pub async fn list_service_accounts(
         page,
         per_page,
         query.search.as_deref(),
+        owner_filter.as_deref(),
     )
     .await?;
 
@@ -203,9 +330,8 @@ pub async fn get_service_account(
     auth_user: AuthUser,
     Path(sa_id): Path<String>,
 ) -> AppResult<Json<ServiceAccountItem>> {
-    require_admin(&state, &auth_user).await?;
-
     let sa = service_account_service::get_service_account(&state.db, &sa_id).await?;
+    require_admin_read_or_owning_org_admin(&state, &auth_user, &sa).await?;
 
     Ok(Json(sa_to_item(sa)))
 }
@@ -214,11 +340,12 @@ pub async fn get_service_account(
 pub async fn update_service_account(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Path(sa_id): Path<String>,
     Json(body): Json<UpdateServiceAccountRequest>,
 ) -> AppResult<Json<ServiceAccountItem>> {
-    require_admin(&state, &auth_user).await?;
+    let existing = service_account_service::get_service_account(&state.db, &sa_id).await?;
+    require_admin_or_owning_org_admin(&state, &auth_user, &existing).await?;
 
     let updated = service_account_service::update_service_account(
         &state.db,
@@ -232,15 +359,13 @@ pub async fn update_service_account(
     )
     .await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "admin.sa.updated".to_string(),
+        &auth_user,
+        "admin.sa.updated",
         Some(serde_json::json!({
             "target_sa_id": &sa_id,
         })),
-        extract_ip(&headers),
-        extract_user_agent(&headers),
     );
 
     Ok(Json(sa_to_item(updated)))
@@ -250,22 +375,30 @@ pub async fn update_service_account(
 pub async fn delete_service_account(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    headers: HeaderMap,
+    tele: TelemetryContext,
+    _headers: HeaderMap,
     Path(sa_id): Path<String>,
 ) -> AppResult<Json<AdminActionResponse>> {
-    require_admin(&state, &auth_user).await?;
+    let existing = service_account_service::get_service_account(&state.db, &sa_id).await?;
+    require_admin_or_owning_org_admin(&state, &auth_user, &existing).await?;
 
     service_account_service::delete_service_account(&state.db, &sa_id).await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "admin.sa.deleted".to_string(),
+        &auth_user,
+        "admin.sa.deleted",
         Some(serde_json::json!({
             "target_sa_id": &sa_id,
         })),
-        extract_ip(&headers),
-        extract_user_agent(&headers),
+    );
+
+    emit_event(
+        state.telemetry.as_deref(),
+        &auth_user.user_id.to_string(),
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::AdminServiceAccountDeleted,
     );
 
     Ok(Json(AdminActionResponse {
@@ -277,23 +410,31 @@ pub async fn delete_service_account(
 pub async fn rotate_secret(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    headers: HeaderMap,
+    tele: TelemetryContext,
+    _headers: HeaderMap,
     Path(sa_id): Path<String>,
 ) -> AppResult<Json<RotateSecretResponse>> {
-    require_admin(&state, &auth_user).await?;
+    let existing = service_account_service::get_service_account(&state.db, &sa_id).await?;
+    require_admin_or_owning_org_admin(&state, &auth_user, &existing).await?;
 
     let (updated, raw_secret) = service_account_service::rotate_secret(&state.db, &sa_id).await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "admin.sa.secret_rotated".to_string(),
+        &auth_user,
+        "admin.sa.secret_rotated",
         Some(serde_json::json!({
             "target_sa_id": &sa_id,
             "client_id": &updated.client_id,
         })),
-        extract_ip(&headers),
-        extract_user_agent(&headers),
+    );
+
+    emit_event(
+        state.telemetry.as_deref(),
+        &auth_user.user_id.to_string(),
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::AdminServiceAccountRotated,
     );
 
     Ok(Json(RotateSecretResponse {
@@ -309,26 +450,22 @@ pub async fn rotate_secret(
 pub async fn revoke_tokens(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Path(sa_id): Path<String>,
 ) -> AppResult<Json<RevokeTokensResponse>> {
-    require_admin(&state, &auth_user).await?;
-
-    // Verify it exists
     let _sa = service_account_service::get_service_account(&state.db, &sa_id).await?;
+    require_admin_or_owning_org_admin(&state, &auth_user, &_sa).await?;
 
     let revoked_count = service_account_service::revoke_all_tokens(&state.db, &sa_id).await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "admin.sa.tokens_revoked".to_string(),
+        &auth_user,
+        "admin.sa.tokens_revoked",
         Some(serde_json::json!({
             "target_sa_id": &sa_id,
             "revoked_count": revoked_count,
         })),
-        extract_ip(&headers),
-        extract_user_agent(&headers),
     );
 
     Ok(Json(RevokeTokensResponse {

@@ -6,6 +6,7 @@ use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::mw::auth::AuthUser;
 use crate::services::{audit_service, token_exchange_service};
+use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event, hash_short_id};
 
 #[derive(Serialize)]
 pub struct DelegationRefreshResponse {
@@ -23,6 +24,7 @@ pub struct DelegationRefreshResponse {
 pub async fn refresh_delegation_token(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
 ) -> AppResult<Json<DelegationRefreshResponse>> {
     // Only delegated tokens can use this endpoint
     let acting_client_id = auth_user.acting_client_id.as_deref().ok_or_else(|| {
@@ -41,16 +43,25 @@ pub async fn refresh_delegation_token(
     )
     .await?;
 
-    audit_service::log_async(
+    emit_event(
+        state.telemetry.as_deref(),
+        &user_id_str,
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::AuthDelegationRefreshed {
+            // Hash: raw UUID would be scrubbed to `[UUID_REDACTED]`.
+            client_id: hash_short_id(acting_client_id),
+        },
+    );
+
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(user_id_str),
-        "delegation_token_refreshed".to_string(),
+        &auth_user,
+        "delegation_token_refreshed",
         Some(serde_json::json!({
             "acting_client_id": acting_client_id,
             "scope": &result.scope,
         })),
-        None,
-        None,
     );
 
     Ok(Json(DelegationRefreshResponse {

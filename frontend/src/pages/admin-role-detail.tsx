@@ -2,16 +2,23 @@ import { useState } from "react";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useRole, useUpdateRole, useDeleteRole } from "@/hooks/use-rbac";
+import {
+  useRole,
+  useUpdateRole,
+  useDeleteRole,
+  useBulkAssignRole,
+} from "@/hooks/use-rbac";
 import { updateRoleSchema, type UpdateRoleFormData } from "@/schemas/rbac";
 import { ApiError } from "@/lib/api-client";
 import { formatDate } from "@/lib/utils";
+import { canAdminWrite } from "@/types/api";
+import { useAuthStore } from "@/stores/auth-store";
 import { PageHeader } from "@/components/shared/page-header";
+import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
 import { DetailSection } from "@/components/shared/detail-section";
 import { DetailRow } from "@/components/shared/detail-row";
-import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import {
@@ -30,20 +37,27 @@ import {
   FormLabel,
   FormMessage,
 } from "@/components/ui/form";
-import { Pencil, Trash2, AlertCircle } from "lucide-react";
+import { Pencil, Trash2, AlertCircle, Users } from "lucide-react";
+import { SmartRemoteIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
 import { Checkbox } from "@/components/ui/checkbox";
 
 export function AdminRoleDetailPage() {
   const { roleId } = useParams({ strict: false }) as { roleId: string };
   const navigate = useNavigate();
+  const currentUser = useAuthStore((s) => s.user);
+  const canWrite = canAdminWrite(currentUser);
 
   const { data: role, isLoading, error } = useRole(roleId);
   const updateMutation = useUpdateRole();
   const deleteMutation = useDeleteRole();
+  const bulkAssignMutation = useBulkAssignRole();
 
   const [editOpen, setEditOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [bulkAssignOpen, setBulkAssignOpen] = useState(false);
+
+  useBreadcrumbLabel(role?.name);
 
   const form = useForm<UpdateRoleFormData>({
     resolver: zodResolver(updateRoleSchema),
@@ -89,11 +103,9 @@ export function AdminRoleDetailPage() {
       toast.success("Role updated successfully");
       setEditOpen(false);
     } catch (err) {
-      if (err instanceof ApiError) {
-        form.setError("root", { message: err.message });
-      } else {
-        toast.error("Failed to update role");
-      }
+      toast.error(
+        err instanceof ApiError ? err.message : "Failed to update role",
+      );
     }
   }
 
@@ -111,6 +123,21 @@ export function AdminRoleDetailPage() {
     }
   }
 
+  async function handleBulkAssignAll() {
+    try {
+      const result = await bulkAssignMutation.mutateAsync({
+        roleId,
+        data: { all: true },
+      });
+      toast.success(result.message);
+      setBulkAssignOpen(false);
+    } catch (err) {
+      toast.error(
+        err instanceof ApiError ? err.message : "Failed to bulk assign role",
+      );
+    }
+  }
+
   if (isLoading) {
     return (
       <div className="space-y-6">
@@ -124,7 +151,9 @@ export function AdminRoleDetailPage() {
     return (
       <div className="flex flex-col items-center justify-center py-16 text-center">
         <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
-        <h3 className="mb-2 font-display text-lg font-semibold">Role not found</h3>
+        <h3 className="mb-2 font-display text-lg font-semibold">
+          Role not found
+        </h3>
         <p className="mb-4 text-sm text-muted-foreground">
           The role you are looking for does not exist or has been deleted.
         </p>
@@ -141,41 +170,45 @@ export function AdminRoleDetailPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        breadcrumbs={[
-          { label: "Role Management", to: "/admin/roles" },
-          { label: role.name },
-        ]}
         title={role.name}
         description={role.description ?? undefined}
         actions={
-          <>
-            <Button variant="outline" size="sm" onClick={openEditDialog}>
-              <Pencil className="mr-1 h-3 w-3" />
-              Edit
-            </Button>
-            {!role.is_system && (
+          canWrite ? (
+            <>
               <Button
-                variant="destructive"
-                size="sm"
-                onClick={() => setDeleteOpen(true)}
+                variant="outline"
+                onClick={() => setBulkAssignOpen(true)}
               >
-                <Trash2 className="mr-1 h-3 w-3" />
-                Delete
+                <ButtonIcon><Users className="h-3 w-3" /></ButtonIcon>
+                Assign All
               </Button>
-            )}
-          </>
+              <Button variant="outline" onClick={openEditDialog}>
+                <ButtonIcon><Pencil className="h-3 w-3" /></ButtonIcon>
+                Edit
+              </Button>
+              {!role.is_system && (
+                <Button
+                  variant="destructive"
+                  onClick={() => setDeleteOpen(true)}
+                >
+                  <ButtonIcon variant="destructive"><Trash2 className="h-3 w-3 text-destructive" /></ButtonIcon>
+                  Delete
+                </Button>
+              )}
+            </>
+          ) : null
         }
       />
 
       <DetailSection title="Role Information">
-        <DetailRow label="ID" value={role.id} copyable mono />
+        <DetailRow label="ID" value={role.id} copyable />
         <DetailRow label="Name" value={role.name} />
-        <DetailRow label="Slug" value={role.slug} copyable mono />
+        <DetailRow label="Slug" value={role.slug} copyable />
         <DetailRow
           label="Type"
           value={role.is_system ? "System" : "Custom"}
           badge
-          badgeVariant={role.is_system ? "secondary" : "outline"}
+          badgeVariant={role.is_system ? "secondary" : "default"}
         />
         <DetailRow
           label="Default"
@@ -184,23 +217,22 @@ export function AdminRoleDetailPage() {
           badgeVariant={role.is_default ? "success" : "secondary"}
         />
         {role.client_id && (
-          <DetailRow label="Client ID" value={role.client_id} copyable mono />
+          <DetailRow label="Client ID" value={role.client_id} copyable />
         )}
         <DetailRow label="Created" value={formatDate(role.created_at)} />
         <DetailRow label="Updated" value={formatDate(role.updated_at)} />
       </DetailSection>
 
-      <Separator />
-
       <DetailSection title="Permissions">
         {role.permissions.length === 0 ? (
-          <p className="text-sm text-muted-foreground">
-            No permissions assigned.
-          </p>
+          <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
+            <SmartRemoteIcon className="h-48 w-48 text-muted-foreground/30" />
+            <p className="text-[12px] text-muted-foreground/30">No permissions assigned.</p>
+          </div>
         ) : (
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap gap-2 px-4 py-3">
             {role.permissions.map((perm) => (
-              <Badge key={perm} variant="outline" className="font-mono text-xs">
+              <Badge key={perm} variant="secondary" className="font-mono text-xs">
                 {perm}
               </Badge>
             ))}
@@ -222,11 +254,6 @@ export function AdminRoleDetailPage() {
               onSubmit={form.handleSubmit((data) => void handleEdit(data))}
               className="space-y-4"
             >
-              {form.formState.errors.root && (
-                <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
-                  {form.formState.errors.root.message}
-                </div>
-              )}
               <FormField
                 control={form.control}
                 name="name"
@@ -316,7 +343,7 @@ export function AdminRoleDetailPage() {
                 >
                   Cancel
                 </Button>
-                <Button type="submit" isLoading={updateMutation.isPending}>
+                <Button type="submit" variant="primary" isLoading={updateMutation.isPending}>
                   Save Changes
                 </Button>
               </DialogFooter>
@@ -331,8 +358,9 @@ export function AdminRoleDetailPage() {
           <DialogHeader>
             <DialogTitle>Delete Role</DialogTitle>
             <DialogDescription>
-              Are you sure you want to delete &quot;{role.name}&quot;? It will be
-              removed from all users and groups. This action cannot be undone.
+              Are you sure you want to delete &quot;{role.name}&quot;? It will
+              be removed from all users and groups. This action cannot be
+              undone.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
@@ -345,6 +373,31 @@ export function AdminRoleDetailPage() {
               isLoading={deleteMutation.isPending}
             >
               Delete Role
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Bulk Assign Confirmation */}
+      <Dialog open={bulkAssignOpen} onOpenChange={setBulkAssignOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Assign Role to All Users</DialogTitle>
+            <DialogDescription>
+              This will assign the &quot;{role.name}&quot; role to every
+              existing user who does not already have it. Users who already have
+              this role will not be affected.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setBulkAssignOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              onClick={() => void handleBulkAssignAll()}
+              isLoading={bulkAssignMutation.isPending}
+            >
+              Assign to All Users
             </Button>
           </DialogFooter>
         </DialogContent>

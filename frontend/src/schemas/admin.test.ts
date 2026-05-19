@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { updateUserSchema, createUserSchema } from "./admin";
+import {
+  updateUserSchema,
+  createUserSchema,
+  createInviteCodeSchema,
+} from "./admin";
 
 describe("createUserSchema", () => {
   const validData = {
@@ -137,6 +141,62 @@ describe("updateUserSchema", () => {
   it("rejects display_name over 200 characters", () => {
     const result = updateUserSchema.safeParse({
       display_name: "a".repeat(201),
+    });
+    expect(result.success).toBe(false);
+  });
+});
+
+describe("createInviteCodeSchema", () => {
+  it("accepts default values (10 uses, no note)", () => {
+    const result = createInviteCodeSchema.safeParse({ max_uses: 10 });
+    expect(result.success).toBe(true);
+  });
+
+  it("accepts max_uses at lower bound", () => {
+    const result = createInviteCodeSchema.safeParse({ max_uses: 1 });
+    expect(result.success).toBe(true);
+  });
+
+  it("accepts max_uses at upper bound", () => {
+    const result = createInviteCodeSchema.safeParse({ max_uses: 1000 });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects max_uses below 1", () => {
+    const result = createInviteCodeSchema.safeParse({ max_uses: 0 });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects max_uses above 1000", () => {
+    const result = createInviteCodeSchema.safeParse({ max_uses: 1001 });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects non-integer max_uses", () => {
+    const result = createInviteCodeSchema.safeParse({ max_uses: 5.5 });
+    expect(result.success).toBe(false);
+  });
+
+  it("accepts a note within the length limit", () => {
+    const result = createInviteCodeSchema.safeParse({
+      max_uses: 10,
+      note: "alice@corp",
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("accepts an empty-string note", () => {
+    const result = createInviteCodeSchema.safeParse({
+      max_uses: 10,
+      note: "",
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects a note longer than 512 characters", () => {
+    const result = createInviteCodeSchema.safeParse({
+      max_uses: 10,
+      note: "a".repeat(513),
     });
     expect(result.success).toBe(false);
   });

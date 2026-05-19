@@ -10,7 +10,7 @@ interface CopyableFieldProps {
   readonly size?: "sm" | "md";
 }
 
-/* ── VoidPortal Copyable Field ── */
+/* ── NyxID Copyable Field ── */
 export function CopyableField({
   label,
   value,
@@ -31,24 +31,25 @@ export function CopyableField({
 
   const textSize = size === "sm" ? "text-[10px]" : "text-xs";
   const labelSize = size === "sm" ? "text-[10px]" : "text-xs";
-  const btnSize = size === "sm" ? "h-6 w-6" : "h-7 w-7";
-  const padding = size === "sm" ? "px-2 py-1" : "px-2 py-1.5";
+  const btnSize = size === "sm" ? "h-7 w-7" : "h-8 w-8";
+  const padding = size === "sm" ? "px-3 py-2" : "px-4 py-3.5";
+  const minH = size === "sm" ? "min-h-[36px]" : "min-h-[44px]";
 
   return (
     <div>
       <p className={`mb-1 ${labelSize} font-medium text-text-tertiary`}>
         {label}
       </p>
-      <div className="flex items-center gap-1">
+      <div className="relative">
         <code
-          className={`flex-1 rounded-md border border-border bg-muted font-mono ${padding} ${textSize} break-all text-foreground`}
+          className={`flex items-center rounded-xl border border-border bg-muted font-mono ${padding} pr-10 ${minH} ${textSize} break-all text-foreground`}
         >
           {value}
         </code>
         <Button
           variant="ghost"
           size="icon"
-          className={`${btnSize} shrink-0`}
+          className={`${btnSize} absolute right-1 top-1/2 -translate-y-1/2 shrink-0`}
           onClick={() => void handleCopy()}
         >
           {copied ? (

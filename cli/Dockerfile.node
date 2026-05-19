@@ -1,0 +1,62 @@
+# NyxID Node Agent - Docker Image
+#
+# Build:
+#   docker build -f cli/Dockerfile.node -t nyxid-node .
+#
+# Run (existing config):
+#   docker run --user "$(id -u):$(id -g)" -v ~/.nyxid-node:/app/config nyxid-node
+#
+# Run (auto-register + start):
+#   docker run --user "$(id -u):$(id -g)" \
+#     -v ~/.nyxid-node:/app/config \
+#     -e NYXID_NODE_TOKEN=nyx_nreg_... \
+#     -e NYXID_NODE_URL=wss://nyx-api.example.com/api/v1/nodes/ws \
+#     nyxid-node
+
+# -- Stage 1: Build --------------------------------------------------------
+FROM rust:1.93-bookworm AS builder
+
+# libdbus-1-dev is required at compile time by the keyring crate
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends pkg-config libdbus-1-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Copy entire workspace (needed for workspace dependency resolution).
+# `cloud-auth/` (NyxID#716) is a workspace member depended on by the
+# node agent via `cli/Cargo.toml`; missing it makes the workspace
+# refuse to resolve.
+COPY Cargo.toml Cargo.lock ./
+COPY backend/ backend/
+COPY cli/ cli/
+COPY cloud-auth/ cloud-auth/
+COPY mcp-demo/ mcp-demo/
+COPY docs/AI_AGENT_PLAYBOOK.md docs/AI_AGENT_PLAYBOOK.md
+
+# Build only the CLI binary (includes node agent subcommand)
+RUN cargo build --release -p nyxid-cli
+
+# -- Stage 2: Runtime -------------------------------------------------------
+FROM debian:bookworm-slim
+
+# Only ca-certificates needed at runtime. No libdbus -- keychain is not
+# usable in Docker (no secret-service daemon). Node agent uses the file
+# backend (AES-GCM encrypted) which has no runtime dependencies.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy the compiled CLI binary and entrypoint
+COPY --from=builder /build/target/release/nyxid /usr/local/bin/nyxid
+COPY cli/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+
+# Config directory: mount a volume here at runtime.
+# The container must be run with --user "$(id -u):$(id -g)" so it can
+# read/write host-mounted config files (written with mode 0600 by the CLI).
+RUN mkdir -p /app/config
+
+# No ports exposed -- node agent initiates outbound WebSocket connections.
+ENTRYPOINT ["docker-entrypoint.sh"]

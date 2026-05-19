@@ -1,3 +1,22 @@
+# Base Docker Compose for NyxID.
+#
+# This file contains only services shared between local development and
+# production deployments. Environment-specific bits live in:
+#
+#   docker-compose.override.yml  -- auto-loaded for local development
+#                                   (adds Mailpit, exposes Mongo on 27018,
+#                                   sets a hardcoded dev password)
+#   docker-compose.prod.yml      -- explicitly loaded for production deploy
+#                                   (adds backend + frontend, enforces an
+#                                   env-driven Mongo password)
+#
+# Local dev (auto-loads override.yml):
+#     docker compose up -d
+#
+# Production deploy (override.yml is NOT auto-loaded with explicit -f):
+#     docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+#                    --env-file .env.production up -d
+
 services:
   mongodb:
     image: mongo:8.0
@@ -5,28 +24,18 @@ services:
     restart: unless-stopped
     environment:
       MONGO_INITDB_ROOT_USERNAME: nyxid
-      MONGO_INITDB_ROOT_PASSWORD: nyxid_dev_password
       MONGO_INITDB_DATABASE: nyxid
-    ports:
-      - "127.0.0.1:27018:27017"
+      # MONGO_INITDB_ROOT_PASSWORD is intentionally NOT set here. The dev
+      # override sets a hardcoded dev password; the prod override requires
+      # MONGO_ROOT_PASSWORD to be provided via .env.production.
     volumes:
       - mongodb_data:/data/db
     healthcheck:
       test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
-      interval: 5s
+      interval: 10s
       timeout: 5s
       retries: 5
-
-  mailpit:
-    image: axllent/mailpit:latest
-    container_name: nyxid-mailpit
-    restart: unless-stopped
-    ports:
-      - "1025:1025"
-      - "8025:8025"
-    environment:
-      MP_SMTP_AUTH_ACCEPT_ANY: 1
-      MP_SMTP_AUTH_ALLOW_INSECURE: 1
+      start_period: 10s
 
 volumes:
   mongodb_data:

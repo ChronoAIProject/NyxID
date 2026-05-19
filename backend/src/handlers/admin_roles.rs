@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::errors::AppResult;
-use crate::handlers::admin_helpers::{extract_ip, extract_user_agent, require_admin};
+use crate::handlers::admin_helpers::{require_admin, require_admin_or_operator};
 use crate::models::role::Role;
 use crate::mw::auth::AuthUser;
 use crate::services::{audit_service, role_service};
@@ -69,6 +69,23 @@ pub struct RoleAssignmentResponse {
     pub message: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct BulkAssignRequest {
+    /// If `true`, assign the role to all users. Mutually exclusive with `user_ids`.
+    #[serde(default)]
+    pub all: bool,
+    /// Specific user IDs to assign the role to. Mutually exclusive with `all`.
+    #[serde(default)]
+    pub user_ids: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BulkAssignResponse {
+    pub assigned_count: u64,
+    pub already_assigned_count: u64,
+    pub message: String,
+}
+
 // --- Helpers ---
 
 fn role_to_response(r: Role) -> RoleResponse {
@@ -94,7 +111,7 @@ pub async fn list_roles(
     auth_user: AuthUser,
     Query(query): Query<RoleListQuery>,
 ) -> AppResult<Json<RoleListResponse>> {
-    require_admin(&state, &auth_user).await?;
+    require_admin_or_operator(&state, &auth_user, "admin.roles.list").await?;
 
     let roles = role_service::list_roles(&state.db, query.client_id.as_deref()).await?;
     let items: Vec<RoleResponse> = roles.into_iter().map(role_to_response).collect();
@@ -106,7 +123,7 @@ pub async fn list_roles(
 pub async fn create_role(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Json(body): Json<CreateRoleRequest>,
 ) -> AppResult<Json<RoleResponse>> {
     require_admin(&state, &auth_user).await?;
@@ -128,16 +145,14 @@ pub async fn create_role(
     )
     .await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "admin.role.created".to_string(),
+        &auth_user,
+        "admin.role.created",
         Some(serde_json::json!({
             "role_id": &role.id,
             "role_slug": &role.slug,
         })),
-        extract_ip(&headers),
-        extract_user_agent(&headers),
     );
 
     Ok(Json(role_to_response(role)))
@@ -149,7 +164,7 @@ pub async fn get_role(
     auth_user: AuthUser,
     Path(role_id): Path<String>,
 ) -> AppResult<Json<RoleResponse>> {
-    require_admin(&state, &auth_user).await?;
+    require_admin_or_operator(&state, &auth_user, "admin.roles.get").await?;
 
     let role = role_service::get_role(&state.db, &role_id).await?;
     Ok(Json(role_to_response(role)))
@@ -159,7 +174,7 @@ pub async fn get_role(
 pub async fn update_role(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Path(role_id): Path<String>,
     Json(body): Json<UpdateRoleRequest>,
 ) -> AppResult<Json<RoleResponse>> {
@@ -176,16 +191,14 @@ pub async fn update_role(
     )
     .await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "admin.role.updated".to_string(),
+        &auth_user,
+        "admin.role.updated",
         Some(serde_json::json!({
             "role_id": &role_id,
             "role_slug": &role.slug,
         })),
-        extract_ip(&headers),
-        extract_user_agent(&headers),
     );
 
     Ok(Json(role_to_response(role)))
@@ -195,20 +208,18 @@ pub async fn update_role(
 pub async fn delete_role(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Path(role_id): Path<String>,
 ) -> AppResult<Json<RoleAssignmentResponse>> {
     require_admin(&state, &auth_user).await?;
 
     role_service::delete_role(&state.db, &role_id).await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "admin.role.deleted".to_string(),
+        &auth_user,
+        "admin.role.deleted",
         Some(serde_json::json!({ "role_id": &role_id })),
-        extract_ip(&headers),
-        extract_user_agent(&headers),
     );
 
     Ok(Json(RoleAssignmentResponse {
@@ -222,7 +233,7 @@ pub async fn get_user_roles(
     auth_user: AuthUser,
     Path(user_id): Path<String>,
 ) -> AppResult<Json<UserRolesResponse>> {
-    require_admin(&state, &auth_user).await?;
+    require_admin_or_operator(&state, &auth_user, "admin.users.roles.list").await?;
 
     let rbac = crate::services::rbac_helpers::resolve_user_rbac(&state.db, &user_id).await?;
     let direct_roles = role_service::get_user_roles(&state.db, &user_id).await?;
@@ -263,23 +274,21 @@ pub async fn get_user_roles(
 pub async fn assign_role(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Path((user_id, role_id)): Path<(String, String)>,
 ) -> AppResult<Json<RoleAssignmentResponse>> {
     require_admin(&state, &auth_user).await?;
 
     role_service::assign_role_to_user(&state.db, &user_id, &role_id).await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "admin.role.assigned".to_string(),
+        &auth_user,
+        "admin.role.assigned",
         Some(serde_json::json!({
             "target_user_id": &user_id,
             "role_id": &role_id,
         })),
-        extract_ip(&headers),
-        extract_user_agent(&headers),
     );
 
     Ok(Json(RoleAssignmentResponse {
@@ -291,26 +300,76 @@ pub async fn assign_role(
 pub async fn revoke_role(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Path((user_id, role_id)): Path<(String, String)>,
 ) -> AppResult<Json<RoleAssignmentResponse>> {
     require_admin(&state, &auth_user).await?;
 
     role_service::revoke_role_from_user(&state.db, &user_id, &role_id).await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "admin.role.revoked".to_string(),
+        &auth_user,
+        "admin.role.revoked",
         Some(serde_json::json!({
             "target_user_id": &user_id,
             "role_id": &role_id,
         })),
-        extract_ip(&headers),
-        extract_user_agent(&headers),
     );
 
     Ok(Json(RoleAssignmentResponse {
         message: "Role revoked".to_string(),
+    }))
+}
+
+/// POST /api/v1/admin/roles/:role_id/assign-bulk
+pub async fn bulk_assign_role(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    _headers: HeaderMap,
+    Path(role_id): Path<String>,
+    Json(body): Json<BulkAssignRequest>,
+) -> AppResult<Json<BulkAssignResponse>> {
+    require_admin(&state, &auth_user).await?;
+
+    if !body.all && body.user_ids.is_empty() {
+        return Err(crate::errors::AppError::ValidationError(
+            "Either set 'all' to true or provide 'user_ids'".to_string(),
+        ));
+    }
+    if body.all && !body.user_ids.is_empty() {
+        return Err(crate::errors::AppError::ValidationError(
+            "'all' and 'user_ids' are mutually exclusive".to_string(),
+        ));
+    }
+
+    let user_ids_opt = if body.all {
+        None
+    } else {
+        Some(&body.user_ids[..])
+    };
+
+    let result = role_service::bulk_assign_role(&state.db, &role_id, user_ids_opt).await?;
+
+    audit_service::log_for_user(
+        state.db.clone(),
+        &auth_user,
+        "admin.role.bulk_assigned",
+        Some(serde_json::json!({
+            "role_id": &role_id,
+            "all": body.all,
+            "user_ids_count": body.user_ids.len(),
+            "assigned_count": result.assigned_count,
+            "already_assigned_count": result.already_assigned_count,
+        })),
+    );
+
+    Ok(Json(BulkAssignResponse {
+        assigned_count: result.assigned_count,
+        already_assigned_count: result.already_assigned_count,
+        message: format!(
+            "Role assigned to {} users ({} already had it)",
+            result.assigned_count, result.already_assigned_count
+        ),
     }))
 }

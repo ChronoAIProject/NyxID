@@ -9,7 +9,9 @@ use crate::config::AppConfig;
 use crate::crypto::jwt::JwtKeys;
 use crate::crypto::token::{generate_random_token, hash_token};
 use crate::errors::{AppError, AppResult};
-use crate::models::authorization_code::{AuthorizationCode, COLLECTION_NAME as AUTH_CODES};
+use crate::models::authorization_code::{
+    AuthorizationCode, COLLECTION_NAME as AUTH_CODES, ExternalSubjectRef,
+};
 use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
 use crate::models::refresh_token::{COLLECTION_NAME as REFRESH_TOKENS, RefreshToken};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
@@ -88,6 +90,7 @@ pub async fn create_authorization_code(
     code_challenge: Option<&str>,
     code_challenge_method: Option<&str>,
     nonce: Option<&str>,
+    external_subject: Option<&ExternalSubjectRef>,
 ) -> AppResult<String> {
     let code = generate_random_token();
     let code_hash = hash_token(&code);
@@ -103,6 +106,7 @@ pub async fn create_authorization_code(
         code_challenge: code_challenge.map(String::from),
         code_challenge_method: code_challenge_method.map(String::from),
         nonce: nonce.map(String::from),
+        external_subject: external_subject.cloned(),
         expires_at: now + Duration::minutes(5),
         used: false,
         created_at: now,
@@ -175,7 +179,18 @@ fn validate_client_secret(client: &OauthClient, client_secret: Option<&str>) -> 
 /// for confidential clients. Persists the refresh token to the database
 /// and implements code replay detection.
 ///
-/// Returns (access_token, refresh_token, id_token, granted_scope).
+/// Returns the minted token strings plus metadata needed by the OAuth broker path.
+pub struct ExchangedTokens {
+    pub access_token: String,
+    pub refresh_token: String,
+    pub refresh_token_jti: String,
+    pub id_token: Option<String>,
+    pub granted_scope: String,
+    pub user_id: String,
+    pub external_subject: Option<ExternalSubjectRef>,
+    pub broker_capability_enabled: bool,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn exchange_authorization_code(
     db: &mongodb::Database,
@@ -186,7 +201,8 @@ pub async fn exchange_authorization_code(
     redirect_uri: &str,
     code_verifier: Option<&str>,
     client_secret: Option<&str>,
-) -> AppResult<(String, String, Option<String>, String)> {
+    access_token_ttl_override_secs: Option<i64>,
+) -> AppResult<ExchangedTokens> {
     let code_hash = hash_token(code);
 
     // Atomically claim the authorization code (prevents TOCTOU race condition).
@@ -252,14 +268,23 @@ pub async fn exchange_authorization_code(
         return Err(AppError::InvalidRedirectUri);
     }
 
-    // Validate client_secret for confidential clients
+    // Validate client_secret for confidential clients. Reject auth
+    // codes against soft-deleted clients (`is_active = false`) so an
+    // already-issued code cannot be exchanged after the developer
+    // app -- or its owning org -- has been deleted. The legacy
+    // delete path on `oauth_clients` is a soft-delete, so the row
+    // can linger with `is_active = false` until the org cascade
+    // sweeps it; without this filter the code window is up to the
+    // auth-code TTL after the delete.
     let client = db
         .collection::<OauthClient>(OAUTH_CLIENTS)
-        .find_one(doc! { "_id": client_id })
+        .find_one(doc! { "_id": client_id, "is_active": true })
         .await?
         .ok_or_else(|| AppError::BadRequest("OAuth client not found".to_string()))?;
 
     validate_client_secret(&client, client_secret)?;
+    let broker_capability_enabled =
+        crate::services::oauth_broker_service::is_broker_client(&client);
 
     // PKCE verification (S256 only)
     if let Some(challenge) = &stored.code_challenge {
@@ -301,10 +326,16 @@ pub async fn exchange_authorization_code(
         &user_uuid,
         &stored.scope,
         Some(&rbac_data),
+        broker_capability_enabled
+            .then_some(access_token_ttl_override_secs)
+            .flatten(),
+        None,
+        None,
     )?;
 
     let (refresh_token_jwt, refresh_jti) =
         crate::crypto::jwt::generate_refresh_token(jwt_keys, config, &user_uuid)?;
+    let refresh_token_jti = refresh_jti.clone();
 
     // Persist OAuth refresh token to database for revocation support
     let refresh_id = Uuid::new_v4().to_string();
@@ -363,7 +394,16 @@ pub async fn exchange_authorization_code(
     };
 
     let granted_scope = stored.scope.clone();
-    Ok((access_token, refresh_token_jwt, id_token, granted_scope))
+    Ok(ExchangedTokens {
+        access_token,
+        refresh_token: refresh_token_jwt,
+        refresh_token_jti,
+        id_token,
+        granted_scope,
+        user_id: stored.user_id,
+        external_subject: stored.external_subject,
+        broker_capability_enabled,
+    })
 }
 
 /// Check whether a redirect URI is a loopback address per RFC 8252 section 7.3.

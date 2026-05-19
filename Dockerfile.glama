@@ -1,0 +1,31 @@
+# Reference Dockerfile for the Glama directory listing.
+#
+# This file is documentation, not a build artifact: Glama's UI does not
+# auto-read it from the repo. Paste the build step (the `RUN` body) and
+# CMD into Glama's admin Dockerfile page to keep the deployed config in
+# sync with this file.
+#
+# Builds the standalone `nyxid-mcp-demo` crate (just serde_json + std)
+# instead of the full `nyxid` backend so the cargo build finishes in
+# under a minute on a constrained CI runner. The full backend speaks
+# the same MCP surface over Streamable HTTP at /mcp on a real NyxID
+# deployment — see the `mcp-demo` crate's main.rs for the parity notes.
+
+FROM debian:trixie-slim
+
+RUN set -eu \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends build-essential ca-certificates curl git \
+ && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --default-toolchain 1.93.0 --profile minimal \
+ && git clone --depth 1 --branch main https://github.com/ChronoAIProject/NyxID /src \
+ && cd /src \
+ && /root/.cargo/bin/cargo build --release -p nyxid-mcp-demo \
+ && strip target/release/nyxid-mcp-demo \
+ && install -m0755 target/release/nyxid-mcp-demo /usr/local/bin/nyxid-mcp-demo \
+ && cd / \
+ && rm -rf /src /root/.cargo /root/.rustup /root/.cache \
+ && apt-get purge -y --auto-remove build-essential curl git \
+ && rm -rf /var/lib/apt/lists/*
+
+CMD ["nyxid-mcp-demo"]

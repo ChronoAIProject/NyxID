@@ -138,7 +138,11 @@ describe("apiClient", () => {
 });
 
 describe("401 auth state handling", () => {
-  function errorResponse(status: number, errorCode: number, message: string): Response {
+  function errorResponse(
+    status: number,
+    errorCode: number,
+    message: string,
+  ): Response {
     return {
       ok: false,
       status,
@@ -153,7 +157,9 @@ describe("401 auth state handling", () => {
   }
 
   it("clears auth state on 401 for protected endpoints", async () => {
-    mockFetch.mockResolvedValueOnce(errorResponse(401, 1001, "Not authenticated"));
+    mockFetch.mockResolvedValueOnce(
+      errorResponse(401, 1001, "Not authenticated"),
+    );
     await expect(apiClient("/users/me")).rejects.toThrow(ApiError);
     expect(mockFetch).toHaveBeenCalledTimes(1);
     expect(mockSetUser).toHaveBeenCalledWith(null);

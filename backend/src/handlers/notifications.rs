@@ -9,6 +9,7 @@ use crate::errors::{AppError, AppResult};
 use crate::models::notification_channel::{COLLECTION_NAME, NotificationChannel};
 use crate::mw::auth::AuthUser;
 use crate::services::{audit_service, notification_service};
+use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 // --- Response types ---
 
@@ -100,6 +101,15 @@ pub async fn update_settings(
         ));
     }
 
+    let resulting_approval_required = body.approval_required.unwrap_or(channel.approval_required);
+    if resulting_approval_required
+        && !has_enabled_notification_channel_after_update(&channel, &body)
+    {
+        return Err(AppError::BadRequest(
+            "Approval protection requires at least one enabled notification channel. Keep Telegram or push notifications enabled, or disable approval protection first.".to_string(),
+        ));
+    }
+
     let now = bson::DateTime::from_chrono(Utc::now());
     let mut update_doc = doc! { "updated_at": now };
 
@@ -132,10 +142,10 @@ pub async fn update_settings(
 
     let updated = notification_service::get_or_create_channel(&state.db, &user_id).await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(user_id),
-        "notification_settings_updated".to_string(),
+        &auth_user,
+        "notification_settings_updated",
         Some(serde_json::json!({
             "telegram_enabled": updated.telegram_enabled,
             "approval_required": updated.approval_required,
@@ -143,13 +153,18 @@ pub async fn update_settings(
             "grant_expiry_days": updated.grant_expiry_days,
             "push_enabled": updated.push_enabled,
         })),
-        None,
-        None,
     );
 
     Ok(Json(to_settings_response(&updated)))
 }
 
+// TODO(telemetry): emit `notification.channel_linked { channel: "telegram" }`
+// from the Telegram webhook handler (`handlers/telegram_webhook.rs`), where
+// the link is actually completed when the user sends the /start code to the
+// bot. This handler only generates the link code; emitting here would misfire
+// whenever a user starts but never finishes the flow. Webhook file is out of
+// scope for this chunk.
+//
 /// POST /api/v1/notifications/telegram/link
 ///
 /// Generate a one-time link code for connecting Telegram account.
@@ -214,41 +229,71 @@ pub async fn telegram_link(
 pub async fn telegram_disconnect(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
 ) -> AppResult<Json<MessageResponse>> {
     let user_id = auth_user.user_id.to_string();
     let channel = notification_service::get_or_create_channel(&state.db, &user_id).await?;
 
+    // Auto-disable approval_required if no other notification channel remains
+    let no_push_channel = channel.push_devices.is_empty() || !channel.push_enabled;
+
     let now = bson::DateTime::from_chrono(Utc::now());
+    let mut set_doc = doc! {
+        "telegram_chat_id": bson::Bson::Null,
+        "telegram_username": bson::Bson::Null,
+        "telegram_enabled": false,
+        "telegram_link_code": bson::Bson::Null,
+        "telegram_link_code_expires_at": bson::Bson::Null,
+        "updated_at": now,
+    };
+    if no_push_channel {
+        set_doc.insert("approval_required", false);
+    }
+
     state
         .db
         .collection::<NotificationChannel>(COLLECTION_NAME)
-        .update_one(
-            doc! { "_id": &channel.id },
-            doc! {
-                "$set": {
-                    "telegram_chat_id": bson::Bson::Null,
-                    "telegram_username": bson::Bson::Null,
-                    "telegram_enabled": false,
-                    "telegram_link_code": bson::Bson::Null,
-                    "telegram_link_code_expires_at": bson::Bson::Null,
-                    "updated_at": now,
-                }
-            },
-        )
+        .update_one(doc! { "_id": &channel.id }, doc! { "$set": set_doc })
         .await?;
 
-    audit_service::log_async(
+    let approval_disabled = no_push_channel && channel.approval_required;
+
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(user_id),
-        "telegram_disconnected".to_string(),
-        None,
-        None,
-        None,
+        &auth_user,
+        "telegram_disconnected",
+        if approval_disabled {
+            Some(serde_json::json!({ "approval_auto_disabled": true }))
+        } else {
+            None
+        },
     );
 
-    Ok(Json(MessageResponse {
-        message: "Telegram disconnected".to_string(),
-    }))
+    // Telemetry: notification.channel_unlinked (Telegram). Only emit
+    // when the pre-update state actually had Telegram linked --
+    // otherwise a repeated tap / retry / no-op disconnect would
+    // fabricate unlink activity. The endpoint is idempotent, so this
+    // handler must be too.
+    let telegram_was_linked = channel.telegram_chat_id.is_some() || channel.telegram_enabled;
+    if telegram_was_linked {
+        emit_event(
+            state.telemetry.as_deref(),
+            &user_id,
+            auth_user.api_key_id.as_deref(),
+            &tele,
+            TelemetryEvent::NotificationChannelUnlinked {
+                channel: "telegram".to_string(),
+            },
+        );
+    }
+
+    let message = if approval_disabled {
+        "Telegram disconnected. Approval protection has been disabled because no notification channels remain.".to_string()
+    } else {
+        "Telegram disconnected".to_string()
+    };
+
+    Ok(Json(MessageResponse { message }))
 }
 
 fn to_settings_response(channel: &NotificationChannel) -> NotificationSettingsResponse {
@@ -261,5 +306,129 @@ fn to_settings_response(channel: &NotificationChannel) -> NotificationSettingsRe
         grant_expiry_days: channel.grant_expiry_days,
         push_enabled: channel.push_enabled,
         push_device_count: channel.push_devices.len(),
+    }
+}
+
+fn has_enabled_notification_channel_after_update(
+    channel: &NotificationChannel,
+    body: &UpdateNotificationSettingsRequest,
+) -> bool {
+    let telegram_enabled = body.telegram_enabled.unwrap_or(channel.telegram_enabled);
+    let push_enabled = body.push_enabled.unwrap_or(channel.push_enabled);
+
+    (telegram_enabled && channel.telegram_chat_id.is_some())
+        || (push_enabled && !channel.push_devices.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_channel() -> NotificationChannel {
+        NotificationChannel {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: uuid::Uuid::new_v4().to_string(),
+            telegram_chat_id: None,
+            telegram_username: None,
+            telegram_enabled: false,
+            telegram_link_code: None,
+            telegram_link_code_expires_at: None,
+            approval_timeout_secs: 30,
+            grant_expiry_days: 30,
+            approval_required: false,
+            push_enabled: false,
+            push_devices: vec![],
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn allows_approval_when_push_is_enabled_with_registered_device() {
+        let mut channel = make_channel();
+        channel
+            .push_devices
+            .push(crate::models::notification_channel::DeviceToken {
+                device_id: uuid::Uuid::new_v4().to_string(),
+                platform: "fcm".to_string(),
+                token: "token".to_string(),
+                device_name: None,
+                app_id: None,
+                registered_at: Utc::now(),
+                last_used_at: None,
+            });
+
+        let body = UpdateNotificationSettingsRequest {
+            telegram_enabled: None,
+            approval_required: Some(true),
+            approval_timeout_secs: None,
+            grant_expiry_days: None,
+            push_enabled: Some(true),
+        };
+
+        assert!(has_enabled_notification_channel_after_update(
+            &channel, &body
+        ));
+    }
+
+    #[test]
+    fn rejects_disabling_last_channel_while_approval_stays_enabled() {
+        let mut channel = make_channel();
+        channel.push_enabled = true;
+        channel.approval_required = true;
+        channel
+            .push_devices
+            .push(crate::models::notification_channel::DeviceToken {
+                device_id: uuid::Uuid::new_v4().to_string(),
+                platform: "fcm".to_string(),
+                token: "token".to_string(),
+                device_name: None,
+                app_id: None,
+                registered_at: Utc::now(),
+                last_used_at: None,
+            });
+
+        let body = UpdateNotificationSettingsRequest {
+            telegram_enabled: None,
+            approval_required: None,
+            approval_timeout_secs: None,
+            grant_expiry_days: None,
+            push_enabled: Some(false),
+        };
+
+        assert!(!has_enabled_notification_channel_after_update(
+            &channel, &body
+        ));
+    }
+
+    #[test]
+    fn allows_disabling_approval_and_last_channel_together() {
+        let mut channel = make_channel();
+        channel.push_enabled = true;
+        channel.approval_required = true;
+        channel
+            .push_devices
+            .push(crate::models::notification_channel::DeviceToken {
+                device_id: uuid::Uuid::new_v4().to_string(),
+                platform: "fcm".to_string(),
+                token: "token".to_string(),
+                device_name: None,
+                app_id: None,
+                registered_at: Utc::now(),
+                last_used_at: None,
+            });
+
+        let body = UpdateNotificationSettingsRequest {
+            telegram_enabled: None,
+            approval_required: Some(false),
+            approval_timeout_secs: None,
+            grant_expiry_days: None,
+            push_enabled: Some(false),
+        };
+
+        assert!(!body.approval_required.unwrap());
+        assert!(!has_enabled_notification_channel_after_update(
+            &channel, &body
+        ));
     }
 }

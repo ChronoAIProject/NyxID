@@ -22,15 +22,21 @@ import type {
   SaServiceConnectionActionResponse,
 } from "@/types/service-accounts";
 
-export function useServiceAccounts(page: number, perPage: number, search?: string) {
+export function useServiceAccounts(
+  page: number,
+  perPage: number,
+  search?: string,
+  orgId?: string,
+) {
   return useQuery({
-    queryKey: ["admin", "service-accounts", page, perPage, search],
+    queryKey: ["admin", "service-accounts", page, perPage, search, orgId],
     queryFn: async (): Promise<ServiceAccountListResponse> => {
       const params = new URLSearchParams({
         page: String(page),
         per_page: String(perPage),
       });
       if (search) params.set("search", search);
+      if (orgId) params.set("org_id", orgId);
       return api.get<ServiceAccountListResponse>(
         `/admin/service-accounts?${params.toString()}`,
       );
@@ -79,10 +85,7 @@ export function useUpdateServiceAccount() {
       readonly saId: string;
       readonly data: UpdateServiceAccountRequest;
     }): Promise<ServiceAccount> => {
-      return api.put<ServiceAccount>(
-        `/admin/service-accounts/${saId}`,
-        data,
-      );
+      return api.put<ServiceAccount>(`/admin/service-accounts/${saId}`, data);
     },
     onSuccess: (_, { saId }) => {
       void queryClient.invalidateQueries({
@@ -100,9 +103,7 @@ export function useDeleteServiceAccount() {
 
   return useMutation({
     mutationFn: async (saId: string): Promise<AdminActionResponse> => {
-      return api.delete<AdminActionResponse>(
-        `/admin/service-accounts/${saId}`,
-      );
+      return api.delete<AdminActionResponse>(`/admin/service-accounts/${saId}`);
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({
@@ -222,7 +223,10 @@ export function useInitiateOAuthForSa() {
       readonly saId: string;
       readonly providerId: string;
     }): Promise<SaOAuthInitiateResponse> => {
-      return api.get<SaOAuthInitiateResponse>(
+      // Mounted as POST under the canonical route since this creates an
+      // OAuth state row (state-mutating). The backend keeps GET as a
+      // legacy fallback for one release; new callers use POST.
+      return api.post<SaOAuthInitiateResponse>(
         `/admin/service-accounts/${saId}/providers/${providerId}/connect/oauth`,
       );
     },

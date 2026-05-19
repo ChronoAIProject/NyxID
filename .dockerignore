@@ -7,6 +7,7 @@ frontend/dist/
 !.env.example
 keys/
 docs/
+!docs/AI_AGENT_PLAYBOOK.md
 k8s/
 node_modules/
 SERVICES_OVERHAUL_PLAN.md

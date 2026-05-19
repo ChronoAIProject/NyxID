@@ -9,7 +9,10 @@ export const createRoleSchema = z.object({
     .string()
     .min(1, "Slug is required")
     .max(100, "Slug must be 100 characters or less")
-    .regex(/^[a-z0-9_-]+$/, "Slug must be lowercase alphanumeric with hyphens or underscores"),
+    .regex(
+      /^[a-z0-9_-]+$/,
+      "Slug must be lowercase alphanumeric with hyphens or underscores",
+    ),
   description: z
     .string()
     .max(500, "Description must be 500 characters or less")
@@ -31,7 +34,10 @@ export const updateRoleSchema = z.object({
     .string()
     .min(1, "Slug is required")
     .max(100, "Slug must be 100 characters or less")
-    .regex(/^[a-z0-9_-]+$/, "Slug must be lowercase alphanumeric with hyphens or underscores"),
+    .regex(
+      /^[a-z0-9_-]+$/,
+      "Slug must be lowercase alphanumeric with hyphens or underscores",
+    ),
   description: z
     .string()
     .max(500, "Description must be 500 characters or less")
@@ -52,7 +58,10 @@ export const createGroupSchema = z.object({
     .string()
     .min(1, "Slug is required")
     .max(100, "Slug must be 100 characters or less")
-    .regex(/^[a-z0-9_-]+$/, "Slug must be lowercase alphanumeric with hyphens or underscores"),
+    .regex(
+      /^[a-z0-9_-]+$/,
+      "Slug must be lowercase alphanumeric with hyphens or underscores",
+    ),
   description: z
     .string()
     .max(500, "Description must be 500 characters or less")
@@ -73,7 +82,10 @@ export const updateGroupSchema = z.object({
     .string()
     .min(1, "Slug is required")
     .max(100, "Slug must be 100 characters or less")
-    .regex(/^[a-z0-9_-]+$/, "Slug must be lowercase alphanumeric with hyphens or underscores"),
+    .regex(
+      /^[a-z0-9_-]+$/,
+      "Slug must be lowercase alphanumeric with hyphens or underscores",
+    ),
   description: z
     .string()
     .max(500, "Description must be 500 characters or less")

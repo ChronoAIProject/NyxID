@@ -16,9 +16,21 @@ export function formatDate(dateStr: string | null | undefined): string {
   }).format(date);
 }
 
-export function formatRelativeTime(
-  dateStr: string | null | undefined,
-): string {
+export function formatDateTime(dateStr: string | null | undefined): string {
+  if (!dateStr) return "N/A";
+  const date = new Date(dateStr);
+  if (Number.isNaN(date.getTime())) return "N/A";
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(date);
+}
+
+export function formatRelativeTime(dateStr: string | null | undefined): string {
   if (!dateStr) return "N/A";
   const date = new Date(dateStr);
   if (Number.isNaN(date.getTime())) return "N/A";
@@ -36,8 +48,47 @@ export function formatRelativeTime(
   return formatDate(dateStr);
 }
 
+/**
+ * Format a timestamp relative to now, supporting both past and future times.
+ *
+ * Past times render like `formatRelativeTime` (e.g. `15m ago`). Future times
+ * render as `in 15m`, `in 3h`, `in 2d`, or an absolute date for anything
+ * farther than a week out. Use this for "expires at" timestamps and similar
+ * fields where the value can legitimately sit in the future.
+ */
+export function formatTimeDistance(
+  dateStr: string | null | undefined,
+): string {
+  if (!dateStr) return "N/A";
+  const date = new Date(dateStr);
+  if (Number.isNaN(date.getTime())) return "N/A";
+  const diffMs = date.getTime() - Date.now();
+  const absMs = Math.abs(diffMs);
+  const absSeconds = Math.floor(absMs / 1000);
+  const absMinutes = Math.floor(absSeconds / 60);
+  const absHours = Math.floor(absMinutes / 60);
+  const absDays = Math.floor(absHours / 24);
+
+  const isFuture = diffMs > 0;
+  const suffix = isFuture ? "" : " ago";
+  const prefix = isFuture ? "in " : "";
+
+  if (absSeconds < 60) return isFuture ? "in a moment" : "just now";
+  if (absMinutes < 60) return `${prefix}${String(absMinutes)}m${suffix}`;
+  if (absHours < 24) return `${prefix}${String(absHours)}h${suffix}`;
+  if (absDays < 7) return `${prefix}${String(absDays)}d${suffix}`;
+  return formatDate(dateStr);
+}
+
 export function maskApiKey(keyPrefix: string): string {
   return `${keyPrefix}${"*".repeat(24)}`;
+}
+
+export function isPastTimestamp(dateStr: string | null | undefined): boolean {
+  if (!dateStr) return false;
+  const date = new Date(dateStr);
+  if (Number.isNaN(date.getTime())) return false;
+  return date.getTime() <= Date.now();
 }
 
 export async function copyToClipboard(text: string): Promise<void> {

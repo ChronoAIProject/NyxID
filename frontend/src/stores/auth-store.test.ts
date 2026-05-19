@@ -56,7 +56,7 @@ describe("setUser", () => {
     const mockUser = {
       id: "u1",
       email: "test@test.com",
-      name: "Test",
+      display_name: "Test",
       avatar_url: null,
       email_verified: true,
       mfa_enabled: false,
@@ -183,7 +183,7 @@ describe("checkAuth", () => {
     const mockUser = {
       id: "u1",
       email: "test@test.com",
-      name: "Test",
+      display_name: "Test",
       avatar_url: null,
       email_verified: true,
       mfa_enabled: false,

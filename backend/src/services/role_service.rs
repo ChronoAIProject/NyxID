@@ -5,8 +5,205 @@ use uuid::Uuid;
 
 use crate::errors::{AppError, AppResult};
 use crate::models::group::{COLLECTION_NAME as GROUPS, Group};
-use crate::models::role::{COLLECTION_NAME as ROLES, Role};
-use crate::models::user::{COLLECTION_NAME as USERS, User};
+use crate::models::role::{
+    COLLECTION_NAME as ROLES, PLATFORM_ADMIN_ROLE_SLUG, PLATFORM_OPERATOR_ROLE_SLUG,
+    PLATFORM_USER_ROLE_SLUG, Role,
+};
+use crate::models::user::{COLLECTION_NAME as USERS, PlatformRole, User};
+
+const PLATFORM_ADMIN_ROLE_NAME: &str = "Admin";
+const PLATFORM_OPERATOR_ROLE_NAME: &str = "Operator";
+const PLATFORM_USER_ROLE_NAME: &str = "User";
+const PLATFORM_ADMIN_ROLE_DESCRIPTION: &str = "System administrator with full access";
+const PLATFORM_OPERATOR_ROLE_DESCRIPTION: &str = "Read-only platform admin operator";
+const PLATFORM_USER_ROLE_DESCRIPTION: &str = "Default user role";
+const PLATFORM_ADMIN_PERMISSIONS: &[&str] = &["*"];
+const PLATFORM_OPERATOR_PERMISSIONS: &[&str] = &["nyxid:admin:read"];
+const PLATFORM_USER_PERMISSIONS: &[&str] = &[];
+
+#[derive(Clone, Debug)]
+pub struct PlatformRoleIds {
+    pub admin: String,
+    pub operator: String,
+}
+
+struct SystemRoleSpec {
+    name: &'static str,
+    slug: &'static str,
+    description: &'static str,
+    permissions: &'static [&'static str],
+    is_default: bool,
+}
+
+fn permissions_vec(permissions: &[&str]) -> Vec<String> {
+    permissions
+        .iter()
+        .map(|permission| (*permission).to_string())
+        .collect()
+}
+
+fn push_unique(values: &mut Vec<String>, value: String) {
+    if !values.contains(&value) {
+        values.push(value);
+    }
+}
+
+async fn ensure_system_role(db: &mongodb::Database, spec: &SystemRoleSpec) -> AppResult<Role> {
+    let roles = db.collection::<Role>(ROLES);
+    let permissions = permissions_vec(spec.permissions);
+    let now = Utc::now();
+
+    if let Some(existing) = roles.find_one(doc! { "slug": spec.slug }).await? {
+        roles
+            .update_one(
+                doc! { "_id": &existing.id },
+                doc! { "$set": {
+                    "name": spec.name,
+                    "description": spec.description,
+                    "permissions": &permissions,
+                    "is_default": spec.is_default,
+                    "is_system": true,
+                    "client_id": null,
+                    "updated_at": bson::DateTime::from_chrono(now),
+                }},
+            )
+            .await?;
+
+        return roles
+            .find_one(doc! { "_id": &existing.id })
+            .await?
+            .ok_or_else(|| AppError::Internal("System role disappeared after update".to_string()));
+    }
+
+    let role = Role {
+        id: Uuid::new_v4().to_string(),
+        name: spec.name.to_string(),
+        slug: spec.slug.to_string(),
+        description: Some(spec.description.to_string()),
+        permissions,
+        is_default: spec.is_default,
+        is_system: true,
+        client_id: None,
+        created_at: now,
+        updated_at: now,
+    };
+
+    roles.insert_one(&role).await?;
+    tracing::info!(slug = spec.slug, "Seeded system role");
+    Ok(role)
+}
+
+async fn get_platform_role_by_slug(db: &mongodb::Database, slug: &str) -> AppResult<Role> {
+    db.collection::<Role>(ROLES)
+        .find_one(doc! {
+            "slug": slug,
+            "client_id": null,
+            "is_system": true,
+        })
+        .await?
+        .ok_or_else(|| {
+            AppError::Internal(format!(
+                "Platform system role '{slug}' is missing; startup seed did not complete"
+            ))
+        })
+}
+
+pub async fn get_platform_role_ids(db: &mongodb::Database) -> AppResult<PlatformRoleIds> {
+    let admin = get_platform_role_by_slug(db, PLATFORM_ADMIN_ROLE_SLUG).await?;
+    let operator = get_platform_role_by_slug(db, PLATFORM_OPERATOR_ROLE_SLUG).await?;
+    Ok(PlatformRoleIds {
+        admin: admin.id,
+        operator: operator.id,
+    })
+}
+
+pub fn resolve_platform_role_from_ids(user: &User, role_ids: &PlatformRoleIds) -> PlatformRole {
+    if user
+        .role_ids
+        .iter()
+        .any(|role_id| role_id == &role_ids.admin)
+    {
+        PlatformRole::Admin
+    } else if user
+        .role_ids
+        .iter()
+        .any(|role_id| role_id == &role_ids.operator)
+    {
+        PlatformRole::Operator
+    } else {
+        PlatformRole::User
+    }
+}
+
+pub async fn resolve_platform_role(db: &mongodb::Database, user: &User) -> AppResult<PlatformRole> {
+    let role_ids = get_platform_role_ids(db).await?;
+    Ok(resolve_platform_role_from_ids(user, &role_ids))
+}
+
+pub fn add_platform_role_id(
+    role_ids: &mut Vec<String>,
+    platform_role: PlatformRole,
+    platform_role_ids: &PlatformRoleIds,
+) {
+    match platform_role {
+        PlatformRole::Admin => push_unique(role_ids, platform_role_ids.admin.clone()),
+        PlatformRole::Operator => push_unique(role_ids, platform_role_ids.operator.clone()),
+        PlatformRole::User => {}
+    }
+}
+
+/// Build an aggregation-pipeline `update_one` doc that atomically swaps a
+/// user's platform RBAC membership to `target` and mirrors the legacy
+/// `is_admin` / `is_operator` flags in a single round-trip. The pipeline:
+///   1. Strips any existing admin/operator role IDs from `role_ids`.
+///   2. Appends the role ID for `target` (none when `target = User`).
+///   3. Sets the legacy flag mirror.
+///   4. Stamps `updated_at`.
+pub fn set_platform_role_update(
+    target: PlatformRole,
+    platform_role_ids: &PlatformRoleIds,
+    now: bson::DateTime,
+) -> Vec<bson::Document> {
+    let (is_admin, is_operator) = target.legacy_flags();
+    let to_add: Vec<String> = match target {
+        PlatformRole::Admin => vec![platform_role_ids.admin.clone()],
+        PlatformRole::Operator => vec![platform_role_ids.operator.clone()],
+        PlatformRole::User => vec![],
+    };
+
+    vec![doc! {
+        "$set": {
+            "is_admin": is_admin,
+            "is_operator": is_operator,
+            "updated_at": now,
+            "role_ids": {
+                "$concatArrays": [
+                    {
+                        "$filter": {
+                            "input": { "$ifNull": ["$role_ids", []] },
+                            "cond": {
+                                "$not": {
+                                    "$in": [
+                                        "$$this",
+                                        [&platform_role_ids.admin, &platform_role_ids.operator],
+                                    ]
+                                }
+                            }
+                        }
+                    },
+                    to_add,
+                ]
+            }
+        }
+    }]
+}
+
+pub struct PlatformRoleBackfillResult {
+    pub admin_role_id: String,
+    pub operator_role_id: String,
+    pub admin_users_modified: u64,
+    pub operator_users_modified: u64,
+}
 
 /// Create a new role.
 pub async fn create_role(
@@ -234,55 +431,310 @@ pub async fn get_user_roles(db: &mongodb::Database, user_id: &str) -> AppResult<
     Ok(roles)
 }
 
-/// Seed system roles ("admin", "user") if they don't exist.
+/// Result of a bulk role assignment operation.
+pub struct BulkAssignResult {
+    /// Number of users who had the role added (did not already have it).
+    pub assigned_count: u64,
+    /// Number of users who already had the role (skipped).
+    pub already_assigned_count: u64,
+}
+
+/// Assign a role to multiple users in bulk.
+///
+/// If `user_ids` is `Some`, assigns only to those users. If `None`, assigns to
+/// all users who don't already have the role.
+pub async fn bulk_assign_role(
+    db: &mongodb::Database,
+    role_id: &str,
+    user_ids: Option<&[String]>,
+) -> AppResult<BulkAssignResult> {
+    // Verify role exists
+    let _role = get_role(db, role_id).await?;
+
+    let users_coll = db.collection::<User>(USERS);
+
+    // Count users who already have this role (for reporting)
+    let already_filter = match user_ids {
+        Some(ids) => doc! { "_id": { "$in": ids }, "role_ids": role_id },
+        None => doc! { "role_ids": role_id },
+    };
+    let already_assigned_count = users_coll.count_documents(already_filter).await?;
+
+    // Add role to users who don't have it yet
+    let update_filter = match user_ids {
+        Some(ids) => doc! { "_id": { "$in": ids }, "role_ids": { "$ne": role_id } },
+        None => doc! { "role_ids": { "$ne": role_id } },
+    };
+
+    let now = bson::DateTime::from_chrono(Utc::now());
+    let result = users_coll
+        .update_many(
+            update_filter,
+            doc! {
+                "$addToSet": { "role_ids": role_id },
+                "$set": { "updated_at": now },
+            },
+        )
+        .await?;
+
+    Ok(BulkAssignResult {
+        assigned_count: result.modified_count,
+        already_assigned_count,
+    })
+}
+
+/// Get IDs of all roles marked as `is_default: true`.
+///
+/// Used during user registration to auto-assign default roles.
+pub async fn get_default_role_ids(db: &mongodb::Database) -> AppResult<Vec<String>> {
+    let roles: Vec<Role> = db
+        .collection::<Role>(ROLES)
+        .find(doc! { "is_default": true })
+        .await?
+        .try_collect()
+        .await?;
+
+    Ok(roles.into_iter().map(|r| r.id).collect())
+}
+
+/// Seed system roles if they don't exist, and normalize their immutable
+/// metadata. Existing role IDs are preserved so deployments that already have
+/// a seeded `admin` role can safely backfill users onto that role.
 pub async fn seed_system_roles(db: &mongodb::Database) -> AppResult<()> {
-    let now = Utc::now();
+    let admin = SystemRoleSpec {
+        name: PLATFORM_ADMIN_ROLE_NAME,
+        slug: PLATFORM_ADMIN_ROLE_SLUG,
+        description: PLATFORM_ADMIN_ROLE_DESCRIPTION,
+        permissions: PLATFORM_ADMIN_PERMISSIONS,
+        is_default: false,
+    };
+    ensure_system_role(db, &admin).await?;
 
-    // Seed "admin" role
-    let admin_exists = db
-        .collection::<Role>(ROLES)
-        .find_one(doc! { "slug": "admin" })
-        .await?;
+    let operator = SystemRoleSpec {
+        name: PLATFORM_OPERATOR_ROLE_NAME,
+        slug: PLATFORM_OPERATOR_ROLE_SLUG,
+        description: PLATFORM_OPERATOR_ROLE_DESCRIPTION,
+        permissions: PLATFORM_OPERATOR_PERMISSIONS,
+        is_default: false,
+    };
+    ensure_system_role(db, &operator).await?;
 
-    if admin_exists.is_none() {
-        let admin_role = Role {
-            id: Uuid::new_v4().to_string(),
-            name: "Admin".to_string(),
-            slug: "admin".to_string(),
-            description: Some("System administrator with full access".to_string()),
-            permissions: vec!["*".to_string()],
-            is_default: false,
-            is_system: true,
-            client_id: None,
-            created_at: now,
-            updated_at: now,
-        };
-        db.collection::<Role>(ROLES).insert_one(&admin_role).await?;
-        tracing::info!("Seeded system role: admin");
-    }
-
-    // Seed "user" role
-    let user_exists = db
-        .collection::<Role>(ROLES)
-        .find_one(doc! { "slug": "user" })
-        .await?;
-
-    if user_exists.is_none() {
-        let user_role = Role {
-            id: Uuid::new_v4().to_string(),
-            name: "User".to_string(),
-            slug: "user".to_string(),
-            description: Some("Default user role".to_string()),
-            permissions: vec![],
-            is_default: true,
-            is_system: true,
-            client_id: None,
-            created_at: now,
-            updated_at: now,
-        };
-        db.collection::<Role>(ROLES).insert_one(&user_role).await?;
-        tracing::info!("Seeded system role: user");
-    }
+    let user = SystemRoleSpec {
+        name: PLATFORM_USER_ROLE_NAME,
+        slug: PLATFORM_USER_ROLE_SLUG,
+        description: PLATFORM_USER_ROLE_DESCRIPTION,
+        permissions: PLATFORM_USER_PERMISSIONS,
+        is_default: true,
+    };
+    ensure_system_role(db, &user).await?;
 
     Ok(())
+}
+
+pub async fn backfill_platform_role_memberships(
+    db: &mongodb::Database,
+) -> AppResult<PlatformRoleBackfillResult> {
+    let role_ids = get_platform_role_ids(db).await?;
+    let users = db.collection::<User>(USERS);
+    let now = bson::DateTime::from_chrono(Utc::now());
+
+    let admin_result = users
+        .update_many(
+            doc! {
+                "is_admin": true,
+                "role_ids": { "$ne": &role_ids.admin },
+            },
+            doc! {
+                "$addToSet": { "role_ids": &role_ids.admin },
+                "$set": { "updated_at": now },
+            },
+        )
+        .await?;
+
+    let operator_result = users
+        .update_many(
+            doc! {
+                "is_operator": true,
+                "role_ids": { "$ne": &role_ids.operator },
+            },
+            doc! {
+                "$addToSet": { "role_ids": &role_ids.operator },
+                "$set": { "updated_at": now },
+            },
+        )
+        .await?;
+
+    Ok(PlatformRoleBackfillResult {
+        admin_role_id: role_ids.admin,
+        operator_role_id: role_ids.operator,
+        admin_users_modified: admin_result.modified_count,
+        operator_users_modified: operator_result.modified_count,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::user::UserType;
+    use crate::test_utils::{connect_test_database, test_user};
+
+    async fn insert_flagged_user(
+        db: &mongodb::Database,
+        is_admin: bool,
+        is_operator: bool,
+    ) -> String {
+        let user_id = Uuid::new_v4().to_string();
+        let mut user = test_user(&user_id, UserType::Person);
+        user.is_admin = is_admin;
+        user.is_operator = is_operator;
+        db.collection::<User>(USERS)
+            .insert_one(&user)
+            .await
+            .expect("insert flagged user");
+        user_id
+    }
+
+    fn make_user_with_role_ids(role_ids: Vec<String>) -> User {
+        let mut user = test_user("00000000-0000-0000-0000-000000000000", UserType::Person);
+        user.role_ids = role_ids;
+        user
+    }
+
+    #[test]
+    fn resolve_platform_role_from_ids_picks_admin_over_operator() {
+        let role_ids = PlatformRoleIds {
+            admin: "admin-id".to_string(),
+            operator: "operator-id".to_string(),
+        };
+
+        let none = make_user_with_role_ids(vec![]);
+        assert_eq!(
+            resolve_platform_role_from_ids(&none, &role_ids),
+            PlatformRole::User
+        );
+
+        let only_operator = make_user_with_role_ids(vec!["operator-id".to_string()]);
+        assert_eq!(
+            resolve_platform_role_from_ids(&only_operator, &role_ids),
+            PlatformRole::Operator
+        );
+
+        let both = make_user_with_role_ids(vec!["admin-id".to_string(), "operator-id".to_string()]);
+        assert_eq!(
+            resolve_platform_role_from_ids(&both, &role_ids),
+            PlatformRole::Admin
+        );
+
+        let only_admin = make_user_with_role_ids(vec!["admin-id".to_string()]);
+        assert_eq!(
+            resolve_platform_role_from_ids(&only_admin, &role_ids),
+            PlatformRole::Admin
+        );
+        assert!(resolve_platform_role_from_ids(&only_admin, &role_ids).has_admin_read());
+    }
+
+    #[tokio::test]
+    async fn seed_creates_platform_roles_exactly_once_when_run_twice() {
+        let Some(db) = connect_test_database("role_seed_platform").await else {
+            eprintln!("skipping role seed test: no local MongoDB available");
+            return;
+        };
+
+        seed_system_roles(&db).await.expect("seed roles");
+        seed_system_roles(&db).await.expect("seed roles again");
+
+        let roles: Vec<Role> = db
+            .collection::<Role>(ROLES)
+            .find(doc! {
+                "slug": {
+                    "$in": [
+                        PLATFORM_ADMIN_ROLE_SLUG,
+                        PLATFORM_OPERATOR_ROLE_SLUG,
+                    ],
+                },
+                "client_id": null,
+                "is_system": true,
+            })
+            .await
+            .expect("query roles")
+            .try_collect()
+            .await
+            .expect("collect roles");
+
+        assert_eq!(roles.len(), 2, "admin/operator roles should be unique");
+        let admin = roles
+            .iter()
+            .find(|role| role.slug == PLATFORM_ADMIN_ROLE_SLUG)
+            .expect("admin role exists");
+        assert_eq!(
+            admin.permissions,
+            permissions_vec(PLATFORM_ADMIN_PERMISSIONS)
+        );
+        let operator = roles
+            .iter()
+            .find(|role| role.slug == PLATFORM_OPERATOR_ROLE_SLUG)
+            .expect("operator role exists");
+        assert_eq!(
+            operator.permissions,
+            permissions_vec(PLATFORM_OPERATOR_PERMISSIONS)
+        );
+    }
+
+    #[tokio::test]
+    async fn backfill_assigns_admin_role_to_legacy_admin_flag() {
+        let Some(db) = connect_test_database("role_backfill_admin").await else {
+            eprintln!("skipping admin backfill test: no local MongoDB available");
+            return;
+        };
+        seed_system_roles(&db).await.expect("seed roles");
+        let user_id = insert_flagged_user(&db, true, false).await;
+
+        let result = backfill_platform_role_memberships(&db)
+            .await
+            .expect("backfill memberships");
+        assert_eq!(result.admin_users_modified, 1);
+        let second = backfill_platform_role_memberships(&db)
+            .await
+            .expect("backfill memberships again");
+        assert_eq!(second.admin_users_modified, 0);
+
+        let user = db
+            .collection::<User>(USERS)
+            .find_one(doc! { "_id": &user_id })
+            .await
+            .expect("query user")
+            .expect("user exists");
+        let role_ids = get_platform_role_ids(&db).await.expect("platform role ids");
+        assert!(user.role_ids.contains(&role_ids.admin));
+        assert!(!user.role_ids.contains(&role_ids.operator));
+    }
+
+    #[tokio::test]
+    async fn backfill_assigns_operator_role_to_legacy_operator_flag() {
+        let Some(db) = connect_test_database("role_backfill_operator").await else {
+            eprintln!("skipping operator backfill test: no local MongoDB available");
+            return;
+        };
+        seed_system_roles(&db).await.expect("seed roles");
+        let user_id = insert_flagged_user(&db, false, true).await;
+
+        let result = backfill_platform_role_memberships(&db)
+            .await
+            .expect("backfill memberships");
+        assert_eq!(result.operator_users_modified, 1);
+        let second = backfill_platform_role_memberships(&db)
+            .await
+            .expect("backfill memberships again");
+        assert_eq!(second.operator_users_modified, 0);
+
+        let user = db
+            .collection::<User>(USERS)
+            .find_one(doc! { "_id": &user_id })
+            .await
+            .expect("query user")
+            .expect("user exists");
+        let role_ids = get_platform_role_ids(&db).await.expect("platform role ids");
+        assert!(!user.role_ids.contains(&role_ids.admin));
+        assert!(user.role_ids.contains(&role_ids.operator));
+    }
 }

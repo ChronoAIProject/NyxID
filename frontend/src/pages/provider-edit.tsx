@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { useNavigate, useParams } from "@tanstack/react-router";
-import { useForm } from "react-hook-form";
+import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useProvider, useUpdateProvider } from "@/hooks/use-providers";
 import {
@@ -30,13 +30,14 @@ import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { AlertCircle } from "lucide-react";
+import { ErrorBanner } from "@/components/shared/error-banner";
 import { toast } from "sonner";
 
 const PROVIDER_TYPE_LABELS: Readonly<Record<string, string>> = {
   oauth2: "OAuth 2.0",
   api_key: "API Key",
   device_code: "Device Code",
+  telegram_widget: "Telegram Widget",
 };
 
 function splitScopes(raw: string | undefined): readonly string[] | undefined {
@@ -51,9 +52,7 @@ function stripEmptyStrings<T extends Record<string, unknown>>(
   obj: T,
 ): Record<string, unknown> {
   return Object.fromEntries(
-    Object.entries(obj).filter(
-      ([, v]) => v !== "" && v !== undefined,
-    ),
+    Object.entries(obj).filter(([, v]) => v !== "" && v !== undefined),
   );
 }
 
@@ -62,7 +61,7 @@ export function ProviderEditPage() {
     providerId: string;
   };
   const navigate = useNavigate();
-  const { data: provider, isLoading, error } = useProvider(providerId);
+  const { data: provider, isLoading, error, refetch } = useProvider(providerId);
   const updateMutation = useUpdateProvider(providerId);
 
   const form = useForm<UpdateProviderFormData>({
@@ -80,6 +79,7 @@ export function ProviderEditPage() {
       is_active: true,
       client_id: "",
       client_secret: "",
+      client_id_param_name: "",
       supports_pkce: true,
       device_code_url: "",
       device_token_url: "",
@@ -102,11 +102,11 @@ export function ProviderEditPage() {
         authorization_url: "",
         token_url: "",
         revocation_url: "",
-        default_scopes:
-          provider.default_scopes?.join(", ") ?? "",
+        default_scopes: provider.default_scopes?.join(", ") ?? "",
         is_active: provider.is_active,
         client_id: "",
         client_secret: "",
+        client_id_param_name: provider.client_id_param_name ?? "",
         supports_pkce: provider.supports_pkce,
         device_code_url: "",
         device_token_url: "",
@@ -120,18 +120,27 @@ export function ProviderEditPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [provider]);
 
-  const watchedProviderType = form.watch("provider_type");
+  const watchedProviderType = useWatch({
+    control: form.control,
+    name: "provider_type",
+  });
 
   async function onSubmit(data: UpdateProviderFormData) {
     if (!provider) return;
     try {
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
       const { slug: _, provider_type: _providerType, ...updateFields } = data;
+      const isOAuthOrDeviceCode =
+        data.provider_type === "oauth2" ||
+        data.provider_type === "device_code";
       const cleaned = stripEmptyStrings({
         ...updateFields,
         default_scopes: splitScopes(data.default_scopes),
         supports_pkce:
           data.provider_type === "oauth2" ? data.supports_pkce : undefined,
+        credential_mode: isOAuthOrDeviceCode
+          ? updateFields.credential_mode
+          : undefined,
       });
       await updateMutation.mutateAsync(
         cleaned as Parameters<typeof updateMutation.mutateAsync>[0],
@@ -161,47 +170,32 @@ export function ProviderEditPage() {
 
   if (error || !provider) {
     return (
-      <div className="flex flex-col items-center justify-center py-16 text-center">
-        <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
-        <h3 className="mb-2 font-display text-lg font-semibold">Provider not found</h3>
-        <p className="mb-4 text-sm text-muted-foreground">
-          The provider you are trying to edit does not exist or has been deleted.
-        </p>
-        <Button
-          variant="outline"
-          onClick={() => void navigate({ to: "/providers/manage" })}
-        >
-          Back to Providers
-        </Button>
+      <div className="space-y-8">
+        <PageHeader title="Provider Not Found" />
+        <ErrorBanner
+          message={error instanceof ApiError ? error.message : "The provider you are trying to edit does not exist or has been deleted."}
+          onRetry={refetch}
+        />
       </div>
     );
   }
 
   const isOAuth = watchedProviderType === "oauth2";
   const isDeviceCode = watchedProviderType === "device_code";
+  const isApiKey = watchedProviderType === "api_key";
+  const isTelegram = watchedProviderType === "telegram_widget";
 
   return (
     <div className="space-y-8">
       <PageHeader
-        breadcrumbs={[
-          { label: "Manage Providers", to: "/providers/manage" },
-          {
-            label: provider.name,
-            to: `/providers/${providerId}`,
-          },
-          { label: "Edit" },
-        ]}
         title={`Edit ${provider.name}`}
       />
 
       <div className="max-w-2xl">
         <Form {...form}>
-          <form
-            onSubmit={form.handleSubmit(onSubmit)}
-            className="space-y-4"
-          >
+          <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
             {form.formState.errors.root && (
-              <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
+              <div className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive">
                 {form.formState.errors.root.message}
               </div>
             )}
@@ -221,7 +215,7 @@ export function ProviderEditPage() {
             />
 
             <div>
-              <p className="text-sm font-medium mb-1">Slug</p>
+              <p className="text-[12px] font-medium mb-1">Slug</p>
               <Badge variant="secondary">{provider.slug}</Badge>
               <p className="text-xs text-muted-foreground mt-1">
                 Slug cannot be changed after creation.
@@ -229,7 +223,7 @@ export function ProviderEditPage() {
             </div>
 
             <div>
-              <p className="text-sm font-medium mb-1">Provider Type</p>
+              <p className="text-[12px] font-medium mb-1">Provider Type</p>
               <Badge variant="secondary">
                 {PROVIDER_TYPE_LABELS[provider.provider_type] ??
                   provider.provider_type}
@@ -247,7 +241,7 @@ export function ProviderEditPage() {
                   <FormLabel>Description</FormLabel>
                   <FormControl>
                     <textarea
-                      className="flex min-h-[80px] w-full rounded-[10px] border border-input bg-transparent px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                      className="flex min-h-[80px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-[12px] placeholder:text-muted-foreground focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
                       placeholder="Optional description"
                       {...field}
                     />
@@ -296,15 +290,9 @@ export function ProviderEditPage() {
                         </SelectTrigger>
                       </FormControl>
                       <SelectContent>
-                        <SelectItem value="admin">
-                          Admin Only
-                        </SelectItem>
-                        <SelectItem value="user">
-                          User Provided
-                        </SelectItem>
-                        <SelectItem value="both">
-                          Admin or User
-                        </SelectItem>
+                        <SelectItem value="admin">Admin Only</SelectItem>
+                        <SelectItem value="user">User Provided</SelectItem>
+                        <SelectItem value="both">Admin or User</SelectItem>
                       </SelectContent>
                     </Select>
                     <p className="text-xs text-muted-foreground">
@@ -341,10 +329,7 @@ export function ProviderEditPage() {
                 <FormItem>
                   <FormLabel>Documentation URL</FormLabel>
                   <FormControl>
-                    <Input
-                      placeholder="https://docs.example.com"
-                      {...field}
-                    />
+                    <Input placeholder="https://docs.example.com" {...field} />
                   </FormControl>
                   <FormMessage />
                 </FormItem>
@@ -354,7 +339,7 @@ export function ProviderEditPage() {
             {isOAuth && (
               <>
                 <Separator className="my-2" />
-                <h3 className="text-sm font-semibold">
+                <h3 className="text-[13px] font-semibold">
                   OAuth 2.0 Configuration
                 </h3>
                 <p className="text-xs text-muted-foreground">
@@ -496,7 +481,7 @@ export function ProviderEditPage() {
             {isDeviceCode && (
               <>
                 <Separator className="my-2" />
-                <h3 className="text-sm font-semibold">
+                <h3 className="text-[13px] font-semibold">
                   Device Code Configuration (RFC 8628)
                 </h3>
                 <p className="text-xs text-muted-foreground">
@@ -634,12 +619,61 @@ export function ProviderEditPage() {
               </>
             )}
 
-            {!isOAuth && !isDeviceCode && (
+            {isTelegram && (
               <>
                 <Separator className="my-2" />
-                <h3 className="text-sm font-semibold">
-                  API Key Configuration
+                <h3 className="text-[13px] font-semibold">
+                  Telegram Widget Configuration
                 </h3>
+                <p className="text-xs text-muted-foreground">
+                  Leave the bot token blank to keep the current secret.
+                </p>
+
+                <FormField
+                  control={form.control}
+                  name="client_id_param_name"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Bot Username</FormLabel>
+                      <FormControl>
+                        <Input placeholder="NyxIdBot" {...field} />
+                      </FormControl>
+                      <p className="text-xs text-muted-foreground">
+                        Enter the BotFather username. A leading
+                        <span> @</span> is optional.
+                      </p>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+
+                <FormField
+                  control={form.control}
+                  name="client_secret"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Bot Token</FormLabel>
+                      <FormControl>
+                        <Input
+                          type="password"
+                          placeholder="Leave blank to keep current"
+                          {...field}
+                        />
+                      </FormControl>
+                      <p className="text-xs text-muted-foreground">
+                        Only fill this in when rotating the Telegram bot token.
+                      </p>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+              </>
+            )}
+
+            {isApiKey && (
+              <>
+                <Separator className="my-2" />
+                <h3 className="text-[13px] font-semibold">API Key Configuration</h3>
 
                 <FormField
                   control={form.control}
@@ -649,7 +683,7 @@ export function ProviderEditPage() {
                       <FormLabel>API Key Instructions</FormLabel>
                       <FormControl>
                         <textarea
-                          className="flex min-h-[80px] w-full rounded-[10px] border border-input bg-transparent px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                          className="flex min-h-[80px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-[12px] placeholder:text-muted-foreground focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
                           placeholder="Instructions for users to obtain an API key"
                           {...field}
                         />
@@ -681,9 +715,9 @@ export function ProviderEditPage() {
               </>
             )}
 
-            <div className="flex items-center gap-3 pt-4">
-              <Button type="submit" isLoading={updateMutation.isPending}>
-                Save changes
+            <div className="flex items-center justify-end gap-3 pt-4">
+              <Button variant="primary" type="submit" isLoading={updateMutation.isPending} disabled={!form.formState.isDirty}>
+                Save Changes
               </Button>
               <Button
                 type="button"

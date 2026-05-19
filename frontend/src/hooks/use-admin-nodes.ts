@@ -1,9 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
-import type {
-  AdminNodeInfo,
-  AdminNodeListResponse,
-} from "@/types/nodes";
+import type { AdminNodeInfo, AdminNodeListResponse } from "@/types/nodes";
 
 export function useAdminNodes(
   page: number,

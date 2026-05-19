@@ -27,6 +27,7 @@ export interface CreateServiceAccountRequest {
   readonly allowed_scopes: string;
   readonly role_ids?: readonly string[];
   readonly rate_limit_override?: number;
+  readonly target_org_id?: string;
 }
 
 export interface CreateServiceAccountResponse {

@@ -6,3 +6,18 @@ build
 /.eas
 GoogleService-Info.plist
 build-android-release.sh
+
+# Local env files (see .env.example)
+.env
+.env.dev
+.env.prod
+.env.local
+
+# Submit + signing credentials (.p8, service account JSON, release keystore)
+credentials/*
+!credentials/.gitkeep
+
+# iOS build artifacts
+ios/build/
+ios/Pods/
+ios/.xcode.env.local

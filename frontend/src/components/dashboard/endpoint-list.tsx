@@ -10,14 +10,11 @@ import {
 } from "@/hooks/use-endpoints";
 import { EndpointFormDialog } from "./endpoint-form-dialog";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
+import { AddCtaButton } from "@/components/shared/add-cta-button";
 import { Skeleton } from "@/components/ui/skeleton";
-import {
-  Pencil,
-  Plus,
-  Trash2,
-  Wand2,
-} from "lucide-react";
+import { PowerBoltIcon } from "@/components/icons/empty-state";
+import { Pencil, Trash2, Wand2 } from "lucide-react";
 import { toast } from "sonner";
 
 interface EndpointListProps {
@@ -34,7 +31,9 @@ const METHOD_COLORS: Readonly<Record<string, string>> = {
 };
 
 function getMethodColor(method: string): string {
-  return METHOD_COLORS[method.toUpperCase()] ?? "bg-muted text-muted-foreground";
+  return (
+    METHOD_COLORS[method.toUpperCase()] ?? "bg-muted text-muted-foreground"
+  );
 }
 
 export function EndpointList({ serviceId, hasApiSpecUrl }: EndpointListProps) {
@@ -106,33 +105,32 @@ export function EndpointList({ serviceId, hasApiSpecUrl }: EndpointListProps) {
   return (
     <div className="space-y-3">
       <div className="flex items-center gap-2">
-        <Button variant="outline" size="sm" onClick={handleAdd}>
-          <Plus className="mr-1 h-3 w-3" />
-          Add Endpoint
-        </Button>
+        <AddCtaButton label="Add Endpoint" onClick={handleAdd} />
         {hasApiSpecUrl && (
           <Button
             variant="outline"
-            size="sm"
             onClick={() => void handleDiscover()}
             isLoading={discoverMutation.isPending}
           >
-            <Wand2 className="mr-1 h-3 w-3" />
+            <ButtonIcon><Wand2 className="h-3 w-3" /></ButtonIcon>
             Auto-discover from OpenAPI
           </Button>
         )}
       </div>
 
       {!endpoints || endpoints.length === 0 ? (
-        <p className="py-4 text-center text-xs text-muted-foreground">
-          No endpoints configured.{" "}
-          {hasApiSpecUrl
-            ? "Use auto-discover or add one manually."
-            : "Add one manually or set an OpenAPI spec URL to auto-discover."}
-        </p>
+        <div className="flex flex-col items-center justify-center gap-1 py-8">
+          <PowerBoltIcon className="h-48 w-48 text-muted-foreground/30" />
+          <div className="rounded-lg bg-white/[0.03] px-4 py-3 text-[12px] text-muted-foreground/30">
+            No endpoints configured.{" "}
+            {hasApiSpecUrl
+              ? "Use auto-discover or add one manually."
+              : "Add one manually or set an OpenAPI spec URL to auto-discover."}
+          </div>
+        </div>
       ) : (
-        <div className="rounded-md border">
-          <table className="w-full text-sm">
+        <div className="rounded-lg border">
+          <table className="w-full text-[12px]">
             <thead>
               <tr className="border-b bg-muted/50">
                 <th className="px-3 py-2 text-left font-medium text-muted-foreground">
@@ -154,7 +152,7 @@ export function EndpointList({ serviceId, hasApiSpecUrl }: EndpointListProps) {
                 <tr key={ep.id} className="border-b last:border-0">
                   <td className="px-3 py-2">
                     <div className="flex items-center gap-2">
-                      <span className="font-mono text-xs">{ep.name}</span>
+                      <span className="text-xs">{ep.name}</span>
                       {!ep.is_active && (
                         <Badge variant="secondary" className="text-[10px]">
                           Inactive
@@ -164,8 +162,8 @@ export function EndpointList({ serviceId, hasApiSpecUrl }: EndpointListProps) {
                   </td>
                   <td className="px-3 py-2">
                     <Badge
-                      variant="outline"
-                      className={`font-mono text-[10px] ${getMethodColor(ep.method)}`}
+                      variant="secondary"
+                      className={`text-[10px] ${getMethodColor(ep.method)}`}
                     >
                       {ep.method}
                     </Badge>
@@ -193,7 +191,7 @@ export function EndpointList({ serviceId, hasApiSpecUrl }: EndpointListProps) {
                         onClick={() => void handleDelete(ep.id)}
                         disabled={deletingId === ep.id}
                       >
-                        <Trash2 className="h-3 w-3" />
+                        <Trash2 className="h-3 w-3 text-destructive" />
                         <span className="sr-only">Delete endpoint</span>
                       </Button>
                     </div>
@@ -211,9 +209,7 @@ export function EndpointList({ serviceId, hasApiSpecUrl }: EndpointListProps) {
         endpoint={editingEndpoint}
         onSubmit={handleFormSubmit}
         isPending={
-          editingEndpoint
-            ? updateMutation.isPending
-            : createMutation.isPending
+          editingEndpoint ? updateMutation.isPending : createMutation.isPending
         }
       />
     </div>

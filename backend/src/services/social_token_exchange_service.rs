@@ -65,6 +65,8 @@ pub async fn exchange_social_token(
                 })),
                 None,
                 None,
+                None,
+                None,
             );
         }
         Err(err) => {
@@ -79,6 +81,8 @@ pub async fn exchange_social_token(
                     "result": "failure",
                     "error": err.to_string(),
                 })),
+                None,
+                None,
                 None,
                 None,
             );
@@ -151,8 +155,12 @@ async fn exchange_social_token_inner(
         SocialProvider::Apple => verify_apple_token(jwks_cache, config, subject_token).await?,
     };
 
-    // Step 4: Find or create user
-    let user = social_auth_service::find_or_create_user(db, &profile).await?;
+    // Step 4: Find or create user. First-time social sign-ups are blocked
+    // when the invite-code gate is enabled.
+    let allow_new_users = !config.invite_code_required;
+    let user = social_auth_service::find_or_create_user(db, &profile, allow_new_users)
+        .await?
+        .user;
 
     // Step 5: Issue full NyxID token set
     let tokens = token_service::create_session_and_issue_tokens(
@@ -184,7 +192,7 @@ async fn exchange_social_token_inner(
         refresh_token: tokens.refresh_token,
         id_token: Some(id_token),
         expires_in: tokens.access_expires_in,
-        scope: "openid profile email".to_string(),
+        scope: token_service::FIRST_PARTY_ACCESS_SCOPES.to_string(),
         user_id_for_audit: user.id,
     })
 }

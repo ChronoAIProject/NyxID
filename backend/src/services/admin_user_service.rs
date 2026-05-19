@@ -5,7 +5,8 @@ use uuid::Uuid;
 use crate::crypto::password;
 use crate::errors::{AppError, AppResult};
 use crate::models::session::{COLLECTION_NAME as SESSIONS, Session};
-use crate::models::user::{COLLECTION_NAME as USERS, User};
+use crate::models::user::{COLLECTION_NAME as USERS, PlatformRole, User};
+use crate::services::role_service;
 
 /// Maximum password length to prevent Argon2 DoS via extremely long passwords.
 const MAX_PASSWORD_LENGTH: usize = 128;
@@ -27,6 +28,20 @@ const NOTIFICATION_CHANNELS: &str = "notification_channels";
 const OAUTH_CLIENTS: &str = "oauth_clients";
 const SERVICE_ACCOUNTS: &str = "service_accounts";
 const SERVICE_ACCOUNT_TOKENS: &str = "service_account_tokens";
+
+/// Look up the email for `user_id` without erroring on "not found".
+///
+/// Returns `Ok(None)` if the user doesn't exist (or any other lookup
+/// failure that the caller wants to treat as a soft miss). Used by the
+/// OAuth callback handler to compose a session-mismatch message -- the
+/// callback must not block on a database read.
+pub async fn get_user_email(db: &mongodb::Database, user_id: &str) -> AppResult<Option<String>> {
+    let user = db
+        .collection::<User>(USERS)
+        .find_one(doc! { "_id": user_id })
+        .await?;
+    Ok(user.map(|u| u.email))
+}
 
 /// Create a new user (admin action).
 ///
@@ -76,17 +91,23 @@ pub async fn create_user(
     }
 
     // Validate role
-    if role != "admin" && role != "user" {
+    if role != "admin" && role != "user" && role != "operator" {
         return Err(AppError::ValidationError(
-            "Role must be 'admin' or 'user'".to_string(),
+            "Role must be 'admin', 'operator', or 'user'".to_string(),
         ));
     }
 
-    // Check email uniqueness (case-insensitive)
+    // Check email uniqueness (case-insensitive). Scoped to person accounts
+    // because the new partial-unique index on `users.email` only constrains
+    // `user_type = "person"`, and orgs are allowed to share contact emails
+    // with persons.
     let normalized = email.to_lowercase();
     let existing = db
         .collection::<User>(USERS)
-        .find_one(doc! { "email": &normalized })
+        .find_one(doc! {
+            "email": &normalized,
+            "user_type": "person",
+        })
         .await?;
 
     if existing.is_some() {
@@ -107,13 +128,29 @@ pub async fn create_user(
     let password_hash = password::hash_password(password_raw)?;
     let now = Utc::now();
     let user_id = Uuid::new_v4().to_string();
-    let is_admin = role == "admin";
+    let platform_role = match role {
+        "admin" => PlatformRole::Admin,
+        "operator" => PlatformRole::Operator,
+        "user" => PlatformRole::User,
+        _ => {
+            return Err(AppError::ValidationError(
+                "Role must be 'admin', 'operator', or 'user'".to_string(),
+            ));
+        }
+    };
+    let (is_admin, is_operator) = platform_role.legacy_flags();
+
+    // Auto-assign default roles to new admin-created users
+    let mut role_ids = role_service::get_default_role_ids(db).await?;
+    let platform_role_ids = role_service::get_platform_role_ids(db).await?;
+    role_service::add_platform_role_id(&mut role_ids, platform_role, &platform_role_ids);
 
     let new_user = User {
         id: user_id.clone(),
         email: normalized,
         password_hash: Some(password_hash),
         display_name: display_name.map(String::from),
+        slug: None,
         avatar_url: None,
         email_verified: true,
         email_verification_token: None,
@@ -121,19 +158,24 @@ pub async fn create_user(
         password_reset_expires_at: None,
         is_active: true,
         is_admin,
-        role_ids: vec![],
+        is_operator,
+        role_ids,
         group_ids: vec![],
+        invite_code_id: None,
         mfa_enabled: false,
         social_provider: None,
         social_provider_id: None,
+        user_type: crate::models::user::UserType::Person,
+        primary_org_id: None,
         created_at: now,
         updated_at: now,
         last_login_at: None,
+        profile_config: Default::default(),
     };
 
     db.collection::<User>(USERS).insert_one(&new_user).await?;
 
-    tracing::info!(user_id = %user_id, is_admin = %is_admin, "Admin created user");
+    tracing::info!(user_id = %user_id, is_admin = %is_admin, is_operator = %is_operator, "Admin created user");
 
     Ok(new_user)
 }
@@ -189,11 +231,17 @@ pub async fn update_user(
             ));
         }
 
-        // Check uniqueness (case-insensitive)
+        // Check uniqueness (case-insensitive). Scoped to person accounts so
+        // that an org's contact email does not spuriously block a person
+        // rename, matching the partial-unique `users.email` index.
         let normalized = new_email.to_lowercase();
         let existing_with_email = db
             .collection::<User>(USERS)
-            .find_one(doc! { "email": &normalized, "_id": { "$ne": user_id } })
+            .find_one(doc! {
+                "email": &normalized,
+                "user_type": "person",
+                "_id": { "$ne": user_id },
+            })
             .await?;
 
         if existing_with_email.is_some() {
@@ -240,20 +288,34 @@ pub async fn update_user(
     Ok(updated)
 }
 
-/// Set the admin role for a target user.
+/// Set the platform role for a target user. Accepts `"admin"`, `"operator"`,
+/// or `"user"`. Self-protection: admin_user_id must differ from target_user_id.
 ///
-/// Self-protection: admin_user_id must differ from target_user_id.
-pub async fn set_admin_role(
+/// Platform RBAC role membership is authoritative. The legacy boolean fields
+/// are still mirrored so older deployment code and stored documents remain
+/// compatible during the migration window.
+pub async fn set_platform_role(
     db: &mongodb::Database,
     admin_user_id: &str,
     target_user_id: &str,
-    is_admin: bool,
-) -> AppResult<()> {
+    role: &str,
+) -> AppResult<User> {
     if admin_user_id == target_user_id {
         return Err(AppError::ValidationError(
-            "Cannot change your own admin role".to_string(),
+            "Cannot change your own platform role".to_string(),
         ));
     }
+
+    let platform_role = match role {
+        "admin" => PlatformRole::Admin,
+        "operator" => PlatformRole::Operator,
+        "user" => PlatformRole::User,
+        _ => {
+            return Err(AppError::ValidationError(
+                "Role must be 'admin', 'operator', or 'user'".to_string(),
+            ));
+        }
+    };
 
     let _target = db
         .collection::<User>(USERS)
@@ -261,18 +323,20 @@ pub async fn set_admin_role(
         .await?
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
-    let now = Utc::now();
+    let platform_role_ids = role_service::get_platform_role_ids(db).await?;
+    let pipeline = role_service::set_platform_role_update(
+        platform_role,
+        &platform_role_ids,
+        bson::DateTime::from_chrono(Utc::now()),
+    );
     db.collection::<User>(USERS)
-        .update_one(
-            doc! { "_id": target_user_id },
-            doc! { "$set": {
-                "is_admin": is_admin,
-                "updated_at": bson::DateTime::from_chrono(now),
-            }},
-        )
+        .update_one(doc! { "_id": target_user_id }, pipeline)
         .await?;
 
-    Ok(())
+    db.collection::<User>(USERS)
+        .find_one(doc! { "_id": target_user_id })
+        .await?
+        .ok_or_else(|| AppError::Internal("User disappeared after role update".to_string()))
 }
 
 /// Set the active status for a target user.

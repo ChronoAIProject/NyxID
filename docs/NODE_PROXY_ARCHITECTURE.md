@@ -385,7 +385,7 @@ impl NodeWsManager {
 
 - `proxy_response` resolves the OneShot sender (non-streaming path)
 - `proxy_response_start` upgrades the pending entry from OneShot to Streaming, sends `StreamChunk::Start`
-- `proxy_response_chunk` sends `StreamChunk::Data` through the channel
+- Binary chunk frames or legacy `proxy_response_chunk` JSON messages send `StreamChunk::Data` through the channel
 - `proxy_response_end` sends `StreamChunk::End` and removes the entry
 
 ### node_metrics_service (`backend/src/services/node_metrics_service.rs`)
@@ -652,7 +652,7 @@ match response_type {
 
 WebSocket does not have native backpressure. Mitigation strategies:
 
-1. **Chunk size limit**: Each `proxy_response_chunk` is capped at 64KB of base64-encoded data. Larger downstream chunks are split.
+1. **Chunk size limit**: Each streaming chunk carries at most 64KB of raw payload. Larger downstream chunks are split.
 2. **Bounded channel**: The streaming channel uses `mpsc::channel(256)`. If the channel is full, the node-side stream pauses (backpressure propagates to the downstream HTTP connection).
 3. **Proxy timeout**: The overall proxy timeout still applies to streaming requests.
 4. **Max stream duration**: A separate configurable max stream duration (default: 300 seconds, via `NODE_MAX_STREAM_DURATION_SECS`) prevents runaway streams.
@@ -783,27 +783,9 @@ if node.metrics.total_requests > 10 {
 
 ---
 
-## Node Agent Crate (`node-agent/`)
+## Node Agent Code
 
-The `nyxid-node` agent is a separate workspace member alongside `backend/`.
-
-### Crate Structure
-
-```
-node-agent/
-  Cargo.toml
-  src/
-    main.rs              # CLI entry point, command dispatch
-    cli.rs               # Clap subcommand definitions
-    config.rs            # TOML config loading, secret storage backend selection
-    ws_client.rs         # WebSocket connection + reconnection loop
-    proxy_executor.rs    # HTTP request execution, credential injection, SSE streaming
-    credential_store.rs  # In-memory decrypted credential store
-    signing.rs           # HMAC-SHA256 verification, replay guard
-    metrics.rs           # Local atomic counters (total_requests, success_count, error_count)
-    encryption.rs        # AES-256-GCM local encryption, keyfile management (0600 mode)
-    error.rs             # Error enum with thiserror
-```
+The node agent lives in the `nyxid` CLI (`cli/src/node/`). The former standalone `node-agent/` crate has been removed.
 
 ### Key Dependencies
 
@@ -848,7 +830,7 @@ shared_secret_encrypted = "base64-of-aes-gcm-ciphertext"
 
 **Keychain backend** (`--keychain` at registration): Secrets are stored in the OS keychain (macOS Keychain, Windows Credential Manager, Linux Secret Service). The config file contains only non-secret metadata.
 
-Migration between backends: `nyxid-node migrate --to keychain` or `nyxid-node migrate --to file`.
+Migration between backends: `nyxid node migrate --to keychain` or `nyxid node migrate --to file`.
 
 ### WebSocket Client
 
@@ -902,7 +884,7 @@ async fn stream_proxy_response(
     tx: &mpsc::UnboundedSender<String>,
 ) {
     // Send proxy_response_start with status + headers
-    // Stream chunks as proxy_response_chunk (base64-encoded)
+    // Stream chunks using negotiated binary frames, with JSON/base64 fallback
     // Send proxy_response_end when the stream completes
     // On error, send proxy_error instead
 }

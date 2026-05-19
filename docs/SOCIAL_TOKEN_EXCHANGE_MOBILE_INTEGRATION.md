@@ -616,8 +616,8 @@ Authorization: Bearer {access_token}
 |-----------|-------------|-------------|-------------|
 | 6004 | `invalid_grant` | 400 | Provider token is invalid, expired, or has wrong audience |
 | 6005 | `invalid_request` | 400 | Provider not supported or not configured on server |
-| 6001 | `invalid_grant` | 401 | No verified email found from provider |
-| 6002 | `invalid_grant` | 409 | Email already linked to a different social provider |
+| 6001 | `invalid_grant` | 409 | Provider identity could not be linked because it is already reserved by another account |
+| 6002 | `invalid_grant` | 400 | No verified email found from provider |
 | 6003 | `invalid_grant` | 403 | User account is deactivated |
 
 Common causes and fixes:
@@ -635,10 +635,10 @@ Common causes and fixes:
 NyxID uses the same account matching logic for both web social login and mobile token exchange:
 
 1. **Returning user**: If a user with the same provider + provider ID exists, they are logged in.
-2. **Email linking**: If a user with the same email exists (registered via email/password or another provider), the social identity is linked to the existing account. This only works if the existing account has no social provider set.
+2. **Email linking**: If a user with the same verified email exists (registered via email/password or another provider), the social identity is linked to the existing account.
 3. **New user**: If no match is found, a new account is created with `email_verified = true`.
 
-If the email is already associated with a *different* social provider (e.g., the user signed up with GitHub and now tries Google with the same email), the exchange returns a `409 Conflict` error.
+If the existing account was previously linked to a different social provider, NyxID re-links it to the current provider. A `409 Conflict` is reserved for identity-collision cases where the provider identity is already bound to another account and cannot be reassigned automatically.
 
 ---
 

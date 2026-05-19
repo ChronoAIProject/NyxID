@@ -12,12 +12,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::errors::AppResult;
-use crate::handlers::admin_helpers::require_admin;
+use crate::handlers::admin_helpers::{require_admin, require_admin_or_operator};
 use crate::handlers::node_admin::{NodeMetricsInfo, build_metrics_info};
 use crate::models::node::{NodeMetadata, NodeStatus};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::AuthUser;
 use crate::services::{audit_service, node_service};
+use crate::telemetry::{
+    context::{TelemetryContext, emit_event},
+    sampling::hash_short_id,
+    schema::TelemetryEvent,
+};
 
 // --- Request/Response types ---
 
@@ -66,7 +71,7 @@ pub async fn admin_list_nodes(
     auth_user: AuthUser,
     Query(query): Query<AdminNodeListQuery>,
 ) -> AppResult<Json<AdminNodeListResponse>> {
-    require_admin(&state, &auth_user).await?;
+    require_admin_or_operator(&state, &auth_user, "admin.nodes.list").await?;
 
     let page = query.page.unwrap_or(1).max(1);
     let per_page = query.per_page.unwrap_or(50).min(100);
@@ -166,7 +171,7 @@ pub async fn admin_get_node(
     auth_user: AuthUser,
     Path(node_id): Path<String>,
 ) -> AppResult<Json<AdminNodeInfo>> {
-    require_admin(&state, &auth_user).await?;
+    require_admin_or_operator(&state, &auth_user, "admin.nodes.get").await?;
 
     let node = node_service::get_node_by_id(&state.db, &node_id)
         .await?
@@ -206,11 +211,13 @@ pub async fn admin_get_node(
 pub async fn admin_disconnect_node(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     Path(node_id): Path<String>,
 ) -> AppResult<impl IntoResponse> {
     require_admin(&state, &auth_user).await?;
 
-    if state.node_ws_manager.is_connected(&node_id) {
+    let was_connected = state.node_ws_manager.is_connected(&node_id);
+    if was_connected {
         state
             .node_ws_manager
             .disconnect_connection(&node_id, 4000, "admin disconnected node")
@@ -218,14 +225,30 @@ pub async fn admin_disconnect_node(
         node_service::set_node_status(&state.db, &node_id, NodeStatus::Offline).await?;
     }
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "admin_node_disconnected".to_string(),
+        &auth_user,
+        "admin_node_disconnected",
         Some(serde_json::json!({ "node_id": &node_id })),
-        None,
-        None,
     );
+
+    // Only emit when a real disconnect actually happened. Posting to
+    // /disconnect for an already-offline node (or a typo / nonexistent
+    // id) is idempotent and should not fabricate disconnect activity
+    // in telemetry.
+    if was_connected {
+        emit_event(
+            state.telemetry.as_deref(),
+            &auth_user.user_id.to_string(),
+            auth_user.api_key_id.as_deref(),
+            &tele,
+            TelemetryEvent::AdminNodeDisconnected {
+                // Raw UUID would be scrubbed to `[UUID_REDACTED]`; hash
+                // keeps per-node granularity without leaking the UUID.
+                node_id: hash_short_id(&node_id),
+            },
+        );
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -234,6 +257,7 @@ pub async fn admin_disconnect_node(
 pub async fn admin_delete_node(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     Path(node_id): Path<String>,
 ) -> AppResult<impl IntoResponse> {
     require_admin(&state, &auth_user).await?;
@@ -248,13 +272,23 @@ pub async fn admin_delete_node(
             .await;
     }
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "admin_node_deleted".to_string(),
+        &auth_user,
+        "admin_node_deleted",
         Some(serde_json::json!({ "node_id": &node_id })),
-        None,
-        None,
+    );
+
+    emit_event(
+        state.telemetry.as_deref(),
+        &auth_user.user_id.to_string(),
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::AdminNodeDeleted {
+            // Raw UUID would be scrubbed to `[UUID_REDACTED]`; hash keeps
+            // per-node granularity without leaking the UUID.
+            node_id: hash_short_id(&node_id),
+        },
     );
 
     Ok(StatusCode::NO_CONTENT)

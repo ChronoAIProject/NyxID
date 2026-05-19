@@ -177,16 +177,14 @@ pub async fn connect_service(
         "User connected to service"
     );
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(user_id),
-        "connection_created".to_string(),
+        &auth_user,
+        "connection_created",
         Some(serde_json::json!({
             "service_id": &service_id,
             "has_credential": body.credential.is_some(),
         })),
-        None,
-        None,
     );
 
     Ok(Json(ConnectResponse {
@@ -223,13 +221,11 @@ pub async fn update_connection_credential(
         "Connection credential updated"
     );
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(user_id),
-        "connection_credential_updated".to_string(),
+        &auth_user,
+        "connection_credential_updated",
         Some(serde_json::json!({ "service_id": &service_id })),
-        None,
-        None,
     );
 
     Ok(Json(UpdateCredentialResponse {
@@ -256,13 +252,11 @@ pub async fn disconnect_service(
         "User disconnected from service"
     );
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(user_id),
-        "connection_removed".to_string(),
+        &auth_user,
+        "connection_removed",
         Some(serde_json::json!({ "service_id": &service_id })),
-        None,
-        None,
     );
 
     Ok(Json(DisconnectResponse {

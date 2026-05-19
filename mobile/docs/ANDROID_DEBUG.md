@@ -29,12 +29,14 @@ cd mobile
 pnpm install
 ```
 
-**API 地址**（`mobile/.env`）：
+**API 地址**（`mobile/.env.dev`，因为 `pnpm android` 用 `APP_ENV=dev`）：
 
-- **模拟器**：`EXPO_PUBLIC_API_BASE_URL=http://10.0.2.2:3001/api/v1`（Android 模拟器里 `10.0.2.2` 指向宿主机）
-- **真机**：用本机局域网 IP，例如 `EXPO_PUBLIC_API_BASE_URL=http://192.168.1.100:3001/api/v1`（先在本机起好 backend）
+- **模拟器**：`DEV_API_BASE_URL=http://10.0.2.2:3001/api/v1`（Android 模拟器里 `10.0.2.2` 指向宿主机）
+- **真机**：用本机局域网 IP，例如 `DEV_API_BASE_URL=http://192.168.1.100:3001/api/v1`（先在本机起好 backend）
 
 确保 backend 在对应地址可访问（如 `cargo run` 在 3001 端口）。
+
+> `EXPO_PUBLIC_API_BASE_URL` 直接设置会被 `app.config.ts` 覆盖。请改 `DEV_API_BASE_URL`（或 `PROD_API_BASE_URL` 若运行 `APP_ENV=prod`）。
 
 ---
 
@@ -76,7 +78,7 @@ pnpm start
 | `ANDROID_HOME` 未设置 | 设置并 `source ~/.zshrc` 后重试 |
 | 真机访问不到 API | 用本机局域网 IP，不要用 `localhost`；确认手机和电脑同一网段 |
 | 模拟器访问不到 API | 用 `10.0.2.2:3001`，不要用 `localhost` |
-| Gradle / androidx 相关报错 | 若 prebuild 后出现，可手动跑一次 patch：`EAS_BUILD_PLATFORM=android node scripts/patch-android-build-gradle.js`（仅当脚本检测到 `android/build.gradle` 时生效） |
+| Gradle / androidx 相关报错 | `pnpm build:android` 已自动跑 `patch-android-build-gradle.js`；如需手动可用 `EAS_BUILD_PLATFORM=android node scripts/patch-android-build-gradle.js`（仅在 `android/build.gradle` 存在时生效） |
 | `adb devices` 为空 | 真机：换线/换口、确认 USB 调试已开、重插后点「允许」；模拟器：先启动 AVD 再 `pnpm android` |
 
 ---
@@ -84,5 +86,5 @@ pnpm start
 ## 5. 小结
 
 1. 装好 Java 17、Android SDK，设好 `ANDROID_HOME`。
-2. `mobile/.env` 里按设备类型设 `EXPO_PUBLIC_API_BASE_URL`（模拟器 `10.0.2.2:3001`，真机本机 IP）。
+2. `mobile/.env.dev` 里按设备类型设 `DEV_API_BASE_URL`（模拟器 `10.0.2.2:3001`，真机本机 IP）。
 3. 在项目根起 backend，在 `mobile` 下执行 `pnpm android` 即可本地编译并跑起 Android 调试。

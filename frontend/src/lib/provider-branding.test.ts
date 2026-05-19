@@ -52,6 +52,34 @@ describe("getProviderBrand", () => {
     expect(brand.color).toBe("#000000");
   });
 
+  it("returns Telegram brand for 'telegram' slug", () => {
+    const brand = getProviderBrand("telegram");
+    expect(brand.label).toBe("Telegram");
+    expect(brand.initial).toBe("Tg");
+    expect(brand.color).toBe("#26A5E4");
+  });
+
+  it("returns Telegram Bot brand for 'telegram-bot' slug", () => {
+    const brand = getProviderBrand("telegram-bot");
+    expect(brand.label).toBe("Telegram Bot");
+    expect(brand.initial).toBe("Tb");
+    expect(brand.color).toBe("#26A5E4");
+  });
+
+  it("returns Lark brand for 'lark' slug", () => {
+    const brand = getProviderBrand("lark");
+    expect(brand.label).toBe("Lark");
+    expect(brand.initial).toBe("Lk");
+    expect(brand.color).toBe("#3370FF");
+  });
+
+  it("returns Feishu brand for 'feishu' slug", () => {
+    const brand = getProviderBrand("feishu");
+    expect(brand.label).toBe("Feishu");
+    expect(brand.initial).toBe("Fs");
+    expect(brand.color).toBe("#3370FF");
+  });
+
   it("returns default brand for unknown slug", () => {
     const brand = getProviderBrand("unknown-provider");
     expect(brand.label).toBe("");
@@ -71,6 +99,10 @@ describe("hasKnownBrand", () => {
     expect(hasKnownBrand("openai-codex")).toBe(true);
     expect(hasKnownBrand("deepseek")).toBe(true);
     expect(hasKnownBrand("twitter")).toBe(true);
+    expect(hasKnownBrand("telegram")).toBe(true);
+    expect(hasKnownBrand("telegram-bot")).toBe(true);
+    expect(hasKnownBrand("lark")).toBe(true);
+    expect(hasKnownBrand("feishu")).toBe(true);
   });
 
   it("returns false for unknown slugs", () => {

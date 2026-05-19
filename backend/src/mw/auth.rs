@@ -1,5 +1,10 @@
+use std::net::SocketAddr;
+
 use axum::{
-    extract::FromRequestParts, http::request::Parts, middleware::Next, response::IntoResponse,
+    extract::{ConnectInfo, FromRequestParts},
+    http::{Method, header, request::Parts},
+    middleware::Next,
+    response::IntoResponse,
 };
 use base64::Engine as _;
 use mongodb::bson::doc;
@@ -24,6 +29,9 @@ pub enum AuthMethod {
     Session,
     /// Bearer access token (JWT)
     AccessToken,
+    /// Channel relay callback token (JWT with `relay: true`).
+    /// Bypasses approval enforcement like Session.
+    Relay,
     /// X-API-Key header
     ApiKey,
     /// Service account client credentials
@@ -45,6 +53,68 @@ pub struct AuthUser {
     pub approval_owner_user_id: Option<String>,
     /// How the user authenticated this request.
     pub auth_method: AuthMethod,
+    /// If true, key can access ALL of the user's external services (default for non-API-key auth).
+    pub allow_all_services: bool,
+    /// If true, key can route through ALL of the user's nodes (default for non-API-key auth).
+    pub allow_all_nodes: bool,
+    /// List of UserService IDs this key can access (only checked when allow_all_services is false).
+    pub allowed_service_ids: Vec<String>,
+    /// List of Node IDs this key can route through (only checked when allow_all_nodes is false).
+    pub allowed_node_ids: Vec<String>,
+    /// API key ID when auth_method == ApiKey (for agent identity tracking)
+    pub api_key_id: Option<String>,
+    /// Human-readable API key name (for audit logs)
+    pub api_key_name: Option<String>,
+    /// Per-agent rate limit (from ApiKey), None = use user-level defaults
+    pub rate_limit_per_second: Option<u32>,
+    pub rate_limit_burst: Option<u32>,
+    /// Client IP captured at extraction time (from X-Forwarded-For, X-Real-IP, or
+    /// the TCP peer address). Used to enrich audit log entries.
+    pub ip_address: Option<String>,
+    /// Client User-Agent header captured at extraction time. Used to enrich audit
+    /// log entries.
+    pub user_agent: Option<String>,
+}
+
+/// Extract the client IP from common reverse-proxy headers, falling back to the
+/// TCP peer address available via `ConnectInfo`.
+///
+/// Lookup order: `X-Forwarded-For` (first hop), `X-Real-IP`, then the peer
+/// socket address.
+fn extract_request_ip(parts: &Parts) -> Option<String> {
+    if let Some(forwarded) = parts
+        .headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.split(',').next().unwrap_or("").trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        return Some(forwarded);
+    }
+
+    if let Some(real_ip) = parts
+        .headers
+        .get("x-real-ip")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        return Some(real_ip);
+    }
+
+    parts
+        .extensions
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(addr)| addr.ip().to_string())
+}
+
+/// Extract the User-Agent header.
+fn extract_request_user_agent(parts: &Parts) -> Option<String> {
+    parts
+        .headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(String::from)
 }
 
 impl AuthUser {
@@ -55,6 +125,23 @@ impl AuthUser {
             .unwrap_or_else(|| self.user_id.to_string())
     }
 
+    /// User ID whose services should be considered for proxy resolution.
+    ///
+    /// Service-account tokens use the service account UUID as the authenticated
+    /// subject for audit/requester attribution, but proxy resources are owned
+    /// by the service account's effective owner. For all non-ServiceAccount auth
+    /// methods (Session, AccessToken, ApiKey) this returns `user_id.to_string()`,
+    /// identical to prior behavior.
+    pub fn proxy_resolution_user_id(&self) -> String {
+        if self.auth_method == AuthMethod::ServiceAccount
+            && let Some(owner) = &self.approval_owner_user_id
+        {
+            return owner.clone();
+        }
+
+        self.user_id.to_string()
+    }
+
     /// Canonical requester type used in approval request and grant records.
     /// Session callers never enter approval flow.
     pub fn approval_requester_type(&self) -> Option<&'static str> {
@@ -63,6 +150,7 @@ impl AuthUser {
             AuthMethod::Delegated => Some("delegated"),
             AuthMethod::ServiceAccount => Some("service_account"),
             AuthMethod::AccessToken => Some("access_token"),
+            AuthMethod::Relay => Some("relay"),
             AuthMethod::Session => None,
         }
     }
@@ -74,6 +162,68 @@ impl AuthUser {
             .clone()
             .unwrap_or_else(|| self.user_id.to_string())
     }
+
+    pub fn has_scope(&self, expected: &str) -> bool {
+        scope_contains(&self.scope, expected)
+    }
+
+    pub fn can_use_rest_proxy(&self) -> bool {
+        matches!(self.auth_method, AuthMethod::Session)
+            || self.has_scope(PROXY_SCOPE)
+            || self.has_scope(WIDE_PROXY_SCOPE)
+    }
+
+    pub fn can_use_llm_proxy(&self) -> bool {
+        matches!(self.auth_method, AuthMethod::Session) || scope_allows_llm_proxy(&self.scope)
+    }
+
+    pub fn ensure_rest_proxy_access(&self) -> Result<(), AppError> {
+        if self.can_use_rest_proxy() {
+            return Ok(());
+        }
+
+        Err(AppError::Forbidden(format!(
+            "Missing required scope for proxy access. Expected one of: {PROXY_SCOPE}, {WIDE_PROXY_SCOPE}"
+        )))
+    }
+
+    pub fn ensure_llm_proxy_access(&self) -> Result<(), AppError> {
+        if self.can_use_llm_proxy() {
+            return Ok(());
+        }
+
+        Err(AppError::Forbidden(format!(
+            "Missing required scope for LLM proxy access. Expected one of: {PROXY_SCOPE}, {WIDE_PROXY_SCOPE}, {LLM_PROXY_SCOPE}"
+        )))
+    }
+
+    pub fn can_write(&self) -> bool {
+        !matches!(self.auth_method, AuthMethod::ApiKey)
+            || self.has_scope(WRITE_SCOPE)
+            || self.has_scope(ADMIN_SCOPE)
+    }
+
+    pub fn ensure_write_scope(&self) -> Result<(), AppError> {
+        if self.can_write() {
+            return Ok(());
+        }
+        Err(AppError::Forbidden(
+            "write or admin scope required for this operation".to_string(),
+        ))
+    }
+
+    pub fn ensure_management_write_scope(
+        &self,
+        method: &Method,
+        path: &str,
+    ) -> Result<(), AppError> {
+        if matches!(self.auth_method, AuthMethod::ApiKey)
+            && api_key_management_write_requires_scope(method, path)
+        {
+            self.ensure_write_scope()?;
+        }
+        Ok(())
+    }
 }
 
 /// Name of the session cookie.
@@ -81,6 +231,118 @@ pub const SESSION_COOKIE_NAME: &str = "nyx_session";
 
 /// Name of the access token cookie.
 pub const ACCESS_TOKEN_COOKIE_NAME: &str = "nyx_access_token";
+
+/// Scope that grants management write access (create, update, delete, rotate).
+pub const WRITE_SCOPE: &str = "write";
+
+/// Scope that grants full admin access (implies write).
+pub const ADMIN_SCOPE: &str = "admin";
+
+/// Scope that grants standard NyxID proxy access.
+pub const PROXY_SCOPE: &str = "proxy";
+
+/// Scope that grants broad delegated/service-account proxy access.
+pub const WIDE_PROXY_SCOPE: &str = "proxy:*";
+
+/// Scope that grants access to the LLM gateway.
+pub const LLM_PROXY_SCOPE: &str = "llm:proxy";
+
+fn scope_contains(scopes: &str, expected: &str) -> bool {
+    scopes.split_whitespace().any(|scope| scope == expected)
+}
+
+pub fn scope_allows_rest_proxy(scopes: &str) -> bool {
+    scope_contains(scopes, PROXY_SCOPE) || scope_contains(scopes, WIDE_PROXY_SCOPE)
+}
+
+pub fn scope_allows_llm_proxy(scopes: &str) -> bool {
+    scope_allows_rest_proxy(scopes) || scope_contains(scopes, LLM_PROXY_SCOPE)
+}
+
+fn api_key_management_write_requires_scope(method: &Method, path: &str) -> bool {
+    if !matches!(
+        *method,
+        Method::POST | Method::PUT | Method::PATCH | Method::DELETE
+    ) || !path_matches_prefix(path, "/api/v1")
+    {
+        return false;
+    }
+
+    ![
+        "/api/v1/channel-events",
+        "/api/v1/channel-relay",
+        "/api/v1/delegation",
+        "/api/v1/llm",
+        "/api/v1/proxy",
+        "/api/v1/ssh",
+    ]
+    .iter()
+    .any(|prefix| path_matches_prefix(path, prefix))
+}
+
+fn path_matches_prefix(path: &str, prefix: &str) -> bool {
+    path == prefix
+        || path
+            .strip_prefix(prefix)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+fn validate_dpop_bound_access(
+    parts: &Parts,
+    state: &AppState,
+    expected_jkt: &str,
+) -> Result<(), AppError> {
+    let proof = parts
+        .headers
+        .get("dpop")
+        .ok_or_else(|| AppError::Unauthorized("DPoP proof required".to_string()))?
+        .to_str()
+        .map_err(|_| AppError::Unauthorized("invalid DPoP proof".to_string()))?;
+    let expected_htu =
+        crate::crypto::dpop::htu_from_base_and_path(&state.config.base_url, parts.uri.path())?;
+    let proof_jkt = crate::crypto::dpop::validate_proof(
+        proof,
+        parts.method.as_str(),
+        &expected_htu,
+        &state.dpop_jti_cache,
+    )?;
+    if proof_jkt != expected_jkt {
+        return Err(AppError::Unauthorized("DPoP cnf mismatch".to_string()));
+    }
+    Ok(())
+}
+
+fn validate_mtls_bound_access(
+    parts: &Parts,
+    state: &AppState,
+    expected_x5t: &str,
+) -> Result<(), AppError> {
+    let header_name = state
+        .config
+        .mtls_client_cert_header
+        .as_deref()
+        .filter(|header| !header.trim().is_empty())
+        .ok_or_else(|| {
+            AppError::Unauthorized(
+                "mTLS binding required but server has no cert header configured".to_string(),
+            )
+        })?;
+    let cert_header = parts
+        .headers
+        .get(header_name)
+        .ok_or_else(|| {
+            AppError::Unauthorized("mTLS binding required: missing cert header".to_string())
+        })?
+        .to_str()
+        .map_err(|_| AppError::Unauthorized("invalid mTLS client certificate".to_string()))?;
+    let presented = crate::crypto::mtls::cert_thumbprint_from_header(cert_header)?;
+    if presented != expected_x5t {
+        return Err(AppError::Unauthorized(
+            "mTLS cert thumbprint mismatch".to_string(),
+        ));
+    }
+    Ok(())
+}
 
 impl FromRequestParts<AppState> for AuthUser {
     type Rejection = AppError;
@@ -96,13 +358,18 @@ impl FromRequestParts<AppState> for AuthUser {
         state: &AppState,
     ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
         async move {
+            let request_ip = extract_request_ip(parts);
+            let request_ua = extract_request_user_agent(parts);
             // Try Bearer token first
             if let Some(auth_header) = parts.headers.get("authorization") {
                 let auth_str = auth_header.to_str().map_err(|_| {
                     AppError::Unauthorized("Invalid authorization header".to_string())
                 })?;
 
-                if let Some(token) = auth_str.strip_prefix("Bearer ") {
+                let bearer_token = auth_str.strip_prefix("Bearer ");
+                let dpop_token = auth_str.strip_prefix("DPoP ");
+                if let Some(token) = bearer_token.or(dpop_token) {
+                    let allow_api_key_fallback = bearer_token.is_some();
                     // Try JWT verification first. If it fails for a reason
                     // other than expiry, fall back to API-key validation so
                     // that OpenAI-compatible clients (which send API keys as
@@ -112,6 +379,9 @@ impl FromRequestParts<AppState> for AuthUser {
                         Ok(claims) => claims,
                         Err(AppError::TokenExpired) => return Err(AppError::TokenExpired),
                         Err(jwt_err) => {
+                            if !allow_api_key_fallback {
+                                return Err(jwt_err);
+                            }
                             match crate::services::key_service::validate_api_key(&state.db, token)
                                 .await
                             {
@@ -141,14 +411,29 @@ impl FromRequestParts<AppState> for AuthUser {
                                         }
                                     }
 
-                                    return Ok(AuthUser {
+                                    let auth_user = AuthUser {
                                         user_id,
                                         session_id: None,
                                         scope: api_key.scopes.clone(),
                                         acting_client_id: None,
                                         approval_owner_user_id: None,
                                         auth_method: AuthMethod::ApiKey,
-                                    });
+                                        allow_all_services: api_key.allow_all_services,
+                                        allow_all_nodes: api_key.allow_all_nodes,
+                                        allowed_service_ids: api_key.allowed_service_ids.clone(),
+                                        allowed_node_ids: api_key.allowed_node_ids.clone(),
+                                        api_key_id: Some(api_key.id.clone()),
+                                        api_key_name: Some(api_key.name.clone()),
+                                        rate_limit_per_second: api_key.rate_limit_per_second,
+                                        rate_limit_burst: api_key.rate_limit_burst,
+                                        ip_address: request_ip.clone(),
+                                        user_agent: request_ua.clone(),
+                                    };
+                                    auth_user.ensure_management_write_scope(
+                                        &parts.method,
+                                        parts.uri.path(),
+                                    )?;
+                                    return Ok(auth_user);
                                 }
                                 Err(_) => return Err(jwt_err),
                             }
@@ -157,6 +442,15 @@ impl FromRequestParts<AppState> for AuthUser {
 
                     if claims.token_type != "access" {
                         return Err(AppError::Unauthorized("Expected access token".to_string()));
+                    }
+
+                    if let Some(claims_jkt) = claims.cnf.as_ref().and_then(|c| c.jkt.as_deref()) {
+                        validate_dpop_bound_access(parts, state, claims_jkt)?;
+                    }
+                    if let Some(claims_x5t) =
+                        claims.cnf.as_ref().and_then(|c| c.x5t_s256.as_deref())
+                    {
+                        validate_mtls_bound_access(parts, state, claims_x5t)?;
                     }
 
                     // Check if this is a service account token
@@ -205,6 +499,16 @@ impl FromRequestParts<AppState> for AuthUser {
                             acting_client_id: None,
                             approval_owner_user_id: Some(sa.effective_owner_user_id().to_string()),
                             auth_method: AuthMethod::ServiceAccount,
+                            allow_all_services: true,
+                            allow_all_nodes: true,
+                            allowed_service_ids: vec![],
+                            allowed_node_ids: vec![],
+                            api_key_id: None,
+                            api_key_name: None,
+                            rate_limit_per_second: None,
+                            rate_limit_burst: None,
+                            ip_address: request_ip.clone(),
+                            user_agent: request_ua.clone(),
                         });
                     }
 
@@ -232,8 +536,32 @@ impl FromRequestParts<AppState> for AuthUser {
 
                     let auth_method = if claims.act.is_some() {
                         AuthMethod::Delegated
+                    } else if claims.relay == Some(true) {
+                        AuthMethod::Relay
                     } else {
                         AuthMethod::AccessToken
+                    };
+
+                    // For relay tokens, inherit the agent key's scope restrictions.
+                    // For regular access tokens, allow all (scope enforced at JWT level).
+                    let (
+                        allow_all_services,
+                        allow_all_nodes,
+                        allowed_service_ids,
+                        allowed_node_ids,
+                        api_key_id,
+                        api_key_name,
+                    ) = if auth_method == AuthMethod::Relay {
+                        (
+                            claims.relay_allow_all_services.unwrap_or(true),
+                            claims.relay_allow_all_nodes.unwrap_or(true),
+                            claims.relay_allowed_service_ids.clone().unwrap_or_default(),
+                            claims.relay_allowed_node_ids.clone().unwrap_or_default(),
+                            claims.relay_api_key_id.clone(),
+                            claims.relay_api_key_name.clone(),
+                        )
+                    } else {
+                        (true, true, vec![], vec![], None, None)
                     };
 
                     return Ok(AuthUser {
@@ -243,6 +571,16 @@ impl FromRequestParts<AppState> for AuthUser {
                         acting_client_id: claims.act.map(|a| a.sub),
                         approval_owner_user_id: None,
                         auth_method,
+                        allow_all_services,
+                        allow_all_nodes,
+                        allowed_service_ids,
+                        allowed_node_ids,
+                        api_key_id,
+                        api_key_name,
+                        rate_limit_per_second: None,
+                        rate_limit_burst: None,
+                        ip_address: request_ip.clone(),
+                        user_agent: request_ua.clone(),
                     });
                 }
             }
@@ -300,6 +638,16 @@ impl FromRequestParts<AppState> for AuthUser {
                                     acting_client_id: None,
                                     approval_owner_user_id: None,
                                     auth_method: AuthMethod::Session,
+                                    allow_all_services: true,
+                                    allow_all_nodes: true,
+                                    allowed_service_ids: vec![],
+                                    allowed_node_ids: vec![],
+                                    api_key_id: None,
+                                    api_key_name: None,
+                                    rate_limit_per_second: None,
+                                    rate_limit_burst: None,
+                                    ip_address: request_ip.clone(),
+                                    user_agent: request_ua.clone(),
                                 });
                             }
                             _ => {
@@ -357,14 +705,26 @@ impl FromRequestParts<AppState> for AuthUser {
                     }
                 }
 
-                return Ok(AuthUser {
+                let auth_user = AuthUser {
                     user_id,
                     session_id: None,
                     scope: key.scopes.clone(),
                     acting_client_id: None,
                     approval_owner_user_id: None,
                     auth_method: AuthMethod::ApiKey,
-                });
+                    allow_all_services: key.allow_all_services,
+                    allow_all_nodes: key.allow_all_nodes,
+                    allowed_service_ids: key.allowed_service_ids.clone(),
+                    allowed_node_ids: key.allowed_node_ids.clone(),
+                    api_key_id: Some(key.id.clone()),
+                    api_key_name: Some(key.name.clone()),
+                    rate_limit_per_second: key.rate_limit_per_second,
+                    rate_limit_burst: key.rate_limit_burst,
+                    ip_address: request_ip,
+                    user_agent: request_ua,
+                };
+                auth_user.ensure_management_write_scope(&parts.method, parts.uri.path())?;
+                return Ok(auth_user);
             }
 
             tracing::debug!(
@@ -543,6 +903,28 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::{Request, header};
+    use uuid::Uuid;
+
+    fn test_auth_user(auth_method: AuthMethod, scope: &str) -> AuthUser {
+        AuthUser {
+            user_id: Uuid::new_v4(),
+            session_id: None,
+            scope: scope.to_string(),
+            acting_client_id: None,
+            approval_owner_user_id: None,
+            auth_method,
+            allow_all_services: true,
+            allow_all_nodes: true,
+            allowed_service_ids: vec![],
+            allowed_node_ids: vec![],
+            api_key_id: None,
+            api_key_name: None,
+            rate_limit_per_second: None,
+            rate_limit_burst: None,
+            ip_address: None,
+            user_agent: None,
+        }
+    }
 
     #[test]
     fn parse_cookie_single() {
@@ -593,6 +975,95 @@ mod tests {
     #[test]
     fn access_token_cookie_name_constant() {
         assert_eq!(ACCESS_TOKEN_COOKIE_NAME, "nyx_access_token");
+    }
+
+    #[test]
+    fn api_key_auth_includes_key_identity() {
+        let user = AuthUser {
+            user_id: Uuid::new_v4(),
+            session_id: None,
+            scope: "read proxy".to_string(),
+            acting_client_id: None,
+            approval_owner_user_id: None,
+            auth_method: AuthMethod::ApiKey,
+            allow_all_services: false,
+            allow_all_nodes: true,
+            allowed_service_ids: vec!["svc-1".to_string()],
+            allowed_node_ids: vec![],
+            api_key_id: Some("key-uuid-123".to_string()),
+            api_key_name: Some("coding-agent".to_string()),
+            rate_limit_per_second: None,
+            rate_limit_burst: None,
+            ip_address: None,
+            user_agent: None,
+        };
+        assert_eq!(user.api_key_id.as_deref(), Some("key-uuid-123"));
+        assert_eq!(user.api_key_name.as_deref(), Some("coding-agent"));
+    }
+
+    #[test]
+    fn non_api_key_auth_has_no_key_identity() {
+        let user = test_auth_user(AuthMethod::Session, "");
+        assert!(user.api_key_id.is_none());
+        assert!(user.api_key_name.is_none());
+    }
+
+    #[test]
+    fn proxy_resolution_user_id_uses_service_account_owner_when_present() {
+        let mut user = test_auth_user(AuthMethod::ServiceAccount, "proxy");
+        let service_account_id = user.user_id.to_string();
+        let owner_id = Uuid::new_v4().to_string();
+        user.approval_owner_user_id = Some(owner_id.clone());
+
+        assert_eq!(user.proxy_resolution_user_id(), owner_id);
+        assert_eq!(user.user_id.to_string(), service_account_id);
+    }
+
+    #[test]
+    fn proxy_resolution_user_id_uses_subject_for_service_account_without_owner() {
+        let user = test_auth_user(AuthMethod::ServiceAccount, "proxy");
+
+        assert_eq!(user.proxy_resolution_user_id(), user.user_id.to_string());
+    }
+
+    #[test]
+    fn proxy_resolution_user_id_uses_subject_for_non_service_account() {
+        let mut user = test_auth_user(AuthMethod::ApiKey, "proxy");
+        user.approval_owner_user_id = Some(Uuid::new_v4().to_string());
+
+        assert_eq!(user.proxy_resolution_user_id(), user.user_id.to_string());
+    }
+
+    #[test]
+    fn session_auth_can_use_proxy_without_scope() {
+        let auth_user = test_auth_user(AuthMethod::Session, "");
+
+        assert!(auth_user.can_use_rest_proxy());
+        assert!(auth_user.can_use_llm_proxy());
+    }
+
+    #[test]
+    fn access_tokens_require_proxy_scope_for_rest_proxy() {
+        let auth_user = test_auth_user(AuthMethod::AccessToken, "openid profile email");
+
+        assert!(!auth_user.can_use_rest_proxy());
+        assert!(auth_user.ensure_rest_proxy_access().is_err());
+    }
+
+    #[test]
+    fn delegated_llm_scope_does_not_grant_rest_proxy() {
+        let auth_user = test_auth_user(AuthMethod::Delegated, "llm:proxy");
+
+        assert!(!auth_user.can_use_rest_proxy());
+        assert!(auth_user.can_use_llm_proxy());
+    }
+
+    #[test]
+    fn api_key_proxy_scope_grants_proxy_and_llm_access() {
+        let auth_user = test_auth_user(AuthMethod::ApiKey, "read proxy");
+
+        assert!(auth_user.can_use_rest_proxy());
+        assert!(auth_user.can_use_llm_proxy());
     }
 
     // L1: Tests for delegated token detection (C1 fix)
@@ -762,5 +1233,133 @@ mod tests {
             .unwrap();
 
         assert!(!is_service_account_request(&request));
+    }
+
+    #[test]
+    fn api_key_management_write_routes_require_write_scope() {
+        let user = test_auth_user(AuthMethod::ApiKey, "read proxy");
+        let write_routes = [
+            (Method::POST, "/api/v1/api-keys"),
+            (Method::POST, "/api/v1/api-keys/key-1/rotate"),
+            (Method::POST, "/api/v1/keys"),
+            (Method::PUT, "/api/v1/keys/key-1"),
+            (Method::DELETE, "/api/v1/keys/key-1"),
+            (Method::PUT, "/api/v1/endpoints/endpoint-1"),
+            (Method::DELETE, "/api/v1/endpoints/endpoint-1"),
+            (Method::PUT, "/api/v1/api-keys/external/key-1"),
+            (Method::DELETE, "/api/v1/api-keys/external/key-1"),
+            (Method::PUT, "/api/v1/user-services/service-1"),
+            (Method::DELETE, "/api/v1/user-services/service-1"),
+        ];
+
+        for (method, path) in write_routes {
+            assert!(
+                api_key_management_write_requires_scope(&method, path),
+                "{method:?} {path} should require write scope"
+            );
+            assert!(
+                user.ensure_management_write_scope(&method, path).is_err(),
+                "{method:?} {path} should reject read-only API key auth"
+            );
+        }
+    }
+
+    #[test]
+    fn api_key_write_or_admin_scope_can_use_management_write_routes() {
+        let write_user = test_auth_user(AuthMethod::ApiKey, "read write");
+        let admin_user = test_auth_user(AuthMethod::ApiKey, "read admin");
+
+        for user in [write_user, admin_user] {
+            assert!(
+                user.ensure_management_write_scope(&Method::POST, "/api/v1/keys")
+                    .is_ok()
+            );
+            assert!(
+                user.ensure_management_write_scope(&Method::PUT, "/api/v1/api-keys/external/key-1")
+                    .is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn api_key_read_and_operational_routes_do_not_require_management_write_scope() {
+        let user = test_auth_user(AuthMethod::ApiKey, "read proxy");
+        let allowed_routes = [
+            (Method::GET, "/api/v1/keys"),
+            (Method::GET, "/api/v1/api-keys/external"),
+            (Method::POST, "/api/v1/proxy/s/openai/v1/chat/completions"),
+            (Method::POST, "/api/v1/llm/gateway/v1/chat/completions"),
+            (Method::POST, "/api/v1/channel-relay/reply"),
+            (Method::POST, "/api/v1/channel-events/conversation-1"),
+            (Method::POST, "/api/v1/ssh/service-1/exec"),
+            (Method::POST, "/oauth/token"),
+        ];
+
+        for (method, path) in allowed_routes {
+            assert!(
+                !api_key_management_write_requires_scope(&method, path),
+                "{method:?} {path} should not use management write-scope gating"
+            );
+            assert!(
+                user.ensure_management_write_scope(&method, path).is_ok(),
+                "{method:?} {path} should not reject at the management scope layer"
+            );
+        }
+    }
+
+    #[test]
+    fn api_key_read_only_cannot_write() {
+        let user = test_auth_user(AuthMethod::ApiKey, "read");
+        assert!(!user.can_write());
+        assert!(user.ensure_write_scope().is_err());
+    }
+
+    #[test]
+    fn api_key_read_proxy_cannot_write() {
+        let user = test_auth_user(AuthMethod::ApiKey, "read proxy");
+        assert!(!user.can_write());
+        assert!(user.ensure_write_scope().is_err());
+    }
+
+    #[test]
+    fn api_key_write_scope_can_write() {
+        let user = test_auth_user(AuthMethod::ApiKey, "read write");
+        assert!(user.can_write());
+        assert!(user.ensure_write_scope().is_ok());
+    }
+
+    #[test]
+    fn api_key_admin_scope_can_write() {
+        let user = test_auth_user(AuthMethod::ApiKey, "read admin");
+        assert!(user.can_write());
+        assert!(user.ensure_write_scope().is_ok());
+    }
+
+    #[test]
+    fn session_auth_can_write_without_scope() {
+        let user = test_auth_user(AuthMethod::Session, "");
+        assert!(user.can_write());
+        assert!(user.ensure_write_scope().is_ok());
+    }
+
+    #[test]
+    fn access_token_can_write_without_scope() {
+        let user = test_auth_user(AuthMethod::AccessToken, "openid profile");
+        assert!(user.can_write());
+        assert!(user.ensure_write_scope().is_ok());
+    }
+
+    #[test]
+    fn delegated_token_can_write_without_scope() {
+        let user = test_auth_user(AuthMethod::Delegated, "openid");
+        assert!(user.can_write());
+        assert!(user.ensure_write_scope().is_ok());
+    }
+
+    #[test]
+    fn service_account_can_write_without_scope() {
+        let user = test_auth_user(AuthMethod::ServiceAccount, "");
+        assert!(user.can_write());
+        assert!(user.ensure_write_scope().is_ok());
     }
 }

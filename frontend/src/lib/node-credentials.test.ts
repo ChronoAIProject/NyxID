@@ -14,12 +14,18 @@ function makeService(
     slug: "example",
     description: "Example",
     base_url: "https://api.example.com",
+    service_type: "http",
+    visibility: "public",
     auth_method: "header",
     auth_type: "api_key",
     auth_key_name: "X-API-Key",
     is_active: true,
     oauth_client_id: null,
+    openapi_spec_url: null,
     api_spec_url: null,
+    asyncapi_spec_url: null,
+    streaming_supported: false,
+    ssh_config: null,
     service_category: "connection",
     requires_user_credential: true,
     created_by: "user-1",
@@ -38,7 +44,7 @@ describe("buildNodeCredentialCommand", () => {
     });
 
     expect(buildNodeCredentialCommand("openai", service)).toBe(
-      "nyxid-node credentials add --service openai --header Authorization --secret-format bearer",
+      "nyxid node credentials add --service openai --header Authorization --secret-format bearer",
     );
     expect(getNodeCredentialPromptHint(service)).toContain("raw token");
   });
@@ -51,7 +57,7 @@ describe("buildNodeCredentialCommand", () => {
     });
 
     expect(buildNodeCredentialCommand("github", service)).toBe(
-      "nyxid-node credentials add --service github --header Authorization --secret-format basic",
+      "nyxid node credentials add --service github --header Authorization --secret-format basic",
     );
     expect(getNodeCredentialPromptHint(service)).toContain("username:password");
   });
@@ -64,14 +70,24 @@ describe("buildNodeCredentialCommand", () => {
     });
 
     expect(buildNodeCredentialCommand("stripe", service)).toBe(
-      "nyxid-node credentials add --service stripe --query-param api_key",
+      "nyxid node credentials add --service stripe --query-param api_key",
     );
     expect(getNodeCredentialPromptHint(service)).toBeNull();
   });
 
   it("falls back to a raw header command when service metadata is unavailable", () => {
     expect(buildNodeCredentialCommand("fallback", undefined)).toBe(
-      "nyxid-node credentials add --service fallback --header Authorization",
+      "nyxid node credentials add --service fallback --header Authorization",
     );
+  });
+
+  it("returns null for SSH services (no credential injection needed)", () => {
+    const service = makeService({
+      service_type: "ssh",
+      auth_method: "none",
+      auth_type: "ssh",
+    });
+
+    expect(buildNodeCredentialCommand("bastion", service)).toBeNull();
   });
 });

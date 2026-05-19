@@ -1,1073 +1,226 @@
-# NyxID
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![GitHub Stars](https://img.shields.io/github/stars/ChronoAIProject/NyxID)](https://github.com/ChronoAIProject/NyxID)
+[![Discord](https://img.shields.io/discord/1422500823925264438?logo=discord&logoColor=white&label=Discord&color=5865F2)](https://discord.gg/QMvcs8UQBW)
+[![nyxid MCP server](https://glama.ai/mcp/servers/ChronoAIProject/nyxid/badges/score.svg)](https://glama.ai/mcp/servers/ChronoAIProject/nyxid)
 
-**NyxID** is a self-hosted authentication and single sign-on (SSO) platform. Named after Nyx, the Greek goddess and protector of darkness, NyxID guards the boundary between your users and your services.
+<p align="center">
+  <img src="assets/banner.png" alt="NyxID — Connect AI agents to any API, anywhere. Securely." width="100%">
+</p>
 
-It provides a complete identity layer: user registration, session management, OpenID Connect, social login, multi-factor authentication, API key management, a reverse proxy that injects credentials into downstream service requests, a mobile approval app (iOS + Android), and a TypeScript OAuth SDK for client integration.
+**Connect AI agents to any API, anywhere. Securely.** Open-source Agent Connectivity Gateway.
 
----
+NyxID lets your AI agents (Claude Code, Cursor, n8n) reach any API you have,
+public or private, and handles all the credentials so your agent never sees
+a raw key.
 
-## Table of Contents
+```mermaid
+flowchart LR
+    subgraph Agents["AI Agents"]
+        CC[Claude Code]
+        CU[Cursor]
+        N8[n8n]
+    end
 
-- [Features](#features)
-- [Architecture Overview](#architecture-overview)
-- [Prerequisites](#prerequisites)
-- [Quick Start](#quick-start)
-- [API Documentation](#api-documentation)
-- [Environment Variables](#environment-variables)
-- [Database Schema](#database-schema)
-- [Security](#security)
-- [Credential Nodes (Node Proxy)](#credential-nodes-node-proxy)
-- [MCP Integration](#mcp-integration)
-- [Contributing](#contributing)
-- [Development Guide](#development-guide)
-- [Project Structure](#project-structure)
-- [License](#license)
+    subgraph NyxID["NyxID Gateway"]
+        AUTH[OIDC and API Key Auth]
+        PROXY[Credential Injection Proxy]
+        MCP[MCP Tool Wrapping]
+    end
 
----
+    subgraph Connectivity["Private Reach"]
+        NODE[Credential Node]
+    end
 
-## Features
+    subgraph Targets["Connected Services"]
+        PUB[Public APIs]
+        INT[Internal APIs]
+        LOC[Localhost Services]
+    end
 
-### Authentication and Session Management
-- Email/password registration with Argon2id hashing (OWASP-recommended parameters)
-- Session-based authentication with HttpOnly, SameSite cookies
-- JWT access and refresh tokens signed with RS256 (4096-bit RSA keys)
-- Token rotation on refresh for replay attack prevention
+    CC --> AUTH
+    CU --> AUTH
+    N8 --> AUTH
 
-### OpenID Connect Provider
-- Full Authorization Code flow with mandatory PKCE (S256)
-- ID token issuance following OpenID Connect Core
-- UserInfo endpoint
-- Support for both confidential and public clients
+    AUTH --> PROXY
+    PROXY --> MCP
+    PROXY -->|Direct proxy| PUB
+    PROXY -->|Private network| INT
+    PROXY -->|NAT traversal| NODE
+    NODE --> LOC
 
-### Social Login
-- Google and GitHub OAuth 2.0 integration
-- Automatic account linking by verified email
-- Session creation on successful social login (same cookies as email/password login)
+    classDef agents fill:#eef2ff,stroke:#4f46e5,color:#111827,stroke-width:1.5px;
+    classDef gateway fill:#111827,stroke:#22d3ee,color:#ffffff,stroke-width:2px;
+    classDef tooling fill:#e0f2fe,stroke:#0284c7,color:#0f172a,stroke-width:1.5px;
+    classDef node fill:#fef3c7,stroke:#f59e0b,color:#111827,stroke-width:1.5px;
+    classDef targets fill:#ecfeff,stroke:#14b8a6,color:#0f172a,stroke-width:1.5px;
 
-### Social Token Exchange (Native Mobile)
-- Exchange external provider tokens (Google ID tokens, GitHub access tokens) for NyxID token sets via RFC 8693 Token Exchange
-- Enables native mobile apps (Google Sign-In SDK, GitHub OAuth) to authenticate without browser redirects
-- Google ID tokens verified cryptographically via JWKS (RS256 signature, audience, expiry, email verification)
-- GitHub access tokens verified as app-bound to NyxID's configured GitHub OAuth app, then validated via GitHub API
-- Same account linking rules as web social login: returning user, email linking, or new user creation
-- Reuses the existing `POST /oauth/token` endpoint -- no new routes or environment variables required
-- JWKS keys cached with TTL to minimize external network calls
-- Supports both confidential and public OAuth clients (mobile apps can omit `client_secret`)
-
-### Multi-Factor Authentication (MFA)
-- TOTP-based second factor (compatible with Google Authenticator, Authy, 1Password)
-- QR code provisioning
-- Recovery codes for account recovery
-- MFA secrets encrypted at rest
-
-### API Key Management
-- Create, list, rotate, and revoke scoped API keys
-- Key prefix display for identification (full key shown only at creation)
-- SHA-256 hashed storage (plaintext never persisted)
-- Optional expiration dates
-- Last-used tracking
-
-### Downstream Service Proxy
-- Reverse proxy to internal or external services
-- Three service categories: **provider** (OIDC/SSO), **connection** (per-user credentials), **internal** (master credential)
-- Automatic credential injection: header, bearer token, query parameter, or basic auth
-- Developer-friendly slug-based proxy URLs (`/api/v1/proxy/s/{slug}/{path}`) alongside UUID-based URLs
-- Service discovery endpoint (`GET /api/v1/proxy/services`) for listing available services with proxy URLs and connection status
-- Connection enforcement: users must connect before proxying; per-user credentials for connection services, master credentials for internal services
-- SSRF protection (blocks private IPs, metadata endpoints, localhost)
-- Path traversal prevention (rejects `..` and `//` in proxy paths)
-- Header allowlist to prevent leaking sensitive request headers
-
-### Service Connection Management
-- Register downstream services with encrypted credentials (AES-256-GCM)
-- Per-user encrypted credential storage for connection services
-- Credential update without disconnect/reconnect
-- Secure credential cleanup on disconnect and service deactivation
-- Single source of truth for mapping users to downstream APIs
-
-### Administration
-- Full admin user management: list, view, edit, delete users
-- Role management: promote/demote admin privileges (with self-protection)
-- Account control: enable/disable users with automatic session and API key revocation
-- Force password reset with session revocation
-- Manual email verification
-- Per-user session listing and bulk session revocation
-- Cascade user deletion across 8 related collections (audit logs preserved)
-- Audit log with action, resource, IP, and user-agent tracking (filterable by user)
-- OAuth client management (create, list, deactivate)
-
-### Roles and Groups (RBAC)
-- Role definitions with permission string tags (e.g., `users:read`, `users:write`)
-- Realm-level and client-scoped roles
-- System roles (`admin`, `user`) seeded at startup and protected from deletion
-- Default roles auto-assigned to new users
-- Groups with role inheritance: all group members inherit the group's roles
-- Hierarchical groups with optional parent-child relationships
-- Direct role assignment to users and indirect assignment via group membership
-- Effective permissions computed from direct roles + group-inherited roles
-- New scopes (`roles`, `groups`) control whether RBAC claims appear in tokens
-- Admin CRUD for roles, groups, role assignment, and group membership
-
-### Token Introspection and Revocation
-- Token introspection endpoint (RFC 7662): validates access and refresh tokens, returns active status with claims
-- Token revocation endpoint (RFC 7009): revokes refresh tokens; access tokens expire naturally
-- Both endpoints require client authentication (`client_id` + `client_secret`)
-- Introspection response includes RBAC claims (`roles`, `groups`, `permissions`) when present
-
-### User Consent Management
-- Users can view all OAuth consents granted to third-party applications
-- Per-client consent revocation without disconnecting from the application
-- Consent records track granted scopes, grant time, and optional expiration
-
-### Service Accounts
-- Non-human (machine-to-machine) identities for programmatic access
-- OAuth2 Client Credentials Grant authentication (`POST /oauth/token` with `grant_type=client_credentials`)
-- Admin CRUD for service accounts with paginated listing and search
-- Client secret generation with SHA-256 hashed storage (plaintext shown once at creation)
-- Client secret rotation with automatic token revocation
-- Scope-based access control (requested scopes must be a subset of allowed scopes)
-- Token revocation support with per-token tracking via JTI
-- Service accounts can access proxy, LLM gateway, connections, and provider endpoints
-- RBAC role assignment for service accounts (direct roles, no group membership)
-- Blocked from human-only endpoints (auth, users, sessions, admin, MFA)
-- Configurable token TTL (default: 1 hour)
-- Full audit logging for all service account operations
-
-### Credential Broker
-- 19 providers auto-seeded at startup: 7 API key providers (OpenAI, Anthropic, Google AI, Mistral, Cohere, DeepSeek, OpenAI Codex) and 11 social OAuth2 providers (Google, GitHub, Twitter/X, Facebook, Discord, Spotify, LinkedIn, Slack, Microsoft, TikTok, Twitch) plus Reddit
-- Three credential modes: admin-managed (`admin`), user-provided (`user`), or both -- users can bring their own OAuth app credentials for supported providers
-- Users connect by entering API keys or completing OAuth2/device-code flows
-- All credentials encrypted at rest (AES-256-GCM) with secure memory cleanup (zeroize)
-- Token revocation on disconnect: best-effort remote revocation via provider's revocation endpoint (RFC 7009)
-- Credential delegation: downstream services declare provider requirements, proxy injects user tokens automatically
-- Lazy OAuth token refresh with 5-minute buffer before expiry
-- Token lifecycle tracking: active, expired, revoked, refresh_failed
-
-### LLM Gateway
-- Unified LLM access through NyxID: proxy requests to any supported LLM provider using stored credentials
-- **Provider-specific endpoint:** `ANY /api/v1/llm/{provider_slug}/v1/{*path}` -- passthrough proxy to a specific provider's API
-- **OpenAI-compatible gateway:** `ANY /api/v1/llm/gateway/v1/{*path}` -- routes requests by `model` field and translates between API formats
-- **Status endpoint:** `GET /api/v1/llm/status` -- per-user provider readiness with proxy URLs
-- Auto-seeded downstream services for 7 LLM providers at startup (no manual configuration required)
-- Model-to-provider routing based on model name prefix (e.g., `gpt-*` to OpenAI, `claude-*` to Anthropic)
-- Automatic Anthropic format translation: send OpenAI-format requests to Claude models through the gateway
-- Google AI routed through its OpenAI-compatible endpoint automatically
-- Supported providers: OpenAI, OpenAI Codex (OAuth), Anthropic, Google AI, Mistral, Cohere, DeepSeek
-
-### Identity Propagation
-- Forward authenticated user identity to downstream services during proxy requests
-- Four modes: `none`, `headers`, `jwt`, `both`
-- Header mode: `X-NyxID-User-Id`, `X-NyxID-User-Email`, `X-NyxID-User-Name`
-- JWT mode: Short-lived RS256-signed identity assertion (60-second TTL) via `X-NyxID-Identity-Token`
-- Per-service configuration of which claims to include
-- CRLF injection prevention on all header values
-
-### Delegated Access
-- Downstream services can make NyxID API calls (LLM gateway, proxy) on behalf of users
-- Two complementary paths:
-  - **MCP Injection:** NyxID automatically injects a short-lived delegation token (`X-NyxID-Delegation-Token`, 5-min TTL) when proxying MCP tool calls to services with `inject_delegation_token` enabled
-  - **OAuth 2.0 Token Exchange (RFC 8693):** OIDC-linked services exchange a user's access token for a delegated token (5-minute TTL) via `POST /oauth/token` with `grant_type=urn:ietf:params:oauth:grant-type:token-exchange`
-  - **Token Refresh:** Downstream services can renew delegation tokens during long-running/agentic workflows via `POST /api/v1/delegation/refresh`
-- Delegated tokens are standard NyxID JWTs with `act.sub` (acting service) and `delegated: true` claims
-- Scope enforcement: delegated tokens are restricted to proxy, LLM gateway, and delegation refresh endpoints; all other endpoints reject them via middleware
-- Consent-gated: token exchange and every refresh validate that the user has active consent for the client; revoking consent immediately blocks further delegation
-- Chained exchange prevention: delegated tokens cannot be exchanged for new delegated tokens
-- Per-client `delegation_scopes` configuration controls which scopes can be requested
-- Per-service `inject_delegation_token` and `delegation_token_scope` control MCP/proxy injection
-
-### Transaction Approval
-- Push-based approval for service access via Telegram and mobile push notifications (FCM + APNs)
-- **Blocking flow:** Proxy and LLM gateway requests hold the HTTP connection open until the user approves/rejects or the timeout expires, then return the downstream response or a 403 error -- no retry needed
-- Triggered for **all non-session auth methods** (API keys, delegated tokens, service accounts, access tokens) when the resource owner has approval enabled
-- **Per-service approval configuration:** Override the global approval toggle on a per-service basis (e.g., require approval for OpenAI but auto-approve internal services). 3-tier resolution: per-service config -> global setting -> default (no approval)
-- Configurable approval timeout (10--300 seconds) and grant expiry (1--365 days)
-- Approval grants: once approved, access is granted for a configurable period without re-prompting
-- Web UI and Telegram approval: approve or reject from the NyxID dashboard or directly in Telegram
-- **Dual Telegram delivery:** Webhook mode for production (public HTTPS URL required) or automatic long polling fallback for development (no ngrok needed)
-- Approval history and grant management pages in the frontend
-- Idempotent approval requests (SHA-256 based idempotency keys prevent duplicates)
-- Approval status polling endpoint for programmatic callers
-- Background task auto-expires timed-out requests
-
-### Credential Nodes (Node Proxy)
-- Run lightweight credential nodes on your own infrastructure via the `nyxid-node` agent binary
-- Credentials never transit NyxID -- the node injects them locally before forwarding to the downstream service
-- Selective per-service routing: bind specific services to a node, keep others on NyxID
-- Automatic fallback to NyxID-stored credentials when a node is offline
-- Streaming proxy support: SSE/chunked responses streamed through the WebSocket tunnel in real time
-- Multi-node failover: priority-based routing with health-aware automatic failback
-- HMAC request signing: HMAC-SHA256 integrity verification with replay protection
-- Per-node metrics: request counts, success rate, average latency, error tracking
-- Admin management: system-wide node view with disconnect and delete actions
-- WebSocket-based control plane with heartbeat health monitoring
-- One-time registration tokens with configurable TTL
-- Auth token and signing secret rotation with immediate invalidation
-- Configurable limits: max nodes per user, max concurrent connections, proxy timeout
-
-See [docs/NYXID_NODE.md](docs/NYXID_NODE.md) for the agent user guide, [docs/NODE_PROXY.md](docs/NODE_PROXY.md) for setup instructions, and [docs/NODE_PROXY_PROTOCOL.md](docs/NODE_PROXY_PROTOCOL.md) for the WebSocket protocol specification.
-
-### Security Hardening
-- Rate limiting: per-IP sliding window with global token-bucket fallback
-- Security headers: HSTS, CSP, X-Frame-Options (DENY), X-Content-Type-Options, Referrer-Policy, Permissions-Policy
-- CORS restricted to a single configured frontend origin
-- 1 MB global body size limit
-- Input validation on all endpoints
-- Structured error responses that never leak internal details
-- Audit logging for all authentication events
-
-### Mobile App (iOS + Android)
-- React Native + Expo cross-platform mobile app for transaction approvals
-- Challenge inbox: view, approve, and reject pending approval requests
-- Push notifications via APNs (iOS) and FCM (Android)
-- Deep linking: `nyxid://challenge/{id}` opens approval detail directly
-- Secure token storage via `expo-secure-store`
-- Approval grant management with revocation
-- EAS cloud builds for TestFlight and Play Store distribution
-
-### OAuth SDK (`@nyxids/*`)
-- TypeScript OAuth 2.0 client SDK for integrating with NyxID
-- `@nyxids/oauth-core`: PKCE Authorization Code flow, token management, userinfo endpoint
-- `@nyxids/oauth-react`: React context provider + `useNyxID()` hook
-- Storage-agnostic: works with `localStorage` (browser) or custom backends
-- Zero runtime dependencies in the core package
-
----
-
-## Architecture Overview
-
-```
-                         +------------------+
-                         |   React 19 SPA   |
-                         |  (Vite / Tailwind)|
-                         +--------+---------+
-                                  |
-                            HTTPS | CORS
-                                  |
-                         +--------v---------+
-                         |    Axum 0.8      |
-                         |  (Rust Backend)  |
-                         |                  |
-                         |  +-- Middleware --+------> Rate Limiter
-                         |  |  Security Hdr |------> CORS Layer
-                         |  |  Auth Extract |------> JWT / Session
-                         |  +---------------+
-                         |                  |
-                         |  +-- Handlers ---+
-                         |  |  auth         |  POST /api/v1/auth/*
-                         |  |  users        |  GET/PUT /api/v1/users/me
-                         |  |  api_keys     |  CRUD /api/v1/api-keys
-                         |  |  services     |  CRUD /api/v1/services
-                         |  |  proxy        |  ANY  /api/v1/proxy/:id/*, /s/:slug/*
-                         |  |  llm_gateway  |  ANY  /api/v1/llm/*
-                         |  |  oauth        |  /oauth/authorize, /token, /userinfo
-                         |  |  admin        |  /api/v1/admin/*
-                         |  +---------------+
-                         |                  |
-                         |  +-- Services ---+
-                         |  |  auth_service |  Registration, password verification
-                         |  |  token_service|  JWT issuance, refresh rotation
-                         |  |  oauth_service|  OIDC code exchange, client validation
-                         |  |  key_service  |  API key CRUD, hashing
-                         |  |  proxy_service|  Target resolution, request forwarding
-                         |  |  llm_gateway  |  Model routing, format translation
-                         |  |  mfa_service  |  TOTP generation, verification
-                         |  |  audit_service|  Async audit log insertion
-                         |  +---------------+
-                         |                  |
-                         +--------+---------+
-                                  |
-                            MongoDB Driver
-                                  |
-                         +--------v---------+
-                         |  MongoDB 8.0     |
-                         |  (29 collections)|
-                         +------------------+
+    class CC,CU,N8 agents;
+    class AUTH,PROXY gateway;
+    class MCP tooling;
+    class NODE node;
+    class PUB,INT,LOC targets;
 ```
 
-The backend follows a layered architecture:
+NyxID proxies requests, injects credentials automatically, punches through
+NAT (Network Address Translation) to reach your local services, and wraps
+any REST API as MCP (Model Context Protocol) tools.
 
-1. **Middleware Layer** -- Rate limiting, security headers, authentication extraction
-2. **Handler Layer** -- Request parsing, validation, response construction
-3. **Service Layer** -- Business logic, orchestration
-4. **Crypto Layer** -- Password hashing, JWT signing, AES encryption, token generation
-5. **Model Layer** -- Document models mapping to MongoDB collections
+## What NyxID Does
 
----
+- **Reach anything** — public APIs, internal APIs, localhost services via credential nodes (`nyxid node`). SSH (Secure Shell) tunneling (`nyxid ssh`) reaches remote hosts. No VPN (Virtual Private Network), no port forwarding.
+- **Never expose keys** — the reverse proxy injects credentials automatically. Your agent talks to NyxID; NyxID talks to the API with the real key.
+- **MCP auto-wrap** — REST APIs with OpenAPI specs become [MCP](https://modelcontextprotocol.io/) (Model Context Protocol) tools. `nyxid mcp config --tool cursor` generates the config. Works with Claude Code, Cursor, VS Code, and any MCP client.
+- **Per-agent isolation** — each agent gets a scoped token. Agent A accesses Slack and Gmail. Agent B only accesses your internal API. Revoke any session without touching the underlying credentials.
+- **Full identity layer** — OIDC (OpenID Connect) / OAuth 2.0 with PKCE (Proof Key for Code Exchange), RBAC (Role-Based Access Control), service accounts, transaction approval (Telegram + mobile push), LLM (Large Language Model) gateway for 7 providers.
 
-## Prerequisites
+## See It in Action
 
-| Tool       | Version   | Purpose                              |
-|------------|-----------|--------------------------------------|
-| Rust       | 1.85+     | Backend compiler                     |
-| Node.js    | 20+       | Frontend build tooling               |
-| MongoDB    | 8.0       | Primary database                     |
-| Docker     | 24+       | Run MongoDB and Mailpit via Compose  |
+The end-to-end loop is short: connect a service to NyxID once, then any AI agent pointed at your NyxID MCP endpoint can use it — without ever seeing the raw API key.
 
----
+1. **Add a service** in the web console — paste your OpenAI (or Anthropic, GitHub, etc.) key once; NyxID stores it encrypted.
+2. **Wire up your AI tool** — `claude mcp add --transport http --scope user nyxid http://localhost:3001/mcp` (or one-click install for Cursor in `Settings` → `MCP`).
+3. **Use it** — Claude Code, Cursor, or any MCP client can now call the service through NyxID. The agent sees the response; never the key.
 
-## Quick Start
+<p align="center">
+  <img src="assets/demo.gif" alt="NyxID end-to-end demo — connect a service, wire up MCP, call through the proxy" width="80%">
+</p>
 
-### 1. Clone and configure
+<p align="center"><a href="https://cdn.godgpt-labs.workers.dev/nyx-ai-service-flow-demo.mp4" target="_blank" rel="noopener noreferrer">▶ Watch fullscreen</a></p>
 
-```bash
-git clone https://github.com/ChronoAIProject/NyxID.git
-cd NyxID
+## Why NyxID
 
-cp .env.example .env
-```
+Other tools solve parts of this — NyxID combines credential injection, NAT traversal, and MCP tooling in one open-source gateway:
 
-Edit `.env` and generate a real encryption key:
-
-```bash
-# Generate a 32-byte encryption key (required)
-openssl rand -hex 32
-```
-
-Paste the output as the value of `ENCRYPTION_KEY` in `.env`.
-
-### 2. Start infrastructure
-
-```bash
-docker compose up -d
-```
-
-This starts:
-- **MongoDB 8.0** on port `27017` (database: `nyxid`)
-- **Mailpit** SMTP on port `1025`, web UI on port `8025` (for dev email testing)
-
-### 3. Initialize database
-
-MongoDB collections are created automatically on first use. No manual migrations are required.
-
-### 4. Start the backend
-
-```bash
-cargo run --manifest-path backend/Cargo.toml
-```
-
-The server starts on `http://localhost:3001`. RSA signing keys are auto-generated in development mode if the `keys/` directory does not exist.
-
-### 5. Start the frontend
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-The frontend starts on `http://localhost:3000`.
-
-### 6. Verify
-
-```bash
-curl http://localhost:3001/health
-```
-
-Expected response:
-
-```json
-{
-  "status": "ok",
-  "version": "0.1.0"
-}
-```
-
----
-
-## API Documentation
-
-All endpoints return JSON. Authenticated endpoints require either:
-- A `Bearer <token>` header, or
-- A valid `nyx_session` cookie for first-party browser sessions
-
-For the full API reference with request/response schemas and example curl commands, see **[docs/API.md](docs/API.md)**.
-
-### Endpoint Summary
-
-| Method | Path                                 | Auth     | Description                          |
-|--------|--------------------------------------|----------|--------------------------------------|
-| GET    | `/health`                            | None     | Health check                         |
-| POST   | `/api/v1/auth/register`              | None     | Register a new user                  |
-| POST   | `/api/v1/auth/login`                 | None     | Log in (web: session cookie, mobile/token clients: tokens) |
-| POST   | `/api/v1/auth/logout`                | Required | Log out and revoke session           |
-| POST   | `/api/v1/auth/refresh`               | None     | Refresh access token for token clients |
-| POST   | `/api/v1/auth/verify-email`          | None     | Verify email address with token      |
-| POST   | `/api/v1/auth/forgot-password`       | None     | Request a password reset email       |
-| POST   | `/api/v1/auth/reset-password`        | None     | Reset password with token            |
-| GET    | `/api/v1/auth/social/{provider}`     | None     | Initiate social login (redirects to provider) |
-| GET    | `/api/v1/auth/social/{provider}/callback` | None | Social login callback (exchanges code, creates session) |
-| GET    | `/api/v1/users/me`                   | Required | Get current user profile             |
-| PUT    | `/api/v1/users/me`                   | Required | Update current user profile          |
-| GET    | `/api/v1/api-keys`                   | Required | List API keys                        |
-| POST   | `/api/v1/api-keys`                   | Required | Create a new API key                 |
-| DELETE | `/api/v1/api-keys/{key_id}`          | Required | Delete (deactivate) an API key       |
-| POST   | `/api/v1/api-keys/{key_id}/rotate`   | Required | Rotate an API key                    |
-| GET    | `/api/v1/services`                   | Required | List downstream services (`?category=` filter) |
-| POST   | `/api/v1/services`                   | Admin    | Register a downstream service        |
-| DELETE | `/api/v1/services/{service_id}`      | Admin    | Deactivate a downstream service      |
-| GET    | `/api/v1/connections`                | Required | List user's service connections      |
-| POST   | `/api/v1/connections/{service_id}`   | Required | Connect to a service (with credentials) |
-| PUT    | `/api/v1/connections/{id}/credential`| Required | Update connection credential         |
-| DELETE | `/api/v1/connections/{service_id}`   | Required | Disconnect from a service            |
-| ANY    | `/api/v1/proxy/{service_id}/{*path}` | Required | Proxy request (requires connection)  |
-| ANY    | `/api/v1/proxy/s/{slug}/{*path}`     | Required | Proxy request via service slug       |
-| GET    | `/api/v1/proxy/services`             | Required | List proxyable services (paginated)  |
-| GET    | `/oauth/authorize`                   | Required | OIDC authorization endpoint          |
-| POST   | `/oauth/token`                       | None     | OIDC token endpoint (+ RFC 8693 token exchange) |
-| GET    | `/oauth/userinfo`                    | Required | OIDC userinfo endpoint               |
-| GET    | `/api/v1/admin/users`                | Admin    | List users (paginated, searchable)   |
-| POST   | `/api/v1/admin/users`                | Admin    | Create a new user                    |
-| GET    | `/api/v1/admin/users/{user_id}`      | Admin    | Get user details                     |
-| PUT    | `/api/v1/admin/users/{user_id}`      | Admin    | Edit user profile                    |
-| PATCH  | `/api/v1/admin/users/{user_id}/role` | Admin    | Toggle admin role                    |
-| PATCH  | `/api/v1/admin/users/{user_id}/status`| Admin   | Enable/disable user                  |
-| POST   | `/api/v1/admin/users/{user_id}/reset-password` | Admin | Force password reset        |
-| DELETE | `/api/v1/admin/users/{user_id}`      | Admin    | Delete user (cascade)                |
-| PATCH  | `/api/v1/admin/users/{user_id}/verify-email` | Admin | Manual email verification    |
-| GET    | `/api/v1/admin/users/{user_id}/sessions` | Admin | List user sessions                |
-| DELETE | `/api/v1/admin/users/{user_id}/sessions` | Admin | Revoke all user sessions         |
-| GET    | `/api/v1/admin/audit-log`            | Admin    | Query audit log (paginated, filterable) |
-| GET    | `/api/v1/admin/roles`                | Admin    | List all roles                        |
-| POST   | `/api/v1/admin/roles`                | Admin    | Create a role                         |
-| GET    | `/api/v1/admin/roles/{role_id}`      | Admin    | Get role details                      |
-| PUT    | `/api/v1/admin/roles/{role_id}`      | Admin    | Update a role                         |
-| DELETE | `/api/v1/admin/roles/{role_id}`      | Admin    | Delete a role                         |
-| GET    | `/api/v1/admin/users/{user_id}/roles`| Admin    | Get user's direct and inherited roles |
-| POST   | `/api/v1/admin/users/{user_id}/roles/{role_id}` | Admin | Assign role to user       |
-| DELETE | `/api/v1/admin/users/{user_id}/roles/{role_id}` | Admin | Revoke role from user     |
-| GET    | `/api/v1/admin/groups`               | Admin    | List all groups                       |
-| POST   | `/api/v1/admin/groups`               | Admin    | Create a group                        |
-| GET    | `/api/v1/admin/groups/{group_id}`    | Admin    | Get group details                     |
-| PUT    | `/api/v1/admin/groups/{group_id}`    | Admin    | Update a group                        |
-| DELETE | `/api/v1/admin/groups/{group_id}`    | Admin    | Delete a group                        |
-| GET    | `/api/v1/admin/groups/{group_id}/members` | Admin | List group members                |
-| POST   | `/api/v1/admin/groups/{group_id}/members/{user_id}` | Admin | Add member to group  |
-| DELETE | `/api/v1/admin/groups/{group_id}/members/{user_id}` | Admin | Remove member from group |
-| GET    | `/api/v1/admin/users/{user_id}/groups`| Admin   | Get user's groups                     |
-| POST   | `/oauth/introspect`                  | None*    | Token introspection (RFC 7662)        |
-| POST   | `/oauth/revoke`                      | None*    | Token revocation (RFC 7009)           |
-| GET    | `/api/v1/users/me/consents`          | Required | List user's OAuth consents            |
-| DELETE | `/api/v1/users/me/consents/{client_id}` | Required | Revoke consent for a client       |
-| GET    | `/api/v1/providers`                  | Required | List provider configurations          |
-| POST   | `/api/v1/providers`                  | Admin    | Register a provider                   |
-| GET    | `/api/v1/providers/{id}`             | Required | Get a provider                        |
-| PUT    | `/api/v1/providers/{id}`             | Admin    | Update a provider                     |
-| DELETE | `/api/v1/providers/{id}`             | Admin    | Deactivate a provider                 |
-| GET    | `/api/v1/providers/my-tokens`        | Required | List user's provider tokens           |
-| POST   | `/api/v1/providers/{id}/connect/api-key` | Required | Connect via API key              |
-| GET    | `/api/v1/providers/{id}/connect/oauth` | Required | Start OAuth connection flow         |
-| GET    | `/api/v1/providers/callback`         | Required | Generic OAuth callback                |
-| DELETE | `/api/v1/providers/{id}/disconnect`  | Required | Disconnect from a provider            |
-| POST   | `/api/v1/providers/{id}/refresh`     | Required | Manually refresh provider token       |
-| GET    | `/api/v1/services/{id}/requirements` | Required | List service provider requirements    |
-| POST   | `/api/v1/services/{id}/requirements` | Admin    | Add a provider requirement            |
-| DELETE | `/api/v1/services/{id}/requirements/{rid}` | Admin | Remove a provider requirement    |
-| POST   | `/api/v1/mfa/setup`                  | Required | Begin TOTP MFA enrollment            |
-| POST   | `/api/v1/mfa/verify-setup`           | Required | Complete TOTP MFA enrollment         |
-| GET    | `/api/v1/llm/status`                 | Required | LLM provider readiness per user      |
-| ANY    | `/api/v1/llm/{provider_slug}/v1/{*path}` | Required | Proxy to LLM provider           |
-| ANY    | `/api/v1/llm/gateway/v1/{*path}`     | Required | OpenAI-compatible LLM gateway        |
-| POST   | `/api/v1/delegation/refresh`         | Delegated| Refresh a delegated access token     |
-| POST   | `/api/v1/admin/service-accounts`     | Admin    | Create a service account             |
-| GET    | `/api/v1/admin/service-accounts`     | Admin    | List service accounts (paginated, searchable) |
-| GET    | `/api/v1/admin/service-accounts/{sa_id}` | Admin | Get service account details          |
-| PUT    | `/api/v1/admin/service-accounts/{sa_id}` | Admin | Update a service account             |
-| DELETE | `/api/v1/admin/service-accounts/{sa_id}` | Admin | Delete (deactivate) a service account |
-| POST   | `/api/v1/admin/service-accounts/{sa_id}/rotate-secret` | Admin | Rotate client secret |
-| POST   | `/api/v1/admin/service-accounts/{sa_id}/revoke-tokens` | Admin | Revoke all tokens    |
-| GET    | `/api/v1/notifications/settings`            | Required | Get notification/approval settings    |
-| PUT    | `/api/v1/notifications/settings`            | Required | Update notification/approval settings |
-| POST   | `/api/v1/notifications/telegram/link`       | Required | Generate Telegram link code           |
-| DELETE | `/api/v1/notifications/telegram`            | Required | Disconnect Telegram                   |
-| POST   | `/api/v1/notifications/devices`             | Required | Register push device token            |
-| GET    | `/api/v1/notifications/devices`             | Required | List registered push devices          |
-| DELETE | `/api/v1/notifications/devices/{device_id}` | Required | Remove a push device                  |
-| GET    | `/api/v1/approvals/requests`                | Required | List approval requests (history)      |
-| GET    | `/api/v1/approvals/requests/{id}/status`    | Required | Poll approval request status          |
-| POST   | `/api/v1/approvals/requests/{id}/decide`    | Required | Approve/reject via web UI             |
-| GET    | `/api/v1/approvals/grants`                  | Required | List active approval grants           |
-| DELETE | `/api/v1/approvals/grants/{grant_id}`       | Required | Revoke an approval grant              |
-| GET    | `/api/v1/approvals/service-configs`         | Required | List per-service approval configs     |
-| PUT    | `/api/v1/approvals/service-configs/{service_id}` | Required | Set per-service approval config       |
-| DELETE | `/api/v1/approvals/service-configs/{service_id}` | Required | Remove per-service approval config    |
-| POST   | `/api/v1/webhooks/telegram`                 | None*    | Telegram webhook (secret-verified)    |
-| POST   | `/api/v1/nodes/register-token`              | Required | Create node registration token        |
-| GET    | `/api/v1/nodes`                             | Required | List user's credential nodes          |
-| GET    | `/api/v1/nodes/{node_id}`                   | Required | Get node details                      |
-| DELETE | `/api/v1/nodes/{node_id}`                   | Required | Delete/deregister a node              |
-| POST   | `/api/v1/nodes/{node_id}/rotate-token`      | Required | Rotate node auth token                |
-| GET    | `/api/v1/nodes/{node_id}/bindings`          | Required | List node service bindings            |
-| POST   | `/api/v1/nodes/{node_id}/bindings`          | Required | Create a service binding              |
-| PATCH  | `/api/v1/nodes/{node_id}/bindings/{binding_id}` | Required | Update binding priority          |
-| DELETE | `/api/v1/nodes/{node_id}/bindings/{binding_id}` | Required | Remove a service binding         |
-| GET    | `/api/v1/nodes/ws`                          | None*    | Node WebSocket upgrade (auth via WS protocol) |
-| GET    | `/api/v1/admin/nodes`                       | Admin    | List all nodes across all users       |
-| GET    | `/api/v1/admin/nodes/{node_id}`             | Admin    | Get any node's details                |
-| POST   | `/api/v1/admin/nodes/{node_id}/disconnect`  | Admin    | Force-disconnect a node               |
-| DELETE | `/api/v1/admin/nodes/{node_id}`             | Admin    | Admin-delete a node                   |
-
-`POST /oauth/token` also supports `grant_type=client_credentials` for service account authentication and `grant_type=urn:ietf:params:oauth:grant-type:token-exchange` for social token exchange (Google: `subject_token_type=id_token`; GitHub: `subject_token_type=access_token`) and delegated access.
-
----
-
-## Environment Variables
-
-All configuration is loaded from environment variables. A `.env` file is supported via `dotenvy`.
-
-### Required
-
-| Variable         | Description                                        | Example                                        |
-|------------------|----------------------------------------------------|------------------------------------------------|
-| `DATABASE_URL`   | MongoDB connection string                          | `mongodb://localhost:27017/nyxid`              |
-| `ENCRYPTION_KEY` | 32-byte hex-encoded AES-256 key (64 hex chars)     | Output of `openssl rand -hex 32`               |
-
-### Encryption
-
-| Variable                   | Default | Description                                                          |
-|----------------------------|---------|----------------------------------------------------------------------|
-| `ENCRYPTION_KEY_PREVIOUS`  | *(none)* | Previous encryption key for zero-downtime key rotation (64 hex chars). Set this to the old `ENCRYPTION_KEY` value when rotating keys. With Phase 2 envelope encryption, KEK rotation only re-wraps per-record DEK blobs (via `rewrap()`) without re-encrypting data. One previous key supported at a time; finish re-wrapping before rotating again. See [docs/SECURITY.md](docs/SECURITY.md#key-rotation) for the full procedure and `/health` decrypt counters. |
-
-### Server
-
-| Variable       | Default                  | Description                          |
-|----------------|--------------------------|--------------------------------------|
-| `PORT`         | `3001`                   | HTTP listen port                     |
-| `BASE_URL`     | `http://localhost:3001`  | Backend base URL (used in JWT `aud`) |
-| `FRONTEND_URL` | `http://localhost:3000`  | Frontend origin for CORS             |
-| `ENVIRONMENT`  | `development`            | `development`, `staging`, `production` |
-
-### Database
-
-| Variable                   | Default | Description                     |
-|----------------------------|---------|---------------------------------|
-| `DATABASE_MAX_CONNECTIONS` | `10`    | Connection pool max size        |
-
-### JWT
-
-| Variable               | Default              | Description                              |
-|------------------------|----------------------|------------------------------------------|
-| `JWT_PRIVATE_KEY_PATH` | `keys/private.pem`   | Path to RSA private key PEM file         |
-| `JWT_PUBLIC_KEY_PATH`  | `keys/public.pem`    | Path to RSA public key PEM file          |
-| `JWT_ISSUER`           | `nyxid`              | JWT `iss` claim value                    |
-| `JWT_ACCESS_TTL_SECS`  | `900` (15 min)       | Access token lifetime in seconds         |
-| `JWT_REFRESH_TTL_SECS` | `604800` (7 days)    | Refresh token lifetime in seconds        |
-| `SA_TOKEN_TTL_SECS`   | `3600` (1 hour)      | Service account token lifetime in seconds |
-
-In development mode, RSA keys are auto-generated if the files do not exist. In production, you must provide pre-generated keys:
-
-```bash
-openssl genrsa -out keys/private.pem 4096
-openssl rsa -in keys/private.pem -pubout -out keys/public.pem
-chmod 600 keys/private.pem
-```
-
-### Rate Limiting
-
-| Variable               | Default | Description                            |
-|------------------------|---------|----------------------------------------|
-| `RATE_LIMIT_PER_SECOND`| `10`    | Global rate limit (requests/second)    |
-| `RATE_LIMIT_BURST`     | `30`    | Burst capacity and per-IP limit        |
-
-### Social Login (Optional)
-
-| Variable               | Description             |
-|------------------------|-------------------------|
-| `GOOGLE_CLIENT_ID`     | Google OAuth client ID  |
-| `GOOGLE_CLIENT_SECRET` | Google OAuth secret     |
-| `GITHUB_CLIENT_ID`     | GitHub OAuth client ID  |
-| `GITHUB_CLIENT_SECRET` | GitHub OAuth secret     |
-
-### Telegram / Approval System (Optional)
-
-| Variable                         | Default | Description                                      |
-|----------------------------------|---------|--------------------------------------------------|
-| `TELEGRAM_BOT_TOKEN`             |         | Telegram Bot API token (from @BotFather)         |
-| `TELEGRAM_WEBHOOK_SECRET`        |         | Secret for verifying Telegram webhook callbacks  |
-| `TELEGRAM_WEBHOOK_URL`           |         | Public URL for Telegram webhooks (e.g. `https://auth.nyxid.dev/api/v1/webhooks/telegram`). Omit to use long polling mode. |
-| `TELEGRAM_BOT_USERNAME`          |         | Bot username without @ (for link instructions)   |
-| `APPROVAL_EXPIRY_INTERVAL_SECS`  | `5`     | Interval between approval expiry sweeps (seconds)|
-
-The approval system works without Telegram -- users can always approve/reject via the web UI. Telegram delivery requires `TELEGRAM_BOT_TOKEN`.
-
-### Mobile Push Notifications (Optional)
-
-| Variable                         | Default | Description                                          |
-|----------------------------------|---------|------------------------------------------------------|
-| `FCM_SERVICE_ACCOUNT_PATH`       |         | Path to Firebase service account JSON file           |
-| `APNS_KEY_PATH`                  |         | Path to APNs .p8 private key file                    |
-| `APNS_KEY_ID`                    |         | APNs Key ID (from Apple Developer portal)            |
-| `APNS_TEAM_ID`                   |         | APNs Team ID (from Apple Developer portal)           |
-| `APNS_TOPIC`                     |         | APNs topic / iOS app bundle ID (e.g. `dev.nyxid.app`)|
-| `APNS_SANDBOX`                   | `true` in dev, `false` in prod | Use APNs sandbox environment |
-
-FCM and APNs are independent -- configure either or both. Push notifications are sent in parallel alongside Telegram. Invalid device tokens are automatically cleaned up when the push service reports them as unregistered.
-
-**Telegram delivery modes:** When `TELEGRAM_WEBHOOK_URL` (and `TELEGRAM_WEBHOOK_SECRET`) are set, the backend registers a webhook with Telegram at startup. When only `TELEGRAM_BOT_TOKEN` is set (no webhook URL), the backend automatically falls back to `getUpdates` long polling -- ideal for local development without ngrok or tunnels.
-
-### SMTP (Optional)
-
-| Variable            | Description                       |
-|---------------------|-----------------------------------|
-| `SMTP_HOST`         | SMTP server hostname              |
-| `SMTP_PORT`         | SMTP server port                  |
-| `SMTP_USERNAME`     | SMTP authentication username      |
-| `SMTP_PASSWORD`     | SMTP authentication password      |
-| `SMTP_FROM_ADDRESS` | Sender address for outbound email |
-
-For development, Mailpit is provided via Docker Compose (SMTP on `localhost:1025`, web UI at `http://localhost:8025`).
-
-### Credential Nodes (Optional)
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `NODE_HEARTBEAT_INTERVAL_SECS` | `30` | Heartbeat ping interval to connected nodes |
-| `NODE_HEARTBEAT_TIMEOUT_SECS` | `90` | Mark node offline after N seconds without heartbeat |
-| `NODE_PROXY_TIMEOUT_SECS` | `30` | Timeout for proxy requests routed through nodes |
-| `NODE_REGISTRATION_TOKEN_TTL_SECS` | `3600` | Registration token validity (1 hour) |
-| `NODE_MAX_PER_USER` | `10` | Maximum nodes per user |
-| `NODE_MAX_WS_CONNECTIONS` | `100` | Maximum concurrent node WebSocket connections |
-| `NODE_MAX_STREAM_DURATION_SECS` | `300` | Maximum duration for streaming proxy responses |
-| `NODE_HMAC_SIGNING_ENABLED` | `true` | Enable HMAC request signing for node proxy requests |
-
-### Logging
-
-| Variable   | Default                                | Description              |
-|------------|----------------------------------------|--------------------------|
-| `RUST_LOG` | `nyxid=info,tower_http=info` | Tracing filter string |
-
----
-
-## Database Schema
-
-NyxID uses 29 MongoDB collections:
-
-| Collection                 | Description                                          |
-|----------------------------|------------------------------------------------------|
-| `users`                    | User accounts (email, password hash, MFA status)     |
-| `sessions`                 | Server-side sessions with hashed tokens              |
-| `oauth_clients`            | Registered OIDC/OAuth clients (includes `delegation_scopes` for token exchange) |
-| `authorization_codes`      | Short-lived OIDC authorization codes                 |
-| `refresh_tokens`           | Issued refresh tokens with rotation chain tracking   |
-| `api_keys`                 | User-scoped API keys (hashed, with prefix)           |
-| `downstream_services`      | Registered downstream services for proxying (includes auto-seeded LLM services via `provider_config_id`, `inject_delegation_token` and `delegation_token_scope` for delegated access) |
-| `user_service_connections` | Per-user connections and encrypted credentials for downstream services |
-| `mfa_factors`              | TOTP factors and encrypted recovery codes            |
-| `service_endpoints`        | Registered API endpoints per service (MCP tools)     |
-| `provider_configs`         | External provider registry (encrypted OAuth creds)   |
-| `user_provider_tokens`     | Per-user encrypted provider tokens (API keys/OAuth)  |
-| `user_provider_credentials`| Per-user encrypted provider credentials              |
-| `service_provider_requirements` | Provider token requirements per service          |
-| `oauth_states`             | Temporary OAuth state for provider flows             |
-| `roles`                    | Role definitions with permissions and scoping        |
-| `groups`                   | Group definitions with role inheritance               |
-| `consents`                 | User OAuth consent records per client                 |
-| `service_accounts`         | Non-human (machine) identity definitions             |
-| `service_account_tokens`   | Issued service account JWT records for revocation    |
-| `approval_requests`        | Pending/resolved approval requests for proxy access  |
-| `approval_grants`          | Cached approval grants (time-limited, revocable)     |
-| `service_approval_configs` | Per-service approval overrides (per user)            |
-| `notification_channels`    | Per-user notification preferences, Telegram links, and push device tokens |
-| `nodes`                    | Registered credential nodes (per user, with auth token hash and status) |
-| `node_service_bindings`    | Service-to-node routing bindings (which services a node handles) |
-| `node_registration_tokens` | One-time tokens for node registration (TTL-indexed, auto-expire) |
-| `mcp_sessions`             | MCP protocol session state                           |
-| `audit_log`                | Immutable audit trail of security events             |
-
-All documents use UUID identifiers, ISO 8601 timestamps, and appropriate indexes for query patterns.
-
-For the full schema with fields and relationships, see **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
-
----
-
-## Security
-
-### Cryptography
-
-| Purpose              | Algorithm / Standard                           |
-|----------------------|------------------------------------------------|
-| Password hashing     | Argon2id (m=64MiB, t=3, p=4)                  |
-| JWT signing          | RS256 with 4096-bit RSA keys                   |
-| Encryption at rest   | AES-256-GCM envelope encryption (per-record DEKs wrapped by KEK) |
-| Token hashing        | SHA-256                                         |
-| PKCE                 | S256 (SHA-256 code challenge)                   |
-
-### HTTP Security Headers
-
-Every response includes:
-- `Strict-Transport-Security: max-age=31536000; includeSubDomains; preload`
-- `X-Content-Type-Options: nosniff`
-- `X-Frame-Options: DENY`
-- `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'`
-- `Referrer-Policy: strict-origin-when-cross-origin`
-- `Permissions-Policy: camera=(), microphone=(), geolocation=(), interest-cohort=()`
-- `X-XSS-Protection: 1; mode=block`
-
-### Cookie Security
-
-- Browser authentication uses an `HttpOnly`, `SameSite=Lax` `nyx_session` cookie
-- `Secure` flag is automatically set when not running on localhost
-- Mobile and OAuth clients use bearer tokens and refresh tokens in explicit request bodies instead of browser auth cookies
-
-### SSRF Protection
-
-The service registration endpoint validates that `base_url` values:
-- Use `https://` or `http://` scheme only
-- Do not resolve to private IP ranges (10.x, 172.16-31.x, 192.168.x, 127.x, ::1)
-- Do not point to `localhost`, `metadata.google.internal`, or other reserved hosts
-
-### Rate Limiting
-
-Dual-layer rate limiting:
-1. **Per-IP**: Sliding window counter per client IP (configurable via `RATE_LIMIT_BURST`)
-2. **Global**: Token-bucket algorithm as a safety net for total server throughput
-
-Returns HTTP 429 when limits are exceeded.
-
----
-
-## Credential Nodes (Node Proxy)
-
-NyxID supports user-operated **credential nodes** that keep API keys and tokens on your own infrastructure. When a proxy request arrives for a node-bound service, NyxID routes it to your node via WebSocket. The node injects credentials locally and forwards to the downstream service. Credentials never transit NyxID's servers.
-
-**Key features:**
-- **Selective routing:** Bind specific services to a node; unbound services use NyxID-stored credentials
-- **Automatic fallback:** If the node is offline, requests transparently fall back to the standard proxy
-- **Streaming proxy:** SSE/chunked responses streamed through the WebSocket tunnel in real time
-- **Multi-node failover:** Priority-based routing with health-aware node selection
-- **HMAC request signing:** HMAC-SHA256 integrity verification with replay protection
-- **Per-node metrics:** Request counts, success rate, latency tracking, error diagnostics
-- **Admin management:** System-wide node view with disconnect/delete actions
-- **WebSocket control plane:** Persistent connection with heartbeat monitoring (configurable interval and timeout)
-- **Token security:** Registration and auth tokens are 32-byte random values; only SHA-256 hashes are stored
-- **Audit trail:** All node operations and node-routed proxy requests are logged
-
-**Quick start:**
-1. Build the agent: `cargo build --release -p nyxid-node`
-2. Navigate to **Credential Nodes** in the dashboard and click **Register Node**
-3. Register the agent: `nyxid-node register --token nyx_nreg_... --url wss://your-server/api/v1/nodes/ws`
-   - Add `--keychain` to store secrets in the OS keychain instead of encrypted file
-4. Add credentials: `nyxid-node credentials add --service openai --header "Authorization: Bearer sk-..."`
-5. Start the agent: `nyxid-node start`
-6. Bind services to the node from the node detail page
-7. (Optional) Migrate storage: `nyxid-node migrate --to keychain`
-
-For the agent user guide, see **[docs/NYXID_NODE.md](docs/NYXID_NODE.md)**.
-For setup instructions, see **[docs/NODE_PROXY.md](docs/NODE_PROXY.md)**.
-For the WebSocket protocol specification, see **[docs/NODE_PROXY_PROTOCOL.md](docs/NODE_PROXY_PROTOCOL.md)**.
-
----
-
-## MCP Integration
-
-NyxID is designed to be accessible to AI agents via the Model Context Protocol (MCP). The backend's built-in MCP transport (`/mcp`) exposes connected downstream services as MCP tools.
-
-**How it works:**
-- MCP sessions start with 3 meta-tools: `nyx__search_tools`, `nyx__discover_services`, and `nyx__connect_service`
-- Service tools are loaded on-demand when the LLM calls `nyx__search_tools` or `nyx__connect_service`
-- The server sends `notifications/tools/list_changed` so clients automatically refresh their tool lists
-- Each service endpoint is mapped to an MCP tool named `{service_slug}__{endpoint_name}`
-- Tool calls are forwarded through NyxID's authenticated proxy with per-user credential injection
-- Maximum 20 activated services per session to bound memory usage
-
-**Agent capabilities:**
-- Authenticate users and manage sessions
-- Create and rotate API keys
-- Register and query downstream services
-- Proxy requests to downstream services on behalf of users
-- Query audit logs
-
-This makes NyxID suitable as an identity and credential management layer in agentic workflows. See **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** for MCP proxy deployment instructions.
-
----
+| | NyxID | 1Password Universal Autofill | Cloudflare Tunnel | Keycloak |
+|---|---|---|---|---|
+| Open source | Yes | No | No | Yes |
+| NAT traversal to localhost | Yes (`nyxid node`) | No | Yes (no credentials) | No |
+| Credential injection | Yes (any API) | Partner integrations | No | No |
+| REST to MCP auto-wrap | Yes | No | No | No |
+| Per-agent isolation | Yes | No | No | No |
+| OIDC / OAuth 2.0 | Yes | No | No | Yes |
+
+## Use Cases
+
+- Give Claude Code access to your private APIs without sharing keys
+- Expose internal microservices to AI agents through a single MCP endpoint
+- Secure AI agent access to self-hosted tools (Grafana, Jenkins, n8n) behind your firewall
+
+## Getting Started
+
+NyxID is used in two phases — install once, then pick a workflow. The install gives you a NyxID instance and an Agent Key; the workflow shows what to build with them.
+
+### 1. Install NyxID
+
+Choose hosted (we run it for you) or self-host (Docker on your machine).
+
+| | Hosted | Self-host |
+|---|---|---|
+| **What it is** | We run NyxID for you in the cloud | You run NyxID on your own machine |
+| **Best for** | Getting started quickly, no setup | Full control, private networks, offline use |
+| **Status** | Early access (invite code below) | Open — anyone can run it |
+
+> **Driving NyxID from an AI coding agent?** Hand it this single line at any point — it installs the `nyxid` CLI plus the Nyx skill files for the agent to drive:
+>
+> ```
+> Install nyx skills from https://github.com/ChronoAIProject/NyxID/blob/main/skills/INSTALL.md
+> ```
+>
+> The agent reads [`skills/INSTALL.md`](skills/INSTALL.md) end-to-end. You'll still need a hosted account or a self-host stack (below) for the agent to log into.
+
+#### Hosted (Recommended)
+
+Start using NyxID in under a minute — no Docker, no setup.
+
+1. Open **[nyx.chrono-ai.fun/register](https://nyx.chrono-ai.fun/register)** in a new tab (Cmd/Ctrl-click, or right-click → Open Link in New Tab) so you can keep this checklist open.
+2. Enter invite code: **`NYX-FGNY85AF`**
+3. Sign in with Google, GitHub, or Apple
+4. Open `AI Services`, add and connect your first external service, and run the API Usage verification curl
+5. After the service is verified, wire your AI tool to NyxID's MCP endpoint
+
+The full click-through flow is in **[Add your first AI Service](docs/connecting-services/web-ui.md)**. Early access is limited to 20 users.
+
+#### Self-Host
+
+Run NyxID on your own machine. This sets up three Docker containers (database, backend, frontend) — takes about 2 minutes.
+
+**Prerequisites:** [Docker](https://docs.docker.com/get-docker/) and a bash shell. macOS and Linux already have one — Windows users, see [docs/WINDOWS_SETUP.md](docs/WINDOWS_SETUP.md) before going further. The `nyxid` CLI is optional. Full prereqs and disk budgets are in [SETUP.md](docs/SETUP.md).
+
+##### AI-Assisted (Recommended)
+
+If you have Claude Code, Cursor, or any AI coding assistant open, paste the prompt below into it and it will drive the entire self-host flow for you — preflight, clone, env generation, Docker stack, health check, optional CLI install, login, first credential, and MCP config.
+
+<details>
+<summary><strong>Click to expand the full AI-assisted self-host prompt</strong></summary>
+
+> I want to self-host NyxID on this machine (the repo is https://github.com/ChronoAIProject/NyxID). Walk me through the full setup interactively. If anything fails or I'd prefer to follow the manual steps myself, the full step-by-step with troubleshooting is at https://github.com/ChronoAIProject/NyxID/blob/main/docs/SETUP.md. If I'm on Windows, confirm I'm running from a WSL Ubuntu shell (not native PowerShell or CMD) before proceeding — see https://github.com/ChronoAIProject/NyxID/blob/main/docs/WINDOWS_SETUP.md.
+> 1. Confirm Docker is installed and running before touching anything (check `git`, `docker`, `openssl`, `curl`, `docker compose` v2, and `docker info`).
+> 2. **Before cloning or generating anything, check whether NyxID install STATE is present** — look for a `./NyxID/.env.dev` file OR any Docker volume matching `nyx*_mongodb_data` (run `docker volume ls --format '{{.Name}}' | grep -E 'nyx.*_mongodb_data$'` — this catches the default `nyxid_mongodb_data` plus any variant from a renamed checkout). A bare `./NyxID` directory alone does NOT count as "installed" — `uninstall.sh` leaves the source tree in place, so the directory can exist with no state. **If install state is present, stop and tell me the quickstart is a first-time-only install.** Ask whether I want to (a) uninstall first — if `./NyxID` exists, run `cd NyxID && ./scripts/uninstall.sh --yes && cd ..`; if only the stale Docker volume is orphaned (checkout was manually deleted earlier), run `docker volume ls --format '{{.Name}}' | grep -E 'nyx.*_mongodb_data$' | xargs -r docker volume rm` directly. Either path wipes the volume, containers, and (for the script path) `.env.dev`/keys — destroys all NyxID accounts and encrypted credentials. Or (b) keep my existing install and stop here — I can verify it's still running with `curl -sf http://localhost:3001/health`. Do not proceed to step 3 until I answer.
+> 3. If `./NyxID` already exists (post-uninstall reinstall), `cd` into it; otherwise clone the repo into the current directory and `cd` in. Generate `.env.dev` with a fresh `ENCRYPTION_KEY` and `MONGO_ROOT_PASSWORD` (set `ENVIRONMENT=development`, `INVITE_CODE_REQUIRED=false`, `AUTO_VERIFY_EMAIL=true`, and `EMAIL_AUTH_ENABLED=true` so I don't get stuck on email verification or a locked-down signup page), symlink it to `.env.production`, create the PKCS#1 JWT signing keys under `keys/` (with a LibreSSL fallback using `-pubout` if `-RSAPublicKey_out` isn't supported), then pull images and start the stack with `docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.production up -d`. Wait up to 90 seconds for `http://localhost:3001/health` to return 200 — if it times out, tell me to run `docker logs nyxid-backend`. If the logs show `SCRAM failure: Authentication failed`, that means the MongoDB volume has a stale password from a previous install — tell me to run `./scripts/uninstall.sh --yes` (or, if the checkout is gone, `docker volume ls --format '{{.Name}}' | grep -E 'nyx.*_mongodb_data$' | xargs -r docker volume rm` to remove any nyx-flavored orphan volume) and retry. Show me the generated `ENCRYPTION_KEY` so I can back it up.
+> 4. Tell me to open http://localhost:3000 and register my account (no email verification needed — accounts are auto-verified in dev mode), and wait until I confirm I've done that.
+> 5. **Ask me whether I want to install the `nyxid` CLI plus the Nyx skill** so you can drive NyxID from the terminal afterwards. Explain that it's optional, that the installer downloads a roughly 10 MB prebuilt binary plus a small set of skill files (no Rust toolchain required), installs the CLI into a versioned layout with rollback support, and that only unsupported OS/arch combinations fall back to a Rust source build. If I say yes, follow the install manifest at https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/INSTALL.md end-to-end (it installs the CLI under `~/.local/share/nyxid/`, drops the skill into your skill directory, and tells you to `export PATH="$HOME/.local/bin:$PATH"` if needed); verify with `nyxid doctor`, log me in with `nyxid login --base-url http://localhost:3001`, add my OpenAI key with `nyxid service add llm-openai --credential-env OPENAI_API_KEY`, then verify with `nyxid proxy request <slug> models` using the slug the previous `service add` command printed under `Slug:` (typically `llm-openai`, but suffixed if I already had a service with that slug). If I say no, walk me through adding the same OpenAI credential in the web console instead.
+> 6. Finish by connecting my AI tool to NyxID's MCP endpoint at `http://localhost:3001/mcp`. For Claude Code: `claude mcp add --transport http --scope user nyxid http://localhost:3001/mcp`. For Codex: `codex mcp add nyxid --url http://localhost:3001/mcp`. For Cursor: open `Settings` > `MCP` in the web console and click `Install to Cursor`.
+
+</details>
+
+<!-- AI setup-prompt maintenance: validate this prompt against actual CLI + web console on each release -->
+
+##### Manual Setup
+
+Prefer to run each step yourself, or need the full troubleshooting guide? Follow **[docs/SETUP.md](docs/SETUP.md)** (macOS, Linux, or Windows via WSL).
+
+It covers:
+
+- System preflight check — [Step 1](docs/SETUP.md#step-1-of-3--check-your-system)
+- One paste-block install — [Step 2](docs/SETUP.md#step-2-of-3--install-and-start)
+- Register your account — [Step 3](docs/SETUP.md#step-3-of-3--register-and-connect)
+- Optional [CLI install](docs/SETUP.md#optional-install-the-nyxid-cli)
+- [Uninstall & reinstall](docs/SETUP.md#uninstall--reinstall), [orphan volume recovery](docs/SETUP.md#recovering-an-orphan-volume), and [SCRAM failure](docs/SETUP.md#stuck-on-scram-failure) troubleshooting
+
+Once NyxID is running and you've registered at `http://localhost:3000`, continue to [2. Pick a workflow](#2-pick-a-workflow).
+
+For production deployment (TLS, custom domain, email verification), see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+
+### 2. Pick a workflow
+
+With NyxID running and an Agent Key in hand, pick the workflow that matches what you want to build. Each is a step-by-step procedure that ends with a working integration; the four are independent and can be completed in any order.
+
+| Quickstart | Outcome | NyxID capability |
+|---|---|---|
+| [**n8n: Daily AI News Digest with One NyxID Credential**](docs/quickstarts/n8n.md) | An n8n workflow pulls an RSS feed, summarizes each article with Gemini, and posts to Telegram — using one `Header Auth` credential in n8n while NyxID stores the upstream Gemini and Telegram secrets. | Per-service credential injection |
+| [**Per-Agent Keys for Claude Code and Codex**](docs/quickstarts/claude-code.md) | Two coding agents on one machine, each scoped to a distinct service and credential, attributed independently in the audit log. | Agent isolation, scoped Agent Keys |
+| [**Reach a Localhost API from a Cloud-Hosted Agent**](docs/quickstarts/node-proxy.md) | A private-host API is reachable from a cloud agent without VPN, port forwarding, or a tunneling service. | Credential Node, outbound-only NAT traversal |
+| [**Wrap a REST API as MCP Tools**](docs/quickstarts/mcp-wrapping.md) | An OpenAPI spec is exposed as typed MCP tools to Claude Code / Cursor / VS Code / Codex with no MCP server code. | OpenAPI → MCP auto-wrap |
+
+> For a per-interface reference walkthrough that ends with `HTTP/1.1 200` from your first proxied call (Web UI · CLI · AI-driven · Direct API), see the [Connecting AI Services hub](docs/connecting-services/).
+
+## Connecting AI Services (interface reference)
+
+[Pick a workflow](#2-pick-a-workflow) in Getting Started is organized by use case. For an interface-oriented reference that ends with a verified proxy call (`HTTP/1.1 200`) using your preferred entry point — Web UI, CLI, AI-driven (MCP), or Direct API — see **[docs/connecting-services/](docs/connecting-services/)**. The hub distinguishes external service credentials from NyxID Agent Keys and links to one walkthrough per interface.
+
+## Resources
+
+| Topic | Link | Description |
+|-------|------|-------------|
+| Quickstarts | [docs/quickstarts/](docs/quickstarts/) | End-to-end recipes — n8n, per-agent keys, node proxy, MCP wrapping |
+| Connecting AI Services | [docs/connecting-services/](docs/connecting-services/) | Add your first (or Nth) AI Service — Web UI / CLI / AI-driven / Direct API |
+| Setup | [docs/SETUP.md](docs/SETUP.md) | Step-by-step self-host + troubleshooting (macOS, Linux, Windows via WSL) |
+| Deployment | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Start here for production setup |
+| AI Agent Playbook | [docs/AI_AGENT_PLAYBOOK.md](docs/AI_AGENT_PLAYBOOK.md) | Start here for agent integration |
+| Architecture | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System design and data flows |
+| API Reference | [docs/API.md](docs/API.md) | Full endpoint documentation |
+| Credential Nodes | [docs/NODE_PROXY.md](docs/NODE_PROXY.md) | NAT traversal setup |
+| MCP Integration | [docs/MCP_DELEGATION_FLOW.md](docs/MCP_DELEGATION_FLOW.md) | MCP protocol details |
+| SSH Tunneling | [docs/SSH_TUNNELING.md](docs/SSH_TUNNELING.md) | Remote host access over WebSocket |
+| Security | [docs/SECURITY.md](docs/SECURITY.md) | Threat model and hardening |
+| Environment Variables | [docs/ENV.md](docs/ENV.md) | Full config reference |
+| Telemetry | [docs/TELEMETRY.md](docs/TELEMETRY.md) | Opt-in usage analytics — hot-swap contract, event taxonomy, consent + GDPR erasure |
+| Developer Guide | [docs/DEVELOPER_GUIDE.md](docs/DEVELOPER_GUIDE.md) | Local development setup |
 
 ## Contributing
 
-We welcome contributions. See **[CONTRIBUTING.md](CONTRIBUTING.md)** for the development workflow, coding conventions, and pull request process.
-
----
-
-## Development Guide
-
-### Running Tests
-
-```bash
-# Backend unit tests
-cargo test --manifest-path backend/Cargo.toml
-
-# Frontend lint
-cd frontend && npm run lint
-```
-
-### Code Organization
-
-The backend follows a strict layered architecture:
-
-- **`handlers/`** -- HTTP request/response logic only. No business logic.
-- **`services/`** -- Business logic. No HTTP types.
-- **`models/`** -- MongoDB document structs (serde). No logic.
-- **`crypto/`** -- Cryptographic operations. Pure functions where possible.
-- **`mw/`** -- Axum middleware (auth extraction, rate limiting, security headers).
-- **`errors/`** -- Centralized error types with HTTP status code mapping.
-
-### Adding a New Endpoint
-
-1. Define request/response types in `handlers/<module>.rs`
-2. Implement business logic in `services/<module>.rs`
-3. Register the route in `routes.rs`
-4. Add audit logging where appropriate
-
-### Frontend Development
-
-The frontend uses:
-- **React 19** with function components and hooks
-- **TanStack Router** for type-safe file-based routing
-- **TanStack Query** for server state management
-- **Zustand** for client-side auth state
-- **shadcn/ui** (Radix primitives + Tailwind CSS v4) for the component library
-- **Zod v4** for runtime schema validation
-- **React Hook Form** with Zod resolvers for form handling
-
-### Production Deployment Checklist
-
-- [ ] Set `ENVIRONMENT=production`
-- [ ] Generate and mount RSA key pair (`keys/private.pem`, `keys/public.pem`)
-- [ ] Generate a secure `ENCRYPTION_KEY` (`openssl rand -hex 32`)
-- [ ] Configure a real `DATABASE_URL` with SSL
-- [ ] Set `BASE_URL` and `FRONTEND_URL` to production origins
-- [ ] Configure social login provider credentials if needed
-- [ ] Configure SMTP for transactional email
-- [ ] Configure Telegram bot for approval notifications (optional: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`, `TELEGRAM_WEBHOOK_URL`)
-- [ ] Configure FCM for mobile push (optional: generate Firebase service account JSON, set `FCM_SERVICE_ACCOUNT_PATH`)
-- [ ] Configure APNs for mobile push (optional: obtain .p8 key from Apple Developer, set `APNS_KEY_PATH`, `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_TOPIC`, `APNS_SANDBOX=false`)
-- [ ] Place behind a reverse proxy (nginx, Caddy) that sets `X-Forwarded-For`
-- [ ] Enable TLS termination at the reverse proxy
-- [ ] Set `RUST_LOG=nyxid=info,tower_http=warn` for production log levels
-
----
-
-## Project Structure
-
-```
-NyxID/
-|-- Cargo.toml                  Workspace root (backend + node-agent)
-|-- docker-compose.yml          MongoDB 8.0 + Mailpit
-|-- .env.example                Environment variable template
-|-- .gitignore                  Ignores target/, node_modules/, keys/, .env
-|
-|-- node-agent/
-|   |-- Cargo.toml              nyxid-node agent binary
-|   `-- src/
-|       |-- main.rs             CLI entry point, command dispatch
-|       |-- cli.rs              Clap subcommand definitions
-|       |-- config.rs           TOML config file (load, save, encrypt/decrypt fields)
-|       |-- ws_client.rs        WebSocket connection loop, reconnection with exponential backoff
-|       |-- proxy_executor.rs   HTTP request execution, credential injection, streaming
-|       |-- credential_store.rs In-memory decrypted credential store
-|       |-- signing.rs          HMAC-SHA256 verification, replay guard
-|       |-- metrics.rs          Local atomic counters (total, success, error)
-|       |-- encryption.rs       AES-256-GCM local encryption (keyfile management)
-|       |-- keychain.rs         OS keychain storage backend (macOS/Windows/Linux)
-|       |-- secret_backend.rs   Pluggable secret storage trait (file vs keychain)
-|       `-- error.rs            Error enum with thiserror
-|
-|-- backend/
-|   |-- Cargo.toml              Backend dependencies
-|   `-- src/
-|       |-- main.rs             Entry point, middleware stack, server startup
-|       |-- config.rs           AppConfig loaded from environment variables
-|       |-- db.rs               Database connection pool setup
-|       |-- routes.rs           Router definition with all route groups
-|       |-- errors/mod.rs       AppError enum, error codes, JSON error responses
-|       |-- crypto/
-|       |   |-- password.rs     Argon2id hashing and verification
-|       |   |-- jwt.rs          RS256 JWT signing, verification, key management
-|       |   |-- aes.rs          AES-256-GCM envelope encryption (per-record DEKs wrapped by KEK)
-|       |   |-- token.rs        Random token generation, SHA-256 hashing
-|       |   |-- key_provider.rs Pluggable async KeyProvider trait for encryption backends
-|       |   |-- local_key_provider.rs Local hex-key encryption provider
-|       |   |-- aws_kms_provider.rs  AWS KMS encryption provider (feature: aws-kms)
-|       |   |-- gcp_kms_provider.rs  GCP Cloud KMS encryption provider (feature: gcp-kms)
-|       |   |-- jwks.rs         JWKS key fetching and caching (social token verification)
-|       |   `-- apple_client_secret.rs Apple Sign-In client secret generation
-|       |-- models/             MongoDB document definitions (29 collections, incl. role, group, consent, service_account, approval, mcp_session, node)
-|       |-- handlers/           HTTP handler functions by domain
-|       |   |-- auth.rs         Register, login, logout, refresh, verify-email, forgot/reset-password
-|       |   |-- social_auth.rs  Social login: authorize redirect + OAuth callback
-|       |   |-- users.rs        Get/update user profile
-|       |   |-- api_keys.rs     CRUD + rotate API keys
-|       |   |-- services.rs     CRUD downstream services (+ identity propagation config)
-|       |   |-- connections.rs  Connect/disconnect, credential management
-|       |   |-- providers.rs    CRUD external provider configurations
-|       |   |-- user_tokens.rs  User provider token management (API key + OAuth)
-|       |   |-- service_requirements.rs  Service provider requirement management
-|       |   |-- proxy.rs        Reverse proxy handler (+ identity + delegation)
-|       |   |-- llm_gateway.rs  LLM gateway handlers (proxy, gateway, status)
-|       |   |-- mcp.rs          MCP config endpoint
-|       |   |-- mcp_transport.rs MCP SSE/Streamable HTTP transport
-|       |   |-- endpoints.rs    Service endpoint CRUD (MCP tools)
-|       |   |-- sessions.rs     Session listing
-|       |   |-- oidc_discovery.rs OpenID Connect discovery
-|       |   |-- oauth.rs        OIDC authorize, token, userinfo
-|       |   |-- admin.rs        Admin user management, audit log, OAuth client endpoints
-|       |   |-- admin_roles.rs  Admin role CRUD + user role assignment
-|       |   |-- admin_groups.rs Admin group CRUD + membership management
-|       |   |-- admin_service_accounts.rs Admin service account CRUD + secret rotation + token revocation
-|       |   |-- admin_sa_connections.rs Admin service account provider connections
-|       |   |-- admin_sa_providers.rs Admin service account provider management
-|       |   |-- admin_helpers.rs Shared admin handler helpers (require_admin, IP/UA extraction)
-|       |   |-- consent.rs      User consent listing and revocation
-|       |   |-- delegation.rs   Delegation token refresh endpoint
-|       |   |-- approvals.rs    Approval request history, grants, decide, status polling
-|       |   |-- notifications.rs Notification settings CRUD, Telegram link/disconnect
-|       |   |-- device_tokens.rs Push device token registration, listing, removal
-|       |   |-- webhooks.rs     Telegram webhook handler (callback queries + link commands)
-|       |   |-- node_admin.rs   Node management API (register, list, delete, bindings, token rotation)
-|       |   |-- admin_nodes.rs  Admin node management (list all, get, disconnect, delete)
-|       |   |-- node_ws.rs      Node WebSocket handler + heartbeat sweep + streaming
-|       |   |-- developer_apps.rs Developer OAuth application management
-|       |   |-- user_credentials.rs User provider credential management
-|       |   |-- service_helpers.rs Shared service handler helpers
-|       |   |-- mfa.rs          MFA setup and verification
-|       |   `-- health.rs       Health check
-|       |-- services/           Business logic layer
-|       |   |-- auth_service.rs     User registration, password verification
-|       |   |-- social_auth_service.rs Social login OAuth flow (GitHub + Google)
-|       |   |-- token_service.rs    Session/token issuance, refresh rotation
-|       |   |-- oauth_service.rs    Client validation, code exchange
-|       |   |-- key_service.rs      API key lifecycle
-|       |   |-- proxy_service.rs    Target resolution, request forwarding (+ identity + delegation)
-|       |   |-- connection_service.rs Connection lifecycle, credential management
-|       |   |-- provider_service.rs Provider registry CRUD, encrypted credential storage
-|       |   |-- user_token_service.rs User provider token lifecycle (API key + OAuth)
-|       |   |-- delegation_service.rs Credential delegation resolution for proxy
-|       |   |-- token_exchange_service.rs RFC 8693 Token Exchange for delegated access
-|       |   |-- llm_gateway_service.rs LLM gateway: model routing, format translation
-|       |   |-- identity_service.rs Identity propagation headers + JWT assertions
-|       |   |-- oauth_flow.rs       OAuth2 utilities (PKCE, token exchange, refresh)
-|       |   |-- mfa_service.rs      TOTP provisioning, verification
-|       |   |-- admin_user_service.rs Admin user CRUD, cascade delete, session revocation
-|       |   |-- role_service.rs     Role CRUD, assignment, system role seeding
-|       |   |-- group_service.rs    Group CRUD, membership management
-|       |   |-- consent_service.rs  Consent creation, listing, revocation
-|       |   |-- service_account_service.rs Service account CRUD, client credentials auth, token revocation
-|       |   |-- rbac_helpers.rs     Resolve effective roles/groups/permissions for a user
-|       |   |-- approval_service.rs  Approval check, create, process, list, revoke grants
-|       |   |-- notification_service.rs Multi-channel notification delivery (Telegram + FCM + APNs)
-|       |   |-- push_service.rs      FCM HTTP v1 + APNs HTTP/2 push notification clients
-|       |   |-- telegram_service.rs Telegram Bot API client (send, edit, answer, webhook)
-|       |   |-- telegram_poller.rs  Telegram long polling fallback for development
-|       |   |-- mcp_service.rs      MCP tool execution, delegation token injection
-|       |   |-- social_token_exchange_service.rs Social token exchange (Google/GitHub native mobile)
-|       |   |-- node_service.rs     Node CRUD, token validation, binding operations
-|       |   |-- node_routing_service.rs Node route resolution with failover + health filtering
-|       |   |-- node_ws_manager.rs  In-memory WS connection pool, request correlation, streaming, HMAC signing
-|       |   |-- node_metrics_service.rs Per-node proxy metrics (success/error/latency recording)
-|       |   |-- oauth_client_service.rs OAuth client management (admin)
-|       |   |-- service_endpoint_service.rs Service endpoint CRUD
-|       |   |-- chatgpt_translator.rs  OpenAI-to-Anthropic format translation
-|       |   |-- openapi_parser.rs  OpenAPI spec parsing for service endpoints
-|       |   `-- audit_service.rs    Async audit log insertion
-|       `-- mw/                 Middleware
-|           |-- auth.rs         AuthUser extractor (Bearer / cookie / API key)
-|           |-- rate_limit.rs   Per-IP + global rate limiting
-|           `-- security_headers.rs  HSTS, CSP, XFO, etc.
-|
-`-- frontend/
-    |-- package.json            React 19, TanStack, Zustand, shadcn/ui, Zod 4
-    |-- vite.config.ts          Vite 7.3 with React plugin + Tailwind
-    `-- src/
-        |-- main.tsx            Application entry point
-        |-- router.tsx          TanStack Router configuration
-        |-- lib/                API client, utilities
-        |-- stores/             Zustand auth state store
-        |-- types/              TypeScript API type definitions
-        |   |-- api.ts
-        |   |-- admin.ts       Admin-specific types
-        |   |-- rbac.ts        RBAC types (roles, groups, consents)
-        |   |-- service-accounts.ts Service account types
-        |   |-- approvals.ts   Approval request and grant types
-        |   `-- nodes.ts       Node and binding types
-        |-- schemas/            Zod validation schemas
-        |   |-- admin.ts       Admin form schemas
-        |   |-- rbac.ts        RBAC form schemas (role, group)
-        |   |-- nodes.ts       Node registration and binding schemas
-        |   `-- service-accounts.ts Service account form schemas
-        |-- hooks/              React Query hooks
-        |   |-- use-admin.ts   Admin user management hooks
-        |   |-- use-rbac.ts    Role and group management hooks
-        |   |-- use-consents.ts Consent management hooks
-        |   |-- use-service-accounts.ts Service account management hooks
-        |   |-- use-llm-gateway.ts LLM gateway status hook
-        |   |-- use-approvals.ts Approval and notification settings hooks
-        |   |-- use-nodes.ts   Node and binding management hooks
-        |   |-- use-admin-nodes.ts Admin node management hooks
-        |   |-- use-developer-apps.ts Developer OAuth application hooks
-        |   `-- use-providers.ts Provider connection and token hooks
-        |-- components/
-        |   |-- ui/             19 shadcn/ui primitives
-        |   |-- auth/           Login, register, MFA forms
-        |   |-- dashboard/      Sidebar, header, tables, cards
-        |   |-- shared/         Reusable components (breadcrumb, page-header, detail-section)
-        |   `-- layout/         Auth and dashboard layout shells
-        `-- pages/              Route pages
-            |-- admin-roles.tsx    Admin role list
-            |-- admin-role-detail.tsx  Admin role detail
-            |-- admin-groups.tsx   Admin group list
-            |-- admin-group-detail.tsx Admin group detail with member management
-            |-- admin-service-accounts.tsx Admin service account list
-            |-- admin-service-account-detail.tsx Admin service account detail
-            |-- admin-nodes.tsx  Admin node management
-            |-- consents.tsx       User consent management
-            |-- notification-settings.tsx  Notification and approval settings
-            |-- approval-history.tsx  Approval request history (filterable)
-            |-- approval-grants.tsx   Active approval grants with revocation
-            |-- nodes.tsx         Credential node list with registration dialog
-            |-- node-detail.tsx   Node detail with binding management
-            |-- developer-apps.tsx Developer OAuth application management
-            |-- service-detail.tsx Service detail page
-            |-- service-edit.tsx   Service edit page
-            |-- service-list.tsx   Service card grid
-            |-- providers.tsx      Provider list and management
-            |-- provider-detail.tsx Provider detail page
-            `-- (login, register, dashboard, settings, admin-users, admin-user-detail, etc.)
-|
-|-- mobile/                        React Native + Expo mobile app (iOS + Android)
-|   |-- app.json                   Expo app config (bundle ID, permissions, splash)
-|   |-- eas.json                   EAS build profiles (development, preview, production)
-|   |-- package.json               Expo 53, React Native 0.79, TypeScript
-|   |-- google-services.json       Firebase/FCM config for Android push notifications
-|   `-- src/
-|       |-- app/
-|       |   |-- App.tsx            Root component
-|       |   |-- AppNavigator.tsx   React Navigation stack config
-|       |   `-- linking.ts        Deep link routing (nyxid://challenge/{id})
-|       |-- features/
-|       |   |-- auth/              Login, session management (SecureStore)
-|       |   |-- challenges/        Approval challenge inbox, detail, decision screens
-|       |   |-- approvals/         Approval grants list
-|       |   |-- account/           Account settings
-|       |   `-- legal/             Privacy policy, terms of service
-|       |-- components/            Reusable UI (BottomNav, PrimaryButton, ToastOverlay)
-|       |-- lib/
-|       |   |-- api/               HTTP client, API types, idempotency
-|       |   |-- auth/              Token persistence (expo-secure-store)
-|       |   `-- notifications/     APNs/FCM device registration and push handling
-|       `-- theme/                 Design tokens, mobile theme
-|
-`-- sdk/                           OAuth SDK monorepo (TypeScript)
-    |-- package.json               Workspace root (oauth-core, oauth-react, demo-react)
-    |-- oauth-core/                @nyxids/oauth-core: PKCE OAuth 2.0 client
-    |   |-- package.json           v0.1.0, zero runtime dependencies
-    |   `-- src/index.ts           NyxIDClient class (authorize, callback, tokens, userinfo)
-    |-- oauth-react/               @nyxids/oauth-react: React bindings
-    |   |-- package.json           v0.1.0, peerDep: react@^18
-    |   `-- src/index.tsx          NyxIDProvider context + useNyxID() hook
-    `-- demo-react/                Demo Vite app (private, not published)
-        `-- src/App.tsx            Example OAuth flow
-```
-
----
+We welcome contributions. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-MIT License. See [LICENSE](LICENSE) for details.
+[Apache-2.0](LICENSE)

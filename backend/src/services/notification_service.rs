@@ -28,6 +28,13 @@ enum PushResult {
 
 /// Send an approval notification to the user via all enabled channels.
 /// Returns which channels succeeded and Telegram metadata.
+///
+/// `org_name` is the display name of the owning org when
+/// `request.from_org_policy` is true. Pass `None` for personal requests
+/// (or when the lookup failed); the resulting Telegram / push wording is
+/// then byte-identical to the pre-org behavior so non-org callers are
+/// unaffected.
+#[allow(clippy::too_many_arguments)]
 pub async fn send_approval_notification(
     db: &Database,
     config: &AppConfig,
@@ -36,15 +43,25 @@ pub async fn send_approval_notification(
     apns_auth: Option<&ApnsAuth>,
     user_id: &str,
     request: &ApprovalRequest,
+    org_name: Option<&str>,
 ) -> AppResult<NotificationResult> {
     let channel = get_or_create_channel(db, user_id).await?;
+
+    // Only treat `org_name` as meaningful when the request itself carries
+    // the org-policy flag. This keeps the "from_org_policy is the
+    // authoritative signal" invariant shared by the DTO mapper.
+    let effective_org_name = if request.from_org_policy {
+        org_name
+    } else {
+        None
+    };
 
     let mut channels_used: Vec<String> = Vec::new();
     let mut telegram_chat_id = None;
     let mut telegram_message_id = None;
     let mut tokens_to_remove: Vec<String> = Vec::new();
 
-    // 1. Telegram (existing behavior)
+    // 1. Telegram (existing behavior; wording switches when org-scoped)
     if channel.telegram_enabled
         && let Some(chat_id) = channel.telegram_chat_id
     {
@@ -64,8 +81,12 @@ pub async fn send_approval_notification(
                 &request.service_name,
                 &request.service_slug,
                 requester_label,
-                &request.operation_summary,
+                request
+                    .action_description
+                    .as_deref()
+                    .unwrap_or(&request.operation_summary),
                 channel.approval_timeout_secs,
+                effective_org_name,
             )
             .await
             {
@@ -90,6 +111,32 @@ pub async fn send_approval_notification(
             "deeplink".to_string(),
             format!("nyxid://challenge/{}", request.id),
         );
+        // When the request is created under an org policy, inject the
+        // org context so the mobile app can render the org badge on
+        // the detail screen opened via the deeplink before the list
+        // endpoint is re-fetched. Keys are only added when defined —
+        // missing keys are tolerated by the client.
+        if request.from_org_policy {
+            data.insert("from_org_policy".to_string(), "true".to_string());
+            data.insert("org_id".to_string(), request.user_id.clone());
+            if let Some(name) = effective_org_name {
+                data.insert("org_name".to_string(), name.to_string());
+            }
+        }
+
+        // Push title/body switch when the request is org-scoped so admins
+        // can distinguish an org decision from a personal one from the
+        // lock-screen preview alone.
+        let (push_title, push_body_owned): (&str, Option<String>) = match effective_org_name {
+            Some(name) => (
+                "Org Approval Required",
+                Some(format!("{name} admins: a service is requesting access")),
+            ),
+            None => ("Approval Required", None),
+        };
+        let push_body: &str = push_body_owned
+            .as_deref()
+            .unwrap_or("A service is requesting access");
 
         let push_futures: Vec<_> = unique_devices
             .iter()
@@ -100,8 +147,8 @@ pub async fn send_approval_notification(
                     apns_auth,
                     config,
                     device,
-                    "Approval Required",
-                    "A service is requesting access",
+                    push_title,
+                    push_body,
                     &data,
                 )
             })
@@ -198,16 +245,44 @@ pub async fn notify_decision(
         .await?;
     }
 
-    // 2. Send silent push to update mobile app UI
-    let channel = get_or_create_channel(db, &request.user_id).await?;
-    if channel.push_enabled && !channel.push_devices.is_empty() {
-        let unique_devices = unique_devices_by_token(&channel.push_devices);
-        let decision_str = if approved { "approved" } else { "rejected" };
-        let mut data = HashMap::new();
-        data.insert("type".to_string(), "approval_decision".to_string());
-        data.insert("request_id".to_string(), request.id.clone());
-        data.insert("decision".to_string(), decision_str.to_string());
+    // 2. Send silent push to update mobile app UI.
+    //
+    // For personal requests we push to the request owner. For org-policy
+    // requests the owner is the *org*, which has no notification channel of
+    // its own -- the actual mobile clients waiting on a decision are the
+    // org admins that were recorded on `notify_user_ids` at request time.
+    // Fan out silent push to every recorded admin so every admin app clears
+    // the pending state after one admin decides. Falls back to `[user_id]`
+    // for legacy rows without `notify_user_ids` (see
+    // ChronoAIProject/NyxID#370).
+    let decision_str = if approved { "approved" } else { "rejected" };
+    let mut data = HashMap::new();
+    data.insert("type".to_string(), "approval_decision".to_string());
+    data.insert("request_id".to_string(), request.id.clone());
+    data.insert("decision".to_string(), decision_str.to_string());
 
+    let recipients: Vec<String> = if request.notify_user_ids.is_empty() {
+        vec![request.user_id.clone()]
+    } else {
+        request.notify_user_ids.clone()
+    };
+
+    for recipient in recipients {
+        let channel = match get_or_create_channel(db, &recipient).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    recipient = %recipient,
+                    error = %e,
+                    "Failed to load notification channel for decision silent push"
+                );
+                continue;
+            }
+        };
+        if !channel.push_enabled || channel.push_devices.is_empty() {
+            continue;
+        }
+        let unique_devices = unique_devices_by_token(&channel.push_devices);
         for device in unique_devices {
             let _ = send_silent_push(http_client, fcm_auth, apns_auth, config, device, &data).await;
         }
@@ -450,6 +525,27 @@ async fn remove_stale_device_tokens(db: &Database, channel_id: &str, device_ids:
                         doc! {
                             "$set": {
                                 "push_enabled": false,
+                                "updated_at": bson::DateTime::from_chrono(chrono::Utc::now()),
+                            }
+                        },
+                    )
+                    .await;
+
+                let _ = db
+                    .collection::<NotificationChannel>(COLLECTION_NAME)
+                    .update_one(
+                        doc! {
+                            "_id": channel_id,
+                            "approval_required": true,
+                            "push_devices.0": { "$exists": false },
+                            "$or": [
+                                { "telegram_enabled": { "$ne": true } },
+                                { "telegram_chat_id": bson::Bson::Null },
+                            ],
+                        },
+                        doc! {
+                            "$set": {
+                                "approval_required": false,
                                 "updated_at": bson::DateTime::from_chrono(chrono::Utc::now()),
                             }
                         },

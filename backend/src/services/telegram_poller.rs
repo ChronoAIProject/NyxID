@@ -1,6 +1,7 @@
 use mongodb::bson::{self, doc};
 
 use crate::AppState;
+use crate::errors::AppError;
 use crate::models::notification_channel::{COLLECTION_NAME as CHANNELS, NotificationChannel};
 use crate::services::{approval_service, audit_service, telegram_service};
 
@@ -73,18 +74,29 @@ async fn handle_callback_query(
         }
     };
 
-    // Verify the chat_id matches the request's telegram_chat_id
-    let chat_id = callback.message.as_ref().map(|m| m.chat.id).unwrap_or(0);
-
     let request = match approval_service::get_request(&state.db, &request_id).await {
         Ok(r) => r,
-        Err(_) => {
+        Err(crate::errors::AppError::NotFound(_)) => {
             answer_callback(state, &callback.id, "Request not found or expired").await;
+            return;
+        }
+        Err(e) => {
+            tracing::error!("Database error fetching approval request {request_id}: {e}");
+            answer_callback(state, &callback.id, "Server error, please try again").await;
             return;
         }
     };
 
-    // Verify chat_id binding
+    // Verify the chat_id matches the request's telegram_chat_id.
+    // Telegram may omit `callback.message` for old messages, so fall back
+    // to `callback.from.id` which is always present and represents the
+    // user's private chat ID for bot conversations.
+    let chat_id = callback
+        .message
+        .as_ref()
+        .map(|m| m.chat.id)
+        .unwrap_or(callback.from.id);
+
     if request.telegram_chat_id != Some(chat_id) {
         tracing::warn!(
             "Chat ID mismatch: expected {:?}, got {}",
@@ -94,6 +106,10 @@ async fn handle_callback_query(
         answer_callback(state, &callback.id, "Unauthorized").await;
         return;
     }
+
+    // Build an idempotency key from the callback so Telegram retries are
+    // handled correctly instead of being rejected as "already_decided".
+    let decision_idempotency_key = format!("tg:{}:{}", callback.id, request_id);
 
     // Process the decision
     match approval_service::process_decision(
@@ -105,7 +121,7 @@ async fn handle_callback_query(
         &request_id,
         approved,
         None,
-        None,
+        Some(decision_idempotency_key.as_str()),
         "telegram",
     )
     .await
@@ -130,11 +146,18 @@ async fn handle_callback_query(
                 })),
                 None,
                 None,
+                None,
+                None,
             );
         }
         Err(e) => {
-            tracing::warn!("Failed to process approval decision: {e}");
-            answer_callback(state, &callback.id, "Already processed or expired").await;
+            let callback_message = decision_callback_message(&e);
+            if callback_message == "Server error, please try again" {
+                tracing::error!("Failed to process approval decision {request_id}: {e}");
+            } else {
+                tracing::warn!("Failed to process approval decision {request_id}: {e}");
+            }
+            answer_callback(state, &callback.id, callback_message).await;
         }
     }
 }
@@ -199,13 +222,14 @@ async fn handle_link_message(state: &AppState, message: telegram_service::Telegr
         return;
     }
 
-    // Update the channel with the Telegram details
+    // Update the channel with the Telegram details and auto-enable approval
     let now = bson::DateTime::from_chrono(chrono::Utc::now());
     let update = doc! {
         "$set": {
             "telegram_chat_id": chat_id,
             "telegram_username": &username,
             "telegram_enabled": true,
+            "approval_required": true,
             "telegram_link_code": bson::Bson::Null,
             "telegram_link_code_expires_at": bson::Bson::Null,
             "updated_at": now,
@@ -221,7 +245,7 @@ async fn handle_link_message(state: &AppState, message: telegram_service::Telegr
                 &state.http_client,
                 bot_token,
                 chat_id,
-                "Your Telegram account has been linked to NyxID. You will now receive approval notifications here.",
+                "Your Telegram account has been linked to NyxID. Global approval protection has been enabled, and services without per-service overrides will now send approval requests here.",
             )
             .await;
 
@@ -232,7 +256,10 @@ async fn handle_link_message(state: &AppState, message: telegram_service::Telegr
                 Some(serde_json::json!({
                     "telegram_username": username,
                     "telegram_chat_id": chat_id,
+                    "approval_auto_enabled": true,
                 })),
+                None,
+                None,
                 None,
                 None,
             );
@@ -259,5 +286,52 @@ async fn answer_callback(state: &AppState, callback_id: &str, text: &str) {
             text,
         )
         .await;
+    }
+}
+
+fn decision_callback_message(error: &AppError) -> &'static str {
+    match error {
+        AppError::Forbidden(message) if message == "Approval request expired" => "Request expired",
+        AppError::Conflict(_) => "Already processed or expired",
+        AppError::NotFound(_) => "Request not found or expired",
+        _ => "Server error, please try again",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decision_callback_message_maps_expired_forbidden() {
+        let error = AppError::Forbidden("Approval request expired".to_string());
+        assert_eq!(decision_callback_message(&error), "Request expired");
+    }
+
+    #[test]
+    fn decision_callback_message_maps_conflict_to_processed() {
+        let error = AppError::Conflict("already_decided".to_string());
+        assert_eq!(
+            decision_callback_message(&error),
+            "Already processed or expired"
+        );
+    }
+
+    #[test]
+    fn decision_callback_message_maps_not_found() {
+        let error = AppError::NotFound("Approval request not found".to_string());
+        assert_eq!(
+            decision_callback_message(&error),
+            "Request not found or expired"
+        );
+    }
+
+    #[test]
+    fn decision_callback_message_maps_internal_to_server_error() {
+        let error = AppError::Internal("database timeout".to_string());
+        assert_eq!(
+            decision_callback_message(&error),
+            "Server error, please try again"
+        );
     }
 }

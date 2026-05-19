@@ -14,15 +14,29 @@ export const AUTH_TYPE_LABELS: Readonly<Record<string, string>> = {
   oauth2: "OAuth 2.0",
   basic: "Basic Auth",
   bearer: "Bearer Token",
+  bot_bearer: "Bot Token (Discord)",
+  body: "JSON Body Injection",
+  path: "Path Prefix",
   oidc: "OIDC / SSO",
+  ssh: "SSH Tunnel",
   header: "API Key",
   query: "Query Param",
+};
+
+export const SERVICE_TYPE_LABELS: Readonly<Record<string, string>> = {
+  http: "HTTP / API",
+  ssh: "SSH",
 };
 
 export const SERVICE_CATEGORY_LABELS: Readonly<Record<string, string>> = {
   provider: "SSO Provider",
   connection: "External Service",
   internal: "Internal Service",
+};
+
+export const VISIBILITY_LABELS: Readonly<Record<string, string>> = {
+  public: "Public",
+  private: "Private",
 };
 
 export const OAUTH_SCOPE_META: Readonly<Record<string, OAuthScopeMeta>> = {
@@ -38,7 +52,8 @@ export const OAUTH_SCOPE_META: Readonly<Record<string, OAuthScopeMeta>> = {
   },
   email: {
     title: "Read your email",
-    description: "Lets the app access your email address and verification state.",
+    description:
+      "Lets the app access your email address and verification state.",
     risk: "medium",
   },
   offline_access: {
@@ -63,11 +78,17 @@ export function scopeRiskLabel(risk: OAuthScopeRisk): string {
 }
 
 export function getAuthTypeLabel(service: DownstreamService): string {
+  if (service.service_type === "ssh") {
+    return "SSH Tunnel";
+  }
   const key = service.auth_type ?? service.auth_method;
   return AUTH_TYPE_LABELS[key] ?? key;
 }
 
 export function isOidcService(service: DownstreamService): boolean {
+  if (service.service_type !== "http") {
+    return false;
+  }
   return (
     service.auth_method === "oidc" ||
     service.auth_type === "oidc" ||
@@ -76,6 +97,9 @@ export function isOidcService(service: DownstreamService): boolean {
 }
 
 export function isConnectable(service: DownstreamService): boolean {
+  if (service.service_type !== "http") {
+    return false;
+  }
   return (
     service.service_category === "connection" ||
     service.service_category === "internal"
@@ -95,7 +119,13 @@ export function canConnectProvider(
   provider: ProviderConfig,
   hasUserCredentials = false,
 ): boolean {
-  if (provider.provider_type !== "oauth2" && provider.provider_type !== "device_code") {
+  if (provider.provider_type === "telegram_widget") {
+    return provider.has_oauth_config;
+  }
+  if (
+    provider.provider_type !== "oauth2" &&
+    provider.provider_type !== "device_code"
+  ) {
     return true;
   }
   const mode = provider.credential_mode;
@@ -116,9 +146,9 @@ export function getProviderConnectLabel(
     return "Setup required";
   }
 
-  return provider.provider_type === "device_code"
-    ? "Connect via OAuth"
-    : "Connect";
+  if (provider.provider_type === "device_code") return "Connect via OAuth";
+  if (provider.provider_type === "telegram_widget") return "Login with Telegram";
+  return "Connect";
 }
 
 export function getProviderConnectHint(
@@ -126,6 +156,9 @@ export function getProviderConnectHint(
   hasUserCredentials = false,
 ): string | null {
   if (!canConnectProvider(provider, hasUserCredentials)) {
+    if (provider.provider_type === "telegram_widget") {
+      return "Admin must configure the Telegram bot username and bot token first.";
+    }
     const mode = provider.credential_mode;
     if (mode === "user") {
       return "Set up your OAuth app credentials first.";
@@ -144,6 +177,9 @@ export function getCredentialInputType(service: DownstreamService): {
   readonly label: string;
   readonly placeholder: string;
 } {
+  if (service.service_type !== "http") {
+    return { type: "none", label: "", placeholder: "" };
+  }
   if (!service.requires_user_credential) {
     return { type: "none", label: "", placeholder: "" };
   }

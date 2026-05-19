@@ -8,11 +8,14 @@ node_modules/
 dist/
 build/
 *.tsbuildinfo
+.npm-cache/
+.cargo-home/
 
 # ─── Environment ───
 .env
 .env.*
 !.env.example
+!.env.production.example
 !**/.env.example
 
 # ─── Keys ───
@@ -33,7 +36,10 @@ keys/
 logs/
 
 # ─── Docker ───
-docker-compose.override.yml
+# docker-compose.override.yml is intentionally tracked: it is the project's
+# shared dev override (auto-loaded by `docker compose up`). Personal overrides
+# go in docker-compose.local.yml and must be passed explicitly with -f.
+docker-compose.local.yml
 
 # ─── Deployment ───
 k8s/
@@ -43,3 +49,10 @@ k8s/
 .playwright-mcp
 
 mobile/screenshots
+
+# Internal working documents
+docs/IMPLEMENTATION_SPEC*.md
+docs/CLI_AUDIT_GAPS.md
+docs/STREAMLINE_SERVICES_PROPOSAL.md
+.gstack/
+.context/
