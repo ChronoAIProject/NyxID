@@ -1,17 +1,11 @@
 use chrono::{DateTime, Duration, Utc};
 
+#[cfg(test)]
 use crate::crypto::device_code::generate_user_code;
 use crate::errors::{AppError, AppResult};
 use crate::models::device_code::{DeviceCode, UserCodeGen};
 
 use super::DEVICE_CODE_ROTATE_SECS;
-
-pub(super) fn rotate_user_code_if_needed(
-    row: &mut DeviceCode,
-    now: DateTime<Utc>,
-) -> AppResult<String> {
-    rotate_user_code_if_needed_with_generator(row, now, generate_user_code)
-}
 
 pub(super) fn rotate_user_code_if_needed_with_generator<F>(
     row: &mut DeviceCode,
@@ -85,7 +79,8 @@ mod tests {
         let now = Utc::now();
         let mut row = row_with_history(&["AAAA-BBBB-CCCC"], now);
 
-        let current = rotate_user_code_if_needed(&mut row, now).unwrap();
+        let current =
+            rotate_user_code_if_needed_with_generator(&mut row, now, generate_user_code).unwrap();
 
         assert_eq!(current, "AAAA-BBBB-CCCC");
         assert_eq!(row.user_code_history.len(), 1);
@@ -106,7 +101,8 @@ mod tests {
             old_rotated_at,
         );
 
-        let current = rotate_user_code_if_needed(&mut row, now).unwrap();
+        let current =
+            rotate_user_code_if_needed_with_generator(&mut row, now, generate_user_code).unwrap();
 
         assert_eq!(row.user_code_history.len(), 4);
         assert_eq!(row.user_code_history[0].code, current);

@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
@@ -14,8 +12,6 @@ mod rotation;
 
 pub use approve::approve;
 pub use initiate::initiate;
-#[allow(unused_imports)]
-pub use lockout::apply_signature_failure_lockout;
 pub use lockout::{claim_lockout_notification, is_locked};
 use lockout::{is_pubkey_locked, record_pubkey_signature_failure, reset_pubkey_lockout};
 pub use poll::poll;
