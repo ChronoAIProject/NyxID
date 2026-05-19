@@ -138,17 +138,81 @@ export function installModeAFetchShim(bootstrap: WizardBootstrap): void {
       rewritten.pathname = `/api/proxy${url.pathname}`
       // (2) Add CSRF header.
       const headers = withCsrf(extractHeaders(req, init))
-      return originalFetch(rewritten.toString(), {
+      const response = await originalFetch(rewritten.toString(), {
         method: req.method,
         headers,
         body: await readBody(req),
         credentials: req.credentials,
         signal: req.signal,
       })
+      // (5) Sniff structured upstream-error responses emitted by the
+      // wizard server's `proxy_error_response` (NyxID#711) and
+      // re-emit them as a window event so the wizard shell can
+      // surface a top-of-page banner. We never block on this — clone
+      // the response, parse asynchronously, and let any parse failure
+      // mean "not our shape, ignore". The original `response` is
+      // still returned synchronously so the caller's parser sees the
+      // same body it always has.
+      maybeDispatchUpstreamError(response)
+      return response
     }
 
     return originalFetch(req)
   }
+}
+
+// ── upstream-error event bus ────────────────────────────────────────
+
+const UPSTREAM_ERROR_EVENT = "nyxid-wizard-upstream-error"
+
+export type UpstreamErrorKind = "timeout" | "unreachable"
+
+/** Subscribe to upstream-error events emitted by the fetch shim. */
+export function onUpstreamError(
+  cb: (kind: UpstreamErrorKind) => void,
+): () => void {
+  const handler = (e: Event) => {
+    if (!(e instanceof CustomEvent)) return
+    const detail = (e as CustomEvent<{ kind?: unknown }>).detail
+    const kind = detail?.kind
+    if (kind === "timeout" || kind === "unreachable") {
+      cb(kind)
+    }
+  }
+  window.addEventListener(UPSTREAM_ERROR_EVENT, handler)
+  return () => {
+    window.removeEventListener(UPSTREAM_ERROR_EVENT, handler)
+  }
+}
+
+function maybeDispatchUpstreamError(response: Response): void {
+  if (response.ok) return
+  const ct = response.headers.get("content-type")
+  if (!ct || !ct.toLowerCase().includes("application/json")) return
+  // Clone so the caller's `.json()` still works.
+  response
+    .clone()
+    .json()
+    .then((body: unknown) => {
+      if (!body || typeof body !== "object") return
+      const errCode = (body as { error?: unknown }).error
+      if (errCode === "upstream_timeout") {
+        window.dispatchEvent(
+          new CustomEvent(UPSTREAM_ERROR_EVENT, {
+            detail: { kind: "timeout" },
+          }),
+        )
+      } else if (errCode === "upstream_unreachable") {
+        window.dispatchEvent(
+          new CustomEvent(UPSTREAM_ERROR_EVENT, {
+            detail: { kind: "unreachable" },
+          }),
+        )
+      }
+    })
+    .catch(() => {
+      // Not the proxy's shape — ignore.
+    })
 }
 
 /**

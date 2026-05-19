@@ -487,9 +487,15 @@ function CustomServiceForm({
         label: res.label,
       });
     } catch (e) {
-      setError(
-        e instanceof ApiError ? e.message : (e as Error).message ?? "Failed.",
-      );
+      // `ApiError.message` can be empty when the proxy returns a body the
+      // shared parser couldn't extract a `message` from. Without the
+      // fallback the user sees no error and the button silently re-enables
+      // (NyxID#711).
+      const apiMessage = e instanceof ApiError ? e.message : null;
+      const rawMessage = apiMessage ?? (e as Error | null)?.message;
+      setError(rawMessage && rawMessage.length > 0
+        ? rawMessage
+        : "Couldn't connect this service. Please try again.");
     } finally {
       setLoading(false);
     }
@@ -772,7 +778,15 @@ function CatalogConfirmForm({
         label: res.label,
       });
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : "Failed to create service.");
+      // `ApiError.message` can be empty when the proxy returns a body the
+      // shared parser couldn't extract a `message` from. Without the
+      // fallback the user sees no error and the button silently re-enables
+      // (NyxID#711).
+      const apiMessage = e instanceof ApiError ? e.message : null;
+      const rawMessage = apiMessage ?? (e as Error | null)?.message;
+      setError(rawMessage && rawMessage.length > 0
+        ? rawMessage
+        : "Couldn't create the service. Please try again.");
     } finally {
       setLoading(false);
     }

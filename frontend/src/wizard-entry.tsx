@@ -77,11 +77,14 @@ import type {
 import {
   installHeartbeat,
   installModeAFetchShim,
+  onUpstreamError,
   postWizardCancel,
   postWizardComplete,
+  type UpstreamErrorKind,
   type WizardBootstrap,
 } from "@/components/cli-wizard/client"
 import { DisconnectBanner } from "@/components/cli-wizard/disconnect-banner"
+import { UpstreamErrorBanner } from "@/components/cli-wizard/upstream-error-banner"
 import { Button } from "@/components/ui/button"
 import { parseAiKeyPrefill } from "@/schemas/cli-wizard"
 
@@ -159,6 +162,20 @@ export function shouldShowDisconnectBanner(
   )
 }
 
+/**
+ * Show the upstream-error banner only while the user is still on the
+ * editable confirm step. Once the wizard has moved on to secret /
+ * ack / done / cancelled / wizard-lost, the banner is stale — those
+ * screens are their own terminal states.
+ */
+export function shouldShowUpstreamBanner(
+  phase: ModeAPhase["phase"],
+  upstreamError: UpstreamErrorKind | null,
+): boolean {
+  if (!upstreamError) return false
+  return phase === "claimed"
+}
+
 function WizardApp() {
   const [stage, setStage] = useState<ModeAPhase>({ phase: "claimed" })
   const [completeError, setCompleteError] = useState<string | null>(null)
@@ -173,6 +190,13 @@ function WizardApp() {
   // non-blocking banner while the CLI's more tolerant watchdog gives
   // the browser a chance to recover.
   const [disconnected, setDisconnected] = useState(false)
+  // Latest upstream-error kind reported by the fetch shim — set when
+  // a `/api/proxy/...` call returns the wizard proxy's
+  // upstream_timeout / upstream_unreachable JSON (NyxID#711). Cleared
+  // on user dismiss; only rendered while the user is still on the
+  // editable confirm step (no banner once we transition to the
+  // result/done screens).
+  const [upstreamError, setUpstreamError] = useState<UpstreamErrorKind | null>(null)
 
   // Shim is installed at module-load above; here we kick off the
   // heartbeat so the CLI's watchdog keeps the server alive, AND we
@@ -191,6 +215,18 @@ function WizardApp() {
     return () => {
       stopHeartbeat()
     }
+  }, [])
+
+  // Listen for upstream-error events raised by the fetch shim. The
+  // shim dispatches whenever the wizard proxy returns a structured
+  // upstream_timeout / upstream_unreachable body, so every flow that
+  // routes through `/api/v1/*` gets the banner without per-panel
+  // wiring.
+  useEffect(() => {
+    if (!bootstrap) return
+    return onUpstreamError((kind) => {
+      setUpstreamError(kind)
+    })
   }, [])
 
   // Issue #653 — wizard MUST reach a terminal state. If the heartbeat
@@ -255,6 +291,14 @@ function WizardApp() {
 
   return (
     <WizardShell context="local" step={step}>
+      {shouldShowUpstreamBanner(stage.phase, upstreamError) ? (
+        <UpstreamErrorBanner
+          kind={upstreamError!}
+          onDismiss={() => {
+            setUpstreamError(null)
+          }}
+        />
+      ) : null}
       {shouldShowDisconnectBanner(stage.phase, disconnected) ? (
         <DisconnectBanner state="disconnected" context="local" />
       ) : null}

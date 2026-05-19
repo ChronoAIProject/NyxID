@@ -31,7 +31,11 @@ vi.mock("@/components/shared/org-scope-select", () => ({
   ),
 }));
 
-import { ConfirmDispatcher, shouldShowDisconnectBanner } from "./wizard-entry";
+import {
+  ConfirmDispatcher,
+  shouldShowDisconnectBanner,
+  shouldShowUpstreamBanner,
+} from "./wizard-entry";
 
 function createWrapper() {
   const queryClient = new QueryClient({
@@ -75,6 +79,29 @@ describe("shouldShowDisconnectBanner", () => {
     "returns false for disconnected terminal phase %s",
     (phase) => {
       expect(shouldShowDisconnectBanner(phase, true)).toBe(false);
+    },
+  );
+});
+
+describe("shouldShowUpstreamBanner", () => {
+  it("returns false when there is no upstream error", () => {
+    expect(shouldShowUpstreamBanner("claimed", null)).toBe(false);
+  });
+
+  it.each(["timeout", "unreachable"] as const)(
+    "returns true on the editable confirm step for kind %s",
+    (kind) => {
+      expect(shouldShowUpstreamBanner("claimed", kind)).toBe(true);
+    },
+  );
+
+  // Once the user is past the editable step, the inline error is
+  // stale — the success / cancel / lost screens own their own copy
+  // and the banner would just confuse them.
+  it.each(["secret", "acking", "done", "cancelled", "wizard-lost"] as const)(
+    "returns false on terminal/post-submit phase %s",
+    (phase) => {
+      expect(shouldShowUpstreamBanner(phase, "timeout")).toBe(false);
     },
   );
 });

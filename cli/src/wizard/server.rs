@@ -645,6 +645,37 @@ fn base_security_headers() -> HeaderMap {
     h
 }
 
+/// Build a proxy-error response whose body matches the shared frontend
+/// `ApiErrorResponse` shape (`error` + `error_code` + `message`). The
+/// shared `apiClient` parser at `frontend/src/lib/api-client.ts` reads
+/// `message` into `ApiError.message`; without it, `ApiError.message`
+/// is empty and the wizard confirm panels' catch blocks silently set
+/// an empty error string, so no UI message is shown to the user on
+/// upstream failures (NyxID#711).
+///
+/// `detail` is preserved for debugging but is not what the user sees;
+/// the user-facing copy lives in `message`.
+fn proxy_error_response(
+    status: StatusCode,
+    error: &str,
+    message: &str,
+    detail: String,
+) -> Response {
+    let body = json!({
+        "error": error,
+        "error_code": -1,
+        "message": message,
+        "detail": detail,
+    })
+    .to_string();
+    let mut h = base_security_headers();
+    h.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    (status, h, body).into_response()
+}
+
 /// Mint a 128-bit random nonce, base64url-encoded. Used once per
 /// serve_index response to authorize the bundle's inline script +
 /// style + bootstrap script tags under the strict CSP.
@@ -1399,12 +1430,32 @@ async fn handle_proxy(State(state): State<ServerState>, req: Request<Body>) -> R
     let first_resp = match build_req(&current_token).send().await {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("  proxy error ({method} {upstream_url}): {e}");
-            return (
-                StatusCode::BAD_GATEWAY,
-                json!({ "error": "upstream unreachable", "detail": e.to_string() }).to_string(),
-            )
-                .into_response();
+            // Distinguish timeout (504) from connection failure (502) so the
+            // wizard panel can show an actionable, retry-friendly message
+            // instead of bouncing the user back to an idle form (#711).
+            let (status, error, message, user_line) = if e.is_timeout() {
+                (
+                    StatusCode::GATEWAY_TIMEOUT,
+                    "upstream_timeout",
+                    "The request to NyxID timed out. No changes were made — check that the NyxID backend is reachable, then try again.",
+                    "request to NyxID backend timed out",
+                )
+            } else {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    "upstream_unreachable",
+                    "Couldn't reach the NyxID backend. No changes were made — check your network and try again.",
+                    "couldn't reach the NyxID backend",
+                )
+            };
+            // Surface a user-readable line on stderr so the operator sees
+            // the same situation in the terminal that the wizard banner
+            // shows in the browser. Keep the diagnostic line so support
+            // logs still capture the underlying transport error.
+            eprintln!("⚠ wizard: {user_line} ({method} {backend_path})");
+            eprintln!("   retry from the wizard tab, or press Ctrl-C to cancel");
+            eprintln!("   detail: {e}");
+            return proxy_error_response(status, error, message, e.to_string());
         }
     };
 
@@ -1435,12 +1486,12 @@ async fn handle_proxy(State(state): State<ServerState>, req: Request<Body>) -> R
     let body = match upstream_resp.bytes().await {
         Ok(b) => b,
         Err(e) => {
-            return (
+            return proxy_error_response(
                 StatusCode::BAD_GATEWAY,
-                json!({ "error": "upstream body read failed", "detail": e.to_string() })
-                    .to_string(),
-            )
-                .into_response();
+                "upstream_body_read_failed",
+                "Lost connection to the NyxID backend before the response finished. No changes were made — try again.",
+                e.to_string(),
+            );
         }
     };
 

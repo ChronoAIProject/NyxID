@@ -12,6 +12,7 @@ frontend/src/components/cli-wizard/name-input.tsx
 frontend/src/components/cli-wizard/scope-picker.tsx
 frontend/src/components/cli-wizard/shell.tsx
 frontend/src/components/cli-wizard/step-label.tsx
+frontend/src/components/cli-wizard/upstream-error-banner.tsx
 frontend/src/components/cli-wizard/wizard-footer.tsx
 frontend/src/components/shared/org-scope-select.tsx
 frontend/src/components/ui/button.tsx
