@@ -10,22 +10,16 @@ export const createServiceAccountSchema = z.object({
     .max(500, "Description must be 500 characters or less")
     .optional()
     .or(z.literal("")),
-  allowed_scopes: z
-    .string()
-    .min(1, "At least one scope is required"),
+  allowed_scopes: z.string().min(1, "At least one scope is required"),
   // role_ids and rate_limit_override are strings in the form because HTML
   // inputs produce string values; they are parsed in the submit handler.
-  role_ids: z
-    .string()
-    .optional()
-    .or(z.literal("")),
-  rate_limit_override: z
-    .string()
-    .optional()
-    .or(z.literal("")),
+  role_ids: z.string().optional().or(z.literal("")),
+  rate_limit_override: z.string().optional().or(z.literal("")),
 });
 
-export type CreateServiceAccountFormData = z.infer<typeof createServiceAccountSchema>;
+export type CreateServiceAccountFormData = z.infer<
+  typeof createServiceAccountSchema
+>;
 
 export const updateServiceAccountSchema = z.object({
   name: z
@@ -37,18 +31,12 @@ export const updateServiceAccountSchema = z.object({
     .max(500, "Description must be 500 characters or less")
     .optional()
     .or(z.literal("")),
-  allowed_scopes: z
-    .string()
-    .min(1, "At least one scope is required"),
-  role_ids: z
-    .string()
-    .optional()
-    .or(z.literal("")),
-  rate_limit_override: z
-    .string()
-    .optional()
-    .or(z.literal("")),
+  allowed_scopes: z.string().min(1, "At least one scope is required"),
+  role_ids: z.string().optional().or(z.literal("")),
+  rate_limit_override: z.string().optional().or(z.literal("")),
   is_active: z.boolean().optional(),
 });
 
-export type UpdateServiceAccountFormData = z.infer<typeof updateServiceAccountSchema>;
+export type UpdateServiceAccountFormData = z.infer<
+  typeof updateServiceAccountSchema
+>;

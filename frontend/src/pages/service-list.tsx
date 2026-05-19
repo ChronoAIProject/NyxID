@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useNavigate } from "@tanstack/react-router";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
@@ -11,10 +12,20 @@ import {
   type CreateServiceFormData,
   AUTH_TYPES,
   SERVICE_CATEGORIES,
+  SERVICE_TYPES,
+  VISIBILITY_OPTIONS,
 } from "@/schemas/services";
-import { AUTH_TYPE_LABELS, SERVICE_CATEGORY_LABELS } from "@/lib/constants";
+import {
+  AUTH_TYPE_LABELS,
+  SERVICE_CATEGORY_LABELS,
+  SERVICE_TYPE_LABELS,
+  VISIBILITY_LABELS,
+} from "@/lib/constants";
+import { parseAllowedPrincipals } from "@/lib/ssh";
 import { ApiError } from "@/lib/api-client";
 import { ServiceCard } from "@/components/dashboard/service-card";
+import { PageHeader } from "@/components/shared/page-header";
+import { AddCtaButton } from "@/components/shared/add-cta-button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import {
@@ -24,7 +35,6 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
 } from "@/components/ui/dialog";
 import {
   Form,
@@ -35,6 +45,7 @@ import {
   FormMessage,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import {
   Select,
   SelectContent,
@@ -42,10 +53,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Plus, Server } from "lucide-react";
+import { Switch } from "@/components/ui/switch";
+import { BrickWallIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
 
 export function ServiceListPage() {
+  const navigate = useNavigate();
   const { data: services, isLoading } = useServices();
   const createMutation = useCreateService();
   const deleteMutation = useDeleteService();
@@ -57,24 +70,69 @@ export function ServiceListPage() {
     defaultValues: {
       name: "",
       description: "",
+      service_type: "http",
       base_url: "",
       auth_type: "api_key",
+      auth_key_name: "",
       service_category: "connection",
+      host: "",
+      port: "22",
+      certificate_auth_enabled: false,
+      certificate_ttl_minutes: "30",
+      allowed_principals: "",
     },
   });
 
+  const serviceType = form.watch("service_type");
+  const authType = form.watch("auth_type");
+  const certificateAuthEnabled =
+    form.watch("certificate_auth_enabled") ?? false;
+
   async function onSubmit(data: CreateServiceFormData) {
     try {
-      await createMutation.mutateAsync(data);
+      const created =
+        data.service_type === "ssh"
+          ? await createMutation.mutateAsync({
+              name: data.name,
+              description: data.description || undefined,
+              service_type: "ssh",
+              visibility: data.visibility ?? "private",
+              service_category: data.service_category ?? "internal",
+              ssh_config: {
+                host: (data.host ?? "").trim(),
+                port: Number(data.port),
+                certificate_auth_enabled:
+                  data.certificate_auth_enabled ?? false,
+                certificate_ttl_minutes: Number(
+                  data.certificate_ttl_minutes || "30",
+                ),
+                allowed_principals: parseAllowedPrincipals(
+                  data.allowed_principals,
+                ),
+              },
+            })
+          : await createMutation.mutateAsync({
+              name: data.name,
+              description: data.description || undefined,
+              service_type: "http",
+              visibility: data.visibility ?? "public",
+              base_url: data.base_url ?? "",
+              auth_type: data.auth_type ?? "api_key",
+              auth_key_name: data.auth_key_name || undefined,
+              service_category: data.service_category ?? "connection",
+            });
+
       toast.success("Service created successfully");
       setCreateOpen(false);
       form.reset();
+      void navigate({
+        to: "/services/$serviceId",
+        params: { serviceId: created.id },
+      });
     } catch (error) {
-      if (error instanceof ApiError) {
-        form.setError("root", { message: error.message });
-      } else {
-        toast.error("Failed to create service");
-      }
+      toast.error(
+        error instanceof ApiError ? error.message : "Failed to create service",
+      );
     }
   }
 
@@ -92,25 +150,21 @@ export function ServiceListPage() {
 
   return (
     <div className="space-y-8">
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <h2 className="font-display text-3xl font-normal tracking-tight md:text-5xl">Services</h2>
-          <p className="text-sm text-muted-foreground">
-            Manage downstream services and their authentication.
-          </p>
-        </div>
-        <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-          <DialogTrigger asChild>
-            <Button className="w-fit">
-              <Plus className="mr-2 h-4 w-4" />
-              Create Service
-            </Button>
-          </DialogTrigger>
+      <PageHeader
+        title="Services"
+        description="Manage downstream services and their authentication."
+        actions={
+          <AddCtaButton label="Create Service" onClick={() => setCreateOpen(true)} />
+        }
+      />
+
+      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
           <DialogContent>
             <DialogHeader>
               <DialogTitle>Create Service</DialogTitle>
               <DialogDescription>
-                Register a new downstream service to connect with NyxID.
+                Pick the service type first, then configure the fields NyxID
+                should manage.
               </DialogDescription>
             </DialogHeader>
 
@@ -119,11 +173,44 @@ export function ServiceListPage() {
                 onSubmit={form.handleSubmit(onSubmit)}
                 className="space-y-4"
               >
-                {form.formState.errors.root && (
-                  <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
-                    {form.formState.errors.root.message}
-                  </div>
-                )}
+
+                <FormField
+                  control={form.control}
+                  name="service_type"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Service Type</FormLabel>
+                      <Select
+                        value={field.value}
+                        onValueChange={(value) => {
+                          field.onChange(value);
+                          form.clearErrors();
+                          if (value === "ssh") {
+                            form.setValue("service_category", "internal");
+                            form.setValue("visibility", "private");
+                          } else {
+                            form.setValue("service_category", "connection");
+                            form.setValue("visibility", "public");
+                          }
+                        }}
+                      >
+                        <FormControl>
+                          <SelectTrigger>
+                            <SelectValue placeholder="Select service type" />
+                          </SelectTrigger>
+                        </FormControl>
+                        <SelectContent>
+                          {SERVICE_TYPES.map((type) => (
+                            <SelectItem key={type} value={type}>
+                              {SERVICE_TYPE_LABELS[type] ?? type}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
 
                 <FormField
                   control={form.control}
@@ -147,7 +234,7 @@ export function ServiceListPage() {
                       <FormLabel>Description</FormLabel>
                       <FormControl>
                         <textarea
-                          className="flex min-h-[60px] w-full rounded-[10px] border border-input bg-transparent px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                          className="flex min-h-[60px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-[12px] placeholder:text-muted-foreground focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
                           placeholder="Optional description"
                           {...field}
                         />
@@ -157,95 +244,283 @@ export function ServiceListPage() {
                   )}
                 />
 
-                <FormField
-                  control={form.control}
-                  name="base_url"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>Base URL</FormLabel>
-                      <FormControl>
-                        <Input
-                          placeholder="https://api.example.com"
-                          {...field}
+                {serviceType === "ssh" ? (
+                  <>
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <FormField
+                        control={form.control}
+                        name="host"
+                        render={({ field }) => (
+                          <FormItem>
+                            <FormLabel>SSH Host</FormLabel>
+                            <FormControl>
+                              <Input
+                                placeholder="ssh.internal.example"
+                                {...field}
+                              />
+                            </FormControl>
+                            <FormMessage />
+                          </FormItem>
+                        )}
+                      />
+
+                      <FormField
+                        control={form.control}
+                        name="port"
+                        render={({ field }) => (
+                          <FormItem>
+                            <FormLabel>SSH Port</FormLabel>
+                            <FormControl>
+                              <Input
+                                type="number"
+                                min={1}
+                                max={65535}
+                                {...field}
+                              />
+                            </FormControl>
+                            <FormMessage />
+                          </FormItem>
+                        )}
+                      />
+                    </div>
+
+                    <div className="flex items-center justify-between rounded-lg border border-border p-3">
+                      <Label
+                        htmlFor="create-ssh-cert-auth"
+                        className="text-[12px] font-normal"
+                      >
+                        Enable short-lived SSH certificates
+                      </Label>
+                      <Switch
+                        id="create-ssh-cert-auth"
+                        checked={certificateAuthEnabled}
+                        onCheckedChange={(checked) =>
+                          form.setValue("certificate_auth_enabled", checked)
+                        }
+                      />
+                    </div>
+
+                    {certificateAuthEnabled && (
+                      <div className="grid gap-4 sm:grid-cols-2">
+                        <FormField
+                          control={form.control}
+                          name="certificate_ttl_minutes"
+                          render={({ field }) => (
+                            <FormItem>
+                              <FormLabel>Certificate TTL (minutes)</FormLabel>
+                              <FormControl>
+                                <Input
+                                  type="number"
+                                  min={15}
+                                  max={60}
+                                  {...field}
+                                />
+                              </FormControl>
+                              <FormMessage />
+                            </FormItem>
+                          )}
                         />
-                      </FormControl>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
+
+                        <FormField
+                          control={form.control}
+                          name="allowed_principals"
+                          render={({ field }) => (
+                            <FormItem>
+                              <FormLabel>Allowed Principals</FormLabel>
+                              <FormControl>
+                                <Input
+                                  placeholder="ubuntu, deploy"
+                                  {...field}
+                                />
+                              </FormControl>
+                              <p className="text-xs text-muted-foreground">
+                                Comma-separated SSH usernames NyxID is allowed
+                                to sign.
+                              </p>
+                              <FormMessage />
+                            </FormItem>
+                          )}
+                        />
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    <FormField
+                      control={form.control}
+                      name="base_url"
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormLabel>Base URL</FormLabel>
+                          <FormControl>
+                            <Input
+                              placeholder="https://api.example.com"
+                              {...field}
+                            />
+                          </FormControl>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+
+                    <FormField
+                      control={form.control}
+                      name="auth_type"
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormLabel>Auth Type</FormLabel>
+                          <Select
+                            value={field.value}
+                            onValueChange={(value) => {
+                              field.onChange(value);
+                              if (value === "oidc") {
+                                form.setValue("service_category", "provider");
+                              } else if (value === "none") {
+                                form.setValue("service_category", "internal");
+                              } else if (
+                                form.getValues("service_category") ===
+                                  "provider" ||
+                                form.getValues("service_category") ===
+                                  "internal"
+                              ) {
+                                form.setValue("service_category", "connection");
+                              }
+                              // Clear auth_key_name when switching away from
+                              // body auth so stale values don't carry over.
+                              if (value !== "body") {
+                                form.setValue("auth_key_name", "");
+                              }
+                            }}
+                          >
+                            <FormControl>
+                              <SelectTrigger>
+                                <SelectValue placeholder="Select auth type" />
+                              </SelectTrigger>
+                            </FormControl>
+                            <SelectContent>
+                              {AUTH_TYPES.map((type) => (
+                                <SelectItem key={type} value={type}>
+                                  {AUTH_TYPE_LABELS[type] ?? type}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                          {authType === "body" && (
+                            <p className="text-xs text-muted-foreground">
+                              NyxID will merge{" "}
+                              <code>{`{<field>: <credential>}`}</code> into the
+                              JSON request body. Used for Lark/Feishu tenant
+                              token exchange where{" "}
+                              <code>app_secret</code> must travel in the body.
+                            </p>
+                          )}
+                          {authType === "bot_bearer" && (
+                            <p className="text-xs text-muted-foreground">
+                              Sends{" "}
+                              <code>Authorization: Bot &lt;credential&gt;</code>{" "}
+                              (Discord bot token format -- note the{" "}
+                              <code>Bot</code> prefix, not{" "}
+                              <code>Bearer</code>).
+                            </p>
+                          )}
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+
+                    {authType === "body" && (
+                      <FormField
+                        control={form.control}
+                        name="auth_key_name"
+                        render={({ field }) => (
+                          <FormItem>
+                            <FormLabel>Body Field Name</FormLabel>
+                            <FormControl>
+                              <Input
+                                placeholder="app_secret"
+                                {...field}
+                                value={field.value ?? ""}
+                              />
+                            </FormControl>
+                            <p className="text-xs text-muted-foreground">
+                              The JSON field where the credential will be
+                              injected. For Lark/Feishu use{" "}
+                              <code>app_secret</code>.
+                            </p>
+                            <FormMessage />
+                          </FormItem>
+                        )}
+                      />
+                    )}
+
+                    {form.watch("auth_type") !== "oidc" &&
+                      form.watch("auth_type") !== "none" && (
+                        <FormField
+                          control={form.control}
+                          name="service_category"
+                          render={({ field }) => (
+                            <FormItem>
+                              <FormLabel>Service Category</FormLabel>
+                              <Select
+                                value={field.value ?? "connection"}
+                                onValueChange={field.onChange}
+                              >
+                                <FormControl>
+                                  <SelectTrigger>
+                                    <SelectValue placeholder="Select category" />
+                                  </SelectTrigger>
+                                </FormControl>
+                                <SelectContent>
+                                  {SERVICE_CATEGORIES.filter(
+                                    (cat) => cat !== "provider",
+                                  ).map((cat) => (
+                                    <SelectItem key={cat} value={cat}>
+                                      {SERVICE_CATEGORY_LABELS[cat] ?? cat}
+                                    </SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                              <FormMessage />
+                            </FormItem>
+                          )}
+                        />
+                      )}
+                  </>
+                )}
 
                 <FormField
                   control={form.control}
-                  name="auth_type"
+                  name="visibility"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Auth Type</FormLabel>
+                      <FormLabel>Visibility</FormLabel>
                       <Select
-                        value={field.value}
-                        onValueChange={(value) => {
-                          field.onChange(value);
-                          // Auto-set category based on auth type
-                          if (value === "oidc") {
-                            form.setValue("service_category", "provider");
-                          } else if (value === "none") {
-                            form.setValue("service_category", "internal");
-                          } else if (
-                            form.getValues("service_category") === "provider" ||
-                            form.getValues("service_category") === "internal"
-                          ) {
-                            form.setValue("service_category", "connection");
-                          }
-                        }}
+                        value={
+                          field.value ??
+                          (serviceType === "ssh" ? "private" : "public")
+                        }
+                        onValueChange={field.onChange}
                       >
                         <FormControl>
                           <SelectTrigger>
-                            <SelectValue placeholder="Select auth type" />
+                            <SelectValue placeholder="Select visibility" />
                           </SelectTrigger>
                         </FormControl>
                         <SelectContent>
-                          {AUTH_TYPES.map((type) => (
-                            <SelectItem key={type} value={type}>
-                              {AUTH_TYPE_LABELS[type] ?? type}
+                          {VISIBILITY_OPTIONS.map((opt) => (
+                            <SelectItem key={opt} value={opt}>
+                              {VISIBILITY_LABELS[opt] ?? opt}
                             </SelectItem>
                           ))}
                         </SelectContent>
                       </Select>
+                      <p className="text-xs text-muted-foreground">
+                        Private services are only visible to you.
+                      </p>
                       <FormMessage />
                     </FormItem>
                   )}
                 />
-
-                {form.watch("auth_type") !== "oidc" && form.watch("auth_type") !== "none" && (
-                  <FormField
-                    control={form.control}
-                    name="service_category"
-                    render={({ field }) => (
-                      <FormItem>
-                        <FormLabel>Service Category</FormLabel>
-                        <Select
-                          value={field.value ?? "connection"}
-                          onValueChange={field.onChange}
-                        >
-                          <FormControl>
-                            <SelectTrigger>
-                              <SelectValue placeholder="Select category" />
-                            </SelectTrigger>
-                          </FormControl>
-                          <SelectContent>
-                            {SERVICE_CATEGORIES.filter(
-                              (cat) => cat !== "provider",
-                            ).map((cat) => (
-                              <SelectItem key={cat} value={cat}>
-                                {SERVICE_CATEGORY_LABELS[cat] ?? cat}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                        <FormMessage />
-                      </FormItem>
-                    )}
-                  />
-                )}
 
                 <DialogFooter>
                   <Button
@@ -255,15 +530,14 @@ export function ServiceListPage() {
                   >
                     Cancel
                   </Button>
-                  <Button type="submit" isLoading={createMutation.isPending}>
+                  <Button variant="primary" type="submit" isLoading={createMutation.isPending}>
                     Create service
                   </Button>
                 </DialogFooter>
               </form>
             </Form>
           </DialogContent>
-        </Dialog>
-      </div>
+      </Dialog>
 
       {isLoading ? (
         <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
@@ -272,11 +546,14 @@ export function ServiceListPage() {
           ))}
         </div>
       ) : !services || services.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-          <Server className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
-            No services yet. Add a service to get started.
-          </p>
+        <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+          <BrickWallIcon className="h-64 w-64 text-muted-foreground/30" />
+          <div className="space-y-1">
+            <p className="text-[12px] font-medium text-muted-foreground/30">No services yet</p>
+            <p className="text-xs text-muted-foreground/30">
+              Add a service to get started.
+            </p>
+          </div>
         </div>
       ) : (
         <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">

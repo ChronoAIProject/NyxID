@@ -1,0 +1,36 @@
+# Local development overrides for NyxID.
+#
+# Auto-loaded by `docker compose up` alongside docker-compose.yml. NOT loaded
+# when production is invoked with explicit `-f` flags. See docker-compose.yml
+# header for the full topology.
+#
+# Provides:
+#   - A hardcoded dev password for MongoDB so contributors don't need to
+#     configure secrets just to run a database.
+#   - MongoDB exposed on host port 27018 (intentionally NOT 27017 to avoid
+#     colliding with a system mongo a developer may also be running).
+#   - Mailpit, a dev-only SMTP catcher used by the backend's email flows.
+#     Mailpit web UI lives on http://localhost:8025.
+#   - Faster Mongo healthcheck interval for snappier `up -d` feedback.
+
+services:
+  mongodb:
+    environment:
+      MONGO_INITDB_ROOT_PASSWORD: nyxid_dev_password
+    ports:
+      - "127.0.0.1:27018:27017"
+    healthcheck:
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: nyxid-mailpit
+    restart: unless-stopped
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: 1
+      MP_SMTP_AUTH_ALLOW_INSECURE: 1

@@ -87,13 +87,23 @@ This document describes the system architecture, component design, data flows, a
              |
     +--------v---------+
     |  MongoDB 8.0     |
-    |  (29 collections)|
+    |  (33 collections)|
     +------------------+
 ```
 
 ---
 
 ## Component Architecture
+
+### CLI Tools
+
+NyxID ships one CLI binary built from the Cargo workspace:
+
+| Crate | Binary | Purpose |
+|-------|--------|---------|
+| `cli` | `nyxid` | User-facing CLI for managing services, API keys, catalog, nodes, approvals, SSH, MCP config, notifications, and more. Includes the `nyxid node` subcommand for on-premise credential node agent. Reads `$NYXID_ACCESS_TOKEN` for auth. |
+
+The `nyxid` CLI communicates with the backend exclusively via the public REST API (`/api/v1/*`). It stores session tokens in a local file and supports both interactive login and API key authentication.
 
 ### Backend Components
 
@@ -171,6 +181,11 @@ Handlers are thin HTTP boundary functions. They:
 | `user_tokens.rs` | list tokens, connect API key/OAuth, disconnect, refresh      |
 | `service_requirements.rs` | list, add, remove service provider requirements      |
 | `llm_gateway.rs` | llm_status, llm_proxy_request, gateway_request                  |
+| `keys.rs`     | unified key CRUD: create (auto-provisions endpoint + key + service), list, get, delete |
+| `catalog.rs`  | list catalog templates, get template by slug                    |
+| `user_endpoints.rs` | list, update, delete user-managed target URLs              |
+| `user_api_keys_external.rs` | list, update, delete user's external credentials |
+| `user_services_handler.rs` | list, update, delete user's proxy routing config  |
 
 #### 4. Service Layer (`services/`)
 
@@ -198,6 +213,11 @@ The service layer contains all business logic. Services receive database connect
 | `llm_gateway_service.rs` | LLM gateway: provider slug resolution, model-to-provider routing, translator trait with Anthropic/Google AI/passthrough implementations |
 | `token_exchange_service.rs` | RFC 8693 Token Exchange: client authentication, subject token validation, consent verification, delegation scope validation, delegated token issuance |
 | `oauth_flow.rs`     | OAuth2 utilities: PKCE code verifier/challenge generation, token exchange with no-redirect HTTP client, token refresh |
+| `unified_key_service.rs` | Orchestration: auto-provisions UserEndpoint + UserApiKey + UserService from catalog or custom input |
+| `catalog_service.rs` | Read-only service catalog from DownstreamService collection for user-facing template selection |
+| `user_endpoint_service.rs` | CRUD for user-managed target URLs (UserEndpoint collection) |
+| `user_api_key_service.rs` | CRUD for user's external credentials (UserApiKey collection) |
+| `user_service_service.rs` | CRUD for user's proxy routing config (UserService collection) |
 
 #### 5. Crypto Layer (`crypto/`)
 
@@ -278,9 +298,10 @@ frontend/src/
     |-- login.tsx
     |-- register.tsx
     |-- dashboard.tsx
-    |-- api-keys.tsx
-    |-- services.tsx
-    |-- connections.tsx
+    |-- keys.tsx              AI Services page (2 tabs: External Services, NyxID API Keys)
+    |-- key-detail.tsx        Unified key detail (endpoint, key, service, routing)
+    |-- ai-setup.tsx          AI setup quick prompts page
+    |-- services.tsx          Admin-only service management
     |-- settings.tsx
     |-- admin-users.tsx       Admin user list (search, pagination, status badges)
     `-- admin-user-detail.tsx Admin user detail (edit, actions, sessions)
@@ -491,7 +512,7 @@ Two proxy URL formats are supported:
 - **UUID-based:** `ANY /api/v1/proxy/{service_id}/{*path}` -- uses the service UUID directly
 - **Slug-based:** `ANY /api/v1/proxy/s/{slug}/{*path}` -- resolves the slug to a service UUID via `proxy_service::resolve_service_by_slug()`, then delegates to the same shared `execute_proxy()` pipeline
 
-Both routes share a single `execute_proxy()` function that handles the full proxy pipeline (credential resolution, identity propagation, delegation token injection, request forwarding).
+Both routes share a single `execute_proxy()` function that handles the full proxy pipeline (credential resolution, identity propagation, delegation token injection, request forwarding). The proxy first attempts resolution via the new `UserService` path (checking `user_services` collection by slug + user_id), then falls back to the legacy `DownstreamService` + `UserProviderToken` path for backward compatibility with unmigrated users.
 
 ```
 Client                     NyxID Backend                     Downstream
@@ -617,6 +638,11 @@ Client                     NyxID Backend                     Downstream
         +--->| approval_requests |
         +--->| approval_grants   |
         +--->| mcp_sessions      |
+        |
+        |    +-------------------+
+        +--->| user_endpoints    |  (streamlined services)
+        +--->| user_api_keys     |  (external credentials)
+        +--->| user_services     |  (proxy routing config)
 ```
 
 ### Collection Details
@@ -1248,9 +1274,30 @@ The `roles` and `groups` scopes control whether RBAC claims appear in access tok
 
 ## Credential Broker
 
-The credential broker enables NyxID to act as a centralized token vault for external service providers. Admins configure providers, users connect their credentials, and downstream services declare which provider tokens they need.
+The credential broker enables NyxID to act as a centralized token vault for external service providers. The system has two credential paths: the new streamlined path (preferred) and the legacy path (kept for backward compatibility).
 
-### Provider Registry
+### Streamlined Path (New)
+
+Users manage credentials through a unified API (`/api/v1/keys`) that auto-provisions three records:
+
+```
+User provides key              Catalog provides defaults
+(or custom endpoint)           (DownstreamService)
+     |                              |
+     v                              v
++---------------------+    +-------------------+
+| unified_key_service  |--->| catalog_service   |
+| (orchestration)     |    | (read-only)       |
++----------+----------+    +-------------------+
+           |
+           +--> UserEndpoint   (target URL)
+           +--> UserApiKey     (encrypted credential)
+           +--> UserService    (proxy routing config + optional node_id)
+```
+
+### Legacy Path (Migration)
+
+The original provider registry is retained for backward compatibility:
 
 ```
 Admin creates                  Users connect
@@ -1270,6 +1317,8 @@ provider config                their credentials
 | (per-service)     |    +---------------------+
 +-------------------+
 ```
+
+Proxy resolution checks the new `UserService` path first, then falls back to the legacy path for unmigrated users.
 
 ### Credential Delegation Flow
 
@@ -1315,7 +1364,7 @@ At startup, `provider_service::seed_default_llm_services()` idempotently creates
 | `openai` | `llm-openai` | `https://api.openai.com/v1` | Bearer |
 | `openai-codex` | `llm-openai-codex` | `https://api.openai.com/v1` | Bearer |
 | `anthropic` | `llm-anthropic` | `https://api.anthropic.com/v1` | Header (`x-api-key`) |
-| `google-ai` | `llm-google-ai` | `https://generativelanguage.googleapis.com/v1beta` | Query (`key`) |
+| `google-ai` | `llm-google-ai` | `https://generativelanguage.googleapis.com/v1beta` | Header (`x-goog-api-key`) |
 | `mistral` | `llm-mistral` | `https://api.mistral.ai/v1` | Bearer |
 | `cohere` | `llm-cohere` | `https://api.cohere.com/v2` | Bearer |
 

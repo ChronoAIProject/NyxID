@@ -38,6 +38,18 @@ pub struct ApprovalGrant {
     /// Whether this grant has been explicitly revoked
     #[serde(default)]
     pub revoked: bool,
+
+    /// True when this grant was created under an org's per-service approval
+    /// policy. Org-scoped grants are reusable by **any** member of the owning
+    /// org (the `user_id` field) calling the same service, regardless of the
+    /// original `requester_type`/`requester_id` pair.
+    ///
+    /// The access check consults `org_scoped` + `user_id` + `service_id` only;
+    /// the requester context is retained on the row for audit and UI display
+    /// but not for authorization. Personal grants (default `false`) keep the
+    /// existing per-requester semantics (see ChronoAIProject/NyxID#364).
+    #[serde(default)]
+    pub org_scoped: bool,
 }
 
 #[cfg(test)]
@@ -62,6 +74,7 @@ mod tests {
             granted_at: Utc::now(),
             expires_at: Utc::now() + chrono::Duration::days(30),
             revoked: false,
+            org_scoped: false,
         }
     }
 
@@ -93,5 +106,28 @@ mod tests {
         assert!(keys.contains(&"granted_at"));
         assert!(keys.contains(&"expires_at"));
         assert!(keys.contains(&"revoked"));
+        assert!(keys.contains(&"org_scoped"));
+    }
+
+    #[test]
+    fn missing_org_scoped_defaults_to_false_for_legacy_grants() {
+        // Pre-fix grants have no `org_scoped` field. They must deserialize
+        // as personal (per-requester) grants so we never widen their scope
+        // retroactively.
+        let grant = make_approval_grant();
+        let mut doc = bson::to_document(&grant).expect("serialize");
+        doc.remove("org_scoped");
+        let restored: ApprovalGrant = bson::from_document(doc).expect("deserialize");
+        assert!(!restored.org_scoped);
+    }
+
+    #[test]
+    fn org_scoped_grant_roundtrips() {
+        let mut grant = make_approval_grant();
+        grant.org_scoped = true;
+        let doc = bson::to_document(&grant).expect("serialize");
+        assert!(doc.get_bool("org_scoped").unwrap());
+        let restored: ApprovalGrant = bson::from_document(doc).expect("deserialize");
+        assert!(restored.org_scoped);
     }
 }

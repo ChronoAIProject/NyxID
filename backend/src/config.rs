@@ -11,6 +11,13 @@ pub struct AppConfig {
     pub frontend_url: String,
     /// Additional CORS allowed origins (comma-separated, e.g. "http://localhost:5847,http://localhost:3000")
     pub cors_allowed_origins: Vec<String>,
+    /// Additional origins trusted for browser CSRF (comma-separated).
+    /// These are merged with `frontend_url` + `base_url` when checking the
+    /// `Origin` / `Referer` header on cookie-authenticated state-changing
+    /// requests. Keep this strictly narrower than `CORS_ALLOWED_ORIGINS`:
+    /// only include origins that legitimately perform cookie-authenticated
+    /// state changes. Bearer / API-key callers never need to be listed here.
+    pub csrf_trusted_origins: Vec<String>,
     /// MongoDB connection string
     pub database_url: String,
     /// Maximum database connection pool size
@@ -28,6 +35,10 @@ pub struct AppConfig {
     pub jwt_issuer: String,
     /// Access token TTL in seconds (default: 900 = 15 min)
     pub jwt_access_ttl_secs: i64,
+    /// Relay reply token TTL in seconds (default: 1800 = 30 min)
+    pub jwt_relay_reply_ttl_secs: i64,
+    /// Relay callback token TTL in seconds (default: 300 = 5 min)
+    pub jwt_relay_callback_ttl_secs: i64,
     /// Refresh token TTL in seconds (default: 604800 = 7 days)
     pub jwt_refresh_ttl_secs: i64,
 
@@ -65,9 +76,45 @@ pub struct AppConfig {
     pub rate_limit_per_second: u64,
     /// Max burst size for rate limiter
     pub rate_limit_burst: u32,
+    /// Allowlist of reverse-proxy IPs whose `X-Forwarded-For` /
+    /// `X-Real-IP` headers may be trusted for rate-limit keying.
+    /// When the TCP peer is not in this list, forwarded headers are
+    /// ignored and the peer IP is used instead — so a direct-exposure
+    /// deployment can't be tricked into per-header buckets.
+    ///
+    /// Parsed from the comma-separated `TRUSTED_PROXY_IPS` env var.
+    /// Empty (the default) is the strict mode: nothing trusted.
+    pub trusted_proxy_ips: Vec<std::net::IpAddr>,
+
+    /// Optional reverse-proxy-forwarded client certificate header used for
+    /// RFC 8705 certificate-bound broker access tokens. Unset/empty disables
+    /// mTLS binding even if a client sends `X-Client-Cert` directly.
+    pub mtls_client_cert_header: Option<String>,
+
+    /// Explicit HMAC key (64 hex chars = 32 bytes) used to derive
+    /// `CliPairing.code_hash`. When unset, the backend derives the
+    /// key from `ENCRYPTION_KEY` (if configured) or from the JWT
+    /// private key PEM — see `derive_cli_pairing_hmac_key` in
+    /// `main.rs` for the full priority chain. Set explicitly only
+    /// when you want to rotate the pairing HMAC independently of
+    /// both `ENCRYPTION_KEY` and the JWT signing key. Threaded
+    /// through `AppConfig` (rather than read via `std::env::var`
+    /// at the call site) so ops can introspect the resolved value
+    /// via the same path as every other env-backed setting.
+    pub cli_pairing_hmac_key: Option<String>,
 
     /// Service account token TTL in seconds (default: 3600 = 1 hour)
     pub sa_token_ttl_secs: i64,
+
+    /// Telemetry DSN (e.g. PostHog project API key). When unset (default)
+    /// telemetry is hard-off: `TelemetryClient::from_config` returns
+    /// `None` and no events are captured.
+    pub telemetry_dsn: Option<String>,
+    /// Telemetry ingest host (defaults to EU PostHog if unset).
+    pub telemetry_host: Option<String>,
+    /// When true AND `telemetry_dsn` is empty, fall back to the
+    /// compiled-in public share-back DSN. Self-hoster opt-in knob.
+    pub share_analytics: bool,
 
     /// Optional cookie domain for cross-subdomain auth (e.g. ".chrono-ai.fun").
     /// When set, cookies include `Domain=<value>` so they are shared across
@@ -138,6 +185,8 @@ pub struct AppConfig {
     pub node_proxy_timeout_secs: u64,
     /// Registration token validity in seconds (default: 3600 = 1 hour)
     pub node_registration_token_ttl_secs: i64,
+    /// Pending node credential metadata TTL in seconds (default: 86400 = 24 hours)
+    pub node_pending_credential_ttl_secs: i64,
     /// Maximum nodes per user (default: 10)
     pub node_max_per_user: u32,
     /// Maximum concurrent WebSocket connections (default: 100)
@@ -146,6 +195,82 @@ pub struct AppConfig {
     pub node_max_stream_duration_secs: u64,
     /// Enable HMAC request signing for node proxy requests (default: true)
     pub node_hmac_signing_enabled: bool,
+
+    // Proxy streaming
+    /// Maximum request body size for proxy routes in bytes (default: 100 MB)
+    pub proxy_max_body_size: usize,
+    /// Idle timeout for proxy streaming responses in seconds (default: 60).
+    /// Stream is terminated if no data chunk arrives within this duration.
+    pub proxy_stream_idle_timeout_secs: u64,
+    /// Maximum concurrent SSH WebSocket tunnel sessions per user (default: 4)
+    pub ssh_max_sessions_per_user: usize,
+    /// Timeout for connecting to a downstream SSH target in seconds (default: 10)
+    pub ssh_connect_timeout_secs: u64,
+    /// Maximum duration for an SSH tunnel session in seconds (default: 3600)
+    pub ssh_max_tunnel_duration_secs: u64,
+    /// Maximum concurrent WebSocket passthrough connections (default: 200)
+    pub ws_passthrough_max_connections: usize,
+
+    // Channel Bot Relay
+    /// Timeout in seconds for delivering inbound messages to agent callback URLs (default: 30)
+    pub channel_relay_callback_timeout_secs: u32,
+    /// Maximum number of channel bots a single user can register (default: 5)
+    pub channel_relay_max_bots_per_user: u32,
+    /// TTL in days for channel messages before automatic expiry (default: 30)
+    pub channel_relay_message_ttl_days: u32,
+    /// Per-message edit rate limit for channel relay replies (default: 10/s).
+    pub channel_relay_edit_rate_limit_per_second: u32,
+    /// Burst capacity for per-message edit rate limiting (default: 20).
+    pub channel_relay_edit_rate_limit_burst: u32,
+
+    // HTTP Event Gateway (NyxID#221 / ADR-013)
+    /// Per-channel event rate limit (events per second, default 100).
+    pub channel_event_rate_limit_per_second: u32,
+    /// Per-channel event rate limit burst capacity (default 200).
+    pub channel_event_rate_limit_burst: u32,
+    /// Event dedup LRU cache capacity (default 10_000).
+    pub channel_event_dedup_capacity: usize,
+    /// Event dedup TTL in seconds (default 300 = 5 minutes).
+    pub channel_event_dedup_ttl_secs: u64,
+
+    /// Response-cache TTL (seconds) for the `aws_sigv4` proxy auth
+    /// method. AWS Cost Explorer charges $0.01 per paginated request,
+    /// so identical proxy requests in a short window get served from
+    /// cache. **Defaults to 0 (disabled).** Operators should review
+    /// the cache scoping (per-credential + per-operation-header keying
+    /// via `CloudResponseCache::key`) and the bounds below before
+    /// enabling. See NyxID#716 + Codex review REC 11.
+    pub cloud_response_cache_ttl_secs: u64,
+    /// Maximum bytes for a single cacheable response. Larger responses
+    /// are forwarded uncached. Default 1 MiB. Override via
+    /// `CLOUD_RESPONSE_CACHE_MAX_ENTRY_BYTES`.
+    pub cloud_response_cache_max_entry_bytes: usize,
+    /// Maximum number of cached entries. LRU-ish eviction by
+    /// insertion timestamp when full. Override via
+    /// `CLOUD_RESPONSE_CACHE_MAX_ENTRIES`.
+    pub cloud_response_cache_max_entries: usize,
+
+    // Registration gate
+    /// When `true` (default), new-user registration requires a valid invite
+    /// code and first-time social sign-ups are rejected. Set
+    /// `INVITE_CODE_REQUIRED=false` to open public registration — used once
+    /// the product launches publicly. See issue #179.
+    pub invite_code_required: bool,
+
+    /// When `true`, email/password auth UI is shown on `/login` and
+    /// `/register`, and `POST /api/v1/auth/register` accepts new accounts.
+    /// Defaults to `false` — the self-host quickstart in `README.md` is the
+    /// only path that opts in by writing `EMAIL_AUTH_ENABLED=true` to
+    /// `.env.dev`. Production, stock local `cargo run`, and any other
+    /// environment without the flag get SSO-only signup. The login endpoint
+    /// is NOT gated — existing users can still authenticate via direct API
+    /// call even when the UI is hidden.
+    pub email_auth_enabled: bool,
+
+    // Dev convenience
+    /// When `true`, newly registered users are marked as email-verified
+    /// immediately. Only intended for local development — defaults to `false`.
+    pub auto_verify_email: bool,
 }
 
 impl std::fmt::Debug for AppConfig {
@@ -161,6 +286,11 @@ impl std::fmt::Debug for AppConfig {
             .field("jwt_public_key_path", &self.jwt_public_key_path)
             .field("jwt_issuer", &self.jwt_issuer)
             .field("jwt_access_ttl_secs", &self.jwt_access_ttl_secs)
+            .field("jwt_relay_reply_ttl_secs", &self.jwt_relay_reply_ttl_secs)
+            .field(
+                "jwt_relay_callback_ttl_secs",
+                &self.jwt_relay_callback_ttl_secs,
+            )
             .field("jwt_refresh_ttl_secs", &self.jwt_refresh_ttl_secs)
             .field("google_client_id", &self.google_client_id)
             .field("google_client_secret", &"[REDACTED]")
@@ -193,6 +323,16 @@ impl std::fmt::Debug for AppConfig {
             )
             .field("rate_limit_per_second", &self.rate_limit_per_second)
             .field("rate_limit_burst", &self.rate_limit_burst)
+            .field("trusted_proxy_ips", &self.trusted_proxy_ips)
+            .field("mtls_client_cert_header", &self.mtls_client_cert_header)
+            .field(
+                "cli_pairing_hmac_key",
+                if self.cli_pairing_hmac_key.is_some() {
+                    &"Some([REDACTED])"
+                } else {
+                    &"None"
+                },
+            )
             .field("sa_token_ttl_secs", &self.sa_token_ttl_secs)
             .field("cookie_domain", &self.cookie_domain)
             .field("telegram_bot_token", &"[REDACTED]")
@@ -256,6 +396,10 @@ impl std::fmt::Debug for AppConfig {
                 "node_registration_token_ttl_secs",
                 &self.node_registration_token_ttl_secs,
             )
+            .field(
+                "node_pending_credential_ttl_secs",
+                &self.node_pending_credential_ttl_secs,
+            )
             .field("node_max_per_user", &self.node_max_per_user)
             .field("node_max_ws_connections", &self.node_max_ws_connections)
             .field(
@@ -263,7 +407,108 @@ impl std::fmt::Debug for AppConfig {
                 &self.node_max_stream_duration_secs,
             )
             .field("node_hmac_signing_enabled", &self.node_hmac_signing_enabled)
+            .field("proxy_max_body_size", &self.proxy_max_body_size)
+            .field(
+                "proxy_stream_idle_timeout_secs",
+                &self.proxy_stream_idle_timeout_secs,
+            )
+            .field("ssh_max_sessions_per_user", &self.ssh_max_sessions_per_user)
+            .field("ssh_connect_timeout_secs", &self.ssh_connect_timeout_secs)
+            .field(
+                "ssh_max_tunnel_duration_secs",
+                &self.ssh_max_tunnel_duration_secs,
+            )
+            .field(
+                "ws_passthrough_max_connections",
+                &self.ws_passthrough_max_connections,
+            )
+            .field(
+                "channel_relay_callback_timeout_secs",
+                &self.channel_relay_callback_timeout_secs,
+            )
+            .field(
+                "channel_relay_max_bots_per_user",
+                &self.channel_relay_max_bots_per_user,
+            )
+            .field(
+                "channel_relay_message_ttl_days",
+                &self.channel_relay_message_ttl_days,
+            )
+            .field(
+                "channel_relay_edit_rate_limit_per_second",
+                &self.channel_relay_edit_rate_limit_per_second,
+            )
+            .field(
+                "channel_relay_edit_rate_limit_burst",
+                &self.channel_relay_edit_rate_limit_burst,
+            )
+            .field(
+                "channel_event_rate_limit_per_second",
+                &self.channel_event_rate_limit_per_second,
+            )
+            .field(
+                "channel_event_rate_limit_burst",
+                &self.channel_event_rate_limit_burst,
+            )
+            .field(
+                "channel_event_dedup_capacity",
+                &self.channel_event_dedup_capacity,
+            )
+            .field(
+                "channel_event_dedup_ttl_secs",
+                &self.channel_event_dedup_ttl_secs,
+            )
             .finish()
+    }
+}
+
+/// Parse a boolean env var with a default value.
+fn parse_bool_env(name: &str, default: bool) -> bool {
+    match env::var(name)
+        .ok()
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        None => default,
+        Some(v) => matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "on"),
+    }
+}
+
+/// Parse the comma-separated `TRUSTED_PROXY_IPS` env var into a Vec of
+/// IP addresses. Entries that fail to parse are dropped with a warning
+/// so a typo can't silently extend trust to unparsed input; startup
+/// still succeeds because direct-exposure deployments are the common
+/// case and don't need this set.
+fn parse_trusted_proxy_ips(raw: Option<String>) -> Vec<std::net::IpAddr> {
+    let Some(raw) = raw.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) else {
+        return Vec::new();
+    };
+    let mut ips = Vec::new();
+    for entry in raw.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        match entry.parse::<std::net::IpAddr>() {
+            Ok(ip) => ips.push(ip),
+            Err(err) => tracing::warn!(
+                entry = %entry,
+                error = %err,
+                "TRUSTED_PROXY_IPS entry is not a valid IP address; dropping",
+            ),
+        }
+    }
+    ips
+}
+
+/// Parse the `INVITE_CODE_REQUIRED` env var.
+///
+/// Defaults to `true` (invite codes required) when the variable is unset or
+/// empty. Accepts the usual boolean-ish spellings case-insensitively.
+fn parse_invite_code_required(raw: Option<String>) -> bool {
+    match raw.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        None => true,
+        Some(v) => !matches!(
+            v.to_ascii_lowercase().as_str(),
+            "false" | "0" | "no" | "off"
+        ),
     }
 }
 
@@ -289,6 +534,12 @@ impl AppConfig {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect(),
+            csrf_trusted_origins: env::var("CSRF_TRUSTED_ORIGINS")
+                .unwrap_or_default()
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
             database_url: env::var("DATABASE_URL").expect("DATABASE_URL must be set"),
             database_max_connections: env::var("DATABASE_MAX_CONNECTIONS")
                 .ok()
@@ -308,6 +559,14 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(900),
+            jwt_relay_reply_ttl_secs: env::var("JWT_RELAY_REPLY_TTL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1800),
+            jwt_relay_callback_ttl_secs: env::var("JWT_RELAY_CALLBACK_TTL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(300),
             jwt_refresh_ttl_secs: env::var("JWT_REFRESH_TTL_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -344,11 +603,27 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(30),
+            trusted_proxy_ips: parse_trusted_proxy_ips(env::var("TRUSTED_PROXY_IPS").ok()),
+            mtls_client_cert_header: env::var("MTLS_CLIENT_CERT_HEADER")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+            cli_pairing_hmac_key: env::var("CLI_PAIRING_HMAC_KEY")
+                .ok()
+                .filter(|s| !s.trim().is_empty()),
 
             sa_token_ttl_secs: env::var("SA_TOKEN_TTL_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(3600),
+
+            telemetry_dsn: env::var("NYXID_TELEMETRY_DSN")
+                .ok()
+                .filter(|s| !s.is_empty()),
+            telemetry_host: env::var("NYXID_TELEMETRY_HOST")
+                .ok()
+                .filter(|s| !s.is_empty()),
+            share_analytics: parse_bool_env("NYXID_SHARE_ANALYTICS", false),
 
             cookie_domain: env::var("COOKIE_DOMAIN").ok().filter(|s| !s.is_empty()),
 
@@ -412,6 +687,10 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(3600),
+            node_pending_credential_ttl_secs: env::var("NODE_PENDING_CREDENTIAL_TTL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(86_400),
             node_max_per_user: env::var("NODE_MAX_PER_USER")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -428,6 +707,89 @@ impl AppConfig {
                 .ok()
                 .map(|v| v != "false" && v != "0")
                 .unwrap_or(true),
+            proxy_max_body_size: env::var("PROXY_MAX_BODY_SIZE")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(100 * 1024 * 1024),
+            proxy_stream_idle_timeout_secs: env::var("PROXY_STREAM_IDLE_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(60),
+            ssh_max_sessions_per_user: env::var("SSH_MAX_SESSIONS_PER_USER")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(4),
+            ssh_connect_timeout_secs: env::var("SSH_CONNECT_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(10),
+            ssh_max_tunnel_duration_secs: env::var("SSH_MAX_TUNNEL_DURATION_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(3600),
+            ws_passthrough_max_connections: env::var("WS_PASSTHROUGH_MAX_CONNECTIONS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(200),
+            channel_relay_callback_timeout_secs: env::var("CHANNEL_RELAY_CALLBACK_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(30),
+            channel_relay_max_bots_per_user: env::var("CHANNEL_RELAY_MAX_BOTS_PER_USER")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(5),
+            channel_relay_message_ttl_days: env::var("CHANNEL_RELAY_MESSAGE_TTL_DAYS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(30),
+            channel_relay_edit_rate_limit_per_second: env::var(
+                "CHANNEL_RELAY_EDIT_RATE_LIMIT_PER_SECOND",
+            )
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10),
+            channel_relay_edit_rate_limit_burst: env::var("CHANNEL_RELAY_EDIT_RATE_LIMIT_BURST")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(20),
+            channel_event_rate_limit_per_second: env::var("CHANNEL_EVENT_RATE_LIMIT_PER_SECOND")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(100),
+            channel_event_rate_limit_burst: env::var("CHANNEL_EVENT_RATE_LIMIT_BURST")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(200),
+            channel_event_dedup_capacity: env::var("CHANNEL_EVENT_DEDUP_CAPACITY")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                // Default sized to honor the 5-min TTL window under the
+                // default rate limit: 100 events/s × 300s = 30,000 entries
+                // for a single saturated channel. 32_768 leaves headroom
+                // and is a power of two. Operators with many concurrent
+                // high-throughput channels should tune this up.
+                .unwrap_or(32_768),
+            channel_event_dedup_ttl_secs: env::var("CHANNEL_EVENT_DEDUP_TTL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(300),
+            cloud_response_cache_ttl_secs: env::var("CLOUD_RESPONSE_CACHE_TTL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
+            cloud_response_cache_max_entry_bytes: env::var("CLOUD_RESPONSE_CACHE_MAX_ENTRY_BYTES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(crate::services::cloud_response_cache::DEFAULT_MAX_ENTRY_BYTES),
+            cloud_response_cache_max_entries: env::var("CLOUD_RESPONSE_CACHE_MAX_ENTRIES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(crate::services::cloud_response_cache::DEFAULT_MAX_ENTRIES),
+
+            invite_code_required: parse_invite_code_required(env::var("INVITE_CODE_REQUIRED").ok()),
+            email_auth_enabled: parse_bool_env("EMAIL_AUTH_ENABLED", false),
+            auto_verify_email: parse_bool_env("AUTO_VERIFY_EMAIL", false),
         }
     }
 
@@ -635,6 +997,18 @@ impl AppConfig {
             );
         }
     }
+
+    pub fn validate_ssh_runtime_config(&self) {
+        if self.ssh_max_sessions_per_user == 0 {
+            panic!("SSH_MAX_SESSIONS_PER_USER must be greater than 0");
+        }
+        if self.ssh_connect_timeout_secs == 0 {
+            panic!("SSH_CONNECT_TIMEOUT_SECS must be greater than 0");
+        }
+        if self.ssh_max_tunnel_duration_secs == 0 {
+            panic!("SSH_MAX_TUNNEL_DURATION_SECS must be greater than 0");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -648,6 +1022,7 @@ mod tests {
             base_url: base_url.to_string(),
             frontend_url: "http://localhost:3000".to_string(),
             cors_allowed_origins: vec![],
+            csrf_trusted_origins: vec![],
             database_url: "mongodb://localhost:27017/nyxid".to_string(),
             database_max_connections: 10,
             environment: environment.to_string(),
@@ -655,6 +1030,8 @@ mod tests {
             jwt_public_key_path: "keys/public.pem".to_string(),
             jwt_issuer: base_url.to_string(),
             jwt_access_ttl_secs: 900,
+            jwt_relay_reply_ttl_secs: 1800,
+            jwt_relay_callback_ttl_secs: 300,
             jwt_refresh_ttl_secs: 604800,
             google_client_id: None,
             google_client_secret: None,
@@ -673,7 +1050,13 @@ mod tests {
             encryption_key_previous: None,
             rate_limit_per_second: 10,
             rate_limit_burst: 30,
+            trusted_proxy_ips: vec![],
+            mtls_client_cert_header: None,
+            cli_pairing_hmac_key: None,
             sa_token_ttl_secs: 3600,
+            telemetry_dsn: None,
+            telemetry_host: None,
+            share_analytics: false,
             cookie_domain: None,
             telegram_bot_token: None,
             telegram_webhook_secret: None,
@@ -696,10 +1079,34 @@ mod tests {
             node_heartbeat_timeout_secs: 90,
             node_proxy_timeout_secs: 30,
             node_registration_token_ttl_secs: 3600,
+            node_pending_credential_ttl_secs: 86_400,
             node_max_per_user: 10,
             node_max_ws_connections: 100,
             node_max_stream_duration_secs: 300,
             node_hmac_signing_enabled: true,
+            proxy_max_body_size: 100 * 1024 * 1024,
+            proxy_stream_idle_timeout_secs: 60,
+            ssh_max_sessions_per_user: 4,
+            ssh_connect_timeout_secs: 10,
+            ssh_max_tunnel_duration_secs: 3600,
+            ws_passthrough_max_connections: 200,
+            channel_relay_callback_timeout_secs: 30,
+            channel_relay_max_bots_per_user: 5,
+            channel_relay_message_ttl_days: 30,
+            channel_relay_edit_rate_limit_per_second: 10,
+            channel_relay_edit_rate_limit_burst: 20,
+            channel_event_rate_limit_per_second: 100,
+            channel_event_rate_limit_burst: 200,
+            channel_event_dedup_capacity: 32_768,
+            channel_event_dedup_ttl_secs: 300,
+            cloud_response_cache_ttl_secs: 0,
+            cloud_response_cache_max_entry_bytes:
+                crate::services::cloud_response_cache::DEFAULT_MAX_ENTRY_BYTES,
+            cloud_response_cache_max_entries:
+                crate::services::cloud_response_cache::DEFAULT_MAX_ENTRIES,
+            invite_code_required: true,
+            email_auth_enabled: false,
+            auto_verify_email: false,
         }
     }
 
@@ -847,5 +1254,95 @@ mod tests {
         let mut cfg = make_config("http://localhost:3001", "dev", &key);
         cfg.encryption_key_previous = Some("00".repeat(32));
         cfg.validate_encryption_key();
+    }
+
+    #[test]
+    #[should_panic(expected = "SSH_MAX_SESSIONS_PER_USER must be greater than 0")]
+    fn validate_ssh_runtime_config_rejects_zero_max_sessions() {
+        let mut cfg = make_config("http://localhost:3001", "dev", &"ab".repeat(32));
+        cfg.ssh_max_sessions_per_user = 0;
+        cfg.validate_ssh_runtime_config();
+    }
+
+    #[test]
+    #[should_panic(expected = "SSH_CONNECT_TIMEOUT_SECS must be greater than 0")]
+    fn validate_ssh_runtime_config_rejects_zero_connect_timeout() {
+        let mut cfg = make_config("http://localhost:3001", "dev", &"ab".repeat(32));
+        cfg.ssh_connect_timeout_secs = 0;
+        cfg.validate_ssh_runtime_config();
+    }
+
+    #[test]
+    fn validate_ssh_runtime_config_accepts_valid_values() {
+        let cfg = make_config("http://localhost:3001", "dev", &"ab".repeat(32));
+        cfg.validate_ssh_runtime_config();
+    }
+
+    #[test]
+    fn trusted_proxy_ips_unset_defaults_to_empty() {
+        assert!(parse_trusted_proxy_ips(None).is_empty());
+        assert!(parse_trusted_proxy_ips(Some(String::new())).is_empty());
+        assert!(parse_trusted_proxy_ips(Some("   ".to_string())).is_empty());
+    }
+
+    #[test]
+    fn trusted_proxy_ips_parses_single_ipv4() {
+        let parsed = parse_trusted_proxy_ips(Some("10.0.0.1".to_string()));
+        assert_eq!(
+            parsed,
+            vec![std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1))]
+        );
+    }
+
+    #[test]
+    fn trusted_proxy_ips_parses_comma_separated_list() {
+        let parsed = parse_trusted_proxy_ips(Some("10.0.0.1, 127.0.0.1 ,::1".to_string()));
+        assert_eq!(
+            parsed,
+            vec![
+                std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1)),
+                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+            ]
+        );
+    }
+
+    #[test]
+    fn trusted_proxy_ips_drops_invalid_entries() {
+        let parsed = parse_trusted_proxy_ips(Some("10.0.0.1, not-an-ip, 127.0.0.1".to_string()));
+        assert_eq!(
+            parsed,
+            vec![
+                std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1)),
+                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            ]
+        );
+    }
+
+    #[test]
+    fn invite_code_required_defaults_to_true_when_unset() {
+        assert!(parse_invite_code_required(None));
+        assert!(parse_invite_code_required(Some(String::new())));
+        assert!(parse_invite_code_required(Some("   ".to_string())));
+    }
+
+    #[test]
+    fn invite_code_required_false_for_falsy_values() {
+        for v in ["false", "FALSE", "False", "0", "no", "NO", "off", "OFF"] {
+            assert!(
+                !parse_invite_code_required(Some(v.to_string())),
+                "{v} should disable the gate"
+            );
+        }
+    }
+
+    #[test]
+    fn invite_code_required_true_for_truthy_values() {
+        for v in ["true", "TRUE", "1", "yes", "on", "anything-else"] {
+            assert!(
+                parse_invite_code_required(Some(v.to_string())),
+                "{v} should leave the gate enabled"
+            );
+        }
     }
 }

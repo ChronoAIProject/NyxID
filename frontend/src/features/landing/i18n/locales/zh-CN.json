@@ -1,0 +1,62 @@
+{
+  "nav.register": "注册",
+  "nav.login": "登录",
+
+  "hero.eyebrow": "开源智能体连接网关",
+  "hero.title": "将 Claude、Cursor 或你自己的智能体连接到公共、内部和本地 API — 并具备安全访问控制。",
+  "hero.subtitle": "在手机上审批每一个连接。你的凭证永远不会离开 NyxID。",
+  "hero.ctaRegister": "注册",
+  "hero.ctaEarlyAccess": "申请抢先体验",
+  "hero.ctaSubtext": "Nyx 守护着大门 — Discord 持有钥匙",
+
+  "install.heading": "安装 Nyx 技能",
+  "install.subheading": "粘贴到 Claude Code、Cursor 或你的 AI 编程智能体 — 剩下的它会处理。",
+  "install.commandLabel": "安装命令",
+  "install.copy": "复制",
+  "install.copied": "已复制",
+  "install.helper": "从 NyxID GitHub 仓库读取 INSTALL.md。没有智能体？请参考 README 中的手动安装步骤。",
+
+  "features.heading": "Nyx 守护什么",
+  "features.subheading": "每项功能都守护着访问与入侵之间的门槛。你始终清楚自己在批准什么 — 一切尽在掌握。",
+  "features.pushApprovals.title": "实时推送审批",
+  "features.pushApprovals.description": "当受保护的系统需要验证时，NyxID 会立即向你的手机发送推送通知。一键批准或拒绝 — 无需复制验证码，无需先打开其他应用。",
+  "features.seeBeforeApprove.title": "审批前预览",
+  "features.seeBeforeApprove.description": "每个请求都会向你展示详细信息：资源、操作、状态和过期时间。在点击批准之前就能发现可疑活动。",
+  "features.securityByDesign.title": "安全设计",
+  "features.securityByDesign.description": "密钥留在暗处。认证令牌存储在设备钥匙串中。推送通知不包含敏感内容 — 只有打开应用时才会获取详情。默认最小攻击面。",
+  "features.manageRevoke.title": "实时管理与撤销",
+  "features.manageRevoke.description": "活跃的审批可直接在应用中查看和管理。发现异常立即撤销访问 — 无需管理员门户。",
+
+  "whyNyx.label": "为什么叫 \"Nyx\"",
+  "whyNyx.quote": "Nyx — 太古的夜之女神。诞生于混沌。连宙斯都畏惧她。她守护着已知与未知之间的门槛。",
+  "whyNyx.para1": "认证是一个临界时刻 — 从匿名到已知、从拒绝到授权的交汇点。NyxID 站在这个门槛上。",
+  "whyNyx.para2": "如同她的名字，NyxID 将密钥隐藏在黑暗中。凭证永远不会出现在通知中。令牌存储在设备钥匙串中，永远不在应用存储中。代理持有你的 API 密钥，你的应用永远不会直接看到它们。",
+  "whyNyx.para3": "Nyx 守护的，无人可见。她批准的，方可通过。她拒绝的，留在黑暗中。",
+
+  "howItWorks.heading": "跨越门槛",
+  "howItWorks.subheading": "从匿名到认证，只需三步。",
+  "howItWorks.step1.title": "使用身份提供商登录",
+  "howItWorks.step1.description": "使用现有的 Google、GitHub 或 Apple 账户登录 NyxID Mobile。无需创建新密码 — NyxID 与你组织现有的身份管理方式无缝对接。",
+  "howItWorks.step2.title": "关键时刻收到推送",
+  "howItWorks.step2.description": "当高风险登录或访问请求被触发时，NyxID 会向你发送推送通知。打开应用查看完整详情：谁在请求、请求什么、持续多久。",
+  "howItWorks.step3.title": "一键批准或拒绝",
+  "howItWorks.step3.description": "由你决定。批准以授予限时访问，或拒绝以立即阻止。你的决定会被记录，请求系统会实时收到通知，操作完成。",
+
+  "whoItsFor.heading": "Nyx 守护谁",
+  "whoItsFor.subheading": "为访问决策事关重大的团队而构建。",
+  "whoItsFor.developers.title": "开发者与平台工程师",
+  "whoItsFor.developers.description": "正在构建 IAM 到你的产品或服务中？NyxID 提供 SDK 友好、API 优先的认证方案，包含真正的审批工作流 — 不仅仅是 TOTP 验证码。",
+  "whoItsFor.security.title": "IT 与安全团队",
+  "whoItsFor.security.description": "负责全组织的访问控制？NyxID 提供合规就绪的审计追踪、审批工作流，以及你的 SOC 团队会欣赏的最小化推送通知。",
+  "whoItsFor.founders.title": "创始人与小团队",
+  "whoItsFor.founders.description": "需要企业级安全但不想要复杂的开销？通过 Google 登录连接，为部署设置推送审批，并可随时从移动应用撤销访问。",
+
+  "carousel.heading": "看看 Nyx 看到了什么",
+  "carousel.subheading": "每个请求、每个决定、每个凭证 — 对你可见，对其他一切隐藏。",
+
+  "beta.heading": "与我们一同步入暗夜",
+  "beta.subheading": "NyxID 目前处于封闭内测。加入我们的 Discord，名额开放时团队将向你发送邀请码。",
+  "beta.socialProof": "仅限邀请 — 在门槛之上获得",
+  "beta.discordCta": "加入 Discord →",
+  "beta.disclaimer": "邀请名额有限，将随容量开放滚动发放。绝不发送垃圾邮件。"
+}

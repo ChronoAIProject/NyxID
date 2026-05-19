@@ -1,9 +1,13 @@
+import Constants from "expo-constants";
+
+import { ApiError } from "./ApiError";
 import {
   clearStoredAuthSession,
   loadStoredAuthSession,
   persistAuthSession,
 } from "../auth/sessionStore";
 import {
+  ApprovalMode,
   AccountProfile,
   ApprovalItem,
   ChallengeDetail,
@@ -13,11 +17,13 @@ import {
   PageResponse,
   PushTokenRegisterRequest,
   PushTokenRegisterResponse,
+  TelegramLinkInfo,
+  UpdateNotificationSettingsInput,
 } from "./types";
 
 const DEFAULT_API_BASE_URL = "http://localhost:3001/api/v1";
 const DEFAULT_CHALLENGE_DURATION_SEC = 24 * 60 * 60;
-const CHALLENGE_PAGE_SIZE = 100;
+const ACTIVITY_PAGE_SIZE = 20;
 const REFRESH_CONFLICT_RETRY_COUNT = 1;
 const REFRESH_CONFLICT_RETRY_DELAY_MS = 160;
 const PROACTIVE_REFRESH_BUFFER_MS = 2 * 60 * 1000;
@@ -88,8 +94,16 @@ type BackendApprovalRequestItem = {
   requester_type: string;
   requester_label?: string | null;
   operation_summary: string;
+  action_description?: string | null;
+  approval_mode: ApprovalMode;
   status: string;
   created_at: string;
+  // Org context — optional so responses from older backends still
+  // parse. `from_org_policy` is the authoritative flag; `org_id` and
+  // `org_name` are only set when the flag is true.
+  from_org_policy?: boolean;
+  org_id?: string | null;
+  org_name?: string | null;
 };
 
 type BackendApprovalRequestsResponse = {
@@ -108,6 +122,10 @@ type BackendApprovalGrantItem = {
   requester_label?: string | null;
   granted_at: string;
   expires_at: string;
+  // Org context for grants — optional for the same reason as above.
+  org_scoped?: boolean;
+  org_id?: string | null;
+  org_name?: string | null;
 };
 
 type BackendApprovalGrantsResponse = {
@@ -132,9 +150,7 @@ type MessageResponse = {
   message: string;
 };
 
-type BackendNotificationSettingsResponse = {
-  grant_expiry_days: number;
-};
+type BackendNotificationSettingsResponse = NotificationSettings;
 
 function getApiBaseUrl(): string {
   const rawBaseUrl = process.env.EXPO_PUBLIC_API_BASE_URL ?? DEFAULT_API_BASE_URL;
@@ -167,21 +183,24 @@ async function readJsonSafely(response: Response): Promise<unknown> {
   }
 }
 
-function stringifyErrorPayload(payload: unknown, status: number): string {
+function buildApiError(payload: unknown, status: number): ApiError | Error {
   if (payload && typeof payload === "object") {
-    if ("error" in payload && typeof payload.error === "string") {
-      return payload.error;
-    }
-    if ("message" in payload && typeof payload.message === "string") {
-      return payload.message;
-    }
+    const obj = payload as Record<string, unknown>;
+    const errorKey = typeof obj.error === "string" ? obj.error : `request_failed_${status}`;
+    const errorCode = typeof obj.error_code === "number" ? obj.error_code : 0;
+    const message =
+      typeof obj.message === "string" && obj.message.length > 0
+        ? obj.message
+        : errorKey;
+
+    return new ApiError({ errorKey, errorCode, statusCode: status, message });
   }
 
   if (typeof payload === "string" && payload.length > 0) {
-    return payload;
+    return new Error(payload);
   }
 
-  return `request_failed_${status}`;
+  return new Error(`request_failed_${status}`);
 }
 
 function computeAccessTokenExpiresAt(expiresInSec: number): number | undefined {
@@ -294,18 +313,27 @@ function deriveChallengeExpiry(createdAt: string): string {
 }
 
 function mapBackendRequestToChallenge(item: BackendApprovalRequestItem): ChallengeDetail {
-  const parsed = parseOperationSummary(item.operation_summary);
+  const summary = item.action_description ?? item.operation_summary;
+  const parsed = parseOperationSummary(summary);
+
+  // Only surface org fields when the backend flags the request as
+  // created under an org policy. Falsy / missing `from_org_policy`
+  // yields the pre-existing personal-approval shape.
+  const fromOrgPolicy = item.from_org_policy === true;
+  const orgId = fromOrgPolicy ? item.org_id ?? null : undefined;
+  const orgName = fromOrgPolicy ? item.org_name ?? null : undefined;
 
   return {
     id: item.id,
     title: sanitizeDisplayValue(item.service_name, "Unknown Service"),
     action: parsed.action,
     resource: parsed.resource,
+    approval_mode: item.approval_mode,
     risk_level: deriveRiskLevel(parsed.action),
     status: mapChallengeStatus(item.status),
     created_at: item.created_at,
     expires_at: deriveChallengeExpiry(item.created_at),
-    summary: item.operation_summary,
+    summary,
     request_context: {
       client: sanitizeDisplayValue(item.requester_type, "Unknown"),
       location: sanitizeDisplayValue(
@@ -313,6 +341,10 @@ function mapBackendRequestToChallenge(item: BackendApprovalRequestItem): Challen
         "Unknown"
       ),
     },
+    from_org_policy: fromOrgPolicy,
+    org_id: orgId,
+    org_name: orgName,
+    service_slug: item.service_slug,
   };
 }
 
@@ -323,8 +355,8 @@ function toBackendPushPlatform(platform: PushTokenRegisterRequest["platform"]): 
 }
 
 function resolveIosPushAppId(): string {
-  const fromEnv = process.env.EXPO_PUBLIC_IOS_BUNDLE_ID?.trim();
-  if (fromEnv) return fromEnv;
+  const fromConfig = Constants.expoConfig?.ios?.bundleIdentifier?.trim();
+  if (fromConfig) return fromConfig;
   return "fun.chrono-ai.nyxid";
 }
 
@@ -368,7 +400,6 @@ async function requestRefreshAccessToken(
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ refresh_token: refreshToken, client: "mobile" }),
-      credentials: "include",
     });
 
     const payload = await readJsonSafely(response);
@@ -462,13 +493,28 @@ export async function refreshAccessTokenIfNeeded(): Promise<boolean> {
   return Boolean(refreshed);
 }
 
-async function requestJson<T>(path: string, options: RequestOptions = {}): Promise<T> {
+export async function requestJson<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const method = options.method ?? "GET";
   const requiresAuth = options.requiresAuth ?? true;
   const retryOnAuthFailure = options.retryOnAuthFailure ?? true;
 
+  // Surface identification for server-side telemetry. Sent on every
+  // request regardless of the mobile client's own telemetry config:
+  // the header identifies the calling app, not the telemetry state.
+  // Backend may be opted in for analytics even when the mobile client
+  // is opted out locally, and the surface attribution still needs to
+  // read "mobile" for those backend-emitted events -- otherwise
+  // mobile-driven auth / approval / device funnels collapse into
+  // `surface="backend"` in the hosted deploy.
+  const telemetryHeaders: Record<string, string> = {
+    "X-NyxID-Client": "mobile",
+    "X-NyxID-Client-Version":
+      (Constants.expoConfig?.version as string | undefined) ?? "dev",
+  };
+
   const headers: Record<string, string> = {
     Accept: "application/json",
+    ...telemetryHeaders,
     ...options.headers,
   };
 
@@ -490,7 +536,6 @@ async function requestJson<T>(path: string, options: RequestOptions = {}): Promi
       method,
       headers,
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
-      credentials: "include",
     });
 
   let response = await send();
@@ -513,7 +558,7 @@ async function requestJson<T>(path: string, options: RequestOptions = {}): Promi
         await clearStoredAuthSession();
       }
     }
-    throw new Error(stringifyErrorPayload(payload, response.status));
+    throw buildApiError(payload, response.status);
   }
 
   return payload as T;
@@ -521,20 +566,41 @@ async function requestJson<T>(path: string, options: RequestOptions = {}): Promi
 
 async function listPendingApprovalRequests(
   page = 1,
-  perPage = CHALLENGE_PAGE_SIZE
+  perPage = ACTIVITY_PAGE_SIZE
 ): Promise<BackendApprovalRequestsResponse> {
+  // `include_admin_orgs=true` asks the backend to union in org-policy
+  // requests for every org the caller is an active admin of. Backends
+  // that don't yet recognize the param ignore it and return the legacy
+  // personal-only list, so the mobile build remains compatible with
+  // older deployments (see ChronoAIProject/NyxID#376).
   return requestJson<BackendApprovalRequestsResponse>(
-    `/approvals/requests?status=pending&page=${page}&per_page=${perPage}`
+    `/approvals/requests?status=pending&page=${page}&per_page=${perPage}&include_admin_orgs=true`
   );
 }
 
 export async function getNotificationSettingsRequest(): Promise<NotificationSettings> {
-  const response = await requestJson<BackendNotificationSettingsResponse>(
-    "/notifications/settings"
-  );
-  return {
-    grant_expiry_days: response.grant_expiry_days,
-  };
+  return requestJson<NotificationSettings>("/notifications/settings");
+}
+
+export async function updateNotificationSettingsRequest(
+  body: UpdateNotificationSettingsInput
+): Promise<NotificationSettings> {
+  return requestJson<NotificationSettings>("/notifications/settings", {
+    method: "PUT",
+    body,
+  });
+}
+
+export async function telegramLinkRequest(): Promise<TelegramLinkInfo> {
+  return requestJson<TelegramLinkInfo>("/notifications/telegram/link", {
+    method: "POST",
+  });
+}
+
+export async function telegramDisconnectRequest(): Promise<{ message: string }> {
+  return requestJson<{ message: string }>("/notifications/telegram", {
+    method: "DELETE",
+  });
 }
 
 export async function loginWithPasswordRequest(payload: LoginRequest): Promise<LoginResponse> {
@@ -556,8 +622,36 @@ export async function registerWithPasswordRequest(
   });
 }
 
-export async function listChallengesRequest(): Promise<PageResponse<ChallengeDetail>> {
-  const response = await listPendingApprovalRequests(1, CHALLENGE_PAGE_SIZE);
+export async function listChallengesRequest(
+  page = 1,
+  perPage = ACTIVITY_PAGE_SIZE
+): Promise<PageResponse<ChallengeDetail>> {
+  const response = await listPendingApprovalRequests(page, perPage);
+  return {
+    items: response.requests.map(mapBackendRequestToChallenge),
+    total: response.total,
+    page: response.page,
+    per_page: response.per_page,
+  };
+}
+
+export async function listApprovalRequestsRequest(params?: {
+  status?: string;
+  page?: number;
+  per_page?: number;
+}): Promise<PageResponse<ChallengeDetail>> {
+  const qs = new URLSearchParams();
+  if (params?.status) qs.set("status", params.status);
+  qs.set("page", String(params?.page ?? 1));
+  qs.set("per_page", String(params?.per_page ?? 20));
+  // See listPendingApprovalRequests for rationale. History queries use
+  // the same opt-in so admins see their org's approved/rejected items
+  // alongside their personal history.
+  qs.set("include_admin_orgs", "true");
+
+  const response = await requestJson<BackendApprovalRequestsResponse>(
+    `/approvals/requests?${qs.toString()}`
+  );
   return {
     items: response.requests.map(mapBackendRequestToChallenge),
     total: response.total,
@@ -573,7 +667,8 @@ export async function getChallengeRequest(challengeId: string): Promise<Challeng
     );
     return mapBackendRequestToChallenge(item);
   } catch (error) {
-    if (error instanceof Error && error.message === "not_found") {
+    if ((error instanceof ApiError && error.errorKey === "not_found") ||
+        (error instanceof Error && error.message === "not_found")) {
       throw new Error("challenge_not_found");
     }
     throw error;
@@ -606,32 +701,55 @@ export async function submitChallengeDecisionRequest(
   };
 }
 
-export async function listApprovalsRequest(): Promise<PageResponse<ApprovalItem>> {
+export async function listApprovalsRequest(
+  page = 1,
+  perPage = ACTIVITY_PAGE_SIZE
+): Promise<PageResponse<ApprovalItem>> {
+  // Same admin-org opt-in as requests: mobile's Active tab shows
+  // personal grants plus any org-scoped grants the caller admins.
   const response = await requestJson<BackendApprovalGrantsResponse>(
-    "/approvals/grants?page=1&per_page=100"
+    `/approvals/grants?page=${page}&per_page=${perPage}&include_admin_orgs=true`
   );
 
   return {
-    items: response.grants.map((item) => ({
-      id: item.id,
-      service_id: item.service_id,
-      service_name: sanitizeDisplayValue(item.service_name, "Unknown Service"),
-      requester_type: sanitizeDisplayValue(item.requester_type, "Unknown"),
-      requester_id: sanitizeDisplayValue(item.requester_id, "unknown"),
-      requester_label: sanitizeOptionalDisplayValue(item.requester_label),
-      granted_at: item.granted_at,
-      expires_at: item.expires_at,
-    })),
+    items: response.grants.map((item) => {
+      const orgScoped = item.org_scoped === true;
+      return {
+        id: item.id,
+        service_id: item.service_id,
+        service_name: sanitizeDisplayValue(item.service_name, "Unknown Service"),
+        requester_type: sanitizeDisplayValue(item.requester_type, "Unknown"),
+        requester_id: sanitizeDisplayValue(item.requester_id, "unknown"),
+        requester_label: sanitizeOptionalDisplayValue(item.requester_label),
+        granted_at: item.granted_at,
+        expires_at: item.expires_at,
+        org_scoped: orgScoped,
+        org_id: orgScoped ? item.org_id ?? null : undefined,
+        org_name: orgScoped ? item.org_name ?? null : undefined,
+      };
+    }),
     total: response.total,
     page: response.page,
     per_page: response.per_page,
   };
 }
 
-export async function revokeApprovalRequest(approvalId: string): Promise<RevokeApprovalResponse> {
-  return requestJson<MessageResponse>(`/approvals/grants/${encodeURIComponent(approvalId)}`, {
-    method: "DELETE",
-  });
+export async function revokeApprovalRequest(
+  approvalId: string,
+  orgId?: string | null
+): Promise<RevokeApprovalResponse> {
+  // Org-scoped grants live under the owning org's user_id, not the
+  // caller's. The backend's revoke handler uses `?org_id=` to pivot
+  // ownership to the target org and then checks the caller is an
+  // active admin of it. Without this param, DELETE on an org grant
+  // 404s because the default path still searches by user_id = actor.
+  const qs = orgId ? `?org_id=${encodeURIComponent(orgId)}` : "";
+  return requestJson<MessageResponse>(
+    `/approvals/grants/${encodeURIComponent(approvalId)}${qs}`,
+    {
+      method: "DELETE",
+    }
+  );
 }
 
 export async function registerPushTokenRequest(

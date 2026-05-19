@@ -101,9 +101,7 @@ export function useDeleteEndpoint() {
       readonly serviceId: string;
       readonly endpointId: string;
     }): Promise<void> => {
-      return api.delete<void>(
-        `/services/${serviceId}/endpoints/${endpointId}`,
-      );
+      return api.delete<void>(`/services/${serviceId}/endpoints/${endpointId}`);
     },
     onSuccess: (_data, variables) => {
       void queryClient.invalidateQueries({

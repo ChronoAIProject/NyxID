@@ -1,6 +1,10 @@
 import { create } from "zustand";
 import type { User, LoginResponse } from "@/types/api";
 import { api, ApiError } from "@/lib/api-client";
+import {
+  identify as telemetryIdentify,
+  reset as telemetryReset,
+} from "@/lib/telemetry";
 
 const MFA_REQUIRED_ERROR_CODE = 2002;
 
@@ -72,6 +76,9 @@ export const useAuthStore = create<AuthStore>((set) => ({
     try {
       await api.post<void>("/auth/logout");
     } finally {
+      // Clear telemetry identity BEFORE state wipe so the next event
+      // the app emits already carries a fresh anon distinct_id.
+      telemetryReset();
       set({
         user: null,
         isAuthenticated: false,
@@ -86,8 +93,17 @@ export const useAuthStore = create<AuthStore>((set) => ({
     try {
       const user = await api.get<User>("/users/me");
       set({ user, isAuthenticated: true, isLoading: false });
+      // Associate the restored session with its user_id so pageviews
+      // captured after boot attribute correctly. Safe no-op when
+      // telemetry is off.
+      telemetryIdentify(user.id);
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
+        // Session expired / server rejected — this is a sign-out path
+        // and must reset the telemetry identity before we wipe state
+        // so subsequent pageviews attribute to a fresh anon, not the
+        // ex-user. Parity with the explicit `logout()` branch above.
+        telemetryReset();
         set({ user: null, isAuthenticated: false, isLoading: false });
       } else {
         set({ isLoading: false });
@@ -97,6 +113,9 @@ export const useAuthStore = create<AuthStore>((set) => ({
 
   setUser: (user: User | null): void => {
     set({ user, isAuthenticated: user !== null });
+    if (user !== null) {
+      telemetryIdentify(user.id);
+    }
   },
 
   setMfaRequired: (required: boolean, token: string | null): void => {

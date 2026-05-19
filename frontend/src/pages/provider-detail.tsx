@@ -3,11 +3,11 @@ import { useNavigate, useParams } from "@tanstack/react-router";
 import { useProvider, useDeleteProvider } from "@/hooks/use-providers";
 import { formatDate } from "@/lib/utils";
 import { PageHeader } from "@/components/shared/page-header";
+import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
 import { DetailSection } from "@/components/shared/detail-section";
 import { DetailRow } from "@/components/shared/detail-row";
-import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
   Dialog,
@@ -17,13 +17,16 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Pencil, Trash2, AlertCircle } from "lucide-react";
+import { ErrorBanner } from "@/components/shared/error-banner";
+import { ApiError } from "@/lib/api-client";
+import { Pencil, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 const PROVIDER_TYPE_LABELS: Readonly<Record<string, string>> = {
   oauth2: "OAuth 2.0",
   api_key: "API Key",
   device_code: "Device Code",
+  telegram_widget: "Telegram Widget",
 };
 
 export function ProviderDetailPage() {
@@ -31,9 +34,11 @@ export function ProviderDetailPage() {
     providerId: string;
   };
   const navigate = useNavigate();
-  const { data: provider, isLoading, error } = useProvider(providerId);
+  const { data: provider, isLoading, error, refetch } = useProvider(providerId);
   const deleteMutation = useDeleteProvider();
   const [deleteOpen, setDeleteOpen] = useState(false);
+
+  useBreadcrumbLabel(provider?.name);
 
   async function handleDelete() {
     if (!provider) return;
@@ -60,39 +65,31 @@ export function ProviderDetailPage() {
 
   if (error || !provider) {
     return (
-      <div className="flex flex-col items-center justify-center py-16 text-center">
-        <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
-        <h3 className="mb-2 font-display text-lg font-semibold">Provider not found</h3>
-        <p className="mb-4 text-sm text-muted-foreground">
-          The provider you are looking for does not exist or has been deleted.
-        </p>
-        <Button
-          variant="outline"
-          onClick={() => void navigate({ to: "/providers/manage" })}
-        >
-          Back to Providers
-        </Button>
+      <div className="space-y-8">
+        <PageHeader title="Provider Not Found" />
+        <ErrorBanner
+          message={error instanceof ApiError ? error.message : "The provider you are looking for does not exist or has been deleted."}
+          onRetry={refetch}
+        />
       </div>
     );
   }
 
   const isOAuth = provider.provider_type === "oauth2";
   const isDeviceCode = provider.provider_type === "device_code";
+  const isApiKey = provider.provider_type === "api_key";
+  const isTelegram = provider.provider_type === "telegram_widget";
 
   return (
     <div className="space-y-8">
       <PageHeader
-        breadcrumbs={[
-          { label: "Manage Providers", to: "/providers/manage" },
-          { label: provider.name },
-        ]}
         title={provider.name}
         description={provider.description ?? undefined}
         actions={
           <>
             <Button
               variant="outline"
-              size="sm"
+              className="text-text-tertiary hover:text-muted-foreground"
               onClick={() =>
                 void navigate({
                   to: "/providers/$providerId/edit",
@@ -100,15 +97,14 @@ export function ProviderDetailPage() {
                 })
               }
             >
-              <Pencil className="mr-1 h-3 w-3" />
+              <ButtonIcon><Pencil className="h-3 w-3" /></ButtonIcon>
               Edit
             </Button>
             <Button
               variant="destructive"
-              size="sm"
               onClick={() => setDeleteOpen(true)}
             >
-              <Trash2 className="mr-1 h-3 w-3" />
+              <ButtonIcon variant="destructive"><Trash2 className="h-3 w-3 text-destructive" /></ButtonIcon>
               Delete
             </Button>
           </>
@@ -125,19 +121,22 @@ export function ProviderDetailPage() {
           }
           badge
         />
-        <DetailRow
-          label="Credential Mode"
-          value={
-            provider.credential_mode === "admin"
-              ? "Admin Only"
-              : provider.credential_mode === "user"
-                ? "User Provided"
-                : provider.credential_mode === "both"
-                  ? "Admin or User"
-                  : provider.credential_mode
-          }
-          badge
-        />
+        {(provider.provider_type === "oauth2" ||
+          provider.provider_type === "device_code") && (
+          <DetailRow
+            label="Credential Mode"
+            value={
+              provider.credential_mode === "admin"
+                ? "Admin Only"
+                : provider.credential_mode === "user"
+                  ? "User Provided"
+                  : provider.credential_mode === "both"
+                    ? "Admin or User"
+                    : provider.credential_mode
+            }
+            badge
+          />
+        )}
         <DetailRow
           label="Status"
           value={provider.is_active ? "Active" : "Inactive"}
@@ -150,7 +149,7 @@ export function ProviderDetailPage() {
 
       {isOAuth && (
         <>
-          <Separator />
+
           <DetailSection title="OAuth 2.0 Configuration">
             <DetailRow
               label="OAuth Configured"
@@ -164,26 +163,25 @@ export function ProviderDetailPage() {
               badge
               badgeVariant={provider.supports_pkce ? "success" : "secondary"}
             />
-            {provider.default_scopes &&
-              provider.default_scopes.length > 0 && (
-                <div className="flex items-start justify-between text-sm">
-                  <span className="text-muted-foreground">Default Scopes</span>
-                  <div className="flex flex-wrap gap-1 justify-end max-w-[60%]">
-                    {provider.default_scopes.map((scope) => (
-                      <Badge key={scope} variant="outline">
-                        {scope}
-                      </Badge>
-                    ))}
-                  </div>
+            {provider.default_scopes && provider.default_scopes.length > 0 && (
+              <div className="flex items-start justify-between text-[12px]">
+                <span className="text-muted-foreground">Default Scopes</span>
+                <div className="flex flex-wrap gap-1 justify-end max-w-[60%]">
+                  {provider.default_scopes.map((scope) => (
+                    <Badge key={scope} variant="secondary">
+                      {scope}
+                    </Badge>
+                  ))}
                 </div>
-              )}
+              </div>
+            )}
           </DetailSection>
         </>
       )}
 
       {isDeviceCode && (
         <>
-          <Separator />
+
           <DetailSection title="Device Code Configuration (RFC 8628)">
             <DetailRow
               label="OAuth Configured"
@@ -212,33 +210,32 @@ export function ProviderDetailPage() {
                 copyable
               />
             )}
-            {provider.default_scopes &&
-              provider.default_scopes.length > 0 && (
-                <div className="flex items-start justify-between text-sm">
-                  <span className="text-muted-foreground">Default Scopes</span>
-                  <div className="flex flex-wrap gap-1 justify-end max-w-[60%]">
-                    {provider.default_scopes.map((scope) => (
-                      <Badge key={scope} variant="outline">
-                        {scope}
-                      </Badge>
-                    ))}
-                  </div>
+            {provider.default_scopes && provider.default_scopes.length > 0 && (
+              <div className="flex items-start justify-between text-[12px]">
+                <span className="text-muted-foreground">Default Scopes</span>
+                <div className="flex flex-wrap gap-1 justify-end max-w-[60%]">
+                  {provider.default_scopes.map((scope) => (
+                    <Badge key={scope} variant="secondary">
+                      {scope}
+                    </Badge>
+                  ))}
                 </div>
-              )}
+              </div>
+            )}
           </DetailSection>
         </>
       )}
 
-      {!isOAuth && !isDeviceCode && (
+      {isApiKey && (
         <>
-          <Separator />
+
           <DetailSection title="API Key Configuration">
             {provider.api_key_instructions && (
-              <div className="text-sm">
+              <div className="text-[12px]">
                 <span className="text-muted-foreground block mb-1">
                   Instructions
                 </span>
-                <p className="whitespace-pre-wrap text-sm">
+                <p className="whitespace-pre-wrap text-[12px]">
                   {provider.api_key_instructions}
                 </p>
               </div>
@@ -254,16 +251,35 @@ export function ProviderDetailPage() {
         </>
       )}
 
+      {isTelegram && (
+        <>
+
+          <DetailSection title="Telegram Widget Configuration">
+            <DetailRow
+              label="Configured"
+              value={provider.has_oauth_config ? "Yes" : "No"}
+              badge
+              badgeVariant={provider.has_oauth_config ? "success" : "secondary"}
+            />
+            <DetailRow
+              label="Bot Username"
+              value={
+                provider.client_id_param_name
+                  ? `@${provider.client_id_param_name}`
+                  : "Not set"
+              }
+              copyable={provider.client_id_param_name !== null}
+            />
+          </DetailSection>
+        </>
+      )}
+
       {(provider.icon_url || provider.documentation_url) && (
         <>
-          <Separator />
+
           <DetailSection title="Display">
             {provider.icon_url && (
-              <DetailRow
-                label="Icon URL"
-                value={provider.icon_url}
-                copyable
-              />
+              <DetailRow label="Icon URL" value={provider.icon_url} copyable />
             )}
             {provider.documentation_url && (
               <DetailRow

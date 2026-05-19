@@ -12,7 +12,10 @@ import {
 } from "@/schemas/service-accounts";
 import { ApiError } from "@/lib/api-client";
 import { formatDate } from "@/lib/utils";
+import { canAdminWrite } from "@/types/api";
+import { useAuthStore } from "@/stores/auth-store";
 import { PageHeader } from "@/components/shared/page-header";
+import { AddCtaButton } from "@/components/shared/add-cta-button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -42,14 +45,13 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import {
-  Bot,
   Search,
   ChevronLeft,
   ChevronRight,
-  Plus,
   Copy,
   AlertTriangle,
 } from "lucide-react";
+import { RoboticArmIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
 import { copyToClipboard } from "@/lib/utils";
 import type { CreateServiceAccountResponse } from "@/types/service-accounts";
@@ -61,6 +63,8 @@ const PER_PAGE = 20;
 // components/dashboard/create-service-account-dialog.tsx if the file grows.
 export function AdminServiceAccountsPage() {
   const navigate = useNavigate();
+  const currentUser = useAuthStore((s) => s.user);
+  const canWrite = canAdminWrite(currentUser);
   const [page, setPage] = useState(1);
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
@@ -131,11 +135,9 @@ export function AdminServiceAccountsPage() {
       setCreatedResult(result);
       toast.success("Service account created");
     } catch (err) {
-      if (err instanceof ApiError) {
-        createForm.setError("root", { message: err.message });
-      } else {
-        toast.error("Failed to create service account");
-      }
+      toast.error(
+        err instanceof ApiError ? err.message : "Failed to create service account",
+      );
     }
   }
 
@@ -144,42 +146,41 @@ export function AdminServiceAccountsPage() {
       <PageHeader
         title="Service Accounts"
         description="Manage machine-to-machine service accounts for programmatic access."
+        actions={
+          canWrite ? (
+            <AddCtaButton label="Create Service Account" onClick={openCreateDialog} />
+          ) : null
+        }
       />
 
-      <div className="flex items-center justify-between gap-2">
-        <form onSubmit={handleSearch} className="flex items-center gap-2">
-          <div className="relative flex-1 max-w-sm">
-            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              placeholder="Search by name..."
-              value={searchInput}
-              onChange={(e) => setSearchInput(e.target.value)}
-              className="pl-9"
-            />
-          </div>
-          <Button type="submit" variant="outline" size="sm">
-            Search
-          </Button>
-          {search && (
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              onClick={() => {
-                setSearchInput("");
-                setSearch("");
-                setPage(1);
-              }}
-            >
-              Clear
-            </Button>
-          )}
-        </form>
-        <Button size="sm" onClick={openCreateDialog}>
-          <Plus className="mr-1 h-4 w-4" />
-          Create Service Account
+      <form onSubmit={handleSearch} className="flex items-center gap-2">
+        <div className="relative max-w-sm flex-1">
+          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            placeholder="Search by name..."
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
+            className="pl-9"
+          />
+        </div>
+        <Button type="submit" variant="outline" size="sm">
+          Search
         </Button>
-      </div>
+        {search && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={() => {
+              setSearchInput("");
+              setSearch("");
+              setPage(1);
+            }}
+          >
+            Clear
+          </Button>
+        )}
+      </form>
 
       {isLoading ? (
         <div className="space-y-2">
@@ -188,24 +189,71 @@ export function AdminServiceAccountsPage() {
           ))}
         </div>
       ) : error ? (
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-          <Bot className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
-            Failed to load service accounts. Please try again.
-          </p>
+        <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+          <RoboticArmIcon className="h-64 w-64 text-muted-foreground/30" />
+          <div className="space-y-1">
+            <p className="text-[12px] font-medium text-muted-foreground/30">Failed to load service accounts</p>
+            <p className="text-xs text-muted-foreground/30">Please try again later.</p>
+          </div>
         </div>
       ) : accounts.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-          <Bot className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
-            {search
-              ? "No service accounts match your search."
-              : "No service accounts found."}
-          </p>
+        <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+          <RoboticArmIcon className="h-64 w-64 text-muted-foreground/30" />
+          <div className="space-y-1">
+            <p className="text-[12px] font-medium text-muted-foreground/30">No service accounts found</p>
+            <p className="text-xs text-muted-foreground/30">
+              {search
+                ? "No service accounts match your search."
+                : "There are no service accounts to display."}
+            </p>
+          </div>
         </div>
       ) : (
         <>
-          <div className="rounded-md border">
+          {/* Mobile cards */}
+          <div className="flex flex-col gap-3 md:hidden">
+            {accounts.map((sa) => (
+              <div
+                key={sa.id}
+                className="rounded-xl border border-border/50 bg-card p-4 transition-colors hover:bg-white/[0.03] cursor-pointer"
+                tabIndex={0}
+                role="link"
+                onClick={() =>
+                  void navigate({
+                    to: "/admin/service-accounts/$saId",
+                    params: { saId: sa.id },
+                  })
+                }
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    void navigate({
+                      to: "/admin/service-accounts/$saId",
+                      params: { saId: sa.id },
+                    });
+                  }
+                }}
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-medium truncate">{sa.name}</p>
+                    <p className="text-xs text-muted-foreground font-mono truncate mt-0.5">
+                      {sa.client_id}
+                    </p>
+                  </div>
+                  <Badge variant={sa.is_active ? "success" : "destructive"}>
+                    {sa.is_active ? "Active" : "Inactive"}
+                  </Badge>
+                </div>
+                <div className="mt-3 flex items-center gap-3 text-xs text-muted-foreground">
+                  <span>Created {formatDate(sa.created_at)}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Desktop table */}
+          <div className="hidden md:block rounded-xl border border-border/50 bg-card overflow-hidden">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -245,9 +293,7 @@ export function AdminServiceAccountsPage() {
                       {sa.client_id}
                     </TableCell>
                     <TableCell>
-                      <Badge
-                        variant={sa.is_active ? "success" : "destructive"}
-                      >
+                      <Badge variant={sa.is_active ? "success" : "destructive"}>
                         {sa.is_active ? "Active" : "Inactive"}
                       </Badge>
                     </TableCell>
@@ -270,7 +316,7 @@ export function AdminServiceAccountsPage() {
           </div>
 
           <div className="flex items-center justify-between">
-            <p className="text-sm text-muted-foreground">
+            <p className="text-[11px] text-text-tertiary">
               Showing {String((page - 1) * PER_PAGE + 1)}-
               {String(Math.min(page * PER_PAGE, total))} of {String(total)}{" "}
               service accounts
@@ -278,24 +324,24 @@ export function AdminServiceAccountsPage() {
             <div className="flex items-center gap-2">
               <Button
                 variant="outline"
-                size="sm"
+                size="icon"
                 disabled={page <= 1}
                 onClick={() => setPage((p) => Math.max(1, p - 1))}
+                aria-label="Previous page"
               >
-                <ChevronLeft className="h-4 w-4" />
-                Previous
+                <ChevronLeft className="h-3 w-3" />
               </Button>
-              <span className="text-sm text-muted-foreground">
+              <span className="text-[11px] text-text-tertiary">
                 Page {String(page)} of {String(totalPages)}
               </span>
               <Button
                 variant="outline"
-                size="sm"
+                size="icon"
                 disabled={page >= totalPages}
                 onClick={() => setPage((p) => p + 1)}
+                aria-label="Next page"
               >
-                Next
-                <ChevronRight className="h-4 w-4" />
+                <ChevronRight className="h-3 w-3" />
               </Button>
             </div>
           </div>
@@ -382,16 +428,11 @@ export function AdminServiceAccountsPage() {
           ) : (
             <Form {...createForm}>
               <form
-                onSubmit={createForm.handleSubmit((data) =>
-                  void handleCreate(data),
+                onSubmit={createForm.handleSubmit(
+                  (data) => void handleCreate(data),
                 )}
                 className="space-y-4"
               >
-                {createForm.formState.errors.root && (
-                  <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
-                    {createForm.formState.errors.root.message}
-                  </div>
-                )}
                 <FormField
                   control={createForm.control}
                   name="name"
@@ -399,10 +440,7 @@ export function AdminServiceAccountsPage() {
                     <FormItem>
                       <FormLabel>Name</FormLabel>
                       <FormControl>
-                        <Input
-                          placeholder="e.g. CI/CD Pipeline"
-                          {...field}
-                        />
+                        <Input placeholder="e.g. CI/CD Pipeline" {...field} />
                       </FormControl>
                       <FormMessage />
                     </FormItem>
@@ -442,7 +480,9 @@ export function AdminServiceAccountsPage() {
                   name="role_ids"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Role IDs (comma-separated, optional)</FormLabel>
+                      <FormLabel>
+                        Role IDs (comma-separated, optional)
+                      </FormLabel>
                       <FormControl>
                         <Input placeholder="Optional" {...field} />
                       </FormControl>
@@ -475,7 +515,7 @@ export function AdminServiceAccountsPage() {
                   >
                     Cancel
                   </Button>
-                  <Button type="submit" isLoading={createMutation.isPending}>
+                  <Button type="submit" variant="primary" isLoading={createMutation.isPending}>
                     Create
                   </Button>
                 </DialogFooter>

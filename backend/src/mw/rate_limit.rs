@@ -1,11 +1,17 @@
-use axum::{body::Body, extract::Extension, http::Request, middleware::Next, response::Response};
+use axum::{
+    body::Body,
+    extract::Extension,
+    http::{HeaderMap, Request},
+    middleware::Next,
+    response::Response,
+};
 use governor::{
     Quota, RateLimiter,
     clock::DefaultClock,
     state::{InMemoryState, NotKeyed},
 };
 use std::collections::HashMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -70,6 +76,211 @@ impl PerIpRateLimiter {
 /// Shared per-IP rate limiter type for use as an Extension.
 pub type SharedPerIpRateLimiter = Arc<PerIpRateLimiter>;
 
+/// Per-agent rate limiter keyed by API key ID.
+/// Each agent gets its own token bucket keyed by API key ID.
+/// `rate_limit_per_second` controls refill rate and `burst` controls capacity.
+#[derive(Clone)]
+pub struct PerAgentRateLimiter {
+    state: Arc<Mutex<HashMap<String, AgentBucket>>>,
+}
+
+#[derive(Clone, Debug)]
+struct AgentBucket {
+    tokens: f64,
+    last_refill: Instant,
+}
+
+impl PerAgentRateLimiter {
+    pub fn new() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Check if a request from the given agent should be allowed.
+    /// Returns true if allowed, false if rate limited.
+    pub fn check(&self, agent_id: &str, rate_per_second: u32, burst_capacity: u32) -> bool {
+        let now = Instant::now();
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = state.entry(agent_id.to_string()).or_insert(AgentBucket {
+            tokens: burst_capacity as f64,
+            last_refill: now,
+        });
+
+        let elapsed_secs = now.duration_since(entry.last_refill).as_secs_f64();
+        entry.tokens =
+            (entry.tokens + elapsed_secs * rate_per_second as f64).min(burst_capacity as f64);
+        entry.last_refill = now;
+
+        if entry.tokens < 1.0 {
+            return false;
+        }
+        entry.tokens -= 1.0;
+        true
+    }
+
+    /// Remove stale entries to prevent unbounded memory growth.
+    pub fn cleanup(&self) {
+        let now = Instant::now();
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.retain(|_, bucket| now.duration_since(bucket.last_refill).as_secs() < 120);
+    }
+}
+
+pub type SharedPerAgentRateLimiter = Arc<PerAgentRateLimiter>;
+
+/// Per-message edit limiter keyed by upstream platform message ID.
+/// Used by the channel relay edit endpoint so progressive updates on one
+/// message cannot starve the rest of the relay.
+#[derive(Clone)]
+pub struct PerMessageEditRateLimiter {
+    state: Arc<Mutex<HashMap<String, AgentBucket>>>,
+    rate_per_second: u32,
+    burst: u32,
+}
+
+impl PerMessageEditRateLimiter {
+    pub fn new(rate_per_second: u32, burst: u32) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(HashMap::new())),
+            rate_per_second,
+            burst,
+        }
+    }
+
+    /// Check if an edit for the given upstream message should be allowed.
+    pub fn check(&self, platform_message_id: &str) -> bool {
+        let now = Instant::now();
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = state
+            .entry(platform_message_id.to_string())
+            .or_insert(AgentBucket {
+                tokens: self.burst as f64,
+                last_refill: now,
+            });
+
+        let elapsed_secs = now.duration_since(entry.last_refill).as_secs_f64();
+        entry.tokens =
+            (entry.tokens + elapsed_secs * self.rate_per_second as f64).min(self.burst as f64);
+        entry.last_refill = now;
+
+        if entry.tokens < 1.0 {
+            return false;
+        }
+        entry.tokens -= 1.0;
+        true
+    }
+
+    /// Remove stale entries to prevent unbounded memory growth.
+    pub fn cleanup(&self) {
+        let now = Instant::now();
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.retain(|_, bucket| now.duration_since(bucket.last_refill).as_secs() < 120);
+    }
+}
+
+pub type SharedPerMessageEditRateLimiter = Arc<PerMessageEditRateLimiter>;
+
+/// Per-channel rate limiter keyed by conversation_id for the HTTP Event
+/// Gateway. Distinct from `PerAgentRateLimiter` because event-channel
+/// throttling is per-conversation, not per-API-key.
+///
+/// Token bucket with a fixed rate_per_second and burst capacity shared by
+/// every conversation. Rate parameters are set at construction time from
+/// env-driven config; per-conversation overrides are not supported in the
+/// initial implementation.
+#[derive(Clone)]
+pub struct PerChannelEventLimiter {
+    state: Arc<Mutex<HashMap<String, AgentBucket>>>,
+    rate_per_second: u32,
+    burst: u32,
+}
+
+impl PerChannelEventLimiter {
+    pub fn new(rate_per_second: u32, burst: u32) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(HashMap::new())),
+            rate_per_second,
+            burst,
+        }
+    }
+
+    /// Check if an event for the given conversation should be allowed.
+    /// Returns `true` if allowed, `false` if rate-limited.
+    pub fn check(&self, conversation_id: &str) -> bool {
+        let now = Instant::now();
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = state
+            .entry(conversation_id.to_string())
+            .or_insert(AgentBucket {
+                tokens: self.burst as f64,
+                last_refill: now,
+            });
+
+        let elapsed_secs = now.duration_since(entry.last_refill).as_secs_f64();
+        entry.tokens =
+            (entry.tokens + elapsed_secs * self.rate_per_second as f64).min(self.burst as f64);
+        entry.last_refill = now;
+
+        if entry.tokens < 1.0 {
+            return false;
+        }
+        entry.tokens -= 1.0;
+        true
+    }
+
+    /// Remove stale entries to prevent unbounded memory growth.
+    pub fn cleanup(&self) {
+        let now = Instant::now();
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.retain(|_, bucket| now.duration_since(bucket.last_refill).as_secs() < 120);
+    }
+
+    #[cfg(test)]
+    fn active_conversations(&self) -> usize {
+        self.state.lock().unwrap().len()
+    }
+}
+
+pub type SharedPerChannelEventLimiter = Arc<PerChannelEventLimiter>;
+
+/// Check per-agent rate limit. Call from proxy handlers after auth extraction.
+pub fn check_agent_rate_limit(
+    limiter: &PerAgentRateLimiter,
+    auth_user: &crate::mw::auth::AuthUser,
+) -> Result<(), crate::errors::AppError> {
+    check_agent_rate_limit_raw(
+        limiter,
+        auth_user.api_key_id.as_deref(),
+        auth_user.rate_limit_per_second,
+        auth_user.rate_limit_burst,
+    )
+}
+
+/// Check per-agent rate limit using raw API-key identity and limit fields.
+/// Used by callers that don't hold an `AuthUser` (e.g. the MCP transport).
+pub fn check_agent_rate_limit_raw(
+    limiter: &PerAgentRateLimiter,
+    api_key_id: Option<&str>,
+    rate_limit_per_second: Option<u32>,
+    rate_limit_burst: Option<u32>,
+) -> Result<(), crate::errors::AppError> {
+    if let (Some(agent_id), Some(rps)) = (api_key_id, rate_limit_per_second) {
+        // When no explicit burst is set, use the sustained rate as the ceiling.
+        // Users who want a higher burst can set rate_limit_burst explicitly.
+        let burst = rate_limit_burst.unwrap_or(rps);
+        if !limiter.check(agent_id, rps, burst) {
+            tracing::warn!(
+                agent_id = %agent_id,
+                rate_limit = rps,
+                "Per-agent rate limit exceeded"
+            );
+            return Err(crate::errors::AppError::RateLimited);
+        }
+    }
+    Ok(())
+}
+
 /// Create a new global rate limiter (kept as fallback).
 ///
 /// The limiter allows `per_second` requests per second with a burst capacity
@@ -84,6 +295,76 @@ pub fn create_rate_limiter(per_second: u64, burst: u32) -> SharedRateLimiter {
 /// Create a per-IP rate limiter.
 pub fn create_per_ip_rate_limiter(max_requests: u32, window_secs: u64) -> SharedPerIpRateLimiter {
     Arc::new(PerIpRateLimiter::new(max_requests, window_secs))
+}
+
+/// Resolve the client IP for per-IP rate-limit keying behind a
+/// configurable trusted-proxy allowlist.
+///
+/// Most deployments put NyxID behind a reverse proxy (nginx, AWS ALB,
+/// Fly.io, etc.); every request's TCP peer is then the proxy itself,
+/// so a per-peer bucket collapses into a single site-wide bucket. The
+/// `X-Forwarded-For` / `X-Real-IP` headers carry the real client IP,
+/// but are client-spoofable when accepted unconditionally — which
+/// would let an attacker bypass the very rate limit this helper
+/// guards.
+///
+/// The trade-off is resolved with an allowlist: the forwarded headers
+/// are honored only when the TCP peer is one of `trusted_proxies`.
+/// Otherwise the peer IP wins, so:
+///
+///   - Direct-exposure deployments (no `TRUSTED_PROXY_IPS` configured)
+///     get the pre-change behavior: per-peer bucket, unspoofable.
+///   - Proxy deployments that list their proxy IPs in
+///     `TRUSTED_PROXY_IPS` get per-real-client buckets.
+///   - A request whose peer isn't trusted can still set
+///     `X-Forwarded-For` — the header is ignored so bypass is
+///     impossible.
+///
+/// `X-Forwarded-For` is read left-to-right per the de-facto standard:
+/// the leftmost entry is the originating client, each subsequent
+/// entry is a proxy closer to the server. We take the leftmost valid
+/// IP, matching the behavior of `extract_ip` for audit logging. Only
+/// entries that parse as `IpAddr` are accepted; malformed values fall
+/// through to the peer.
+pub fn resolve_client_ip_for_rate_limit(
+    headers: &HeaderMap,
+    peer: Option<SocketAddr>,
+    trusted_proxies: &[IpAddr],
+) -> Option<IpAddr> {
+    let peer_ip = peer.map(|p| p.ip());
+
+    // Peer must be a trusted proxy before we honor any forwarded
+    // header. Empty allowlist => never trusted, preserving the
+    // pre-change "peer IP wins" behavior.
+    let peer_is_trusted = peer_ip
+        .as_ref()
+        .map(|ip| trusted_proxies.contains(ip))
+        .unwrap_or(false);
+
+    if peer_is_trusted {
+        if let Some(ip) = headers
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(',').next())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .and_then(|s| s.parse::<IpAddr>().ok())
+        {
+            return Some(ip);
+        }
+
+        if let Some(ip) = headers
+            .get("x-real-ip")
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .and_then(|s| s.parse::<IpAddr>().ok())
+        {
+            return Some(ip);
+        }
+    }
+
+    peer_ip
 }
 
 /// Extract the client IP address from the request.
@@ -267,5 +548,180 @@ mod tests {
             .unwrap();
         let ip = extract_client_ip(&req);
         assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)));
+    }
+
+    #[test]
+    fn per_agent_allows_under_limit() {
+        let limiter = PerAgentRateLimiter::new();
+        assert!(limiter.check("agent-1", 3, 3));
+        assert!(limiter.check("agent-1", 3, 3));
+        assert!(limiter.check("agent-1", 3, 3));
+    }
+
+    #[test]
+    fn per_agent_blocks_over_limit() {
+        let limiter = PerAgentRateLimiter::new();
+        assert!(limiter.check("agent-2", 2, 2));
+        assert!(limiter.check("agent-2", 2, 2));
+        assert!(!limiter.check("agent-2", 2, 2));
+    }
+
+    #[test]
+    fn per_agent_different_agents_independent() {
+        let limiter = PerAgentRateLimiter::new();
+        assert!(limiter.check("agent-a", 1, 1));
+        assert!(!limiter.check("agent-a", 1, 1));
+        assert!(limiter.check("agent-b", 1, 1));
+    }
+
+    #[test]
+    fn per_agent_uses_burst_without_turning_it_into_sustained_limit() {
+        let limiter = PerAgentRateLimiter::new();
+        assert!(limiter.check("agent-burst", 1, 2));
+        assert!(limiter.check("agent-burst", 1, 2));
+        assert!(!limiter.check("agent-burst", 1, 2));
+    }
+
+    #[test]
+    fn per_agent_cleanup_does_not_panic() {
+        let limiter = PerAgentRateLimiter::new();
+        limiter.check("agent-x", 10, 10);
+        limiter.cleanup();
+    }
+
+    #[test]
+    fn per_channel_limiter_allows_up_to_burst() {
+        let limiter = PerChannelEventLimiter::new(100, 3);
+        assert!(limiter.check("conv-a"));
+        assert!(limiter.check("conv-a"));
+        assert!(limiter.check("conv-a"));
+        assert!(!limiter.check("conv-a"));
+    }
+
+    #[test]
+    fn per_channel_limiter_isolates_conversations() {
+        let limiter = PerChannelEventLimiter::new(100, 1);
+        assert!(limiter.check("conv-a"));
+        assert!(!limiter.check("conv-a"));
+        // Second conversation still has its own bucket.
+        assert!(limiter.check("conv-b"));
+    }
+
+    #[test]
+    fn per_channel_limiter_refills_over_time() {
+        // 100 req/s with burst 1 → roughly 10ms per token
+        let limiter = PerChannelEventLimiter::new(100, 1);
+        assert!(limiter.check("conv"));
+        assert!(!limiter.check("conv"));
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        assert!(limiter.check("conv"));
+    }
+
+    #[test]
+    fn per_channel_limiter_cleanup_does_not_panic() {
+        let limiter = PerChannelEventLimiter::new(100, 100);
+        limiter.check("conv-clean");
+        limiter.cleanup();
+        // Still usable after cleanup.
+        assert!(limiter.check("conv-clean"));
+    }
+
+    fn socket(ip: IpAddr) -> SocketAddr {
+        SocketAddr::new(ip, 4242)
+    }
+
+    #[test]
+    fn resolve_client_ip_falls_back_to_peer_when_no_trusted_proxies() {
+        let peer_ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10));
+        let mut headers = HeaderMap::new();
+        // XFF set but we don't trust the peer: header must be
+        // ignored so a direct-exposure deployment can't be spoofed.
+        headers.insert("x-forwarded-for", "198.51.100.4".parse().unwrap());
+        let resolved = resolve_client_ip_for_rate_limit(&headers, Some(socket(peer_ip)), &[]);
+        assert_eq!(resolved, Some(peer_ip));
+    }
+
+    #[test]
+    fn resolve_client_ip_honors_xff_when_peer_is_trusted_proxy() {
+        let proxy_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let client_ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7));
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            format!("{client_ip}, 10.0.0.1").parse().unwrap(),
+        );
+        let resolved =
+            resolve_client_ip_for_rate_limit(&headers, Some(socket(proxy_ip)), &[proxy_ip]);
+        assert_eq!(resolved, Some(client_ip));
+    }
+
+    #[test]
+    fn resolve_client_ip_honors_x_real_ip_fallback_when_trusted() {
+        let proxy_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let client_ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 9));
+        let mut headers = HeaderMap::new();
+        headers.insert("x-real-ip", client_ip.to_string().parse().unwrap());
+        let resolved =
+            resolve_client_ip_for_rate_limit(&headers, Some(socket(proxy_ip)), &[proxy_ip]);
+        assert_eq!(resolved, Some(client_ip));
+    }
+
+    #[test]
+    fn resolve_client_ip_ignores_xff_when_peer_not_in_allowlist() {
+        let peer_ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 99));
+        let proxy_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "198.51.100.55".parse().unwrap());
+        let resolved =
+            resolve_client_ip_for_rate_limit(&headers, Some(socket(peer_ip)), &[proxy_ip]);
+        assert_eq!(resolved, Some(peer_ip));
+    }
+
+    #[test]
+    fn resolve_client_ip_drops_malformed_xff_entry_and_uses_peer() {
+        let proxy_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4));
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "not-an-ip".parse().unwrap());
+        let resolved =
+            resolve_client_ip_for_rate_limit(&headers, Some(socket(proxy_ip)), &[proxy_ip]);
+        assert_eq!(resolved, Some(proxy_ip));
+    }
+
+    #[test]
+    fn resolve_client_ip_takes_leftmost_xff_entry() {
+        let proxy_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            "198.51.100.11, 192.0.2.1, 10.0.0.5".parse().unwrap(),
+        );
+        let resolved =
+            resolve_client_ip_for_rate_limit(&headers, Some(socket(proxy_ip)), &[proxy_ip]);
+        assert_eq!(resolved, Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 11))));
+    }
+
+    #[test]
+    fn resolve_client_ip_handles_missing_peer() {
+        // No peer means we can't make a trust decision. XFF must
+        // still be ignored — returning `None` lets the caller decide
+        // how to handle the ambiguity (typically: skip the per-IP
+        // bucket entirely).
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "198.51.100.4".parse().unwrap());
+        let resolved = resolve_client_ip_for_rate_limit(
+            &headers,
+            None,
+            &[IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))],
+        );
+        assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn per_channel_limiter_tracks_active_conversations() {
+        let limiter = PerChannelEventLimiter::new(100, 10);
+        limiter.check("conv-1");
+        limiter.check("conv-2");
+        limiter.check("conv-3");
+        assert_eq!(limiter.active_conversations(), 3);
     }
 }

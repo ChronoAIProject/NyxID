@@ -12,7 +12,7 @@ import { CredentialDialog } from "@/components/dashboard/credential-dialog";
 import type { DownstreamService } from "@/types/api";
 import { DetailSection } from "@/components/shared/detail-section";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
   Table,
@@ -36,16 +36,20 @@ interface SaConnectedServicesProps {
 }
 
 export function SaConnectedServices({ saId }: SaConnectedServicesProps) {
-  const { data: saConnections, isLoading: connectionsLoading } = useSaConnections(saId);
+  const { data: saConnections, isLoading: connectionsLoading } =
+    useSaConnections(saId);
   const { data: allServices } = useServices();
   const connectServiceMutation = useConnectSaService();
   const updateConnectionCredentialMutation = useUpdateSaConnectionCredential();
   const disconnectServiceMutation = useDisconnectSaService();
 
-  const connectedServiceIds = new Set(saConnections?.map((c) => c.service_id) ?? []);
+  const connectedServiceIds = new Set(
+    saConnections?.map((c) => c.service_id) ?? [],
+  );
   const availableServices = (allServices ?? []).filter(
     (s) =>
       s.is_active &&
+      s.service_type === "http" &&
       s.service_category !== "provider" &&
       !connectedServiceIds.has(s.id),
   );
@@ -141,7 +145,7 @@ export function SaConnectedServices({ saId }: SaConnectedServicesProps) {
         {connectionsLoading ? (
           <Skeleton className="h-24 w-full" />
         ) : saConnections && saConnections.length > 0 ? (
-          <div className="rounded-md border">
+          <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -151,21 +155,25 @@ export function SaConnectedServices({ saId }: SaConnectedServicesProps) {
                   <TableHead>Credential</TableHead>
                   <TableHead>Label</TableHead>
                   <TableHead>Connected</TableHead>
-                  <TableHead />
+                  <TableHead>Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {saConnections.map((conn) => (
                   <TableRow key={conn.service_id}>
-                    <TableCell className="font-medium">{conn.service_name}</TableCell>
+                    <TableCell className="font-medium">
+                      {conn.service_name}
+                    </TableCell>
                     <TableCell>
-                      <Badge variant="outline">{conn.service_category}</Badge>
+                      <Badge variant="secondary">{conn.service_category}</Badge>
                     </TableCell>
                     <TableCell className="text-muted-foreground">
                       {conn.auth_type ?? "-"}
                     </TableCell>
                     <TableCell>
-                      <Badge variant={conn.has_credential ? "success" : "secondary"}>
+                      <Badge
+                        variant={conn.has_credential ? "success" : "secondary"}
+                      >
                         {conn.has_credential ? "Stored" : "None"}
                       </Badge>
                     </TableCell>
@@ -176,25 +184,29 @@ export function SaConnectedServices({ saId }: SaConnectedServicesProps) {
                       {formatDate(conn.connected_at)}
                     </TableCell>
                     <TableCell>
-                      <div className="flex gap-1">
+                      <div className="flex justify-end gap-1">
                         {conn.has_credential && (
                           <Button
                             variant="ghost"
-                            size="sm"
-                            onClick={() => handleUpdateServiceCredential(conn.service_id)}
-                            disabled={updateConnectionCredentialMutation.isPending}
+                            onClick={() =>
+                              handleUpdateServiceCredential(conn.service_id)
+                            }
+                            disabled={
+                              updateConnectionCredentialMutation.isPending
+                            }
                           >
-                            <KeyRound className="mr-1 h-3 w-3" />
+                            <ButtonIcon><KeyRound className="h-3 w-3" /></ButtonIcon>
                             Update
                           </Button>
                         )}
                         <Button
                           variant="ghost"
-                          size="sm"
-                          onClick={() => void handleDisconnectService(conn.service_id)}
+                          onClick={() =>
+                            void handleDisconnectService(conn.service_id)
+                          }
                           disabled={disconnectServiceMutation.isPending}
                         >
-                          <Unlink className="mr-1 h-3 w-3" />
+                          <ButtonIcon><Unlink className="h-3 w-3" /></ButtonIcon>
                           Disconnect
                         </Button>
                       </div>
@@ -205,7 +217,7 @@ export function SaConnectedServices({ saId }: SaConnectedServicesProps) {
             </Table>
           </div>
         ) : (
-          <p className="text-sm text-muted-foreground">
+          <p className="text-[12px] text-muted-foreground">
             No services connected to this service account.
           </p>
         )}
@@ -248,19 +260,19 @@ function ConnectServiceDropdown({
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant="outline" size="sm">
-          <Plug className="mr-1 h-3 w-3" />
+        <Button variant="outline">
+          <ButtonIcon><Plug className="h-3 w-3" /></ButtonIcon>
           Connect Service
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent>
+      <DropdownMenuContent style={{ maxHeight: "16rem", overflowY: "auto" }}>
         {services.map((s) => (
           <DropdownMenuItem key={s.id} onClick={() => onSelect(s)}>
             <span>{s.name}</span>
             {s.requires_user_credential && (
               <KeyRound className="ml-1 h-3 w-3 text-muted-foreground" />
             )}
-            <Badge variant="outline" className="ml-auto text-xs">
+            <Badge variant="secondary" className="ml-auto text-xs">
               {s.service_category}
             </Badge>
           </DropdownMenuItem>

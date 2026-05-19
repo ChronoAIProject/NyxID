@@ -1,4 +1,6 @@
 import type { ApiErrorResponse } from "@/types/api";
+import { useAuthStore } from "@/stores/auth-store";
+import { isTelemetryActive } from "@/lib/telemetry";
 
 const API_ORIGIN = "";
 
@@ -22,6 +24,7 @@ interface RequestOptions {
   readonly method?: string;
   readonly body?: unknown;
   readonly headers?: Record<string, string>;
+  readonly signal?: AbortSignal;
 }
 
 // Endpoints that should not clear the global auth state on 401 because they
@@ -37,15 +40,29 @@ const NO_AUTH_STATE_CLEAR_ENDPOINTS = new Set([
 ]);
 
 function buildFetchConfig(options: RequestOptions): RequestInit {
-  const { method = "GET", body, headers = {} } = options;
+  const { method = "GET", body, headers = {}, signal } = options;
+
+  // Surface identification for server-side telemetry. Only attached
+  // once the runtime telemetry client has been constructed on this
+  // page load. Keying off the live `isTelemetryActive()` (not just
+  // persisted consent) means a browser with stale consent from an
+  // earlier telemetry-on deploy will NOT leak these headers after
+  // the operator turns telemetry off at the backend — the PostHog
+  // client never initialized this session, so the surface header is
+  // pointless anyway.
+  const telemetryHeaders: Record<string, string> = isTelemetryActive()
+    ? { "X-NyxID-Client": "ui" }
+    : {};
 
   const config: RequestInit = {
     method,
     headers: {
       "Content-Type": "application/json",
+      ...telemetryHeaders,
       ...headers,
     },
     credentials: "include",
+    signal,
   };
 
   if (body !== undefined) {
@@ -55,7 +72,9 @@ function buildFetchConfig(options: RequestOptions): RequestInit {
   return config;
 }
 
-async function parseErrorResponse(response: Response): Promise<ApiErrorResponse> {
+async function parseErrorResponse(
+  response: Response,
+): Promise<ApiErrorResponse> {
   try {
     return (await response.json()) as ApiErrorResponse;
   } catch {
@@ -82,13 +101,20 @@ export async function apiClient<T>(
   endpoint: string,
   options: RequestOptions = {},
 ): Promise<T> {
+  if (import.meta.env.DEV) {
+    const { isMockMode, getMockResponse } = await import("./mock-data");
+    if (isMockMode()) {
+      const mock = getMockResponse(endpoint);
+      if (mock !== undefined) return mock as T;
+    }
+  }
+
   const config = buildFetchConfig(options);
   const url = `${BASE_URL}${endpoint}`;
 
   const response = await fetch(url, config);
 
   if (response.status === 401 && !NO_AUTH_STATE_CLEAR_ENDPOINTS.has(endpoint)) {
-    const { useAuthStore } = await import("@/stores/auth-store");
     useAuthStore.getState().setUser(null);
   }
 
@@ -118,8 +144,16 @@ export const api = {
     return apiClient<T>(endpoint, { method: "PUT", body });
   },
 
-  patch<T>(endpoint: string, body?: unknown): Promise<T> {
-    return apiClient<T>(endpoint, { method: "PATCH", body });
+  patch<T>(
+    endpoint: string,
+    body?: unknown,
+    options?: { signal?: AbortSignal },
+  ): Promise<T> {
+    return apiClient<T>(endpoint, {
+      method: "PATCH",
+      body,
+      signal: options?.signal,
+    });
   },
 
   delete<T>(endpoint: string): Promise<T> {

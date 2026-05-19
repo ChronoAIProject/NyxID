@@ -3,6 +3,7 @@ import type { DownstreamService, ProviderConfig } from "@/types/api";
 import {
   AUTH_TYPE_LABELS,
   SERVICE_CATEGORY_LABELS,
+  SERVICE_TYPE_LABELS,
   canConnectProvider,
   getProviderConnectHint,
   getProviderConnectLabel,
@@ -23,12 +24,18 @@ function makeService(
     slug: "test-service",
     description: null,
     base_url: "https://api.example.com",
+    service_type: "http",
+    visibility: "public",
     auth_method: "api_key",
     auth_type: null,
     auth_key_name: "Authorization",
     is_active: true,
     oauth_client_id: null,
+    openapi_spec_url: null,
     api_spec_url: null,
+    asyncapi_spec_url: null,
+    streaming_supported: false,
+    ssh_config: null,
     service_category: "connection",
     requires_user_credential: true,
     created_by: "user-1",
@@ -38,9 +45,7 @@ function makeService(
   };
 }
 
-function makeProvider(
-  overrides: Partial<ProviderConfig> = {},
-): ProviderConfig {
+function makeProvider(overrides: Partial<ProviderConfig> = {}): ProviderConfig {
   return {
     id: "provider-1",
     slug: "provider-1",
@@ -61,6 +66,7 @@ function makeProvider(
     extra_auth_params: null,
     device_code_format: "rfc8628",
     client_id_param_name: null,
+    requires_gateway_url: false,
     icon_url: null,
     documentation_url: null,
     is_active: true,
@@ -94,6 +100,12 @@ describe("SERVICE_CATEGORY_LABELS", () => {
   });
 });
 
+describe("SERVICE_TYPE_LABELS", () => {
+  it("maps ssh to 'SSH'", () => {
+    expect(SERVICE_TYPE_LABELS["ssh"]).toBe("SSH");
+  });
+});
+
 describe("getAuthTypeLabel", () => {
   it("returns label from auth_type when present", () => {
     const svc = makeService({ auth_type: "oauth2" });
@@ -124,9 +136,9 @@ describe("isOidcService", () => {
   });
 
   it("returns true when oauth_client_id is set", () => {
-    expect(
-      isOidcService(makeService({ oauth_client_id: "client-123" })),
-    ).toBe(true);
+    expect(isOidcService(makeService({ oauth_client_id: "client-123" }))).toBe(
+      true,
+    );
   });
 
   it("returns false when none of the conditions match", () => {
@@ -160,6 +172,10 @@ describe("isConnectable", () => {
       false,
     );
   });
+
+  it("returns false for ssh services", () => {
+    expect(isConnectable(makeService({ service_type: "ssh" }))).toBe(false);
+  });
 });
 
 describe("isProvider", () => {
@@ -178,15 +194,21 @@ describe("isProvider", () => {
 
 describe("needsUserCredentials", () => {
   it("returns false for admin mode", () => {
-    expect(needsUserCredentials(makeProvider({ credential_mode: "admin" }))).toBe(false);
+    expect(
+      needsUserCredentials(makeProvider({ credential_mode: "admin" })),
+    ).toBe(false);
   });
 
   it("returns true for user mode", () => {
-    expect(needsUserCredentials(makeProvider({ credential_mode: "user" }))).toBe(true);
+    expect(
+      needsUserCredentials(makeProvider({ credential_mode: "user" })),
+    ).toBe(true);
   });
 
   it("returns true for both mode", () => {
-    expect(needsUserCredentials(makeProvider({ credential_mode: "both" }))).toBe(true);
+    expect(
+      needsUserCredentials(makeProvider({ credential_mode: "both" })),
+    ).toBe(true);
   });
 });
 
@@ -290,6 +312,29 @@ describe("provider connection helpers", () => {
     });
 
     expect(canConnectProvider(provider, false)).toBe(true);
+  });
+
+  it("allows configured telegram_widget providers", () => {
+    const provider = makeProvider({
+      provider_type: "telegram_widget",
+      has_oauth_config: true,
+    });
+
+    expect(canConnectProvider(provider, false)).toBe(true);
+    expect(getProviderConnectLabel(provider)).toBe("Login with Telegram");
+  });
+
+  it("blocks unconfigured telegram_widget providers", () => {
+    const provider = makeProvider({
+      provider_type: "telegram_widget",
+      has_oauth_config: false,
+    });
+
+    expect(canConnectProvider(provider, false)).toBe(false);
+    expect(getProviderConnectLabel(provider)).toBe("Setup required");
+    expect(getProviderConnectHint(provider, false)).toBe(
+      "Admin must configure the Telegram bot username and bot token first.",
+    );
   });
 });
 

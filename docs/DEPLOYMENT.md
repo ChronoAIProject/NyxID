@@ -93,7 +93,7 @@ The frontend starts on `http://localhost:3000`.
 
 ```bash
 curl http://localhost:3001/health
-# {"status":"ok","version":"0.1.0"}
+# {"status":"ok","version":"0.5.0"}
 ```
 
 ---
@@ -107,7 +107,7 @@ curl http://localhost:3001/health
 cargo build --release --manifest-path backend/Cargo.toml
 
 # Binary output
-ls -la backend/target/release/nyxid
+ls -la backend/target/release/nyxid-server
 ```
 
 The release binary is a single statically-linked executable (with dynamically linked system libraries). No runtime dependencies beyond the OS.
@@ -157,39 +157,56 @@ The frontend nginx config (`frontend/nginx.conf.template`) handles:
 
 ### Production Docker Compose
 
-A complete production stack is defined in `docker-compose.prod.yml`:
+The production stack is defined as an override layer on top of the base
+`docker-compose.yml`. Both files must be passed together with `-f`; the
+dev `docker-compose.override.yml` is intentionally NOT auto-loaded when
+`-f` is used explicitly.
 
 ```bash
-# Create a production env file
-cp .env.example .env.production
-# Edit .env.production with real values (ENCRYPTION_KEY, DATABASE_URL, etc.)
+# If you previously ran the quickstart, remove the dev symlink first
+[ -L .env.production ] && rm .env.production
 
-# Generate RSA keys if not already present
+# Create a production env file from the template
+cp .env.production.example .env.production
+$EDITOR .env.production
+# Set the 3 required values: MONGO_ROOT_PASSWORD, ENCRYPTION_KEY, BASE_URL
+
+# Generate RSA keys for JWT signing
 mkdir -p keys
 openssl genrsa -out keys/private.pem 4096
 openssl rsa -in keys/private.pem -pubout -out keys/public.pem
+chmod 755 keys
+chmod 644 keys/private.pem keys/public.pem
+# 644 lets the non-root `nyxid` user inside the backend container read the
+# bind-mounted keys when host UID != container UID (common on Windows WSL2).
+# For tighter perms in production, align host ownership with the container
+# `nyxid` user — see "RSA Key Management" below.
 
-# Set MongoDB root password
-export MONGO_ROOT_PASSWORD=$(openssl rand -base64 24)
-
-# Start all services
-docker compose -f docker-compose.prod.yml up -d
+# Pull published images and start the stack
+docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+               --env-file .env.production pull
+docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+               --env-file .env.production up -d
 ```
 
-The compose file starts three services:
-- **backend**: builds from `backend/Dockerfile`, mounts `keys/` read-only, waits for MongoDB health (MCP transport is built into the backend at `/mcp`)
-- **frontend**: builds from `frontend/Dockerfile`, proxies API requests to backend via `BACKEND_URL` env var
-- **mongodb**: persistent volume, health check via `mongosh`
+The combined config starts three services:
+- **backend**: pulls `ghcr.io/chronoaiproject/nyxid/backend:${NYXID_VERSION:-latest}`, mounts `keys/` read-only, waits for MongoDB health (MCP transport is built into the backend at `/mcp`)
+- **frontend**: pulls `ghcr.io/chronoaiproject/nyxid/frontend:${NYXID_VERSION:-latest}`, proxies API requests to backend via `BACKEND_URL` env var
+- **mongodb**: persistent volume, health check via `mongosh`, password sourced from `MONGO_ROOT_PASSWORD` in `.env.production`
+
+Multi-arch (linux/amd64, linux/arm64) images are published to GHCR by the
+`Publish Images` workflow on every merge to main and every `v*` tag. Pin to
+a specific version by exporting `NYXID_VERSION=v1.2.3` before running compose.
 
 ### Pushing to a Registry
 
 ```bash
 # Tag and push to your container registry
-docker tag nyxid-backend registry.example.com/nyxid/backend:v0.1.0
-docker tag nyxid-frontend registry.example.com/nyxid/frontend:v0.1.0
+docker tag nyxid-backend registry.example.com/nyxid/backend:v0.5.0
+docker tag nyxid-frontend registry.example.com/nyxid/frontend:v0.5.0
 
-docker push registry.example.com/nyxid/backend:v0.1.0
-docker push registry.example.com/nyxid/frontend:v0.1.0
+docker push registry.example.com/nyxid/backend:v0.5.0
+docker push registry.example.com/nyxid/frontend:v0.5.0
 ```
 
 ---
@@ -260,8 +277,8 @@ Edit `k8s/ingress.yaml` and replace `auth.example.com` / `app.example.com` with 
 Edit `k8s/backend-deployment.yaml` and `k8s/frontend-deployment.yaml` to reference your registry:
 
 ```yaml
-image: registry.example.com/nyxid/backend:v0.1.0  # replace
-image: registry.example.com/nyxid/frontend:v0.1.0  # replace
+image: registry.example.com/nyxid/backend:v0.5.0  # replace
+image: registry.example.com/nyxid/frontend:v0.5.0  # replace
 ```
 
 ### Step 5: Apply All Manifests
@@ -641,7 +658,7 @@ npm run build
 
 ```bash
 curl https://auth.example.com/health
-# {"status":"ok","version":"0.1.0"}
+# {"status":"ok","version":"0.5.0"}
 ```
 
 Use this for:
@@ -795,7 +812,7 @@ If a user has already registered through the normal flow, promote them to admin 
 cargo run --manifest-path backend/Cargo.toml -- --promote-admin admin@example.com
 
 # Using the built binary
-./backend/target/release/nyxid --promote-admin admin@example.com
+./backend/target/release/nyxid-server --promote-admin admin@example.com
 ```
 
 This sets `is_admin = true` and `email_verified = true` on the user. The command exits after completion (does not start the server).
@@ -1026,10 +1043,12 @@ cp .env.example .env
 # Edit .env with your NyxID credentials
 npm install
 npm run dev
-
-# Production (Docker)
-docker compose -f docker-compose.prod.yml up -d mcp-proxy
 ```
+
+> **Note:** The standalone `mcp-proxy` service is not currently bundled in
+> `docker-compose.prod.yml`. The backend exposes MCP directly at `/mcp`, so
+> most deployments do not need a separate proxy. If you need a standalone
+> proxy, build and run it manually until it is added to the compose stack.
 
 ### MCP Client Configuration
 

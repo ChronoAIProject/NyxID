@@ -1,7 +1,7 @@
 import { useId } from "react";
 
 /**
- * Portal Mark — pixel-accurate replica of VoidPortal.pen:
+ * Portal Mark — pixel-accurate replica of NyxID.pen:
  * radial glow, three gradient-stroke arc ellipses (partial arcs),
  * Void Moon crescent path, four particle dots.
  *
@@ -13,10 +13,7 @@ export interface PortalMarkLogoProps {
   readonly size?: number;
 }
 
-export function PortalMarkLogo({
-  className,
-  size = 32,
-}: PortalMarkLogoProps) {
+export function PortalMarkLogo({ className, size = 32 }: PortalMarkLogoProps) {
   const uid = useId().replace(/:/g, "");
 
   return (
@@ -30,7 +27,13 @@ export function PortalMarkLogo({
     >
       <defs>
         {/* ── Glow ── */}
-        <radialGradient id={`${uid}g`} cx="65" cy="65" r="65" gradientUnits="userSpaceOnUse">
+        <radialGradient
+          id={`${uid}g`}
+          cx="65"
+          cy="65"
+          r="65"
+          gradientUnits="userSpaceOnUse"
+        >
           <stop offset="0%" stopColor="#8B5CF6" stopOpacity="0.08" />
           <stop offset="100%" stopColor="#8B5CF6" stopOpacity="0" />
         </radialGradient>
@@ -39,7 +42,10 @@ export function PortalMarkLogo({
         <linearGradient
           id={`${uid}ao`}
           gradientUnits="userSpaceOnUse"
-          x1="10" y1="65" x2="120" y2="65"
+          x1="10"
+          y1="65"
+          x2="120"
+          y2="65"
         >
           <stop offset="0" stopColor="#A78BFA" />
           <stop offset="0.5" stopColor="#A78BFA" stopOpacity="0" />
@@ -49,7 +55,10 @@ export function PortalMarkLogo({
         <linearGradient
           id={`${uid}am`}
           gradientUnits="userSpaceOnUse"
-          x1="10" y1="65" x2="120" y2="65"
+          x1="10"
+          y1="65"
+          x2="120"
+          y2="65"
           gradientTransform="rotate(120 65 65)"
         >
           <stop offset="0" stopColor="#C4B5FD" />
@@ -60,7 +69,10 @@ export function PortalMarkLogo({
         <linearGradient
           id={`${uid}ai`}
           gradientUnits="userSpaceOnUse"
-          x1="10" y1="65" x2="120" y2="65"
+          x1="10"
+          y1="65"
+          x2="120"
+          y2="65"
           gradientTransform="rotate(240 65 65)"
         >
           <stop offset="0" stopColor="#DDD6FE" />
@@ -71,7 +83,10 @@ export function PortalMarkLogo({
         <linearGradient
           id={`${uid}vm`}
           gradientUnits="userSpaceOnUse"
-          x1="56" y1="62" x2="86" y2="62"
+          x1="56"
+          y1="62"
+          x2="86"
+          y2="62"
           gradientTransform="rotate(160 71 62)"
         >
           <stop offset="0" stopColor="#C4B5FD" />
@@ -83,13 +98,34 @@ export function PortalMarkLogo({
       <circle cx="65" cy="65" r="65" fill={`url(#${uid}g)`} />
 
       {/* Arc Outer: 110×110 at (10,10) → c(65,65) r=55 */}
-      <circle cx="65" cy="65" r="55" fill="none" stroke={`url(#${uid}ao)`} strokeWidth="1" />
+      <circle
+        cx="65"
+        cy="65"
+        r="55"
+        fill="none"
+        stroke={`url(#${uid}ao)`}
+        strokeWidth="1"
+      />
 
       {/* Arc Mid: 80×80 at (25,25) → c(65,65) r=40 */}
-      <circle cx="65" cy="65" r="40" fill="none" stroke={`url(#${uid}am)`} strokeWidth="1" />
+      <circle
+        cx="65"
+        cy="65"
+        r="40"
+        fill="none"
+        stroke={`url(#${uid}am)`}
+        strokeWidth="1"
+      />
 
       {/* Arc Inner: 50×50 at (40,40) → c(65,65) r=25 */}
-      <circle cx="65" cy="65" r="25" fill="none" stroke={`url(#${uid}ai)`} strokeWidth="0.8" />
+      <circle
+        cx="65"
+        cy="65"
+        r="25"
+        fill="none"
+        stroke={`url(#${uid}ai)`}
+        strokeWidth="0.8"
+      />
 
       {/* Void Moon crescent at (56, 42) */}
       <path

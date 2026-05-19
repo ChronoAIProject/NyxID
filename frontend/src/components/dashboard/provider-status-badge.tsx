@@ -8,7 +8,10 @@ interface ProviderStatusBadgeProps {
 const STATUS_CONFIG: Readonly<
   Record<
     UserProviderToken["status"],
-    { readonly label: string; readonly variant: "success" | "warning" | "destructive" | "secondary" }
+    {
+      readonly label: string;
+      readonly variant: "success" | "warning" | "destructive" | "secondary";
+    }
   >
 > = {
   active: { label: "Connected", variant: "success" },

@@ -37,6 +37,8 @@ pub struct McpSessionRecord {
     pub client_info: Option<String>,
     #[serde(default)]
     pub activated_service_ids: Vec<String>,
+    #[serde(default)]
+    pub proxy_authorized: bool,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
@@ -51,6 +53,8 @@ pub struct McpSession {
     pub last_active: DateTime<Utc>,
     /// Service IDs whose tools are currently exposed in tools/list.
     pub activated_service_ids: HashSet<String>,
+    /// Whether the session was initialized with proxy-capable credentials.
+    pub proxy_authorized: bool,
     /// Channel to send JSON-RPC notifications to the SSE stream.
     /// None if no SSE listener is connected.
     pub notification_tx: Option<mpsc::Sender<serde_json::Value>>,
@@ -172,6 +176,7 @@ impl McpSessionStore {
                     user_id: record.user_id.clone(),
                     last_active: record.last_active_at,
                     activated_service_ids: activated,
+                    proxy_authorized: record.proxy_authorized,
                     notification_tx: Some(tx),
                 },
             );
@@ -210,6 +215,15 @@ impl McpSessionStore {
     /// `pending_receivers` for the SSE handler to take.
     /// Also persists to MongoDB (fire-and-forget).
     pub fn create(&self, user_id: &str) -> Option<String> {
+        self.create_with_proxy_access(user_id, false)
+    }
+
+    /// Create a new session with explicit proxy authorization.
+    pub fn create_with_proxy_access(
+        &self,
+        user_id: &str,
+        proxy_authorized: bool,
+    ) -> Option<String> {
         let (tx, rx) = mpsc::channel(32);
         let session_id = uuid::Uuid::new_v4().to_string();
         let now = Utc::now();
@@ -217,6 +231,7 @@ impl McpSessionStore {
             user_id: user_id.to_string(),
             last_active: now,
             activated_service_ids: HashSet::new(),
+            proxy_authorized,
             notification_tx: Some(tx),
         };
 
@@ -242,6 +257,7 @@ impl McpSessionStore {
                 user_id: user_id.to_string(),
                 client_info: None,
                 activated_service_ids: Vec::new(),
+                proxy_authorized,
                 created_at: now,
                 last_active_at: now,
                 expires_at: now + chrono::Duration::seconds(MCP_SESSION_MAX_IDLE_SECS as i64),
@@ -278,6 +294,15 @@ impl McpSessionStore {
             .unwrap_or_else(|e| e.into_inner())
             .get(session_id)
             .map(|s| s.user_id.clone())
+    }
+
+    /// Check whether a session was created with proxy-capable credentials.
+    pub fn allows_proxy_access(&self, session_id: &str) -> bool {
+        self.sessions
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(session_id)
+            .is_some_and(|s| s.proxy_authorized)
     }
 
     /// Update the `last_active` timestamp to prevent expiry.
@@ -664,6 +689,24 @@ mod tests {
     }
 
     #[test]
+    fn create_defaults_proxy_authorized_to_false() {
+        let store = McpSessionStore::new();
+        let sid = store.create("user-1").expect("create");
+
+        assert!(!store.allows_proxy_access(&sid));
+    }
+
+    #[test]
+    fn create_with_proxy_access_sets_flag() {
+        let store = McpSessionStore::new();
+        let sid = store
+            .create_with_proxy_access("user-1", true)
+            .expect("create");
+
+        assert!(store.allows_proxy_access(&sid));
+    }
+
+    #[test]
     fn multiple_sessions_independent() {
         let store = McpSessionStore::new();
         let s1 = store.create("user-1").expect("create");
@@ -849,6 +892,7 @@ mod tests {
             user_id: uuid::Uuid::new_v4().to_string(),
             client_info: Some("test-client".to_string()),
             activated_service_ids: vec!["svc-1".to_string(), "svc-2".to_string()],
+            proxy_authorized: true,
             created_at: Utc::now(),
             last_active_at: Utc::now(),
             expires_at: Utc::now() + chrono::Duration::days(30),
@@ -859,6 +903,7 @@ mod tests {
         assert_eq!(record.user_id, restored.user_id);
         assert_eq!(record.client_info, restored.client_info);
         assert_eq!(record.activated_service_ids, restored.activated_service_ids);
+        assert_eq!(record.proxy_authorized, restored.proxy_authorized);
     }
 
     #[test]

@@ -3,6 +3,7 @@ import {
   cn,
   formatDate,
   formatRelativeTime,
+  formatTimeDistance,
   maskApiKey,
   sanitizeAvatarUrl,
 } from "./utils";
@@ -93,6 +94,54 @@ describe("formatRelativeTime", () => {
 
   it("returns N/A for invalid date", () => {
     expect(formatRelativeTime("garbage")).toBe("N/A");
+  });
+});
+
+describe("formatTimeDistance", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2024-06-15T12:00:00Z"));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("returns 'in a moment' for very-near-future times", () => {
+    expect(formatTimeDistance("2024-06-15T12:00:30Z")).toBe("in a moment");
+  });
+
+  it("returns future minutes", () => {
+    expect(formatTimeDistance("2024-06-15T12:15:00Z")).toBe("in 15m");
+  });
+
+  it("returns future hours", () => {
+    expect(formatTimeDistance("2024-06-15T15:00:00Z")).toBe("in 3h");
+  });
+
+  it("returns future days", () => {
+    expect(formatTimeDistance("2024-06-18T12:00:00Z")).toBe("in 3d");
+  });
+
+  it("falls back to absolute date for far-future times", () => {
+    const result = formatTimeDistance("2024-07-20T12:00:00Z");
+    expect(result).toMatch(/Jul\s+20,\s+2024/);
+  });
+
+  it("returns 'just now' for very-near-past times", () => {
+    expect(formatTimeDistance("2024-06-15T11:59:30Z")).toBe("just now");
+  });
+
+  it("returns past minutes with 'ago'", () => {
+    expect(formatTimeDistance("2024-06-15T11:45:00Z")).toBe("15m ago");
+  });
+
+  it("returns N/A for null", () => {
+    expect(formatTimeDistance(null)).toBe("N/A");
+  });
+
+  it("returns N/A for invalid date", () => {
+    expect(formatTimeDistance("garbage")).toBe("N/A");
   });
 });
 

@@ -1,9 +1,10 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
+use utoipa::ToSchema;
 
 /// Structured JSON error response returned by all API error paths.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ErrorResponse {
     /// Machine-readable error category (e.g. "unauthorized")
     pub error: String,
@@ -17,9 +18,12 @@ pub struct ErrorResponse {
     /// Browser URL to complete consent flow (consent_required only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub consent_url: Option<String>,
-    /// Approval request ID (approval_required only).
+    /// Approval request ID (approval_required / approval_failed only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
+    /// URL where the user can review pending approvals (approval_failed only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approve_url: Option<String>,
 }
 
 /// Application-level error variants.
@@ -104,7 +108,7 @@ pub enum AppError {
     #[error("Social authentication failed: {0}")]
     SocialAuthFailed(String),
 
-    #[error("Social auth conflict: email already linked to another provider")]
+    #[error("Social auth conflict: social identity already linked to another account")]
     SocialAuthConflict,
 
     #[error("Social auth: no verified email from provider")]
@@ -112,6 +116,27 @@ pub enum AppError {
 
     #[error("Social auth: account is deactivated")]
     SocialAuthDeactivated,
+
+    #[error("Social auth: registration closed — invite code required")]
+    SocialAuthRegistrationClosed,
+
+    #[error("Email signup is disabled on this instance")]
+    EmailSignupDisabled,
+
+    #[error("SSH node key missing: {0}")]
+    SshNodeKeyMissing(String),
+
+    #[error("SSH host key mismatch: {0}")]
+    SshHostKeyMismatch(String),
+
+    #[error("SSH node exec channel closed: {0}")]
+    SshNodeExecChannelClosed(String),
+
+    #[error("SSH principal ambiguous: {0}")]
+    SshPrincipalAmbiguous(String),
+
+    #[error("SSH auth mode unsupported for operation: {0}")]
+    SshAuthModeUnsupportedForOperation(String),
 
     #[error("Consent required")]
     ConsentRequired { consent_url: String },
@@ -121,6 +146,13 @@ pub enum AppError {
 
     #[error("Approval required")]
     ApprovalRequired { request_id: String },
+
+    #[error("Approval failed: {reason}")]
+    ApprovalFailed {
+        request_id: String,
+        approve_url: String,
+        reason: String,
+    },
 
     #[error("External token verification failed: {0}")]
     ExternalTokenInvalid(String),
@@ -139,6 +171,81 @@ pub enum AppError {
 
     #[error("Node registration failed: {0}")]
     NodeRegistrationFailed(String),
+
+    #[error("Node credential missing: {0}")]
+    NodeCredentialMissing(String),
+
+    #[error("WebSocket proxy downstream error: {0}")]
+    WsProxyDownstream(String),
+
+    #[error("API key scope forbidden: {0}")]
+    ApiKeyScopeForbidden(String),
+
+    #[error("API key scope inactive")]
+    ApiKeyScopeInactive,
+
+    #[error("API key scope not found: {0}")]
+    ApiKeyScopeNotFound(String),
+
+    #[error("Channel bot not found: {0}")]
+    ChannelBotNotFound(String),
+
+    #[error("Channel bot inactive or invalid: {0}")]
+    ChannelBotInactive(String),
+
+    #[error("Channel bot limit reached: {0}")]
+    ChannelBotLimitReached(String),
+
+    #[error("Channel webhook verification failed: {0}")]
+    ChannelWebhookVerificationFailed(String),
+
+    #[error("Channel relay failed: {0}")]
+    ChannelRelayFailed(String),
+
+    #[error("Channel platform error: {0}")]
+    ChannelPlatformError(String),
+
+    #[error("Channel platform does not support message edits")]
+    ChannelPlatformEditUnsupported,
+
+    #[error("Device channel conversations do not support replies")]
+    DeviceChannelReplyNotAllowed,
+
+    #[error("Organization accounts cannot authenticate directly")]
+    OrgCannotAuthenticate,
+
+    #[error("Organization membership query timed out")]
+    OrgQueryTimeout,
+
+    #[error("Organization not found: {0}")]
+    OrgNotFound(String),
+
+    #[error("Organization slug is already taken: {0}")]
+    OrgSlugTaken(String),
+
+    #[error("Organization membership required")]
+    OrgMembershipRequired,
+
+    #[error("Organization role insufficient: {0}")]
+    OrgRoleInsufficient(String),
+
+    #[error("Organization invite invalid: {0}")]
+    OrgInviteInvalid(String),
+
+    #[error("Organization invite expired")]
+    OrgInviteExpired,
+
+    #[error("Organization approval policy has no admins to decide: {0}")]
+    OrgApprovalNoAdmin(String),
+
+    #[error("Invalid invite code")]
+    InviteCodeInvalid,
+
+    #[error("Invite code has been used up")]
+    InviteCodeExhausted,
+
+    #[error("Invite code has been deactivated")]
+    InviteCodeDeactivated,
 }
 
 impl AppError {
@@ -168,9 +275,18 @@ impl AppError {
             Self::SocialAuthFailed(_) | Self::SocialAuthNoEmail => StatusCode::BAD_REQUEST,
             Self::SocialAuthConflict => StatusCode::CONFLICT,
             Self::SocialAuthDeactivated => StatusCode::FORBIDDEN,
+            Self::SocialAuthRegistrationClosed => StatusCode::FORBIDDEN,
+            Self::EmailSignupDisabled => StatusCode::FORBIDDEN,
+            Self::SshNodeKeyMissing(_) => StatusCode::NOT_FOUND,
+            Self::SshHostKeyMismatch(_) => StatusCode::BAD_GATEWAY,
+            Self::SshNodeExecChannelClosed(_) => StatusCode::BAD_GATEWAY,
+            Self::SshPrincipalAmbiguous(_) | Self::SshAuthModeUnsupportedForOperation(_) => {
+                StatusCode::BAD_REQUEST
+            }
             Self::ConsentRequired { .. } => StatusCode::FORBIDDEN,
             Self::UnsupportedGrantType(_) => StatusCode::BAD_REQUEST,
             Self::ApprovalRequired { .. } => StatusCode::FORBIDDEN,
+            Self::ApprovalFailed { .. } => StatusCode::FORBIDDEN,
             Self::ExternalTokenInvalid(_) | Self::ExternalProviderNotConfigured(_) => {
                 StatusCode::BAD_REQUEST
             }
@@ -178,6 +294,31 @@ impl AppError {
             Self::NodeOffline(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::NodeProxyTimeout => StatusCode::GATEWAY_TIMEOUT,
             Self::NodeRegistrationFailed(_) => StatusCode::BAD_REQUEST,
+            Self::NodeCredentialMissing(_) => StatusCode::BAD_GATEWAY,
+            Self::WsProxyDownstream(_) => StatusCode::BAD_GATEWAY,
+            Self::ApiKeyScopeForbidden(_) => StatusCode::FORBIDDEN,
+            Self::ApiKeyScopeInactive => StatusCode::FORBIDDEN,
+            Self::ApiKeyScopeNotFound(_) => StatusCode::NOT_FOUND,
+            Self::ChannelBotNotFound(_) => StatusCode::NOT_FOUND,
+            Self::ChannelBotInactive(_) => StatusCode::BAD_REQUEST,
+            Self::ChannelBotLimitReached(_) => StatusCode::TOO_MANY_REQUESTS,
+            Self::ChannelWebhookVerificationFailed(_) => StatusCode::UNAUTHORIZED,
+            Self::ChannelRelayFailed(_) => StatusCode::BAD_GATEWAY,
+            Self::ChannelPlatformError(_) => StatusCode::BAD_GATEWAY,
+            Self::ChannelPlatformEditUnsupported => StatusCode::NOT_IMPLEMENTED,
+            Self::DeviceChannelReplyNotAllowed => StatusCode::BAD_REQUEST,
+            Self::OrgCannotAuthenticate => StatusCode::FORBIDDEN,
+            Self::OrgQueryTimeout => StatusCode::SERVICE_UNAVAILABLE,
+            Self::OrgNotFound(_) => StatusCode::NOT_FOUND,
+            Self::OrgSlugTaken(_) => StatusCode::CONFLICT,
+            Self::OrgMembershipRequired => StatusCode::FORBIDDEN,
+            Self::OrgRoleInsufficient(_) => StatusCode::FORBIDDEN,
+            Self::OrgInviteInvalid(_) => StatusCode::BAD_REQUEST,
+            Self::OrgInviteExpired => StatusCode::GONE,
+            Self::OrgApprovalNoAdmin(_) => StatusCode::SERVICE_UNAVAILABLE,
+            Self::InviteCodeInvalid | Self::InviteCodeExhausted | Self::InviteCodeDeactivated => {
+                StatusCode::BAD_REQUEST
+            }
             Self::Internal(_) | Self::DatabaseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -193,6 +334,12 @@ impl AppError {
             Self::Internal(_) => 1006,
             Self::DatabaseError(_) => 1007,
             Self::ValidationError(_) => 1008,
+            Self::EmailSignupDisabled => 1009,
+            Self::SshNodeKeyMissing(_) => 1011,
+            Self::SshHostKeyMismatch(_) => 1012,
+            Self::SshNodeExecChannelClosed(_) => 1013,
+            Self::SshPrincipalAmbiguous(_) => 1014,
+            Self::SshAuthModeUnsupportedForOperation(_) => 1015,
             Self::AuthenticationFailed(_) => 2000,
             Self::TokenExpired => 2001,
             Self::MfaRequired { .. } => 2002,
@@ -213,15 +360,42 @@ impl AppError {
             Self::SocialAuthConflict => 6001,
             Self::SocialAuthNoEmail => 6002,
             Self::SocialAuthDeactivated => 6003,
+            Self::SocialAuthRegistrationClosed => 6006,
             Self::ConsentRequired { .. } => 3003,
             Self::UnsupportedGrantType(_) => 3004,
             Self::ApprovalRequired { .. } => 7000,
+            Self::ApprovalFailed { .. } => 7001,
             Self::ExternalTokenInvalid(_) => 6004,
             Self::ExternalProviderNotConfigured(_) => 6005,
             Self::NodeNotFound(_) => 8000,
             Self::NodeOffline(_) => 8001,
             Self::NodeProxyTimeout => 8002,
             Self::NodeRegistrationFailed(_) => 8003,
+            Self::NodeCredentialMissing(_) => 8004,
+            Self::WsProxyDownstream(_) => 8005,
+            Self::ApiKeyScopeForbidden(_) => 9000,
+            Self::ApiKeyScopeInactive => 9001,
+            Self::ApiKeyScopeNotFound(_) => 9002,
+            Self::ChannelBotNotFound(_) => 10000,
+            Self::ChannelBotInactive(_) => 10001,
+            Self::ChannelBotLimitReached(_) => 10002,
+            Self::ChannelWebhookVerificationFailed(_) => 10003,
+            Self::ChannelRelayFailed(_) => 10004,
+            Self::ChannelPlatformError(_) => 10005,
+            Self::ChannelPlatformEditUnsupported => 10007,
+            Self::DeviceChannelReplyNotAllowed => 10006,
+            Self::OrgCannotAuthenticate => 1403,
+            Self::OrgQueryTimeout => 8100,
+            Self::OrgNotFound(_) => 8101,
+            Self::OrgSlugTaken(_) => 8107,
+            Self::OrgMembershipRequired => 8102,
+            Self::OrgRoleInsufficient(_) => 8103,
+            Self::OrgInviteInvalid(_) => 8104,
+            Self::OrgInviteExpired => 8105,
+            Self::OrgApprovalNoAdmin(_) => 8106,
+            Self::InviteCodeInvalid => 8200,
+            Self::InviteCodeExhausted => 8201,
+            Self::InviteCodeDeactivated => 8202,
         }
     }
 
@@ -267,6 +441,14 @@ impl AppError {
             Self::Internal(_) => "internal_error",
             Self::DatabaseError(_) => "database_error",
             Self::ValidationError(_) => "validation_error",
+            Self::EmailSignupDisabled => "email_signup_disabled",
+            Self::SshNodeKeyMissing(_) => "ssh_node_key_missing",
+            Self::SshHostKeyMismatch(_) => "ssh_host_key_mismatch",
+            Self::SshNodeExecChannelClosed(_) => "ssh_node_exec_channel_closed",
+            Self::SshPrincipalAmbiguous(_) => "ssh_principal_ambiguous",
+            Self::SshAuthModeUnsupportedForOperation(_) => {
+                "ssh_auth_mode_unsupported_for_operation"
+            }
             Self::AuthenticationFailed(_) => "authentication_failed",
             Self::TokenExpired => "token_expired",
             Self::MfaRequired { .. } => "mfa_required",
@@ -287,15 +469,42 @@ impl AppError {
             Self::SocialAuthConflict => "social_auth_conflict",
             Self::SocialAuthNoEmail => "social_auth_no_email",
             Self::SocialAuthDeactivated => "social_auth_deactivated",
+            Self::SocialAuthRegistrationClosed => "social_auth_registration_closed",
             Self::ConsentRequired { .. } => "consent_required",
             Self::UnsupportedGrantType(_) => "unsupported_grant_type",
             Self::ApprovalRequired { .. } => "approval_required",
+            Self::ApprovalFailed { .. } => "approval_failed",
             Self::ExternalTokenInvalid(_) => "external_token_invalid",
             Self::ExternalProviderNotConfigured(_) => "external_provider_not_configured",
             Self::NodeNotFound(_) => "node_not_found",
             Self::NodeOffline(_) => "node_offline",
             Self::NodeProxyTimeout => "node_proxy_timeout",
             Self::NodeRegistrationFailed(_) => "node_registration_failed",
+            Self::NodeCredentialMissing(_) => "node_credential_missing",
+            Self::WsProxyDownstream(_) => "ws_proxy_downstream",
+            Self::ApiKeyScopeForbidden(_) => "api_key_scope_forbidden",
+            Self::ApiKeyScopeInactive => "api_key_scope_inactive",
+            Self::ApiKeyScopeNotFound(_) => "api_key_scope_not_found",
+            Self::ChannelBotNotFound(_) => "channel_bot_not_found",
+            Self::ChannelBotInactive(_) => "channel_bot_inactive",
+            Self::ChannelBotLimitReached(_) => "channel_bot_limit_reached",
+            Self::ChannelWebhookVerificationFailed(_) => "channel_webhook_verification_failed",
+            Self::ChannelRelayFailed(_) => "channel_relay_failed",
+            Self::ChannelPlatformError(_) => "channel_platform_error",
+            Self::ChannelPlatformEditUnsupported => "edit_unsupported",
+            Self::DeviceChannelReplyNotAllowed => "device_channel_reply_not_allowed",
+            Self::OrgCannotAuthenticate => "org_cannot_authenticate",
+            Self::OrgQueryTimeout => "org_query_timeout",
+            Self::OrgNotFound(_) => "org_not_found",
+            Self::OrgSlugTaken(_) => "org_slug_taken",
+            Self::OrgMembershipRequired => "org_membership_required",
+            Self::OrgRoleInsufficient(_) => "org_role_insufficient",
+            Self::OrgInviteInvalid(_) => "org_invite_invalid",
+            Self::OrgInviteExpired => "org_invite_expired",
+            Self::OrgApprovalNoAdmin(_) => "org_approval_no_admin",
+            Self::InviteCodeInvalid => "invite_code_invalid",
+            Self::InviteCodeExhausted => "invite_code_exhausted",
+            Self::InviteCodeDeactivated => "invite_code_deactivated",
         }
     }
 }
@@ -322,6 +531,11 @@ impl IntoResponse for AppError {
         };
         let approval_request_id = match &self {
             AppError::ApprovalRequired { request_id } => Some(request_id.clone()),
+            AppError::ApprovalFailed { request_id, .. } => Some(request_id.clone()),
+            _ => None,
+        };
+        let approve_url = match &self {
+            AppError::ApprovalFailed { approve_url, .. } => Some(approve_url.clone()),
             _ => None,
         };
 
@@ -341,11 +555,19 @@ impl IntoResponse for AppError {
                     "Approval required. A notification has been sent to the resource owner."
                         .to_string()
                 }
+                AppError::ApprovalFailed {
+                    reason,
+                    approve_url,
+                    ..
+                } => {
+                    format!("Approval failed: {reason}. Review pending approvals at {approve_url}")
+                }
                 other => other.to_string(),
             },
             session_token: mfa_session_token,
             consent_url,
             request_id: approval_request_id,
+            approve_url,
         };
 
         (status, axum::Json(body)).into_response()
@@ -477,12 +699,25 @@ mod tests {
             StatusCode::FORBIDDEN
         );
         assert_eq!(
+            AppError::SocialAuthRegistrationClosed.status_code(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
             AppError::UnsupportedGrantType("x".into()).status_code(),
             StatusCode::BAD_REQUEST
         );
         assert_eq!(
             AppError::ApprovalRequired {
                 request_id: "x".into()
+            }
+            .status_code(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            AppError::ApprovalFailed {
+                request_id: "x".into(),
+                approve_url: "https://example.com/approvals".into(),
+                reason: "rejected".into(),
             }
             .status_code(),
             StatusCode::FORBIDDEN
@@ -511,6 +746,62 @@ mod tests {
             AppError::NodeRegistrationFailed("x".into()).status_code(),
             StatusCode::BAD_REQUEST
         );
+        assert_eq!(
+            AppError::NodeCredentialMissing("x".into()).status_code(),
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            AppError::WsProxyDownstream("x".into()).status_code(),
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            AppError::ApiKeyScopeForbidden("x".into()).status_code(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            AppError::ApiKeyScopeInactive.status_code(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            AppError::ApiKeyScopeNotFound("x".into()).status_code(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            AppError::ChannelBotNotFound("x".into()).status_code(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            AppError::ChannelBotInactive("x".into()).status_code(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            AppError::ChannelBotLimitReached("x".into()).status_code(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(
+            AppError::ChannelWebhookVerificationFailed("x".into()).status_code(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            AppError::ChannelRelayFailed("x".into()).status_code(),
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            AppError::ChannelPlatformError("x".into()).status_code(),
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            AppError::InviteCodeInvalid.status_code(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            AppError::InviteCodeExhausted.status_code(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            AppError::InviteCodeDeactivated.status_code(),
+            StatusCode::BAD_REQUEST
+        );
     }
 
     #[test]
@@ -524,6 +815,7 @@ mod tests {
             AppError::RateLimited.error_code(),
             AppError::Internal("".into()).error_code(),
             AppError::ValidationError("".into()).error_code(),
+            AppError::EmailSignupDisabled.error_code(),
             AppError::AuthenticationFailed("".into()).error_code(),
             AppError::TokenExpired.error_code(),
             AppError::MfaRequired {
@@ -547,9 +839,16 @@ mod tests {
             AppError::SocialAuthConflict.error_code(),
             AppError::SocialAuthNoEmail.error_code(),
             AppError::SocialAuthDeactivated.error_code(),
+            AppError::SocialAuthRegistrationClosed.error_code(),
             AppError::UnsupportedGrantType("".into()).error_code(),
             AppError::ApprovalRequired {
                 request_id: "".into(),
+            }
+            .error_code(),
+            AppError::ApprovalFailed {
+                request_id: "".into(),
+                approve_url: "".into(),
+                reason: "".into(),
             }
             .error_code(),
             AppError::ExternalTokenInvalid("".into()).error_code(),
@@ -558,6 +857,20 @@ mod tests {
             AppError::NodeOffline("".into()).error_code(),
             AppError::NodeProxyTimeout.error_code(),
             AppError::NodeRegistrationFailed("".into()).error_code(),
+            AppError::NodeCredentialMissing("".into()).error_code(),
+            AppError::WsProxyDownstream("".into()).error_code(),
+            AppError::ApiKeyScopeForbidden("".into()).error_code(),
+            AppError::ApiKeyScopeInactive.error_code(),
+            AppError::ApiKeyScopeNotFound("".into()).error_code(),
+            AppError::ChannelBotNotFound("".into()).error_code(),
+            AppError::ChannelBotInactive("".into()).error_code(),
+            AppError::ChannelBotLimitReached("".into()).error_code(),
+            AppError::ChannelWebhookVerificationFailed("".into()).error_code(),
+            AppError::ChannelRelayFailed("".into()).error_code(),
+            AppError::ChannelPlatformError("".into()).error_code(),
+            AppError::InviteCodeInvalid.error_code(),
+            AppError::InviteCodeExhausted.error_code(),
+            AppError::InviteCodeDeactivated.error_code(),
         ];
         let unique: std::collections::HashSet<u32> = codes.iter().copied().collect();
         assert_eq!(
@@ -582,6 +895,15 @@ mod tests {
         assert_eq!(
             AppError::ValidationError("".into()).error_key(),
             "validation_error"
+        );
+        assert_eq!(
+            AppError::EmailSignupDisabled.error_key(),
+            "email_signup_disabled"
+        );
+        assert_eq!(AppError::EmailSignupDisabled.error_code(), 1009);
+        assert_eq!(
+            AppError::EmailSignupDisabled.status_code(),
+            StatusCode::FORBIDDEN
         );
         assert_eq!(
             AppError::AuthenticationFailed("".into()).error_key(),
@@ -661,6 +983,10 @@ mod tests {
             "social_auth_deactivated"
         );
         assert_eq!(
+            AppError::SocialAuthRegistrationClosed.error_key(),
+            "social_auth_registration_closed"
+        );
+        assert_eq!(
             AppError::UnsupportedGrantType("".into()).error_key(),
             "unsupported_grant_type"
         );
@@ -670,6 +996,15 @@ mod tests {
             }
             .error_key(),
             "approval_required"
+        );
+        assert_eq!(
+            AppError::ApprovalFailed {
+                request_id: "".into(),
+                approve_url: "".into(),
+                reason: "".into(),
+            }
+            .error_key(),
+            "approval_failed"
         );
         assert_eq!(
             AppError::ExternalTokenInvalid("".into()).error_key(),
@@ -688,6 +1023,101 @@ mod tests {
         assert_eq!(
             AppError::NodeRegistrationFailed("".into()).error_key(),
             "node_registration_failed"
+        );
+        assert_eq!(
+            AppError::NodeCredentialMissing("".into()).error_key(),
+            "node_credential_missing"
+        );
+        assert_eq!(
+            AppError::NodeCredentialMissing("".into()).error_code(),
+            8004
+        );
+        assert_eq!(
+            AppError::WsProxyDownstream("".into()).error_key(),
+            "ws_proxy_downstream"
+        );
+        assert_eq!(AppError::WsProxyDownstream("".into()).error_code(), 8005);
+        assert_eq!(
+            AppError::ApiKeyScopeForbidden("".into()).error_key(),
+            "api_key_scope_forbidden"
+        );
+        assert_eq!(
+            AppError::ApiKeyScopeInactive.error_key(),
+            "api_key_scope_inactive"
+        );
+        assert_eq!(
+            AppError::ApiKeyScopeNotFound("".into()).error_key(),
+            "api_key_scope_not_found"
+        );
+        assert_eq!(
+            AppError::ChannelBotNotFound("".into()).error_key(),
+            "channel_bot_not_found"
+        );
+        assert_eq!(
+            AppError::ChannelBotInactive("".into()).error_key(),
+            "channel_bot_inactive"
+        );
+        assert_eq!(
+            AppError::ChannelBotLimitReached("".into()).error_key(),
+            "channel_bot_limit_reached"
+        );
+        assert_eq!(
+            AppError::ChannelWebhookVerificationFailed("".into()).error_key(),
+            "channel_webhook_verification_failed"
+        );
+        assert_eq!(
+            AppError::ChannelRelayFailed("".into()).error_key(),
+            "channel_relay_failed"
+        );
+        assert_eq!(
+            AppError::ChannelPlatformError("".into()).error_key(),
+            "channel_platform_error"
+        );
+        assert_eq!(
+            AppError::InviteCodeInvalid.error_key(),
+            "invite_code_invalid"
+        );
+        assert_eq!(AppError::InviteCodeInvalid.error_code(), 8200);
+        assert_eq!(
+            AppError::InviteCodeExhausted.error_key(),
+            "invite_code_exhausted"
+        );
+        assert_eq!(AppError::InviteCodeExhausted.error_code(), 8201);
+        assert_eq!(
+            AppError::InviteCodeDeactivated.error_key(),
+            "invite_code_deactivated"
+        );
+        assert_eq!(AppError::InviteCodeDeactivated.error_code(), 8202);
+        assert_eq!(
+            format!("{}", AppError::InviteCodeInvalid),
+            "Invalid invite code"
+        );
+        assert_eq!(
+            format!("{}", AppError::InviteCodeExhausted),
+            "Invite code has been used up"
+        );
+        assert_eq!(
+            format!("{}", AppError::InviteCodeDeactivated),
+            "Invite code has been deactivated"
+        );
+    }
+
+    #[tokio::test]
+    async fn ws_proxy_downstream_response_includes_node_reason() {
+        let response = AppError::WsProxyDownstream("downstream rejected handshake".to_string())
+            .into_response();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read response body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+
+        assert_eq!(json["error"], "ws_proxy_downstream");
+        assert_eq!(json["error_code"], 8005);
+        assert_eq!(
+            json["message"],
+            "WebSocket proxy downstream error: downstream rejected handshake"
         );
     }
 
@@ -786,6 +1216,7 @@ mod tests {
             session_token: None,
             consent_url: None,
             request_id: None,
+            approve_url: None,
         };
         let json = serde_json::to_value(&resp).expect("serialize");
         assert_eq!(json["error"], "bad_request");
@@ -804,6 +1235,7 @@ mod tests {
             session_token: Some("mfa-session-tok".to_string()),
             consent_url: None,
             request_id: None,
+            approve_url: None,
         };
         let json = serde_json::to_value(&resp).expect("serialize");
         assert_eq!(json["session_token"], "mfa-session-tok");

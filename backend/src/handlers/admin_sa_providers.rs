@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
-use crate::handlers::admin_helpers::{extract_ip, extract_user_agent, require_admin};
+use crate::handlers::admin_helpers::{require_admin, require_admin_or_operator};
 use crate::mw::auth::AuthUser;
 use crate::services::{audit_service, service_account_service, user_token_service};
 
@@ -88,7 +88,7 @@ pub async fn list_sa_providers(
     auth_user: AuthUser,
     Path(sa_id): Path<String>,
 ) -> AppResult<Json<AdminSaProviderListResponse>> {
-    require_admin(&state, &auth_user).await?;
+    require_admin_or_operator(&state, &auth_user, "admin.service_accounts.providers.list").await?;
 
     // Verify SA exists
     let _sa = service_account_service::get_service_account(&state.db, &sa_id).await?;
@@ -101,7 +101,7 @@ pub async fn list_sa_providers(
             provider_id: s.provider_config_id,
             provider_name: s.provider_name,
             provider_slug: s.provider_slug,
-            provider_type: s.token_type,
+            provider_type: s.provider_type,
             status: s.status,
             label: s.label,
             expires_at: s.expires_at,
@@ -117,7 +117,7 @@ pub async fn list_sa_providers(
 pub async fn connect_api_key_for_sa(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Path((sa_id, provider_id)): Path<(String, String)>,
     Json(body): Json<AdminConnectApiKeyRequest>,
 ) -> AppResult<Json<AdminSaProviderActionResponse>> {
@@ -150,20 +150,19 @@ pub async fn connect_api_key_for_sa(
         &provider_id,
         &body.api_key,
         body.label.as_deref(),
+        None, // service accounts don't use gateway URLs
     )
     .await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "admin.sa.provider_connected".to_string(),
+        &auth_user,
+        "admin.sa.provider_connected",
         Some(serde_json::json!({
             "target_sa_id": &sa_id,
             "provider_id": &provider_id,
             "token_type": "api_key",
         })),
-        extract_ip(&headers),
-        extract_user_agent(&headers),
     );
 
     Ok(Json(AdminSaProviderActionResponse {
@@ -176,7 +175,7 @@ pub async fn connect_api_key_for_sa(
 pub async fn disconnect_sa_provider(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Path((sa_id, provider_id)): Path<(String, String)>,
 ) -> AppResult<Json<AdminSaProviderActionResponse>> {
     require_admin(&state, &auth_user).await?;
@@ -192,16 +191,14 @@ pub async fn disconnect_sa_provider(
     )
     .await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "admin.sa.provider_disconnected".to_string(),
+        &auth_user,
+        "admin.sa.provider_disconnected",
         Some(serde_json::json!({
             "target_sa_id": &sa_id,
             "provider_id": &provider_id,
         })),
-        extract_ip(&headers),
-        extract_user_agent(&headers),
     );
 
     Ok(Json(AdminSaProviderActionResponse {
@@ -210,14 +207,21 @@ pub async fn disconnect_sa_provider(
     }))
 }
 
-/// GET /api/v1/admin/service-accounts/{sa_id}/providers/{provider_id}/connect/oauth
+/// POST /api/v1/admin/service-accounts/{sa_id}/providers/{provider_id}/connect/oauth
+/// (legacy: GET — kept one release for back-compat, see `routes.rs`)
 ///
 /// Admin initiates an OAuth redirect flow on behalf of a service account.
 /// Returns the authorization URL for the admin to redirect to.
+///
+/// This is a state-mutating action (creates an OAuth state row, emits an
+/// audit entry), so it MUST stay behind `require_admin` — never weaken to
+/// `require_admin_or_operator`. The route is mounted as POST under the
+/// canonical name; the GET fallback exists only so older clients keep
+/// working during a rolling deploy.
 pub async fn initiate_oauth_for_sa(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Path((sa_id, provider_id)): Path<(String, String)>,
 ) -> AppResult<Json<AdminSaOAuthInitiateResponse>> {
     require_admin(&state, &auth_user).await?;
@@ -240,19 +244,19 @@ pub async fn initiate_oauth_for_sa(
         &provider_id,
         Some(&sa_id),
         Some(&redirect_path),
+        &[],
+        None, // admin-on-behalf-of flow stays single-tenant per SA
     )
     .await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(admin_id),
-        "admin.sa.oauth_initiated".to_string(),
+        &auth_user,
+        "admin.sa.oauth_initiated",
         Some(serde_json::json!({
             "target_sa_id": &sa_id,
             "provider_id": &provider_id,
         })),
-        extract_ip(&headers),
-        extract_user_agent(&headers),
     );
 
     Ok(Json(AdminSaOAuthInitiateResponse {
@@ -267,7 +271,7 @@ pub async fn initiate_oauth_for_sa(
 pub async fn initiate_device_code_for_sa(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Path((sa_id, provider_id)): Path<(String, String)>,
 ) -> AppResult<Json<AdminSaDeviceCodeInitiateResponse>> {
     require_admin(&state, &auth_user).await?;
@@ -287,19 +291,19 @@ pub async fn initiate_device_code_for_sa(
         &admin_id,
         &provider_id,
         Some(&sa_id),
+        &[],
+        None, // admin-on-behalf-of flow stays single-tenant per SA
     )
     .await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(admin_id),
-        "admin.sa.device_code_initiated".to_string(),
+        &auth_user,
+        "admin.sa.device_code_initiated",
         Some(serde_json::json!({
             "target_sa_id": &sa_id,
             "provider_id": &provider_id,
         })),
-        extract_ip(&headers),
-        extract_user_agent(&headers),
     );
 
     Ok(Json(AdminSaDeviceCodeInitiateResponse {
@@ -318,7 +322,7 @@ pub async fn initiate_device_code_for_sa(
 pub async fn poll_device_code_for_sa(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Path((sa_id, provider_id)): Path<(String, String)>,
     Json(body): Json<AdminSaDeviceCodePollRequest>,
 ) -> AppResult<Json<AdminSaDeviceCodePollResponse>> {
@@ -339,17 +343,15 @@ pub async fn poll_device_code_for_sa(
     .await?;
 
     if result.status == "complete" {
-        audit_service::log_async(
+        audit_service::log_for_user(
             state.db.clone(),
-            Some(admin_id),
-            "admin.sa.provider_connected".to_string(),
+            &auth_user,
+            "admin.sa.provider_connected",
             Some(serde_json::json!({
                 "target_sa_id": &sa_id,
                 "provider_id": &provider_id,
                 "token_type": "device_code",
             })),
-            extract_ip(&headers),
-            extract_user_agent(&headers),
         );
     }
 

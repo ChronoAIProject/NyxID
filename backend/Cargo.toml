@@ -1,14 +1,26 @@
 [package]
 name = "nyxid"
-version = "0.1.0"
+version = "0.5.0"
 edition = "2024"
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+
+# Rename the backend binary from the implicit `nyxid` to `nyxid-server` so it
+# does not collide with the CLI's `[[bin]] name = "nyxid"` in cli/Cargo.toml.
+# Without this, `cargo build --bin nyxid` and `cargo build` (workspace) both
+# produce two binaries that race for the same `target/{triple}/release/nyxid`
+# path; whichever wins gets shipped, breaking cargo-dist releases.
+# See backend/Dockerfile and docs/DEPLOYMENT.md for the deployment-side
+# matching changes.
+[[bin]]
+name = "nyxid-server"
+path = "src/main.rs"
 
 [dependencies]
 axum = { workspace = true }
 tower = "0.5.3"
-tower-http = { version = "0.6.8", features = ["cors", "trace", "request-id"] }
+tower-http = { version = "0.6.8", features = ["cors", "trace", "request-id", "limit"] }
 tokio = { workspace = true }
 mongodb = { workspace = true }
 bson = { workspace = true }
@@ -19,25 +31,32 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-jsonwebtoken = "9.3"
+jsonwebtoken = { version = "10.3", default-features = false, features = ["use_pem", "aws_lc_rs"] }
 argon2 = "0.5.3"
 aes-gcm = "0.10.3"
+aes = "0.8.4"
+cbc = "0.1.2"
 sha2 = "0.10.9"
+siphasher = "1"
 rand = "0.8.5"
 hex = "0.4.3"
 base64 = "0.22.1"
 rsa = { version = "0.9.10", features = ["pem"] }
-totp-rs = { version = "5.7", features = ["qr", "gen_secret"] }
+p256 = "0.13"
+totp-rs = { version = "5.7.1", features = ["qr", "gen_secret"] }
 validator = { version = "0.20", features = ["derive"] }
-governor = "0.8.1"
+governor = "0.10"
 reqwest = { version = "0.12.28", features = ["json", "stream", "rustls-tls", "http2"], default-features = false }
 utoipa = { version = "5.4", features = ["axum_extras", "uuid", "chrono"] }
-utoipa-swagger-ui = { version = "8.1", features = ["axum"] }
+utoipa-swagger-ui = { version = "9.0", features = ["axum"] }
 bytes = "1.11"
 anyhow = "1.0.101"
 thiserror = "2.0.18"
 dotenvy = "0.15.7"
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.6", features = ["derive"] }
+dirs = "6"
+open = "5"
+rpassword = "7.5.1"
 subtle = "2"
 url = "2.5"
 urlencoding = "2.1"
@@ -49,13 +68,35 @@ tokio-stream = "0.1"
 dashmap = "6"
 hmac = "0.12"
 async-stream = "0.3"
+ed25519-dalek = { version = "2", features = ["alloc"] }
+ssh-key = { version = "0.6.7", features = ["ed25519", "getrandom"] }
+tokio-tungstenite = { version = "0.29.0", features = ["rustls-tls-webpki-roots"] }
+deunicode = "1.6"
+nyxid-cloud-auth = { path = "../cloud-auth" }
+http = "1.4"
+# Direct rustls dep so we can install a default CryptoProvider at startup.
+# Feature unification picks up BOTH `ring` (via google-cloud-kms ->
+# google-cloud-auth -> jsonwebtoken 9.x and via the transitively-enabled
+# `reqwest/__rustls-ring`) AND `aws_lc_rs` (requested here). With both
+# providers compiled in, rustls cannot auto-select and panics on first
+# TLS use (rustls/src/crypto/mod.rs:249). The CLI hit the same trap; see
+# cli/Cargo.toml + cli/src/main.rs's install_rustls_crypto_provider.
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "logging", "aws_lc_rs"] }
 
 # Optional KMS provider dependencies (behind feature flags)
 aws-config = { version = "1", optional = true }
 aws-sdk-kms = { version = "1", optional = true }
-google-cloud-kms = { version = "0.5", optional = true }
+google-cloud-kms = { version = "0.6", optional = true }
+russh = "0.58.0"
+tempfile = "3.27.0"
+pty-process = { version = "0.5.3", features = ["async"] }
+nix = { version = "0.31.2", features = ["term"] }
+libc = "0.2.184"
 
 [features]
 default = []
 aws-kms = ["aws-config", "aws-sdk-kms"]
 gcp-kms = ["google-cloud-kms"]
+
+[package.metadata.dist]
+dist = false

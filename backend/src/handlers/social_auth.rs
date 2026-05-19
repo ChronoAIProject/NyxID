@@ -11,9 +11,11 @@ use crate::crypto::token::{constant_time_eq, generate_random_token, hash_token};
 use crate::errors::{AppError, AppResult};
 use crate::handlers::auth::{
     apply_browser_session_cookies, build_cookie, build_cookie_with_same_site, clear_cookie,
-    clear_cookie_with_same_site, extract_ip, extract_user_agent,
+    clear_cookie_with_same_site, extract_email_domain, extract_ip, extract_referrer_domain,
+    extract_user_agent,
 };
-use crate::services::{audit_service, social_auth_service, token_service};
+use crate::services::{audit_service, invite_code_service, social_auth_service, token_service};
+use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event, hash_short_id};
 use social_auth_service::SocialProfile;
 
 const SOCIAL_STATE_COOKIE: &str = "nyx_social_state";
@@ -22,6 +24,7 @@ const SOCIAL_REDIRECT_COOKIE: &str = "nyx_social_redirect";
 const SOCIAL_RETURN_TO_COOKIE: &str = "nyx_social_return_to";
 const SOCIAL_CLIENT_MOBILE: &str = "mobile";
 const SOCIAL_NONCE_COOKIE: &str = "nyx_social_nonce";
+const SOCIAL_INVITE_COOKIE: &str = "nyx_social_invite";
 const SOCIAL_STATE_MAX_AGE: i64 = 600; // 10 minutes
 const COOKIE_SAMESITE_LAX: &str = "Lax";
 const COOKIE_SAMESITE_NONE: &str = "None";
@@ -33,6 +36,9 @@ pub struct AuthorizeQuery {
     /// OAuth flow return_to URL. After social login, the user is redirected here
     /// instead of the frontend root so the OAuth authorize flow can resume.
     pub return_to: Option<String>,
+    /// Invite code from the registration form, carried through the OAuth
+    /// round-trip so that SSO sign-ups can satisfy the invite-code gate.
+    pub invite_code: Option<String>,
 }
 
 /// GET /api/v1/auth/social/{provider}
@@ -198,6 +204,44 @@ pub async fn authorize(
         same_site,
     )?;
 
+    // Persist invite code in a short-lived cookie so the callback can
+    // validate it when creating a new user via SSO.
+    let trimmed_invite = query
+        .invite_code
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_uppercase());
+    if let Some(ref code) = trimmed_invite {
+        headers.append(
+            header::SET_COOKIE,
+            build_cookie_with_same_site(
+                SOCIAL_INVITE_COOKIE,
+                &urlencoding::encode(code),
+                SOCIAL_STATE_MAX_AGE,
+                "/api/v1/auth/social",
+                secure,
+                domain,
+                same_site,
+            )
+            .parse()
+            .map_err(|_| AppError::Internal("Cookie error".to_string()))?,
+        );
+    } else {
+        // Clear any stale invite cookie from a previous attempt.
+        if let Ok(cookie) = clear_cookie_with_same_site(
+            SOCIAL_INVITE_COOKIE,
+            "/api/v1/auth/social",
+            secure,
+            domain,
+            same_site,
+        )
+        .parse()
+        {
+            headers.append(header::SET_COOKIE, cookie);
+        }
+    }
+
     headers.insert(
         header::LOCATION,
         authorization_url
@@ -341,22 +385,121 @@ pub async fn callback(
                 redirect_with_error(&redirect_target, "social_auth_profile", secure, domain)
             })?;
 
-    // Find or create user
-    let user = social_auth_service::find_or_create_user(&state.db, &profile)
-        .await
-        .map_err(|e| {
-            tracing::warn!(error = %e, "Social auth find_or_create_user failed");
-            let error_key = match &e {
-                AppError::SocialAuthConflict => "social_auth_conflict",
-                AppError::SocialAuthNoEmail => "social_auth_no_email",
-                AppError::SocialAuthDeactivated => "social_auth_deactivated",
-                _ => "social_auth_exchange",
-            };
-            redirect_with_error(&redirect_target, error_key, secure, domain)
-        })?;
+    // Read invite code from the cookie set at SSO initiation. When
+    // INVITE_CODE_REQUIRED is true and a valid code is present, reserve it
+    // so the new user slot cannot be taken by a concurrent request.
+    let invite_code_raw = extract_cookie_value(&headers, SOCIAL_INVITE_COOKIE);
+    let invite_code = invite_code_raw
+        .as_deref()
+        .and_then(|c| urlencoding::decode(c).ok())
+        .map(|c| c.into_owned())
+        .filter(|c| !c.is_empty());
+
+    let (allow_new_users, reserved_invite_id) = if state.config.invite_code_required {
+        match invite_code.as_deref() {
+            Some(code) => match invite_code_service::reserve_invite_code(&state.db, code).await {
+                Ok(invite_id) => (true, Some(invite_id)),
+                Err(_) => (false, None),
+            },
+            None => (false, None),
+        }
+    } else {
+        (true, None)
+    };
+
+    let create_outcome =
+        social_auth_service::find_or_create_user(&state.db, &profile, allow_new_users)
+            .await
+            .map_err(|e| {
+                tracing::warn!(error = %e, "Social auth find_or_create_user failed");
+                // Release the reserved invite code on failure so it is not stuck.
+                if let Some(ref iid) = reserved_invite_id {
+                    let db = state.db.clone();
+                    let iid = iid.clone();
+                    tokio::spawn(async move {
+                        let _ = invite_code_service::release_reservation(&db, &iid).await;
+                    });
+                }
+                let error_key = match &e {
+                    AppError::SocialAuthConflict => "social_auth_conflict",
+                    AppError::SocialAuthNoEmail => "social_auth_no_email",
+                    AppError::SocialAuthDeactivated => "social_auth_deactivated",
+                    AppError::SocialAuthRegistrationClosed => "social_auth_registration_closed",
+                    _ => "social_auth_exchange",
+                };
+                redirect_with_error(&redirect_target, error_key, secure, domain)
+            })?;
+    let user = create_outcome.user;
+    let was_newly_created = create_outcome.was_newly_created;
+
+    // Record invite code usage after successful user creation / lookup.
+    if let Some(ref iid) = reserved_invite_id {
+        let _ = invite_code_service::record_usage(&state.db, iid, &user.id).await;
+    }
 
     let ip = extract_ip(&headers, Some(peer));
     let ua = extract_user_agent(&headers);
+
+    // Pre-auth path — derive telemetry surface from `redirect_target`
+    // instead of the `X-NyxID-Client` headers. The social provider
+    // redirects the user's browser to this callback directly, so the
+    // request never carries the app's client header and a header-derived
+    // context always resolves to `surface="backend"`. Using the redirect
+    // target keeps web vs. mobile attribution correct for
+    // `AuthLoggedIn { method }` funnel analysis.
+    let surface: &'static str = match &redirect_target {
+        SocialRedirectTarget::Web { .. } => "ui",
+        SocialRedirectTarget::Mobile { .. } => "mobile",
+    };
+    let tele_social = TelemetryContext {
+        surface,
+        client_version: None,
+    };
+
+    // Telemetry: only the new-user branch of `find_or_create_user` emits
+    // `user.signed_up`; returning logins go through `AuthLoggedIn` instead
+    // (emitted below per redirect target). For new users that redeemed an
+    // invite code, also emit `invite.code_redeemed` so the funnel
+    // (`invite.code_generated` → `invite.code_redeemed`) counts conversions.
+    if was_newly_created {
+        let invite_code_id_hash = reserved_invite_id.as_deref().map(hash_short_id);
+        let source = if reserved_invite_id.is_some() {
+            "invite_code".to_string()
+        } else {
+            "social_oauth".to_string()
+        };
+        emit_event(
+            state.telemetry.as_deref(),
+            &user.id,
+            None,
+            &tele_social,
+            TelemetryEvent::UserSignedUp {
+                method: provider.as_str().to_string(),
+                source,
+                email_domain: extract_email_domain(&profile.email),
+                invite_code_id: invite_code_id_hash,
+                referrer_domain: extract_referrer_domain(&headers),
+                via_org: None,
+                invite_code_used: reserved_invite_id.is_some(),
+            },
+        );
+        if let Some(ref iid) = reserved_invite_id
+            && let Some(meta) = invite_code_service::fetch_telemetry_meta(&state.db, iid).await
+        {
+            let days = (chrono::Utc::now() - meta.created_at).num_days().max(0) as u64;
+            emit_event(
+                state.telemetry.as_deref(),
+                &user.id,
+                None,
+                &tele_social,
+                TelemetryEvent::InviteCodeRedeemed {
+                    code_id: hash_short_id(iid),
+                    created_by_user_id: hash_short_id(&meta.created_by),
+                    days_to_redemption: days,
+                },
+            );
+        }
+    }
 
     match &redirect_target {
         SocialRedirectTarget::Web { .. } => {
@@ -365,6 +508,13 @@ pub async fn callback(
                     .await
                     .map_err(|e| {
                         tracing::error!(error = %e, "Social auth session creation failed");
+                        if let Some(ref iid) = reserved_invite_id {
+                            let db = state.db.clone();
+                            let iid = iid.clone();
+                            tokio::spawn(async move {
+                                let _ = invite_code_service::release_reservation(&db, &iid).await;
+                            });
+                        }
                         redirect_with_error(
                             &redirect_target,
                             "social_auth_exchange",
@@ -383,6 +533,19 @@ pub async fn callback(
                 })),
                 ip,
                 ua,
+                None,
+                None,
+            );
+
+            emit_event(
+                state.telemetry.as_deref(),
+                &user.id,
+                None,
+                &tele_social,
+                TelemetryEvent::AuthLoggedIn {
+                    method: provider.as_str().to_string(),
+                    mfa_required: false,
+                },
             );
 
             build_web_auth_redirect(
@@ -406,6 +569,13 @@ pub async fn callback(
             .await
             .map_err(|e| {
                 tracing::error!(error = %e, "Social auth session creation failed");
+                if let Some(ref iid) = reserved_invite_id {
+                    let db = state.db.clone();
+                    let iid = iid.clone();
+                    tokio::spawn(async move {
+                        let _ = invite_code_service::release_reservation(&db, &iid).await;
+                    });
+                }
                 redirect_with_error(&redirect_target, "social_auth_exchange", secure, domain)
             })?;
 
@@ -419,6 +589,19 @@ pub async fn callback(
                 })),
                 ip,
                 ua,
+                None,
+                None,
+            );
+
+            emit_event(
+                state.telemetry.as_deref(),
+                &user.id,
+                None,
+                &tele_social,
+                TelemetryEvent::AuthLoggedIn {
+                    method: provider.as_str().to_string(),
+                    mfa_required: false,
+                },
             );
 
             build_mobile_auth_redirect(
@@ -611,21 +794,115 @@ pub async fn apple_callback(
         };
     }
 
-    // Find or create user (same as Google/GitHub flow)
-    let user = social_auth_service::find_or_create_user(&state.db, &profile)
-        .await
-        .map_err(|e| {
-            let error_key = match &e {
-                AppError::SocialAuthConflict => "social_auth_conflict",
-                AppError::SocialAuthNoEmail => "social_auth_no_email",
-                AppError::SocialAuthDeactivated => "social_auth_deactivated",
-                _ => "social_auth_exchange",
-            };
-            redirect_with_error(&redirect_target, error_key, secure, domain)
-        })?;
+    // Read invite code from the cookie set at SSO initiation (same as
+    // Google/GitHub callback). Reserve it so the slot cannot be stolen.
+    let invite_code_raw = extract_cookie_value(&headers, SOCIAL_INVITE_COOKIE);
+    let invite_code = invite_code_raw
+        .as_deref()
+        .and_then(|c| urlencoding::decode(c).ok())
+        .map(|c| c.into_owned())
+        .filter(|c| !c.is_empty());
+
+    let (allow_new_users, reserved_invite_id) = if state.config.invite_code_required {
+        match invite_code.as_deref() {
+            Some(code) => match invite_code_service::reserve_invite_code(&state.db, code).await {
+                Ok(invite_id) => (true, Some(invite_id)),
+                Err(_) => (false, None),
+            },
+            None => (false, None),
+        }
+    } else {
+        (true, None)
+    };
+
+    let create_outcome =
+        social_auth_service::find_or_create_user(&state.db, &profile, allow_new_users)
+            .await
+            .map_err(|e| {
+                // Release the reserved invite code on failure.
+                if let Some(ref iid) = reserved_invite_id {
+                    let db = state.db.clone();
+                    let iid = iid.clone();
+                    tokio::spawn(async move {
+                        let _ = invite_code_service::release_reservation(&db, &iid).await;
+                    });
+                }
+                let error_key = match &e {
+                    AppError::SocialAuthConflict => "social_auth_conflict",
+                    AppError::SocialAuthNoEmail => "social_auth_no_email",
+                    AppError::SocialAuthDeactivated => "social_auth_deactivated",
+                    AppError::SocialAuthRegistrationClosed => "social_auth_registration_closed",
+                    _ => "social_auth_exchange",
+                };
+                redirect_with_error(&redirect_target, error_key, secure, domain)
+            })?;
+    let user = create_outcome.user;
+    let was_newly_created = create_outcome.was_newly_created;
+
+    // Record invite code usage after successful user creation / lookup.
+    if let Some(ref iid) = reserved_invite_id {
+        let _ = invite_code_service::record_usage(&state.db, iid, &user.id).await;
+    }
 
     let ip = extract_ip(&headers, Some(peer));
     let ua = extract_user_agent(&headers);
+
+    // Pre-auth path — derive surface from `redirect_target` rather than
+    // the `X-NyxID-Client` headers. Apple's `form_post` response mode
+    // POSTs directly from apple.com to this callback, so the request
+    // never carries the app's client header. Using the redirect target
+    // keeps web vs. mobile attribution correct for successful Apple
+    // sign-ins in the AuthLoggedIn funnel.
+    let surface: &'static str = match &redirect_target {
+        SocialRedirectTarget::Web { .. } => "ui",
+        SocialRedirectTarget::Mobile { .. } => "mobile",
+    };
+    let tele_social = TelemetryContext {
+        surface,
+        client_version: None,
+    };
+
+    // Telemetry: gate `user.signed_up` and `invite.code_redeemed` on the
+    // new-user branch, mirroring the Google/GitHub callback above.
+    if was_newly_created {
+        let invite_code_id_hash = reserved_invite_id.as_deref().map(hash_short_id);
+        let source = if reserved_invite_id.is_some() {
+            "invite_code".to_string()
+        } else {
+            "social_oauth".to_string()
+        };
+        emit_event(
+            state.telemetry.as_deref(),
+            &user.id,
+            None,
+            &tele_social,
+            TelemetryEvent::UserSignedUp {
+                method: "apple".to_string(),
+                source,
+                email_domain: extract_email_domain(&profile.email),
+                invite_code_id: invite_code_id_hash,
+                referrer_domain: extract_referrer_domain(&headers),
+                via_org: None,
+                invite_code_used: reserved_invite_id.is_some(),
+            },
+        );
+        if let Some(ref iid) = reserved_invite_id
+            && let Some(meta) = invite_code_service::fetch_telemetry_meta(&state.db, iid).await
+        {
+            let days = (chrono::Utc::now() - meta.created_at).num_days().max(0) as u64;
+            emit_event(
+                state.telemetry.as_deref(),
+                &user.id,
+                None,
+                &tele_social,
+                TelemetryEvent::InviteCodeRedeemed {
+                    code_id: hash_short_id(iid),
+                    created_by_user_id: hash_short_id(&meta.created_by),
+                    days_to_redemption: days,
+                },
+            );
+        }
+    }
 
     match &redirect_target {
         SocialRedirectTarget::Web { .. } => {
@@ -634,6 +911,13 @@ pub async fn apple_callback(
                     .await
                     .map_err(|e| {
                         tracing::error!(error = %e, "Apple auth session creation failed");
+                        if let Some(ref iid) = reserved_invite_id {
+                            let db = state.db.clone();
+                            let iid = iid.clone();
+                            tokio::spawn(async move {
+                                let _ = invite_code_service::release_reservation(&db, &iid).await;
+                            });
+                        }
                         redirect_with_error(
                             &redirect_target,
                             "social_auth_exchange",
@@ -652,6 +936,19 @@ pub async fn apple_callback(
                 })),
                 ip,
                 ua,
+                None,
+                None,
+            );
+
+            emit_event(
+                state.telemetry.as_deref(),
+                &user.id,
+                None,
+                &tele_social,
+                TelemetryEvent::AuthLoggedIn {
+                    method: "apple".to_string(),
+                    mfa_required: false,
+                },
             );
 
             build_web_auth_redirect(
@@ -675,6 +972,13 @@ pub async fn apple_callback(
             .await
             .map_err(|e| {
                 tracing::error!(error = %e, "Apple auth session creation failed");
+                if let Some(ref iid) = reserved_invite_id {
+                    let db = state.db.clone();
+                    let iid = iid.clone();
+                    tokio::spawn(async move {
+                        let _ = invite_code_service::release_reservation(&db, &iid).await;
+                    });
+                }
                 redirect_with_error(&redirect_target, "social_auth_exchange", secure, domain)
             })?;
 
@@ -688,6 +992,19 @@ pub async fn apple_callback(
                 })),
                 ip,
                 ua,
+                None,
+                None,
+            );
+
+            emit_event(
+                state.telemetry.as_deref(),
+                &user.id,
+                None,
+                &tele_social,
+                TelemetryEvent::AuthLoggedIn {
+                    method: "apple".to_string(),
+                    mfa_required: false,
+                },
             );
 
             build_mobile_auth_redirect(&tokens, &redirect_target, "apple", &user.id, secure, domain)
@@ -947,7 +1264,7 @@ fn nonce_matches_cookie_hash(nonce_claim: Option<&str>, cookie_hash: Option<&str
     constant_time_eq(hash.as_bytes(), computed_hash.as_bytes())
 }
 
-fn social_clear_cookie_values(secure: bool, domain: Option<&str>) -> [String; 4] {
+fn social_clear_cookie_values(secure: bool, domain: Option<&str>) -> [String; 6] {
     [
         clear_cookie_with_same_site(
             SOCIAL_STATE_COOKIE,
@@ -972,6 +1289,20 @@ fn social_clear_cookie_values(secure: bool, domain: Option<&str>) -> [String; 4]
         ),
         clear_cookie_with_same_site(
             SOCIAL_NONCE_COOKIE,
+            "/api/v1/auth/social",
+            secure,
+            domain,
+            COOKIE_SAMESITE_NONE,
+        ),
+        clear_cookie_with_same_site(
+            SOCIAL_INVITE_COOKIE,
+            "/api/v1/auth/social",
+            secure,
+            domain,
+            COOKIE_SAMESITE_LAX,
+        ),
+        clear_cookie_with_same_site(
+            SOCIAL_INVITE_COOKIE,
             "/api/v1/auth/social",
             secure,
             domain,
@@ -1125,11 +1456,12 @@ mod tests {
     }
 
     #[test]
-    fn social_clear_cookie_values_include_state_and_nonce_variants() {
+    fn social_clear_cookie_values_include_state_nonce_and_invite_variants() {
         let cookies = social_clear_cookie_values(true, Some(".example.com"));
-        assert_eq!(cookies.len(), 4);
+        assert_eq!(cookies.len(), 6);
         assert!(cookies.iter().any(|c| c.contains("nyx_social_state=")));
         assert!(cookies.iter().any(|c| c.contains("nyx_social_nonce=")));
+        assert!(cookies.iter().any(|c| c.contains("nyx_social_invite=")));
         assert!(cookies.iter().any(|c| c.contains("SameSite=Lax")));
         assert!(cookies.iter().any(|c| c.contains("SameSite=None")));
     }

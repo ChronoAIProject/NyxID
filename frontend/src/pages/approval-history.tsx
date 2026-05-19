@@ -2,9 +2,10 @@ import { useState } from "react";
 import { useApprovalRequests, useDecideApproval } from "@/hooks/use-approvals";
 import { ApiError } from "@/lib/api-client";
 import { formatDate } from "@/lib/utils";
+import { ErrorBanner } from "@/components/shared/error-banner";
 import { PageHeader } from "@/components/shared/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
   Select,
@@ -30,14 +31,14 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import {
-  ClipboardList,
   CheckCircle2,
   XCircle,
-  Clock,
-  Timer,
   ChevronLeft,
   ChevronRight,
+  Wrench,
 } from "lucide-react";
+import { SeoKeywordIcon } from "@/components/icons/empty-state";
+import type { ApprovalRequestItem } from "@/types/approvals";
 import { toast } from "sonner";
 
 const STATUS_OPTIONS = [
@@ -51,36 +52,20 @@ const STATUS_OPTIONS = [
 function getStatusBadge(status: string) {
   switch (status) {
     case "approved":
-      return (
-        <Badge variant="success" className="gap-1">
-          <CheckCircle2 className="h-3 w-3" />
-          Approved
-        </Badge>
-      );
+      return <Badge variant="success">Approved</Badge>;
     case "rejected":
-      return (
-        <Badge variant="destructive" className="gap-1">
-          <XCircle className="h-3 w-3" />
-          Rejected
-        </Badge>
-      );
+      return <Badge variant="destructive">Rejected</Badge>;
     case "expired":
-      return (
-        <Badge variant="secondary" className="gap-1">
-          <Timer className="h-3 w-3" />
-          Expired
-        </Badge>
-      );
+      return <Badge variant="secondary">Expired</Badge>;
     case "pending":
-      return (
-        <Badge variant="warning" className="gap-1">
-          <Clock className="h-3 w-3" />
-          Pending
-        </Badge>
-      );
+      return <Badge variant="warning">Pending</Badge>;
     default:
-      return <Badge variant="outline">{status}</Badge>;
+      return <Badge variant="secondary">{status}</Badge>;
   }
+}
+
+function isToolApproval(request: ApprovalRequestItem): boolean {
+  return request.tool_name != null;
 }
 
 export function ApprovalHistoryPage() {
@@ -89,12 +74,13 @@ export function ApprovalHistoryPage() {
   const [decideTarget, setDecideTarget] = useState<{
     readonly id: string;
     readonly service: string;
+    readonly approvalMode: "per_request" | "grant";
     readonly action: "approve" | "reject";
   } | null>(null);
 
   const perPage = 20;
   const filterValue = statusFilter === "all" ? undefined : statusFilter;
-  const { data, isLoading, error } = useApprovalRequests(
+  const { data, isLoading, error, refetch } = useApprovalRequests(
     page,
     perPage,
     filterValue,
@@ -158,68 +144,175 @@ export function ApprovalHistoryPage() {
       {isLoading ? (
         <div className="space-y-2">
           {Array.from({ length: 5 }).map((_, i) => (
-            <Skeleton
-              key={`req-skel-${String(i)}`}
-              className="h-12 w-full"
-            />
+            <Skeleton key={`req-skel-${String(i)}`} className="h-12 w-full" />
           ))}
         </div>
       ) : error ? (
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-          <ClipboardList className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
-            Failed to load approval history. Please try again.
-          </p>
-        </div>
+        <ErrorBanner message="Failed to load approval history. Please try again." onRetry={refetch} />
       ) : requests.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-          <ClipboardList className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
-            No approval requests found.
-          </p>
+        <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+          <SeoKeywordIcon className="h-64 w-64 text-muted-foreground/30" />
+          <div className="max-w-md space-y-1">
+            <p className="text-[12px] font-medium text-muted-foreground/30">No Approval Requests</p>
+            <p className="text-[12px] text-muted-foreground/30">
+              No approval requests match the current filter.
+            </p>
+          </div>
         </div>
       ) : (
         <>
-          <div className="rounded-xl border border-border">
+          {/* Mobile card view */}
+          <div className="flex flex-col gap-3 md:hidden">
+            {requests.map((request) => (
+              <div key={request.id} className="relative rounded-xl border border-border/50 bg-card p-4">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    {isToolApproval(request) ? (
+                      <div className="flex items-center gap-1.5">
+                        <Wrench className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                        <p className="text-[13px] font-semibold text-foreground truncate">{request.tool_name}</p>
+                      </div>
+                    ) : (
+                      <p className="text-[13px] font-semibold text-foreground truncate">{request.service_name}</p>
+                    )}
+                    <p className="text-[11px] text-muted-foreground truncate">
+                      {request.requester_label ?? request.requester_type}
+                    </p>
+                  </div>
+                  {getStatusBadge(request.status)}
+                </div>
+                <p className="mt-1.5 text-[11px] text-muted-foreground line-clamp-2">
+                  {isToolApproval(request)
+                    ? request.tool_arguments ?? "Tool execution approval"
+                    : request.action_description ?? request.operation_summary}
+                </p>
+                {request.is_destructive && (
+                  <Badge variant="destructive" className="mt-1.5">Destructive</Badge>
+                )}
+                <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+                  <span>{formatDate(request.created_at)}</span>
+                  {request.decided_at && <span>Decided {formatDate(request.decided_at)}</span>}
+                </div>
+                {request.status === "pending" && (
+                  <div className="mt-3 flex gap-2 border-t border-border/40 pt-3">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="flex-1 h-8 text-xs"
+                      onClick={() =>
+                        setDecideTarget({
+                          id: request.id,
+                          service: request.service_name,
+                          approvalMode: request.approval_mode,
+                          action: "approve",
+                        })
+                      }
+                    >
+                      <ButtonIcon><CheckCircle2 className="h-3 w-3 text-success" /></ButtonIcon>
+                      Approve
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="flex-1 h-8 text-xs"
+                      onClick={() =>
+                        setDecideTarget({
+                          id: request.id,
+                          service: request.service_name,
+                          approvalMode: request.approval_mode,
+                          action: "reject",
+                        })
+                      }
+                    >
+                      <ButtonIcon><XCircle className="h-3 w-3 text-destructive" /></ButtonIcon>
+                      Reject
+                    </Button>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+
+          {/* Desktop table view */}
+          <div className="hidden md:block rounded-xl border border-border/50 bg-card overflow-hidden">
             <Table>
               <TableHeader>
                 <TableRow>
                   <TableHead>Service</TableHead>
                   <TableHead>Requester</TableHead>
-                  <TableHead>Operation</TableHead>
+                  <TableHead>Action</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead>Requested</TableHead>
                   <TableHead>Decided</TableHead>
-                  <TableHead className="w-[100px]" />
+                  {requests.some((r) => r.status === "pending") && (
+                    <TableHead className="w-[100px]">Actions</TableHead>
+                  )}
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {requests.map((request) => (
                   <TableRow key={request.id}>
                     <TableCell>
-                      <div className="flex flex-col">
-                        <span className="font-medium">
-                          {request.service_name}
-                        </span>
-                        <span className="text-xs text-muted-foreground">
-                          {request.service_slug}
-                        </span>
-                      </div>
+                      {isToolApproval(request) ? (
+                        <div className="flex flex-col gap-1">
+                          <div className="flex items-center gap-1.5">
+                            <Wrench className="h-3.5 w-3.5 text-muted-foreground" />
+                            <span className="font-medium">
+                              {request.tool_name}
+                            </span>
+                          </div>
+                          {request.is_destructive && (
+                            <Badge variant="destructive">Destructive</Badge>
+                          )}
+                        </div>
+                      ) : (
+                        <div className="flex flex-col gap-0.5">
+                          <span className="font-medium">
+                            {request.service_name}
+                          </span>
+                          <span className="text-[11px] text-muted-foreground">
+                            {request.service_slug}
+                          </span>
+                        </div>
+                      )}
                     </TableCell>
                     <TableCell>
-                      <div className="flex flex-col">
-                        <span className="text-sm">
+                      <div className="flex flex-col gap-0.5">
+                        <span>
                           {request.requester_label ?? request.requester_type}
                         </span>
-                        <span className="text-xs text-muted-foreground">
+                        <span className="text-[11px] text-muted-foreground">
                           {request.requester_type}
                         </span>
                       </div>
                     </TableCell>
                     <TableCell>
-                      <span className="font-mono text-xs">
-                        {request.operation_summary}
-                      </span>
+                      <div className="flex flex-col gap-0.5">
+                        {isToolApproval(request) ? (
+                          <>
+                            <span>
+                              Tool execution approval
+                            </span>
+                            {request.tool_arguments && (
+                              <span className="max-w-[300px] truncate text-[11px] text-muted-foreground">
+                                {request.tool_arguments}
+                              </span>
+                            )}
+                          </>
+                        ) : (
+                          <>
+                            <span>
+                              {request.action_description ??
+                                request.operation_summary}
+                            </span>
+                            {request.action_description && (
+                              <span className="text-[11px] text-muted-foreground">
+                                {request.operation_summary}
+                              </span>
+                            )}
+                          </>
+                        )}
+                      </div>
                     </TableCell>
                     <TableCell>{getStatusBadge(request.status)}</TableCell>
                     <TableCell className="text-muted-foreground">
@@ -230,42 +323,44 @@ export function ApprovalHistoryPage() {
                         ? formatDate(request.decided_at)
                         : "-"}
                     </TableCell>
-                    <TableCell>
-                      {request.status === "pending" && (
-                        <div className="flex gap-1">
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="h-7 text-xs"
-                            onClick={() =>
-                              setDecideTarget({
-                                id: request.id,
-                                service: request.service_name,
-                                action: "approve",
-                              })
-                            }
-                          >
-                            <CheckCircle2 className="mr-1 h-3 w-3 text-success" />
-                            Approve
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="h-7 text-xs"
-                            onClick={() =>
-                              setDecideTarget({
-                                id: request.id,
-                                service: request.service_name,
-                                action: "reject",
-                              })
-                            }
-                          >
-                            <XCircle className="mr-1 h-3 w-3 text-destructive" />
-                            Reject
-                          </Button>
-                        </div>
-                      )}
-                    </TableCell>
+                    {requests.some((r) => r.status === "pending") && (
+                      <TableCell>
+                        {request.status === "pending" && (
+                          <div className="flex justify-end gap-1">
+                            <Button
+                              variant="ghost"
+                              className="h-7 text-xs"
+                              onClick={() =>
+                                setDecideTarget({
+                                  id: request.id,
+                                  service: request.service_name,
+                                  approvalMode: request.approval_mode,
+                                  action: "approve",
+                                })
+                              }
+                            >
+                              <ButtonIcon><CheckCircle2 className="h-3 w-3 text-success" /></ButtonIcon>
+                              Approve
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              className="h-7 text-xs"
+                              onClick={() =>
+                                setDecideTarget({
+                                  id: request.id,
+                                  service: request.service_name,
+                                  approvalMode: request.approval_mode,
+                                  action: "reject",
+                                })
+                              }
+                            >
+                              <ButtonIcon><XCircle className="h-3 w-3 text-destructive" /></ButtonIcon>
+                              Reject
+                            </Button>
+                          </div>
+                        )}
+                      </TableCell>
+                    )}
                   </TableRow>
                 ))}
               </TableBody>
@@ -275,29 +370,31 @@ export function ApprovalHistoryPage() {
           {/* Pagination */}
           {totalPages > 1 && (
             <div className="flex items-center justify-between">
-              <p className="text-sm text-muted-foreground">
+              <p className="text-[11px] text-text-tertiary">
                 Showing {String((page - 1) * perPage + 1)}-
                 {String(Math.min(page * perPage, total))} of {String(total)}
               </p>
               <div className="flex items-center gap-2">
                 <Button
                   variant="outline"
-                  size="sm"
+                  size="icon"
                   disabled={page <= 1}
                   onClick={() => setPage((p) => Math.max(1, p - 1))}
+                  aria-label="Previous page"
                 >
-                  <ChevronLeft className="h-4 w-4" />
+                  <ChevronLeft className="h-3 w-3" />
                 </Button>
-                <span className="text-sm">
+                <span className="text-[11px] text-text-tertiary">
                   Page {String(page)} of {String(totalPages)}
                 </span>
                 <Button
                   variant="outline"
-                  size="sm"
+                  size="icon"
                   disabled={page >= totalPages}
                   onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                  aria-label="Next page"
                 >
-                  <ChevronRight className="h-4 w-4" />
+                  <ChevronRight className="h-3 w-3" />
                 </Button>
               </div>
             </div>
@@ -321,7 +418,9 @@ export function ApprovalHistoryPage() {
             </DialogTitle>
             <DialogDescription>
               {decideTarget?.action === "approve"
-                ? `Are you sure you want to approve access to "${decideTarget?.service ?? ""}"? An approval grant will be created.`
+                ? decideTarget.approvalMode === "grant"
+                  ? `Are you sure you want to approve access to "${decideTarget?.service ?? ""}"? A reusable approval grant will be created using your configured expiry.`
+                  : `Are you sure you want to approve access to "${decideTarget?.service ?? ""}"? This approval applies only to the current request.`
                 : `Are you sure you want to reject access to "${decideTarget?.service ?? ""}"?`}
             </DialogDescription>
           </DialogHeader>

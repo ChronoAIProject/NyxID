@@ -7,7 +7,6 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { PortalMarkLogo } from "@/components/shared/portal-mark-logo";
 import { AlertTriangle, ShieldCheck } from "lucide-react";
 import {
   OAUTH_SCOPE_META,
@@ -40,6 +39,11 @@ export function OAuthConsentPage() {
   const codeChallengeMethod = readParam(search, "code_challenge_method");
   const nonce = search.get("nonce") ?? "";
   const prompt = search.get("prompt") ?? "";
+  const externalSubjectPlatform =
+    search.get("external_subject_platform") ?? "";
+  const externalSubjectTenant = search.get("external_subject_tenant") ?? "";
+  const externalSubjectExternalUserId =
+    search.get("external_subject_external_user_id") ?? "";
 
   const missing =
     !responseType ||
@@ -56,13 +60,17 @@ export function OAuthConsentPage() {
     return (
       <div
         className="mx-auto flex min-h-dvh w-full max-w-2xl items-center px-6 py-10"
-        style={{ paddingTop: "max(2.5rem, var(--sat))", paddingBottom: "max(2.5rem, var(--sab))" }}
+        style={{
+          paddingTop: "max(2.5rem, var(--sat))",
+          paddingBottom: "max(2.5rem, var(--sab))",
+        }}
       >
         <Card className="w-full">
           <CardHeader>
             <CardTitle>Invalid consent request</CardTitle>
             <CardDescription>
-              Missing required OAuth parameters. Please restart the sign-in flow.
+              Missing required OAuth parameters. Please restart the sign-in
+              flow.
             </CardDescription>
           </CardHeader>
         </Card>
@@ -73,13 +81,15 @@ export function OAuthConsentPage() {
   return (
     <div
       className="mx-auto flex min-h-dvh w-full max-w-2xl items-center px-6 py-10"
-      style={{ paddingTop: "max(2.5rem, var(--sat))", paddingBottom: "max(2.5rem, var(--sab))" }}
+      style={{
+        paddingTop: "max(2.5rem, var(--sat))",
+        paddingBottom: "max(2.5rem, var(--sab))",
+      }}
     >
       <Card className="w-full">
         <CardHeader className="space-y-4">
-          <div className="flex items-center gap-3">
-            <PortalMarkLogo size={26} />
-            <p className="logo-wordmark text-xl">NyxID</p>
+          <div className="flex items-center">
+            <img src="/nyxid-wordmark.svg" alt="NyxID" className="h-7 w-auto" />
           </div>
           <CardTitle>Authorize Application</CardTitle>
           <CardDescription>
@@ -89,19 +99,23 @@ export function OAuthConsentPage() {
         </CardHeader>
 
         <CardContent className="space-y-6">
-          <div className="rounded-md border border-border bg-muted px-4 py-3">
-            <div className="flex items-center gap-2 text-sm font-medium text-foreground">
+          <div className="rounded-lg border border-border bg-muted px-4 py-3">
+            <div className="flex items-center gap-2 text-[12px] font-medium text-foreground">
               <ShieldCheck className="h-4 w-4 text-primary" />
               App verification details
             </div>
             <div className="mt-2 space-y-1 text-xs text-muted-foreground">
               <p>
                 Application:{" "}
-                <span className="font-medium text-foreground">{clientName}</span>
+                <span className="font-medium text-foreground">
+                  {clientName}
+                </span>
               </p>
               <p>
                 Redirect host:{" "}
-                <span className="font-mono text-foreground">{redirectHost}</span>
+                <span className="text-foreground">
+                  {redirectHost}
+                </span>
               </p>
             </div>
           </div>
@@ -112,7 +126,7 @@ export function OAuthConsentPage() {
             </p>
             <div className="flex flex-wrap gap-2">
               {scopes.map((item) => (
-                <Badge key={item} variant="outline">
+                <Badge key={item} variant="secondary">
                   {item}
                 </Badge>
               ))}
@@ -134,12 +148,14 @@ export function OAuthConsentPage() {
                 return (
                   <div
                     key={`meta-${item}`}
-                    className="rounded-md border border-border bg-muted/50 px-3 py-2"
+                    className="rounded-lg border border-border bg-muted/50 px-3 py-2"
                   >
-                    <div className="flex items-center justify-between gap-2">
-                      <p className="font-mono text-xs text-foreground">{item}</p>
+                    <div className="flex items-start justify-between gap-2">
+                      <p className="min-w-0 break-words text-xs text-foreground pt-0.5">
+                        {item}
+                      </p>
                       <span
-                        className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${scopeRiskClass(meta.risk)}`}
+                        className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-medium ${scopeRiskClass(meta.risk)}`}
                       >
                         {scopeRiskLabel(meta.risk)}
                       </span>
@@ -161,19 +177,19 @@ export function OAuthConsentPage() {
             <p className="text-xs uppercase tracking-wide text-text-tertiary">
               Client ID
             </p>
-            <p className="font-mono text-xs text-foreground">{clientId}</p>
+            <p className="text-xs text-foreground">{clientId}</p>
           </div>
 
           <div className="space-y-1">
             <p className="text-xs uppercase tracking-wide text-text-tertiary">
               Redirect URI
             </p>
-            <p className="break-all font-mono text-xs text-foreground">
+            <p className="break-all text-xs text-foreground">
               {redirectUri}
             </p>
           </div>
 
-          <div className="rounded-md border border-yellow-500/30 bg-yellow-500/10 px-4 py-3">
+          <div className="rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-4 py-3">
             <div className="flex items-start gap-2">
               <AlertTriangle className="mt-0.5 h-4 w-4 text-yellow-300" />
               <p className="text-xs text-yellow-100/90">
@@ -201,6 +217,27 @@ export function OAuthConsentPage() {
             />
             <input type="hidden" name="nonce" value={nonce} />
             {prompt && <input type="hidden" name="prompt" value={prompt} />}
+            {externalSubjectPlatform && (
+              <input
+                type="hidden"
+                name="external_subject_platform"
+                value={externalSubjectPlatform}
+              />
+            )}
+            {externalSubjectTenant && (
+              <input
+                type="hidden"
+                name="external_subject_tenant"
+                value={externalSubjectTenant}
+              />
+            )}
+            {externalSubjectExternalUserId && (
+              <input
+                type="hidden"
+                name="external_subject_external_user_id"
+                value={externalSubjectExternalUserId}
+              />
+            )}
 
             <Button
               type="submit"
@@ -210,7 +247,7 @@ export function OAuthConsentPage() {
             >
               Deny
             </Button>
-            <Button type="submit" name="decision" value="allow">
+            <Button variant="primary" type="submit" name="decision" value="allow">
               Allow
             </Button>
           </form>

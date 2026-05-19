@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::bson_datetime;
+use crate::models::service_approval_config::{ApprovalMode, legacy_approval_mode_default};
 
 pub const COLLECTION_NAME: &str = "approval_requests";
 
@@ -35,11 +36,43 @@ pub struct ApprovalRequest {
     /// What operation is being performed (e.g. "proxy:GET /v1/chat/completions")
     pub operation_summary: String,
 
+    /// Rich human-readable description of what the API request does.
+    /// e.g., "POST /v1/chat/completions (model: gpt-4, max_tokens: 1000)"
+    /// Falls back to operation_summary if not generated.
+    #[serde(default)]
+    pub action_description: Option<String>,
+
+    /// Tool approval fields (set when created via POST /api/v1/approvals/requests).
+    /// All optional -- `None` for proxy-initiated approval requests.
+
+    /// Name of the agent tool requesting approval (e.g. "invoke_service")
+    #[serde(default)]
+    pub tool_name: Option<String>,
+
+    /// LLM-generated tool call ID for correlation
+    #[serde(default)]
+    pub tool_call_id: Option<String>,
+
+    /// Serialized JSON of tool arguments
+    #[serde(default)]
+    pub tool_arguments: Option<String>,
+
+    /// Whether the tool performs irreversible operations
+    #[serde(default)]
+    pub is_destructive: Option<bool>,
+
+    /// Approval semantics captured at request creation time.
+    /// Legacy requests created before this field existed default to grant mode
+    /// so their original behavior is preserved when decided later.
+    #[serde(default = "legacy_approval_mode_default")]
+    pub approval_mode: ApprovalMode,
+
     /// "pending" | "approved" | "rejected" | "expired"
     pub status: String,
 
-    /// SHA-256 of (user_id + service_id + requester_id + requester_type).
-    /// Prevents duplicate pending requests for the same context.
+    /// Pending request dedupe key.
+    /// Grant mode uses a stable hash for `(user, service, requester)`;
+    /// per-request mode uses a unique value per incoming API call.
     pub idempotency_key: String,
 
     /// Which notification channel delivered this request (e.g. "telegram")
@@ -67,8 +100,34 @@ pub struct ApprovalRequest {
     pub decision_channel: Option<String>,
 
     /// Idempotency key used for the final decision submission.
+    /// System-generated expiry sweeps may also stamp an internal marker here
+    /// to identify the rows they expired.
     #[serde(default)]
     pub decision_idempotency_key: Option<String>,
+
+    /// Users who were notified of this approval request and are authorized
+    /// to decide on it. For personal approvals this is `[user_id]`. For
+    /// org-policy approvals (where the org has set a `service_approval_config`
+    /// on a shared service) this is the list of admin user_ids of the
+    /// owning org at the time the request was created. The decide endpoint
+    /// allows any user in this list to approve/reject in addition to
+    /// `request.user_id` (for backward compat with pre-org rows where this
+    /// field is empty).
+    ///
+    /// Default `vec![]` so legacy rows deserialize cleanly; the decide
+    /// endpoint treats an empty list as "fall back to user_id only".
+    #[serde(default)]
+    pub notify_user_ids: Vec<String>,
+
+    /// Whether this request was created under an org's per-service approval
+    /// policy (rather than the actor's personal policy). When true, `user_id`
+    /// is the org_id, `notify_user_ids` holds the org's admin list, and any
+    /// resulting grant is reusable by every member of that org (see #364).
+    ///
+    /// Default `false` so legacy rows (created before the org cascade was
+    /// introduced) keep their original per-actor semantics on decision.
+    #[serde(default)]
+    pub from_org_policy: bool,
 
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
@@ -94,6 +153,14 @@ mod tests {
             requester_id: uuid::Uuid::new_v4().to_string(),
             requester_label: Some("CI Pipeline".to_string()),
             operation_summary: "proxy:POST /v1/chat/completions".to_string(),
+            action_description: Some(
+                "POST /v1/chat/completions (model: gpt-4, 3 messages)".to_string(),
+            ),
+            tool_name: None,
+            tool_call_id: None,
+            tool_arguments: None,
+            is_destructive: None,
+            approval_mode: ApprovalMode::PerRequest,
             status: "pending".to_string(),
             idempotency_key: "abc123".to_string(),
             notification_channel: Some("telegram".to_string()),
@@ -103,6 +170,8 @@ mod tests {
             decided_at: None,
             decision_channel: None,
             decision_idempotency_key: None,
+            notify_user_ids: vec![],
+            from_org_policy: false,
             created_at: Utc::now(),
         }
     }
@@ -130,6 +199,95 @@ mod tests {
     }
 
     #[test]
+    fn missing_action_description_defaults_to_none() {
+        let req = make_approval_request();
+        let mut doc = bson::to_document(&req).expect("serialize");
+        doc.remove("action_description");
+        let restored: ApprovalRequest = bson::from_document(doc).expect("deserialize");
+        assert!(restored.action_description.is_none());
+    }
+
+    #[test]
+    fn action_description_roundtrips() {
+        let req = make_approval_request();
+        let doc = bson::to_document(&req).expect("serialize");
+        let restored: ApprovalRequest = bson::from_document(doc).expect("deserialize");
+        assert_eq!(
+            restored.action_description.as_deref(),
+            Some("POST /v1/chat/completions (model: gpt-4, 3 messages)")
+        );
+    }
+
+    #[test]
+    fn missing_from_org_policy_defaults_to_false_for_legacy_rows() {
+        // Legacy approval_requests documents predate from_org_policy (added
+        // as part of the org grant reuse fix for ChronoAIProject/NyxID#364
+        // and ChronoAIProject/NyxID#370). They must still deserialize, and
+        // process_decision must treat them as personal requests so a grant
+        // created from one does not silently become org-reusable.
+        let req = make_approval_request();
+        let mut doc = bson::to_document(&req).expect("serialize");
+        doc.remove("from_org_policy");
+        let restored: ApprovalRequest = bson::from_document(doc).expect("deserialize");
+        assert!(!restored.from_org_policy);
+    }
+
+    #[test]
+    fn from_org_policy_roundtrips() {
+        let mut req = make_approval_request();
+        req.from_org_policy = true;
+        let doc = bson::to_document(&req).expect("serialize");
+        assert!(doc.get_bool("from_org_policy").unwrap());
+        let restored: ApprovalRequest = bson::from_document(doc).expect("deserialize");
+        assert!(restored.from_org_policy);
+    }
+
+    #[test]
+    fn missing_approval_mode_defaults_to_grant_for_legacy_requests() {
+        let req = make_approval_request();
+        let mut doc = bson::to_document(&req).expect("serialize");
+        doc.remove("approval_mode");
+        let restored: ApprovalRequest = bson::from_document(doc).expect("deserialize");
+        assert_eq!(restored.approval_mode, ApprovalMode::Grant);
+    }
+
+    #[test]
+    fn bson_roundtrip_with_tool_fields() {
+        let mut req = make_approval_request();
+        req.tool_name = Some("invoke_service".to_string());
+        req.tool_call_id = Some("call_abc123".to_string());
+        req.tool_arguments = Some(r#"{"service_id":"svc_1","endpoint_id":"ep_1"}"#.to_string());
+        req.is_destructive = Some(true);
+
+        let doc = bson::to_document(&req).expect("serialize");
+        assert_eq!(doc.get_str("tool_name").unwrap(), "invoke_service");
+        assert!(doc.get_bool("is_destructive").unwrap());
+
+        let restored: ApprovalRequest = bson::from_document(doc).expect("deserialize");
+        assert_eq!(restored.tool_name.as_deref(), Some("invoke_service"));
+        assert_eq!(restored.tool_call_id.as_deref(), Some("call_abc123"));
+        assert!(restored.tool_arguments.is_some());
+        assert_eq!(restored.is_destructive, Some(true));
+    }
+
+    #[test]
+    fn missing_tool_fields_default_to_none() {
+        let req = make_approval_request();
+        let mut doc = bson::to_document(&req).expect("serialize");
+        // Remove all tool fields (simulates old document without them)
+        doc.remove("tool_name");
+        doc.remove("tool_call_id");
+        doc.remove("tool_arguments");
+        doc.remove("is_destructive");
+
+        let restored: ApprovalRequest = bson::from_document(doc).expect("deserialize");
+        assert!(restored.tool_name.is_none());
+        assert!(restored.tool_call_id.is_none());
+        assert!(restored.tool_arguments.is_none());
+        assert!(restored.is_destructive.is_none());
+    }
+
+    #[test]
     fn bson_all_fields_serialized() {
         let req = make_approval_request();
         let doc = bson::to_document(&req).expect("serialize");
@@ -142,6 +300,7 @@ mod tests {
         assert!(keys.contains(&"requester_type"));
         assert!(keys.contains(&"requester_id"));
         assert!(keys.contains(&"operation_summary"));
+        assert!(keys.contains(&"approval_mode"));
         assert!(keys.contains(&"status"));
         assert!(keys.contains(&"idempotency_key"));
         assert!(keys.contains(&"expires_at"));

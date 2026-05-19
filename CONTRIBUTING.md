@@ -75,7 +75,7 @@ The hook runs `cargo fmt --check`, `cargo clippy`, and `eslint` on staged files.
 
 ```bash
 curl http://localhost:3001/health
-# {"status":"ok","version":"0.1.0"}
+# {"status":"ok","version":"0.2.0"}
 ```
 
 ---
@@ -178,6 +178,19 @@ Error variants map to HTTP status codes and numeric error codes (1000-3002, 7000
 - Organize by feature/domain, not by type
 - Extract reusable components into `components/shared/`
 
+### CLI Wizard Bundle
+
+The CLI embeds a React-based wizard UI (`cli/src/wizard/assets/index.html`) into its binary via `rust_embed`, so `cargo build -p nyxid-cli` does not need a Node toolchain. The bundle is a **committed prebuilt artifact** — if you edit any file the wizard pulls in (`frontend/src/components/cli-wizard/**`, any `components/ui/` primitive or `hooks/`, `lib/`, `schemas/`, `stores/`, `pages/cli-pair/` file the wizard imports, `frontend/wizard.html`, `frontend/vite.wizard.config.ts`, or `frontend/package-lock.json`), rebuild the bundle and commit the result in the same PR:
+
+```bash
+npm --prefix frontend run build:wizard
+git add cli/src/wizard/
+```
+
+`build:wizard` now copies the built bundle into `cli/src/wizard/assets/index.html`, writes the module-graph manifest to `cli/src/wizard/bundle-meta/index.manifest`, and a source-closure hash to `cli/src/wizard/bundle-meta/index.hash`. All three files must be committed.
+
+Freshness is enforced by the `wizard_bundle_is_fresh` integration test in `cli/tests/wizard_bundle_freshness.rs`, which runs as the dedicated **CLI Wizard Bundle Freshness** CI job and on `cargo test -p nyxid-cli --test wizard_bundle_freshness` locally. The test re-hashes the current source closure from the committed manifest and compares against the committed hash — no npm install or vite rebuild is needed. The hash covers every file Vite traversed at build time (so transitive imports like `components/ui/button.tsx` are caught automatically) plus `frontend/package-lock.json`, `frontend/vite.wizard.config.ts`, `frontend/wizard.html`, `frontend/vite-plugins/wizard-manifest.ts`, and `.node-version`.
+
 ---
 
 ## Security Requirements
@@ -209,7 +222,7 @@ cargo test
 cargo test --all-features
 
 # Node agent tests
-cargo test -p nyxid-node
+cargo test -p nyxid-cli
 
 # Frontend tests
 cd frontend && npm run test
@@ -271,22 +284,27 @@ Include:
 
 ### CI Checks
 
-Every pull request runs the following checks automatically via GitHub Actions:
+Every pull request runs the following checks automatically via GitHub Actions. Jobs are gated on path filters so a PR only runs the suites whose files actually changed -- e.g. an SDK-only PR skips backend, CLI, and frontend jobs. The single required status check is **CI Pipeline**, an aggregator that always runs and treats `success` and `skipped` as passing.
 
-| Job | What it does |
-|-----|--------------|
-| **Rust Format** | `cargo fmt --check` -- ensures consistent formatting |
-| **Rust Clippy** | `cargo clippy --workspace` -- catches common mistakes and enforces idioms |
-| **Rust Test** | `cargo test --workspace` with a real MongoDB service -- unit and integration tests |
-| **Rust Features** | Builds with `--features aws-kms`, `gcp-kms`, and both -- ensures KMS providers compile |
-| **Frontend** | `npm run lint`, `npm run test`, `npm run build` -- lint, test, and type-check |
-| **SDK Build** | `npm run build` across all SDK packages -- ensures TypeScript compiles |
+| Job | What it does | Triggers on |
+|-----|--------------|-------------|
+| **Rust Format** | `cargo fmt --all -- --check` -- ensures consistent formatting | any Rust change (backend, cli, mcp-demo, root Cargo files) |
+| **Rust Clippy** | `cargo clippy --workspace --all-targets -- -D warnings` -- catches common mistakes and enforces idioms | any Rust change |
+| **Backend Test** | `cargo nextest run -p nyxid` against a MongoDB 8.0 service container -- handler, service, and integration tests | `backend/**` or shared workspace files |
+| **CLI Test** | `cargo nextest run -p nyxid-cli` -- CLI + node-agent unit and integration tests | `cli/**` or shared workspace files |
+| **Rust Features** | Builds with `--features aws-kms`, `gcp-kms`, and both -- ensures KMS providers compile | `backend/**` or shared workspace files |
+| **Frontend** | `npm run lint`, `npm run test`, `npm run build` -- lint, test, and type-check | `frontend/**` or `.node-version` |
+| **CLI Wizard Bundle Freshness** | Re-hashes the wizard's source closure (from `cli/src/wizard/bundle-meta/index.manifest`) and fails if it no longer matches the committed hash. No npm install or vite rebuild in CI. See [CLI Wizard Bundle](#cli-wizard-bundle). | `frontend/**`, `cli/src/wizard/**`, or `.node-version` |
+| **SDK Build** | `npm run build` across all SDK packages -- ensures TypeScript compiles | `sdk/**` or `.node-version` |
+| **CI Pipeline** | Aggregator that depends on all of the above and reports a single pass/fail to branch protection. Treats `skipped` as success. | always |
+
+A change under `Cargo.toml` / `Cargo.lock` re-runs both `Backend Test` and `CLI Test` because they share the workspace lock file. A change under `.github/workflows/**` forces every job to run.
 
 All checks must pass before a PR can be merged. If a check fails, fix the issue locally and push -- the workflow re-runs automatically.
 
 ### Review Process
 
-- All PRs target the `dev` branch (not `main`)
+- PRs target the `main` branch by default
 - At least one approval is required before merge
 - All CI checks must pass (see above)
 - Security-sensitive changes require explicit security review

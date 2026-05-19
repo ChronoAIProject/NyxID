@@ -15,6 +15,11 @@ use crate::errors::{AppError, AppResult};
 use crate::services::llm_gateway_service::{
     LlmTranslator, SseEvent, StreamTranslationState, TranslatedRequest,
 };
+use crate::services::llm_usage_service::{
+    ReportedLlmUsageAccumulator, UsageAuditContext, extract_reported_usage,
+    extract_reported_usage_from_sse_event, log_reported_usage_async,
+};
+use crate::services::sse_parser;
 
 /// Returns `true` if the body is in Chat Completions format (has `messages`).
 /// Returns `false` if already in Responses API format (has `input`).
@@ -33,18 +38,37 @@ impl ChatgptTranslator {
     ) -> AppResult<TranslatedRequest> {
         let mut translated = serde_json::Map::new();
 
-        // Passthrough fields
+        // Passthrough scalar fields. `parallel_tool_calls` is a valid
+        // Responses API field and must be forwarded so callers can opt out
+        // of parallel tool invocation.
         for key in &[
             "model",
             "temperature",
             "top_p",
             "stream",
-            "tools",
-            "tool_choice",
+            "parallel_tool_calls",
         ] {
             if let Some(val) = body.get(*key) {
                 translated.insert(key.to_string(), val.clone());
             }
+        }
+
+        // Convert Chat Completions tools (nested `function` object) into
+        // Responses API tools (flat `name`/`description`/`parameters`/`strict`).
+        if let Some(tools) = body.get("tools") {
+            translated.insert(
+                "tools".to_string(),
+                convert_tools_to_responses_format(tools),
+            );
+        }
+
+        // Convert tool_choice object form (`{type, function: {name}}`) into
+        // Responses API form (`{type, name}`); string forms pass through.
+        if let Some(tool_choice) = body.get("tool_choice") {
+            translated.insert(
+                "tool_choice".to_string(),
+                convert_tool_choice_to_responses_format(tool_choice),
+            );
         }
 
         // Convert messages -> instructions + input
@@ -100,6 +124,22 @@ impl ChatgptTranslator {
 
         // Codex backend requires streaming
         enriched.insert("stream".to_string(), serde_json::Value::Bool(true));
+
+        // Defensively normalize `function_call` items in the input array.
+        // Some agent frameworks replay prior `function_call` items from a
+        // Responses API response but drop the `call_id` field, leaving only
+        // `id`. The Codex backend requires `call_id` as the correlation key
+        // between a `function_call` and its matching `function_call_output`.
+        // When `call_id` is missing but `id` is present, copy `id` into
+        // `call_id`. This is safe because the Responses API treats `call_id`
+        // as an opaque string and only requires the values match between the
+        // pair, and misbehaving clients that hit this path are already using
+        // the `id` value as the `call_id` on the paired `function_call_output`.
+        if let Some(input) = enriched.get_mut("input").and_then(|v| v.as_array_mut()) {
+            for item in input.iter_mut() {
+                normalize_function_call_input_item(item);
+            }
+        }
 
         Ok(TranslatedRequest {
             path: path.to_string(),
@@ -458,8 +498,218 @@ impl LlmTranslator for ChatgptTranslator {
 }
 
 // ---------------------------------------------------------------------------
+// Tool conversion helpers
+// ---------------------------------------------------------------------------
+
+/// Convert a Chat Completions `tools` array into Responses API format.
+///
+/// Chat Completions nests function metadata under a `function` object:
+/// ```json
+/// {"type": "function", "function": {"name": "x", "description": "...", "parameters": {...}, "strict": true}}
+/// ```
+///
+/// The Responses API flattens these fields to the top level:
+/// ```json
+/// {"type": "function", "name": "x", "description": "...", "parameters": {...}, "strict": true}
+/// ```
+///
+/// Non-function tool entries (web_search, file_search, etc.) and tools that
+/// are already in the flat Responses API shape pass through unchanged.
+fn convert_tools_to_responses_format(tools: &serde_json::Value) -> serde_json::Value {
+    let Some(arr) = tools.as_array() else {
+        return tools.clone();
+    };
+
+    let converted: Vec<serde_json::Value> = arr
+        .iter()
+        .map(|tool| {
+            let is_function = tool.get("type").and_then(|t| t.as_str()) == Some("function");
+            if !is_function {
+                return tool.clone();
+            }
+            // Only flatten when the Chat Completions nested shape is present.
+            let Some(func) = tool.get("function").and_then(|f| f.as_object()) else {
+                return tool.clone();
+            };
+
+            let mut flattened = func.clone();
+            flattened.insert(
+                "type".to_string(),
+                serde_json::Value::String("function".to_string()),
+            );
+            serde_json::Value::Object(flattened)
+        })
+        .collect();
+
+    serde_json::Value::Array(converted)
+}
+
+/// Convert a Chat Completions `tool_choice` value into Responses API format.
+///
+/// String forms (`"auto"`, `"none"`, `"required"`) and tool-type objects
+/// without a nested `function` key pass through. Chat Completions' explicit
+/// function selection object is flattened:
+/// `{"type": "function", "function": {"name": "x"}}` -> `{"type": "function", "name": "x"}`.
+fn convert_tool_choice_to_responses_format(tool_choice: &serde_json::Value) -> serde_json::Value {
+    let Some(obj) = tool_choice.as_object() else {
+        return tool_choice.clone();
+    };
+    let is_function = obj.get("type").and_then(|t| t.as_str()) == Some("function");
+    if !is_function {
+        return tool_choice.clone();
+    }
+    let Some(func) = obj.get("function").and_then(|f| f.as_object()) else {
+        return tool_choice.clone();
+    };
+
+    let mut flattened = func.clone();
+    flattened.insert(
+        "type".to_string(),
+        serde_json::Value::String("function".to_string()),
+    );
+    serde_json::Value::Object(flattened)
+}
+
+// ---------------------------------------------------------------------------
 // Message conversion helpers
 // ---------------------------------------------------------------------------
+
+/// Convert a Chat Completions content value (string or array of parts) into
+/// Responses API input content parts suitable for a user message.
+///
+/// Chat Completions uses `{"type": "text", "text": ...}` and
+/// `{"type": "image_url", "image_url": {"url": ..., "detail": ...}}`.
+/// Responses API uses `{"type": "input_text", "text": ...}` and
+/// `{"type": "input_image", "image_url": "...", "detail": "..."}`. String
+/// content is returned as-is since the Responses API accepts a bare string
+/// for simple text input.
+fn convert_user_content(content: Option<&serde_json::Value>) -> serde_json::Value {
+    match content {
+        None | Some(serde_json::Value::Null) => serde_json::Value::Null,
+        Some(serde_json::Value::String(_)) => content.unwrap().clone(),
+        Some(serde_json::Value::Array(parts)) => {
+            let converted: Vec<serde_json::Value> =
+                parts.iter().filter_map(convert_user_content_part).collect();
+            serde_json::Value::Array(converted)
+        }
+        Some(other) => other.clone(),
+    }
+}
+
+fn convert_user_content_part(part: &serde_json::Value) -> Option<serde_json::Value> {
+    let obj = part.as_object()?;
+    let part_type = obj.get("type").and_then(|t| t.as_str()).unwrap_or("");
+    match part_type {
+        "text" | "input_text" => {
+            let text = obj.get("text").cloned().unwrap_or(serde_json::Value::Null);
+            Some(serde_json::json!({"type": "input_text", "text": text}))
+        }
+        "image_url" | "input_image" => {
+            // Chat Completions nests the URL under `image_url.url` with an
+            // optional `detail`. Responses API expects a flat `image_url`
+            // string (or data URL) and an optional `detail` sibling.
+            let image_url_value = obj.get("image_url");
+            let (url, detail) = match image_url_value {
+                Some(serde_json::Value::String(s)) => (Some(s.clone()), None),
+                Some(serde_json::Value::Object(img)) => {
+                    let url = img.get("url").and_then(|u| u.as_str()).map(String::from);
+                    let detail = img.get("detail").and_then(|d| d.as_str()).map(String::from);
+                    (url, detail)
+                }
+                _ => (None, None),
+            };
+            let mut out = serde_json::Map::new();
+            out.insert(
+                "type".to_string(),
+                serde_json::Value::String("input_image".to_string()),
+            );
+            if let Some(url) = url {
+                out.insert("image_url".to_string(), serde_json::Value::String(url));
+            }
+            if let Some(detail) = obj.get("detail").and_then(|d| d.as_str()).map(String::from) {
+                out.insert("detail".to_string(), serde_json::Value::String(detail));
+            } else if let Some(detail) = detail {
+                out.insert("detail".to_string(), serde_json::Value::String(detail));
+            }
+            Some(serde_json::Value::Object(out))
+        }
+        "file" | "input_file" => {
+            // Pass file parts through as `input_file`. Chat Completions wraps
+            // file data under `file`, which we promote to the top level.
+            let mut out = serde_json::Map::new();
+            out.insert(
+                "type".to_string(),
+                serde_json::Value::String("input_file".to_string()),
+            );
+            if let Some(file_obj) = obj.get("file").and_then(|f| f.as_object()) {
+                for (k, v) in file_obj {
+                    out.insert(k.clone(), v.clone());
+                }
+            } else {
+                for (k, v) in obj {
+                    if k != "type" {
+                        out.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+            Some(serde_json::Value::Object(out))
+        }
+        _ => None,
+    }
+}
+
+/// Convert a Chat Completions assistant content value (string or array of
+/// parts) into Responses API output content parts.
+fn convert_assistant_content(content: Option<&serde_json::Value>) -> serde_json::Value {
+    match content {
+        None | Some(serde_json::Value::Null) => serde_json::Value::Null,
+        Some(serde_json::Value::String(_)) => content.unwrap().clone(),
+        Some(serde_json::Value::Array(parts)) => {
+            let converted: Vec<serde_json::Value> = parts
+                .iter()
+                .filter_map(|p| {
+                    let obj = p.as_object()?;
+                    let part_type = obj.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                    match part_type {
+                        "text" | "output_text" => {
+                            let text = obj.get("text").cloned().unwrap_or(serde_json::Value::Null);
+                            Some(serde_json::json!({"type": "output_text", "text": text}))
+                        }
+                        "refusal" => {
+                            let refusal = obj
+                                .get("refusal")
+                                .cloned()
+                                .unwrap_or(serde_json::Value::Null);
+                            Some(serde_json::json!({"type": "refusal", "refusal": refusal}))
+                        }
+                        _ => None,
+                    }
+                })
+                .collect();
+            serde_json::Value::Array(converted)
+        }
+        Some(other) => other.clone(),
+    }
+}
+
+/// Flatten content that may be a string or an array of Chat Completions text
+/// parts into a single string. Used for system/developer instructions and
+/// tool message output, where the Responses API expects a flat string.
+fn flatten_content_to_string(content: Option<&serde_json::Value>) -> String {
+    match content {
+        None | Some(serde_json::Value::Null) => String::new(),
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Array(parts)) => parts
+            .iter()
+            .filter_map(|p| {
+                let obj = p.as_object()?;
+                obj.get("text").and_then(|t| t.as_str()).map(String::from)
+            })
+            .collect::<Vec<_>>()
+            .join(""),
+        Some(other) => other.to_string(),
+    }
+}
 
 /// Convert Chat Completions `messages` array into Responses API `instructions`
 /// (from system messages) and `input` array (from user/assistant/tool messages).
@@ -473,32 +723,37 @@ fn convert_messages_to_input(
         let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
         match role {
             "system" | "developer" => {
-                if let Some(content) = msg.get("content").and_then(|c| c.as_str()) {
-                    instructions_parts.push(content.to_string());
+                let text = flatten_content_to_string(msg.get("content"));
+                if !text.is_empty() {
+                    instructions_parts.push(text);
                 }
             }
             "user" => {
-                // Support both string content and array content (multimodal)
                 input.push(serde_json::json!({
                     "role": "user",
-                    "content": msg.get("content").cloned()
-                        .unwrap_or(serde_json::Value::Null),
+                    "content": convert_user_content(msg.get("content")),
                 }));
             }
             "assistant" => {
                 if let Some(tool_calls) = msg.get("tool_calls").and_then(|tc| tc.as_array()) {
-                    // Emit text content as a message if present
-                    if let Some(content) = msg.get("content").and_then(|c| c.as_str())
-                        && !content.is_empty()
-                    {
+                    // Emit text content as a message if present. Chat Completions
+                    // allows `content: null` when tool_calls are the only output.
+                    let assistant_content = convert_assistant_content(msg.get("content"));
+                    if !content_is_empty(&assistant_content) {
                         input.push(serde_json::json!({
                             "role": "assistant",
-                            "content": content,
+                            "content": assistant_content,
                         }));
                     }
-                    // Each tool_call becomes a separate function_call input item
+                    // Each tool_call becomes a separate function_call input item.
+                    // Chat Completions' `tool_calls[].id` (e.g. `call_xxx`) maps
+                    // to the Responses API `call_id`, which is the correlation
+                    // key used by the matching `function_call_output`. The
+                    // Responses API's own `id` field (e.g. `fc_xxx`) is an
+                    // item identifier we don't have when converting from
+                    // Chat Completions, so we omit it.
                     for tc in tool_calls {
-                        let id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
+                        let call_id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
                         let name = tc
                             .pointer("/function/name")
                             .and_then(|v| v.as_str())
@@ -509,16 +764,16 @@ fn convert_messages_to_input(
                             .unwrap_or("{}");
                         input.push(serde_json::json!({
                             "type": "function_call",
-                            "id": id,
+                            "call_id": call_id,
                             "name": name,
                             "arguments": arguments,
+                            "status": "completed",
                         }));
                     }
                 } else {
                     input.push(serde_json::json!({
                         "role": "assistant",
-                        "content": msg.get("content").cloned()
-                            .unwrap_or(serde_json::Value::Null),
+                        "content": convert_assistant_content(msg.get("content")),
                     }));
                 }
             }
@@ -527,7 +782,7 @@ fn convert_messages_to_input(
                     .get("tool_call_id")
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
-                let output = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
+                let output = flatten_content_to_string(msg.get("content"));
                 input.push(serde_json::json!({
                     "type": "function_call_output",
                     "call_id": call_id,
@@ -545,6 +800,43 @@ fn convert_messages_to_input(
     };
 
     (instructions, input)
+}
+
+/// Defensively backfill `call_id` on a `function_call` input item when the
+/// caller supplied only `id`. The Responses API requires `call_id` as the
+/// correlation key, and some agent frameworks incorrectly drop it when they
+/// replay prior response items as input. Items that already have `call_id`,
+/// items of other types, and items without an `id` are left untouched.
+fn normalize_function_call_input_item(item: &mut serde_json::Value) {
+    let Some(obj) = item.as_object_mut() else {
+        return;
+    };
+    let is_function_call = obj.get("type").and_then(|t| t.as_str()) == Some("function_call");
+    if !is_function_call {
+        return;
+    }
+    let has_call_id = obj.get("call_id").map(|v| !v.is_null()).unwrap_or(false);
+    if has_call_id {
+        return;
+    }
+    let Some(id_value) = obj.get("id").cloned() else {
+        return;
+    };
+    if id_value.is_null() {
+        return;
+    }
+    obj.insert("call_id".to_string(), id_value);
+}
+
+/// Returns true if a converted content value is effectively empty and should
+/// not be emitted as a message item (null, empty string, or empty array).
+fn content_is_empty(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Null => true,
+        serde_json::Value::String(s) => s.is_empty(),
+        serde_json::Value::Array(parts) => parts.is_empty(),
+        _ => false,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -633,6 +925,7 @@ pub async fn send_to_chatgpt(
     is_streaming: bool,
     translate_response: bool,
     query: Option<&str>,
+    usage_context: Option<UsageAuditContext>,
 ) -> AppResult<axum::response::Response> {
     send_to_chatgpt_with_api_url(
         translated_body,
@@ -641,6 +934,7 @@ pub async fn send_to_chatgpt(
         translate_response,
         query,
         CHATGPT_RESPONSES_API_URL,
+        usage_context,
     )
     .await
 }
@@ -652,6 +946,7 @@ async fn send_to_chatgpt_with_api_url(
     translate_response: bool,
     query: Option<&str>,
     api_url: &str,
+    usage_context: Option<UsageAuditContext>,
 ) -> AppResult<axum::response::Response> {
     use axum::body::Body;
     use axum::http::StatusCode;
@@ -716,9 +1011,11 @@ async fn send_to_chatgpt_with_api_url(
 
     if is_streaming {
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(32);
+        let usage_context = usage_context.clone();
 
         tokio::spawn(async move {
             let mut received_any_event = false;
+            let mut usage_accumulator = ReportedLlmUsageAccumulator::default();
 
             if translate_response {
                 // Chat Completions mode: translate SSE events → OpenAI chunks
@@ -742,6 +1039,13 @@ async fn send_to_chatgpt_with_api_url(
                     while let Some(event) = extract_next_sse_event(&mut sse_buf) {
                         received_any_event = true;
 
+                        if let Some((usage, mode)) = extract_reported_usage_from_sse_event(
+                            event.event_type.as_deref(),
+                            &event.data,
+                        ) {
+                            usage_accumulator.observe(usage, mode);
+                        }
+
                         tracing::debug!(
                             event_type = %event.event_type.as_deref().unwrap_or(""),
                             "ChatGPT SSE recv: {}",
@@ -761,12 +1065,22 @@ async fn send_to_chatgpt_with_api_url(
                                 .is_err()
                             {
                                 tracing::debug!("ChatGPT SSE client disconnected");
+                                if let Some(context) = usage_context.clone()
+                                    && let Some(usage) = usage_accumulator.clone().finalize()
+                                {
+                                    log_reported_usage_async(context, usage);
+                                }
                                 return;
                             }
                         }
 
                         let etype = event.event_type.as_deref().unwrap_or("");
                         if etype == "response.completed" || etype == "response.incomplete" {
+                            if let Some(context) = usage_context.clone()
+                                && let Some(usage) = usage_accumulator.clone().finalize()
+                            {
+                                log_reported_usage_async(context, usage);
+                            }
                             return;
                         }
                     }
@@ -790,6 +1104,13 @@ async fn send_to_chatgpt_with_api_url(
                     while let Some(event) = extract_next_sse_event(&mut sse_buf) {
                         received_any_event = true;
 
+                        if let Some((usage, mode)) = extract_reported_usage_from_sse_event(
+                            event.event_type.as_deref(),
+                            &event.data,
+                        ) {
+                            usage_accumulator.observe(usage, mode);
+                        }
+
                         let event_type = event.event_type.as_deref().unwrap_or("");
                         tracing::debug!(
                             event_type = %event_type,
@@ -800,11 +1121,21 @@ async fn send_to_chatgpt_with_api_url(
                         let sse = format!("event: {event_type}\ndata: {}\n\n", event.data,);
                         if tx.send(Ok(bytes::Bytes::from(sse))).await.is_err() {
                             tracing::debug!("ChatGPT SSE client disconnected (passthrough)");
+                            if let Some(context) = usage_context.clone()
+                                && let Some(usage) = usage_accumulator.clone().finalize()
+                            {
+                                log_reported_usage_async(context, usage);
+                            }
                             return;
                         }
 
                         if event_type == "response.completed" || event_type == "response.incomplete"
                         {
+                            if let Some(context) = usage_context.clone()
+                                && let Some(usage) = usage_accumulator.clone().finalize()
+                            {
+                                log_reported_usage_async(context, usage);
+                            }
                             return;
                         }
                     }
@@ -844,6 +1175,12 @@ async fn send_to_chatgpt_with_api_url(
             }
 
             tracing::debug!("ChatGPT SSE stream ended");
+
+            if let Some(context) = usage_context
+                && let Some(usage) = usage_accumulator.finalize()
+            {
+                log_reported_usage_async(context, usage);
+            }
         });
 
         let body = Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx));
@@ -897,7 +1234,7 @@ async fn send_to_chatgpt_with_api_url(
             serde_json::json!({"error": "No response received from ChatGPT"})
         });
 
-        let body_bytes = if translate_response {
+        let output_json = if translate_response {
             let translator = ChatgptTranslator;
             let translated = translator.translate_response(resp_json)?;
             tracing::debug!(
@@ -907,15 +1244,23 @@ async fn send_to_chatgpt_with_api_url(
                     2000,
                 ),
             );
-            serde_json::to_vec(&translated)
+            translated
         } else {
             tracing::debug!(
                 "ChatGPT response (passthrough): {}",
                 truncate_for_log(&serde_json::to_string(&resp_json).unwrap_or_default(), 2000,),
             );
-            serde_json::to_vec(&resp_json)
+            resp_json
+        };
+
+        if let Some(context) = usage_context
+            && let Some(usage) = extract_reported_usage(&output_json)
+        {
+            log_reported_usage_async(context, usage);
         }
-        .map_err(|e| AppError::Internal(format!("Failed to serialize response: {e}")))?;
+
+        let body_bytes = serde_json::to_vec(&output_json)
+            .map_err(|e| AppError::Internal(format!("Failed to serialize response: {e}")))?;
 
         axum::http::Response::builder()
             .status(StatusCode::OK)
@@ -925,52 +1270,9 @@ async fn send_to_chatgpt_with_api_url(
     }
 }
 
-/// Extract the next complete SSE event from a buffer.
-///
-/// SSE events are delimited by double newlines (`\n\n`). Each event may have:
-/// - `event: <type>` line
-/// - `data: <payload>` line(s)
-///
-/// Returns `None` if no complete event is available yet.
+/// Convenience wrapper around the shared SSE parser.
 fn extract_next_sse_event(buf: &mut String) -> Option<SseEvent> {
-    let delimiter = "\n\n";
-    let pos = buf.find(delimiter)?;
-
-    let raw = buf[..pos].to_string();
-    *buf = buf[pos + delimiter.len()..].to_string();
-
-    let mut event_type = None;
-    let mut data_parts = Vec::new();
-
-    for line in raw.lines() {
-        if let Some(val) = line.strip_prefix("event: ") {
-            event_type = Some(val.to_string());
-        } else if let Some(val) = line.strip_prefix("data: ") {
-            data_parts.push(val.to_string());
-        } else if let Some(val) = line.strip_prefix("event:") {
-            event_type = Some(val.trim().to_string());
-        } else if let Some(val) = line.strip_prefix("data:") {
-            data_parts.push(val.trim().to_string());
-        }
-    }
-
-    if data_parts.is_empty() && event_type.is_none() {
-        return None;
-    }
-
-    let data = data_parts.join("\n");
-
-    // If no explicit event: header, try to extract type from the JSON data
-    if event_type.is_none()
-        && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&data)
-    {
-        event_type = parsed
-            .get("type")
-            .and_then(|t| t.as_str())
-            .map(String::from);
-    }
-
-    Some(SseEvent { event_type, data })
+    sse_parser::parse_next_event(buf)
 }
 
 /// Truncate a string for logging, appending "..." if cut.
@@ -1122,13 +1424,297 @@ mod tests {
         assert_eq!(input.len(), 3);
 
         assert_eq!(input[0]["role"], "user");
+        // The Responses API requires `call_id` (not `id`) on function_call
+        // input items, and `status: "completed"` indicates this call has
+        // already been processed by the caller.
         assert_eq!(input[1]["type"], "function_call");
-        assert_eq!(input[1]["id"], "call_1");
+        assert_eq!(input[1]["call_id"], "call_1");
         assert_eq!(input[1]["name"], "get_weather");
         assert_eq!(input[1]["arguments"], "{\"location\":\"NYC\"}");
+        assert_eq!(input[1]["status"], "completed");
+        assert!(
+            input[1].get("id").is_none(),
+            "Responses API `id` (fc_xxx) is not available when converting \
+             from Chat Completions; only `call_id` should be emitted"
+        );
         assert_eq!(input[2]["type"], "function_call_output");
         assert_eq!(input[2]["call_id"], "call_1");
         assert_eq!(input[2]["output"], "Sunny, 72F");
+    }
+
+    #[test]
+    fn chatgpt_translate_request_user_multimodal_content() {
+        let translator = ChatgptTranslator;
+        let body = serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "What's in this image?"},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "https://example.com/cat.png",
+                            "detail": "high"
+                        }
+                    }
+                ]
+            }]
+        });
+
+        let result = translator
+            .translate_request("chat/completions", &body)
+            .unwrap();
+
+        let input = result.body["input"].as_array().unwrap();
+        let content = input[0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+
+        // Chat Completions `text` -> Responses API `input_text`
+        assert_eq!(content[0]["type"], "input_text");
+        assert_eq!(content[0]["text"], "What's in this image?");
+
+        // Chat Completions `image_url.{url, detail}` -> flat `input_image`
+        assert_eq!(content[1]["type"], "input_image");
+        assert_eq!(content[1]["image_url"], "https://example.com/cat.png");
+        assert_eq!(content[1]["detail"], "high");
+    }
+
+    #[test]
+    fn chatgpt_translate_request_user_string_content_unchanged() {
+        let translator = ChatgptTranslator;
+        let body = serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "plain text"}]
+        });
+
+        let result = translator
+            .translate_request("chat/completions", &body)
+            .unwrap();
+
+        let input = result.body["input"].as_array().unwrap();
+        assert_eq!(input[0]["content"], "plain text");
+    }
+
+    #[test]
+    fn chatgpt_translate_request_assistant_multimodal_content() {
+        let translator = ChatgptTranslator;
+        let body = serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [{
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "Here is the answer."}
+                ]
+            }]
+        });
+
+        let result = translator
+            .translate_request("chat/completions", &body)
+            .unwrap();
+
+        let input = result.body["input"].as_array().unwrap();
+        let content = input[0]["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "output_text");
+        assert_eq!(content[0]["text"], "Here is the answer.");
+    }
+
+    #[test]
+    fn chatgpt_translate_request_system_content_as_array() {
+        let translator = ChatgptTranslator;
+        let body = serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": [
+                        {"type": "text", "text": "You are a helpful assistant."},
+                        {"type": "text", "text": " Be concise."}
+                    ]
+                },
+                {"role": "user", "content": "Hi"}
+            ]
+        });
+
+        let result = translator
+            .translate_request("chat/completions", &body)
+            .unwrap();
+
+        assert_eq!(
+            result.body["instructions"],
+            "You are a helpful assistant. Be concise."
+        );
+    }
+
+    #[test]
+    fn chatgpt_translate_request_tool_content_as_array() {
+        let translator = ChatgptTranslator;
+        let body = serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_x",
+                        "type": "function",
+                        "function": {"name": "fn", "arguments": "{}"}
+                    }]
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_x",
+                    "content": [
+                        {"type": "text", "text": "part one "},
+                        {"type": "text", "text": "part two"}
+                    ]
+                }
+            ]
+        });
+
+        let result = translator
+            .translate_request("chat/completions", &body)
+            .unwrap();
+
+        let input = result.body["input"].as_array().unwrap();
+        let output_item = input.iter().find(|i| i["type"] == "function_call_output");
+        assert_eq!(output_item.unwrap()["output"], "part one part two");
+    }
+
+    #[test]
+    fn chatgpt_translate_request_passes_through_parallel_tool_calls() {
+        let translator = ChatgptTranslator;
+        let body = serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "parallel_tool_calls": false
+        });
+
+        let result = translator
+            .translate_request("chat/completions", &body)
+            .unwrap();
+
+        assert_eq!(result.body["parallel_tool_calls"], false);
+    }
+
+    #[test]
+    fn chatgpt_enrich_backfills_missing_call_id_from_id() {
+        // Some agent frameworks replay a prior Responses API `function_call`
+        // item as input but drop the `call_id` field, leaving only `id`.
+        // The Codex backend 400s with `Missing required parameter:
+        // 'input[N].call_id'`. The enrich path should backfill `call_id`
+        // from `id` so the pair still validates.
+        let translator = ChatgptTranslator;
+        let body = serde_json::json!({
+            "model": "gpt-5",
+            "input": [
+                {"role": "user", "content": "what's my status?"},
+                {
+                    "type": "function_call",
+                    "id": "fc_abc123",
+                    "name": "nyxid_account",
+                    "arguments": "{}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "fc_abc123",
+                    "output": "{\"email\":\"x@y.z\"}"
+                }
+            ]
+        });
+
+        let result = translator.translate_request("responses", &body).unwrap();
+        let input = result.body["input"].as_array().unwrap();
+
+        // The well-formed user message is untouched.
+        assert_eq!(input[0]["role"], "user");
+
+        // The function_call item now has `call_id` matching its `id`, and
+        // the original `id` field is preserved.
+        assert_eq!(input[1]["type"], "function_call");
+        assert_eq!(input[1]["id"], "fc_abc123");
+        assert_eq!(input[1]["call_id"], "fc_abc123");
+
+        // The paired function_call_output is untouched.
+        assert_eq!(input[2]["type"], "function_call_output");
+        assert_eq!(input[2]["call_id"], "fc_abc123");
+    }
+
+    #[test]
+    fn chatgpt_enrich_leaves_well_formed_function_call_untouched() {
+        // A function_call item that already has a distinct `call_id`
+        // (different from `id`, as would come from a proper Responses API
+        // response) must not be overwritten.
+        let translator = ChatgptTranslator;
+        let body = serde_json::json!({
+            "model": "gpt-5",
+            "input": [
+                {
+                    "type": "function_call",
+                    "id": "fc_item_999",
+                    "call_id": "call_real_xyz",
+                    "name": "nyxid_account",
+                    "arguments": "{}"
+                }
+            ]
+        });
+
+        let result = translator.translate_request("responses", &body).unwrap();
+        let input = result.body["input"].as_array().unwrap();
+
+        assert_eq!(input[0]["id"], "fc_item_999");
+        assert_eq!(input[0]["call_id"], "call_real_xyz");
+    }
+
+    #[test]
+    fn chatgpt_enrich_ignores_non_function_call_items() {
+        // Only function_call items should be normalized. User/assistant
+        // messages and function_call_output items must pass through
+        // unchanged even if they happen to have an `id` field.
+        let translator = ChatgptTranslator;
+        let body = serde_json::json!({
+            "model": "gpt-5",
+            "input": [
+                {"role": "user", "content": "hi", "id": "msg_1"},
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": "ok"
+                }
+            ]
+        });
+
+        let result = translator.translate_request("responses", &body).unwrap();
+        let input = result.body["input"].as_array().unwrap();
+
+        // The user message retains only its role/content/id and did not
+        // gain a spurious call_id.
+        assert!(input[0].get("call_id").is_none());
+        // function_call_output had a call_id already and is untouched.
+        assert_eq!(input[1]["call_id"], "call_1");
+    }
+
+    #[test]
+    fn chatgpt_enrich_skips_function_call_without_id() {
+        // If a caller sends a function_call with neither `id` nor `call_id`,
+        // we can't invent one, so we leave the item alone and let the
+        // backend reject it with the same error as before.
+        let translator = ChatgptTranslator;
+        let body = serde_json::json!({
+            "model": "gpt-5",
+            "input": [
+                {
+                    "type": "function_call",
+                    "name": "nyxid_account",
+                    "arguments": "{}"
+                }
+            ]
+        });
+
+        let result = translator.translate_request("responses", &body).unwrap();
+        let input = result.body["input"].as_array().unwrap();
+        assert!(input[0].get("call_id").is_none());
+        assert!(input[0].get("id").is_none());
     }
 
     #[test]
@@ -1165,19 +1751,20 @@ mod tests {
     }
 
     #[test]
-    fn chatgpt_translate_request_passthrough_tools() {
+    fn chatgpt_translate_request_flattens_function_tools() {
         let translator = ChatgptTranslator;
-        let tools = serde_json::json!([{
-            "type": "function",
-            "function": {
-                "name": "get_weather",
-                "parameters": {"type": "object", "properties": {}}
-            }
-        }]);
         let body = serde_json::json!({
             "model": "gpt-4o",
             "messages": [{"role": "user", "content": "Hi"}],
-            "tools": tools,
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get current weather",
+                    "parameters": {"type": "object", "properties": {}},
+                    "strict": true
+                }
+            }],
             "tool_choice": "auto"
         });
 
@@ -1185,8 +1772,96 @@ mod tests {
             .translate_request("chat/completions", &body)
             .unwrap();
 
-        assert_eq!(result.body["tools"], tools);
+        // Responses API expects name/description/parameters/strict at the top
+        // level, not nested under a `function` key.
+        let expected_tools = serde_json::json!([{
+            "type": "function",
+            "name": "get_weather",
+            "description": "Get current weather",
+            "parameters": {"type": "object", "properties": {}},
+            "strict": true
+        }]);
+        assert_eq!(result.body["tools"], expected_tools);
         assert_eq!(result.body["tool_choice"], "auto");
+    }
+
+    #[test]
+    fn chatgpt_translate_request_flattens_tool_choice_object() {
+        let translator = ChatgptTranslator;
+        let body = serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "tool_choice": {
+                "type": "function",
+                "function": {"name": "get_weather"}
+            }
+        });
+
+        let result = translator
+            .translate_request("chat/completions", &body)
+            .unwrap();
+
+        assert_eq!(
+            result.body["tool_choice"],
+            serde_json::json!({"type": "function", "name": "get_weather"})
+        );
+    }
+
+    #[test]
+    fn chatgpt_translate_request_passes_through_non_function_tools() {
+        let translator = ChatgptTranslator;
+        // Non-function tool types (e.g. hosted tools) should pass through unchanged.
+        let body = serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "tools": [
+                {"type": "web_search"},
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "lookup",
+                        "parameters": {"type": "object"}
+                    }
+                }
+            ]
+        });
+
+        let result = translator
+            .translate_request("chat/completions", &body)
+            .unwrap();
+
+        let tools = result.body["tools"].as_array().unwrap();
+        assert_eq!(tools[0], serde_json::json!({"type": "web_search"}));
+        assert_eq!(
+            tools[1],
+            serde_json::json!({
+                "type": "function",
+                "name": "lookup",
+                "parameters": {"type": "object"}
+            })
+        );
+    }
+
+    #[test]
+    fn chatgpt_translate_request_passes_through_already_flat_tools() {
+        // If a caller already provides Responses API shaped tools, leave them alone.
+        let translator = ChatgptTranslator;
+        let tools = serde_json::json!([{
+            "type": "function",
+            "name": "get_weather",
+            "parameters": {"type": "object"}
+        }]);
+        let body = serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "tools": tools,
+        });
+
+        let result = translator
+            .translate_request("chat/completions", &body)
+            .unwrap();
+
+        assert_eq!(result.body["tools"], tools);
     }
 
     // --- Format detection tests ---
@@ -1765,9 +2440,10 @@ mod tests {
     #[test]
     fn extract_sse_event_empty_lines_skipped() {
         let mut buf = "\n\nevent: test\ndata: {}\n\n".to_string();
-        // First extraction gets empty block (no event/data lines)
-        let first = extract_next_sse_event(&mut buf);
-        // Empty block has no event_type and no data -- returns None
-        assert!(first.is_none() || first.unwrap().data.is_empty());
+        // Empty frame is skipped internally; first call returns the real event
+        let event = extract_next_sse_event(&mut buf).unwrap();
+        assert_eq!(event.event_type.as_deref(), Some("test"));
+        assert_eq!(event.data, "{}");
+        assert!(buf.is_empty());
     }
 }

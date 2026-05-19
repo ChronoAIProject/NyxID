@@ -123,22 +123,40 @@ pub async fn create_service_account(
     Ok((sa, raw_secret))
 }
 
-/// List all service accounts (paginated).
+/// List service accounts (paginated). When `owner_user_id` is `Some`,
+/// scopes the result to SAs owned by that user (used for org-scoped
+/// listing). Without an owner filter the function returns every SA in
+/// the system; the caller is responsible for the global-admin gate.
 pub async fn list_service_accounts(
     db: &Database,
     page: u64,
     per_page: u64,
     search: Option<&str>,
+    owner_user_id: Option<&str>,
 ) -> AppResult<(Vec<ServiceAccount>, u64)> {
     let offset = (page - 1) * per_page;
 
-    let filter = match search {
+    let mut filter = match search {
         Some(s) if !s.is_empty() => {
             let escaped = regex::escape(s);
             doc! { "name": { "$regex": &escaped, "$options": "i" } }
         }
         _ => doc! {},
     };
+
+    // Owner filter (used for org-scoped listing). Match either
+    // `owner_user_id` directly or `created_by` for pre-owner-field
+    // records that never got the field populated.
+    if let Some(owner) = owner_user_id {
+        filter.insert(
+            "$or",
+            vec![
+                doc! { "owner_user_id": owner },
+                doc! { "owner_user_id": { "$exists": false }, "created_by": owner },
+                doc! { "owner_user_id": bson::Bson::Null, "created_by": owner },
+            ],
+        );
+    }
 
     let total = db
         .collection::<ServiceAccount>(SERVICE_ACCOUNTS)

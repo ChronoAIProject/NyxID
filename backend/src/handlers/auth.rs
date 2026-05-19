@@ -2,11 +2,12 @@ use std::net::SocketAddr;
 
 use axum::{
     Json,
+    body::Bytes,
     extract::{ConnectInfo, State},
     http::{HeaderMap, header},
 };
 use serde::{Deserialize, Serialize};
-use validator::Validate;
+use validator::{Validate, ValidationError};
 
 use mongodb::bson::doc;
 
@@ -14,7 +15,10 @@ use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::{ACCESS_TOKEN_COOKIE_NAME, AuthUser, SESSION_COOKIE_NAME};
-use crate::services::{audit_service, auth_service, token_service};
+use crate::services::{
+    audit_service, auth_service, invite_code_service, role_service, token_service,
+};
+use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event, hash_short_id};
 
 // --- Request / Response types ---
 
@@ -28,6 +32,11 @@ pub struct RegisterRequest {
         message = "Password must be between 8 and 128 characters"
     ))]
     pub password: String,
+    /// Invite code. Required when `AppConfig::invite_code_required` is true
+    /// (the default). When the gate is disabled for public launch the
+    /// handler accepts a missing or empty invite code.
+    #[serde(default)]
+    pub invite_code: Option<String>,
     pub display_name: Option<String>,
 }
 
@@ -118,6 +127,71 @@ pub(crate) fn extract_user_agent(headers: &HeaderMap) -> Option<String> {
         .get(header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
         .map(String::from)
+}
+
+/// Lowercase domain portion of an email (everything after the last `@`).
+/// Returns `None` when the email is empty or has no `@`. Public so the
+/// signup telemetry path can populate `user.signed_up.email_domain`
+/// without leaking the full address through the egress scrubber.
+pub(crate) fn extract_email_domain(email: &str) -> Option<String> {
+    email
+        .rsplit_once('@')
+        .map(|(_, domain)| domain.trim().to_lowercase())
+        .filter(|d| !d.is_empty())
+}
+
+/// Bare host portion of the HTTP `Referer` header. Strips scheme, path,
+/// query, and any port suffix so that referer URLs with PII in path or
+/// query never reach telemetry. Returns `None` when the header is
+/// missing, malformed, or carries no host.
+pub(crate) fn extract_referrer_domain(headers: &HeaderMap) -> Option<String> {
+    let raw = headers.get(header::REFERER).and_then(|v| v.to_str().ok())?;
+    // Tolerate scheme-relative (`//host/...`) and bare-host references.
+    let after_scheme = raw
+        .find("://")
+        .map(|i| &raw[i + 3..])
+        .unwrap_or(raw.strip_prefix("//").unwrap_or(raw));
+    let host = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .split('@')
+        .next_back()
+        .unwrap_or("");
+    let host = host.split(':').next().unwrap_or("").trim().to_lowercase();
+    if host.is_empty() { None } else { Some(host) }
+}
+
+fn resolve_cli_session_user_agent(
+    client_ua: Option<String>,
+    headers: &HeaderMap,
+) -> Option<String> {
+    client_ua
+        .map(|ua| ua.trim().to_string())
+        .filter(|ua| !ua.is_empty())
+        .or_else(|| extract_user_agent(headers))
+}
+
+fn validate_cli_user_agent(client_ua: &str) -> Result<(), ValidationError> {
+    if client_ua.chars().any(|ch| ch.is_ascii_control()) {
+        return Err(ValidationError::new("cli_user_agent_control_chars"));
+    }
+
+    Ok(())
+}
+
+fn parse_cli_token_request_body(body: Bytes) -> AppResult<Option<CliTokenRequest>> {
+    if body.is_empty() {
+        return Ok(None);
+    }
+
+    let request: CliTokenRequest = serde_json::from_slice(&body)
+        .map_err(|_| AppError::BadRequest("Invalid CLI token request body".to_string()))?;
+    request
+        .validate()
+        .map_err(|e| AppError::ValidationError(e.to_string()))?;
+
+    Ok(Some(request))
 }
 
 /// Build a Set-Cookie header value for an HttpOnly cookie with explicit SameSite policy.
@@ -274,16 +348,70 @@ pub async fn register(
     headers: HeaderMap,
     Json(body): Json<RegisterRequest>,
 ) -> AppResult<Json<RegisterResponse>> {
+    if !state.config.email_auth_enabled {
+        return Err(AppError::EmailSignupDisabled);
+    }
+
     body.validate()
         .map_err(|e| AppError::ValidationError(e.to_string()))?;
 
-    let result = auth_service::register_user(
+    // When the invite-code gate is enabled, an invite code is mandatory and
+    // we reserve one slot up front. When it is disabled (public launch),
+    // any invite code the client sent is ignored and registration proceeds
+    // without reserving anything.
+    let invite_code_id = if state.config.invite_code_required {
+        let raw_code = body
+            .invite_code
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| AppError::ValidationError("Invite code is required".to_string()))?;
+        Some(invite_code_service::reserve_invite_code(&state.db, raw_code).await?)
+    } else {
+        None
+    };
+
+    let register_result = auth_service::register_user(
         &state.db,
         &body.email,
         &body.password,
         body.display_name.as_deref(),
+        invite_code_id.as_deref(),
+        state.config.auto_verify_email,
     )
-    .await?;
+    .await;
+
+    let result = match register_result {
+        Ok(r) if r.actually_created => {
+            if let Some(ref code_id) = invite_code_id {
+                invite_code_service::record_usage(&state.db, code_id, &r.user_id).await;
+            }
+            r
+        }
+        // The two arms below silently no-op the invite-code accounting:
+        // `Ok(_)` is the email-enumeration-protection fake-success branch
+        // (no real user was created); `Err(_)` is a downstream failure.
+        // In both cases we release the reservation and do NOT emit
+        // `invite.code_redeemed` — only an actually-redeemed code counts.
+        Ok(r) => {
+            // Email already existed: the service returned a fake-success to
+            // prevent enumeration. The invite code slot (if any) was never
+            // actually used, so release it before returning the fake
+            // result to the caller.
+            if let Some(ref code_id) = invite_code_id {
+                invite_code_service::release_reservation(&state.db, code_id).await;
+            }
+            r
+        }
+        Err(e) => {
+            // Registration failed for another reason (hash, DB write, etc).
+            // Release any reservation before surfacing the error.
+            if let Some(ref code_id) = invite_code_id {
+                invite_code_service::release_reservation(&state.db, code_id).await;
+            }
+            return Err(e);
+        }
+    };
 
     audit_service::log_async(
         state.db.clone(),
@@ -292,6 +420,8 @@ pub async fn register(
         Some(serde_json::json!({ "email": body.email })),
         extract_ip(&headers, Some(peer)),
         extract_user_agent(&headers),
+        None,
+        None,
     );
 
     #[cfg(debug_assertions)]
@@ -300,9 +430,76 @@ pub async fn register(
         "Email verification token (dev only)"
     );
 
+    let message = if state.config.auto_verify_email {
+        "Registration processed. You can now sign in.".to_string()
+    } else {
+        "Check your email for a verification link to complete registration.".to_string()
+    };
+
+    // Telemetry: user.signed_up. Pre-auth path, so surface comes from
+    // the `X-NyxID-Client` header rather than from `AuthUser`.
+    let tele = TelemetryContext::from_headers(
+        headers.get("x-nyxid-client").and_then(|v| v.to_str().ok()),
+        headers
+            .get("x-nyxid-client-version")
+            .and_then(|v| v.to_str().ok()),
+    );
+
+    // Skip telemetry on the fake-success enumeration-protection branch:
+    // `result.actually_created` is false there and no real user exists.
+    // Emitting would inflate signup counts with phantom users.
+    if result.actually_created {
+        let invite_code_id_hash = invite_code_id.as_deref().map(hash_short_id);
+        let source = if invite_code_id.is_some() {
+            "invite_code".to_string()
+        } else {
+            // Reached only when `INVITE_CODE_REQUIRED=false`. Once the
+            // public-launch flag is flipped, all email signups have a
+            // code and `invite_code` is the only `source` we emit.
+            "direct".to_string()
+        };
+        emit_event(
+            state.telemetry.as_deref(),
+            &result.user_id,
+            None,
+            &tele,
+            TelemetryEvent::UserSignedUp {
+                method: "email".to_string(),
+                source,
+                email_domain: extract_email_domain(&body.email),
+                invite_code_id: invite_code_id_hash,
+                referrer_domain: extract_referrer_domain(&headers),
+                via_org: None,
+                invite_code_used: invite_code_id.is_some(),
+            },
+        );
+
+        // Emit `invite.code_redeemed` after the user is actually created so
+        // the funnel (`invite.code_generated` → `invite.code_redeemed`)
+        // counts only successful conversions. Metadata is best-effort:
+        // a missing fetch result drops the event rather than fabricating
+        // placeholder ids.
+        if let Some(ref code_id) = invite_code_id
+            && let Some(meta) = invite_code_service::fetch_telemetry_meta(&state.db, code_id).await
+        {
+            let days = (chrono::Utc::now() - meta.created_at).num_days().max(0) as u64;
+            emit_event(
+                state.telemetry.as_deref(),
+                &result.user_id,
+                None,
+                &tele,
+                TelemetryEvent::InviteCodeRedeemed {
+                    code_id: hash_short_id(code_id),
+                    created_by_user_id: hash_short_id(&meta.created_by),
+                    days_to_redemption: days,
+                },
+            );
+        }
+    }
+
     Ok(Json(RegisterResponse {
         user_id: result.user_id,
-        message: "Registration successful. Please verify your email.".to_string(),
+        message,
     }))
 }
 
@@ -326,8 +523,28 @@ pub async fn login(
     if user.mfa_enabled {
         match &body.mfa_code {
             Some(code) => {
+                // Build the telemetry context eagerly so both failure
+                // branches (length abuse + wrong code) can emit the same
+                // `mfa.challenge_failed` event before returning the error.
+                let tele_mfa = TelemetryContext::from_headers(
+                    headers.get("x-nyxid-client").and_then(|v| v.to_str().ok()),
+                    headers
+                        .get("x-nyxid-client-version")
+                        .and_then(|v| v.to_str().ok()),
+                );
+
                 // Validate MFA code length to prevent abuse
                 if code.len() > 10 {
+                    emit_event(
+                        state.telemetry.as_deref(),
+                        &user.id.to_string(),
+                        None,
+                        &tele_mfa,
+                        TelemetryEvent::MfaChallengeFailed {
+                            factor_type: "totp".to_string(),
+                            reason: "wrong_code".to_string(),
+                        },
+                    );
                     return Err(AppError::AuthenticationFailed(
                         "Invalid MFA code".to_string(),
                     ));
@@ -342,10 +559,34 @@ pub async fn login(
                 .await?;
 
                 if !valid {
+                    emit_event(
+                        state.telemetry.as_deref(),
+                        &user.id.to_string(),
+                        None,
+                        &tele_mfa,
+                        TelemetryEvent::MfaChallengeFailed {
+                            factor_type: "totp".to_string(),
+                            reason: "wrong_code".to_string(),
+                        },
+                    );
                     return Err(AppError::AuthenticationFailed(
                         "Invalid MFA code".to_string(),
                     ));
                 }
+
+                // Inline-MFA success: pair with the failure emit above so
+                // the MFA funnel sees both outcomes from the
+                // single-request `/auth/login` path. The standalone
+                // `/auth/mfa/verify` path emits its own success event.
+                emit_event(
+                    state.telemetry.as_deref(),
+                    &user.id.to_string(),
+                    None,
+                    &tele_mfa,
+                    TelemetryEvent::MfaChallengeSucceeded {
+                        factor_type: "totp".to_string(),
+                    },
+                );
             }
             None => {
                 // Store a temporary MFA session bound to the user.
@@ -367,6 +608,18 @@ pub async fn login(
 
     let ip = extract_ip(&headers, Some(peer));
     let ua = extract_user_agent(&headers);
+
+    // Telemetry context is derived here from the X-NyxID-Client headers
+    // so both match arms can emit `auth.logged_in` AFTER their
+    // state-changing session/token creation succeeds. Emitting
+    // before-the-match risked reporting "logged in" on a request that
+    // later failed inside `create_session*`.
+    let tele_login = TelemetryContext::from_headers(
+        headers.get("x-nyxid-client").and_then(|v| v.to_str().ok()),
+        headers
+            .get("x-nyxid-client-version")
+            .and_then(|v| v.to_str().ok()),
+    );
     let client_mode = resolve_auth_client_mode(&headers, body.client.as_deref());
     let secure = state.config.use_secure_cookies();
     let domain = state.config.cookie_domain();
@@ -385,6 +638,8 @@ pub async fn login(
                 Some(serde_json::json!({ "session_id": session.session_id })),
                 ip,
                 ua,
+                None,
+                None,
             );
 
             apply_browser_session_cookies(
@@ -393,6 +648,17 @@ pub async fn login(
                 secure,
                 domain,
             )?;
+
+            emit_event(
+                state.telemetry.as_deref(),
+                &user.id.to_string(),
+                None,
+                &tele_login,
+                TelemetryEvent::AuthLoggedIn {
+                    method: "password".to_string(),
+                    mfa_required: body.mfa_code.is_some(),
+                },
+            );
 
             Ok((
                 response_headers,
@@ -422,6 +688,19 @@ pub async fn login(
                 Some(serde_json::json!({ "session_id": tokens.session_id })),
                 ip,
                 ua,
+                None,
+                None,
+            );
+
+            emit_event(
+                state.telemetry.as_deref(),
+                &user.id.to_string(),
+                None,
+                &tele_login,
+                TelemetryEvent::AuthLoggedIn {
+                    method: "password".to_string(),
+                    mfa_required: body.mfa_code.is_some(),
+                },
             );
 
             Ok((
@@ -442,9 +721,10 @@ pub async fn login(
 /// Revoke the current session and clear all auth cookies.
 pub async fn logout(
     State(state): State<AppState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    ConnectInfo(_peer): ConnectInfo<SocketAddr>,
     auth_user: AuthUser,
-    headers: HeaderMap,
+    tele: TelemetryContext,
+    _headers: HeaderMap,
 ) -> AppResult<(HeaderMap, Json<LogoutResponse>)> {
     if let Some(session_id) = auth_user.session_id {
         token_service::revoke_session(
@@ -455,14 +735,15 @@ pub async fn logout(
         .await?;
     }
 
-    audit_service::log_async(
-        state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "logout".to_string(),
-        None,
-        extract_ip(&headers, Some(peer)),
-        extract_user_agent(&headers),
+    emit_event(
+        state.telemetry.as_deref(),
+        &auth_user.user_id.to_string(),
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::AuthLoggedOut,
     );
+
+    audit_service::log_for_user(state.db.clone(), &auth_user, "logout", None);
 
     let secure = state.config.use_secure_cookies();
     let domain = state.config.cookie_domain();
@@ -513,6 +794,7 @@ pub struct RefreshRequest {
 /// Browser sessions do not use this endpoint.
 pub async fn refresh(
     State(state): State<AppState>,
+    headers: HeaderMap,
     body: Option<Json<RefreshRequest>>,
 ) -> AppResult<(HeaderMap, Json<RefreshResponse>)> {
     let refresh_token = body
@@ -528,6 +810,26 @@ pub async fn refresh(
         Some(&state.mcp_sessions),
     )
     .await?;
+
+    // Telemetry: auth.token_refreshed. Pre-auth path (no AuthUser),
+    // so we decode the newly-issued access token to get the user id.
+    if let Ok(claims) =
+        crate::crypto::jwt::verify_token(&state.jwt_keys, &state.config, &tokens.access_token)
+    {
+        let tele = TelemetryContext::from_headers(
+            headers.get("x-nyxid-client").and_then(|v| v.to_str().ok()),
+            headers
+                .get("x-nyxid-client-version")
+                .and_then(|v| v.to_str().ok()),
+        );
+        emit_event(
+            state.telemetry.as_deref(),
+            &claims.sub,
+            None,
+            &tele,
+            TelemetryEvent::AuthTokenRefreshed,
+        );
+    }
 
     Ok((
         HeaderMap::new(),
@@ -556,9 +858,26 @@ pub struct VerifyEmailResponse {
 /// Verify a user's email address using the token sent during registration.
 pub async fn verify_email(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<VerifyEmailRequest>,
 ) -> AppResult<Json<VerifyEmailResponse>> {
-    auth_service::verify_email(&state.db, &body.token).await?;
+    let user_id = auth_service::verify_email(&state.db, &body.token).await?;
+
+    // Telemetry: user.email_verified. Pre-auth path (token-gated), so
+    // surface comes from the `X-NyxID-Client` header.
+    let tele = TelemetryContext::from_headers(
+        headers.get("x-nyxid-client").and_then(|v| v.to_str().ok()),
+        headers
+            .get("x-nyxid-client-version")
+            .and_then(|v| v.to_str().ok()),
+    );
+    emit_event(
+        state.telemetry.as_deref(),
+        &user_id,
+        None,
+        &tele,
+        TelemetryEvent::UserEmailVerified,
+    );
 
     Ok(Json(VerifyEmailResponse {
         message: "Email verified successfully".to_string(),
@@ -599,6 +918,14 @@ pub async fn forgot_password(
         tracing::debug!(token = %token, "Password reset token generated (dev only)");
     }
 
+    // TODO(telemetry): blocked — see TELEMETRY.md §6.5 (auth.password_reset_requested).
+    // `initiate_password_reset` returns `Option<String>` (the bare reset token)
+    // and intentionally does not reveal whether the email matched a user,
+    // so we have no `user_id` to use as distinct_id without a service
+    // refactor. Emitting here would require changing the service to return
+    // the user_id alongside the token, which is explicitly out of scope for
+    // this sweep per the Part-2 hard scope rule.
+
     Ok(Json(ForgotPasswordResponse {
         message: "If that email exists, a password reset link has been sent.".to_string(),
     }))
@@ -633,6 +960,12 @@ pub async fn reset_password(
         .map_err(|e| AppError::ValidationError(e.to_string()))?;
 
     auth_service::reset_password(&state.db, &body.token, &body.new_password).await?;
+
+    // TODO(telemetry): blocked — see TELEMETRY.md §6.5 (auth.password_reset_completed).
+    // `auth_service::reset_password` returns `AppResult<()>` and the handler
+    // has no `AuthUser` (pre-auth path), so we have no `user_id` to use as
+    // distinct_id. Emitting here would require changing the service to
+    // return the user_id, which is explicitly out of scope for this sweep.
 
     Ok(Json(ResetPasswordResponse {
         message: "Password has been reset successfully".to_string(),
@@ -693,22 +1026,24 @@ pub async fn setup(
         &body.email,
         &body.password,
         body.display_name.as_deref(),
+        None,
+        true, // Admin setup always auto-verifies
     )
     .await?;
 
-    // Promote to admin and mark email as verified
-    let now = chrono::Utc::now();
+    // Promote to admin and mark email as verified. The RBAC membership is
+    // authoritative; the legacy flag is mirrored during the migration window.
+    let platform_role_ids = role_service::get_platform_role_ids(&state.db).await?;
+    let mut pipeline = role_service::set_platform_role_update(
+        crate::models::user::PlatformRole::Admin,
+        &platform_role_ids,
+        mongodb::bson::DateTime::from_chrono(chrono::Utc::now()),
+    );
+    pipeline.push(doc! { "$set": { "email_verified": true } });
     state
         .db
         .collection::<User>(USERS)
-        .update_one(
-            doc! { "_id": &result.user_id },
-            doc! { "$set": {
-                "is_admin": true,
-                "email_verified": true,
-                "updated_at": mongodb::bson::DateTime::from_chrono(now),
-            }},
-        )
+        .update_one(doc! { "_id": &result.user_id }, pipeline)
         .await?;
 
     audit_service::log_async(
@@ -721,6 +1056,8 @@ pub async fn setup(
         })),
         extract_ip(&headers, Some(peer)),
         extract_user_agent(&headers),
+        None,
+        None,
     );
 
     tracing::info!(user_id = %result.user_id, email = %body.email, "Initial admin created via bootstrap");
@@ -731,9 +1068,95 @@ pub async fn setup(
     }))
 }
 
+/// POST /api/v1/auth/cli-token
+///
+/// Issue an access token and refresh token for the CLI. Requires cookie-based
+/// session auth (used by the `/cli-auth` frontend page after browser login).
+///
+/// The `client_ua` field in the request body carries the CLI's own User-Agent
+/// string through the browser round-trip so the session is recorded as a CLI
+/// session rather than a browser session.
+pub async fn cli_token(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    auth_user: AuthUser,
+    headers: HeaderMap,
+    body: Bytes,
+) -> AppResult<Json<CliTokenResponse>> {
+    let client_ua = parse_cli_token_request_body(body)?.and_then(|body| body.client_ua);
+
+    let user_id_str = auth_user.user_id.to_string();
+    let user_agent = resolve_cli_session_user_agent(client_ua, &headers);
+
+    let tokens = token_service::create_session_and_issue_tokens(
+        &state.db,
+        &state.config,
+        &state.jwt_keys,
+        &user_id_str,
+        extract_ip(&headers, Some(peer)).as_deref(),
+        user_agent.as_deref(),
+    )
+    .await?;
+
+    Ok(Json(CliTokenResponse {
+        access_token: tokens.access_token,
+        refresh_token: tokens.refresh_token,
+    }))
+}
+
+#[derive(Debug, Deserialize, Validate)]
+pub struct CliTokenRequest {
+    /// The CLI's User-Agent string, passed through the browser round-trip.
+    #[validate(length(max = 512, message = "CLI user-agent too long"))]
+    #[validate(custom(function = "validate_cli_user_agent"))]
+    pub client_ua: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CliTokenResponse {
+    pub access_token: String,
+    pub refresh_token: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Bytes;
+
+    #[test]
+    fn email_domain_extracts_lowercased_host_portion() {
+        assert_eq!(
+            extract_email_domain("Alice@Example.COM"),
+            Some("example.com".into())
+        );
+        assert_eq!(extract_email_domain(""), None);
+        assert_eq!(extract_email_domain("no-at-sign"), None);
+        // Empty domain portion (`alice@`) must not produce an empty
+        // string in telemetry — egress would still send `""` as a value.
+        assert_eq!(extract_email_domain("alice@"), None);
+    }
+
+    #[test]
+    fn referrer_domain_strips_scheme_path_and_port() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::REFERER,
+            "https://example.com:443/path?leak=secret".parse().unwrap(),
+        );
+        assert_eq!(
+            extract_referrer_domain(&headers),
+            Some("example.com".into())
+        );
+
+        // Bare hostname (rare but allowed by RFC).
+        let mut h2 = HeaderMap::new();
+        h2.insert(header::REFERER, "twitter.com".parse().unwrap());
+        assert_eq!(extract_referrer_domain(&h2), Some("twitter.com".into()));
+
+        // Missing header → None (signup did not arrive from web).
+        let empty = HeaderMap::new();
+        assert_eq!(extract_referrer_domain(&empty), None);
+    }
 
     #[test]
     fn explicit_mobile_client_uses_token_mode() {
@@ -773,5 +1196,73 @@ mod tests {
             resolve_auth_client_mode(&headers, Some("token")),
             AuthClientMode::TokenClient
         );
+    }
+
+    #[test]
+    fn cli_session_prefers_client_user_agent_over_browser_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::USER_AGENT, "Mozilla/5.0".parse().unwrap());
+
+        assert_eq!(
+            resolve_cli_session_user_agent(Some("nyxid-cli/0.1.0".to_string()), &headers),
+            Some("nyxid-cli/0.1.0".to_string())
+        );
+    }
+
+    #[test]
+    fn cli_session_falls_back_to_browser_header_when_client_user_agent_is_blank() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::USER_AGENT, "Mozilla/5.0".parse().unwrap());
+
+        assert_eq!(
+            resolve_cli_session_user_agent(Some("   ".to_string()), &headers),
+            Some("Mozilla/5.0".to_string())
+        );
+    }
+
+    #[test]
+    fn cli_session_falls_back_to_browser_header_when_client_user_agent_is_missing() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::USER_AGENT, "Mozilla/5.0".parse().unwrap());
+
+        assert_eq!(
+            resolve_cli_session_user_agent(None, &headers),
+            Some("Mozilla/5.0".to_string())
+        );
+    }
+
+    #[test]
+    fn cli_token_request_rejects_overlong_client_user_agent() {
+        let body = CliTokenRequest {
+            client_ua: Some("x".repeat(513)),
+        };
+
+        assert!(body.validate().is_err());
+    }
+
+    #[test]
+    fn cli_token_request_rejects_control_characters() {
+        let body = CliTokenRequest {
+            client_ua: Some("nyxid-cli/0.1.0\nspoof".to_string()),
+        };
+
+        assert!(body.validate().is_err());
+    }
+
+    #[test]
+    fn parse_cli_token_request_body_accepts_empty_body() {
+        assert!(
+            parse_cli_token_request_body(Bytes::new())
+                .expect("empty body should be accepted")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn parse_cli_token_request_body_rejects_invalid_json() {
+        let error = parse_cli_token_request_body(Bytes::from_static(b"{"))
+            .expect_err("invalid JSON should be rejected");
+
+        assert!(matches!(error, AppError::BadRequest(_)));
     }
 }

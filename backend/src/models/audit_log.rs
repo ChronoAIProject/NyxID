@@ -14,6 +14,12 @@ pub struct AuditLog {
     pub event_data: Option<serde_json::Value>,
     pub ip_address: Option<String>,
     pub user_agent: Option<String>,
+    /// API key ID that made this request (None for non-API-key auth)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_id: Option<String>,
+    /// Human-readable API key name
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_name: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
 }
@@ -36,12 +42,15 @@ mod tests {
             event_data: Some(serde_json::json!({"ip": "127.0.0.1"})),
             ip_address: Some("127.0.0.1".to_string()),
             user_agent: Some("Mozilla/5.0".to_string()),
+            api_key_id: None,
+            api_key_name: None,
             created_at: Utc::now(),
         };
         let doc = bson::to_document(&log).expect("serialize");
         let restored: AuditLog = bson::from_document(doc).expect("deserialize");
         assert_eq!(log.id, restored.id);
         assert_eq!(log.event_type, restored.event_type);
+        assert!(restored.api_key_id.is_none());
     }
 
     #[test]
@@ -53,11 +62,56 @@ mod tests {
             event_data: None,
             ip_address: None,
             user_agent: None,
+            api_key_id: None,
+            api_key_name: None,
             created_at: Utc::now(),
         };
         let doc = bson::to_document(&log).expect("serialize");
         let restored: AuditLog = bson::from_document(doc).expect("deserialize");
         assert!(restored.user_id.is_none());
         assert!(restored.event_data.is_none());
+        assert!(restored.api_key_id.is_none());
+        assert!(restored.api_key_name.is_none());
+    }
+
+    #[test]
+    fn bson_roundtrip_with_api_key() {
+        let log = AuditLog {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: Some(uuid::Uuid::new_v4().to_string()),
+            event_type: "proxy_request".to_string(),
+            event_data: None,
+            ip_address: None,
+            user_agent: None,
+            api_key_id: Some("key-id-123".to_string()),
+            api_key_name: Some("coding-agent".to_string()),
+            created_at: Utc::now(),
+        };
+        let doc = bson::to_document(&log).expect("serialize");
+        let restored: AuditLog = bson::from_document(doc).expect("deserialize");
+        assert_eq!(restored.api_key_id.as_deref(), Some("key-id-123"));
+        assert_eq!(restored.api_key_name.as_deref(), Some("coding-agent"));
+    }
+
+    #[test]
+    fn bson_backward_compat_missing_api_key_fields() {
+        let log = AuditLog {
+            id: "test".to_string(),
+            user_id: None,
+            event_type: "old_event".to_string(),
+            event_data: None,
+            ip_address: None,
+            user_agent: None,
+            api_key_id: Some("should-be-skipped".to_string()),
+            api_key_name: None,
+            created_at: Utc::now(),
+        };
+        let mut doc = bson::to_document(&log).expect("serialize");
+        // Simulate old document without api_key fields
+        doc.remove("api_key_id");
+        doc.remove("api_key_name");
+        let restored: AuditLog = bson::from_document(doc).expect("deserialize");
+        assert!(restored.api_key_id.is_none());
+        assert!(restored.api_key_name.is_none());
     }
 }

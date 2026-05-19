@@ -30,6 +30,7 @@ Operational guide for running NyxID with AWS KMS or GCP Cloud KMS as the encrypt
 | `AWS_KMS_KEY_ARN_PREVIOUS` | AWS KMS key rotation | Previous AWS KMS key ARN |
 | `GCP_KMS_KEY_NAME` | `KEY_PROVIDER=gcp-kms` | Full GCP KMS key resource name |
 | `GCP_KMS_KEY_NAME_PREVIOUS` | GCP KMS key rotation | Previous GCP KMS key name |
+| `CLI_PAIRING_HMAC_KEY` | Optional; only when you need to rotate the pairing HMAC independently of ENCRYPTION_KEY / the JWT signing key | 64 hex chars (32 bytes). Keys `CliPairing.code_hash`. Without this set, the backend derives the HMAC from `ENCRYPTION_KEY` (if present) or from the JWT private key PEM — both are stable across workers, so cluster members stay in sync automatically. Generate with `openssl rand -hex 32` when you do need to set it. See [ENV.md](ENV.md#cli-remote-pairing-optional). |
 
 ### AWS KMS Key ARN Format
 

@@ -8,6 +8,7 @@ use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::mw::auth::AuthUser;
 use crate::services::{audit_service, provider_service, user_credentials_service};
+use crate::telemetry::TelemetryContext;
 
 // --- Request / Response types ---
 
@@ -81,6 +82,7 @@ pub async fn get_my_credentials(
 pub async fn set_my_credentials(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     Path(provider_id): Path<String>,
     Json(body): Json<SetUserCredentialsRequest>,
 ) -> AppResult<Json<UserCredentialsResponse>> {
@@ -130,16 +132,23 @@ pub async fn set_my_credentials(
     )
     .await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(user_id_str),
-        "user_credentials_set".to_string(),
+        &auth_user,
+        "user_credentials_set",
         Some(serde_json::json!({
             "provider_id": &provider_id,
         })),
-        None,
-        None,
     );
+
+    // Intentionally NO `ServiceConnected` emit here. This endpoint manages
+    // per-user OAuth client credentials (client_id / optional client_secret),
+    // not the actual `UserService`/provider binding lifecycle. Emitting a
+    // service.connected event when users rotate or re-save credentials would
+    // overcount connection churn even though the binding is unchanged.
+    // `service.connected` / `service.disconnected` are owned by
+    // `user_services_handler.rs` and the provider-connect flow handlers.
+    let _ = (&provider, &tele);
 
     Ok(Json(UserCredentialsResponse {
         provider_config_id: cred.provider_config_id,
@@ -154,6 +163,7 @@ pub async fn set_my_credentials(
 pub async fn delete_my_credentials(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     Path(provider_id): Path<String>,
 ) -> AppResult<Json<DeleteCredentialsResponse>> {
     let user_id_str = auth_user.user_id.to_string();
@@ -161,16 +171,21 @@ pub async fn delete_my_credentials(
     user_credentials_service::delete_user_credentials(&state.db, &user_id_str, &provider_id)
         .await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(user_id_str),
-        "user_credentials_deleted".to_string(),
+        &auth_user,
+        "user_credentials_deleted",
         Some(serde_json::json!({
             "provider_id": &provider_id,
         })),
-        None,
-        None,
     );
+
+    // Intentionally NO `ServiceDisconnected` emit here. See the matching
+    // note in `set_my_credentials` above: this endpoint only removes the
+    // user's per-user OAuth client credentials, not the actual
+    // `UserService`/provider binding. `service.disconnected` is owned by
+    // the binding lifecycle in `user_services_handler.rs`.
+    let _ = &tele;
 
     Ok(Json(DeleteCredentialsResponse {
         message: "Credentials deleted successfully".to_string(),

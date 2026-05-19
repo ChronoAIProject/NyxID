@@ -1,10 +1,13 @@
 pub mod aes;
 pub mod apple_client_secret;
+pub mod dpop;
 pub mod jwks;
 pub mod jwt;
 pub mod key_provider;
 pub mod local_key_provider;
+pub mod mtls;
 pub mod password;
+pub mod telegram;
 pub mod token;
 
 #[cfg(feature = "aws-kms")]

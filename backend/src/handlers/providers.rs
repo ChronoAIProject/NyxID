@@ -7,9 +7,10 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::mw::auth::AuthUser;
+use crate::services::url_validation::validate_base_url;
 use crate::services::{audit_service, provider_service, user_credentials_service};
 
-use super::services_helpers::{require_admin, validate_base_url};
+use super::services_helpers::require_admin;
 
 // --- Request / Response types ---
 
@@ -150,6 +151,7 @@ pub struct ProviderResponse {
     pub extra_auth_params: Option<std::collections::HashMap<String, String>>,
     pub device_code_format: String,
     pub client_id_param_name: Option<String>,
+    pub requires_gateway_url: bool,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -190,16 +192,24 @@ fn provider_to_response(p: crate::models::provider_config::ProviderConfig) -> Pr
         extra_auth_params: p.extra_auth_params,
         device_code_format: p.device_code_format,
         client_id_param_name: p.client_id_param_name,
+        requires_gateway_url: p.requires_gateway_url,
         created_at: p.created_at.to_rfc3339(),
         updated_at: p.updated_at.to_rfc3339(),
     }
 }
 
-/// Check whether a provider has enough configuration to start an OAuth flow.
+/// Check whether a provider has enough configuration to start a connection flow.
 ///
-/// - For `"user"` mode: true if the shared OAuth URLs are configured.
-/// - For `"admin"`/`"both"` mode: true if OAuth URLs AND admin-level credentials are configured.
+/// - OAuth providers: true when their URLs and required credentials are set.
+/// - Telegram widget providers: true when the bot username and bot token are set.
 fn provider_has_oauth_config(p: &crate::models::provider_config::ProviderConfig) -> bool {
+    if p.provider_type == "telegram_widget" {
+        return p.client_secret_encrypted.is_some()
+            && p.client_id_param_name.as_deref().is_some_and(|username| {
+                provider_service::normalize_telegram_bot_username(username).is_ok()
+            });
+    }
+
     let has_urls = match p.provider_type.as_str() {
         "oauth2" => p.authorization_url.is_some() && p.token_url.is_some(),
         "device_code" => {
@@ -260,7 +270,7 @@ pub async fn create_provider(
     validate_slug(&body.slug)?;
 
     // Validate provider_type
-    let valid_types = ["oauth2", "api_key", "device_code"];
+    let valid_types = ["oauth2", "api_key", "device_code", "telegram_widget"];
     if !valid_types.contains(&body.provider_type.as_str()) {
         return Err(AppError::ValidationError(format!(
             "provider_type must be one of: {}",
@@ -275,6 +285,16 @@ pub async fn create_provider(
             "credential_mode must be one of: {}",
             valid_credential_modes.join(", ")
         )));
+    }
+    if body.provider_type == "telegram_widget" && credential_mode != "admin" {
+        return Err(AppError::ValidationError(
+            "telegram_widget providers only support credential_mode=admin".to_string(),
+        ));
+    }
+    if body.provider_type == "api_key" && credential_mode != "admin" {
+        return Err(AppError::ValidationError(
+            "credential_mode only applies to oauth2/device_code providers; omit it or set \"admin\" for api_key providers".to_string(),
+        ));
     }
 
     let token_endpoint_auth_method = body
@@ -310,10 +330,10 @@ pub async fn create_provider(
         })?;
 
         // SSRF validation on OAuth provider URLs
-        validate_base_url(authorization_url, state.config.is_development())?;
-        validate_base_url(token_url, state.config.is_development())?;
+        validate_base_url(authorization_url)?;
+        validate_base_url(token_url)?;
         if let Some(ref url) = body.revocation_url {
-            validate_base_url(url, state.config.is_development())?;
+            validate_base_url(url)?;
         }
 
         let client_id = body.client_id.clone();
@@ -373,15 +393,15 @@ pub async fn create_provider(
         })?;
 
         // SSRF validation on all URLs
-        validate_base_url(authorization_url, state.config.is_development())?;
-        validate_base_url(token_url, state.config.is_development())?;
-        validate_base_url(device_code_url, state.config.is_development())?;
-        validate_base_url(device_token_url, state.config.is_development())?;
+        validate_base_url(authorization_url)?;
+        validate_base_url(token_url)?;
+        validate_base_url(device_code_url)?;
+        validate_base_url(device_token_url)?;
         if let Some(ref url) = body.device_verification_url {
-            validate_base_url(url, state.config.is_development())?;
+            validate_base_url(url)?;
         }
         if let Some(ref url) = body.hosted_callback_url {
-            validate_base_url(url, state.config.is_development())?;
+            validate_base_url(url)?;
         }
 
         let client_id = body.client_id.clone();
@@ -421,6 +441,37 @@ pub async fn create_provider(
         None
     };
 
+    let telegram_widget_config = if body.provider_type == "telegram_widget" {
+        let bot_token = body.client_secret.as_ref().ok_or_else(|| {
+            AppError::ValidationError(
+                "Bot token (client_secret) is required for telegram_widget providers".to_string(),
+            )
+        })?;
+        if bot_token.is_empty() {
+            return Err(AppError::ValidationError(
+                "Bot token (client_secret) must not be empty for telegram_widget providers"
+                    .to_string(),
+            ));
+        }
+        let bot_username = body.client_id_param_name.as_ref().ok_or_else(|| {
+            AppError::ValidationError(
+                "Bot username (client_id_param_name) is required for telegram_widget providers"
+                    .to_string(),
+            )
+        })?;
+        if bot_username.is_empty() {
+            return Err(AppError::ValidationError(
+                "Bot username must not be empty for telegram_widget providers".to_string(),
+            ));
+        }
+        Some(provider_service::TelegramWidgetProviderInput {
+            bot_token: bot_token.clone(),
+            bot_username: bot_username.clone(),
+        })
+    } else {
+        None
+    };
+
     let provider = provider_service::create_provider(
         &state.db,
         &state.encryption_keys,
@@ -432,6 +483,7 @@ pub async fn create_provider(
         oauth_config,
         api_key_config,
         device_code_config,
+        telegram_widget_config,
         body.description.as_deref(),
         body.icon_url.as_deref(),
         body.documentation_url.as_deref(),
@@ -442,16 +494,14 @@ pub async fn create_provider(
     )
     .await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(user_id_str),
-        "provider_created".to_string(),
+        &auth_user,
+        "provider_created",
         Some(serde_json::json!({
             "provider_id": &provider.id,
             "slug": &provider.slug,
         })),
-        None,
-        None,
     );
 
     Ok(Json(provider_to_response(provider)))
@@ -478,25 +528,25 @@ pub async fn update_provider(
 
     // SSRF validation on URLs if provided
     if let Some(ref url) = body.authorization_url {
-        validate_base_url(url, state.config.is_development())?;
+        validate_base_url(url)?;
     }
     if let Some(ref url) = body.token_url {
-        validate_base_url(url, state.config.is_development())?;
+        validate_base_url(url)?;
     }
     if let Some(ref url) = body.revocation_url {
-        validate_base_url(url, state.config.is_development())?;
+        validate_base_url(url)?;
     }
     if let Some(ref url) = body.device_code_url {
-        validate_base_url(url, state.config.is_development())?;
+        validate_base_url(url)?;
     }
     if let Some(ref url) = body.device_token_url {
-        validate_base_url(url, state.config.is_development())?;
+        validate_base_url(url)?;
     }
     if let Some(ref url) = body.device_verification_url {
-        validate_base_url(url, state.config.is_development())?;
+        validate_base_url(url)?;
     }
     if let Some(ref url) = body.hosted_callback_url {
-        validate_base_url(url, state.config.is_development())?;
+        validate_base_url(url)?;
     }
 
     let updates = provider_service::ProviderUpdateInput {
@@ -529,13 +579,11 @@ pub async fn update_provider(
         provider_service::update_provider(&state.db, &state.encryption_keys, &provider_id, updates)
             .await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "provider_updated".to_string(),
+        &auth_user,
+        "provider_updated",
         Some(serde_json::json!({ "provider_id": &provider_id })),
-        None,
-        None,
     );
 
     Ok(Json(provider_to_response(updated)))
@@ -551,13 +599,11 @@ pub async fn delete_provider(
 
     provider_service::delete_provider(&state.db, &provider_id).await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "provider_deleted".to_string(),
+        &auth_user,
+        "provider_deleted",
         Some(serde_json::json!({ "provider_id": &provider_id })),
-        None,
-        None,
     );
 
     Ok(Json(DeleteProviderResponse {
@@ -600,6 +646,7 @@ mod tests {
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            requires_gateway_url: false,
             created_by: "system".to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -640,5 +687,38 @@ mod tests {
         provider.client_secret_encrypted = None;
 
         assert!(provider_has_oauth_config(&provider));
+    }
+
+    #[test]
+    fn telegram_widget_requires_bot_username() {
+        let mut provider = make_provider("telegram_widget");
+        provider.client_id_param_name = None;
+
+        assert!(!provider_has_oauth_config(&provider));
+    }
+
+    #[test]
+    fn telegram_widget_requires_bot_token() {
+        let mut provider = make_provider("telegram_widget");
+        provider.client_id_param_name = Some("NyxIdBot".to_string());
+        provider.client_secret_encrypted = None;
+
+        assert!(!provider_has_oauth_config(&provider));
+    }
+
+    #[test]
+    fn telegram_widget_is_connectable_when_bot_is_configured() {
+        let mut provider = make_provider("telegram_widget");
+        provider.client_id_param_name = Some("NyxIdBot".to_string());
+
+        assert!(provider_has_oauth_config(&provider));
+    }
+
+    #[test]
+    fn telegram_widget_with_invalid_bot_username_is_not_connectable() {
+        let mut provider = make_provider("telegram_widget");
+        provider.client_id_param_name = Some("not-a-bot".to_string());
+
+        assert!(!provider_has_oauth_config(&provider));
     }
 }

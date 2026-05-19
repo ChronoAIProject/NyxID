@@ -14,6 +14,8 @@ import type {
   UpdateGroupRequest,
   RoleAssignmentResponse,
   GroupMembershipResponse,
+  BulkAssignRequest,
+  BulkAssignResponse,
 } from "@/types/rbac";
 
 // --- Role Hooks ---
@@ -149,6 +151,31 @@ export function useRevokeRole() {
   });
 }
 
+// --- Bulk Role Assignment ---
+
+export function useBulkAssignRole() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async ({
+      roleId,
+      data,
+    }: {
+      readonly roleId: string;
+      readonly data: BulkAssignRequest;
+    }): Promise<BulkAssignResponse> => {
+      return api.post<BulkAssignResponse>(
+        `/admin/roles/${roleId}/assign-bulk`,
+        data,
+      );
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["admin", "users"] });
+      void queryClient.invalidateQueries({ queryKey: ["admin", "roles"] });
+    },
+  });
+}
+
 // --- Group Hooks ---
 
 export function useGroups() {
@@ -224,9 +251,7 @@ export function useGroupMembers(groupId: string) {
   return useQuery({
     queryKey: ["admin", "groups", groupId, "members"],
     queryFn: async (): Promise<GroupMembersResponse> => {
-      return api.get<GroupMembersResponse>(
-        `/admin/groups/${groupId}/members`,
-      );
+      return api.get<GroupMembersResponse>(`/admin/groups/${groupId}/members`);
     },
     enabled: groupId.length > 0,
   });

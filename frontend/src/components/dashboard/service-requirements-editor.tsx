@@ -1,5 +1,6 @@
 import type { ProviderConfig } from "@/types/api";
 import { useProviders, useServiceRequirements } from "@/hooks/use-providers";
+import { EngineerCapIcon } from "@/components/icons/empty-state";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { CheckCircle, XCircle, KeyRound } from "lucide-react";
@@ -25,9 +26,12 @@ export function ServiceRequirementsView({
 
   if (!requirements || requirements.length === 0) {
     return (
-      <p className="text-sm text-muted-foreground">
-        This service has no provider requirements.
-      </p>
+      <div className="flex flex-col items-center justify-center gap-1 py-8">
+        <EngineerCapIcon className="h-48 w-48 text-muted-foreground/30" />
+        <div className="rounded-lg bg-white/[0.03] px-4 py-3 text-[12px] text-muted-foreground/30">
+          This service has no provider requirements.
+        </div>
+      </div>
     );
   }
 
@@ -39,17 +43,18 @@ export function ServiceRequirementsView({
     <div className="space-y-2">
       {requirements.map((req) => {
         const provider = providerMap.get(req.provider_config_id);
-        const hasToken = userTokenProviderIds?.has(req.provider_config_id) ?? false;
+        const hasToken =
+          userTokenProviderIds?.has(req.provider_config_id) ?? false;
 
         return (
           <div
             key={req.id}
-            className="flex items-center justify-between rounded-md border p-3"
+            className="flex items-center justify-between rounded-lg border p-3"
           >
             <div className="flex items-center gap-3">
               <KeyRound className="h-4 w-4 text-muted-foreground" />
               <div>
-                <p className="text-sm font-medium">
+                <p className="text-[12px] font-medium">
                   {provider?.name ?? req.provider_name}
                 </p>
                 <p className="text-xs text-muted-foreground">
@@ -57,7 +62,9 @@ export function ServiceRequirementsView({
                     ? "Bearer token"
                     : req.injection_method === "header"
                       ? `Header: ${req.injection_key ?? ""}`
-                      : `Query: ${req.injection_key ?? ""}`}
+                      : req.injection_method === "path"
+                        ? `Path prefix: ${req.injection_key ?? ""}`
+                        : `Query: ${req.injection_key ?? ""}`}
                 </p>
               </div>
             </div>

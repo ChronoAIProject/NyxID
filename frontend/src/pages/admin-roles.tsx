@@ -6,7 +6,10 @@ import { useRoles, useCreateRole, useDeleteRole } from "@/hooks/use-rbac";
 import { createRoleSchema, type CreateRoleFormData } from "@/schemas/rbac";
 import { ApiError } from "@/lib/api-client";
 import { formatDate } from "@/lib/utils";
+import { canAdminWrite } from "@/types/api";
+import { useAuthStore } from "@/stores/auth-store";
 import { PageHeader } from "@/components/shared/page-header";
+import { AddCtaButton } from "@/components/shared/add-cta-button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -35,12 +38,15 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { ShieldCheck, Plus, Trash2 } from "lucide-react";
+import { Trash2 } from "lucide-react";
+import { SmartRemoteIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
 import { Checkbox } from "@/components/ui/checkbox";
 
 export function AdminRolesPage() {
   const navigate = useNavigate();
+  const currentUser = useAuthStore((s) => s.user);
+  const canWrite = canAdminWrite(currentUser);
   const [createOpen, setCreateOpen] = useState(false);
   const [deleteRoleId, setDeleteRoleId] = useState<string | null>(null);
 
@@ -93,11 +99,9 @@ export function AdminRolesPage() {
       toast.success("Role created successfully");
       setCreateOpen(false);
     } catch (err) {
-      if (err instanceof ApiError) {
-        createForm.setError("root", { message: err.message });
-      } else {
-        toast.error("Failed to create role");
-      }
+      toast.error(
+        err instanceof ApiError ? err.message : "Failed to create role",
+      );
     }
   }
 
@@ -121,10 +125,9 @@ export function AdminRolesPage() {
         title="Role Management"
         description="Manage roles and permissions for your organization."
         actions={
-          <Button size="sm" onClick={openCreateDialog}>
-            <Plus className="mr-1 h-4 w-4" />
-            Add Role
-          </Button>
+          canWrite ? (
+            <AddCtaButton label="Add Role" onClick={openCreateDialog} />
+          ) : null
         }
       />
 
@@ -135,19 +138,74 @@ export function AdminRolesPage() {
           ))}
         </div>
       ) : error ? (
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-          <ShieldCheck className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
-            Failed to load roles. Please try again.
-          </p>
+        <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+          <SmartRemoteIcon className="h-64 w-64 text-muted-foreground/30" />
+          <div className="space-y-1">
+            <p className="text-[12px] font-medium text-muted-foreground/30">Failed to load roles</p>
+            <p className="text-xs text-muted-foreground/30">Please try again later.</p>
+          </div>
         </div>
       ) : roles.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-          <ShieldCheck className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">No roles found.</p>
+        <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+          <SmartRemoteIcon className="h-64 w-64 text-muted-foreground/30" />
+          <div className="space-y-1">
+            <p className="text-[12px] font-medium text-muted-foreground/30">No roles found</p>
+            <p className="text-xs text-muted-foreground/30">There are no roles to display.</p>
+          </div>
         </div>
       ) : (
-        <div className="rounded-xl border border-border">
+        <>
+        {/* Mobile cards */}
+        <div className="flex flex-col gap-3 md:hidden">
+          {roles.map((r) => (
+            <div
+              key={r.id}
+              className="rounded-xl border border-border/50 bg-card p-4 transition-colors hover:bg-white/[0.03] cursor-pointer"
+              tabIndex={0}
+              role="link"
+              onClick={() =>
+                void navigate({
+                  to: "/admin/roles/$roleId",
+                  params: { roleId: r.id },
+                })
+              }
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  void navigate({
+                    to: "/admin/roles/$roleId",
+                    params: { roleId: r.id },
+                  });
+                }
+              }}
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-medium truncate">{r.name}</p>
+                  <p className="text-xs text-muted-foreground font-mono truncate mt-0.5">
+                    {r.slug}
+                  </p>
+                </div>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <Badge variant="secondary">
+                    {r.is_system ? "System" : "Custom"}
+                  </Badge>
+                </div>
+              </div>
+              <div className="mt-3 flex items-center gap-3 text-xs text-muted-foreground">
+                <span>
+                  {String(r.permissions.length)} permission
+                  {r.permissions.length !== 1 ? "s" : ""}
+                </span>
+                <span className="text-border">|</span>
+                <span>Created {formatDate(r.created_at)}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Desktop table */}
+        <div className="hidden md:block rounded-xl border border-border/50 bg-card overflow-hidden">
           <Table>
             <TableHeader>
               <TableRow>
@@ -197,7 +255,7 @@ export function AdminRolesPage() {
                     {role.is_system ? (
                       <Badge variant="secondary">System</Badge>
                     ) : (
-                      <Badge variant="outline">Custom</Badge>
+                      <Badge variant="secondary">Custom</Badge>
                     )}
                   </TableCell>
                   <TableCell>
@@ -211,7 +269,7 @@ export function AdminRolesPage() {
                     {formatDate(role.created_at)}
                   </TableCell>
                   <TableCell>
-                    {!role.is_system && (
+                    {canWrite && !role.is_system && (
                       <Button
                         variant="ghost"
                         size="icon"
@@ -221,7 +279,7 @@ export function AdminRolesPage() {
                           setDeleteRoleId(role.id);
                         }}
                       >
-                        <Trash2 className="h-4 w-4 text-muted-foreground" />
+                        <Trash2 className="h-3 w-3 text-muted-foreground" />
                       </Button>
                     )}
                   </TableCell>
@@ -230,6 +288,7 @@ export function AdminRolesPage() {
             </TableBody>
           </Table>
         </div>
+        </>
       )}
 
       {/* Create Role Dialog */}
@@ -243,16 +302,11 @@ export function AdminRolesPage() {
           </DialogHeader>
           <Form {...createForm}>
             <form
-              onSubmit={createForm.handleSubmit((data) =>
-                void handleCreate(data),
+              onSubmit={createForm.handleSubmit(
+                (data) => void handleCreate(data),
               )}
               className="space-y-4"
             >
-              {createForm.formState.errors.root && (
-                <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
-                  {createForm.formState.errors.root.message}
-                </div>
-              )}
               <FormField
                 control={createForm.control}
                 name="name"
@@ -312,14 +366,14 @@ export function AdminRolesPage() {
                 control={createForm.control}
                 name="is_default"
                 render={({ field }) => (
-                  <FormItem className="flex items-center gap-2">
+                  <FormItem className="flex items-center gap-2 space-y-0">
                     <FormControl>
                       <Checkbox
                         checked={field.value}
                         onCheckedChange={field.onChange}
                       />
                     </FormControl>
-                    <FormLabel className="!mt-0">
+                    <FormLabel>
                       Auto-assign to new users
                     </FormLabel>
                     <FormMessage />
@@ -334,7 +388,7 @@ export function AdminRolesPage() {
                 >
                   Cancel
                 </Button>
-                <Button type="submit" isLoading={createMutation.isPending}>
+                <Button type="submit" variant="primary" isLoading={createMutation.isPending}>
                   Create Role
                 </Button>
               </DialogFooter>

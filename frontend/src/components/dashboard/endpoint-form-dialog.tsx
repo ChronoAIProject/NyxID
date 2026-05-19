@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
+import { z } from "zod";
 import type { ServiceEndpoint } from "@/types/api";
 import {
   createEndpointSchema,
@@ -43,6 +44,9 @@ interface EndpointFormDialogProps {
   readonly isPending: boolean;
 }
 
+const DESCRIPTION_MAX_LENGTH = 500;
+const DESCRIPTION_MAX_ERROR = "Description must be at most 500 characters";
+
 function serializeJson(value: unknown): string {
   if (value === null || value === undefined) return "";
   try {
@@ -50,6 +54,32 @@ function serializeJson(value: unknown): string {
   } catch {
     return "";
   }
+}
+
+function buildEndpointFormSchema(existingDescription?: string | null) {
+  return createEndpointSchema.extend({
+    description: z
+      .string()
+      .optional()
+      .or(z.literal(""))
+      .superRefine((value, ctx) => {
+        const description = value ?? "";
+        const isUnchangedLegacyDescription =
+          typeof existingDescription === "string" &&
+          existingDescription.length > DESCRIPTION_MAX_LENGTH &&
+          description === existingDescription;
+
+        if (
+          description.length > DESCRIPTION_MAX_LENGTH &&
+          !isUnchangedLegacyDescription
+        ) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: DESCRIPTION_MAX_ERROR,
+          });
+        }
+      }),
+  });
 }
 
 export function EndpointFormDialog({
@@ -60,9 +90,12 @@ export function EndpointFormDialog({
   isPending,
 }: EndpointFormDialogProps) {
   const isEditing = endpoint !== null && endpoint !== undefined;
+  const formSchema = buildEndpointFormSchema(
+    isEditing ? endpoint?.description : undefined,
+  );
 
   const form = useForm<CreateEndpointFormData>({
-    resolver: zodResolver(createEndpointSchema),
+    resolver: zodResolver(formSchema),
     defaultValues: {
       name: "",
       description: "",
@@ -118,7 +151,7 @@ export function EndpointFormDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-lg max-h-[85vh] overflow-y-auto">
+      <DialogContent>
         <DialogHeader>
           <DialogTitle>
             {isEditing ? "Edit Endpoint" : "Add Endpoint"}
@@ -136,7 +169,7 @@ export function EndpointFormDialog({
             className="space-y-4"
           >
             {form.formState.errors.root && (
-              <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
+              <div className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive">
                 {form.formState.errors.root.message}
               </div>
             )}
@@ -163,7 +196,7 @@ export function EndpointFormDialog({
                   <FormLabel>Description</FormLabel>
                   <FormControl>
                     <textarea
-                      className="flex min-h-[60px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                      className="flex min-h-[60px] w-full rounded-lg border border-input bg-background px-3 py-2 text-[12px] placeholder:text-muted-foreground focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
                       placeholder="Optional description of this endpoint"
                       {...field}
                     />
@@ -222,7 +255,7 @@ export function EndpointFormDialog({
                   <FormLabel>Parameters (JSON)</FormLabel>
                   <FormControl>
                     <textarea
-                      className="flex min-h-[80px] w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                      className="flex min-h-[80px] w-full rounded-lg border border-input bg-background px-3 py-2 font-mono text-xs placeholder:text-muted-foreground focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
                       placeholder='[{"name": "id", "in": "path", "required": true}]'
                       {...field}
                     />
@@ -240,7 +273,7 @@ export function EndpointFormDialog({
                   <FormLabel>Request Body Schema (JSON)</FormLabel>
                   <FormControl>
                     <textarea
-                      className="flex min-h-[80px] w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                      className="flex min-h-[80px] w-full rounded-lg border border-input bg-background px-3 py-2 font-mono text-xs placeholder:text-muted-foreground focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
                       placeholder='{"type": "object", "properties": {...}}'
                       {...field}
                     />
@@ -275,8 +308,8 @@ export function EndpointFormDialog({
               >
                 Cancel
               </Button>
-              <Button type="submit" isLoading={isPending}>
-                {isEditing ? "Save changes" : "Create endpoint"}
+              <Button variant="primary" type="submit" isLoading={isPending} disabled={!form.formState.isValid || isPending}>
+                {isEditing ? "Save Changes" : "Create Endpoint"}
               </Button>
             </DialogFooter>
           </form>

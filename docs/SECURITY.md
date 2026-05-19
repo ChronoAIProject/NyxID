@@ -285,8 +285,9 @@ Services only receive the identity information they need.
 Base URLs for downstream services and OAuth provider endpoints are validated against:
 
 - **Scheme check:** Must be `http://` or `https://`
-- **Hostname blocklist:** `localhost`, `127.0.0.1`, `0.0.0.0`, `[::1]`, `metadata.google.internal`
-- **Private IP ranges:** 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, loopback
+- **Cloud metadata blocklist:** `metadata.google.internal`, `169.254.169.254`, `[fd00:ec2::254]`
+
+Private IPs (`10.x`, `172.16-31.x`, `192.168.x`, `127.x`) and `localhost` are allowed. NyxID is a self-hosted platform where services commonly run on private infrastructure, especially when accessed via node agents that inject credentials on-premise.
 
 ### Path Traversal Prevention
 
@@ -696,7 +697,7 @@ Rate limit state is per-instance (in-memory). For distributed deployments, consi
 | Password brute force            | Argon2id cost parameters, rate limiting              |
 | Session hijacking               | HttpOnly cookies, SameSite, short JWT TTL            |
 | CSRF                            | SameSite cookies, OAuth state parameter              |
-| SSRF via proxy                  | IP blocklist, hostname validation                    |
+| SSRF via proxy                  | Cloud metadata blocklist, scheme validation           |
 | SSRF via OAuth redirect         | No-redirect HTTP client for token exchange           |
 | Path traversal via proxy        | Reject `..` and `//` in paths                        |
 | Header injection                | Request/response header allowlists                   |

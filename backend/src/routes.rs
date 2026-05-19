@@ -1,8 +1,11 @@
 use axum::{
-    Router, middleware,
+    Router,
+    extract::DefaultBodyLimit,
+    middleware,
     routing::{delete, get, patch, post, put},
 };
 use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
+use tower_http::limit::RequestBodyLimitLayer;
 
 use crate::AppState;
 use crate::handlers;
@@ -31,7 +34,7 @@ fn oauth_public_cors() -> CorsLayer {
 /// The caller must attach separate CORS layers to each before merging.
 /// Public OAuth endpoints allow any origin (per RFC 9207) while private
 /// API endpoints restrict origin to FRONTEND_URL.
-pub fn build_router() -> (Router<AppState>, Router<AppState>) {
+pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<AppState>) {
     let mfa_routes = Router::new()
         .route("/setup", post(handlers::mfa::setup))
         .route("/confirm", post(handlers::mfa::confirm))
@@ -43,6 +46,7 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
         .route("/login", post(handlers::auth::login))
         .route("/logout", post(handlers::auth::logout))
         .route("/refresh", post(handlers::auth::refresh))
+        .route("/cli-token", post(handlers::auth::cli_token))
         .route("/verify-email", post(handlers::auth::verify_email))
         .route("/forgot-password", post(handlers::auth::forgot_password))
         .route("/reset-password", post(handlers::auth::reset_password))
@@ -62,6 +66,18 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
         .route("/me", get(handlers::users::get_me))
         .route("/me", put(handlers::users::update_me))
         .route("/me", delete(handlers::users::delete_me))
+        .route(
+            "/me/onboarding/complete",
+            post(handlers::users::complete_onboarding),
+        )
+        .route(
+            "/me/broker-bindings",
+            get(handlers::broker_bindings::list_my_broker_bindings),
+        )
+        .route(
+            "/me/broker-bindings/{binding_hash}",
+            delete(handlers::broker_bindings::revoke_my_broker_binding),
+        )
         .route("/me/consents", get(handlers::consent::list_my_consents))
         .route(
             "/me/consents/{client_id}",
@@ -71,8 +87,24 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
     let api_key_routes = Router::new()
         .route("/", get(handlers::api_keys::list_keys))
         .route("/", post(handlers::api_keys::create_key))
-        .route("/{key_id}", delete(handlers::api_keys::delete_key))
-        .route("/{key_id}/rotate", post(handlers::api_keys::rotate_key));
+        .route("/usage", get(handlers::api_keys::list_key_usage))
+        .route(
+            "/{key_id}",
+            get(handlers::api_keys::get_key)
+                .put(handlers::api_keys::update_key)
+                .delete(handlers::api_keys::delete_key),
+        )
+        .route("/{key_id}/usage", get(handlers::api_keys::get_key_usage))
+        .route("/{key_id}/rotate", post(handlers::api_keys::rotate_key))
+        .route(
+            "/{key_id}/bindings",
+            get(handlers::agent_bindings::list_bindings)
+                .post(handlers::agent_bindings::create_binding),
+        )
+        .route(
+            "/{key_id}/bindings/{binding_id}",
+            delete(handlers::agent_bindings::delete_binding),
+        );
 
     let service_routes = Router::new()
         .route("/", get(handlers::services::list_services))
@@ -180,6 +212,14 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
             post(handlers::user_tokens::poll_device_code),
         )
         .route(
+            "/{provider_id}/connect/telegram",
+            get(handlers::user_tokens::get_telegram_connect_config),
+        )
+        .route(
+            "/{provider_id}/connect/telegram/callback",
+            post(handlers::user_tokens::telegram_callback),
+        )
+        .route(
             "/{provider_id}/disconnect",
             delete(handlers::user_tokens::disconnect_provider),
         )
@@ -237,9 +277,17 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
             "/{sa_id}/providers/{provider_id}/connect/api-key",
             post(handlers::admin_sa_providers::connect_api_key_for_sa),
         )
+        // OAuth-connect on behalf of a service account is a state-mutating
+        // action (creates an OAuth state row, emits an audit entry). It is
+        // mounted as POST under the new route. The legacy GET form is kept
+        // for one release of back-compat with older frontends/CLIs and will
+        // be removed in a future release. Both methods route to the same
+        // handler, which keeps `require_admin` (NOT `require_admin_or_operator`)
+        // because operator is a read-only role.
         .route(
             "/{sa_id}/providers/{provider_id}/connect/oauth",
-            get(handlers::admin_sa_providers::initiate_oauth_for_sa),
+            post(handlers::admin_sa_providers::initiate_oauth_for_sa)
+                .get(handlers::admin_sa_providers::initiate_oauth_for_sa),
         )
         .route(
             "/{sa_id}/providers/{provider_id}/connect/device-code/initiate",
@@ -321,6 +369,10 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
                 .delete(handlers::admin_roles::delete_role),
         )
         .route(
+            "/roles/{role_id}/assign-bulk",
+            post(handlers::admin_roles::bulk_assign_role),
+        )
+        .route(
             "/groups",
             get(handlers::admin_groups::list_groups).post(handlers::admin_groups::create_group),
         )
@@ -361,7 +413,17 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
             "/oauth-clients/{client_id}/consents",
             get(handlers::admin::list_client_consents),
         )
-        .nest("/service-accounts", sa_admin_routes);
+        .nest("/service-accounts", sa_admin_routes)
+        .nest("/invite-codes", {
+            Router::new()
+                .route("/", get(handlers::invite_codes::list_invite_codes))
+                .route("/", post(handlers::invite_codes::create_invite_code))
+                .route("/{id}", patch(handlers::invite_codes::update_invite_code))
+                .route(
+                    "/{id}",
+                    delete(handlers::invite_codes::deactivate_invite_code),
+                )
+        });
 
     let oauth_routes = Router::new()
         .route("/authorize", get(handlers::oauth::authorize))
@@ -369,7 +431,16 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
             "/authorize/decision",
             post(handlers::oauth::authorize_decision),
         )
+        .route("/par", post(handlers::oauth::pushed_authorization_request))
         .route("/token", post(handlers::oauth::token))
+        .route(
+            "/bindings",
+            get(handlers::oauth::list_bindings_by_external_subject),
+        )
+        .route(
+            "/bindings/{binding_id}",
+            get(handlers::oauth::get_binding).delete(handlers::oauth::delete_binding),
+        )
         .route(
             "/userinfo",
             get(handlers::oauth::userinfo).post(handlers::oauth::userinfo),
@@ -415,7 +486,10 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
 
     // Approval management (human-only; status polling is in api_v1_delegated)
     let approval_routes = Router::new()
-        .route("/requests", get(handlers::approvals::list_requests))
+        .route(
+            "/requests",
+            get(handlers::approvals::list_requests).post(handlers::approvals::create_request),
+        )
         .route(
             "/requests/{request_id}",
             get(handlers::approvals::get_request_by_id),
@@ -456,6 +530,23 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
             post(handlers::node_admin::rotate_token),
         )
         .route(
+            "/{node_id}/transfer",
+            post(handlers::node_admin::transfer_node),
+        )
+        .route(
+            "/{node_id}/credentials/push",
+            post(handlers::node_admin::push_pending_credential),
+        )
+        .route(
+            "/{node_id}/credentials/pending",
+            get(handlers::node_admin::list_pending_credentials),
+        )
+        .route(
+            "/{node_id}/credentials/pending/{pending_id}",
+            delete(handlers::node_admin::cancel_pending_credential),
+        )
+        .route("/{node_id}/admins", get(handlers::node_admin::list_admins))
+        .route(
             "/{node_id}/bindings",
             get(handlers::node_admin::list_bindings).post(handlers::node_admin::create_binding),
         )
@@ -464,6 +555,194 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
             patch(handlers::node_admin::update_binding)
                 .delete(handlers::node_admin::delete_binding),
         );
+
+    let node_agent_routes = Router::new()
+        .route(
+            "/pending-credentials",
+            get(handlers::node_agent::list_pending_credentials),
+        )
+        .route(
+            "/pending-credentials/{pending_id}/consume",
+            post(handlers::node_agent::consume_pending_credential),
+        )
+        .route(
+            "/pending-credentials/{pending_id}/decline",
+            post(handlers::node_agent::decline_pending_credential),
+        );
+
+    let unified_key_routes = Router::new()
+        .route(
+            "/",
+            get(handlers::keys::list_keys).post(handlers::keys::create_key),
+        )
+        .route(
+            "/{key_id}",
+            get(handlers::keys::get_key)
+                .put(handlers::keys::update_key)
+                .delete(handlers::keys::delete_key),
+        );
+
+    let user_endpoint_routes = Router::new()
+        .route("/", get(handlers::user_endpoints::list_endpoints))
+        .route(
+            "/{endpoint_id}",
+            put(handlers::user_endpoints::update_endpoint)
+                .delete(handlers::user_endpoints::delete_endpoint),
+        )
+        .route(
+            "/{endpoint_id}/openapi-endpoints",
+            get(handlers::user_endpoints::list_openapi_endpoints),
+        );
+
+    let external_api_key_routes = Router::new()
+        .route(
+            "/",
+            get(handlers::user_api_keys_external::list_external_api_keys),
+        )
+        .route(
+            "/{key_id}",
+            put(handlers::user_api_keys_external::update_external_api_key)
+                .delete(handlers::user_api_keys_external::delete_external_api_key),
+        );
+
+    let user_service_routes = Router::new()
+        .route(
+            "/",
+            get(handlers::user_services_handler::list_user_services),
+        )
+        .route(
+            "/{service_id}/ssh-auth-mode",
+            patch(handlers::user_services_handler::patch_user_service_ssh_auth_mode),
+        )
+        .route(
+            "/{service_id}",
+            put(handlers::user_services_handler::update_user_service)
+                .delete(handlers::user_services_handler::delete_user_service),
+        );
+
+    // Org management routes (creation, members, invites). All routes
+    // authenticate as a regular session/user; admin-vs-member checks happen
+    // inside the handlers based on org_memberships rather than a global flag.
+    let org_routes = Router::new()
+        .route(
+            "/",
+            get(handlers::orgs::list_orgs).post(handlers::orgs::create_org),
+        )
+        .route("/join/{nonce}", post(handlers::orgs::redeem_invite))
+        .route(
+            "/{org_id}",
+            get(handlers::orgs::get_org)
+                .patch(handlers::orgs::update_org)
+                .delete(handlers::orgs::delete_org),
+        )
+        .route(
+            "/{org_id}/members",
+            get(handlers::orgs::list_members).post(handlers::orgs::add_member),
+        )
+        .route(
+            "/{org_id}/members/{member_id}",
+            patch(handlers::orgs::update_member).delete(handlers::orgs::remove_member),
+        )
+        .route(
+            "/{org_id}/role-scopes",
+            get(handlers::org_role_scopes::list_role_scopes),
+        )
+        .route(
+            "/{org_id}/role-scopes/{role}",
+            put(handlers::org_role_scopes::set_role_scope)
+                .delete(handlers::org_role_scopes::clear_role_scope),
+        )
+        .route(
+            "/{org_id}/invites",
+            get(handlers::orgs::list_invites).post(handlers::orgs::create_invite),
+        )
+        .route(
+            "/{org_id}/invites/{invite_id}",
+            delete(handlers::orgs::cancel_invite),
+        );
+
+    let catalog_routes = Router::new()
+        .route("/", get(handlers::catalog::list_catalog))
+        .route("/{slug}", get(handlers::catalog::get_catalog_entry))
+        .route(
+            "/{slug}/endpoints",
+            get(handlers::catalog::list_catalog_endpoints),
+        );
+
+    let cli_pairing_routes = Router::new()
+        .route("/", post(handlers::cli_pairings::create_pairing))
+        .route("/claim", post(handlers::cli_pairings::claim_pairing))
+        .route("/{id}/poll", get(handlers::cli_pairings::poll_pairing))
+        .route(
+            "/{id}/reserve-action",
+            post(handlers::cli_pairings::reserve_action),
+        )
+        .route(
+            "/{id}/rewind-action",
+            post(handlers::cli_pairings::rewind_action),
+        )
+        .route(
+            "/{id}/complete",
+            post(handlers::cli_pairings::complete_pairing),
+        )
+        .route("/{id}/cancel", post(handlers::cli_pairings::cancel_pairing));
+
+    let channel_bot_routes = Router::new()
+        .route(
+            "/",
+            get(handlers::channel_bots::list_bots).post(handlers::channel_bots::create_bot),
+        )
+        .route(
+            "/{id}",
+            get(handlers::channel_bots::get_bot)
+                .patch(handlers::channel_bots::update_bot)
+                .delete(handlers::channel_bots::delete_bot),
+        )
+        .route("/{id}/verify", post(handlers::channel_bots::verify_bot));
+
+    let channel_conversation_routes = Router::new()
+        .route(
+            "/",
+            get(handlers::channel_conversations::list_conversations)
+                .post(handlers::channel_conversations::create_conversation),
+        )
+        .route(
+            "/{id}",
+            get(handlers::channel_conversations::get_conversation)
+                .put(handlers::channel_conversations::update_conversation)
+                .delete(handlers::channel_conversations::delete_conversation),
+        )
+        .route(
+            "/{id}/messages",
+            get(handlers::channel_conversations::list_conversation_messages),
+        );
+
+    let channel_relay_routes = Router::new()
+        .route("/reply", post(handlers::channel_relay::async_reply))
+        .route("/reply/update", post(handlers::channel_relay::update_reply))
+        .route(
+            "/messages/{conversation_id}",
+            get(handlers::channel_relay::list_messages),
+        )
+        .route(
+            "/resolve-sender",
+            get(handlers::channel_relay::resolve_sender),
+        );
+
+    // HTTP Event Gateway — device event ingress (NyxID#221, ADR-013).
+    // Authenticated via API key; rate-limited per conversation.
+    //
+    // `DefaultBodyLimit::disable()` opts this router out of the app-wide
+    // 1 MiB body cap set in `main.rs`. Per the plan §8.1 and the gateway
+    // design doc §NOT in Scope, NyxID deliberately does not enforce an
+    // application-level payload size limit on device events — analyzers
+    // that ship larger JSON blobs or embedded metadata must be accepted.
+    let channel_event_routes = Router::new()
+        .route(
+            "/{conversation_id}",
+            post(handlers::channel_events::post_event),
+        )
+        .layer(DefaultBodyLimit::disable());
 
     let developer_routes = Router::new()
         .route(
@@ -482,6 +761,36 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
             post(handlers::developer_apps::rotate_my_oauth_client_secret),
         );
 
+    // Proxy pass-through routes allow larger request bodies than the rest of the API.
+    // Use RequestBodyLimitLayer so manual Request<Body> handlers are also protected.
+    let proxy_passthrough_routes = Router::new()
+        .route(
+            "/proxy/s/{slug}/{*path}",
+            axum::routing::any(handlers::proxy::proxy_request_by_slug),
+        )
+        .route(
+            "/proxy/s/{slug}",
+            axum::routing::any(handlers::proxy::proxy_request_by_slug_root),
+        )
+        .route(
+            "/proxy/{service_id}/{*path}",
+            axum::routing::any(handlers::proxy::proxy_request),
+        )
+        .route(
+            "/proxy/{service_id}",
+            axum::routing::any(handlers::proxy::proxy_request_root),
+        )
+        .layer(RequestBodyLimitLayer::new(proxy_max_body_size));
+
+    // LLM gateway routes get a moderate limit (10 MB for LLM payloads).
+    let llm_routes = llm_routes.layer(RequestBodyLimitLayer::new(10 * 1024 * 1024));
+
+    // Public API routes that expose non-sensitive runtime metadata.
+    let api_v1_public = Router::new().route(
+        "/runtime-config",
+        get(handlers::runtime_config::get_runtime_config),
+    );
+
     // Routes that ALLOW delegated tokens (proxy, LLM gateway, delegation refresh)
     // Also accessible by service accounts.
     let api_v1_delegated = Router::new()
@@ -491,15 +800,23 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
             "/approvals/requests/{request_id}/status",
             get(handlers::approvals::get_request_status),
         )
-        .route("/proxy/services", get(handlers::proxy::list_proxy_services))
         .route(
-            "/proxy/s/{slug}/{*path}",
-            axum::routing::any(handlers::proxy::proxy_request_by_slug),
+            "/proxy/services/{service_id}/docs",
+            get(handlers::docs::service_docs_ui),
         )
         .route(
-            "/proxy/{service_id}/{*path}",
-            axum::routing::any(handlers::proxy::proxy_request),
-        );
+            "/proxy/services/{service_id}/openapi.json",
+            get(handlers::docs::service_openapi_json),
+        )
+        .route(
+            "/proxy/services/{service_id}/asyncapi.json",
+            get(handlers::docs::service_asyncapi_json),
+        )
+        .route("/proxy/services", get(handlers::proxy::list_proxy_services))
+        .route("/demo", get(handlers::demo::get_demo))
+        .nest("/channel-relay", channel_relay_routes)
+        .nest("/channel-events", channel_event_routes)
+        .merge(proxy_passthrough_routes);
 
     // Routes accessible by both users and service accounts (block delegated tokens)
     let api_v1_shared = Router::new()
@@ -513,6 +830,23 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
         .nest("/users", user_routes)
         .nest("/api-keys", api_key_routes)
         .nest("/services", service_routes)
+        .route("/docs", get(handlers::docs::docs_ui))
+        .route("/docs/catalog", get(handlers::docs::catalog_ui))
+        .route("/docs/openapi.json", get(handlers::docs::openapi_json))
+        .route("/docs/asyncapi.json", get(handlers::docs::asyncapi_json))
+        .route(
+            "/ssh/{service_id}/certificate",
+            post(handlers::ssh_tunnel::issue_ssh_certificate),
+        )
+        .route(
+            "/ssh/{service_id}",
+            get(handlers::ssh_tunnel::ssh_tunnel_ws),
+        )
+        .route("/ssh/{service_id}/exec", post(handlers::ssh_exec::ssh_exec))
+        .route(
+            "/ssh/{service_id}/terminal",
+            get(handlers::ssh_web_terminal::ssh_web_terminal),
+        )
         .nest("/sessions", session_routes)
         .nest("/mcp", mcp_routes)
         .nest("/developer", developer_routes)
@@ -520,11 +854,29 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
         .nest("/notifications", notification_routes)
         .nest("/approvals", approval_routes)
         .nest("/nodes", node_routes)
+        .nest("/keys", unified_key_routes)
+        .nest("/endpoints", user_endpoint_routes)
+        .nest("/api-keys/external", external_api_key_routes)
+        .nest("/user-services", user_service_routes)
+        .nest("/orgs", org_routes)
+        .route(
+            "/users/me/primary-org",
+            patch(handlers::orgs::set_primary_org),
+        )
+        .nest("/catalog", catalog_routes)
+        .nest("/cli-pairings", cli_pairing_routes)
+        .nest("/channel-bots", channel_bot_routes)
+        .nest("/channel-conversations", channel_conversation_routes)
+        .route(
+            "/integrations/openclaw/mappings",
+            post(handlers::openclaw_channel::create_mapping),
+        )
         .route("/public/config", get(handlers::health::public_config))
         .layer(middleware::from_fn(reject_delegated_tokens))
         .layer(middleware::from_fn(reject_service_account_tokens));
 
-    let api_v1 = api_v1_delegated
+    let api_v1 = api_v1_public
+        .merge(api_v1_delegated)
         .merge(api_v1_shared)
         .merge(api_v1_human_only);
 
@@ -552,9 +904,40 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
     let webhook_routes =
         Router::new().route("/telegram", post(handlers::webhooks::telegram_webhook));
 
+    // Integration webhook routes -- unauthenticated (verified by HMAC signature)
+    let integration_routes = Router::new().route(
+        "/openclaw/channel",
+        post(handlers::openclaw_channel::handle_channel_message),
+    );
+
     let private = Router::new()
         .route("/health", get(handlers::health::health_check))
+        .route("/llms.txt", get(handlers::llms_txt::llms_txt))
+        .route("/llms-full.txt", get(handlers::llms_txt::llms_full_txt))
         .nest("/api/v1/webhooks", webhook_routes)
+        // Channel bot webhook routes -- unauthenticated (per-bot signature verified)
+        .route(
+            "/api/v1/webhooks/channel/telegram/{bot_id}",
+            post(handlers::channel_webhooks::telegram_webhook),
+        )
+        .route(
+            "/api/v1/webhooks/channel/discord/{bot_id}",
+            post(handlers::channel_webhooks::discord_webhook),
+        )
+        .route(
+            "/api/v1/webhooks/channel/lark/{bot_id}",
+            post(handlers::channel_webhooks::lark_webhook),
+        )
+        .route(
+            "/api/v1/webhooks/channel/feishu/{bot_id}",
+            post(handlers::channel_webhooks::feishu_webhook),
+        )
+        .route(
+            "/api/v1/webhooks/channel/slack/{bot_id}",
+            post(handlers::channel_webhooks::slack_webhook),
+        )
+        .nest("/api/v1/integrations", integration_routes)
+        .nest("/api/v1/node-agent", node_agent_routes)
         .nest("/api/v1", api_v1)
         // WebSocket endpoint for node agents. Auth happens in-message (not middleware).
         // Rate limiting: global per-IP rate limiter covers HTTP upgrade requests.

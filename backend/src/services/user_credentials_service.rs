@@ -356,3 +356,174 @@ async fn decrypt_user_credentials(
 pub fn supports_user_credentials(provider: &ProviderConfig) -> bool {
     provider.credential_mode == "user" || provider.credential_mode == "both"
 }
+
+/// Resolve OAuth client credentials directly from a multi-connection
+/// `UserApiKey` identified by `connection_id`.
+///
+/// Returns `Ok(Some(...))` when a `UserApiKey` with this `connection_id`
+/// exists and carries `user_oauth_client_id_encrypted` (and a paired
+/// secret). Returns `Ok(None)` when there is no such key, or when the
+/// matched key has no BYO credentials — in which case the caller falls
+/// back to the legacy resolution paths (`resolve_oauth_credentials` /
+/// `resolve_token_oauth_credentials`). This is the multi-connection
+/// cousin of `resolve_oauth_credentials`: it lets the per-connection
+/// authorize / exchange path use the connection's own Custom App
+/// credentials rather than the single-row `user_provider_credentials`
+/// table, which can't represent two Custom Apps for the same
+/// `(user, provider)` pair.
+///
+/// Note: `refresh_user_api_key_in_place` does **not** use this helper —
+/// it already operates on the `UserApiKey` directly (the
+/// `credential_user_id` field is unused there). Keeping the refresh
+/// path's existing implementation avoids needing to deserialize twice
+/// in the hot path.
+pub async fn resolve_connection_oauth_credentials(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    connection_id: &str,
+) -> AppResult<Option<ResolvedOAuthCredentials>> {
+    use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
+    use mongodb::bson::doc;
+
+    let key = db
+        .collection::<UserApiKey>(USER_API_KEYS)
+        .find_one(doc! { "connection_id": connection_id })
+        .await?;
+    let Some(key) = key else {
+        return Ok(None);
+    };
+    let Some(enc_cid) = key.user_oauth_client_id_encrypted.as_ref() else {
+        return Ok(None);
+    };
+
+    let dec_cid = Zeroizing::new(encryption_keys.decrypt(enc_cid).await?);
+    let client_id = String::from_utf8((*dec_cid).clone())
+        .map_err(|e| AppError::Internal(format!("Failed to decode connection client_id: {e}")))?;
+
+    let client_secret = if let Some(enc_sec) = key.user_oauth_client_secret_encrypted.as_ref() {
+        let dec_sec = Zeroizing::new(encryption_keys.decrypt(enc_sec).await?);
+        Some(String::from_utf8((*dec_sec).clone()).map_err(|e| {
+            AppError::Internal(format!("Failed to decode connection client_secret: {e}"))
+        })?)
+    } else {
+        None
+    };
+
+    Ok(Some(ResolvedOAuthCredentials {
+        client_id,
+        client_secret,
+        // The `credential_user_id` field on `ResolvedOAuthCredentials`
+        // is load-bearing only for the legacy `user_provider_credentials`
+        // path (it identifies which user-owned cred row a token was
+        // minted against, so a future refresh can re-resolve from the
+        // same row). For the multi-connection path, the refresh code
+        // reads creds directly off the `UserApiKey` row by id, so this
+        // back-reference is unused. Leaving it `None` keeps
+        // `OAuthState.credential_user_id` empty on the multi-connection
+        // path — verified consistent with §12 of the design doc.
+        credential_user_id: None,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+
+    use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
+    use crate::test_utils::{connect_test_database, test_encryption_keys};
+
+    use super::resolve_connection_oauth_credentials;
+
+    fn placeholder_key(connection_id: &str) -> UserApiKey {
+        UserApiKey {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: uuid::Uuid::new_v4().to_string(),
+            label: "test".to_string(),
+            credential_type: "oauth2".to_string(),
+            credential_encrypted: None,
+            access_token_encrypted: None,
+            refresh_token_encrypted: None,
+            token_scopes: None,
+            expires_at: None,
+            provider_config_id: Some(uuid::Uuid::new_v4().to_string()),
+            connection_id: Some(connection_id.to_string()),
+            user_oauth_client_id_encrypted: None,
+            user_oauth_client_secret_encrypted: None,
+            status: "pending_auth".to_string(),
+            last_used_at: None,
+            error_message: None,
+            source: Some("user_created".to_string()),
+            source_id: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn returns_none_when_no_key_matches_connection_id() {
+        let Some(db) = connect_test_database("user_creds_resolve_no_match").await else {
+            eprintln!("skipping integration test: no local MongoDB available");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let bogus = uuid::Uuid::new_v4().to_string();
+        let resolved = resolve_connection_oauth_credentials(&db, &enc, &bogus)
+            .await
+            .unwrap();
+        assert!(resolved.is_none(), "expected None when no key matches");
+    }
+
+    #[tokio::test]
+    async fn returns_none_when_matched_key_has_no_byo_creds() {
+        // A multi-connection key that doesn't carry BYO credentials
+        // (e.g. codex via device_code) must NOT short-circuit
+        // credential resolution. The caller falls back to the legacy
+        // resolution path which reads `ProviderConfig` / `user_provider_credentials`.
+        let Some(db) = connect_test_database("user_creds_resolve_no_byo").await else {
+            eprintln!("skipping integration test: no local MongoDB available");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let connection_id = uuid::Uuid::new_v4().to_string();
+        let key = placeholder_key(&connection_id);
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .insert_one(&key)
+            .await
+            .unwrap();
+
+        let resolved = resolve_connection_oauth_credentials(&db, &enc, &connection_id)
+            .await
+            .unwrap();
+        assert!(
+            resolved.is_none(),
+            "key without BYO creds must resolve to None"
+        );
+    }
+
+    #[tokio::test]
+    async fn returns_creds_when_matched_key_has_byo_pair() {
+        let Some(db) = connect_test_database("user_creds_resolve_byo_ok").await else {
+            eprintln!("skipping integration test: no local MongoDB available");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let connection_id = uuid::Uuid::new_v4().to_string();
+        let mut key = placeholder_key(&connection_id);
+        key.user_oauth_client_id_encrypted = Some(enc.encrypt(b"cli_marketing").await.unwrap());
+        key.user_oauth_client_secret_encrypted = Some(enc.encrypt(b"super-secret").await.unwrap());
+
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .insert_one(&key)
+            .await
+            .unwrap();
+
+        let resolved = resolve_connection_oauth_credentials(&db, &enc, &connection_id)
+            .await
+            .unwrap()
+            .expect("BYO creds should resolve to Some");
+        assert_eq!(resolved.client_id, "cli_marketing");
+        assert_eq!(resolved.client_secret.as_deref(), Some("super-secret"));
+        // Per §12: the multi-connection branch leaves credential_user_id None.
+        assert!(resolved.credential_user_id.is_none());
+    }
+}

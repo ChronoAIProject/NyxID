@@ -29,11 +29,40 @@ export const connectApiKeySchema = z.object({
     .min(1, "API key is required")
     .max(8192, "API key must be at most 8192 characters"),
   label: z.string().max(200, "Label must be at most 200 characters").optional(),
+  gateway_url: z
+    .string()
+    .url("Must be a valid URL")
+    .max(2048, "URL must be at most 2048 characters")
+    .optional()
+    .or(z.literal("")),
 });
 
 export type ConnectApiKeyFormData = z.infer<typeof connectApiKeySchema>;
 
-export const PROVIDER_TYPES = ["oauth2", "api_key", "device_code"] as const;
+const optionalTelegramString = z.string().trim().min(1);
+const TELEGRAM_BOT_USERNAME_PATTERN = /^@?[a-z][a-z0-9_]{1,28}bot$/i;
+const TELEGRAM_BOT_USERNAME_MESSAGE =
+  "Bot username must be 5-32 characters, start with a letter, use only letters, digits, or underscores, and end in 'bot'";
+
+export const telegramLoginDataSchema = z.object({
+  id: z.coerce.number().int().positive(),
+  first_name: z.string().trim().min(1, "First name is required"),
+  last_name: optionalTelegramString.optional(),
+  username: optionalTelegramString.optional(),
+  photo_url: z.string().url("Photo URL must be a valid URL").optional(),
+  auth_date: z.coerce.number().int().positive(),
+  hash: z
+    .string()
+    .trim()
+    .regex(/^[a-fA-F0-9]{64}$/, "Invalid Telegram login hash"),
+});
+
+export const PROVIDER_TYPES = [
+  "oauth2",
+  "api_key",
+  "device_code",
+  "telegram_widget",
+] as const;
 
 export type ProviderType = (typeof PROVIDER_TYPES)[number];
 
@@ -217,6 +246,38 @@ export const createProviderSchema = z
         });
       }
     }
+    if (data.provider_type === "telegram_widget") {
+      if (data.credential_mode && data.credential_mode !== "admin") {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            "Telegram widget providers only support admin credential mode",
+          path: ["credential_mode"],
+        });
+      }
+      if (!data.client_id_param_name?.trim()) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Bot username is required for Telegram widget providers",
+          path: ["client_id_param_name"],
+        });
+      } else if (
+        !TELEGRAM_BOT_USERNAME_PATTERN.test(data.client_id_param_name.trim())
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: TELEGRAM_BOT_USERNAME_MESSAGE,
+          path: ["client_id_param_name"],
+        });
+      }
+      if (!data.client_secret?.trim()) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Bot token is required for Telegram widget providers",
+          path: ["client_secret"],
+        });
+      }
+    }
   });
 
 export type CreateProviderFormData = z.infer<typeof createProviderSchema>;
@@ -260,6 +321,49 @@ export const updateProviderSchema = z
           path: ["token_url"],
         });
       }
+    }
+    if (
+      data.provider_type === "telegram_widget" &&
+      data.credential_mode &&
+      data.credential_mode !== "admin"
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Telegram widget providers only support admin credential mode",
+        path: ["credential_mode"],
+      });
+    }
+    if (
+      data.provider_type === "telegram_widget" &&
+      data.client_id_param_name &&
+      !data.client_id_param_name.trim()
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Bot username must not be blank",
+        path: ["client_id_param_name"],
+      });
+    } else if (
+      data.provider_type === "telegram_widget" &&
+      data.client_id_param_name &&
+      !TELEGRAM_BOT_USERNAME_PATTERN.test(data.client_id_param_name.trim())
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: TELEGRAM_BOT_USERNAME_MESSAGE,
+        path: ["client_id_param_name"],
+      });
+    }
+    if (
+      data.provider_type === "telegram_widget" &&
+      data.client_secret &&
+      !data.client_secret.trim()
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Bot token must not be blank",
+        path: ["client_secret"],
+      });
     }
     // Note: device_code_url and device_token_url are optional on update (blank = keep current)
   });

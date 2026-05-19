@@ -68,7 +68,16 @@ pub struct ProviderConfig {
     pub documentation_url: Option<String>,
 
     pub is_active: bool,
-    /// "admin" | "user" | "both" -- controls where OAuth client credentials come from
+    /// "admin" | "user" | "both" -- controls where OAuth client credentials come from.
+    ///
+    /// Only meaningful for `oauth2` and `device_code` providers, where it gates
+    /// whether admin-level client_id/client_secret are required at setup time
+    /// (`user_token_service::ensure_oauth_provider_configured`) and whether the
+    /// admin client_id is disclosed to users during OAuth setup
+    /// (`catalog_service`). The field has no effect at request-time credential
+    /// resolution -- proxy credential lookup (`proxy_service`,
+    /// `delegation_service`) never reads it. `api_key` providers ignore this
+    /// field; the API rejects non-"admin" values on create/update.
     #[serde(default = "default_credential_mode")]
     pub credential_mode: String,
     /// How client credentials are sent to the token endpoint:
@@ -90,6 +99,11 @@ pub struct ProviderConfig {
     /// OAuth requests (e.g., TikTok uses "client_key"). Default is "client_id".
     #[serde(default)]
     pub client_id_param_name: Option<String>,
+
+    /// Whether users must provide their own gateway/instance URL when connecting
+    /// (e.g., self-hosted providers like OpenClaw).
+    #[serde(default)]
+    pub requires_gateway_url: bool,
 
     pub created_by: String,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
@@ -136,6 +150,7 @@ mod tests {
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            requires_gateway_url: false,
             created_by: "admin".to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -146,6 +161,7 @@ mod tests {
         assert_eq!(config.provider_type, restored.provider_type);
         assert!(restored.supports_pkce);
         assert_eq!(restored.credential_mode, "admin");
+        assert!(!restored.requires_gateway_url);
     }
 
     #[test]
@@ -177,6 +193,7 @@ mod tests {
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            requires_gateway_url: false,
             created_by: "admin".to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),

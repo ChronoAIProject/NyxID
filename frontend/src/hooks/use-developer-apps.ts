@@ -11,14 +11,23 @@ export interface CreateDeveloperAppRequest {
   readonly redirect_uris: readonly string[];
   readonly client_type: "public" | "confidential";
   readonly delegation_scopes?: string;
+  readonly broker_capability_enabled?: boolean;
   readonly allowed_scopes?: readonly string[];
+  readonly target_org_id?: string;
 }
 
-export function useDeveloperApps() {
+export function useDeveloperApps(orgId?: string) {
   return useQuery({
-    queryKey: ["developer", "oauth-clients"],
+    queryKey: ["developer", "oauth-clients", orgId],
     queryFn: async (): Promise<DeveloperOAuthClientListResponse> => {
-      return api.get<DeveloperOAuthClientListResponse>("/developer/oauth-clients");
+      const params = new URLSearchParams();
+      if (orgId) params.set("org_id", orgId);
+      const query = params.toString();
+      return api.get<DeveloperOAuthClientListResponse>(
+        query
+          ? `/developer/oauth-clients?${query}`
+          : "/developer/oauth-clients",
+      );
     },
   });
 }
@@ -37,7 +46,9 @@ export function useCreateDeveloperApp() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: async (data: CreateDeveloperAppRequest): Promise<OAuthClient> => {
+    mutationFn: async (
+      data: CreateDeveloperAppRequest,
+    ): Promise<OAuthClient> => {
       return api.post<OAuthClient>("/developer/oauth-clients", data);
     },
     onSuccess: (created) => {
@@ -56,6 +67,7 @@ export interface UpdateDeveloperAppRequest {
   readonly name?: string;
   readonly redirect_uris?: readonly string[];
   readonly delegation_scopes?: string;
+  readonly broker_capability_enabled?: boolean;
   readonly allowed_scopes?: readonly string[];
 }
 
@@ -75,7 +87,10 @@ export function useUpdateDeveloperApp() {
       readonly clientId: string;
       readonly data: UpdateDeveloperAppRequest;
     }): Promise<OAuthClient> => {
-      return api.patch<OAuthClient>(`/developer/oauth-clients/${clientId}`, data);
+      return api.patch<OAuthClient>(
+        `/developer/oauth-clients/${clientId}`,
+        data,
+      );
     },
     onSuccess: (updated) => {
       void queryClient.invalidateQueries({
@@ -94,7 +109,9 @@ export function useDeleteDeveloperApp() {
 
   return useMutation({
     mutationFn: async (clientId: string): Promise<{ message: string }> => {
-      return api.delete<{ message: string }>(`/developer/oauth-clients/${clientId}`);
+      return api.delete<{ message: string }>(
+        `/developer/oauth-clients/${clientId}`,
+      );
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({

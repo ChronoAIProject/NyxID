@@ -1,11 +1,22 @@
+import { useCallback } from "react";
+import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Copy } from "lucide-react";
+import { toast } from "sonner";
 import {
   OAUTH_SCOPE_META,
   scopeRiskClass,
   scopeRiskLabel,
 } from "@/lib/constants";
+import {
+  INTEGRATION_GUIDE_TABS,
+  INTEGRATION_GUIDE_TAB_DEFAULT,
+  parseTab,
+} from "@/lib/url-tabs";
+import { PageHeader } from "@/components/shared/page-header";
 
 function CodeBlock({
   label,
@@ -14,14 +25,34 @@ function CodeBlock({
   readonly label: string;
   readonly code: string;
 }) {
+  const handleCopy = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(code);
+      toast.success("Copied to clipboard");
+    } catch {
+      toast.error("Failed to copy");
+    }
+  }, [code]);
+
   return (
     <div className="space-y-2">
-      <Badge variant="outline" className="text-[10px]">
+      <Badge variant="secondary" className="text-[10px]">
         {label}
       </Badge>
-      <pre className="overflow-x-auto rounded-lg border border-border bg-muted px-4 py-3 font-mono text-xs leading-relaxed text-foreground">
-        {code}
-      </pre>
+      <div className="relative">
+        <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-12 min-h-[44px] font-mono text-xs leading-relaxed text-foreground">
+          {code}
+        </pre>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="absolute right-2 top-2 h-8 w-8 text-text-tertiary hover:text-foreground"
+          onClick={() => void handleCopy()}
+          aria-label="Copy"
+        >
+          <Copy className="h-3.5 w-3.5" />
+        </Button>
+      </div>
     </div>
   );
 }
@@ -38,7 +69,7 @@ function StepCard({
   return (
     <Card>
       <CardHeader className="pb-3">
-        <CardTitle className="flex items-center gap-3 text-base">
+        <CardTitle className="flex items-center gap-3">
           <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-primary text-xs font-semibold text-primary-foreground">
             {index}
           </span>
@@ -104,19 +135,26 @@ const rawUserInfo = `GET /api/v1/users/me
 Authorization: Bearer ACCESS_TOKEN`;
 
 export function IntegrationGuidePage() {
+  const searchParams = useRouterState({ select: (s) => s.location.search as Record<string, unknown> });
+  const navigate = useNavigate();
+  const currentTab = parseTab(
+    searchParams.tab,
+    INTEGRATION_GUIDE_TABS,
+    INTEGRATION_GUIDE_TAB_DEFAULT,
+  );
+
+  function handleTabChange(value: string) {
+    void navigate({ to: "/integration-guide", search: { tab: value }, replace: true });
+  }
+
   return (
     <div className="space-y-8">
-      <div className="space-y-2">
-        <h2 className="font-display text-3xl md:text-5xl font-normal tracking-tight">
-          Integration Guide
-        </h2>
-        <p className="text-muted-foreground">
-          Use the official React or Core SDK (recommended), or integrate with
-          raw OAuth endpoints for custom flows.
-        </p>
-      </div>
+      <PageHeader
+        title="Integration & SDK Guide"
+        description="Use the official React or Core SDK (recommended), or integrate with raw OAuth endpoints for custom flows."
+      />
 
-      <Tabs defaultValue="react" className="space-y-6">
+      <Tabs value={currentTab} onValueChange={handleTabChange} className="space-y-6">
         <TabsList>
           <TabsTrigger value="react">React SDK</TabsTrigger>
           <TabsTrigger value="core">Core SDK</TabsTrigger>
@@ -168,21 +206,23 @@ export function IntegrationGuidePage() {
           {Object.entries(OAUTH_SCOPE_META).map(([scope, meta]) => (
             <div
               key={scope}
-              className="rounded-md border border-border bg-muted/50 px-3 py-2"
+              className="flex items-center gap-4 rounded-lg border border-border bg-muted/50 px-3 py-2.5"
             >
-              <div className="flex items-center justify-between gap-2">
-                <p className="font-mono text-xs text-foreground">{scope}</p>
-                <span
-                  className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${scopeRiskClass(meta.risk)}`}
-                >
-                  {scopeRiskLabel(meta.risk)}
-                </span>
+              <div className="min-w-0 flex-1">
+                <p className="text-[12px] text-foreground break-all">{scope}</p>
+                <p className="text-[11px] text-muted-foreground">
+                  <span className="font-medium text-foreground">
+                    {meta.title}
+                  </span>
+                  {" - "}
+                  {meta.description}
+                </p>
               </div>
-              <p className="mt-1 text-xs text-muted-foreground">
-                <span className="font-medium text-foreground">{meta.title}</span>
-                {" - "}
-                {meta.description}
-              </p>
+              <span
+                className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-medium ${scopeRiskClass(meta.risk)}`}
+              >
+                {scopeRiskLabel(meta.risk)}
+              </span>
             </div>
           ))}
         </CardContent>

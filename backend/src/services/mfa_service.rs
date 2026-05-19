@@ -40,7 +40,17 @@ pub async fn setup_totp(
     user_id: &str,
     user_email: &str,
 ) -> AppResult<TotpSetupResult> {
-    // Check if user already has an active TOTP factor
+    // Look up any active TOTP factor for this user. There are two
+    // shapes that can come back:
+    //   - VERIFIED: MFA is fully enabled, the user is using TOTP.
+    //     Refuse with 409 — they should `mfa disable` first.
+    //   - UNVERIFIED: a prior `setup` call started enrollment but
+    //     `confirm` never completed (e.g. user closed the wizard tab,
+    //     terminal flow died mid-prompt, NyxID#506 reproducer). The
+    //     stranded factor blocks re-enrollment with no recovery path
+    //     other than direct DB access. Deactivate it and proceed —
+    //     the user-visible effect is exactly what they expected from
+    //     re-running `mfa setup`.
     let existing = db
         .collection::<MfaFactor>(MFA_FACTORS)
         .find_one(doc! {
@@ -50,10 +60,31 @@ pub async fn setup_totp(
         })
         .await?;
 
-    if existing.is_some() {
-        return Err(AppError::Conflict(
-            "TOTP is already configured for this account".to_string(),
-        ));
+    if let Some(prev) = existing {
+        if prev.is_verified {
+            return Err(AppError::Conflict(
+                "TOTP is already configured for this account".to_string(),
+            ));
+        }
+        // Soft-deactivate the stranded unverified factor. We update by
+        // _id rather than the broader filter so a concurrent `confirm`
+        // racing this update can't accidentally activate the new
+        // factor we're about to mint (the confirm handler in
+        // `verify_totp_setup` looks up by factor_id + user_id, so a
+        // legitimate confirm in flight will simply 404 once we mark
+        // this row inactive — exactly what the refresh path wants).
+        let now = Utc::now();
+        db.collection::<MfaFactor>(MFA_FACTORS)
+            .update_one(
+                doc! { "_id": &prev.id },
+                doc! {
+                    "$set": {
+                        "is_active": false,
+                        "updated_at": bson::DateTime::from_chrono(now),
+                    }
+                },
+            )
+            .await?;
     }
 
     let secret = Secret::generate_secret();
