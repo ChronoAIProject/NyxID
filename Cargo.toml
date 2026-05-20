@@ -43,10 +43,18 @@ install-updater = false
 
 [workspace.metadata.dist.github-custom-runners]
 aarch64-apple-darwin = "macos-latest"
-aarch64-unknown-linux-gnu = "ubuntu-24.04-arm"
 x86_64-apple-darwin = "macos-latest"
 x86_64-unknown-linux-gnu = "ubuntu-24.04"
 global = "ubuntu-24.04"
+
+# Build the aarch64 Linux artifact inside an older-glibc container so it
+# stays forward-compatible with NVIDIA Jetson / Raspberry Pi / Ubuntu 20.04
+# hosts (glibc 2.31). The runner is still ubuntu-24.04-arm; cargo-dist runs
+# the build job inside `buildpack-deps:bullseye`, which provides curl, git,
+# build-essential, and gcc 10 (past gcc bug #95189). See NyxID issue #802.
+[workspace.metadata.dist.github-custom-runners.aarch64-unknown-linux-gnu]
+runner = "ubuntu-24.04-arm"
+container = { image = "buildpack-deps:bullseye", host = "aarch64-unknown-linux-gnu", package-manager = "apt" }
 
 [workspace.metadata.dist.dependencies.apt]
 libdbus-1-dev = "*"

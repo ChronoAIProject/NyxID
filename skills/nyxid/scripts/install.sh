@@ -160,6 +160,49 @@ migrate_prebuilt_to_versioned_layout() {
   info "Versioned install: $versioned_bin"
 }
 
+ensure_source_build_cc() {
+  # aws-lc-sys (a transitive dep via sigstore) hard-panics when built with a
+  # gcc affected by https://gcc.gnu.org/bugzilla/show_bug.cgi?id=95189 (memcmp
+  # miscompile, fixed in gcc 10). On long-tail aarch64 hosts (NVIDIA Jetson
+  # Ubuntu 20.04, older Raspberry Pi OS) the system cc is still gcc 9.x.
+  # When we detect that, switch to clang if available; otherwise stop with an
+  # actionable error before cargo wastes minutes on a doomed compile. See
+  # NyxID issue #802.
+  [ "$(uname -s)" = "Linux" ] || return 0
+  [ -z "${CC:-}" ] || return 0
+
+  local cc_cmd cc_version cc_major
+  cc_cmd="$(command -v cc 2>/dev/null || command -v gcc 2>/dev/null || true)"
+  [ -n "$cc_cmd" ] || return 0
+
+  cc_version="$("$cc_cmd" -dumpversion 2>/dev/null | head -n1)"
+  cc_major="${cc_version%%.*}"
+  case "$cc_major" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+
+  if [ "$cc_major" -ge 10 ]; then
+    return 0
+  fi
+
+  warn "Detected $cc_cmd $cc_version; aws-lc-sys refuses gcc < 10 due to gcc bug #95189."
+  if command -v clang &>/dev/null; then
+    info "Using clang to compile native C deps (CC=clang CXX=clang++)."
+    export CC=clang
+    if command -v clang++ &>/dev/null; then
+      export CXX=clang++
+    fi
+    return 0
+  fi
+
+  fail "gcc $cc_version cannot build aws-lc-sys, and clang is not installed.
+  Install a working C toolchain and re-run this installer. For example:
+    Debian/Ubuntu: sudo apt-get install -y clang
+    Fedora/RHEL:   sudo dnf install -y clang
+  Background: https://gcc.gnu.org/bugzilla/show_bug.cgi?id=95189
+  Tracking issue: https://github.com/ChronoAIProject/NyxID/issues/802"
+}
+
 install_from_source() {
   info "Falling back to source install. This requires Rust and may take several minutes."
 
@@ -181,6 +224,8 @@ install_from_source() {
   if ! command -v cargo &>/dev/null; then
     fail "cargo still not found after setup. Please add $CARGO_BIN to your PATH manually."
   fi
+
+  ensure_source_build_cc
 
   cargo install --git "$REPO" nyxid-cli --force --locked
 
