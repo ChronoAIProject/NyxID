@@ -3,6 +3,7 @@ import { useState } from "react";
 import { PortalMarkLogo } from "@/components/shared/portal-mark-logo";
 import { LandingFooter } from "@/features/landing/components/landing-footer";
 import { useScroll } from "@/features/landing/hooks/use-scroll";
+import { useLogoHref } from "@/hooks/use-logo-href";
 import "@/features/landing/landing.css";
 
 // Visually matches LandingNavbar (border, glow, blur) but uses absolute hrefs
@@ -10,6 +11,7 @@ import "@/features/landing/landing.css";
 // non-existent local anchor.
 function BlogNavbar() {
   const [scrolled, setScrolled] = useState(false);
+  const logoHref = useLogoHref();
   useScroll((scrollY) => setScrolled(scrollY > 0));
 
   return (
@@ -21,7 +23,7 @@ function BlogNavbar() {
       }`}
     >
       <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
-        <a href="/" className="flex items-center gap-2">
+        <a href={logoHref} className="flex items-center gap-2">
           <PortalMarkLogo size={32} />
           <span className="font-serif text-xl text-white">NyxID</span>
         </a>

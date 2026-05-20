@@ -54,12 +54,12 @@ export function WhoItsFor() {
   const { t } = useTranslation();
 
   return (
-    <section className="px-6 py-24" ref={ref}>
+    <section className="px-6 py-20" ref={ref}>
       <div className="mx-auto max-w-6xl">
-        <h2 className="mb-4 text-center font-serif text-3xl text-white md:text-4xl">
+        <h2 className="mb-4 text-center text-3xl font-bold tracking-tight text-foreground md:text-4xl">
           {t("whoItsFor.heading")}
         </h2>
-        <p className="mx-auto mb-16 max-w-xl text-center text-gray-300">
+        <p className="mx-auto mb-12 max-w-xl text-center text-muted-foreground">
           {t("whoItsFor.subheading")}
         </p>
 
@@ -67,18 +67,18 @@ export function WhoItsFor() {
           {segmentKeys.map((key, i) => (
             <div
               key={key}
-              className={`rounded-2xl border border-landing-border-subtle bg-landing-surface p-8 transition-colors hover:border-white/[0.15] ${
+              className={`rounded-xl border border-border/50 bg-card p-6 transition-colors hover:border-white/[0.15] ${
                 inView ? "animate-fade-up" : "opacity-0"
               }`}
               style={{ animationDelay: `${i * 120}ms` }}
             >
-              <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-primary/10 text-primary">
+              <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-nyx-secondary-400/10 text-nyx-secondary-400">
                 {icons[i]}
               </div>
-              <h3 className="mb-2 font-mono text-lg font-medium text-white">
+              <h3 className="mb-2 text-lg font-semibold text-foreground">
                 {t(`whoItsFor.${key}.title`)}
               </h3>
-              <p className="leading-relaxed text-gray-300">
+              <p className="leading-relaxed text-muted-foreground">
                 {t(`whoItsFor.${key}.description`)}
               </p>
             </div>

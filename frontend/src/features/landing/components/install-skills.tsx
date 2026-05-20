@@ -19,27 +19,27 @@ export function InstallSkills() {
   };
 
   return (
-    <section className="border-y border-landing-border-subtle bg-landing-surface/40 px-6 py-20">
+    <section className="border-y border-border/60 bg-card/40 px-6 py-20">
       <div className="mx-auto max-w-3xl text-center">
-        <h2 className="font-serif text-3xl text-white md:text-4xl">
+        <h2 className="text-3xl font-bold tracking-tight text-foreground md:text-4xl">
           {t("install.heading")}
         </h2>
-        <p className="mx-auto mt-4 max-w-2xl text-base leading-relaxed text-gray-400">
+        <p className="mx-auto mt-4 max-w-2xl text-base leading-relaxed text-muted-foreground">
           {t("install.subheading")}
         </p>
 
-        <div className="mt-10 flex flex-col items-stretch overflow-hidden rounded-xl border border-primary/30 bg-black/50 backdrop-blur-md sm:flex-row">
+        <div className="mt-10 flex flex-col items-stretch overflow-hidden rounded-xl border border-border bg-black/40 backdrop-blur-md sm:flex-row">
           <input
             readOnly
             value={INSTALL_COMMAND}
             onFocus={(e) => e.currentTarget.select()}
             aria-label={t("install.commandLabel")}
-            className="flex-1 truncate bg-transparent px-5 py-4 text-left font-mono text-sm text-gray-200 outline-none"
+            className="flex-1 truncate bg-transparent px-5 py-4 text-left font-mono text-sm text-muted-foreground outline-none"
           />
           <button
             type="button"
             onClick={handleCopy}
-            className="flex items-center justify-center gap-2 border-t border-primary/30 bg-primary/15 px-6 py-4 text-sm font-semibold text-white transition-colors hover:bg-primary/30 sm:border-l sm:border-t-0"
+            className="flex items-center justify-center gap-2 border-t border-border bg-nyx-secondary-400/10 px-6 py-4 text-sm font-medium text-nyx-secondary-400 transition-colors hover:bg-nyx-secondary-400/20 sm:border-l sm:border-t-0"
           >
             {copied ? (
               <>
@@ -91,7 +91,7 @@ export function InstallSkills() {
           </button>
         </div>
 
-        <p className="mt-5 text-sm text-gray-500">{t("install.helper")}</p>
+        <p className="mt-5 text-sm text-text-tertiary">{t("install.helper")}</p>
       </div>
     </section>
   );

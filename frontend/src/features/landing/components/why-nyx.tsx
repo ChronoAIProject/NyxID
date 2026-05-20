@@ -145,7 +145,7 @@ export function WhyNyx() {
               top: "10%",
               left: "5%",
               background:
-                "radial-gradient(circle, rgba(139,92,246,0.14) 0%, rgba(139,92,246,0.04) 45%, transparent 70%)",
+                "radial-gradient(circle, rgba(166,114,251,0.14) 0%, rgba(166,114,251,0.04) 45%, transparent 70%)",
               filter: "blur(20px)",
             }}
           />
@@ -191,16 +191,16 @@ export function WhyNyx() {
           className={`relative mx-auto max-w-3xl ${inView ? "animate-fade-up" : "opacity-0"}`}
           style={{ zIndex: 10 }}
         >
-          <div className="rounded-2xl border border-landing-border-subtle bg-landing-surface/90 p-10 backdrop-blur-sm md:p-14">
-            <p className="mb-6 font-mono text-xs uppercase tracking-widest text-primary">
+          <div className="rounded-xl border border-border/50 bg-card/90 p-8 backdrop-blur-sm md:p-12">
+            <p className="mb-6 text-xs font-medium uppercase tracking-widest text-nyx-secondary-400">
               {t("whyNyx.label")}
             </p>
 
-            <blockquote className="mb-8 font-serif text-2xl leading-relaxed text-white md:text-3xl">
+            <blockquote className="mb-8 text-2xl font-semibold leading-relaxed tracking-tight text-foreground md:text-3xl">
               {t("whyNyx.quote")}
             </blockquote>
 
-            <div className="space-y-4 leading-relaxed text-gray-300">
+            <div className="space-y-4 leading-relaxed text-muted-foreground">
               <p>{t("whyNyx.para1")}</p>
               <p>{t("whyNyx.para2")}</p>
               <p className="font-medium text-nyx-100">

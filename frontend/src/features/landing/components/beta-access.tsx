@@ -8,28 +8,28 @@ export function BetaAccess() {
   const { t } = useTranslation();
 
   return (
-    <section id="beta" className="px-6 py-24" ref={ref}>
+    <section id="beta" className="px-6 py-20" ref={ref}>
       <div
         className={`mx-auto max-w-lg ${
           inView ? "animate-fade-up" : "opacity-0"
         }`}
       >
-        <h2 className="mb-4 text-center font-serif text-3xl text-white md:text-4xl">
+        <h2 className="mb-4 text-center text-3xl font-bold tracking-tight text-foreground md:text-4xl">
           {t("beta.heading")}
         </h2>
-        <p className="mx-auto mb-2 max-w-md text-center text-gray-300">
+        <p className="mx-auto mb-2 max-w-md text-center text-muted-foreground">
           {t("beta.subheading")}
         </p>
-        <p className="mb-10 text-center font-mono text-sm text-primary">
+        <p className="mb-10 text-center text-sm font-medium text-nyx-secondary-400">
           {t("beta.socialProof")}
         </p>
 
-        <div className="rounded-2xl border border-landing-border-subtle bg-landing-surface p-8 text-center">
+        <div className="rounded-xl border border-border/50 bg-card p-6 text-center">
           <a
             href={DISCORD_URL}
             target="_blank"
             rel="noopener noreferrer"
-            className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-primary py-3.5 font-semibold text-white transition-colors hover:bg-nyx-400"
+            className="inline-flex w-full items-center justify-center gap-2 rounded-lg nyx-gradient-vivid py-3.5 font-medium text-white shadow-[0_2px_12px_rgba(90,42,241,0.25)] transition-all hover:shadow-[0_4px_20px_rgba(90,42,241,0.35)] hover:brightness-110"
           >
             <svg
               width="20"
@@ -42,7 +42,7 @@ export function BetaAccess() {
             </svg>
             {t("beta.discordCta")}
           </a>
-          <p className="mt-4 text-center text-xs text-gray-500">
+          <p className="mt-4 text-center text-xs text-text-tertiary">
             {t("beta.disclaimer")}
           </p>
         </div>

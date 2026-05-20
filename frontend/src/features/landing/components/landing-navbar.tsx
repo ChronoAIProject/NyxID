@@ -2,10 +2,12 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { LanguageSwitcher } from "./language-switcher";
 import { useScroll } from "../hooks/use-scroll";
+import { useAuthStore } from "@/stores/auth-store";
 
 export function LandingNavbar() {
   const [scrolled, setScrolled] = useState(false);
   const { t } = useTranslation();
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
 
   useScroll((scrollY) => setScrolled(scrollY > 0));
 
@@ -16,14 +18,14 @@ export function LandingNavbar() {
 
   return (
     <nav
-      className={`fixed top-0 left-0 right-0 z-50 border-b backdrop-blur-md transition-all duration-500 ${
+      className={`fixed top-0 left-0 right-0 z-50 border-b backdrop-blur-md transition-colors duration-300 ${
         scrolled
-          ? "border-primary/20 bg-landing-bg/80 navbar-glow"
-          : "border-landing-border-subtle bg-landing-bg/80"
+          ? "border-border/60 bg-landing-bg/80"
+          : "border-transparent bg-landing-bg/60"
       }`}
     >
       <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
-        <a href="#" className="flex items-center">
+        <a href={isAuthenticated ? "/dashboard" : "#"} className="flex items-center">
           <img src="/nyxid-wordmark.svg" alt="NyxID" className="h-8 w-auto" />
         </a>
 
@@ -31,13 +33,13 @@ export function LandingNavbar() {
           <LanguageSwitcher />
           <a
             href={loginHref}
-            className="rounded-lg border border-primary/40 px-5 py-2 text-sm font-semibold text-white transition-colors hover:bg-primary/10"
+            className="rounded-lg border border-white/[0.08] px-5 py-2 text-sm font-medium text-foreground transition-colors hover:border-white/[0.15] hover:bg-white/[0.03]"
           >
             {t("nav.login")}
           </a>
           <a
             href={registerHref}
-            className="hidden rounded-lg bg-primary px-5 py-2 text-sm font-semibold text-white transition-colors hover:bg-nyx-400 md:inline-block"
+            className="hidden rounded-lg nyx-gradient-vivid px-5 py-2 text-sm font-medium text-white shadow-[0_0_12px_rgba(90,42,241,0.25)] transition-all hover:shadow-[0_0_18px_rgba(90,42,241,0.35)] hover:brightness-110 md:inline-block"
           >
             {t("nav.register")}
           </a>
