@@ -34,7 +34,7 @@ pub async fn run(command: ExternalKeyCommands) -> Result<()> {
 
                         for key in items {
                             let id = key["id"].as_str().or(key["_id"].as_str()).unwrap_or("-");
-                            let short_id = if id.len() > 8 { &id[..8] } else { id };
+                            let short_id = crate::commands::short_id(id);
                             let label = key["label"]
                                 .as_str()
                                 .or(key["name"].as_str())

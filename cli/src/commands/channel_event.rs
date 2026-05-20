@@ -196,11 +196,11 @@ async fn run_channel(command: ChannelEventChannelCommands) -> Result<()> {
                     table.set_header(["ID", "Channel ID", "Type", "Agent Key", "Active"]);
                     for conv in devices {
                         let id = conv["id"].as_str().unwrap_or("-");
-                        let short_id = if id.len() > 8 { &id[..8] } else { id };
+                        let short_id = crate::commands::short_id(id);
                         let chan = conv["platform_conversation_id"].as_str().unwrap_or("-");
                         let ctype = conv["platform_conversation_type"].as_str().unwrap_or("-");
                         let agent = conv["agent_api_key_id"].as_str().unwrap_or("-");
-                        let short_agent = if agent.len() > 8 { &agent[..8] } else { agent };
+                        let short_agent = crate::commands::short_id(agent);
                         let active = if conv["is_active"].as_bool().unwrap_or(false) {
                             "yes"
                         } else {

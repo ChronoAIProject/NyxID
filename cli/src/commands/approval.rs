@@ -49,7 +49,7 @@ pub async fn run(command: ApprovalCommands) -> Result<()> {
 
                         for req in items {
                             let id = req["id"].as_str().or(req["_id"].as_str()).unwrap_or("-");
-                            let short_id = if id.len() > 8 { &id[..8] } else { id };
+                            let short_id = crate::commands::short_id(id);
                             let service = req["service_name"]
                                 .as_str()
                                 .or(req["service_slug"].as_str())
@@ -184,7 +184,7 @@ pub async fn run(command: ApprovalCommands) -> Result<()> {
                                 .as_str()
                                 .or(grant["_id"].as_str())
                                 .unwrap_or("-");
-                            let short_id = if gid.len() > 8 { &gid[..8] } else { gid };
+                            let short_id = crate::commands::short_id(gid);
                             let service = grant["service_name"].as_str().unwrap_or("-");
                             let requester = grant["requester_label"]
                                 .as_str()
@@ -317,7 +317,7 @@ pub async fn run(command: ApprovalCommands) -> Result<()> {
 
                         for cfg in items {
                             let cid = cfg["service_id"].as_str().unwrap_or("-");
-                            let short_id = if cid.len() > 8 { &cid[..8] } else { cid };
+                            let short_id = crate::commands::short_id(cid);
                             let service = cfg["service_name"].as_str().unwrap_or("-");
                             let require = cfg["approval_required"]
                                 .as_bool()
@@ -394,9 +394,11 @@ async fn resolve_optional_org(api: &mut ApiClient, org: Option<String>) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::mock_auth;
-    use wiremock::matchers::{body_json, method, path};
+    use crate::test_support::{mock_auth, mock_auth_with_output};
+    use wiremock::matchers::{body_json, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const ORG_UUID: &str = "00000000-0000-0000-0000-0000000000aa";
 
     #[tokio::test]
     async fn list_fetches_requests() {
@@ -613,5 +615,85 @@ mod tests {
         })
         .await
         .expect("service-configs should succeed");
+    }
+
+    #[tokio::test]
+    async fn list_with_org_scopes_request_path() {
+        let server = MockServer::start().await;
+        // A UUID org short-circuits resolution (no /orgs lookup) and is
+        // appended as ?org_id=… on the requests path.
+        Mock::given(method("GET"))
+            .and(path("/api/v1/approvals/requests"))
+            .and(query_param("org_id", ORG_UUID))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "requests": [] })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ApprovalCommands::List {
+            org: Some(ORG_UUID.to_string()),
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("org-scoped list should succeed");
+    }
+
+    // --- Decision / set-config edge cases ---
+
+    #[tokio::test]
+    async fn deny_without_reason_omits_reason_field() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/approvals/requests/r1/decide"))
+            .and(body_json(serde_json::json!({ "decision": "denied" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ApprovalCommands::Deny {
+            id: "r1".to_string(),
+            reason: None,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("deny without reason should succeed");
+    }
+
+    #[tokio::test]
+    async fn set_config_with_no_fields_is_noop() {
+        let server = MockServer::start().await;
+        // No flags → "No updates specified", returns Ok without any HTTP.
+        run(ApprovalCommands::SetConfig {
+            id: "svc-1".to_string(),
+            require_approval: None,
+            approval_mode: None,
+            org: None,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("no-op set-config should succeed");
+    }
+
+    #[tokio::test]
+    async fn revoke_grant_table_output() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/approvals/grants/g1"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ApprovalCommands::RevokeGrant {
+            id: "g1".to_string(),
+            org: None,
+            yes: true,
+            auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
+        })
+        .await
+        .expect("revoke-grant table should succeed");
     }
 }

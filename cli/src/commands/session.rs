@@ -32,7 +32,7 @@ pub async fn run(command: SessionCommands) -> Result<()> {
                                 .as_str()
                                 .or(session["_id"].as_str())
                                 .unwrap_or("-");
-                            let short_id = if id.len() > 8 { &id[..8] } else { id };
+                            let short_id = crate::commands::short_id(id);
                             let client = session["user_agent"].as_str().unwrap_or("-");
                             let ip = session["ip_address"].as_str().unwrap_or("-");
                             let created = session["created_at"].as_str().unwrap_or("-");

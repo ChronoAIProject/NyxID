@@ -12,11 +12,7 @@ pub async fn run(command: McpCommands) -> Result<()> {
 
             match auth.output {
                 OutputFormat::Json => {
-                    let config = serde_json::json!({
-                        "mcp_url": mcp_url,
-                        "tool": tool,
-                        "base_url": base,
-                    });
+                    let config = mcp_config_json(&tool, base);
                     println!("{}", serde_json::to_string_pretty(&config)?);
                 }
                 OutputFormat::Table => match tool.as_str() {
@@ -88,5 +84,30 @@ pub async fn run(command: McpCommands) -> Result<()> {
             }
             Ok(())
         }
+    }
+}
+
+/// Build the machine-readable MCP config object emitted by
+/// `--output json`. Kept pure so the agent-facing contract — the
+/// `mcp_url` value clients copy into their config — is unit-testable
+/// without capturing stdout. `mcp_url` is always `{base}/mcp`.
+fn mcp_config_json(tool: &str, base: &str) -> serde_json::Value {
+    serde_json::json!({
+        "mcp_url": format!("{base}/mcp"),
+        "tool": tool,
+        "base_url": base,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mcp_config_json_derives_url_from_base() {
+        let v = mcp_config_json("claude-code", "https://auth.nyxid.dev");
+        assert_eq!(v["mcp_url"], "https://auth.nyxid.dev/mcp");
+        assert_eq!(v["tool"], "claude-code");
+        assert_eq!(v["base_url"], "https://auth.nyxid.dev");
     }
 }

@@ -238,7 +238,8 @@ fn confirm(prompt: &str) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::mock_auth;
+    use crate::cli::OutputFormat;
+    use crate::test_support::{mock_auth, mock_auth_with_output};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -297,6 +298,12 @@ mod tests {
         assert_eq!(format_external_subject(&Value::Null), "-");
     }
 
+    #[test]
+    fn format_external_subject_without_tenant_omits_tenant_segment() {
+        let v = serde_json::json!({"platform": "github", "external_user_id": "u9"});
+        assert_eq!(format_external_subject(&v), "github · u9");
+    }
+
     // --- Command-level (broker-binding HTTP) ---
 
     #[tokio::test]
@@ -343,5 +350,51 @@ mod tests {
         })
         .await
         .expect("revoke should succeed");
+    }
+
+    #[tokio::test]
+    async fn binding_show_fetches_and_resolves_prefix() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/users/me/broker-bindings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(sample_bindings()))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(OauthCommands::Bindings {
+            command: BindingCommands::Show {
+                id_or_hash: "deadbeefcafe".to_string(),
+                auth: mock_auth(server.uri()),
+            },
+        })
+        .await
+        .expect("show should succeed");
+    }
+
+    #[tokio::test]
+    async fn binding_revoke_table_output() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/users/me/broker-bindings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(sample_bindings()))
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/users/me/broker-bindings/deadbeefcafe0001"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(OauthCommands::Bindings {
+            command: BindingCommands::Revoke {
+                id_or_hash: "deadbeefcafe".to_string(),
+                yes: true,
+                auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
+            },
+        })
+        .await
+        .expect("revoke table should succeed");
     }
 }

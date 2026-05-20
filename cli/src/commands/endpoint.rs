@@ -34,7 +34,7 @@ pub async fn run(command: EndpointCommands) -> Result<()> {
 
                         for ep in items {
                             let id = ep["id"].as_str().or(ep["_id"].as_str()).unwrap_or("-");
-                            let short_id = if id.len() > 8 { &id[..8] } else { id };
+                            let short_id = crate::commands::short_id(id);
                             let label = ep["label"].as_str().or(ep["name"].as_str()).unwrap_or("-");
                             let url = ep["url"]
                                 .as_str()

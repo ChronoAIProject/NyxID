@@ -81,7 +81,7 @@ async fn run_invite_code(command: InviteCodeCommands) -> Result<()> {
 
                     for ic in items {
                         let id = ic["id"].as_str().unwrap_or("-");
-                        let short_id = if id.len() > 8 { &id[..8] } else { id };
+                        let short_id = crate::commands::short_id(id);
                         let code = ic["code"].as_str().unwrap_or("-");
                         let used = ic["used_count"].as_i64().unwrap_or(0);
                         let max = ic["max_uses"].as_i64().unwrap_or(0);
@@ -170,7 +170,7 @@ async fn run_user(command: AdminUserCommands) -> Result<()> {
 
                     for user in &users {
                         let id = user["id"].as_str().unwrap_or("-");
-                        let short_id = if id.len() > 8 { &id[..8] } else { id };
+                        let short_id = crate::commands::short_id(id);
                         let email = user["email"].as_str().unwrap_or("-");
                         let name = user["display_name"].as_str().unwrap_or("-");
                         let role = role_from_user(user);

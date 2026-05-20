@@ -232,7 +232,7 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
 
                         for bot in items {
                             let id = bot["id"].as_str().unwrap_or("-");
-                            let short_id = if id.len() > 8 { &id[..8] } else { id };
+                            let short_id = crate::commands::short_id(id);
                             let platform = bot["platform"].as_str().unwrap_or("-");
                             let username = bot["platform_bot_username"].as_str().unwrap_or("-");
                             let label = bot["label"].as_str().unwrap_or("-");
@@ -469,17 +469,13 @@ async fn run_route(command: ChannelRouteCommands) -> Result<()> {
 
                         for route in items {
                             let id = route["id"].as_str().unwrap_or("-");
-                            let short_id = if id.len() > 8 { &id[..8] } else { id };
+                            let short_id = crate::commands::short_id(id);
                             let bot = route["channel_bot_id"].as_str().unwrap_or("-");
-                            let short_bot = if bot.len() > 8 { &bot[..8] } else { bot };
+                            let short_bot = crate::commands::short_id(bot);
                             let platform = route["platform"].as_str().unwrap_or("-");
                             let conv_id = route["platform_conversation_id"].as_str().unwrap_or("*");
                             let agent_key = route["agent_api_key_id"].as_str().unwrap_or("-");
-                            let short_key = if agent_key.len() > 8 {
-                                &agent_key[..8]
-                            } else {
-                                agent_key
-                            };
+                            let short_key = crate::commands::short_id(agent_key);
                             let is_default = if route["default_agent"].as_bool().unwrap_or(false) {
                                 "yes"
                             } else {
@@ -615,9 +611,11 @@ fn env_secret(var: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{env_lock, mock_auth};
-    use wiremock::matchers::{body_partial_json, method, path};
+    use crate::test_support::{env_lock, mock_auth, mock_auth_with_output};
+    use wiremock::matchers::{body_partial_json, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const ORG_UUID: &str = "00000000-0000-0000-0000-0000000000bb";
 
     fn register(
         uri: String,
@@ -888,5 +886,376 @@ mod tests {
     #[test]
     fn resolve_optional_secret_none_when_absent() {
         assert!(resolve_optional_secret(None, None).expect("ok").is_none());
+    }
+
+    #[test]
+    fn resolve_secret_reads_env_var() {
+        let _guard = env_lock().lock().expect("env lock");
+        // SAFETY: env mutation serialized by env_lock.
+        unsafe {
+            std::env::set_var("NYXID_TEST_BOT_TOKEN", "from-env");
+        }
+        let got = resolve_secret(None, Some("NYXID_TEST_BOT_TOKEN"), "bot token").expect("ok");
+        unsafe {
+            std::env::remove_var("NYXID_TEST_BOT_TOKEN");
+        }
+        assert_eq!(got, "from-env");
+    }
+
+    // --- Register: optional fields + table output ---
+
+    #[tokio::test]
+    async fn register_lark_includes_all_optional_fields() {
+        let server = MockServer::start().await;
+        // app_id / app_secret / encrypt_key / public_key are each added to
+        // the body only when present — assert they all round-trip.
+        Mock::given(method("POST"))
+            .and(path("/api/v1/channel-bots"))
+            .and(body_partial_json(serde_json::json!({
+                "platform": "lark",
+                "app_id": "cli_app",
+                "app_secret": "secret-x",
+                "verification_token": "vtok",
+                "encrypt_key": "ekey",
+                "public_key": "pkey"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "bot-3", "status": "pending_webhook"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ChannelBotCommands::Register {
+            platform: "lark".to_string(),
+            bot_token: Some("tok".to_string()),
+            token_env: None,
+            label: "support".to_string(),
+            app_id: Some("cli_app".to_string()),
+            app_secret: Some("secret-x".to_string()),
+            app_secret_env: None,
+            verification_token: Some("vtok".to_string()),
+            encrypt_key: Some("ekey".to_string()),
+            public_key: Some("pkey".to_string()),
+            org: None,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("lark full register should succeed");
+    }
+
+    #[tokio::test]
+    async fn register_with_org_sets_target_org_id() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/channel-bots"))
+            .and(body_partial_json(
+                serde_json::json!({ "target_org_id": ORG_UUID }),
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "id": "bot-4", "status": "active" })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ChannelBotCommands::Register {
+            platform: "telegram".to_string(),
+            bot_token: Some("tok".to_string()),
+            token_env: None,
+            label: "support".to_string(),
+            app_id: None,
+            app_secret: None,
+            app_secret_env: None,
+            verification_token: None,
+            encrypt_key: None,
+            public_key: None,
+            org: Some(ORG_UUID.to_string()),
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("org-scoped register should succeed");
+    }
+
+    // --- Update: per-field branches + blank guard + table output ---
+
+    #[tokio::test]
+    async fn update_sends_all_changed_fields() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/api/v1/channel-bots/bot-1"))
+            .and(body_partial_json(serde_json::json!({
+                "verification_token": "vtok2",
+                "encrypt_key": "ekey2",
+                "app_id": "cli_app2",
+                "app_secret": "secret2"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "bot-1", "label": "support"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ChannelBotCommands::Update {
+            id: "bot-1".to_string(),
+            label: None,
+            verification_token: Some("vtok2".to_string()),
+            encrypt_key: Some("ekey2".to_string()),
+            app_id: Some("cli_app2".to_string()),
+            app_secret: Some("secret2".to_string()),
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("update with all fields should succeed");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn update_blank_verification_token_is_rejected() {
+        let _guard = env_lock().lock().expect("env lock");
+        let server = MockServer::start().await;
+        // SAFETY: env mutation serialized by env_lock.
+        unsafe {
+            std::env::remove_var("NYXID_LARK_VERIFICATION_TOKEN");
+        }
+        let result = run(ChannelBotCommands::Update {
+            id: "bot-1".to_string(),
+            label: None,
+            verification_token: Some("   ".to_string()),
+            encrypt_key: None,
+            app_id: None,
+            app_secret: None,
+            auth: mock_auth(server.uri()),
+        })
+        .await;
+        assert!(result.is_err(), "blank verification token must be rejected");
+    }
+
+    // --- List: table + empty + org-scoped ---
+
+    #[tokio::test]
+    async fn list_with_org_scopes_path() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/channel-bots"))
+            .and(query_param("org_id", ORG_UUID))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "bots": [] })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ChannelBotCommands::List {
+            org: Some(ORG_UUID.to_string()),
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("org-scoped list should succeed");
+    }
+
+    // --- Show (was entirely untested) ---
+
+    #[tokio::test]
+    async fn show_fetches_bot() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/channel-bots/bot-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "bot-1", "platform": "telegram", "status": "active"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ChannelBotCommands::Show {
+            id: "bot-1".to_string(),
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("show should succeed");
+    }
+
+    #[tokio::test]
+    async fn show_table_renders_detail() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/channel-bots/bot-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "bot-1", "platform": "telegram", "label": "support",
+                "platform_bot_username": "supportbot", "status": "active",
+                "webhook_registered": true, "is_active": true, "conversations_count": 3,
+                "created_at": "2026-05-20T00:00:00Z", "updated_at": "2026-05-20T01:00:00Z"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ChannelBotCommands::Show {
+            id: "bot-1".to_string(),
+            auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
+        })
+        .await
+        .expect("show table should succeed");
+    }
+
+    // --- Verify table output ---
+
+    #[tokio::test]
+    async fn verify_table_output() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/channel-bots/bot-1/verify"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "active", "webhook_registered": true
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ChannelBotCommands::Verify {
+            id: "bot-1".to_string(),
+            auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
+        })
+        .await
+        .expect("verify table should succeed");
+    }
+
+    #[tokio::test]
+    async fn delete_table_output() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/channel-bots/bot-1"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ChannelBotCommands::Delete {
+            id: "bot-1".to_string(),
+            yes: true,
+            auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
+        })
+        .await
+        .expect("delete table should succeed");
+    }
+
+    // --- Route: create options + table, list, update ---
+
+    #[tokio::test]
+    async fn route_create_with_all_options() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/channel-conversations"))
+            .and(body_partial_json(serde_json::json!({
+                "channel_bot_id": "bot-1",
+                "agent_api_key_id": "key-1",
+                "platform_conversation_id": "conv-9",
+                "platform_conversation_type": "group",
+                "platform_sender_id": "user-9",
+                "default_agent": true,
+                "target_org_id": ORG_UUID
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "route-1", "platform": "telegram", "default_agent": true
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ChannelBotCommands::Route {
+            command: ChannelRouteCommands::Create {
+                bot_id: "bot-1".to_string(),
+                agent_key_id: "key-1".to_string(),
+                conversation_id: Some("conv-9".to_string()),
+                conversation_type: Some("group".to_string()),
+                sender_id: Some("user-9".to_string()),
+                default_agent: true,
+                org: Some(ORG_UUID.to_string()),
+                auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
+            },
+        })
+        .await
+        .expect("route create with options should succeed");
+    }
+
+    #[tokio::test]
+    async fn route_list_renders_rows() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/channel-conversations"))
+            .and(query_param("bot_id", "bot-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "conversations": [{
+                    "id": "route-abcdef12", "channel_bot_id": "bot-abcdef12",
+                    "platform": "telegram", "platform_conversation_id": "conv-9",
+                    "agent_api_key_id": "key-abcdef12", "default_agent": true, "is_active": true
+                }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ChannelBotCommands::Route {
+            command: ChannelRouteCommands::List {
+                bot_id: Some("bot-1".to_string()),
+                org: None,
+                auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
+            },
+        })
+        .await
+        .expect("route list should succeed");
+    }
+
+    #[tokio::test]
+    async fn route_list_handles_empty() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/channel-conversations"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "conversations": [] })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ChannelBotCommands::Route {
+            command: ChannelRouteCommands::List {
+                bot_id: None,
+                org: None,
+                auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
+            },
+        })
+        .await
+        .expect("empty route list should succeed");
+    }
+
+    #[tokio::test]
+    async fn route_update_sets_fields() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/api/v1/channel-conversations/route-1"))
+            .and(body_partial_json(serde_json::json!({
+                "agent_api_key_id": "key-2", "default_agent": true, "is_active": false
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ChannelBotCommands::Route {
+            command: ChannelRouteCommands::Update {
+                id: "route-1".to_string(),
+                agent_key_id: Some("key-2".to_string()),
+                default_agent: Some(true),
+                active: Some(false),
+                auth: mock_auth(server.uri()),
+            },
+        })
+        .await
+        .expect("route update should succeed");
     }
 }
