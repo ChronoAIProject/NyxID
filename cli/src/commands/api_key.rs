@@ -25,7 +25,7 @@ pub async fn run(command: ApiKeyCommands) -> Result<()> {
             no_wait,
             auth,
         } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let org = match org {
                 Some(raw) => Some(resolve_org_id(&mut api, &raw).await?),
                 None => None,
@@ -143,7 +143,7 @@ pub async fn run(command: ApiKeyCommands) -> Result<()> {
         }
 
         ApiKeyCommands::List { org, auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let org = match org {
                 Some(raw) => Some(resolve_org_id(&mut api, &raw).await?),
                 None => None,
@@ -223,7 +223,7 @@ pub async fn run(command: ApiKeyCommands) -> Result<()> {
         }
 
         ApiKeyCommands::Show { id, auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let key: Value = api.get(&format!("/api-keys/{id}")).await?;
 
             match auth.output {
@@ -285,7 +285,7 @@ pub async fn run(command: ApiKeyCommands) -> Result<()> {
                 && (no_wait || (interactive_output && crate::wizard::is_browser_flow_eligible()));
 
             if wizard_eligible {
-                let mut api = ApiClient::from_auth(&auth)?;
+                let mut api = ApiClient::from_auth_checked(&auth).await?;
                 // Resolve id-or-name → canonical id BEFORE handing off to
                 // the wizard. Refuses on ambiguous names (see
                 // `find_key_by_name`) so we can never rotate the wrong key.
@@ -308,7 +308,7 @@ pub async fn run(command: ApiKeyCommands) -> Result<()> {
 
             // Scripted / headless path — UNCHANGED from pre-wizard
             // behavior so existing CI / scripts keep working.
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let result: Value = api
                 .post(&format!("/api-keys/{id}/rotate"), &serde_json::json!({}))
                 .await?;
@@ -338,7 +338,7 @@ pub async fn run(command: ApiKeyCommands) -> Result<()> {
                 }
             }
 
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             api.delete_empty(&format!("/api-keys/{id}")).await?;
             match auth.output {
                 OutputFormat::Json => println!(
@@ -361,7 +361,7 @@ pub async fn run(command: ApiKeyCommands) -> Result<()> {
             callback_url,
             auth,
         } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
 
             let mut body = serde_json::Map::new();
 
@@ -468,7 +468,7 @@ async fn bind_credential(
     service_slug: &str,
     credential_label: Option<&str>,
 ) -> Result<()> {
-    let mut api = ApiClient::from_auth(auth)?;
+    let mut api = ApiClient::from_auth_checked(auth).await?;
 
     // Resolve API key ID
     let key_id = resolve_key_id(&mut api, id_or_name).await?;

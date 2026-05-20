@@ -35,7 +35,7 @@ pub async fn run(command: MfaCommands) -> Result<()> {
             // working. Note this prints the TOTP secret + URL to
             // the terminal; that's exactly the leak the wizard
             // closes for the default interactive path.
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let result: Value = api.post("/auth/mfa/setup", &serde_json::json!({})).await?;
 
             match auth.output {
@@ -62,7 +62,7 @@ pub async fn run(command: MfaCommands) -> Result<()> {
         }
 
         MfaCommands::Verify { code, auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let body = serde_json::json!({ "code": code });
             // Backend route is `/auth/mfa/confirm` — MFA endpoints are
             // nested under `/auth` in `backend/src/routes.rs:63`. The
@@ -93,7 +93,7 @@ pub async fn run(command: MfaCommands) -> Result<()> {
         }
 
         MfaCommands::Status { auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let user: Value = api.get("/users/me").await?;
 
             match auth.output {

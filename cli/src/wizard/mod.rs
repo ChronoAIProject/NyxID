@@ -355,6 +355,11 @@ pub async fn run_ai_key_wizard(
     prefill: WizardPrefill,
     no_wait: bool,
 ) -> Result<()> {
+    // Validate the session before opening any browser: a dead session prompts
+    // for re-login (or errors cleanly when headless) instead of launching the
+    // wizard only to 401 inside the SPA.
+    crate::auth::ensure_session(auth).await?;
+
     if no_wait {
         let prefill_json = pairing::prefill_ai_key(&prefill);
         return pairing::run_no_wait_pairing(auth, pairing::PairingFlow::AiKey, prefill_json).await;
@@ -452,6 +457,8 @@ pub async fn run_node_register_token_wizard(
     prefill: NodeRegisterPrefill,
     no_wait: bool,
 ) -> Result<()> {
+    crate::auth::ensure_session(auth).await?;
+
     if no_wait {
         let prefill_json = pairing::prefill_node_register(&prefill);
         return pairing::run_no_wait_pairing(
@@ -537,6 +544,8 @@ pub async fn run_api_key_create_wizard(
     prefill: ApiKeyCreatePrefill,
     no_wait: bool,
 ) -> Result<()> {
+    crate::auth::ensure_session(auth).await?;
+
     if no_wait {
         let prefill_json = pairing::prefill_api_key_create(&prefill);
         return pairing::run_no_wait_pairing(
@@ -681,6 +690,10 @@ async fn run_rotation_wizard(
     resource_label: &'static str,
     rerun_command: &'static str,
 ) -> Result<()> {
+    // Covers all four rotation flows (api-key, node-token, SA secret,
+    // developer-app secret) since they funnel through here.
+    crate::auth::ensure_session(auth).await?;
+
     if no_wait {
         let pairing_flow = rotation_pairing_flow(flow_kind)?;
         let prefill_json = pairing::prefill_rotate(&prefill);
@@ -838,6 +851,8 @@ pub async fn run_service_account_create_wizard(
     prefill: ServiceAccountCreatePrefill,
     no_wait: bool,
 ) -> Result<()> {
+    crate::auth::ensure_session(auth).await?;
+
     if no_wait {
         let prefill_json = pairing::prefill_service_account_create(&prefill);
         return pairing::run_no_wait_pairing(
@@ -928,6 +943,8 @@ pub async fn run_developer_app_create_wizard(
     prefill: DeveloperAppCreatePrefill,
     no_wait: bool,
 ) -> Result<()> {
+    crate::auth::ensure_session(auth).await?;
+
     if no_wait {
         let prefill_json = pairing::prefill_developer_app_create(&prefill);
         return pairing::run_no_wait_pairing(
@@ -1022,6 +1039,8 @@ pub async fn run_mfa_setup_wizard(
     prefill: MfaSetupPrefill,
     no_wait: bool,
 ) -> Result<()> {
+    crate::auth::ensure_session(auth).await?;
+
     if no_wait {
         let prefill_json = pairing::prefill_mfa_setup(&prefill);
         return pairing::run_no_wait_pairing(auth, pairing::PairingFlow::MfaSetup, prefill_json)

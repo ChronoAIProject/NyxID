@@ -278,7 +278,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             // `NYXID_NO_WIZARD=1` to restore the pre-wizard stdin
             // prompt path for CI jobs or scripts that rely on it.
             let mut api = if org.is_some() {
-                Some(ApiClient::from_auth(&auth)?)
+                Some(ApiClient::from_auth_checked(&auth).await?)
             } else {
                 None
             };
@@ -336,7 +336,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
 
             let mut api = match api {
                 Some(api) => api,
-                None => ApiClient::from_auth(&auth)?,
+                None => ApiClient::from_auth_checked(&auth).await?,
             };
 
             // Resolve `--via-node <ID_OR_NAME>` to a node ID up-front so that
@@ -720,7 +720,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             org,
             auth,
         } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
 
             // Accept either a node ID or a node name (from `nyxid node list`).
             let via_node = crate::commands::node::resolve_node_id(&mut api, &via_node)
@@ -827,7 +827,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             to_proxy_only,
             auth,
         } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let mode = match (to_node_key, to_cert, to_proxy_only) {
                 (true, false, false) => "node_key",
                 (false, true, false) => "cert",
@@ -875,7 +875,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
         }
 
         ServiceCommands::List { auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let resp: Value = api.get("/keys").await?;
 
             match auth.output {
@@ -917,7 +917,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
         }
 
         ServiceCommands::Show { id, auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let svc: Value = api.get(&format!("/keys/{id}")).await?;
 
             match auth.output {
@@ -998,7 +998,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 }
             }
 
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             api.delete_empty(&format!("/keys/{id}")).await?;
             match auth.output {
                 OutputFormat::Json => println!(
@@ -1025,7 +1025,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             ws_frame_clear,
             auth,
         } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
 
             let mut body = serde_json::Map::new();
             let ws_frame_injections =
@@ -1110,7 +1110,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             credential,
             auth,
         } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
 
             // Fetch service to get the external api_key_id
             let svc: Value = api.get(&format!("/keys/{id}")).await?;
@@ -1149,7 +1149,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             direct,
             auth,
         } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
 
             // Accept either a node ID or a node name (from `nyxid node list`).
             let node = match node {
@@ -1189,7 +1189,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             client_secret,
             auth,
         } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
 
             // Fetch catalog entry to get provider_id
             let catalog: Value = api.get(&format!("/catalog/{slug}")).await?;

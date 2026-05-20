@@ -24,7 +24,7 @@ pub async fn run(command: OauthCommands) -> Result<()> {
 async fn run_bindings(command: BindingCommands) -> Result<()> {
     match command {
         BindingCommands::List { auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let response: Value = api.get("/users/me/broker-bindings").await?;
             match auth.output {
                 OutputFormat::Json => {
@@ -38,7 +38,7 @@ async fn run_bindings(command: BindingCommands) -> Result<()> {
         }
 
         BindingCommands::Show { id_or_hash, auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let response: Value = api.get("/users/me/broker-bindings").await?;
             let binding = resolve_binding(&response, &id_or_hash)?;
             match auth.output {
@@ -57,7 +57,7 @@ async fn run_bindings(command: BindingCommands) -> Result<()> {
             yes,
             auth,
         } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let response: Value = api.get("/users/me/broker-bindings").await?;
             let binding = resolve_binding(&response, &id_or_hash)?;
             let binding_hash = binding["binding_hash"]

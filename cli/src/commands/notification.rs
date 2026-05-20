@@ -7,7 +7,7 @@ use crate::cli::{NotificationCommands, OutputFormat};
 pub async fn run(command: NotificationCommands) -> Result<()> {
     match command {
         NotificationCommands::Settings { auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let settings: Value = api.get("/notifications/settings").await?;
 
             match auth.output {
@@ -47,7 +47,7 @@ pub async fn run(command: NotificationCommands) -> Result<()> {
             approval_telegram,
             auth,
         } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let mut body = serde_json::Map::new();
 
             if let Some(v) = approval_email {
@@ -81,7 +81,7 @@ pub async fn run(command: NotificationCommands) -> Result<()> {
         }
 
         NotificationCommands::TelegramLink { auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let result: Value = api
                 .post("/notifications/telegram/link", &serde_json::json!({}))
                 .await?;
@@ -109,7 +109,7 @@ pub async fn run(command: NotificationCommands) -> Result<()> {
         }
 
         NotificationCommands::TelegramDisconnect { auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             api.delete_empty("/notifications/telegram").await?;
             match auth.output {
                 OutputFormat::Json => println!(
