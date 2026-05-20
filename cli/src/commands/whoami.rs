@@ -47,3 +47,48 @@ pub async fn run(api: &mut ApiClient, output: OutputFormat) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn whoami_fetches_user_json() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/users/me"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "u1", "email": "a@b.com", "display_name": "Alice",
+                "role": "admin", "mfa_enabled": true, "email_verified": true
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut api = ApiClient::new(&server.uri(), "test-token".to_string()).unwrap();
+        run(&mut api, OutputFormat::Json)
+            .await
+            .expect("whoami json should succeed");
+    }
+
+    #[tokio::test]
+    async fn whoami_table_uses_role_fallback() {
+        let server = MockServer::start().await;
+        // No `role`/`is_admin`/`mfa_enabled` → exercises the fallback branches.
+        Mock::given(method("GET"))
+            .and(path("/api/v1/users/me"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "id": "u1", "email": "a@b.com" })),
+            )
+            .mount(&server)
+            .await;
+
+        let mut api = ApiClient::new(&server.uri(), "test-token".to_string()).unwrap();
+        run(&mut api, OutputFormat::Table)
+            .await
+            .expect("whoami table should succeed");
+    }
+}

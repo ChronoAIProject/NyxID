@@ -534,3 +534,463 @@ async fn bind_credential(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::mock_auth;
+    use wiremock::matchers::{body_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // --- Command-level integration tests (against a mock server) ---
+
+    #[tokio::test]
+    async fn create_posts_key_with_name_and_platform() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/api-keys"))
+            .and(body_json(serde_json::json!({
+                "name": "agent-key",
+                "scopes": "read write",
+                "platform": "claude-code"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "name": "agent-key", "full_key": "nyxid_ag_secret", "scopes": "read write"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // terminal: true forces the scripted (non-wizard) path that
+        // existing CI/scripts use — byte-identical to pre-wizard.
+        run(ApiKeyCommands::Create {
+            name: Some("agent-key".to_string()),
+            scopes: None,
+            expires_in_days: None,
+            allowed_services: None,
+            allowed_nodes: None,
+            allow_all_services: false,
+            allow_all_nodes: false,
+            platform: Some("claude-code".to_string()),
+            callback_url: None,
+            org: None,
+            terminal: true,
+            no_wait: false,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("create should succeed");
+    }
+
+    #[tokio::test]
+    async fn list_fetches_keys_ok() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/api-keys"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "keys": [{"id": "key-1", "name": "agent-key", "scopes": "read write"}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ApiKeyCommands::List {
+            org: None,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("list should succeed");
+    }
+
+    #[tokio::test]
+    async fn show_fetches_key_ok() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/api-keys/key-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "key-1", "name": "agent-key", "scopes": "read write"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ApiKeyCommands::Show {
+            id: "key-1".to_string(),
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("show should succeed");
+    }
+
+    #[tokio::test]
+    async fn rotate_posts_rotate_endpoint() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/api-keys/key-1/rotate"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "full_key": "nyxid_ag_rotated" })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ApiKeyCommands::Rotate {
+            id: "key-1".to_string(),
+            terminal: true,
+            no_wait: false,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("rotate should succeed");
+    }
+
+    #[tokio::test]
+    async fn delete_with_yes_issues_delete_request() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/api-keys/key-1"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ApiKeyCommands::Delete {
+            id: "key-1".to_string(),
+            yes: true,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("delete should succeed");
+    }
+
+    #[tokio::test]
+    async fn update_sends_only_changed_fields() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/api/v1/api-keys/key-1"))
+            .and(body_json(serde_json::json!({ "name": "renamed" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ApiKeyCommands::Update {
+            id: "key-1".to_string(),
+            name: Some("renamed".to_string()),
+            scopes: None,
+            allowed_services: None,
+            allowed_nodes: None,
+            allow_all_services: None,
+            allow_all_nodes: None,
+            callback_url: None,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("update should succeed");
+    }
+
+    #[tokio::test]
+    async fn bind_auto_resolves_service_credential_and_posts_binding() {
+        let server = MockServer::start().await;
+        // resolve_key_id → direct GET /api-keys/{id}
+        Mock::given(method("GET"))
+            .and(path("/api/v1/api-keys/key-1"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "id": "key-1", "name": "agent-key" })),
+            )
+            .mount(&server)
+            .await;
+        // service lookup via GET /keys (slug → id + configured api_key_id)
+        Mock::given(method("GET"))
+            .and(path("/api/v1/keys"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "keys": [{"slug": "openai", "id": "svc-1", "api_key_id": "cred-1"}]
+            })))
+            .mount(&server)
+            .await;
+        // binding create with the auto-resolved credential
+        Mock::given(method("POST"))
+            .and(path("/api/v1/api-keys/key-1/bindings"))
+            .and(body_json(serde_json::json!({
+                "user_service_id": "svc-1",
+                "user_api_key_id": "cred-1"
+            })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "id": "bind-1" })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ApiKeyCommands::Bind {
+            id: "key-1".to_string(),
+            service: "openai".to_string(),
+            credential: None,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("bind should succeed");
+    }
+
+    // --- Resolution-logic tests (security-relevant) ---
+
+    #[tokio::test]
+    async fn find_key_by_name_refuses_ambiguous_match() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/api-keys"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "keys": [{"name": "dup", "id": "a"}, {"name": "dup", "id": "b"}]
+            })))
+            .mount(&server)
+            .await;
+
+        let mut api = ApiClient::new(&server.uri(), "test-token".to_string()).unwrap();
+        let err = find_key_by_name(&mut api, "dup")
+            .await
+            .expect_err("ambiguous name must be refused");
+        assert!(
+            err.to_string().contains("matches 2"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_key_id_prefers_direct_id() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/api-keys/abc123"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "id": "abc123" })),
+            )
+            .mount(&server)
+            .await;
+
+        let mut api = ApiClient::new(&server.uri(), "test-token".to_string()).unwrap();
+        let id = resolve_key_id(&mut api, "abc123").await.expect("resolve");
+        assert_eq!(id, "abc123");
+    }
+
+    // --- Pure helper tests ---
+
+    #[test]
+    fn array_from_response_finds_first_present_field() {
+        let v = serde_json::json!({ "api_keys": [1, 2] });
+        let arr = array_from_response(&v, &["keys", "api_keys"]).expect("array");
+        assert_eq!(arr.len(), 2);
+    }
+
+    #[test]
+    fn array_from_response_falls_back_to_top_level_array() {
+        let v = serde_json::json!([1, 2, 3]);
+        assert_eq!(array_from_response(&v, &["keys"]).expect("array").len(), 3);
+    }
+
+    #[test]
+    fn array_from_response_returns_none_when_absent() {
+        let v = serde_json::json!({ "other": 1 });
+        assert!(array_from_response(&v, &["keys"]).is_none());
+    }
+}
+
+#[cfg(test)]
+mod option_tests {
+    use super::*;
+    use crate::test_support::mock_auth;
+    use wiremock::matchers::{body_json, body_partial_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn create_includes_scope_and_callback_fields() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/api-keys"))
+            .and(body_partial_json(serde_json::json!({
+                "allowed_service_ids": ["svc-a", "svc-b"],
+                "allowed_node_ids": ["node-1"],
+                "callback_url": "https://cb.example"
+            })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "name": "k", "full_key": "nyxid_ag_x" })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ApiKeyCommands::Create {
+            name: Some("k".to_string()),
+            scopes: None,
+            expires_in_days: None,
+            allowed_services: Some("svc-a,svc-b".to_string()),
+            allowed_nodes: Some("node-1".to_string()),
+            allow_all_services: false,
+            allow_all_nodes: false,
+            platform: None,
+            callback_url: Some("https://cb.example".to_string()),
+            org: None,
+            terminal: true,
+            no_wait: false,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("create should succeed");
+    }
+
+    #[tokio::test]
+    async fn create_sends_allow_all_flags() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/api-keys"))
+            .and(body_partial_json(serde_json::json!({
+                "allow_all_services": true, "allow_all_nodes": true
+            })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "name": "k", "full_key": "nyxid_ag_x" })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ApiKeyCommands::Create {
+            name: Some("k".to_string()),
+            scopes: None,
+            expires_in_days: None,
+            allowed_services: None,
+            allowed_nodes: None,
+            allow_all_services: true,
+            allow_all_nodes: true,
+            platform: None,
+            callback_url: None,
+            org: None,
+            terminal: true,
+            no_wait: false,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("create should succeed");
+    }
+
+    #[tokio::test]
+    async fn update_includes_changed_scope_fields() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/api/v1/api-keys/key-1"))
+            .and(body_partial_json(serde_json::json!({
+                "scopes": "read",
+                "allowed_service_ids": ["svc-a"],
+                "allow_all_nodes": true,
+                "callback_url": "https://cb"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ApiKeyCommands::Update {
+            id: "key-1".to_string(),
+            name: None,
+            scopes: Some("read".to_string()),
+            allowed_services: Some("svc-a".to_string()),
+            allowed_nodes: None,
+            allow_all_services: None,
+            allow_all_nodes: Some(true),
+            callback_url: Some("https://cb".to_string()),
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("update should succeed");
+    }
+
+    #[tokio::test]
+    async fn find_key_by_name_errors_when_absent() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/api-keys"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "keys": [{"name": "other", "id": "x"}]
+            })))
+            .mount(&server)
+            .await;
+
+        let mut api = ApiClient::new(&server.uri(), "test-token".to_string()).unwrap();
+        let err = find_key_by_name(&mut api, "missing")
+            .await
+            .expect_err("absent name must error");
+        assert!(err.to_string().contains("not found"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn resolve_key_id_falls_back_to_name_lookup() {
+        let server = MockServer::start().await;
+        // Direct id lookup 404s → falls back to name search via /api-keys.
+        Mock::given(method("GET"))
+            .and(path("/api/v1/api-keys/myname"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/api-keys"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "keys": [{"name": "myname", "id": "key-x"}]
+            })))
+            .mount(&server)
+            .await;
+
+        let mut api = ApiClient::new(&server.uri(), "test-token".to_string()).unwrap();
+        let id = resolve_key_id(&mut api, "myname").await.expect("resolve");
+        assert_eq!(id, "key-x");
+    }
+
+    #[tokio::test]
+    async fn bind_explicit_credential_label_overrides_service_default() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/api-keys/key-1"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "id": "key-1" })),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/keys"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "keys": [{"slug": "openai", "id": "svc-1", "api_key_id": "cred-default"}]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/api-keys/external"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "api_keys": [{"label": "Prod Key", "id": "cred-explicit"}]
+            })))
+            .mount(&server)
+            .await;
+        // The binding must use the LABEL-resolved credential (cred-explicit),
+        // NOT the service's default api_key_id (cred-default).
+        Mock::given(method("POST"))
+            .and(path("/api/v1/api-keys/key-1/bindings"))
+            .and(body_json(serde_json::json!({
+                "user_service_id": "svc-1",
+                "user_api_key_id": "cred-explicit"
+            })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "id": "bind-1" })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ApiKeyCommands::Bind {
+            id: "key-1".to_string(),
+            service: "openai".to_string(),
+            credential: Some("Prod Key".to_string()),
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("bind with label should succeed");
+    }
+}

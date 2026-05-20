@@ -322,3 +322,201 @@ fn truncate_line(s: &str, max: usize) -> String {
         first_line.to_string()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::mock_auth;
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn list_default_hits_catalog() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/catalog"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "entries": [{"slug": "openai", "name": "OpenAI", "provider_type": "api_key"}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(CatalogCommands::List {
+            all: false,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("list should succeed");
+    }
+
+    #[tokio::test]
+    async fn list_all_includes_query_param() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/catalog"))
+            .and(query_param("include_all", "true"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "entries": [] })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(CatalogCommands::List {
+            all: true,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("list --all should succeed");
+    }
+
+    #[tokio::test]
+    async fn show_fetches_slug() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/catalog/openai"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "slug": "openai", "name": "OpenAI", "service_type": "http", "provider_type": "api_key"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(CatalogCommands::Show {
+            slug: "openai".to_string(),
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("show should succeed");
+    }
+
+    #[tokio::test]
+    async fn endpoints_lists_parsed_endpoints() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/catalog/openai/endpoints"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "openapi_spec_url": "https://api.openai.com/openapi.json",
+                "endpoints": [
+                    {"method": "POST", "path": "/v1/chat/completions", "name": "createChat", "description": "Create a chat completion"}
+                ]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(CatalogCommands::Endpoints {
+            slug: "openai".to_string(),
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("endpoints should succeed");
+    }
+
+    #[test]
+    fn truncate_line_keeps_short_strings() {
+        assert_eq!(truncate_line("short", 60), "short");
+    }
+
+    #[test]
+    fn truncate_line_truncates_long_strings_with_ellipsis() {
+        let out = truncate_line("abcdefghijklmnopqrstuvwxyz", 10);
+        assert_eq!(out, "abcdefg...");
+        assert_eq!(out.chars().count(), 10);
+    }
+
+    #[test]
+    fn truncate_line_uses_only_first_line() {
+        assert_eq!(truncate_line("first line\nsecond line", 60), "first line");
+    }
+}
+
+#[cfg(test)]
+mod table_tests {
+    use super::*;
+    use crate::test_support::mock_auth_with_output;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn list_table_renders_mixed_entries() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/catalog"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "entries": [
+                    {"slug": "openai", "name": "OpenAI", "provider_type": "api_key", "service_type": "http"},
+                    {"slug": "lark", "name": "Lark", "provider_type": "oauth2", "credential_mode": "user", "service_type": "http"},
+                    {"slug": "gh", "name": "GitHub", "provider_type": "device_code", "service_type": "http"},
+                    {"slug": "myssh", "name": "SSH Box", "provider_type": "-", "service_type": "ssh"},
+                    {"slug": "self", "name": "Self-hosted", "provider_type": "api_key", "requires_gateway_url": true, "service_type": "http"}
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        run(CatalogCommands::List {
+            all: false,
+            auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
+        })
+        .await
+        .expect("list table should succeed");
+    }
+
+    #[tokio::test]
+    async fn show_table_renders_rich_metadata() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/catalog/openai"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "slug": "openai", "name": "OpenAI", "service_type": "http",
+                "provider_type": "oauth2", "credential_mode": "both",
+                "base_url": "https://api.openai.com", "auth_method": "bearer",
+                "auth_key_name": "Authorization", "description": "OpenAI API",
+                "homepage_url": "https://openai.com",
+                "repository_url": "https://github.com/openai/openai-python",
+                "issues_url": "https://github.com/openai/openai-python/issues",
+                "openapi_spec_url": "https://api.openai.com/openapi.json",
+                "capabilities": {"supports_streaming": true, "supports_proxy_read": true},
+                "auth_notes": "Use a project key", "known_limitations": "Rate limited",
+                "required_permissions": ["read", "write"],
+                "recommended_skills": ["claude-api"],
+                "api_key_instructions": "Get a key from the dashboard",
+                "api_key_url": "https://platform.openai.com/api-keys",
+                "documentation_url": "https://platform.openai.com/docs"
+            })))
+            .mount(&server)
+            .await;
+
+        run(CatalogCommands::Show {
+            slug: "openai".to_string(),
+            auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
+        })
+        .await
+        .expect("show table should succeed");
+    }
+
+    #[tokio::test]
+    async fn endpoints_table_renders_rows() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/catalog/openai/endpoints"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "openapi_spec_url": "https://api.openai.com/openapi.json",
+                "endpoints": [
+                    {"method": "POST", "path": "/v1/chat/completions", "name": "createChat",
+                     "description": "Create a chat completion that is intentionally long so the truncate_line helper trims it"}
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        run(CatalogCommands::Endpoints {
+            slug: "openai".to_string(),
+            auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
+        })
+        .await
+        .expect("endpoints table should succeed");
+    }
+}

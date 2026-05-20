@@ -111,3 +111,88 @@ pub async fn run(command: ExternalKeyCommands) -> Result<()> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::mock_auth;
+    use wiremock::matchers::{body_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn list_fetches_external_keys_ok() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/api-keys/external"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "api_keys": [
+                    {"id": "key-abc12345", "label": "OpenAI", "credential_type": "bearer", "created_at": "2026-01-01"}
+                ]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ExternalKeyCommands::List {
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("list should succeed");
+    }
+
+    #[tokio::test]
+    async fn rotate_sends_credential_in_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/api/v1/api-keys/external/key-1"))
+            .and(body_json(serde_json::json!({ "credential": "new-secret" })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "id": "key-1" })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ExternalKeyCommands::Rotate {
+            id: "key-1".to_string(),
+            credential_env: None,
+            credential: Some("new-secret".to_string()),
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("rotate should succeed");
+    }
+
+    #[tokio::test]
+    async fn rotate_rejects_empty_credential() {
+        let server = MockServer::start().await;
+        // No mock mounted: an empty credential must fail before any request.
+        let result = run(ExternalKeyCommands::Rotate {
+            id: "key-1".to_string(),
+            credential_env: None,
+            credential: Some(String::new()),
+            auth: mock_auth(server.uri()),
+        })
+        .await;
+        assert!(result.is_err(), "empty credential should be rejected");
+    }
+
+    #[tokio::test]
+    async fn delete_with_yes_issues_delete_request() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/api-keys/external/key-1"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ExternalKeyCommands::Delete {
+            id: "key-1".to_string(),
+            yes: true,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("delete should succeed");
+    }
+}
