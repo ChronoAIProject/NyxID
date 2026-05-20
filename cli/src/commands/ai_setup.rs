@@ -852,3 +852,181 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 }
+
+#[cfg(test)]
+mod command_tests {
+    use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn substitute_urls_rewrites_all_known_hosts() {
+        let content = format!(
+            "api={DEFAULT_HOSTED_URL} dash={DEFAULT_HOSTED_DASHBOARD} \
+             local_api=http://localhost:3001 local_dash=http://localhost:3000"
+        );
+        let out = substitute_urls(&content, "https://my.api", "https://my.dash");
+        assert_eq!(
+            out,
+            "api=https://my.api dash=https://my.dash \
+             local_api=https://my.api local_dash=https://my.dash"
+        );
+    }
+
+    #[test]
+    fn substitute_urls_leaves_unrelated_text_untouched() {
+        let out = substitute_urls("nothing to replace here", "https://x", "https://y");
+        assert_eq!(out, "nothing to replace here");
+    }
+
+    #[test]
+    fn resolve_base_url_trims_trailing_slashes_when_provided() {
+        let url = resolve_base_url(&Some("https://api.example.com/".to_string())).unwrap();
+        assert_eq!(url, "https://api.example.com");
+    }
+
+    #[test]
+    fn resolve_base_url_accepts_http_scheme() {
+        let url = resolve_base_url(&Some("http://localhost:3001".to_string())).unwrap();
+        assert_eq!(url, "http://localhost:3001");
+    }
+
+    #[test]
+    fn resolve_base_url_rejects_non_http_scheme() {
+        let err = resolve_base_url(&Some("ftp://example.com".to_string())).unwrap_err();
+        assert!(
+            err.to_string().contains("http:// or https://"),
+            "error was: {err}"
+        );
+    }
+
+    #[test]
+    fn shell_rc_path_maps_known_shells() {
+        let home = Path::new("/tmp/home");
+        assert_eq!(shell_rc_path(home, "zsh"), home.join(".zshrc"));
+        // Unknown shells fall through to ~/.profile.
+        assert_eq!(shell_rc_path(home, "tcsh"), home.join(".profile"));
+    }
+
+    #[test]
+    fn shell_escape_double_quoted_escapes_backslashes_and_quotes() {
+        let p = Path::new(r#"/a\b"c"#);
+        assert_eq!(shell_escape_double_quoted(p), r#"/a\\b\"c"#);
+    }
+
+    #[test]
+    fn cargo_path_is_configured_returns_false_when_absent() {
+        let cargo_bin = Path::new("/home/u/.cargo/bin");
+        let cargo_env = Path::new("/home/u/.cargo/env");
+        assert!(!cargo_path_is_configured(
+            "export PATH=\"/usr/local/bin:$PATH\"\n",
+            cargo_bin,
+            cargo_env
+        ));
+    }
+
+    #[test]
+    fn cargo_path_is_configured_matches_fish_add_path_marker() {
+        let cargo_bin = Path::new("/home/u/.cargo/bin");
+        let cargo_env = Path::new("/home/u/.cargo/env");
+        assert!(cargo_path_is_configured(
+            "fish_add_path /home/u/.cargo/bin\n",
+            cargo_bin,
+            cargo_env
+        ));
+    }
+
+    #[test]
+    fn cargo_setup_command_uses_fish_add_path_for_fish() {
+        let cargo_bin = Path::new("/home/u/.cargo/bin");
+        // For fish, env file existence is irrelevant.
+        let cargo_env = Path::new("/home/u/.cargo/env");
+        assert_eq!(
+            cargo_setup_command("fish", cargo_bin, cargo_env),
+            "fish_add_path \"/home/u/.cargo/bin\""
+        );
+    }
+
+    #[test]
+    fn cargo_setup_command_falls_back_to_export_when_env_missing() {
+        // A path guaranteed not to exist forces the export-PATH branch
+        // (the source-env branch requires cargo_env.exists()).
+        let cargo_bin = Path::new("/nonexistent-nyx/.cargo/bin");
+        let cargo_env = Path::new("/nonexistent-nyx/.cargo/env");
+        assert_eq!(
+            cargo_setup_command("bash", cargo_bin, cargo_env),
+            "export PATH=\"/nonexistent-nyx/.cargo/bin:$PATH\""
+        );
+    }
+
+    #[test]
+    fn cargo_setup_rc_snippet_wraps_command_with_comment_header() {
+        let cargo_bin = Path::new("/nonexistent-nyx/.cargo/bin");
+        let cargo_env = Path::new("/nonexistent-nyx/.cargo/env");
+        let snippet = cargo_setup_rc_snippet("bash", cargo_bin, cargo_env);
+        assert_eq!(
+            snippet,
+            "\n# Cargo (Rust package manager) -- added by NyxID installer\n\
+             export PATH=\"/nonexistent-nyx/.cargo/bin:$PATH\"\n"
+        );
+    }
+
+    #[test]
+    fn skill_paths_cursor_is_relative_project_rule() {
+        // Cursor's path is a project-relative .mdc file, so it does not
+        // depend on $HOME and is deterministic to assert.
+        let paths = skill_paths(AiToolTarget::Cursor).unwrap();
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0].0, "rule");
+        assert_eq!(paths[0].1, PathBuf::from(".cursor/rules/nyxid.mdc"));
+    }
+
+    #[tokio::test]
+    async fn fetch_url_returns_body_on_success() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/llms.txt"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("PLAYBOOK BODY"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let body = fetch_url(&format!("{}/llms.txt", server.uri()))
+            .await
+            .expect("200 should yield body");
+        assert_eq!(body, "PLAYBOOK BODY");
+    }
+
+    #[tokio::test]
+    async fn fetch_url_errors_on_non_success_status() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/missing"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let err = fetch_url(&format!("{}/missing", server.uri()))
+            .await
+            .expect_err("404 should be an error");
+        assert!(err.to_string().contains("HTTP 404"), "error was: {err}");
+    }
+
+    #[tokio::test]
+    async fn fetch_url_rejects_oversized_response() {
+        let server = MockServer::start().await;
+        // Body exceeds MAX_RESPONSE_BYTES (2 MiB) so the reqwest-derived
+        // content-length trips the size guard regardless of header handling.
+        let big = "x".repeat((MAX_RESPONSE_BYTES + 1) as usize);
+        Mock::given(method("GET"))
+            .and(path("/big"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(big))
+            .mount(&server)
+            .await;
+
+        let err = fetch_url(&format!("{}/big", server.uri()))
+            .await
+            .expect_err("oversized response should be rejected");
+        assert!(err.to_string().contains("too large"), "error was: {err}");
+    }
+}
