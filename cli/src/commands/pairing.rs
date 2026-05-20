@@ -155,3 +155,24 @@ fn outcome_to_json(
         }),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The status strings here are load-bearing: `run` exits non-zero on
+    // cancelled/expired so scripts can detect outcome without parsing.
+    #[test]
+    fn cancelled_outcome_maps_to_cancelled_status() {
+        let v = outcome_to_json("pair-1", &wizard::WizardOutcome::Cancelled, None);
+        assert_eq!(v["status"], "cancelled");
+        assert_eq!(v["pairing_id"], "pair-1");
+    }
+
+    #[test]
+    fn timed_out_outcome_maps_to_expired_status() {
+        let v = outcome_to_json("pair-2", &wizard::WizardOutcome::TimedOut, None);
+        assert_eq!(v["status"], "expired");
+        assert_eq!(v["pairing_id"], "pair-2");
+    }
+}

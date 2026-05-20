@@ -299,3 +299,170 @@ fn parse_optional_json(raw: Option<&str>, label: &str) -> Result<Option<Value>> 
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::BaseUrlArgs;
+    use crate::test_support::mock_auth;
+    use wiremock::matchers::{body_partial_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // --- Push (command-level) ---
+
+    #[tokio::test]
+    async fn push_posts_event_envelope() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/channel-events/conv-1"))
+            .and(body_partial_json(serde_json::json!({
+                "event_id": "ev-1",
+                "source": "sensor",
+                "type": "reading",
+                "payload": { "temp": 21 }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "accepted", "event_id": "ev-1"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ChannelEventCommands::Push {
+            conversation_id: "conv-1".to_string(),
+            source: "sensor".to_string(),
+            event_type: "reading".to_string(),
+            event_id: Some("ev-1".to_string()),
+            timestamp: Some("2026-01-01T00:00:00Z".to_string()),
+            payload_json: Some(r#"{"temp":21}"#.to_string()),
+            payload_file: None,
+            metadata_json: None,
+            api_key: Some("nyxid_ag_x".to_string()),
+            api_key_env: None,
+            base: BaseUrlArgs {
+                base_url: Some(server.uri()),
+                profile: None,
+            },
+            output: OutputFormat::Json,
+        })
+        .await
+        .expect("push should succeed");
+    }
+
+    #[tokio::test]
+    async fn push_from_stdin_requires_explicit_key() {
+        // payload-file "-" reads stdin, so the key can't be prompted → bail
+        // before any HTTP. No mock needed.
+        let result = run(ChannelEventCommands::Push {
+            conversation_id: "conv-1".to_string(),
+            source: "sensor".to_string(),
+            event_type: "reading".to_string(),
+            event_id: None,
+            timestamp: None,
+            payload_json: None,
+            payload_file: Some("-".to_string()),
+            metadata_json: None,
+            api_key: None,
+            api_key_env: None,
+            base: BaseUrlArgs {
+                base_url: Some("http://127.0.0.1:1".to_string()),
+                profile: None,
+            },
+            output: OutputFormat::Json,
+        })
+        .await;
+        assert!(
+            result.is_err(),
+            "stdin payload without a key must be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn channel_create_posts_device_conversation() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/channel-conversations"))
+            .and(body_partial_json(serde_json::json!({
+                "platform": "device",
+                "platform_conversation_id": "dev-1",
+                "agent_api_key_id": "key-1"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "c1", "platform_conversation_id": "dev-1"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ChannelEventCommands::Channel {
+            command: ChannelEventChannelCommands::Create {
+                conversation_id: "dev-1".to_string(),
+                agent_key_id: "key-1".to_string(),
+                conversation_type: None,
+                org: None,
+                auth: mock_auth(server.uri()),
+            },
+        })
+        .await
+        .expect("channel create should succeed");
+    }
+
+    #[tokio::test]
+    async fn channel_delete_with_yes_deletes() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/channel-conversations/c1"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ChannelEventCommands::Channel {
+            command: ChannelEventChannelCommands::Delete {
+                id: "c1".to_string(),
+                yes: true,
+                auth: mock_auth(server.uri()),
+            },
+        })
+        .await
+        .expect("channel delete should succeed");
+    }
+
+    // --- Pure parser helpers ---
+
+    #[test]
+    fn resolve_payload_rejects_both_sources() {
+        assert!(resolve_payload(Some("{}"), Some("f.json")).is_err());
+    }
+
+    #[test]
+    fn resolve_payload_parses_inline_json() {
+        let v = resolve_payload(Some(r#"{"a":1}"#), None)
+            .expect("ok")
+            .expect("some");
+        assert_eq!(v["a"], 1);
+    }
+
+    #[test]
+    fn resolve_payload_rejects_invalid_json() {
+        assert!(resolve_payload(Some("{not json"), None).is_err());
+    }
+
+    #[test]
+    fn resolve_payload_none_when_absent() {
+        assert!(resolve_payload(None, None).expect("ok").is_none());
+    }
+
+    #[test]
+    fn resolve_api_key_returns_inline_value() {
+        assert_eq!(
+            resolve_api_key(Some("nyxid_ag_x"), None).expect("ok"),
+            "nyxid_ag_x"
+        );
+    }
+
+    #[test]
+    fn parse_optional_json_rejects_invalid() {
+        assert!(parse_optional_json(Some("{bad"), "metadata").is_err());
+    }
+}

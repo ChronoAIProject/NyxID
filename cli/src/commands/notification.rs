@@ -122,3 +122,104 @@ pub async fn run(command: NotificationCommands) -> Result<()> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::mock_auth;
+    use wiremock::matchers::{body_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn settings_fetches_notification_settings() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/notifications/settings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "push_enabled": true, "telegram_enabled": false,
+                "telegram_connected": false, "approval_required": true
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(NotificationCommands::Settings {
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("settings should succeed");
+    }
+
+    #[tokio::test]
+    async fn update_sends_only_changed_flags() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/api/v1/notifications/settings"))
+            .and(body_json(serde_json::json!({
+                "approval_required": true, "push_enabled": false
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(NotificationCommands::Update {
+            approval_email: Some(true),
+            approval_push: Some(false),
+            approval_telegram: None,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("update should succeed");
+    }
+
+    #[tokio::test]
+    async fn update_with_no_flags_makes_no_request() {
+        // No mock mounted: an empty update must short-circuit before any HTTP.
+        let server = MockServer::start().await;
+        run(NotificationCommands::Update {
+            approval_email: None,
+            approval_push: None,
+            approval_telegram: None,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("no-op update should succeed without a request");
+    }
+
+    #[tokio::test]
+    async fn telegram_link_posts() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/notifications/telegram/link"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "link_code": "ABC123", "bot_username": "nyxid_bot"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(NotificationCommands::TelegramLink {
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("telegram link should succeed");
+    }
+
+    #[tokio::test]
+    async fn telegram_disconnect_deletes() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/notifications/telegram"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(NotificationCommands::TelegramDisconnect {
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("telegram disconnect should succeed");
+    }
+}

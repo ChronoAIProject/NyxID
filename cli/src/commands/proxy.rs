@@ -151,3 +151,138 @@ pub async fn run(command: ProxyCommands) -> Result<()> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::mock_auth;
+    use wiremock::matchers::{body_string, method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn req(
+        uri: String,
+        service: &str,
+        p: &str,
+        m: &str,
+        data: Option<&str>,
+        by_id: bool,
+        via: Option<&str>,
+    ) -> ProxyCommands {
+        ProxyCommands::Request {
+            service: service.to_string(),
+            path: p.to_string(),
+            method: m.to_string(),
+            data: data.map(str::to_string),
+            headers: vec![],
+            stream: false,
+            by_id,
+            via_service: via.map(str::to_string),
+            auth: mock_auth(uri),
+        }
+    }
+
+    #[tokio::test]
+    async fn discover_lists_services() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/proxy/services"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "services": [{"slug": "openai", "name": "OpenAI"}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ProxyCommands::Discover {
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("discover should succeed");
+    }
+
+    #[tokio::test]
+    async fn request_slug_hits_proxy_s_path() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/proxy/s/openai/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(req(
+            server.uri(),
+            "openai",
+            "/v1/models",
+            "GET",
+            None,
+            false,
+            None,
+        ))
+        .await
+        .expect("request should succeed");
+    }
+
+    #[tokio::test]
+    async fn request_by_id_uses_proxy_id_path() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/proxy/svc-1/ping"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(req(server.uri(), "svc-1", "/ping", "GET", None, true, None))
+            .await
+            .expect("by-id request should succeed");
+    }
+
+    #[tokio::test]
+    async fn request_via_service_appends_query() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/proxy/s/openai/x"))
+            .and(query_param("_nyxid_via", "us-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(req(
+            server.uri(),
+            "openai",
+            "/x",
+            "GET",
+            None,
+            false,
+            Some("us-1"),
+        ))
+        .await
+        .expect("via-service request should succeed");
+    }
+
+    #[tokio::test]
+    async fn request_forwards_post_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/proxy/s/openai/v1/chat"))
+            .and(body_string("hello"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(req(
+            server.uri(),
+            "openai",
+            "/v1/chat",
+            "POST",
+            Some("hello"),
+            false,
+            None,
+        ))
+        .await
+        .expect("post request should succeed");
+    }
+}

@@ -234,3 +234,114 @@ fn confirm(prompt: &str) -> Result<bool> {
     }
     Ok(true)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::mock_auth;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn sample_bindings() -> Value {
+        serde_json::json!({
+            "bindings": [
+                {
+                    "binding_hash": "deadbeefcafe0001", "client_name": "App A",
+                    "client_id": "cid-a", "scopes": ["read"],
+                    "external_subject": {"platform": "github", "external_user_id": "u1"}
+                },
+                {"binding_hash": "feedface00000002", "client_name": "App B", "client_id": "cid-b"}
+            ]
+        })
+    }
+
+    // --- Pure resolve_binding (prefix match + validation + ambiguity) ---
+
+    #[test]
+    fn resolve_binding_rejects_short_prefix() {
+        let r = sample_bindings();
+        let err = resolve_binding(&r, "abc").expect_err("too short");
+        assert!(err.to_string().contains("at least"));
+    }
+
+    #[test]
+    fn resolve_binding_errors_on_no_match() {
+        let r = sample_bindings();
+        assert!(resolve_binding(&r, "00000000nomatch").is_err());
+    }
+
+    #[test]
+    fn resolve_binding_returns_single_match() {
+        let r = sample_bindings();
+        let b = resolve_binding(&r, "deadbeefcafe").expect("match");
+        assert_eq!(b["client_name"], "App A");
+    }
+
+    #[test]
+    fn resolve_binding_errors_on_ambiguous_prefix() {
+        let r = serde_json::json!({
+            "bindings": [{"binding_hash": "aaaa11112222"}, {"binding_hash": "aaaa11113333"}]
+        });
+        let err = resolve_binding(&r, "aaaa1111").expect_err("ambiguous");
+        assert!(err.to_string().contains("ambiguous"), "got: {err}");
+    }
+
+    #[test]
+    fn format_external_subject_with_tenant() {
+        let v = serde_json::json!({"platform": "lark", "tenant": "t1", "external_user_id": "u1"});
+        assert_eq!(format_external_subject(&v), "lark · t1 · u1");
+    }
+
+    #[test]
+    fn format_external_subject_null_is_dash() {
+        assert_eq!(format_external_subject(&Value::Null), "-");
+    }
+
+    // --- Command-level (broker-binding HTTP) ---
+
+    #[tokio::test]
+    async fn bindings_list_fetches() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/users/me/broker-bindings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(sample_bindings()))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(OauthCommands::Bindings {
+            command: BindingCommands::List {
+                auth: mock_auth(server.uri()),
+            },
+        })
+        .await
+        .expect("list should succeed");
+    }
+
+    #[tokio::test]
+    async fn binding_revoke_deletes_resolved_hash() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/users/me/broker-bindings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(sample_bindings()))
+            .mount(&server)
+            .await;
+        // The prefix resolves to the full hash, which is what gets deleted.
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/users/me/broker-bindings/deadbeefcafe0001"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(OauthCommands::Bindings {
+            command: BindingCommands::Revoke {
+                id_or_hash: "deadbeefcafe".to_string(),
+                yes: true,
+                auth: mock_auth(server.uri()),
+            },
+        })
+        .await
+        .expect("revoke should succeed");
+    }
+}

@@ -611,3 +611,282 @@ fn env_secret(var: &str) -> Option<String> {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{env_lock, mock_auth};
+    use wiremock::matchers::{body_partial_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn register(
+        uri: String,
+        platform: &str,
+        bot_token: Option<&str>,
+        verification_token: Option<&str>,
+    ) -> ChannelBotCommands {
+        ChannelBotCommands::Register {
+            platform: platform.to_string(),
+            bot_token: bot_token.map(str::to_string),
+            token_env: None,
+            label: "support".to_string(),
+            app_id: None,
+            app_secret: None,
+            app_secret_env: None,
+            verification_token: verification_token.map(str::to_string),
+            encrypt_key: None,
+            public_key: None,
+            org: None,
+            auth: mock_auth(uri),
+        }
+    }
+
+    #[tokio::test]
+    async fn register_telegram_posts_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/channel-bots"))
+            .and(body_partial_json(serde_json::json!({
+                "platform": "telegram", "bot_token": "tok-123", "label": "support"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "bot-1", "status": "active"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(register(server.uri(), "telegram", Some("tok-123"), None))
+            .await
+            .expect("telegram register should succeed");
+    }
+
+    #[tokio::test]
+    async fn register_lark_includes_verification_token() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/channel-bots"))
+            .and(body_partial_json(serde_json::json!({
+                "platform": "lark", "verification_token": "vtok"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "bot-2", "status": "pending_webhook"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(register(server.uri(), "lark", Some("tok"), Some("vtok")))
+            .await
+            .expect("lark register should succeed");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn register_lark_without_verification_token_fails() {
+        let _guard = env_lock().lock().expect("env lock");
+        let server = MockServer::start().await;
+        // SAFETY: env mutation serialized by env_lock.
+        unsafe {
+            std::env::remove_var("NYXID_LARK_VERIFICATION_TOKEN");
+        }
+        let result = run(register(server.uri(), "lark", Some("tok"), None)).await;
+        assert!(
+            result.is_err(),
+            "lark without a verification token must be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_sends_changed_label() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/api/v1/channel-bots/bot-1"))
+            .and(body_partial_json(serde_json::json!({ "label": "renamed" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "bot-1", "label": "renamed"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ChannelBotCommands::Update {
+            id: "bot-1".to_string(),
+            label: Some("renamed".to_string()),
+            verification_token: None,
+            encrypt_key: None,
+            app_id: None,
+            app_secret: None,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("update should succeed");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn update_with_no_fields_fails() {
+        let _guard = env_lock().lock().expect("env lock");
+        let server = MockServer::start().await;
+        // SAFETY: env mutation serialized by env_lock.
+        unsafe {
+            std::env::remove_var("NYXID_LARK_VERIFICATION_TOKEN");
+            std::env::remove_var("NYXID_LARK_ENCRYPT_KEY");
+        }
+        let result = run(ChannelBotCommands::Update {
+            id: "bot-1".to_string(),
+            label: None,
+            verification_token: None,
+            encrypt_key: None,
+            app_id: None,
+            app_secret: None,
+            auth: mock_auth(server.uri()),
+        })
+        .await;
+        assert!(result.is_err(), "empty update must be rejected");
+    }
+
+    #[tokio::test]
+    async fn list_fetches_bots() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/channel-bots"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "bots": [{"id": "bot-1", "platform": "telegram", "status": "active"}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ChannelBotCommands::List {
+            org: None,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("list should succeed");
+    }
+
+    #[tokio::test]
+    async fn verify_posts_to_verify_endpoint() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/channel-bots/bot-1/verify"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "active", "webhook_registered": true
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ChannelBotCommands::Verify {
+            id: "bot-1".to_string(),
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("verify should succeed");
+    }
+
+    #[tokio::test]
+    async fn delete_with_yes_deletes() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/channel-bots/bot-1"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ChannelBotCommands::Delete {
+            id: "bot-1".to_string(),
+            yes: true,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("delete should succeed");
+    }
+
+    // --- Route subcommands ---
+
+    #[tokio::test]
+    async fn route_create_posts_conversation() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/channel-conversations"))
+            .and(body_partial_json(serde_json::json!({
+                "channel_bot_id": "bot-1", "agent_api_key_id": "key-1"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "route-1", "platform": "telegram"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ChannelBotCommands::Route {
+            command: ChannelRouteCommands::Create {
+                bot_id: "bot-1".to_string(),
+                agent_key_id: "key-1".to_string(),
+                conversation_id: None,
+                conversation_type: None,
+                sender_id: None,
+                default_agent: false,
+                org: None,
+                auth: mock_auth(server.uri()),
+            },
+        })
+        .await
+        .expect("route create should succeed");
+    }
+
+    #[tokio::test]
+    async fn route_update_with_no_fields_fails() {
+        let server = MockServer::start().await;
+        let result = run(ChannelBotCommands::Route {
+            command: ChannelRouteCommands::Update {
+                id: "route-1".to_string(),
+                agent_key_id: None,
+                default_agent: None,
+                active: None,
+                auth: mock_auth(server.uri()),
+            },
+        })
+        .await;
+        assert!(result.is_err(), "empty route update must be rejected");
+    }
+
+    #[tokio::test]
+    async fn route_delete_with_yes_deletes() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/channel-conversations/route-1"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ChannelBotCommands::Route {
+            command: ChannelRouteCommands::Delete {
+                id: "route-1".to_string(),
+                yes: true,
+                auth: mock_auth(server.uri()),
+            },
+        })
+        .await
+        .expect("route delete should succeed");
+    }
+
+    // --- Pure secret resolvers ---
+
+    #[test]
+    fn resolve_secret_returns_inline_value() {
+        assert_eq!(
+            resolve_secret(Some("tok"), None, "bot token").expect("ok"),
+            "tok"
+        );
+    }
+
+    #[test]
+    fn resolve_optional_secret_none_when_absent() {
+        assert!(resolve_optional_secret(None, None).expect("ok").is_none());
+    }
+}

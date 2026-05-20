@@ -3381,4 +3381,51 @@ mod branch_tests {
         .await
         .expect("convert ssh via list fallback should succeed");
     }
+
+    #[tokio::test]
+    async fn add_with_org_includes_target_org_id() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/keys"))
+            .and(body_partial_json(
+                serde_json::json!({ "target_org_id": NODE_UUID }),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "svc-1", "slug": "my-custom"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // org as a UUID -> resolve_org_id returns it without an API call;
+        // custom + auth_method=none + terminal forces the scripted path.
+        run(ServiceCommands::Add {
+            slug: None,
+            custom: true,
+            custom_slug: Some("my-custom".to_string()),
+            oauth: false,
+            device_code: false,
+            via_node: None,
+            endpoint_url: Some("https://api.example.com".to_string()),
+            label: Some("My Custom".to_string()),
+            auth_method: Some("none".to_string()),
+            auth_key_name: None,
+            credential: None,
+            credential_env: None,
+            credential_file: None,
+            scopes: vec![],
+            oauth_client_id: None,
+            oauth_client_secret: None,
+            oauth_client_secret_env: None,
+            org: Some(NODE_UUID.to_string()),
+            openapi_spec_url: None,
+            ws_frame_preset: None,
+            ws_frame_clear: false,
+            terminal: true,
+            no_wait: false,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("org add should succeed");
+    }
 }
