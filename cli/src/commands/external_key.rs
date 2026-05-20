@@ -10,7 +10,7 @@ use crate::cli::{ExternalKeyCommands, OutputFormat};
 pub async fn run(command: ExternalKeyCommands) -> Result<()> {
     match command {
         ExternalKeyCommands::List { auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let keys: Value = api.get("/api-keys/external").await?;
 
             match auth.output {
@@ -56,7 +56,7 @@ pub async fn run(command: ExternalKeyCommands) -> Result<()> {
             credential,
             auth,
         } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
 
             let credential = if let Some(c) = credential {
                 c
@@ -97,7 +97,7 @@ pub async fn run(command: ExternalKeyCommands) -> Result<()> {
                 }
             }
 
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             api.delete_empty(&format!("/api-keys/external/{id}"))
                 .await?;
             match auth.output {

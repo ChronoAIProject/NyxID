@@ -10,7 +10,7 @@ use crate::cli::{OutputFormat, ProfileCommands};
 pub async fn run(command: ProfileCommands) -> Result<()> {
     match command {
         ProfileCommands::Update { name, auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let mut body = serde_json::Map::new();
 
             if let Some(name) = name {
@@ -50,7 +50,7 @@ pub async fn run(command: ProfileCommands) -> Result<()> {
                 }
             }
 
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             api.delete_empty("/users/me").await?;
             match auth.output {
                 OutputFormat::Json => println!(
@@ -63,7 +63,7 @@ pub async fn run(command: ProfileCommands) -> Result<()> {
         }
 
         ProfileCommands::Consents { auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let consents: Value = api.get("/users/me/consents").await?;
 
             match auth.output {
@@ -115,7 +115,7 @@ pub async fn run(command: ProfileCommands) -> Result<()> {
                 }
             }
 
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             api.delete_empty(&format!("/users/me/consents/{client_id}"))
                 .await?;
             match auth.output {

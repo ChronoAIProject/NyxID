@@ -56,6 +56,9 @@ pub async fn run(cli: SshCli) -> Result<()> {
             certificate_file,
             ca_public_key_file,
         } => {
+            // Gate before reading the raw token: the SSH WebSocket path uses
+            // this token directly and has no in-flight refresh of its own.
+            crate::auth::ensure_session(&auth).await?;
             let token = crate::auth::resolve_access_token(&auth)?;
             let base_url = auth.resolved_base_url()?;
             let mut api = ApiClient::from_auth(&auth)?;
@@ -81,6 +84,9 @@ pub async fn run(cli: SshCli) -> Result<()> {
             certificate_file,
             ca_public_key_file,
         } => {
+            // Gate before reading the raw token: the SSH WebSocket path uses
+            // this token directly and has no in-flight refresh of its own.
+            crate::auth::ensure_session(&auth).await?;
             let token = crate::auth::resolve_access_token(&auth)?;
             let base_url = auth.resolved_base_url()?;
             let mut api = ApiClient::from_auth(&auth)?;
@@ -132,6 +138,7 @@ pub async fn run(cli: SshCli) -> Result<()> {
             principal,
             command,
         } => {
+            crate::auth::ensure_session(&auth).await?;
             let mut api = ApiClient::from_auth(&auth)?;
             let resolved_id = resolve_ssh_service_id(&mut api, &service_id).await?;
             let service_slug = resolve_user_service_slug(&mut api, &service_id)
@@ -149,6 +156,7 @@ pub async fn run(cli: SshCli) -> Result<()> {
             service_id,
             principal,
         } => {
+            crate::auth::ensure_session(&auth).await?;
             let mut api = ApiClient::from_auth(&auth)?;
             let resolved_id = resolve_ssh_service_id(&mut api, &service_id).await?;
 

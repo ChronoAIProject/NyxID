@@ -12,7 +12,7 @@ pub async fn run(command: ProviderCommands) -> Result<()> {
             org,
             auth,
         } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let org = match org {
                 Some(raw) => Some(resolve_org_id(&mut api, &raw).await?),
                 None => None,

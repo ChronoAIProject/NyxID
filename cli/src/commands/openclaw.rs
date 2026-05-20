@@ -13,7 +13,7 @@ pub async fn run(command: OpenClawCommands) -> Result<()> {
             token_env,
             auth,
         } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
 
             let gateway_url = match url {
                 Some(u) => u,

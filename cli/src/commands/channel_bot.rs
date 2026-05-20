@@ -44,7 +44,7 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
                 );
             }
 
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let org = match org {
                 Some(raw) => Some(resolve_org_id(&mut api, &raw).await?),
                 None => None,
@@ -177,7 +177,7 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
                 bail!("No update fields provided");
             }
 
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let result: Value = api.patch(&format!("/channel-bots/{id}"), &body).await?;
 
             match auth.output {
@@ -197,7 +197,7 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
         }
 
         ChannelBotCommands::List { org, auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let org = match org {
                 Some(raw) => Some(resolve_org_id(&mut api, &raw).await?),
                 None => None,
@@ -252,7 +252,7 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
         }
 
         ChannelBotCommands::Show { id, auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let bot: Value = api.get(&format!("/channel-bots/{id}")).await?;
 
             match auth.output {
@@ -312,7 +312,7 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
                 }
             }
 
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             api.delete_empty(&format!("/channel-bots/{id}")).await?;
             match auth.output {
                 OutputFormat::Json => println!(
@@ -325,7 +325,7 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
         }
 
         ChannelBotCommands::Verify { id, auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let result: Value = api
                 .post(
                     &format!("/channel-bots/{id}/verify"),
@@ -368,7 +368,7 @@ async fn run_route(command: ChannelRouteCommands) -> Result<()> {
             org,
             auth,
         } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let org = match org {
                 Some(raw) => Some(resolve_org_id(&mut api, &raw).await?),
                 None => None,
@@ -420,7 +420,7 @@ async fn run_route(command: ChannelRouteCommands) -> Result<()> {
         }
 
         ChannelRouteCommands::List { bot_id, org, auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let org = match org {
                 Some(raw) => Some(resolve_org_id(&mut api, &raw).await?),
                 None => None,
@@ -509,7 +509,7 @@ async fn run_route(command: ChannelRouteCommands) -> Result<()> {
             active,
             auth,
         } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
 
             let mut body = serde_json::Map::new();
 
@@ -556,7 +556,7 @@ async fn run_route(command: ChannelRouteCommands) -> Result<()> {
                 }
             }
 
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             api.delete_empty(&format!("/channel-conversations/{id}"))
                 .await?;
             match auth.output {

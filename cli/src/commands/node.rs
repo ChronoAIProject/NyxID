@@ -12,7 +12,7 @@ pub async fn run(command: NodeCommands) -> Result<()> {
     match command {
         // --- User-side commands (API calls) ---
         NodeCommands::List { auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let nodes: Value = api.get("/nodes").await?;
             let current_user_id = match auth.output {
                 OutputFormat::Json => None,
@@ -61,7 +61,7 @@ pub async fn run(command: NodeCommands) -> Result<()> {
         }
 
         NodeCommands::Show { id, auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
 
             // Try direct ID first; if 404, resolve by name
             let node: Value = match api.get_value(&format!("/nodes/{id}")).await {
@@ -161,7 +161,7 @@ pub async fn run(command: NodeCommands) -> Result<()> {
         }
 
         NodeCommands::Transfer { id, to, yes, auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let resolved_id = resolve_node_id(&mut api, &id).await?;
             let node: Value = api.get(&format!("/nodes/{resolved_id}")).await?;
             let bindings: Value = api.get(&format!("/nodes/{resolved_id}/bindings")).await?;
@@ -259,7 +259,7 @@ pub async fn run(command: NodeCommands) -> Result<()> {
             // behavior. Still prompts from stdin when --name is absent
             // so existing interactive-but-not-wizardable sessions (SSH)
             // keep working the same way they always did.
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let owner_user_id = match org {
                 Some(raw) => Some(resolve_org_id(&mut api, &raw).await?),
                 None => None,
@@ -311,7 +311,7 @@ pub async fn run(command: NodeCommands) -> Result<()> {
         }
 
         NodeCommands::Delete { id, yes, auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let resolved_id = resolve_node_id(&mut api, &id).await?;
 
             if !yes {
@@ -353,7 +353,7 @@ pub async fn run(command: NodeCommands) -> Result<()> {
                 && (no_wait || (interactive_output && crate::wizard::is_browser_flow_eligible()));
 
             if wizard_eligible {
-                let mut api = ApiClient::from_auth(&auth)?;
+                let mut api = ApiClient::from_auth_checked(&auth).await?;
                 let resolved_id = resolve_node_id(&mut api, &id).await?;
                 // Best-effort fetch of the display name for the confirm
                 // panel. Falls back to id if the GET fails.
@@ -372,7 +372,7 @@ pub async fn run(command: NodeCommands) -> Result<()> {
             }
 
             // Scripted / headless path — UNCHANGED from pre-wizard behavior.
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let resolved_id = resolve_node_id(&mut api, &id).await?;
             let result: Value = api
                 .post(

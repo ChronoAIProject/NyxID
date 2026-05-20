@@ -9,7 +9,7 @@ use crate::cli::{OutputFormat, ProxyCommands};
 pub async fn run(command: ProxyCommands) -> Result<()> {
     match command {
         ProxyCommands::Discover { auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let services: Value = api.get("/proxy/services").await?;
 
             match auth.output {
@@ -64,7 +64,7 @@ pub async fn run(command: ProxyCommands) -> Result<()> {
             via_service,
             auth,
         } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
 
             // Build proxy path
             let trimmed_path = path.trim_start_matches('/');

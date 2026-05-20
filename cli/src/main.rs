@@ -193,11 +193,11 @@ async fn run(cli: Cli) -> Result<()> {
         Commands::ResetPassword(args) => commands::auth_flows::run_reset_password(args).await,
 
         Commands::Whoami(auth) => {
-            let mut api = api::ApiClient::from_auth(&auth)?;
+            let mut api = api::ApiClient::from_auth_checked(&auth).await?;
             commands::whoami::run(&mut api, auth.output).await
         }
         Commands::Status(auth) => {
-            let mut api = api::ApiClient::from_auth(&auth)?;
+            let mut api = api::ApiClient::from_auth_checked(&auth).await?;
             commands::status::run(&mut api, auth.output).await
         }
         Commands::Doctor(args) => commands::doctor::run(args).await,

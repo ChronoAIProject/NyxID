@@ -18,7 +18,7 @@ pub async fn run(command: NodeCredentialAdminCommands) -> Result<()> {
             label,
             auth,
         } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let node_id = crate::commands::node::resolve_node_id(&mut api, &node).await?;
             let body = serde_json::json!({
                 "service_slug": slug,
@@ -54,7 +54,7 @@ pub async fn run(command: NodeCredentialAdminCommands) -> Result<()> {
             Ok(())
         }
         NodeCredentialAdminCommands::List { node, auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let node_id = crate::commands::node::resolve_node_id(&mut api, &node).await?;
             let response: Value = api
                 .get(&format!("/nodes/{node_id}/credentials/pending"))
@@ -103,7 +103,7 @@ pub async fn run(command: NodeCredentialAdminCommands) -> Result<()> {
             yes,
             auth,
         } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let node_id = crate::commands::node::resolve_node_id(&mut api, &node).await?;
 
             if !yes {

@@ -10,7 +10,7 @@ use crate::cli::{EndpointCommands, OutputFormat};
 pub async fn run(command: EndpointCommands) -> Result<()> {
     match command {
         EndpointCommands::List { auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let endpoints: Value = api.get("/endpoints").await?;
 
             match auth.output {
@@ -50,7 +50,7 @@ pub async fn run(command: EndpointCommands) -> Result<()> {
         }
 
         EndpointCommands::Update { id, url, auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let body = serde_json::json!({ "url": url });
             let result: Value = api.put(&format!("/endpoints/{id}"), &body).await?;
 
@@ -77,7 +77,7 @@ pub async fn run(command: EndpointCommands) -> Result<()> {
                 }
             }
 
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             api.delete_empty(&format!("/endpoints/{id}")).await?;
             match auth.output {
                 OutputFormat::Json => println!(

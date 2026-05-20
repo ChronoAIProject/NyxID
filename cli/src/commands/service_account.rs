@@ -29,7 +29,7 @@ pub async fn run(command: ServiceAccountCommands) -> Result<()> {
             no_wait,
             auth,
         } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let org = match org {
                 Some(raw) => Some(resolve_org_id(&mut api, &raw).await?),
                 None => None,
@@ -116,7 +116,7 @@ pub async fn run(command: ServiceAccountCommands) -> Result<()> {
             per_page,
             auth,
         } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let org = match org {
                 Some(raw) => Some(resolve_org_id(&mut api, &raw).await?),
                 None => None,
@@ -181,7 +181,7 @@ pub async fn run(command: ServiceAccountCommands) -> Result<()> {
         }
 
         ServiceAccountCommands::Show { id, auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let result: Value = api.get(&format!("/admin/service-accounts/{id}")).await?;
             match auth.output {
                 OutputFormat::Json => {
@@ -203,7 +203,7 @@ pub async fn run(command: ServiceAccountCommands) -> Result<()> {
             is_active,
             auth,
         } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
 
             let mut body = Map::new();
             if let Some(n) = name {
@@ -250,7 +250,7 @@ pub async fn run(command: ServiceAccountCommands) -> Result<()> {
             if !yes && !confirm(&format!("Delete service account {id}?"))? {
                 return Ok(());
             }
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             api.delete_empty(&format!("/admin/service-accounts/{id}"))
                 .await?;
             match auth.output {
@@ -279,7 +279,7 @@ pub async fn run(command: ServiceAccountCommands) -> Result<()> {
                 && (no_wait || (interactive_output && crate::wizard::is_browser_flow_eligible()));
 
             if wizard_eligible {
-                let mut api = ApiClient::from_auth(&auth)?;
+                let mut api = ApiClient::from_auth_checked(&auth).await?;
                 // Best-effort fetch of the display name for the
                 // confirm panel. Fallback to id if the fetch fails —
                 // non-fatal; the confirm panel just shows the raw id.
@@ -303,7 +303,7 @@ pub async fn run(command: ServiceAccountCommands) -> Result<()> {
                 .await;
             }
 
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let result: Value = api
                 .post(
                     &format!("/admin/service-accounts/{id}/rotate-secret"),
@@ -327,7 +327,7 @@ pub async fn run(command: ServiceAccountCommands) -> Result<()> {
         }
 
         ServiceAccountCommands::RevokeTokens { id, auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let result: Value = api
                 .post(
                     &format!("/admin/service-accounts/{id}/revoke-tokens"),

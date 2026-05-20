@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use reqwest::Client;
+use serde::Serialize;
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
 
 /// User-Agent string sent on all CLI HTTP requests.
 pub const CLI_USER_AGENT: &str = concat!("nyxid-cli/", env!("CARGO_PKG_VERSION"));
@@ -83,12 +83,6 @@ pub struct ApiClient {
     refresh_disabled: bool,
 }
 
-#[derive(Deserialize)]
-struct RefreshResponse {
-    access_token: String,
-    refresh_token: String,
-}
-
 impl ApiClient {
     pub fn new(base_url: &str, access_token: String) -> Result<Self> {
         Self::new_with_profile(base_url, access_token, None)
@@ -116,6 +110,24 @@ impl ApiClient {
         Self::new_with_profile(&base_url, token, auth.profile.clone())
     }
 
+    /// Build a client after validating the saved session up front.
+    ///
+    /// Runs [`crate::auth::ensure_session`] first: a no-op when the access
+    /// token is still valid (local `exp` check, no network), a silent refresh
+    /// when it's expired, or a prompt/clean-error when the session is dead.
+    /// Only then does it build the client. Use this for session-authenticated
+    /// commands so a dead session is handled before the command does anything
+    /// user-visible, instead of surfacing a raw 401 mid-operation.
+    ///
+    /// Do NOT use for flows that authenticate with a non-session credential
+    /// (e.g. an agent API key passed via env) -- those should keep
+    /// [`Self::from_auth`] / [`Self::without_token_refresh`], since
+    /// `ensure_session` would have nothing to validate there anyway.
+    pub async fn from_auth_checked(auth: &crate::cli::AuthArgs) -> Result<Self> {
+        crate::auth::ensure_session(auth).await?;
+        Self::from_auth(auth)
+    }
+
     /// Disable the automatic 401 → session-refresh retry path.
     ///
     /// Returns `self` as a fluent builder. Use this when the caller is
@@ -135,7 +147,10 @@ impl ApiClient {
     }
 
     /// Attempt to refresh the access token using the saved refresh token.
-    /// Returns `true` if the token was refreshed successfully.
+    /// Returns `true` if the token was refreshed successfully. Delegates the
+    /// wire protocol to [`crate::auth::exchange_refresh_token`] (the single
+    /// source of truth) and owns only the token I/O: read the saved refresh
+    /// token, persist the rotated pair, and update this client's in-memory copy.
     async fn try_refresh_token(&mut self) -> bool {
         if self.refresh_disabled {
             return false;
@@ -146,32 +161,28 @@ impl ApiClient {
             None => return false,
         };
 
-        let url = format!("{}/auth/refresh", self.base_url);
-        let resp = self
-            .client
-            .post(&url)
-            .json(&serde_json::json!({ "refresh_token": refresh_token }))
-            .send()
-            .await;
-
-        let resp = match resp {
-            Ok(r) if r.status().is_success() => r,
-            _ => return false,
-        };
-
-        let tokens: RefreshResponse = match resp.json().await {
-            Ok(t) => t,
-            Err(_) => return false,
-        };
-
-        if crate::auth::save_tokens_for(profile, &tokens.access_token, Some(&tokens.refresh_token))
-            .is_err()
+        match crate::auth::exchange_refresh_token(
+            &self.client,
+            self.base_url_root(),
+            &refresh_token,
+        )
+        .await
         {
-            return false;
+            crate::auth::RefreshExchange::Renewed {
+                access_token,
+                refresh_token,
+            } => {
+                if crate::auth::save_tokens_for(profile, &access_token, Some(&refresh_token))
+                    .is_err()
+                {
+                    return false;
+                }
+                self.access_token = access_token;
+                true
+            }
+            crate::auth::RefreshExchange::Unauthorized
+            | crate::auth::RefreshExchange::Network(_) => false,
         }
-
-        self.access_token = tokens.access_token;
-        true
     }
 
     pub async fn get<T: DeserializeOwned>(&mut self, path: &str) -> Result<T> {
