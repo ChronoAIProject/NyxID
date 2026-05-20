@@ -400,3 +400,313 @@ fn confirm(prompt: &str) -> Result<bool> {
     }
     Ok(true)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::mock_auth;
+    use wiremock::matchers::{body_json, method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // A literal UUID — resolve_org_id returns it directly without an HTTP
+    // call, so the request body should carry it verbatim as target_org_id.
+    const ORG_UUID: &str = "11111111-1111-1111-1111-111111111111";
+
+    // --- Create (scripted path; --terminal bypasses the browser wizard) ---
+
+    #[tokio::test]
+    async fn create_scripted_posts_minimal_body() {
+        let server = MockServer::start().await;
+        // body_json is exact: confirms only name + allowed_scopes are sent
+        // when no optional flags are supplied (description/rate_limit/roles
+        // must be absent, NOT null).
+        Mock::given(method("POST"))
+            .and(path("/api/v1/admin/service-accounts"))
+            .and(body_json(serde_json::json!({
+                "name": "ci-bot",
+                "allowed_scopes": "openid profile"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "sa-1",
+                "name": "ci-bot",
+                "client_id": "cid",
+                "client_secret": "shh",
+                "allowed_scopes": "openid profile"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ServiceAccountCommands::Create {
+            name: "ci-bot".to_string(),
+            scopes: "openid profile".to_string(),
+            description: None,
+            rate_limit_override: None,
+            role_ids: None,
+            org: None,
+            terminal: true,
+            no_wait: false,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("create should succeed");
+    }
+
+    #[tokio::test]
+    async fn create_serializes_all_optionals_and_org_and_splits_role_csv() {
+        let server = MockServer::start().await;
+        // Exact body asserts the body-building decision logic:
+        //  - description string
+        //  - rate_limit_override as a JSON number (not string)
+        //  - role_ids CSV is split, trimmed, empties dropped -> array
+        //  - org UUID lands in target_org_id (resolve_org_id is a no-op for UUID)
+        Mock::given(method("POST"))
+            .and(path("/api/v1/admin/service-accounts"))
+            .and(body_json(serde_json::json!({
+                "name": "ci-bot",
+                "allowed_scopes": "openid",
+                "description": "build runner",
+                "rate_limit_override": 25,
+                "role_ids": ["role-a", "role-b"],
+                "target_org_id": ORG_UUID
+            })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "id": "sa-2" })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ServiceAccountCommands::Create {
+            name: "ci-bot".to_string(),
+            scopes: "openid".to_string(),
+            description: Some("build runner".to_string()),
+            rate_limit_override: Some(25),
+            // leading/trailing spaces + a trailing empty segment exercise the
+            // trim()/filter(!is_empty) path in the CSV parser.
+            role_ids: Some(" role-a , role-b , ".to_string()),
+            org: Some(ORG_UUID.to_string()),
+            terminal: true,
+            no_wait: false,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("create with optionals should succeed");
+    }
+
+    #[tokio::test]
+    async fn create_surfaces_server_error() {
+        let server = MockServer::start().await;
+        // 403 from the backend (e.g. non-admin) must bubble up as Err,
+        // not be swallowed.
+        Mock::given(method("POST"))
+            .and(path("/api/v1/admin/service-accounts"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "error": "forbidden"
+            })))
+            .mount(&server)
+            .await;
+
+        let result = run(ServiceAccountCommands::Create {
+            name: "ci-bot".to_string(),
+            scopes: "openid".to_string(),
+            description: None,
+            rate_limit_override: None,
+            role_ids: None,
+            org: None,
+            terminal: true,
+            no_wait: false,
+            auth: mock_auth(server.uri()),
+        })
+        .await;
+        assert!(result.is_err(), "403 from backend must surface as error");
+    }
+
+    // --- List (query-string construction + per_page clamp) ---
+
+    #[tokio::test]
+    async fn list_clamps_per_page_and_forwards_search_and_org() {
+        let server = MockServer::start().await;
+        // per_page=250 must be clamped to 100 (per_page.min(100)); search
+        // and org are URL-encoded and forwarded as query params.
+        Mock::given(method("GET"))
+            .and(path("/api/v1/admin/service-accounts"))
+            .and(query_param("page", "2"))
+            .and(query_param("per_page", "100"))
+            .and(query_param("search", "bot"))
+            .and(query_param("org_id", ORG_UUID))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "service_accounts": [{"id": "sa-1", "name": "bot"}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ServiceAccountCommands::List {
+            org: Some(ORG_UUID.to_string()),
+            search: Some("bot".to_string()),
+            page: 2,
+            per_page: 250,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("list should succeed");
+    }
+
+    // --- Show ---
+
+    #[tokio::test]
+    async fn show_fetches_by_id() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/admin/service-accounts/sa-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "sa-1",
+                "name": "bot"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ServiceAccountCommands::Show {
+            id: "sa-1".to_string(),
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("show should succeed");
+    }
+
+    // --- Update (only-changed-fields PATCH semantics over PUT) ---
+
+    #[tokio::test]
+    async fn update_sends_only_supplied_fields() {
+        let server = MockServer::start().await;
+        // Exact body: name + is_active=false are set, every other column is
+        // None and must be omitted from the body entirely.
+        Mock::given(method("PUT"))
+            .and(path("/api/v1/admin/service-accounts/sa-1"))
+            .and(body_json(serde_json::json!({
+                "name": "renamed",
+                "is_active": false
+            })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "id": "sa-1" })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ServiceAccountCommands::Update {
+            id: "sa-1".to_string(),
+            name: Some("renamed".to_string()),
+            description: None,
+            scopes: None,
+            role_ids: None,
+            is_active: Some(false),
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("update should succeed");
+    }
+
+    #[tokio::test]
+    async fn update_splits_role_ids_csv() {
+        let server = MockServer::start().await;
+        // Confirms Update reuses the same CSV split/trim logic as Create.
+        Mock::given(method("PUT"))
+            .and(path("/api/v1/admin/service-accounts/sa-1"))
+            .and(body_json(serde_json::json!({
+                "allowed_scopes": "openid email",
+                "role_ids": ["r1", "r2"]
+            })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "id": "sa-1" })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ServiceAccountCommands::Update {
+            id: "sa-1".to_string(),
+            name: None,
+            description: None,
+            scopes: Some("openid email".to_string()),
+            role_ids: Some("r1, ,r2".to_string()),
+            is_active: None,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("update should succeed");
+    }
+
+    // --- Delete (--yes skips the stdin confirm prompt) ---
+
+    #[tokio::test]
+    async fn delete_with_yes_issues_delete_request() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/admin/service-accounts/sa-1"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ServiceAccountCommands::Delete {
+            id: "sa-1".to_string(),
+            yes: true,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("delete should succeed");
+    }
+
+    // --- RotateSecret (scripted path; --terminal bypasses the wizard) ---
+
+    #[tokio::test]
+    async fn rotate_secret_scripted_posts_rotate_endpoint() {
+        let server = MockServer::start().await;
+        // null body — the rotate POST carries no payload.
+        Mock::given(method("POST"))
+            .and(path("/api/v1/admin/service-accounts/sa-1/rotate-secret"))
+            .and(body_json(serde_json::Value::Null))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "client_id": "cid",
+                "client_secret": "new-secret"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ServiceAccountCommands::RotateSecret {
+            id: "sa-1".to_string(),
+            terminal: true,
+            no_wait: false,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("rotate-secret should succeed");
+    }
+
+    // --- RevokeTokens ---
+
+    #[tokio::test]
+    async fn revoke_tokens_posts_revoke_endpoint() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/admin/service-accounts/sa-1/revoke-tokens"))
+            .and(body_json(serde_json::Value::Null))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "revoked_count": 3 })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ServiceAccountCommands::RevokeTokens {
+            id: "sa-1".to_string(),
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("revoke-tokens should succeed");
+    }
+}
