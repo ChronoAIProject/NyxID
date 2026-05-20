@@ -8,7 +8,7 @@ use crate::cli::{CatalogCommands, OutputFormat};
 pub async fn run(command: CatalogCommands) -> Result<()> {
     match command {
         CatalogCommands::List { all, auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let path = if all {
                 "/catalog?include_all=true"
             } else {
@@ -87,7 +87,7 @@ pub async fn run(command: CatalogCommands) -> Result<()> {
             Ok(())
         }
         CatalogCommands::Show { slug, auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let item: Value = api.get(&format!("/catalog/{slug}")).await?;
 
             match auth.output {
@@ -261,7 +261,7 @@ pub async fn run(command: CatalogCommands) -> Result<()> {
             Ok(())
         }
         CatalogCommands::Endpoints { slug, auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let result: Value = api.get(&format!("/catalog/{slug}/endpoints")).await?;
 
             match auth.output {

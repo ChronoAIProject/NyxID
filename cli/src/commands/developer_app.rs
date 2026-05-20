@@ -34,7 +34,7 @@ pub async fn run(command: DeveloperAppCommands) -> Result<()> {
                 bail!("At least one --redirect-uri is required");
             }
 
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let org = match org {
                 Some(raw) => Some(resolve_org_id(&mut api, &raw).await?),
                 None => None,
@@ -137,7 +137,7 @@ pub async fn run(command: DeveloperAppCommands) -> Result<()> {
         }
 
         DeveloperAppCommands::List { org, auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let org = match org {
                 Some(raw) => Some(resolve_org_id(&mut api, &raw).await?),
                 None => None,
@@ -207,7 +207,7 @@ pub async fn run(command: DeveloperAppCommands) -> Result<()> {
         }
 
         DeveloperAppCommands::Show { id, auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let result: Value = api.get(&format!("/developer/oauth-clients/{id}")).await?;
             match auth.output {
                 OutputFormat::Json => {
@@ -229,7 +229,7 @@ pub async fn run(command: DeveloperAppCommands) -> Result<()> {
             broker_capability,
             auth,
         } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
 
             let mut body = Map::new();
             if let Some(n) = name {
@@ -280,7 +280,7 @@ pub async fn run(command: DeveloperAppCommands) -> Result<()> {
             if !yes && !confirm(&format!("Delete developer app {id}?"))? {
                 return Ok(());
             }
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             api.delete_empty(&format!("/developer/oauth-clients/{id}"))
                 .await?;
             match auth.output {
@@ -309,7 +309,7 @@ pub async fn run(command: DeveloperAppCommands) -> Result<()> {
                 && (no_wait || (interactive_output && crate::wizard::is_browser_flow_eligible()));
 
             if wizard_eligible {
-                let mut api = ApiClient::from_auth(&auth)?;
+                let mut api = ApiClient::from_auth_checked(&auth).await?;
                 // Best-effort fetch of the display name (client_name)
                 // for the confirm panel. Fallback to id if the fetch
                 // fails — non-fatal.
@@ -333,7 +333,7 @@ pub async fn run(command: DeveloperAppCommands) -> Result<()> {
                 .await;
             }
 
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let result: Value = api
                 .post(
                     &format!("/developer/oauth-clients/{id}/rotate-secret"),

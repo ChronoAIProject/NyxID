@@ -11,7 +11,7 @@ use crate::org_resolver::resolve_org_id;
 pub async fn run(command: ApprovalCommands) -> Result<()> {
     match command {
         ApprovalCommands::List { org, auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let org = resolve_optional_org(&mut api, org).await?;
             let path = match org {
                 Some(ref id) => {
@@ -74,7 +74,7 @@ pub async fn run(command: ApprovalCommands) -> Result<()> {
         }
 
         ApprovalCommands::Show { id, auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let req: Value = api.get(&format!("/approvals/requests/{id}")).await?;
 
             match auth.output {
@@ -111,7 +111,7 @@ pub async fn run(command: ApprovalCommands) -> Result<()> {
         }
 
         ApprovalCommands::Approve { id, auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let body = serde_json::json!({ "decision": "approved" });
             let result: Value = api
                 .post(&format!("/approvals/requests/{id}/decide"), &body)
@@ -129,7 +129,7 @@ pub async fn run(command: ApprovalCommands) -> Result<()> {
         }
 
         ApprovalCommands::Deny { id, reason, auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let mut body = serde_json::json!({ "decision": "denied" });
             if let Some(reason) = reason {
                 body["reason"] = Value::String(reason);
@@ -150,7 +150,7 @@ pub async fn run(command: ApprovalCommands) -> Result<()> {
         }
 
         ApprovalCommands::Grants { org, auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let org = resolve_optional_org(&mut api, org).await?;
             let path = match org {
                 Some(ref id) => {
@@ -213,7 +213,7 @@ pub async fn run(command: ApprovalCommands) -> Result<()> {
                 }
             }
 
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let org = resolve_optional_org(&mut api, org).await?;
             let path = match org {
                 Some(ref org_id) => format!(
@@ -234,7 +234,7 @@ pub async fn run(command: ApprovalCommands) -> Result<()> {
         }
 
         ApprovalCommands::Enable { auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let body = serde_json::json!({ "approval_required": true });
             let result: Value = api.put("/notifications/settings", &body).await?;
 
@@ -265,7 +265,7 @@ pub async fn run(command: ApprovalCommands) -> Result<()> {
                 }
             }
 
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let body = serde_json::json!({ "approval_required": false });
             let result: Value = api.put("/notifications/settings", &body).await?;
 
@@ -283,7 +283,7 @@ pub async fn run(command: ApprovalCommands) -> Result<()> {
         }
 
         ApprovalCommands::ServiceConfigs { org, auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let org = resolve_optional_org(&mut api, org).await?;
             let path = match org {
                 Some(ref id) => {
@@ -340,7 +340,7 @@ pub async fn run(command: ApprovalCommands) -> Result<()> {
             org,
             auth,
         } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let org = resolve_optional_org(&mut api, org).await?;
             let mut body = serde_json::Map::new();
 

@@ -108,7 +108,7 @@ async fn run_channel(command: ChannelEventChannelCommands) -> Result<()> {
             org,
             auth,
         } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let org = match org {
                 Some(raw) => Some(resolve_org_id(&mut api, &raw).await?),
                 None => None,
@@ -152,7 +152,7 @@ async fn run_channel(command: ChannelEventChannelCommands) -> Result<()> {
         }
 
         ChannelEventChannelCommands::List { org, auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let org = match org {
                 Some(raw) => Some(resolve_org_id(&mut api, &raw).await?),
                 None => None,
@@ -226,7 +226,7 @@ async fn run_channel(command: ChannelEventChannelCommands) -> Result<()> {
                 }
             }
 
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             api.delete_empty(&format!("/channel-conversations/{id}"))
                 .await?;
             match auth.output {

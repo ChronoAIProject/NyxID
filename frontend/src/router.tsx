@@ -334,7 +334,14 @@ const connectionsRedirectRoute = createRoute({
 const providersRedirectRoute = createRoute({
   path: "/providers",
   getParentRoute: () => dashboardLayout,
-  beforeLoad: () => {
+  beforeLoad: ({ location }) => {
+    // The backend's OAuth callback redirects every authenticated user here
+    // with ?status=error&message=... on account mismatch (issue #695).
+    // ProvidersCallbackPage must render for non-admins too; otherwise the
+    // actionable error stored by issue #651 never reaches the user.
+    if (location.pathname === "/providers/callback") {
+      return;
+    }
     const { user } = useAuthStore.getState();
     if (user?.is_admin) {
       // Admin users can still access the providers management pages

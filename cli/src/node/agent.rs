@@ -834,7 +834,8 @@ pub async fn cmd_ssh_credentials(
             }
             let mut node_config = NodeConfig::load(&config_file)?;
             let backend = SecretBackend::from_config(&node_config, &config_dir)?;
-            let mut api = crate::api::ApiClient::from_auth(&auth)
+            let mut api = crate::api::ApiClient::from_auth_checked(&auth)
+                .await
                 .map_err(|error| super::error::Error::Config(error.to_string()))?;
             let resp: serde_json::Value = api
                 .get("/keys")

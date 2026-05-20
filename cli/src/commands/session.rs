@@ -8,7 +8,7 @@ use crate::cli::{OutputFormat, SessionCommands};
 pub async fn run(command: SessionCommands) -> Result<()> {
     match command {
         SessionCommands::List { auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let sessions: Value = api.get("/sessions").await?;
 
             match auth.output {

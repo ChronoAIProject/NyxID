@@ -185,7 +185,7 @@ async fn create_org(
     contact_email: Option<&str>,
     avatar_url: Option<&str>,
 ) -> Result<()> {
-    let mut api = ApiClient::from_auth(auth)?;
+    let mut api = ApiClient::from_auth_checked(auth).await?;
 
     let mut body = serde_json::json!({ "display_name": display_name });
     if let Some(email) = contact_email
@@ -222,7 +222,7 @@ async fn create_org(
 }
 
 async fn list_orgs(auth: &AuthArgs) -> Result<()> {
-    let mut api = ApiClient::from_auth(auth)?;
+    let mut api = ApiClient::from_auth_checked(auth).await?;
     let resp: Value = api.get("/orgs").await?;
 
     match auth.output {
@@ -258,7 +258,7 @@ async fn list_orgs(auth: &AuthArgs) -> Result<()> {
 }
 
 async fn show_org(auth: &AuthArgs, id: &str) -> Result<()> {
-    let mut api = ApiClient::from_auth(auth)?;
+    let mut api = ApiClient::from_auth_checked(auth).await?;
     let org: Value = api.get(&format!("/orgs/{id}")).await?;
 
     match auth.output {
@@ -292,7 +292,7 @@ async fn update_org(
     slug: Option<&str>,
     avatar_url: Option<&str>,
 ) -> Result<()> {
-    let mut api = ApiClient::from_auth(auth)?;
+    let mut api = ApiClient::from_auth_checked(auth).await?;
     let mut body = serde_json::Map::new();
     if let Some(name) = display_name {
         body.insert("display_name".into(), Value::String(name.to_string()));
@@ -329,7 +329,7 @@ async fn delete_org(auth: &AuthArgs, id: &str, yes: bool) -> Result<()> {
         }
     }
 
-    let mut api = ApiClient::from_auth(auth)?;
+    let mut api = ApiClient::from_auth_checked(auth).await?;
     api.delete_empty(&format!("/orgs/{id}")).await?;
     match auth.output {
         OutputFormat::Json => println!(
@@ -365,7 +365,7 @@ async fn join_org(auth: &AuthArgs, nonce_or_url: &str) -> Result<()> {
         return Err(anyhow!("Empty invite nonce"));
     }
 
-    let mut api = ApiClient::from_auth(auth)?;
+    let mut api = ApiClient::from_auth_checked(auth).await?;
     let resp: Value = api
         .post(&format!("/orgs/join/{nonce}"), &serde_json::json!({}))
         .await
@@ -387,7 +387,7 @@ async fn join_org(auth: &AuthArgs, nonce_or_url: &str) -> Result<()> {
 }
 
 async fn set_primary_org(auth: &AuthArgs, org_id: Option<&str>, clear: bool) -> Result<()> {
-    let mut api = ApiClient::from_auth(auth)?;
+    let mut api = ApiClient::from_auth_checked(auth).await?;
 
     let body = if clear {
         serde_json::json!({ "primary_org_id": Value::Null })
@@ -416,7 +416,7 @@ async fn set_primary_org(auth: &AuthArgs, org_id: Option<&str>, clear: bool) -> 
 // ─────────────────────────────────────────────────────────────────────────────
 
 async fn list_members(auth: &AuthArgs, org_id: &str) -> Result<()> {
-    let mut api = ApiClient::from_auth(auth)?;
+    let mut api = ApiClient::from_auth_checked(auth).await?;
     let resp: Value = api.get(&format!("/orgs/{org_id}/members")).await?;
 
     match auth.output {
@@ -476,7 +476,7 @@ async fn add_member(
     if let Some(src) = scope_source {
         validate_scope_source(src)?;
     }
-    let mut api = ApiClient::from_auth(auth)?;
+    let mut api = ApiClient::from_auth_checked(auth).await?;
 
     let mut body = serde_json::json!({
         "user_id": user_id,
@@ -526,7 +526,7 @@ async fn update_member(
         ));
     }
 
-    let mut api = ApiClient::from_auth(auth)?;
+    let mut api = ApiClient::from_auth_checked(auth).await?;
     let mut body = serde_json::Map::new();
     if let Some(role) = role {
         body.insert("role".into(), Value::String(role.to_string()));
@@ -570,7 +570,7 @@ async fn remove_member(auth: &AuthArgs, org_id: &str, member_id: &str, yes: bool
         }
     }
 
-    let mut api = ApiClient::from_auth(auth)?;
+    let mut api = ApiClient::from_auth_checked(auth).await?;
     api.delete_empty(&format!("/orgs/{org_id}/members/{member_id}"))
         .await?;
     match auth.output {
@@ -599,7 +599,7 @@ async fn create_invite(
     if let Some(src) = scope_source {
         validate_scope_source(src)?;
     }
-    let mut api = ApiClient::from_auth(auth)?;
+    let mut api = ApiClient::from_auth_checked(auth).await?;
 
     let mut body = serde_json::json!({ "role": role });
     if let Some(src) = scope_source {
@@ -663,7 +663,7 @@ fn build_join_url(auth: &AuthArgs, nonce: &str) -> String {
 }
 
 async fn list_invites(auth: &AuthArgs, org_id: &str) -> Result<()> {
-    let mut api = ApiClient::from_auth(auth)?;
+    let mut api = ApiClient::from_auth_checked(auth).await?;
     let resp: Value = api.get(&format!("/orgs/{org_id}/invites")).await?;
 
     match auth.output {
@@ -723,7 +723,7 @@ async fn cancel_invite(auth: &AuthArgs, org_id: &str, invite_id: &str, yes: bool
             return Ok(());
         }
     }
-    let mut api = ApiClient::from_auth(auth)?;
+    let mut api = ApiClient::from_auth_checked(auth).await?;
     api.delete_empty(&format!("/orgs/{org_id}/invites/{invite_id}"))
         .await?;
     match auth.output {
@@ -741,7 +741,7 @@ async fn cancel_invite(auth: &AuthArgs, org_id: &str, invite_id: &str, yes: bool
 // ─────────────────────────────────────────────────────────────────────────────
 
 async fn list_role_scopes(auth: &AuthArgs, org_id: &str) -> Result<()> {
-    let mut api = ApiClient::from_auth(auth)?;
+    let mut api = ApiClient::from_auth_checked(auth).await?;
     let resp: Value = api.get(&format!("/orgs/{org_id}/role-scopes")).await?;
 
     match auth.output {
@@ -804,7 +804,7 @@ async fn set_role_scope(
         serde_json::json!({ "allowed_service_ids": ids })
     };
 
-    let mut api = ApiClient::from_auth(auth)?;
+    let mut api = ApiClient::from_auth_checked(auth).await?;
     let updated: Value = api
         .put(&format!("/orgs/{org_id}/role-scopes/{role}"), &body)
         .await?;
@@ -827,7 +827,7 @@ async fn set_role_scope(
 
 async fn clear_role_scope(auth: &AuthArgs, org_id: &str, role: &str) -> Result<()> {
     validate_role(role)?;
-    let mut api = ApiClient::from_auth(auth)?;
+    let mut api = ApiClient::from_auth_checked(auth).await?;
     api.delete_empty(&format!("/orgs/{org_id}/role-scopes/{role}"))
         .await?;
     match auth.output {

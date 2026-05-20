@@ -19,7 +19,7 @@ async fn run_invite_code(command: InviteCodeCommands) -> Result<()> {
             note,
             auth,
         } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
 
             let mut body = json!({});
             if let Some(n) = max_uses {
@@ -56,7 +56,7 @@ async fn run_invite_code(command: InviteCodeCommands) -> Result<()> {
         }
 
         InviteCodeCommands::List { auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let result: Value = api.get("/admin/invite-codes").await?;
 
             match auth.output {
@@ -103,7 +103,7 @@ async fn run_invite_code(command: InviteCodeCommands) -> Result<()> {
         }
 
         InviteCodeCommands::Deactivate { id, auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             api.delete_empty(&format!("/admin/invite-codes/{id}"))
                 .await?;
             match auth.output {
@@ -139,7 +139,7 @@ async fn run_user(command: AdminUserCommands) -> Result<()> {
             search,
             auth,
         } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let mut path = format!("/admin/users?page={page}&per_page={per_page}");
             if let Some(s) = search.as_deref().filter(|s| !s.is_empty()) {
                 path.push_str(&format!("&search={}", urlencoding::encode(s)));
@@ -211,7 +211,7 @@ async fn run_user(command: AdminUserCommands) -> Result<()> {
         }
 
         AdminUserCommands::Show { id, auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let user: Value = api.get(&format!("/admin/users/{id}")).await?;
 
             match auth.output {
@@ -256,7 +256,7 @@ async fn run_user(command: AdminUserCommands) -> Result<()> {
         }
 
         AdminUserCommands::SetRole { id, role, auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let path = format!("/admin/users/{id}/role");
 
             // Backwards compatibility: older backends only understand the
