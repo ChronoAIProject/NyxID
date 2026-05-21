@@ -27,3 +27,6 @@ public/sitemap.xml
 *.njsproj
 *.sln
 *.sw?
+
+# Test coverage output
+coverage/

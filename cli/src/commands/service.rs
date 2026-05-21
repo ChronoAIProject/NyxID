@@ -278,7 +278,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             // `NYXID_NO_WIZARD=1` to restore the pre-wizard stdin
             // prompt path for CI jobs or scripts that rely on it.
             let mut api = if org.is_some() {
-                Some(ApiClient::from_auth(&auth)?)
+                Some(ApiClient::from_auth_checked(&auth).await?)
             } else {
                 None
             };
@@ -336,7 +336,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
 
             let mut api = match api {
                 Some(api) => api,
-                None => ApiClient::from_auth(&auth)?,
+                None => ApiClient::from_auth_checked(&auth).await?,
             };
 
             // Resolve `--via-node <ID_OR_NAME>` to a node ID up-front so that
@@ -694,16 +694,17 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                     .or(result["service_slug"].as_str())
                     .unwrap_or("-");
                 eprintln!();
-                eprintln!("Next step: configure the credential on node {node_id}.");
+                eprintln!(
+                    "Next step: SSH to the machine running node {node_id} and configure the credential:"
+                );
                 if custom {
-                    eprintln!(
-                        "  Run `nyxid node credentials add ... --service {result_slug}` on that node."
-                    );
+                    eprintln!("  nyxid node credentials add ... --service {result_slug}");
                 } else {
-                    eprintln!(
-                        "  Run `nyxid node credentials setup --service {result_slug}` on that node."
-                    );
+                    eprintln!("  nyxid node credentials setup --service {result_slug}");
                 }
+                eprintln!(
+                    "  `nyxid node credentials` is node-side only, not available on the user-side CLI."
+                );
             }
             Ok(())
         }
@@ -720,7 +721,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             org,
             auth,
         } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
 
             // Accept either a node ID or a node name (from `nyxid node list`).
             let via_node = crate::commands::node::resolve_node_id(&mut api, &via_node)
@@ -827,7 +828,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             to_proxy_only,
             auth,
         } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let mode = match (to_node_key, to_cert, to_proxy_only) {
                 (true, false, false) => "node_key",
                 (false, true, false) => "cert",
@@ -875,7 +876,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
         }
 
         ServiceCommands::List { auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let resp: Value = api.get("/keys").await?;
 
             match auth.output {
@@ -917,7 +918,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
         }
 
         ServiceCommands::Show { id, auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let svc: Value = api.get(&format!("/keys/{id}")).await?;
 
             match auth.output {
@@ -998,7 +999,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 }
             }
 
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             api.delete_empty(&format!("/keys/{id}")).await?;
             match auth.output {
                 OutputFormat::Json => println!(
@@ -1025,7 +1026,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             ws_frame_clear,
             auth,
         } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
 
             let mut body = serde_json::Map::new();
             let ws_frame_injections =
@@ -1110,7 +1111,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             credential,
             auth,
         } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
 
             // Fetch service to get the external api_key_id
             let svc: Value = api.get(&format!("/keys/{id}")).await?;
@@ -1149,7 +1150,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             direct,
             auth,
         } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
 
             // Accept either a node ID or a node name (from `nyxid node list`).
             let node = match node {
@@ -1189,7 +1190,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             client_secret,
             auth,
         } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
 
             // Fetch catalog entry to get provider_id
             let catalog: Value = api.get(&format!("/catalog/{slug}")).await?;
@@ -1313,9 +1314,12 @@ async fn run_oauth_add(
         // extra scopes (see `cli/src/node/agent.rs::cmd_credentials_setup`).
         print_add_result(api, &key_result, auth.output)?;
         eprintln!();
-        eprintln!("Next step: run this on the node that owns the credential:");
+        eprintln!("Next step: SSH to the node-agent machine, then run:");
         let scope_suffix = format_scope_suffix(options.additional_scopes);
         eprintln!("  nyxid node credentials setup --service {slug}{scope_suffix}");
+        eprintln!(
+            "  `nyxid node credentials` is node-side only, not available on the user-side CLI."
+        );
         return Ok(());
     }
 
@@ -1477,9 +1481,12 @@ async fn run_device_code_add(
     if options.via_node.is_some() {
         print_add_result(api, &key_result, auth.output)?;
         eprintln!();
-        eprintln!("Next step: run this on the node that owns the credential:");
+        eprintln!("Next step: SSH to the node-agent machine, then run:");
         let scope_suffix = format_scope_suffix(options.additional_scopes);
         eprintln!("  nyxid node credentials setup --service {slug}{scope_suffix}");
+        eprintln!(
+            "  `nyxid node credentials` is node-side only, not available on the user-side CLI."
+        );
         return Ok(());
     }
 
@@ -1793,6 +1800,18 @@ async fn wait_for_authorized_key(api: &mut ApiClient, key_id: &str) -> Result<Va
             "active" => {
                 eprintln!();
                 return Ok(key);
+            }
+            "failed" => {
+                // The backend stores an actionable reason on the credential
+                // (issue #651, e.g. an account-mismatch message). Surface it
+                // verbatim instead of swallowing it under a generic status
+                // string -- issue #695.
+                eprintln!();
+                let msg = key["error_message"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("OAuth authorization failed");
+                bail!("{msg}");
             }
             other => {
                 eprintln!();
@@ -2730,5 +2749,702 @@ mod tests {
     #[test]
     fn ws_frame_unknown_preset_is_rejected() {
         assert!(build_ws_frame_injections_body(Some("other"), false).is_err());
+    }
+}
+
+#[cfg(test)]
+mod command_tests {
+    use super::*;
+    use crate::test_support::{mock_auth, mock_auth_with_output};
+    use wiremock::matchers::{body_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn list_fetches_services_json() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/keys"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "keys": [
+                    {"id": "svc-1", "slug": "openai", "label": "OpenAI", "endpoint_url": "https://api.openai.com"}
+                ]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ServiceCommands::List {
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("list should succeed");
+    }
+
+    #[tokio::test]
+    async fn list_empty_table_is_ok() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/keys"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "keys": [] })),
+            )
+            .mount(&server)
+            .await;
+
+        run(ServiceCommands::List {
+            auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
+        })
+        .await
+        .expect("empty list should succeed");
+    }
+
+    #[tokio::test]
+    async fn show_fetches_service() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/keys/svc-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "svc-1", "slug": "openai", "label": "OpenAI",
+                "endpoint_url": "https://api.openai.com", "auth_method": "bearer"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ServiceCommands::Show {
+            id: "svc-1".to_string(),
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("show should succeed");
+    }
+
+    #[tokio::test]
+    async fn delete_with_yes_issues_delete() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/keys/svc-1"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ServiceCommands::Delete {
+            id: "svc-1".to_string(),
+            yes: true,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("delete should succeed");
+    }
+
+    #[tokio::test]
+    async fn update_sends_changed_label() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/api/v1/keys/svc-1"))
+            .and(body_json(serde_json::json!({ "label": "Renamed" })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "id": "svc-1" })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ServiceCommands::Update {
+            id: "svc-1".to_string(),
+            label: Some("Renamed".to_string()),
+            endpoint_url: None,
+            openapi_spec_url: None,
+            node_id: None,
+            no_node: false,
+            active: false,
+            inactive: false,
+            default_header: vec![],
+            clear_default_headers: false,
+            ws_frame_preset: None,
+            ws_frame_clear: false,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("update should succeed");
+    }
+
+    #[tokio::test]
+    async fn add_custom_posts_to_keys() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/keys"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "svc-1", "slug": "my-custom"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // custom + auth_method=none + terminal forces the scripted path:
+        // no catalog lookup, no credential prompt, straight to POST /keys.
+        run(ServiceCommands::Add {
+            slug: None,
+            custom: true,
+            custom_slug: Some("my-custom".to_string()),
+            oauth: false,
+            device_code: false,
+            via_node: None,
+            endpoint_url: Some("https://api.example.com".to_string()),
+            label: Some("My Custom".to_string()),
+            auth_method: Some("none".to_string()),
+            auth_key_name: None,
+            credential: None,
+            credential_env: None,
+            credential_file: None,
+            scopes: vec![],
+            oauth_client_id: None,
+            oauth_client_secret: None,
+            oauth_client_secret_env: None,
+            org: None,
+            openapi_spec_url: None,
+            ws_frame_preset: None,
+            ws_frame_clear: false,
+            terminal: true,
+            no_wait: false,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("custom add should succeed");
+    }
+
+    #[tokio::test]
+    async fn show_table_renders() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/keys/svc-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "svc-1", "slug": "openai", "label": "OpenAI", "service_type": "http",
+                "endpoint_url": "https://api.openai.com", "auth_method": "bearer",
+                "auth_key_name": "Authorization", "status": "active", "is_active": true,
+                "openapi_spec_url": "https://api.openai.com/openapi.json"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ServiceCommands::Show {
+            id: "svc-1".to_string(),
+            auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
+        })
+        .await
+        .expect("show table should succeed");
+    }
+
+    #[tokio::test]
+    async fn rotate_credential_puts_external_key() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/keys/svc-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "svc-1", "api_key_id": "ext-1"
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/api/v1/api-keys/external/ext-1"))
+            .and(body_json(serde_json::json!({ "credential": "new-secret" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ServiceCommands::RotateCredential {
+            id: "svc-1".to_string(),
+            credential_env: None,
+            credential: Some("new-secret".to_string()),
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("rotate credential should succeed");
+    }
+
+    #[tokio::test]
+    async fn route_direct_clears_node() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/keys/svc-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "svc-1", "user_service_id": "us-1"
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/api/v1/user-services/us-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ServiceCommands::Route {
+            id: "svc-1".to_string(),
+            node: None,
+            direct: true,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("route direct should succeed");
+    }
+
+    #[tokio::test]
+    async fn credentials_sets_oauth_client() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/catalog/lark"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "slug": "lark", "provider_config_id": "prov-1"
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/api/v1/providers/prov-1/credentials"))
+            .and(body_json(serde_json::json!({
+                "client_id": "cid", "client_secret": "csecret"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ServiceCommands::Credentials {
+            slug: "lark".to_string(),
+            client_id_env: None,
+            client_id: Some("cid".to_string()),
+            client_secret_env: None,
+            client_secret: Some("csecret".to_string()),
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("credentials should succeed");
+    }
+
+    #[tokio::test]
+    async fn convert_ssh_patches_auth_mode() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/keys/myssh"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "svc-9", "slug": "myssh", "service_type": "ssh",
+                "ssh_host": "10.0.0.1", "ssh_port": 22, "ssh_allowed_principals": ["ubuntu"]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/api/v1/user-services/svc-9/ssh-auth-mode"))
+            .and(body_json(serde_json::json!({ "mode": "cert" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ServiceCommands::ConvertSsh {
+            slug: "myssh".to_string(),
+            to_node_key: false,
+            to_cert: true,
+            to_proxy_only: false,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("convert ssh should succeed");
+    }
+
+    #[tokio::test]
+    async fn update_active_with_default_header() {
+        let server = MockServer::start().await;
+        // Loose body match: parse_default_headers' exact JSON shape is
+        // already covered by the pure-helper tests; here we just exercise
+        // the Update handler's is_active + default_request_headers branches.
+        Mock::given(method("PUT"))
+            .and(path("/api/v1/keys/svc-1"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "id": "svc-1" })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ServiceCommands::Update {
+            id: "svc-1".to_string(),
+            label: None,
+            endpoint_url: None,
+            openapi_spec_url: None,
+            node_id: None,
+            no_node: false,
+            active: true,
+            inactive: false,
+            default_header: vec!["x-api-version=v2".to_string()],
+            clear_default_headers: false,
+            ws_frame_preset: None,
+            ws_frame_clear: false,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("update should succeed");
+    }
+
+    #[tokio::test]
+    async fn add_ssh_posts_to_keys() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/keys"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "svc-ssh", "slug": "ssh-box"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // via_node as a UUID → resolve_node_id returns it without an API call.
+        run(ServiceCommands::AddSsh {
+            label: "SSH Box".to_string(),
+            host: "10.0.0.1".to_string(),
+            port: 22,
+            cert_auth: true,
+            node_key: false,
+            principals: Some("ubuntu".to_string()),
+            ttl: 30,
+            via_node: "11111111-1111-1111-1111-111111111111".to_string(),
+            org: None,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("add-ssh should succeed");
+    }
+}
+
+#[cfg(test)]
+mod branch_tests {
+    use super::*;
+    use crate::test_support::{env_lock, mock_auth};
+    use wiremock::matchers::{body_json, body_partial_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const NODE_UUID: &str = "11111111-1111-1111-1111-111111111111";
+
+    fn catalog_add(uri: String, slug: &str, credential: Option<&str>) -> ServiceCommands {
+        ServiceCommands::Add {
+            slug: Some(slug.to_string()),
+            custom: false,
+            custom_slug: None,
+            oauth: false,
+            device_code: false,
+            via_node: None,
+            endpoint_url: None,
+            label: None,
+            auth_method: None,
+            auth_key_name: None,
+            credential: credential.map(str::to_string),
+            credential_env: None,
+            credential_file: None,
+            scopes: vec![],
+            oauth_client_id: None,
+            oauth_client_secret: None,
+            oauth_client_secret_env: None,
+            org: None,
+            openapi_spec_url: None,
+            ws_frame_preset: None,
+            ws_frame_clear: false,
+            terminal: true,
+            no_wait: false,
+            auth: mock_auth(uri),
+        }
+    }
+
+    #[tokio::test]
+    async fn catalog_add_fetches_catalog_then_posts() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/catalog/openai"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "name": "OpenAI", "auth_method": "bearer", "auth_key_name": "Authorization"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/keys"))
+            .and(body_partial_json(serde_json::json!({
+                "service_slug": "openai", "credential": "sk-test"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "svc-1", "slug": "openai"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(catalog_add(server.uri(), "openai", Some("sk-test")))
+            .await
+            .expect("catalog add should succeed");
+    }
+
+    #[tokio::test]
+    async fn catalog_add_rejects_unknown_slug() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/catalog/unknown"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("nope"))
+            .mount(&server)
+            .await;
+
+        let result = run(catalog_add(server.uri(), "unknown", None)).await;
+        assert!(result.is_err(), "unknown catalog slug must be rejected");
+    }
+
+    #[tokio::test]
+    async fn rotate_credential_rejects_node_managed() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/keys/svc-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "svc-1", "api_key_id": "ext-1", "credential_type": "node_managed"
+            })))
+            .mount(&server)
+            .await;
+
+        let result = run(ServiceCommands::RotateCredential {
+            id: "svc-1".to_string(),
+            credential_env: None,
+            credential: Some("x".to_string()),
+            auth: mock_auth(server.uri()),
+        })
+        .await;
+        assert!(result.is_err(), "node-managed service must be rejected");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn rotate_credential_reads_env_var() {
+        let _guard = env_lock().lock().expect("env lock");
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/keys/svc-1"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "id": "svc-1", "api_key_id": "ext-1" })),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/api/v1/api-keys/external/ext-1"))
+            .and(body_json(serde_json::json!({ "credential": "env-secret" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // SAFETY: env mutation serialized by env_lock above.
+        unsafe {
+            std::env::set_var("NYXID_TEST_ROTATE_CRED", "env-secret");
+        }
+        let result = run(ServiceCommands::RotateCredential {
+            id: "svc-1".to_string(),
+            credential_env: Some("NYXID_TEST_ROTATE_CRED".to_string()),
+            credential: None,
+            auth: mock_auth(server.uri()),
+        })
+        .await;
+        unsafe {
+            std::env::remove_var("NYXID_TEST_ROTATE_CRED");
+        }
+        result.expect("rotate via env should succeed");
+    }
+
+    #[tokio::test]
+    async fn route_via_node_sets_node_id() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/keys/svc-1"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "id": "svc-1", "user_service_id": "us-1" })),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/api/v1/user-services/us-1"))
+            .and(body_partial_json(
+                serde_json::json!({ "node_id": NODE_UUID }),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ServiceCommands::Route {
+            id: "svc-1".to_string(),
+            node: Some(NODE_UUID.to_string()),
+            direct: false,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("route via node should succeed");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn credentials_reads_env_vars() {
+        let _guard = env_lock().lock().expect("env lock");
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/catalog/lark"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({ "slug": "lark", "provider_config_id": "prov-1" }),
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/api/v1/providers/prov-1/credentials"))
+            .and(body_json(serde_json::json!({
+                "client_id": "cid-env", "client_secret": "csecret-env"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // SAFETY: env mutation serialized by env_lock above.
+        unsafe {
+            std::env::set_var("NYXID_TEST_CID", "cid-env");
+            std::env::set_var("NYXID_TEST_CSECRET", "csecret-env");
+        }
+        let result = run(ServiceCommands::Credentials {
+            slug: "lark".to_string(),
+            client_id_env: Some("NYXID_TEST_CID".to_string()),
+            client_id: None,
+            client_secret_env: Some("NYXID_TEST_CSECRET".to_string()),
+            client_secret: None,
+            auth: mock_auth(server.uri()),
+        })
+        .await;
+        unsafe {
+            std::env::remove_var("NYXID_TEST_CID");
+            std::env::remove_var("NYXID_TEST_CSECRET");
+        }
+        result.expect("credentials via env should succeed");
+    }
+
+    #[tokio::test]
+    async fn update_resolves_node_and_clears_openapi() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/api/v1/keys/svc-1"))
+            .and(body_partial_json(serde_json::json!({
+                "endpoint_url": "https://new",
+                "openapi_spec_url": "",
+                "node_id": NODE_UUID
+            })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "id": "svc-1" })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ServiceCommands::Update {
+            id: "svc-1".to_string(),
+            label: None,
+            endpoint_url: Some("https://new".to_string()),
+            openapi_spec_url: Some(String::new()),
+            node_id: Some(NODE_UUID.to_string()),
+            no_node: false,
+            active: false,
+            inactive: false,
+            default_header: vec![],
+            clear_default_headers: false,
+            ws_frame_preset: None,
+            ws_frame_clear: false,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("update should succeed");
+    }
+
+    #[tokio::test]
+    async fn convert_ssh_falls_back_to_service_list() {
+        let server = MockServer::start().await;
+        // Direct GET /keys/{slug} 404s → resolve via the /keys list.
+        Mock::given(method("GET"))
+            .and(path("/api/v1/keys/myssh"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("nope"))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/keys"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "keys": [{"id": "svc-9", "slug": "myssh", "service_type": "ssh", "ssh_host": "h", "ssh_port": 22}]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/api/v1/user-services/svc-9/ssh-auth-mode"))
+            .and(body_json(serde_json::json!({ "mode": "proxy_only" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ServiceCommands::ConvertSsh {
+            slug: "myssh".to_string(),
+            to_node_key: false,
+            to_cert: false,
+            to_proxy_only: true,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("convert ssh via list fallback should succeed");
+    }
+
+    #[tokio::test]
+    async fn add_with_org_includes_target_org_id() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/keys"))
+            .and(body_partial_json(
+                serde_json::json!({ "target_org_id": NODE_UUID }),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "svc-1", "slug": "my-custom"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // org as a UUID -> resolve_org_id returns it without an API call;
+        // custom + auth_method=none + terminal forces the scripted path.
+        run(ServiceCommands::Add {
+            slug: None,
+            custom: true,
+            custom_slug: Some("my-custom".to_string()),
+            oauth: false,
+            device_code: false,
+            via_node: None,
+            endpoint_url: Some("https://api.example.com".to_string()),
+            label: Some("My Custom".to_string()),
+            auth_method: Some("none".to_string()),
+            auth_key_name: None,
+            credential: None,
+            credential_env: None,
+            credential_file: None,
+            scopes: vec![],
+            oauth_client_id: None,
+            oauth_client_secret: None,
+            oauth_client_secret_env: None,
+            org: Some(NODE_UUID.to_string()),
+            openapi_spec_url: None,
+            ws_frame_preset: None,
+            ws_frame_clear: false,
+            terminal: true,
+            no_wait: false,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("org add should succeed");
     }
 }

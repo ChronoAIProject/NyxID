@@ -243,7 +243,7 @@ pub async fn cmd_credentials(
             value,
         } => {
             let service = raw_service.to_lowercase();
-            let mut node_config = NodeConfig::load(&config_file)?;
+            let mut node_config = load_node_config_for_credentials(&config_file, &config_dir)?;
             let backend = SecretBackend::from_config(&node_config, &config_dir)?;
 
             if let Some(header_name) = header {
@@ -414,7 +414,7 @@ pub async fn cmd_credentials(
         }
 
         NodeCredentialCommands::List => {
-            let node_config = NodeConfig::load(&config_file)?;
+            let node_config = load_node_config_for_credentials(&config_file, &config_dir)?;
             let backend = SecretBackend::from_config(&node_config, &config_dir)?;
             let creds = CredentialStore::from_config_with_backend(&node_config, &backend)?;
 
@@ -435,7 +435,7 @@ pub async fn cmd_credentials(
             Ok(())
         }
         NodeCredentialCommands::Pending => {
-            let node_config = NodeConfig::load(&config_file)?;
+            let node_config = load_node_config_for_credentials(&config_file, &config_dir)?;
             let backend = SecretBackend::from_config(&node_config, &config_dir)?;
             let pending = fetch_pending_credentials_for_node(&node_config, &backend).await?;
 
@@ -465,7 +465,7 @@ pub async fn cmd_credentials(
         }
         NodeCredentialCommands::Accept { slug, value_env } => {
             let service = slug.to_lowercase();
-            let mut node_config = NodeConfig::load(&config_file)?;
+            let mut node_config = load_node_config_for_credentials(&config_file, &config_dir)?;
             let backend = SecretBackend::from_config(&node_config, &config_dir)?;
             let pending = find_pending_credential(&node_config, &backend, &service).await?;
 
@@ -506,7 +506,7 @@ pub async fn cmd_credentials(
         }
         NodeCredentialCommands::Decline { slug, reason } => {
             let service = slug.to_lowercase();
-            let node_config = NodeConfig::load(&config_file)?;
+            let node_config = load_node_config_for_credentials(&config_file, &config_dir)?;
             let backend = SecretBackend::from_config(&node_config, &config_dir)?;
             let pending = find_pending_credential(&node_config, &backend, &service).await?;
             let mut api = node_agent_api_client(&node_config, &backend)?;
@@ -560,7 +560,7 @@ pub async fn cmd_credentials(
             service: raw_service,
         } => {
             let service = raw_service.to_lowercase();
-            let mut node_config = NodeConfig::load(&config_file)?;
+            let mut node_config = load_node_config_for_credentials(&config_file, &config_dir)?;
             let backend = SecretBackend::from_config(&node_config, &config_dir)?;
             node_config.remove_credential_via(&service, &backend)?;
             node_config.save(&config_file)?;
@@ -568,6 +568,17 @@ pub async fn cmd_credentials(
             Ok(())
         }
     }
+}
+
+fn load_node_config_for_credentials(config_file: &Path, config_dir: &Path) -> Result<NodeConfig> {
+    if !config_file.exists() {
+        return Err(Error::Config(format!(
+            "No local node agent config found at {}. Run this command on the machine where the node agent is installed (SSH there first); `nyxid node credentials` is node-side only, not available on the user-side CLI.",
+            config_dir.display()
+        )));
+    }
+
+    NodeConfig::load(config_file)
 }
 
 pub async fn cmd_ssh_credentials(
@@ -834,7 +845,8 @@ pub async fn cmd_ssh_credentials(
             }
             let mut node_config = NodeConfig::load(&config_file)?;
             let backend = SecretBackend::from_config(&node_config, &config_dir)?;
-            let mut api = crate::api::ApiClient::from_auth(&auth)
+            let mut api = crate::api::ApiClient::from_auth_checked(&auth)
+                .await
                 .map_err(|error| super::error::Error::Config(error.to_string()))?;
             let resp: serde_json::Value = api
                 .get("/keys")
@@ -1984,7 +1996,7 @@ async fn cmd_credentials_setup(
 ) -> Result<()> {
     let service = raw_service.to_lowercase();
     let service = service.as_str();
-    let node_config = NodeConfig::load(config_file)?;
+    let node_config = load_node_config_for_credentials(config_file, config_dir)?;
 
     // Resolve API URL from config
     let base_api_url = api_url.map(|s| s.to_string()).unwrap_or_else(|| {
@@ -2220,7 +2232,7 @@ async fn cmd_credentials_setup(
                 ));
             }
 
-            let mut node_config = NodeConfig::load(config_file)?;
+            let mut node_config = load_node_config_for_credentials(config_file, config_dir)?;
             let backend = SecretBackend::from_config(&node_config, config_dir)?;
 
             // Store credential using the injection method matching the auth method
@@ -2304,7 +2316,7 @@ async fn cmd_credentials_add_oauth(
     api_url: Option<String>,
     access_token: Option<String>,
 ) -> Result<()> {
-    let mut node_config = NodeConfig::load(config_file)?;
+    let mut node_config = load_node_config_for_credentials(config_file, config_dir)?;
     let backend = SecretBackend::from_config(&node_config, config_dir)?;
 
     // 1. Get OAuth config

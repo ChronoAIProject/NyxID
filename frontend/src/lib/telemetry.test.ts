@@ -25,6 +25,8 @@ import {
   disableTelemetry,
   identify,
   reset as telemetryReset,
+  capture,
+  captureException,
 } from "./telemetry";
 
 const validArgs = {
@@ -225,5 +227,73 @@ describe("emit helpers (identify / reset / capture) are gated on init", () => {
     initTelemetry(validArgs);
     telemetryReset();
     expect(mockPosthog.reset).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("capture / captureException are gated on init", () => {
+  it("capture is a no-op before init", () => {
+    capture({ name: "test_event", props: {} } as never);
+    expect(mockPosthog.capture).not.toHaveBeenCalled();
+  });
+
+  it("capture forwards name and props after init", () => {
+    initTelemetry(validArgs);
+    capture({ name: "test_event", props: { foo: "bar" } } as never);
+    expect(mockPosthog.capture).toHaveBeenCalledWith("test_event", { foo: "bar" });
+  });
+
+  it("captureException is a no-op before init", () => {
+    captureException(new Error("boom"));
+    expect(mockPosthog.captureException).not.toHaveBeenCalled();
+  });
+
+  it("captureException forwards the error after init", () => {
+    initTelemetry(validArgs);
+    const err = new Error("boom");
+    captureException(err);
+    expect(mockPosthog.captureException).toHaveBeenCalledWith(err);
+  });
+});
+
+describe("before_send privacy hook", () => {
+  type PostHogEvent = { properties?: Record<string, unknown> } | null;
+  type BeforeSend = (event: PostHogEvent) => PostHogEvent;
+
+  function getBeforeSend(): BeforeSend {
+    initTelemetry(validArgs);
+    const config = mockPosthog.init.mock.calls[0]?.[1] as { before_send: BeforeSend };
+    return config.before_send;
+  }
+
+  it("returns null for a null event", () => {
+    expect(getBeforeSend()(null)).toBeNull();
+  });
+
+  it("strips query strings from $current_url and $referrer", () => {
+    const result = getBeforeSend()({
+      properties: {
+        $current_url: "https://app.nyxid.dev/keys?token=secret123",
+        $referrer: "https://app.nyxid.dev/login?next=%2Fkeys",
+      },
+    });
+    expect(result?.properties?.$current_url).toBe("https://app.nyxid.dev/keys");
+    expect(result?.properties?.$referrer).toBe("https://app.nyxid.dev/login");
+  });
+
+  it("drops pageviews on sensitive paths (reset-password, verify-email, oauth callback, approve)", () => {
+    const beforeSend = getBeforeSend();
+    for (const pathname of [
+      "/reset-password/abc-token",
+      "/verify-email/xyz",
+      "/oauth/callback",
+      "/approve/req-1",
+    ]) {
+      expect(beforeSend({ properties: { $pathname: pathname } })).toBeNull();
+    }
+  });
+
+  it("passes through events on non-sensitive paths", () => {
+    const event = { properties: { $pathname: "/dashboard" } };
+    expect(getBeforeSend()(event)).toBe(event);
   });
 });

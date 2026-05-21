@@ -1572,27 +1572,26 @@ async fn conditional_abandon_key(state: &ServerState, key_id: &str) {
 async fn try_refresh_access_token(state: &ServerState) -> Option<String> {
     let profile = state.proxy.profile.as_deref();
     let refresh_token = crate::auth::read_saved_refresh_token_for(profile)?;
-    let url = format!(
-        "{}/api/v1/auth/refresh",
-        state.proxy.base_url_root.trim_end_matches('/')
-    );
-    let resp = state
-        .upstream
-        .post(&url)
-        .json(&json!({ "refresh_token": refresh_token }))
-        .send()
-        .await
-        .ok()?;
-    if !resp.status().is_success() {
-        return None;
+    match crate::auth::exchange_refresh_token(
+        &state.upstream,
+        &state.proxy.base_url_root,
+        &refresh_token,
+    )
+    .await
+    {
+        crate::auth::RefreshExchange::Renewed {
+            access_token,
+            refresh_token,
+        } => {
+            crate::auth::save_tokens_for(profile, &access_token, Some(&refresh_token)).ok()?;
+            *state.access_token.lock().await = access_token.clone();
+            eprintln!("  [wizard] refreshed expired access token for profile {profile:?}");
+            Some(access_token)
+        }
+        crate::auth::RefreshExchange::Unauthorized | crate::auth::RefreshExchange::Network(_) => {
+            None
+        }
     }
-    let tokens: Value = resp.json().await.ok()?;
-    let new_access = tokens.get("access_token")?.as_str()?.to_string();
-    let new_refresh = tokens.get("refresh_token")?.as_str()?.to_string();
-    crate::auth::save_tokens_for(profile, &new_access, Some(&new_refresh)).ok()?;
-    *state.access_token.lock().await = new_access.clone();
-    eprintln!("  [wizard] refreshed expired access token for profile {profile:?}");
-    Some(new_access)
 }
 
 /// `POST /api/proxy/abandon-placeholder` — client-triggered cleanup of a

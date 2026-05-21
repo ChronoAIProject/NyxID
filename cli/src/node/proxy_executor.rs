@@ -137,7 +137,8 @@ pub async fn execute_proxy_request(
                         request_id,
                         &format!(
                             "No target URL configured for service '{service_slug}'. \
-                             Run: nyxid node credentials add --service {service_slug} --url <URL> ..."
+                             Run on the node-agent machine: nyxid node credentials add --service {service_slug} --url <URL> ... \
+                             (`nyxid node credentials` is node-side only, not available on the user-side CLI)."
                         ),
                         502,
                         false,

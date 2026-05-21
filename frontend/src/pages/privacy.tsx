@@ -1,6 +1,8 @@
 import { Link } from "@tanstack/react-router";
 import { ArrowLeft } from "lucide-react";
 
+import { useLogoHref } from "@/hooks/use-logo-href";
+
 // ── Last updated date (update on each revision) ──
 const EFFECTIVE_DATE = "2026-02-25";
 
@@ -22,6 +24,8 @@ function Section({
 }
 
 export function PrivacyPage() {
+  const logoHref = useLogoHref();
+
   return (
     <div
       className="flex min-h-dvh flex-col items-center bg-background px-4 py-8"
@@ -34,7 +38,7 @@ export function PrivacyPage() {
         {/* ── Header ── */}
         <div className="flex flex-col items-center gap-4">
           <Link
-            to="/"
+            to={logoHref}
             className="flex items-center transition-opacity hover:opacity-80"
           >
             <img src="/nyxid-wordmark.svg" alt="NyxID" className="h-8 w-auto" />

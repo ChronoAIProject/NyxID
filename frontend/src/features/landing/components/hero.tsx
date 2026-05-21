@@ -90,29 +90,32 @@ export function Hero() {
         <img
           src="/nyxid-wordmark.svg"
           alt="NyxID"
-          className="mb-8 h-12 w-auto drop-shadow-[0_0_24px_rgba(90,42,241,0.45)] md:h-14"
+          className="mb-7 h-9 w-auto drop-shadow-[0_0_24px_rgba(90,42,241,0.45)] md:h-10"
         />
-        <h1 className="max-w-[700px] text-center font-serif text-[32px] leading-tight text-white md:text-5xl lg:text-6xl">
+        <h1
+          className="max-w-[640px] text-center text-[28px] font-bold leading-[1.1] tracking-tight text-foreground sm:text-4xl lg:text-5xl"
+          style={{ letterSpacing: "-0.03em" }}
+        >
           {t("hero.eyebrow")}
         </h1>
 
-        <p className="mt-6 max-w-2xl text-center text-lg leading-relaxed text-gray-300">
+        <p className="mt-5 max-w-xl text-center text-[15px] leading-relaxed text-muted-foreground sm:text-base">
           {t("hero.title")}
         </p>
 
-        <p className="mt-4 max-w-2xl text-center text-base leading-relaxed text-gray-400">
+        <p className="mt-3 max-w-xl text-center text-[13px] leading-relaxed text-muted-foreground/80 sm:text-sm">
           {t("hero.subtitle")}
         </p>
 
-        <div className="mt-10 flex flex-col items-center gap-3 sm:flex-row sm:gap-4">
+        <div className="mt-8 flex flex-col items-center gap-3 sm:flex-row">
           <a
             href={`/register${typeof window !== "undefined" ? window.location.search : ""}`}
-            className="inline-flex items-center gap-2 rounded-xl bg-primary px-8 py-4 text-lg font-semibold text-white transition-all hover:bg-nyx-400 hover:shadow-lg hover:shadow-primary/25"
+            className="inline-flex items-center gap-2 rounded-lg nyx-gradient-vivid px-6 py-3 text-sm font-medium text-white shadow-[0_2px_12px_rgba(90,42,241,0.25)] transition-all hover:shadow-[0_4px_20px_rgba(90,42,241,0.35)] hover:brightness-110"
           >
             {t("hero.ctaRegister")}
             <svg
-              width="20"
-              height="20"
+              width="16"
+              height="16"
               viewBox="0 0 20 20"
               fill="none"
               aria-hidden="true"
@@ -128,13 +131,13 @@ export function Hero() {
           </a>
           <a
             href="#beta"
-            className="inline-flex items-center gap-2 rounded-xl border border-primary/40 px-8 py-4 text-lg font-semibold text-white transition-colors hover:bg-primary/10"
+            className="inline-flex items-center gap-2 rounded-lg border border-white/[0.08] px-6 py-3 text-sm font-medium text-foreground transition-colors hover:border-white/[0.15] hover:bg-white/[0.03]"
           >
             {t("hero.ctaEarlyAccess")}
           </a>
         </div>
 
-        <p className="mt-4 text-sm text-gray-500">{t("hero.ctaSubtext")}</p>
+        <p className="mt-4 text-[11px] text-text-tertiary">{t("hero.ctaSubtext")}</p>
       </div>
     </section>
   );

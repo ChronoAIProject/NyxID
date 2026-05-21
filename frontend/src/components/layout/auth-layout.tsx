@@ -1,6 +1,8 @@
 import { useState, useEffect } from "react";
 import { Link, Outlet } from "@tanstack/react-router";
 
+import { useLogoHref } from "@/hooks/use-logo-href";
+
 const AUTH_IMAGES = [
   "/auth-hero.png",
   "/auth-hero-2.png",
@@ -13,6 +15,7 @@ const FADE_MS = 1200;
 
 export function AuthLayout() {
   const [activeIndex, setActiveIndex] = useState(0);
+  const logoHref = useLogoHref();
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -34,7 +37,7 @@ export function AuthLayout() {
       >
         {/* Logo — top-left */}
         <div className="flex shrink-0 items-center px-10 pt-8">
-          <Link to="/login">
+          <Link to={logoHref}>
             <img
               src="/nyxid-coloured-logo.svg"
               alt="NyxID"

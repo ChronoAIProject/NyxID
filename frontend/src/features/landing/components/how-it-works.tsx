@@ -60,26 +60,30 @@ export function HowItWorks() {
       if (!el) return;
       const threshold = (i + 0.5) / stepKeys.length;
       if (p >= threshold) {
-        el.classList.add("border-primary/60", "shadow-lg", "shadow-primary/20");
-        el.classList.remove("border-landing-border-subtle");
+        el.classList.add(
+          "border-nyx-secondary-400/50",
+          "shadow-lg",
+          "shadow-nyx-secondary-400/20",
+        );
+        el.classList.remove("border-border/50");
       } else {
         el.classList.remove(
-          "border-primary/60",
+          "border-nyx-secondary-400/50",
           "shadow-lg",
-          "shadow-primary/20",
+          "shadow-nyx-secondary-400/20",
         );
-        el.classList.add("border-landing-border-subtle");
+        el.classList.add("border-border/50");
       }
     });
   });
 
   return (
-    <section className="px-6 py-24">
+    <section className="px-6 py-20">
       <div className="mx-auto max-w-4xl" ref={sectionRef}>
-        <h2 className="mb-4 text-center font-serif text-3xl text-white md:text-4xl">
+        <h2 className="mb-4 text-center text-3xl font-bold tracking-tight text-foreground md:text-4xl">
           {t("howItWorks.heading")}
         </h2>
-        <p className="mx-auto mb-16 max-w-xl text-center text-gray-300">
+        <p className="mx-auto mb-12 max-w-xl text-center text-muted-foreground">
           {t("howItWorks.subheading")}
         </p>
 
@@ -87,14 +91,14 @@ export function HowItWorks() {
           {/* Track — positioned dynamically between first and last step centers */}
           <div
             ref={trackRef}
-            className="absolute left-[39px] w-[2px] bg-primary/10"
+            className="absolute left-[39px] w-[2px] bg-nyx-secondary-400/10"
             style={{ top: 0, height: 0 }}
           />
 
           {/* Fill */}
           <div
             ref={lineRef}
-            className="absolute left-[39px] w-[2px] bg-gradient-to-b from-primary via-nyx-300 to-primary"
+            className="absolute left-[39px] w-[2px] bg-gradient-to-b from-nyx-secondary-400 via-nyx-300 to-nyx-secondary-400"
             style={{ top: 0, height: 0, transition: "height 0.05s linear" }}
           />
 
@@ -106,9 +110,9 @@ export function HowItWorks() {
               top: "0%",
               opacity: 0,
               background:
-                "radial-gradient(circle, rgba(139,92,246,0.8) 0%, rgba(139,92,246,0.3) 50%, transparent 70%)",
+                "radial-gradient(circle, rgba(166,114,251,0.8) 0%, rgba(166,114,251,0.3) 50%, transparent 70%)",
               boxShadow:
-                "0 0 12px rgba(139,92,246,0.6), 0 0 30px rgba(139,92,246,0.3)",
+                "0 0 12px rgba(166,114,251,0.6), 0 0 30px rgba(166,114,251,0.3)",
               transition: "top 0.05s linear, opacity 0.3s ease",
             }}
           />
@@ -122,15 +126,15 @@ export function HowItWorks() {
                 ref={(el) => {
                   stepRefs.current[i] = el;
                 }}
-                className="flex h-20 w-20 shrink-0 items-center justify-center rounded-2xl border border-landing-border-subtle bg-landing-surface font-mono text-2xl font-medium text-primary transition-all duration-500"
+                className="flex h-20 w-20 shrink-0 items-center justify-center rounded-xl border border-border/50 bg-card font-mono text-2xl font-medium text-nyx-secondary-400 transition-all duration-500"
               >
                 {stepNumbers[i]}
               </div>
               <div className="pt-2">
-                <h3 className="mb-2 text-lg font-semibold text-white">
+                <h3 className="mb-2 text-lg font-semibold text-foreground">
                   {t(`howItWorks.${key}.title`)}
                 </h3>
-                <p className="leading-relaxed text-gray-300">
+                <p className="leading-relaxed text-muted-foreground">
                   {t(`howItWorks.${key}.description`)}
                 </p>
               </div>

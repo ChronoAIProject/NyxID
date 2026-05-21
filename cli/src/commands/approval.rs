@@ -11,7 +11,7 @@ use crate::org_resolver::resolve_org_id;
 pub async fn run(command: ApprovalCommands) -> Result<()> {
     match command {
         ApprovalCommands::List { org, auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let org = resolve_optional_org(&mut api, org).await?;
             let path = match org {
                 Some(ref id) => {
@@ -49,7 +49,7 @@ pub async fn run(command: ApprovalCommands) -> Result<()> {
 
                         for req in items {
                             let id = req["id"].as_str().or(req["_id"].as_str()).unwrap_or("-");
-                            let short_id = if id.len() > 8 { &id[..8] } else { id };
+                            let short_id = crate::commands::short_id(id);
                             let service = req["service_name"]
                                 .as_str()
                                 .or(req["service_slug"].as_str())
@@ -74,7 +74,7 @@ pub async fn run(command: ApprovalCommands) -> Result<()> {
         }
 
         ApprovalCommands::Show { id, auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let req: Value = api.get(&format!("/approvals/requests/{id}")).await?;
 
             match auth.output {
@@ -111,7 +111,7 @@ pub async fn run(command: ApprovalCommands) -> Result<()> {
         }
 
         ApprovalCommands::Approve { id, auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let body = serde_json::json!({ "decision": "approved" });
             let result: Value = api
                 .post(&format!("/approvals/requests/{id}/decide"), &body)
@@ -129,7 +129,7 @@ pub async fn run(command: ApprovalCommands) -> Result<()> {
         }
 
         ApprovalCommands::Deny { id, reason, auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let mut body = serde_json::json!({ "decision": "denied" });
             if let Some(reason) = reason {
                 body["reason"] = Value::String(reason);
@@ -150,7 +150,7 @@ pub async fn run(command: ApprovalCommands) -> Result<()> {
         }
 
         ApprovalCommands::Grants { org, auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let org = resolve_optional_org(&mut api, org).await?;
             let path = match org {
                 Some(ref id) => {
@@ -184,7 +184,7 @@ pub async fn run(command: ApprovalCommands) -> Result<()> {
                                 .as_str()
                                 .or(grant["_id"].as_str())
                                 .unwrap_or("-");
-                            let short_id = if gid.len() > 8 { &gid[..8] } else { gid };
+                            let short_id = crate::commands::short_id(gid);
                             let service = grant["service_name"].as_str().unwrap_or("-");
                             let requester = grant["requester_label"]
                                 .as_str()
@@ -213,7 +213,7 @@ pub async fn run(command: ApprovalCommands) -> Result<()> {
                 }
             }
 
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let org = resolve_optional_org(&mut api, org).await?;
             let path = match org {
                 Some(ref org_id) => format!(
@@ -234,7 +234,7 @@ pub async fn run(command: ApprovalCommands) -> Result<()> {
         }
 
         ApprovalCommands::Enable { auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let body = serde_json::json!({ "approval_required": true });
             let result: Value = api.put("/notifications/settings", &body).await?;
 
@@ -265,7 +265,7 @@ pub async fn run(command: ApprovalCommands) -> Result<()> {
                 }
             }
 
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let body = serde_json::json!({ "approval_required": false });
             let result: Value = api.put("/notifications/settings", &body).await?;
 
@@ -283,7 +283,7 @@ pub async fn run(command: ApprovalCommands) -> Result<()> {
         }
 
         ApprovalCommands::ServiceConfigs { org, auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let org = resolve_optional_org(&mut api, org).await?;
             let path = match org {
                 Some(ref id) => {
@@ -317,7 +317,7 @@ pub async fn run(command: ApprovalCommands) -> Result<()> {
 
                         for cfg in items {
                             let cid = cfg["service_id"].as_str().unwrap_or("-");
-                            let short_id = if cid.len() > 8 { &cid[..8] } else { cid };
+                            let short_id = crate::commands::short_id(cid);
                             let service = cfg["service_name"].as_str().unwrap_or("-");
                             let require = cfg["approval_required"]
                                 .as_bool()
@@ -340,7 +340,7 @@ pub async fn run(command: ApprovalCommands) -> Result<()> {
             org,
             auth,
         } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let org = resolve_optional_org(&mut api, org).await?;
             let mut body = serde_json::Map::new();
 
@@ -388,5 +388,312 @@ async fn resolve_optional_org(api: &mut ApiClient, org: Option<String>) -> Resul
     match org {
         Some(raw) => Ok(Some(resolve_org_id(api, &raw).await?)),
         None => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{mock_auth, mock_auth_with_output};
+    use wiremock::matchers::{body_json, method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const ORG_UUID: &str = "00000000-0000-0000-0000-0000000000aa";
+
+    #[tokio::test]
+    async fn list_fetches_requests() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/approvals/requests"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "requests": [{"id": "r1", "service_name": "openai", "status": "pending"}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ApprovalCommands::List {
+            org: None,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("list should succeed");
+    }
+
+    #[tokio::test]
+    async fn approve_posts_approved_decision() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/approvals/requests/r1/decide"))
+            .and(body_json(serde_json::json!({ "decision": "approved" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ApprovalCommands::Approve {
+            id: "r1".to_string(),
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("approve should succeed");
+    }
+
+    #[tokio::test]
+    async fn deny_includes_reason_in_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/approvals/requests/r1/decide"))
+            .and(body_json(
+                serde_json::json!({ "decision": "denied", "reason": "nope" }),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ApprovalCommands::Deny {
+            id: "r1".to_string(),
+            reason: Some("nope".to_string()),
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("deny should succeed");
+    }
+
+    #[tokio::test]
+    async fn set_config_rejects_invalid_mode() {
+        let server = MockServer::start().await;
+        // Invalid mode must bail before any HTTP request.
+        let result = run(ApprovalCommands::SetConfig {
+            id: "svc-1".to_string(),
+            require_approval: None,
+            approval_mode: Some("bogus".to_string()),
+            org: None,
+            auth: mock_auth(server.uri()),
+        })
+        .await;
+        assert!(result.is_err(), "invalid approval mode must be rejected");
+    }
+
+    #[tokio::test]
+    async fn set_config_puts_required_and_mode() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/api/v1/approvals/service-configs/svc-1"))
+            .and(body_json(serde_json::json!({
+                "approval_required": true, "approval_mode": "grant"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ApprovalCommands::SetConfig {
+            id: "svc-1".to_string(),
+            require_approval: Some(true),
+            approval_mode: Some("grant".to_string()),
+            org: None,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("set-config should succeed");
+    }
+
+    #[tokio::test]
+    async fn revoke_grant_with_yes_deletes() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/approvals/grants/g1"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ApprovalCommands::RevokeGrant {
+            id: "g1".to_string(),
+            org: None,
+            yes: true,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("revoke-grant should succeed");
+    }
+
+    #[tokio::test]
+    async fn enable_sets_approval_required() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/api/v1/notifications/settings"))
+            .and(body_json(serde_json::json!({ "approval_required": true })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ApprovalCommands::Enable {
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("enable should succeed");
+    }
+
+    #[tokio::test]
+    async fn show_fetches_request() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/approvals/requests/r1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "r1", "service_name": "openai", "status": "pending"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ApprovalCommands::Show {
+            id: "r1".to_string(),
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("show should succeed");
+    }
+
+    #[tokio::test]
+    async fn grants_fetches_grants() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/approvals/grants"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "grants": [{"id": "g1", "service_name": "openai"}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ApprovalCommands::Grants {
+            org: None,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("grants should succeed");
+    }
+
+    #[tokio::test]
+    async fn disable_clears_approval_required() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/api/v1/notifications/settings"))
+            .and(body_json(serde_json::json!({ "approval_required": false })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ApprovalCommands::Disable {
+            yes: true,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("disable should succeed");
+    }
+
+    #[tokio::test]
+    async fn service_configs_fetches_configs() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/approvals/service-configs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "configs": [{"service_id": "svc-1", "service_name": "openai", "approval_required": true}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ApprovalCommands::ServiceConfigs {
+            org: None,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("service-configs should succeed");
+    }
+
+    #[tokio::test]
+    async fn list_with_org_scopes_request_path() {
+        let server = MockServer::start().await;
+        // A UUID org short-circuits resolution (no /orgs lookup) and is
+        // appended as ?org_id=… on the requests path.
+        Mock::given(method("GET"))
+            .and(path("/api/v1/approvals/requests"))
+            .and(query_param("org_id", ORG_UUID))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "requests": [] })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ApprovalCommands::List {
+            org: Some(ORG_UUID.to_string()),
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("org-scoped list should succeed");
+    }
+
+    // --- Decision / set-config edge cases ---
+
+    #[tokio::test]
+    async fn deny_without_reason_omits_reason_field() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/approvals/requests/r1/decide"))
+            .and(body_json(serde_json::json!({ "decision": "denied" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ApprovalCommands::Deny {
+            id: "r1".to_string(),
+            reason: None,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("deny without reason should succeed");
+    }
+
+    #[tokio::test]
+    async fn set_config_with_no_fields_is_noop() {
+        let server = MockServer::start().await;
+        // No flags → "No updates specified", returns Ok without any HTTP.
+        run(ApprovalCommands::SetConfig {
+            id: "svc-1".to_string(),
+            require_approval: None,
+            approval_mode: None,
+            org: None,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("no-op set-config should succeed");
+    }
+
+    #[tokio::test]
+    async fn revoke_grant_table_output() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/approvals/grants/g1"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ApprovalCommands::RevokeGrant {
+            id: "g1".to_string(),
+            org: None,
+            yes: true,
+            auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
+        })
+        .await
+        .expect("revoke-grant table should succeed");
     }
 }

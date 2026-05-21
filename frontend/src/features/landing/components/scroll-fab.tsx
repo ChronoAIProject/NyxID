@@ -29,7 +29,7 @@ export function ScrollFab() {
   return (
     <button
       onClick={scrollToTop}
-      className={`fixed z-50 flex items-center justify-center rounded-full border bg-landing-surface/90 backdrop-blur-sm transition-all duration-500 ${
+      className={`fixed z-50 flex items-center justify-center rounded-full border bg-card/90 backdrop-blur-sm transition-all duration-500 ${
         progress > 0.95
           ? "border-primary/50 fab-glow-full"
           : "border-primary/30 shadow-lg shadow-primary/20"
@@ -62,7 +62,7 @@ export function ScrollFab() {
           cx="22"
           cy="22"
           r="15"
-          fill="#8B5CF6"
+          fill="#A672FB"
           opacity={0.5}
           mask="url(#fab-moon-mask)"
         />
@@ -73,7 +73,7 @@ export function ScrollFab() {
         height={22}
         viewBox="0 0 20 22"
         fill="none"
-        stroke="#DDD6FE"
+        stroke="#E4D2FD"
         strokeWidth={2}
         strokeLinecap="round"
         strokeLinejoin="round"

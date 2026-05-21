@@ -89,3 +89,7 @@ tempfile = "3"
 # crates are already in the dependency graph transitively via self_update.
 tar = "0.4"
 flate2 = "1"
+# HTTP mock server for command-level integration tests: point an
+# ApiClient (via AuthArgs.base_url) at a MockServer and assert on the
+# requests commands issue. Test-only; never ships in the release binary.
+wiremock = "0.6"
