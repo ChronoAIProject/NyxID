@@ -191,7 +191,11 @@ describe("RecoveryCodesPanel — one-time reveal + copy-all", () => {
   it("downloads the codes as nyxid-mfa-recovery-codes.txt, creating and revoking a Blob object URL", async () => {
     const user = userEvent.setup();
     // jsdom/happy-dom don't implement these; stub them so downloadTxt runs.
-    const createObjectURL = vi.fn(() => "blob:nyxid-recovery");
+    // Typed call signature so `.mock.calls[0][0]` is the Blob, not an empty
+    // tuple — without coining an unused parameter the linter would reject.
+    const createObjectURL = vi.fn<(blob: Blob) => string>(
+      () => "blob:nyxid-recovery",
+    );
     const revokeObjectURL = vi.fn();
     const origCreate = (URL as { createObjectURL?: unknown }).createObjectURL;
     const origRevoke = (URL as { revokeObjectURL?: unknown }).revokeObjectURL;
