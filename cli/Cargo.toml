@@ -28,7 +28,7 @@ clap = { version = "4.6", features = ["derive", "env"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"], default-features = false }
 dirs = "6"
 open = "5"
-rpassword = "7.5.1"
+rpassword = "7.5.2"
 urlencoding = "2.1"
 rand = "0.8"
 hex = "0.4"
@@ -54,7 +54,7 @@ keyring = { version = "3", features = ["apple-native", "windows-native", "sync-s
 thiserror = "2"
 pty-process = { version = "0.5.3", features = ["async"] }
 libc = "0.2"
-nix = { version = "0.31.2", features = ["term", "process", "signal"] }
+nix = { version = "0.31.3", features = ["term", "process", "signal"] }
 tempfile = "3"
 const-oid = { version = "0.9", features = ["db"] }
 # Direct rustls dep so we can install a default CryptoProvider at startup.
