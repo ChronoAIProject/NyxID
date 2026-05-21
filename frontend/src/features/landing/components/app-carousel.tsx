@@ -9,18 +9,18 @@ function BrowserFrame({
   children: React.ReactNode;
 }) {
   return (
-    <div className="carousel-card w-[480px] shrink-0 overflow-hidden rounded-2xl border border-landing-border-subtle bg-landing-surface shadow-2xl shadow-primary/5">
-      <div className="flex items-center gap-2 border-b border-landing-border-subtle bg-landing-surface-raised px-4 py-2.5">
+    <div className="carousel-card w-[480px] shrink-0 overflow-hidden rounded-2xl border border-border/50 bg-card shadow-2xl shadow-primary/5">
+      <div className="flex items-center gap-2 border-b border-border/50 bg-muted px-4 py-2.5">
         <div className="flex gap-1.5">
           <div className="h-2.5 w-2.5 rounded-full bg-red-500/60" />
           <div className="h-2.5 w-2.5 rounded-full bg-yellow-500/60" />
           <div className="h-2.5 w-2.5 rounded-full bg-green-500/60" />
         </div>
-        <div className="mx-auto rounded-md bg-landing-surface px-3 py-0.5 font-mono text-xs text-gray-500">
+        <div className="mx-auto rounded-md bg-card px-3 py-0.5 font-mono text-xs text-text-tertiary">
           {url}
         </div>
       </div>
-      <div className="bg-landing-bg p-5">{children}</div>
+      <div className="bg-background p-5">{children}</div>
     </div>
   );
 }
@@ -35,15 +35,15 @@ function MobileFrame({
   children: React.ReactNode;
 }) {
   return (
-    <div className="carousel-card w-[380px] shrink-0 overflow-hidden rounded-2xl border border-landing-border-subtle bg-landing-surface shadow-2xl shadow-primary/5">
-      <div className="flex items-center justify-between border-b border-landing-border-subtle bg-landing-surface-raised px-4 py-2.5">
-        <div className="font-mono text-xs text-gray-500">{title}</div>
+    <div className="carousel-card w-[380px] shrink-0 overflow-hidden rounded-2xl border border-border/50 bg-card shadow-2xl shadow-primary/5">
+      <div className="flex items-center justify-between border-b border-border/50 bg-muted px-4 py-2.5">
+        <div className="font-mono text-xs text-text-tertiary">{title}</div>
         <div className="flex items-center gap-2">
           <div className="h-2 w-2 rounded-full bg-primary" />
-          <span className="font-mono text-xs text-gray-500">{badge}</span>
+          <span className="font-mono text-xs text-text-tertiary">{badge}</span>
         </div>
       </div>
-      <div className="bg-landing-bg p-5">{children}</div>
+      <div className="bg-background p-5">{children}</div>
     </div>
   );
 }
@@ -52,10 +52,10 @@ function DashboardCard() {
   return (
     <BrowserFrame url="app.nyxid.io/dashboard">
       <div className="mb-4 flex items-center justify-between">
-        <div className="font-serif text-base text-white">NyxID Dashboard</div>
+        <div className="text-base font-semibold text-foreground">NyxID Dashboard</div>
         <div className="flex items-center gap-2">
           <div className="h-2 w-2 rounded-full bg-success" />
-          <span className="font-mono text-xs text-gray-400">MFA Active</span>
+          <span className="font-mono text-xs text-muted-foreground">MFA Active</span>
         </div>
       </div>
       <div className="mb-4 grid grid-cols-4 gap-3">
@@ -67,9 +67,9 @@ function DashboardCard() {
         ].map((m) => (
           <div
             key={m.l}
-            className="rounded-lg border border-landing-border-subtle bg-landing-surface p-3"
+            className="rounded-lg border border-border/50 bg-card p-3"
           >
-            <div className="font-mono text-xs text-gray-500">{m.l}</div>
+            <div className="font-mono text-xs text-text-tertiary">{m.l}</div>
             <div className="mt-1 text-lg font-semibold text-nyx-secondary-400">
               {m.v}
             </div>
@@ -96,10 +96,10 @@ function ApprovalCard() {
   return (
     <MobileFrame title="NyxID Mobile" badge="Push Received">
       <div className="mb-3 rounded-lg border border-primary/20 bg-primary/5 p-3">
-        <div className="mb-0.5 font-mono text-xs text-primary">
+        <div className="mb-0.5 font-mono text-xs text-nyx-secondary-400">
           APPROVAL REQUEST
         </div>
-        <div className="font-semibold text-white">
+        <div className="font-semibold text-foreground">
           Production Database Access
         </div>
       </div>
@@ -113,8 +113,8 @@ function ApprovalCard() {
           ] as const
         ).map(([l, v]) => (
           <div key={l} className="flex justify-between">
-            <span className="font-mono text-xs text-gray-500">{l}</span>
-            <span className="font-mono text-xs text-white">{v}</span>
+            <span className="font-mono text-xs text-text-tertiary">{l}</span>
+            <span className="font-mono text-xs text-foreground">{v}</span>
           </div>
         ))}
       </div>
@@ -141,7 +141,7 @@ function AuditCard() {
   return (
     <BrowserFrame url="app.nyxid.io/audit">
       <div className="mb-3 flex items-center justify-between">
-        <div className="font-serif text-base text-white">Audit Trail</div>
+        <div className="text-base font-semibold text-foreground">Audit Trail</div>
         <span className="rounded bg-primary/10 px-2 py-0.5 font-mono text-xs text-nyx-secondary-400">
           Live
         </span>
@@ -150,17 +150,17 @@ function AuditCard() {
         {events.map((e, i) => (
           <div
             key={i}
-            className="flex items-center gap-3 rounded-lg border border-landing-border-subtle bg-landing-surface px-3 py-2"
+            className="flex items-center gap-3 rounded-lg border border-border/50 bg-card px-3 py-2"
           >
-            <span className="font-mono text-xs text-gray-500">{e.t}</span>
+            <span className="font-mono text-xs text-text-tertiary">{e.t}</span>
             <div className="min-w-0 flex-1">
-              <div className="truncate text-sm text-white">{e.a}</div>
-              <div className="truncate font-mono text-xs text-gray-400">
+              <div className="truncate text-sm text-foreground">{e.a}</div>
+              <div className="truncate font-mono text-xs text-muted-foreground">
                 {e.u}
               </div>
             </div>
             <span
-              className={`rounded-full px-2 py-0.5 font-mono text-xs ${e.s === "approved" ? "bg-success/10 text-success" : e.s === "pending" ? "bg-yellow-500/10 text-yellow-400" : "bg-destructive/10 text-destructive"}`}
+              className={`rounded-full px-2 py-0.5 font-mono text-xs ${e.s === "approved" ? "bg-success/10 text-success" : e.s === "pending" ? "bg-warning/10 text-warning" : "bg-destructive/10 text-destructive"}`}
             >
               {e.s}
             </span>
@@ -182,18 +182,18 @@ function ConnectionsCard() {
   ];
   return (
     <BrowserFrame url="app.nyxid.io/connections">
-      <div className="mb-3 font-serif text-base text-white">
+      <div className="mb-3 text-base font-semibold text-foreground">
         Connected Services
       </div>
       <div className="grid grid-cols-2 gap-2">
         {providers.map((p) => (
           <div
             key={p.n}
-            className="flex items-center justify-between rounded-lg border border-landing-border-subtle bg-landing-surface p-3"
+            className="flex items-center justify-between rounded-lg border border-border/50 bg-card p-3"
           >
             <div>
-              <div className="text-sm text-white">{p.n}</div>
-              <div className="font-mono text-xs text-gray-500">{p.t}</div>
+              <div className="text-sm text-foreground">{p.n}</div>
+              <div className="font-mono text-xs text-text-tertiary">{p.t}</div>
             </div>
             <span className="font-mono text-xs text-success">{p.s}</span>
           </div>
@@ -213,23 +213,23 @@ function LlmGatewayCard() {
   return (
     <BrowserFrame url="app.nyxid.io/gateway">
       <div className="mb-3 flex items-center justify-between">
-        <div className="font-serif text-base text-white">LLM Gateway</div>
+        <div className="text-base font-semibold text-foreground">LLM Gateway</div>
         <div className="flex items-center gap-2">
           <div className="h-2 w-2 rounded-full bg-success" />
-          <span className="font-mono text-xs text-gray-400">4 active</span>
+          <span className="font-mono text-xs text-muted-foreground">4 active</span>
         </div>
       </div>
       <div className="space-y-1.5">
         {models.map((m) => (
           <div
             key={m.p}
-            className="flex items-center gap-3 rounded-lg border border-landing-border-subtle bg-landing-surface px-3 py-2"
+            className="flex items-center gap-3 rounded-lg border border-border/50 bg-card px-3 py-2"
           >
             <div className="flex-1">
-              <div className="text-sm text-white">{m.p}</div>
-              <div className="font-mono text-xs text-gray-500">{m.m}</div>
+              <div className="text-sm text-foreground">{m.p}</div>
+              <div className="font-mono text-xs text-text-tertiary">{m.m}</div>
             </div>
-            <span className="font-mono text-xs text-gray-500">{m.ms}</span>
+            <span className="font-mono text-xs text-text-tertiary">{m.ms}</span>
             <span className="font-mono text-xs text-success">Ready</span>
           </div>
         ))}
@@ -262,7 +262,7 @@ function ApiKeysCard() {
   return (
     <BrowserFrame url="app.nyxid.io/keys">
       <div className="mb-3 flex items-center justify-between">
-        <div className="font-serif text-base text-white">API Keys</div>
+        <div className="text-base font-semibold text-foreground">API Keys</div>
         <span className="rounded-lg bg-primary/10 px-2.5 py-1 font-mono text-xs text-nyx-secondary-400">
           + Create
         </span>
@@ -271,13 +271,13 @@ function ApiKeysCard() {
         {keys.map((k) => (
           <div
             key={k.n}
-            className="rounded-lg border border-landing-border-subtle bg-landing-surface p-3"
+            className="rounded-lg border border-border/50 bg-card p-3"
           >
             <div className="mb-1 flex justify-between">
-              <span className="text-sm font-medium text-white">{k.n}</span>
-              <span className="font-mono text-xs text-gray-500">{k.u}</span>
+              <span className="text-sm font-medium text-foreground">{k.n}</span>
+              <span className="font-mono text-xs text-text-tertiary">{k.u}</span>
             </div>
-            <div className="mb-1.5 font-mono text-xs text-gray-400">
+            <div className="mb-1.5 font-mono text-xs text-muted-foreground">
               {k.k}
             </div>
             <div className="flex gap-1">
@@ -306,7 +306,7 @@ function RbacCard() {
   return (
     <BrowserFrame url="app.nyxid.io/roles">
       <div className="mb-3 flex items-center justify-between">
-        <div className="font-serif text-base text-white">
+        <div className="text-base font-semibold text-foreground">
           Roles & Permissions
         </div>
         <span className="rounded-lg bg-primary/10 px-2.5 py-1 font-mono text-xs text-nyx-secondary-400">
@@ -317,13 +317,13 @@ function RbacCard() {
         {roles.map((r) => (
           <div
             key={r.n}
-            className="rounded-lg border border-landing-border-subtle bg-landing-surface p-3"
+            className="rounded-lg border border-border/50 bg-card p-3"
           >
             <div className="mb-1.5 flex items-center gap-2">
-              <span className="font-mono text-sm font-medium text-white">
+              <span className="font-mono text-sm font-medium text-foreground">
                 {r.n}
               </span>
-              <span className="rounded bg-landing-surface-raised px-1.5 py-0.5 font-mono text-xs text-gray-500">
+              <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs text-text-tertiary">
                 {r.m}
               </span>
             </div>
@@ -367,22 +367,22 @@ function ActiveGrantsCard() {
   ];
   return (
     <MobileFrame title="NyxID Mobile" badge="3 active">
-      <div className="mb-3 font-serif text-base text-white">Active Grants</div>
+      <div className="mb-3 text-base font-semibold text-foreground">Active Grants</div>
       <div className="space-y-2">
         {grants.map((g) => (
           <div
             key={g.r}
-            className="rounded-lg border border-landing-border-subtle bg-landing-surface p-3"
+            className="rounded-lg border border-border/50 bg-card p-3"
           >
             <div className="mb-1 flex items-center justify-between">
-              <span className="text-sm font-medium text-white">{g.r}</span>
+              <span className="text-sm font-medium text-foreground">{g.r}</span>
               <span className="rounded bg-primary/10 px-1.5 py-0.5 font-mono text-xs text-nyx-secondary-400">
                 {g.t}
               </span>
             </div>
-            <div className="mb-2 font-mono text-xs text-gray-500">{g.u}</div>
+            <div className="mb-2 font-mono text-xs text-text-tertiary">{g.u}</div>
             <div className="flex items-center justify-between">
-              <span className="font-mono text-xs text-yellow-400">{g.e}</span>
+              <span className="font-mono text-xs text-warning">{g.e}</span>
               <button className="rounded bg-destructive/15 px-2.5 py-0.5 font-mono text-xs text-destructive">
                 Revoke
               </button>
@@ -427,10 +427,10 @@ export function AppCarousel() {
   return (
     <section className="py-24">
       <div className="mx-auto max-w-6xl px-6">
-        <h2 className="mb-4 text-center font-serif text-3xl text-white md:text-4xl">
+        <h2 className="mb-4 text-center text-3xl font-bold tracking-tight text-foreground md:text-4xl">
           {t("carousel.heading")}
         </h2>
-        <p className="mx-auto mb-12 max-w-xl text-center text-gray-300">
+        <p className="mx-auto mb-12 max-w-xl text-center text-muted-foreground">
           {t("carousel.subheading")}
         </p>
       </div>

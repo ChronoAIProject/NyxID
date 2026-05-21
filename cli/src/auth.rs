@@ -2,13 +2,29 @@ use std::io::Write;
 use std::net::TcpListener;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use chrono::{Duration, Utc};
 use serde::Deserialize;
 
 use crate::api::{CLI_USER_AGENT, build_cli_http_client};
 use crate::cli::{AuthArgs, LoginArgs};
+
+/// Default NyxID base URL used when prompting for re-login on a session that
+/// was never associated with a saved base URL. Mirrors the `LoginArgs::base_url`
+/// clap default in `cli.rs`; kept in sync so the prompt path and the explicit
+/// `nyxid login` command target the same server by default.
+const DEFAULT_LOGIN_BASE_URL: &str = "https://nyx-api.chrono-ai.fun";
+
+/// Clock-skew cushion: an access token is treated as still usable only if it
+/// has more than this many seconds of validity left. Small on purpose -- the
+/// goal is to refresh tokens that just crossed the line, not to refresh tokens
+/// that are still good for several minutes (every refresh rotates the token and
+/// counts against the backend's reuse-detection grace window). If the local
+/// clock is wrong, the worst case is one wasted refresh; `ApiClient`'s in-flight
+/// 401-refresh is the backstop.
+const SESSION_SKEW_SECS: i64 = 60;
 
 const TOKEN_DIR_NAME: &str = ".nyxid";
 const PROFILES_DIR_NAME: &str = "profiles";
@@ -250,6 +266,252 @@ pub fn resolve_access_token(auth: &AuthArgs) -> Result<String> {
          set {}, or pass --access-token",
         auth.access_token_env
     )
+}
+
+// ---- Session preflight ----
+
+/// Why a saved session can't be used without re-authenticating.
+#[derive(Debug, Clone, Copy)]
+enum DeadSessionReason {
+    /// No saved access token for this profile (never logged in / logged out).
+    NoToken,
+    /// Access token expired and the refresh token could not renew it
+    /// (missing, expired, revoked, or rejected by the server).
+    Expired,
+}
+
+impl DeadSessionReason {
+    fn headline(self) -> &'static str {
+        match self {
+            DeadSessionReason::NoToken => "You are not logged in.",
+            DeadSessionReason::Expired => "Your session has expired.",
+        }
+    }
+}
+
+/// Outcome of a single silent refresh attempt.
+enum SessionRefresh {
+    /// New tokens were issued and persisted.
+    Refreshed,
+    /// The server (or local state) says this session is done; caller should
+    /// fall through to the dead-session path (prompt or error).
+    Unauthorized,
+    /// Could not reach the server to find out; caller should hard-fail with a
+    /// connectivity message rather than prompt for a login that also needs
+    /// the network.
+    Network(anyhow::Error),
+}
+
+/// Validate the saved session BEFORE a command does any user-visible work
+/// (opening a browser wizard, connecting an SSH socket, firing a proxy
+/// request). The fast path is local and free: parse the stored access token's
+/// `exp` and return immediately if it has time left. Only when the token is
+/// expired do we touch the network (one `/auth/refresh`).
+///
+/// There is no auto-login: when the session is genuinely dead, an interactive
+/// terminal is *prompted* to log in (and, on success, asked to re-run the
+/// command), while a headless/non-TTY caller gets a clean error and a non-zero
+/// exit -- never a hang.
+///
+/// A user-supplied token (`--access-token` or `NYXID_ACCESS_TOKEN`) is left
+/// untouched: the caller chose that credential explicitly, so we don't try to
+/// refresh it or judge its expiry -- any 401 surfaces from the real request.
+pub async fn ensure_session(auth: &AuthArgs) -> Result<()> {
+    if auth.access_token.is_some()
+        || std::env::var(&auth.access_token_env)
+            .map(|v| !v.is_empty())
+            .unwrap_or(false)
+    {
+        return Ok(());
+    }
+
+    let profile = auth.profile.as_deref();
+
+    let Some(access_token) = read_saved_token_for(profile) else {
+        return handle_dead_session(auth, DeadSessionReason::NoToken).await;
+    };
+
+    // Opaque / unparseable token: we can't judge its validity offline, so let
+    // the real request decide (and `ApiClient` refresh-on-401 handle it).
+    let Some(exp) = jwt_exp_from_token(&access_token) else {
+        return Ok(());
+    };
+
+    // Still comfortably valid -> proceed with zero network cost.
+    if exp > Utc::now() + Duration::seconds(SESSION_SKEW_SECS) {
+        return Ok(());
+    }
+
+    // Access token expired -> one silent refresh attempt.
+    match refresh_saved_session(auth).await {
+        SessionRefresh::Refreshed => Ok(()),
+        SessionRefresh::Unauthorized => handle_dead_session(auth, DeadSessionReason::Expired).await,
+        SessionRefresh::Network(e) => Err(anyhow!(
+            "Couldn't reach NyxID to refresh your session ({e}). \
+             Check your connection and try again."
+        )),
+    }
+}
+
+/// Result of the raw `POST /auth/refresh` exchange. This is the single source
+/// of truth for the refresh wire protocol; it performs NO token storage so
+/// callers can decide how to persist / apply the rotated pair.
+pub(crate) enum RefreshExchange {
+    /// Server issued a new access + refresh token pair.
+    Renewed {
+        access_token: String,
+        refresh_token: String,
+    },
+    /// Server rejected the refresh token (4xx) -- the session is not renewable.
+    Unauthorized,
+    /// Could not determine the outcome (network error, 5xx, malformed body).
+    Network(anyhow::Error),
+}
+
+/// Canonical `POST /api/v1/auth/refresh` exchange, shared by the session
+/// preflight ([`refresh_saved_session`]), the in-flight 401 retry
+/// ([`crate::api::ApiClient`]), and the wizard's local proxy
+/// (`wizard::server`). `base_url_root` is the NyxID origin WITHOUT the
+/// `/api/v1` suffix; this function appends the path. Token I/O (reading the
+/// refresh token, persisting the result, updating any in-memory copy) is the
+/// caller's responsibility.
+pub(crate) async fn exchange_refresh_token(
+    client: &reqwest::Client,
+    base_url_root: &str,
+    refresh_token: &str,
+) -> RefreshExchange {
+    let url = format!(
+        "{}/api/v1/auth/refresh",
+        base_url_root.trim_end_matches('/')
+    );
+    let resp = match client
+        .post(&url)
+        .json(&serde_json::json!({ "refresh_token": refresh_token }))
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return RefreshExchange::Network(anyhow!(e)),
+    };
+
+    let status = resp.status();
+    // 429 (rate limited) and 408 (request timeout) are transient, not "session
+    // dead" -- surface them as retryable connectivity-style failures so a
+    // logged-in user isn't pushed through a full re-login over a temporary blip.
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || status == reqwest::StatusCode::REQUEST_TIMEOUT
+    {
+        return RefreshExchange::Network(anyhow!(
+            "refresh temporarily unavailable (HTTP {status})"
+        ));
+    }
+    if status.is_client_error() {
+        // 401/403/400 etc. -> the refresh token is genuinely not renewable.
+        return RefreshExchange::Unauthorized;
+    }
+    if !status.is_success() {
+        return RefreshExchange::Network(anyhow!("refresh failed (HTTP {status})"));
+    }
+
+    #[derive(Deserialize)]
+    struct RefreshBody {
+        access_token: String,
+        refresh_token: String,
+    }
+    match resp.json::<RefreshBody>().await {
+        Ok(b) => RefreshExchange::Renewed {
+            access_token: b.access_token,
+            refresh_token: b.refresh_token,
+        },
+        Err(e) => RefreshExchange::Network(anyhow!(e)),
+    }
+}
+
+/// Attempt to renew the access token using the saved refresh token, persisting
+/// the rotated pair on success. Standalone so the preflight can run before any
+/// client exists; the wire protocol itself lives in [`exchange_refresh_token`].
+async fn refresh_saved_session(auth: &AuthArgs) -> SessionRefresh {
+    let profile = auth.profile.as_deref();
+
+    let Some(refresh_token) = read_saved_refresh_token_for(profile) else {
+        return SessionRefresh::Unauthorized;
+    };
+
+    // If the refresh token itself is already expired, skip the round trip --
+    // the server would only reject it (and reuse-detection could revoke the
+    // whole session).
+    if let Some(exp) = jwt_exp_from_token(&refresh_token)
+        && exp <= Utc::now()
+    {
+        return SessionRefresh::Unauthorized;
+    }
+
+    let base_url = match auth.resolved_base_url() {
+        Ok(url) => url,
+        Err(e) => return SessionRefresh::Network(e),
+    };
+    let client = match build_cli_http_client(profile) {
+        Ok(c) => c,
+        Err(e) => return SessionRefresh::Network(e),
+    };
+
+    match exchange_refresh_token(&client, &base_url, &refresh_token).await {
+        RefreshExchange::Renewed {
+            access_token,
+            refresh_token,
+        } => {
+            if save_tokens_for(profile, &access_token, Some(&refresh_token)).is_err() {
+                return SessionRefresh::Network(anyhow!("failed to persist refreshed tokens"));
+            }
+            SessionRefresh::Refreshed
+        }
+        RefreshExchange::Unauthorized => SessionRefresh::Unauthorized,
+        RefreshExchange::Network(e) => SessionRefresh::Network(e),
+    }
+}
+
+/// Handle a session that can't be used: prompt for re-login when interactive,
+/// otherwise return a clean error. Never hangs in a non-TTY context.
+async fn handle_dead_session(auth: &AuthArgs, reason: DeadSessionReason) -> Result<()> {
+    let headline = reason.headline();
+
+    // Only prompt when we can actually read an answer AND surface the prompt.
+    let interactive = std::io::IsTerminal::is_terminal(&std::io::stdin())
+        && std::io::IsTerminal::is_terminal(&std::io::stderr());
+    if !interactive {
+        bail!("{headline} Run `nyxid login` to continue.");
+    }
+
+    eprint!("{headline} Log in again now? [Y/n] ");
+    std::io::stderr().flush().ok();
+
+    let mut answer = String::new();
+    std::io::stdin()
+        .read_line(&mut answer)
+        .context("Failed to read response")?;
+    let answer = answer.trim().to_ascii_lowercase();
+    if !(answer.is_empty() || answer == "y" || answer == "yes") {
+        bail!("{headline} Run `nyxid login` when you're ready.");
+    }
+
+    // No auto-login: only after explicit consent do we open the login flow.
+    let base_url = auth
+        .resolved_base_url()
+        .unwrap_or_else(|_| DEFAULT_LOGIN_BASE_URL.to_string());
+    run_login(LoginArgs {
+        base_url,
+        password: false,
+        email: None,
+        profile: auth.profile.clone(),
+    })
+    .await?;
+
+    // Deliberately do NOT resume the original command: the user re-runs it with
+    // the fresh token. This keeps the process simple and the behavior
+    // predictable.
+    eprintln!();
+    eprintln!("Logged in. Re-run your command to continue.");
+    std::process::exit(0);
 }
 
 // ---- Login ----
@@ -780,5 +1042,204 @@ mod tests {
                 None => env::remove_var("HOME"),
             }
         }
+    }
+
+    // ---- ensure_session preflight ----
+
+    use crate::cli::{AuthArgs, OutputFormat};
+
+    /// AuthArgs wired so `ensure_session` won't take the user-supplied-token
+    /// shortcut: `access_token` is None and `access_token_env` points at a var
+    /// we keep unset. Profile isolates token storage under the temp HOME.
+    fn preflight_auth_args() -> AuthArgs {
+        AuthArgs {
+            base_url: Some("http://127.0.0.1:0".to_string()),
+            access_token: None,
+            access_token_env: "NYXID_ACCESS_TOKEN_PREFLIGHT_UNSET".to_string(),
+            profile: Some("ensure-session-test".to_string()),
+            output: OutputFormat::Table,
+        }
+    }
+
+    /// RAII: lock the shared env mutex, point HOME at a fresh temp dir, and
+    /// guarantee the preflight env var is unset. Restores HOME on drop. Mirrors
+    /// `api.rs`'s `HomeGuard`; holding the lock across `.await` is intentional
+    /// (the single-threaded test runtime never moves threads).
+    struct PreflightHome {
+        _dir: tempfile::TempDir,
+        prev_home: Option<std::ffi::OsString>,
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl PreflightHome {
+        fn set() -> Self {
+            let guard = crate::test_support::env_lock()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let dir = tempfile::tempdir().expect("tempdir");
+            let prev_home = std::env::var_os("HOME");
+            // SAFETY: serialized by `env_lock`.
+            unsafe {
+                std::env::set_var("HOME", dir.path());
+                std::env::remove_var("NYXID_ACCESS_TOKEN_PREFLIGHT_UNSET");
+            }
+            Self {
+                _dir: dir,
+                prev_home,
+                _guard: guard,
+            }
+        }
+    }
+
+    impl Drop for PreflightHome {
+        fn drop(&mut self) {
+            // SAFETY: serialized by `env_lock`.
+            unsafe {
+                match &self.prev_home {
+                    Some(v) => std::env::set_var("HOME", v),
+                    None => std::env::remove_var("HOME"),
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn ensure_session_skips_when_explicit_token_flag_set() {
+        // The explicit-token shortcut returns before touching token storage or
+        // the network, so no HOME mutation is needed.
+        let mut auth = preflight_auth_args();
+        auth.access_token = Some("explicit-token".to_string());
+        super::ensure_session(&auth)
+            .await
+            .expect("explicit token is honored");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // serializes HOME/env mutations across tests
+    async fn ensure_session_ok_for_unexpired_saved_token() {
+        let _home = PreflightHome::set();
+        let auth = preflight_auth_args();
+        let token = build_jwt(&serde_json::json!({
+            "sub": "11111111-2222-3333-4444-555555555555",
+            "exp": 9999999999i64,
+        }));
+        super::save_tokens_for(auth.profile.as_deref(), &token, Some("refresh"))
+            .expect("save token");
+
+        super::ensure_session(&auth)
+            .await
+            .expect("unexpired token needs no network and is accepted");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn ensure_session_errors_when_no_token_and_headless() {
+        // Test stdin is not a TTY, so handle_dead_session takes the
+        // non-interactive branch and returns a clean error instead of hanging.
+        let _home = PreflightHome::set();
+        let auth = preflight_auth_args();
+
+        let err = super::ensure_session(&auth)
+            .await
+            .expect_err("no token must error");
+        let msg = format!("{err}");
+        assert!(msg.contains("not logged in"), "unexpected message: {msg}");
+        assert!(msg.contains("nyxid login"), "should point at login: {msg}");
+    }
+
+    /// Minimal one-shot HTTP server that answers the first request with a
+    /// 200 `/auth/refresh` body. Returns the base URL to point the client at.
+    async fn spawn_refresh_ok_server(access: &str, refresh: &str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let body = format!(
+            r#"{{"access_token":"{access}","expires_in":900,"refresh_token":"{refresh}"}}"#
+        );
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = [0u8; 2048];
+                let _ = socket.read(&mut buf).await; // body unparsed; respond regardless
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(resp.as_bytes()).await;
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn ensure_session_silently_refreshes_expired_access_token() {
+        // The headline behavior: expired access token + a usable refresh token
+        // -> one silent /auth/refresh -> command proceeds with the new token,
+        // no prompt. Exercises the `Refreshed` arm end to end through the
+        // consolidated `exchange_refresh_token`.
+        let _home = PreflightHome::set();
+        let base = spawn_refresh_ok_server("new-access-token", "new-refresh-token").await;
+        let mut auth = preflight_auth_args();
+        auth.base_url = Some(base);
+
+        let expired = build_jwt(&serde_json::json!({
+            "sub": "11111111-2222-3333-4444-555555555555",
+            "exp": 1_000_000_000i64, // 2001, expired
+        }));
+        // A non-JWT refresh token: `jwt_exp_from_token` returns None, so the
+        // local short-circuit is skipped and the network refresh is attempted.
+        super::save_tokens_for(
+            auth.profile.as_deref(),
+            &expired,
+            Some("usable-refresh-token"),
+        )
+        .expect("save initial tokens");
+
+        super::ensure_session(&auth)
+            .await
+            .expect("silent refresh should succeed without prompting");
+
+        assert_eq!(
+            super::read_saved_token_for(auth.profile.as_deref()).as_deref(),
+            Some("new-access-token"),
+            "preflight should persist the refreshed access token"
+        );
+        assert_eq!(
+            super::read_saved_refresh_token_for(auth.profile.as_deref()).as_deref(),
+            Some("new-refresh-token"),
+            "preflight should persist the rotated refresh token"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn ensure_session_errors_when_expired_and_no_refresh_token() {
+        // Expired access token + no refresh token -> Unauthorized without any
+        // network call -> dead-session path -> clean headless error.
+        let _home = PreflightHome::set();
+        let auth = preflight_auth_args();
+        let expired = build_jwt(&serde_json::json!({
+            "sub": "11111111-2222-3333-4444-555555555555",
+            "exp": 1_000_000_000i64, // year 2001, well past
+        }));
+        // Save only the access token; leave no refresh token file.
+        super::write_token_file(
+            &super::token_file_path_for(auth.profile.as_deref()).expect("path"),
+            &expired,
+        )
+        .expect("write access token");
+
+        let err = super::ensure_session(&auth)
+            .await
+            .expect_err("expired token with no refresh must error");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("session has expired"),
+            "unexpected message: {msg}"
+        );
+        assert!(msg.contains("nyxid login"), "should point at login: {msg}");
     }
 }

@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use crate::crypto::aes::EncryptionKeys;
 use crate::errors::{AppError, AppResult};
+use crate::models::agent_service_binding::COLLECTION_NAME as AGENT_SERVICE_BINDINGS;
 use crate::models::default_request_header::DefaultRequestHeader;
 use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, ServiceCapabilities,
@@ -15,9 +16,11 @@ use crate::models::provider_config::{COLLECTION_NAME, ProviderConfig};
 use crate::models::service_provider_requirement::{
     COLLECTION_NAME as REQUIREMENTS, ServiceProviderRequirement,
 };
+use crate::models::user_api_key::COLLECTION_NAME as USER_API_KEYS;
+use crate::models::user_endpoint::COLLECTION_NAME as USER_ENDPOINTS;
 use crate::models::user_provider_credentials::COLLECTION_NAME as USER_PROVIDER_CREDENTIALS;
 use crate::models::user_provider_token::COLLECTION_NAME as USER_PROVIDER_TOKENS;
-use crate::models::user_service::COLLECTION_NAME as USER_SERVICES;
+use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
 
 const SEEDED_USER_CREDENTIAL_OAUTH_PROVIDER_SLUGS: &[&str] = &[
     "google",
@@ -1628,18 +1631,25 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
-    // Warn once per startup if the google-cloud OAuth client is not yet
-    // configured (common for fresh deploys). Admins configure via the
-    // existing provider PATCH API or admin UI before users can --oauth.
+    // Note once per startup that the google-cloud provider has no
+    // platform-level OAuth client configured. This is the default fresh-deploy
+    // state. It is NOT a hard error: with credential_mode=user (the seeded
+    // default), users can still connect by passing --oauth-client-id /
+    // --oauth-client-secret-env on `nyxid service add api-google-cloud
+    // --oauth`. Admins who want a platform default can PATCH
+    // /api/v1/providers/google-cloud with a client_id/secret and switch
+    // credential_mode to "admin" or "both".
     if let Some(gc) = collection.find_one(doc! { "slug": "google-cloud" }).await?
         && gc.client_id_encrypted.is_none()
     {
-        tracing::warn!(
+        tracing::info!(
             slug = "google-cloud",
-            "google-cloud OAuth provider has no client_id/secret configured; \
-             admins must set them via PATCH /api/v1/providers/google-cloud \
-             (or the admin UI) before users can connect services via --oauth. \
-             Until then the catalog entry exists but OAuth flows will fail."
+            "google-cloud provider has no platform OAuth client configured. \
+             Users can still connect via BYO credentials \
+             (--oauth-client-id / --oauth-client-secret-env on \
+             `nyxid service add api-google-cloud --oauth`). To set a platform \
+             default, PATCH /api/v1/providers/google-cloud with a \
+             client_id/secret and flip credential_mode to \"admin\" or \"both\"."
         );
     }
 
@@ -3017,29 +3027,225 @@ pub async fn seed_default_services(
     }
 
     // NyxID#778: the gcp-cloud-billing / gcp-bigquery-billing catalog entries
-    // (and their legacy service-account auth) have been removed in favor of the
-    // generic `api-google-cloud` + `google-cloud` OAuth flow. Any existing
-    // UserService rows that auto-provisioned from those old slugs now point
-    // at non-existent catalog entries and have invalid credentials. We do
-    // NOT auto-rewrite them (the stored SA JSON is gone from the new model).
-    // Log a one-time warning at startup with a hint for affected users.
-    let removed_gcp_slugs = ["gcp-cloud-billing", "gcp-bigquery-billing"];
-    let orphaned = db
-        .collection::<mongodb::bson::Document>(USER_SERVICES)
-        .count_documents(doc! { "slug": { "$in": &removed_gcp_slugs[..] } })
-        .await?;
-    if orphaned > 0 {
-        tracing::warn!(
-            count = orphaned,
-            slugs = ?removed_gcp_slugs,
-            "NyxID#778: found orphaned UserService rows for removed GCP service-account \
-             catalog entries. These users must re-add the services via the new OAuth flow: \
-             `nyxid service add api-google-cloud --oauth --endpoint-url <google-api-host>`. \
-             Old service-account credentials are no longer supported."
-        );
-    }
+    // (and their gcp-billing / gcp-bigquery providers) were superseded by
+    // the generic `api-google-cloud` + `google-cloud` OAuth flow. The seed
+    // code for these was removed, but pre-existing rows from earlier
+    // deployments remain in MongoDB -- both admin catalog rows AND user-
+    // owned rows that were auto-provisioned from those catalog slugs.
+    //
+    // Auth method `gcp_service_account` is gone from the proxy, so any
+    // surviving UserService row is dead: it cannot route a request and
+    // its stored SA JSON (on the linked UserApiKey) is meaningless. Keep
+    // them around and we leak credentials into perpetuity. Cascade-delete:
+    //
+    //   AgentServiceBinding ─┐
+    //   UserService ─────────┤── (UserEndpoint / UserApiKey if not still
+    //                             referenced by another remaining service)
+    //   UserProviderToken ─┐
+    //   UserProviderCreds ─┤── by provider_config_id IN <removed>
+    //   ServiceProviderRequirement (by either side)
+    //   DownstreamService / ProviderConfig
+    //
+    // Affected users re-add via `api-google-cloud --oauth ...`.
+    cleanup_legacy_gcp_sa_data(db, &service_col, &provider_col, &req_col).await?;
 
     Ok(())
+}
+
+/// One-shot cascade cleanup for NyxID#778. See the call site above for the
+/// dependency tree. After the first run on a deployment with legacy GCP
+/// rows, every subsequent invocation is a no-op (every query returns empty).
+async fn cleanup_legacy_gcp_sa_data(
+    db: &mongodb::Database,
+    service_col: &mongodb::Collection<DownstreamService>,
+    provider_col: &mongodb::Collection<ProviderConfig>,
+    req_col: &mongodb::Collection<ServiceProviderRequirement>,
+) -> AppResult<()> {
+    const REMOVED_SERVICE_SLUGS: &[&str] = &["gcp-cloud-billing", "gcp-bigquery-billing"];
+    const REMOVED_PROVIDER_SLUGS: &[&str] = &["gcp-billing", "gcp-bigquery"];
+
+    let service_ids: Vec<String> = service_col
+        .find(doc! { "slug": { "$in": REMOVED_SERVICE_SLUGS } })
+        .await?
+        .try_collect::<Vec<_>>()
+        .await?
+        .into_iter()
+        .map(|s| s.id)
+        .collect();
+
+    let provider_ids: Vec<String> = provider_col
+        .find(doc! { "slug": { "$in": REMOVED_PROVIDER_SLUGS } })
+        .await?
+        .try_collect::<Vec<_>>()
+        .await?
+        .into_iter()
+        .map(|p| p.id)
+        .collect();
+
+    // Cascade-delete user-owned rows tied to the removed catalog slugs.
+    let user_service_col = db.collection::<UserService>(USER_SERVICES);
+    let user_services: Vec<UserService> = user_service_col
+        .find(doc! { "slug": { "$in": REMOVED_SERVICE_SLUGS } })
+        .await?
+        .try_collect()
+        .await?;
+
+    let user_service_ids: Vec<String> = user_services.iter().map(|s| s.id.clone()).collect();
+    let touched_endpoint_ids: Vec<String> = user_services
+        .iter()
+        .map(|s| s.endpoint_id.clone())
+        .collect();
+    let touched_api_key_ids: Vec<String> = user_services
+        .iter()
+        .filter_map(|s| s.api_key_id.clone())
+        .collect();
+
+    let agent_bindings_removed = if user_service_ids.is_empty() {
+        0
+    } else {
+        db.collection::<mongodb::bson::Document>(AGENT_SERVICE_BINDINGS)
+            .delete_many(doc! { "user_service_id": { "$in": &user_service_ids } })
+            .await?
+            .deleted_count
+    };
+
+    let user_services_removed = if user_service_ids.is_empty() {
+        0
+    } else {
+        user_service_col
+            .delete_many(doc! { "_id": { "$in": &user_service_ids } })
+            .await?
+            .deleted_count
+    };
+
+    // Only delete endpoints / api keys that aren't still referenced by
+    // some other UserService row. Matches the cascade pattern in
+    // `unified_key_service::cleanup_orphan_endpoints_for_user`.
+    let user_endpoints_removed =
+        delete_unreferenced(db, USER_ENDPOINTS, "endpoint_id", &touched_endpoint_ids).await?;
+    let user_api_keys_removed =
+        delete_unreferenced(db, USER_API_KEYS, "api_key_id", &touched_api_key_ids).await?;
+
+    let user_provider_tokens_removed = if provider_ids.is_empty() {
+        0
+    } else {
+        db.collection::<mongodb::bson::Document>(USER_PROVIDER_TOKENS)
+            .delete_many(doc! { "provider_config_id": { "$in": &provider_ids } })
+            .await?
+            .deleted_count
+    };
+
+    let user_provider_creds_removed = if provider_ids.is_empty() {
+        0
+    } else {
+        db.collection::<mongodb::bson::Document>(USER_PROVIDER_CREDENTIALS)
+            .delete_many(doc! { "provider_config_id": { "$in": &provider_ids } })
+            .await?
+            .deleted_count
+    };
+
+    let mut requirement_query = doc! {};
+    if !service_ids.is_empty() {
+        requirement_query.insert("service_id", doc! { "$in": &service_ids });
+    }
+    if !provider_ids.is_empty() {
+        let provider_clause = doc! { "provider_config_id": { "$in": &provider_ids } };
+        if requirement_query.is_empty() {
+            requirement_query = provider_clause;
+        } else {
+            requirement_query = doc! { "$or": [requirement_query, provider_clause] };
+        }
+    }
+    let requirements_removed = if requirement_query.is_empty() {
+        0
+    } else {
+        req_col.delete_many(requirement_query).await?.deleted_count
+    };
+
+    let services_removed = if service_ids.is_empty() {
+        0
+    } else {
+        service_col
+            .delete_many(doc! { "_id": { "$in": &service_ids } })
+            .await?
+            .deleted_count
+    };
+
+    let providers_removed = if provider_ids.is_empty() {
+        0
+    } else {
+        provider_col
+            .delete_many(doc! { "_id": { "$in": &provider_ids } })
+            .await?
+            .deleted_count
+    };
+
+    let nothing_to_do = services_removed == 0
+        && providers_removed == 0
+        && user_services_removed == 0
+        && agent_bindings_removed == 0
+        && user_endpoints_removed == 0
+        && user_api_keys_removed == 0
+        && user_provider_tokens_removed == 0
+        && user_provider_creds_removed == 0
+        && requirements_removed == 0;
+    if nothing_to_do {
+        return Ok(());
+    }
+
+    tracing::info!(
+        services_removed,
+        providers_removed,
+        requirements_removed,
+        user_services_removed,
+        agent_bindings_removed,
+        user_endpoints_removed,
+        user_api_keys_removed,
+        user_provider_tokens_removed,
+        user_provider_creds_removed,
+        service_slugs = ?REMOVED_SERVICE_SLUGS,
+        provider_slugs = ?REMOVED_PROVIDER_SLUGS,
+        "NyxID#778: cascade-removed legacy GCP service-account data \
+         (superseded by api-google-cloud + google-cloud OAuth)"
+    );
+
+    Ok(())
+}
+
+/// Delete rows from `collection` whose `_id` is in `candidate_ids` *and*
+/// no surviving `user_services` row still references that id via the
+/// `referencing_field` foreign key. Returns the number deleted.
+async fn delete_unreferenced(
+    db: &mongodb::Database,
+    collection: &str,
+    referencing_field: &str,
+    candidate_ids: &[String],
+) -> AppResult<u64> {
+    if candidate_ids.is_empty() {
+        return Ok(0);
+    }
+    let still_referenced: std::collections::HashSet<String> = db
+        .collection::<mongodb::bson::Document>(USER_SERVICES)
+        .distinct(
+            referencing_field,
+            doc! { referencing_field: { "$in": candidate_ids } },
+        )
+        .await?
+        .into_iter()
+        .filter_map(|b| b.as_str().map(str::to_string))
+        .collect();
+    let orphaned: Vec<&String> = candidate_ids
+        .iter()
+        .filter(|id| !still_referenced.contains(*id))
+        .collect();
+    if orphaned.is_empty() {
+        return Ok(0);
+    }
+    Ok(db
+        .collection::<mongodb::bson::Document>(collection)
+        .delete_many(doc! { "_id": { "$in": &orphaned } })
+        .await?
+        .deleted_count)
 }
 
 /// Input for OAuth2 provider configuration fields.

@@ -93,5 +93,50 @@ export default defineConfig({
     environment: "happy-dom",
     setupFiles: ["./src/test-setup.ts"],
     include: ["src/**/*.test.{ts,tsx}"],
+    coverage: {
+      // Measurement only — no hard threshold gate here. The CI coverage gate
+      // is tracked separately (issue #785). Run `npm run test -- --coverage`
+      // and read per-file line % from the text table.
+      provider: "v8",
+      reporter: ["text", "json-summary", "html"],
+      reportsDirectory: "./coverage",
+      include: ["src/**/*.{ts,tsx}"],
+      exclude: [
+        "src/**/*.test.{ts,tsx}",
+        "src/**/*.d.ts",
+        // Entry points / framework wiring with no branching logic to test.
+        "src/main.tsx",
+        "src/router.tsx",
+        "src/wizard-entry.tsx",
+        "src/test-setup.ts",
+        // Vendored shadcn/Radix primitives — owned upstream, not our logic.
+        "src/components/ui/**",
+        "src/types/**",
+        // Hand-drawn SVG empty-state icons — presentational, like ui/.
+        "src/components/icons/empty-state/**",
+        // Marketing landing surface (incl. animation hooks) — presentational.
+        "src/features/landing/**",
+        // Blog feature: presentational components, fixtures, and types. The
+        // one pure helper (utils.ts → estimateReadingMinutes) is kept in and
+        // tested; everything else here is markdown rendering / mock content.
+        "src/features/blog/**/*.tsx",
+        "src/features/blog/mock-data.ts",
+        "src/features/blog/mock-api.ts",
+        "src/features/blog/types.ts",
+        // Lazy route loaders — framework wiring with no branching (cf. router.tsx).
+        "src/pages/lazy.ts",
+        // Static config / fixtures / type-only modules — no branching logic.
+        "src/lib/mock-data.ts",
+        "src/lib/navigation.ts",
+        "src/lib/telemetry-schema.ts",
+        // Static legal / redirect stub pages — no branching logic.
+        "src/pages/privacy.tsx",
+        "src/pages/terms.tsx",
+        "src/pages/connections.tsx",
+        "src/pages/services.tsx",
+        "src/pages/providers-layout.tsx",
+        "src/pages/_legal-document-page.tsx",
+      ],
+    },
   },
 })

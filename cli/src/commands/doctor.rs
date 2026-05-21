@@ -541,3 +541,136 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod command_tests {
+    use super::*;
+    use chrono::Duration;
+
+    #[test]
+    fn status_glyphs_are_distinct_per_variant() {
+        assert_eq!(DoctorStatus::Pass.glyph(), "✓");
+        assert_eq!(DoctorStatus::Warn.glyph(), "!");
+        assert_eq!(DoctorStatus::Fail.glyph(), "✗");
+    }
+
+    #[test]
+    fn row_constructor_populates_all_fields() {
+        let r = row("Label", "detail text", DoctorStatus::Warn);
+        assert_eq!(r.label, "Label");
+        assert_eq!(r.detail, "detail text");
+        assert_eq!(r.status, DoctorStatus::Warn);
+    }
+
+    #[test]
+    fn has_failures_is_true_only_with_a_fail_row() {
+        let pass_warn = DoctorReport {
+            sections: vec![DoctorSection {
+                title: "S".to_string(),
+                rows: vec![
+                    row("a", "ok", DoctorStatus::Pass),
+                    row("b", "meh", DoctorStatus::Warn),
+                ],
+            }],
+        };
+        assert!(!pass_warn.has_failures());
+
+        let with_fail = DoctorReport {
+            sections: vec![DoctorSection {
+                title: "S".to_string(),
+                rows: vec![
+                    row("a", "ok", DoctorStatus::Pass),
+                    row("c", "broken", DoctorStatus::Fail),
+                ],
+            }],
+        };
+        assert!(with_fail.has_failures());
+    }
+
+    #[test]
+    fn has_failures_is_false_for_empty_report() {
+        let empty = DoctorReport { sections: vec![] };
+        assert!(!empty.has_failures());
+    }
+
+    #[test]
+    fn format_report_blank_label_row_renders_detail_without_label() {
+        let report = DoctorReport {
+            sections: vec![DoctorSection {
+                title: "Authentication".to_string(),
+                rows: vec![
+                    row("Login state", "logged in as a@b.c", DoctorStatus::Pass),
+                    row("", "(token redacted; expires 2026)", DoctorStatus::Pass),
+                ],
+            }],
+        };
+        let rendered = format_report(&report);
+        // The blank-label branch still emits the detail text.
+        assert!(rendered.contains("(token redacted; expires 2026)"));
+        // Title indentation and trailing-newline trimming behavior.
+        assert!(rendered.starts_with("nyxid doctor\n"));
+        assert!(!rendered.ends_with('\n'));
+    }
+
+    #[test]
+    fn latest_release_row_equal_reports_up_to_date() {
+        // installed_release_tag() returns the compiled-in tag; comparing it to
+        // itself must land on the Ordering::Equal branch.
+        let installed = update_check::installed_release_tag();
+        let row = latest_release_row(&installed);
+        assert_eq!(row.status, DoctorStatus::Pass);
+        assert!(
+            row.detail.contains("you are up to date"),
+            "detail was: {}",
+            row.detail
+        );
+    }
+
+    #[test]
+    fn rate_limit_row_formats_present_headers_with_reset_time() {
+        use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("x-ratelimit-remaining"),
+            HeaderValue::from_static("57"),
+        );
+        headers.insert(
+            HeaderName::from_static("x-ratelimit-limit"),
+            HeaderValue::from_static("60"),
+        );
+        // 2021-01-01T00:00:00Z -> "00:00 UTC"
+        headers.insert(
+            HeaderName::from_static("x-ratelimit-reset"),
+            HeaderValue::from_static("1609459200"),
+        );
+
+        let r = rate_limit_row(&headers);
+        assert_eq!(r.status, DoctorStatus::Pass);
+        assert_eq!(r.label, "Rate limit");
+        assert_eq!(r.detail, "57 / 60 remaining (resets at 00:00 UTC)");
+    }
+
+    #[test]
+    fn rate_limit_row_handles_missing_and_unparseable_headers() {
+        use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+        let mut headers = HeaderMap::new();
+        // remaining/limit absent -> "unknown"; reset present but non-numeric.
+        headers.insert(
+            HeaderName::from_static("x-ratelimit-reset"),
+            HeaderValue::from_static("not-a-number"),
+        );
+
+        let r = rate_limit_row(&headers);
+        assert_eq!(r.detail, "unknown / unknown remaining (reset unavailable)");
+    }
+
+    #[test]
+    fn human_age_buckets_by_largest_unit() {
+        let now = Utc::now();
+        assert_eq!(human_age(now - Duration::days(3)), "3 days ago");
+        assert_eq!(human_age(now - Duration::hours(5)), "5 hours ago");
+        assert_eq!(human_age(now - Duration::minutes(2)), "2 minutes ago");
+        // Sub-minute elapsed falls through to "just now".
+        assert_eq!(human_age(now - Duration::seconds(10)), "just now");
+    }
+}

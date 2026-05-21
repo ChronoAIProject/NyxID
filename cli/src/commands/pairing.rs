@@ -155,3 +155,150 @@ fn outcome_to_json(
         }),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The status strings here are load-bearing: `run` exits non-zero on
+    // cancelled/expired so scripts can detect outcome without parsing.
+    #[test]
+    fn cancelled_outcome_maps_to_cancelled_status() {
+        let v = outcome_to_json("pair-1", &wizard::WizardOutcome::Cancelled, None);
+        assert_eq!(v["status"], "cancelled");
+        assert_eq!(v["pairing_id"], "pair-1");
+    }
+
+    #[test]
+    fn timed_out_outcome_maps_to_expired_status() {
+        let v = outcome_to_json("pair-2", &wizard::WizardOutcome::TimedOut, None);
+        assert_eq!(v["status"], "expired");
+        assert_eq!(v["pairing_id"], "pair-2");
+    }
+
+    #[test]
+    fn ai_key_paired_maps_to_ai_key_kind_with_identifiers() {
+        let outcome = wizard::WizardOutcome::AiKeyPaired(wizard::AiKeyPairingAckPayload {
+            acknowledged: true,
+            service_id: "svc-1".to_string(),
+            slug: "openai".to_string(),
+            label: "OpenAI".to_string(),
+        });
+        let v = outcome_to_json("pair-3", &outcome, None);
+        assert_eq!(v["status"], "completed");
+        assert_eq!(v["kind"], "ai-key");
+        assert_eq!(v["pairing_id"], "pair-3");
+        assert_eq!(v["service_id"], "svc-1");
+        assert_eq!(v["slug"], "openai");
+        assert_eq!(v["label"], "OpenAI");
+    }
+
+    #[test]
+    fn api_key_create_maps_to_api_key_create_kind() {
+        let outcome =
+            wizard::WizardOutcome::ApiKeyCreateAcknowledged(wizard::ApiKeyCreateAckPayload {
+                acknowledged: true,
+                api_key_id: "ak-1".to_string(),
+            });
+        let v = outcome_to_json("pair-4", &outcome, None);
+        assert_eq!(v["status"], "completed");
+        assert_eq!(v["kind"], "api-key-create");
+        assert_eq!(v["api_key_id"], "ak-1");
+    }
+
+    #[test]
+    fn service_account_create_maps_to_service_account_create_kind() {
+        let outcome = wizard::WizardOutcome::ServiceAccountCreateAcknowledged(
+            wizard::ServiceAccountCreateAckPayload {
+                acknowledged: true,
+                service_account_id: "sa-1".to_string(),
+            },
+        );
+        let v = outcome_to_json("pair-5", &outcome, None);
+        assert_eq!(v["kind"], "service-account-create");
+        assert_eq!(v["service_account_id"], "sa-1");
+    }
+
+    #[test]
+    fn developer_app_create_maps_to_developer_app_create_kind() {
+        let outcome = wizard::WizardOutcome::DeveloperAppCreateAcknowledged(
+            wizard::DeveloperAppCreateAckPayload {
+                acknowledged: true,
+                developer_app_id: "da-1".to_string(),
+            },
+        );
+        let v = outcome_to_json("pair-6", &outcome, None);
+        assert_eq!(v["kind"], "developer-app-create");
+        assert_eq!(v["developer_app_id"], "da-1");
+    }
+
+    #[test]
+    fn mfa_setup_maps_to_mfa_setup_kind() {
+        let outcome = wizard::WizardOutcome::MfaSetupAcknowledged(wizard::MfaSetupAckPayload {
+            acknowledged: true,
+            factor_id: "factor-1".to_string(),
+        });
+        let v = outcome_to_json("pair-7", &outcome, None);
+        assert_eq!(v["kind"], "mfa-setup");
+        assert_eq!(v["factor_id"], "factor-1");
+    }
+
+    #[test]
+    fn node_register_maps_to_node_register_token_kind() {
+        let outcome =
+            wizard::WizardOutcome::NodeRegisterAcknowledged(wizard::NodeRegisterAckPayload {
+                acknowledged: true,
+                token_id: "tok-1".to_string(),
+            });
+        let v = outcome_to_json("pair-8", &outcome, None);
+        assert_eq!(v["kind"], "node-register-token");
+        assert_eq!(v["token_id"], "tok-1");
+    }
+
+    #[test]
+    fn ai_key_completed_maps_to_ai_key_local_kind() {
+        let outcome = wizard::WizardOutcome::AiKeyCompleted(serde_json::json!({"ignored": true}));
+        let v = outcome_to_json("pair-9", &outcome, None);
+        assert_eq!(v["status"], "completed");
+        assert_eq!(v["kind"], "ai-key-local");
+        assert_eq!(v["pairing_id"], "pair-9");
+    }
+
+    fn rotation(resource_id: &str) -> wizard::WizardOutcome {
+        wizard::WizardOutcome::RotationAcknowledged(wizard::RotationAckPayload {
+            acknowledged: true,
+            resource_id: resource_id.to_string(),
+        })
+    }
+
+    #[test]
+    fn rotation_preserves_valid_kind_hint() {
+        // Each of the four rotation-shaped flows must round-trip its
+        // exact kind so agents can dispatch without parsing resource ids.
+        for kind in [
+            "api-key-rotate",
+            "node-rotate-token",
+            "service-account-rotate-secret",
+            "developer-app-rotate-secret",
+        ] {
+            let v = outcome_to_json("pair-r", &rotation("res-1"), Some(kind));
+            assert_eq!(v["status"], "completed");
+            assert_eq!(v["kind"], kind, "kind hint {kind} should pass through");
+            assert_eq!(v["resource_id"], "res-1");
+        }
+    }
+
+    #[test]
+    fn rotation_falls_back_to_rotation_on_unknown_kind() {
+        let v = outcome_to_json("pair-r", &rotation("res-2"), Some("bogus-kind"));
+        assert_eq!(v["kind"], "rotation");
+        assert_eq!(v["resource_id"], "res-2");
+    }
+
+    #[test]
+    fn rotation_falls_back_to_rotation_when_kind_hint_absent() {
+        let v = outcome_to_json("pair-r", &rotation("res-3"), None);
+        assert_eq!(v["kind"], "rotation");
+        assert_eq!(v["resource_id"], "res-3");
+    }
+}

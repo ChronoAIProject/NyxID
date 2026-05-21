@@ -18,7 +18,7 @@ pub async fn run(command: NodeCredentialAdminCommands) -> Result<()> {
             label,
             auth,
         } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let node_id = crate::commands::node::resolve_node_id(&mut api, &node).await?;
             let body = serde_json::json!({
                 "service_slug": slug,
@@ -46,7 +46,10 @@ pub async fn run(command: NodeCredentialAdminCommands) -> Result<()> {
                     eprintln!("  field name: {field}");
                     eprintln!();
                     eprintln!(
-                        "The VM operator should run `nyxid node credentials pending`, then `nyxid node credentials accept {slug}`."
+                        "The VM operator must SSH to the node-agent machine and run `nyxid node credentials pending`, then `nyxid node credentials accept {slug}`."
+                    );
+                    eprintln!(
+                        "`nyxid node credentials` is node-side only; it is not available on the user-side CLI."
                     );
                     eprintln!("Do not send the secret value; it is entered on the VM.");
                 }
@@ -54,7 +57,7 @@ pub async fn run(command: NodeCredentialAdminCommands) -> Result<()> {
             Ok(())
         }
         NodeCredentialAdminCommands::List { node, auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let node_id = crate::commands::node::resolve_node_id(&mut api, &node).await?;
             let response: Value = api
                 .get(&format!("/nodes/{node_id}/credentials/pending"))
@@ -103,7 +106,7 @@ pub async fn run(command: NodeCredentialAdminCommands) -> Result<()> {
             yes,
             auth,
         } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let node_id = crate::commands::node::resolve_node_id(&mut api, &node).await?;
 
             if !yes {

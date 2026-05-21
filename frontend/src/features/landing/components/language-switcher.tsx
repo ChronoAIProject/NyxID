@@ -44,7 +44,7 @@ export function LanguageSwitcher() {
     <div ref={ref} className="relative">
       <button
         onClick={() => setOpen((o) => !o)}
-        className="flex h-9 items-center gap-1 rounded-full bg-landing-surface-raised/60 px-2.5 font-mono text-xs text-gray-400 transition-colors hover:text-white"
+        className="flex h-9 items-center gap-1 rounded-full bg-white/[0.04] px-2.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
         aria-label="Change language"
       >
         <svg
@@ -61,19 +61,19 @@ export function LanguageSwitcher() {
           <path d="M2 12h20" />
           <path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z" />
         </svg>
-        <span className="text-gray-300">{current?.label ?? "EN"}</span>
+        <span className="text-foreground">{current?.label ?? "EN"}</span>
       </button>
 
       {open && (
-        <div className="absolute left-0 top-full z-50 mt-1.5 min-w-[80px] overflow-hidden rounded-xl border border-landing-border-subtle bg-landing-surface shadow-xl shadow-black/40">
+        <div className="absolute left-0 top-full z-50 mt-1.5 min-w-[80px] overflow-hidden rounded-xl border border-border/50 bg-card shadow-xl shadow-black/40">
           {languages.map((lang) => (
             <button
               key={lang.code}
               onClick={() => select(lang.code)}
-              className={`flex w-full items-center px-4 py-2 font-mono text-xs transition-colors ${
+              className={`flex w-full items-center px-4 py-2 text-xs transition-colors ${
                 i18n.language === lang.code
-                  ? "text-primary"
-                  : "text-gray-400 hover:bg-landing-surface-raised hover:text-white"
+                  ? "text-nyx-secondary-400"
+                  : "text-muted-foreground hover:bg-white/[0.06] hover:text-foreground"
               }`}
             >
               {lang.label}

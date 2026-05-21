@@ -149,3 +149,62 @@ fn print_table_output(user: &Value, services: &Value, api_keys: &Value, nodes: &
         eprintln!("  (none)");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    async fn mount_status_endpoints(server: &MockServer) {
+        Mock::given(method("GET"))
+            .and(path("/api/v1/users/me"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "email": "a@b.com", "role": "admin" })),
+            )
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/keys"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "keys": [{"id": "s1", "slug": "openai", "endpoint_url": "https://x", "status": "active"}]
+            })))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/api-keys"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "keys": [{"id": "k1", "name": "agent", "scopes": "read write"}]
+            })))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/nodes"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "nodes": [{"id": "n1", "name": "box", "status": "online", "last_heartbeat_at": "2026"}]
+            })))
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn status_aggregates_json() {
+        let server = MockServer::start().await;
+        mount_status_endpoints(&server).await;
+        let mut api = ApiClient::new(&server.uri(), "test-token".to_string()).unwrap();
+        run(&mut api, OutputFormat::Json)
+            .await
+            .expect("status json should succeed");
+    }
+
+    #[tokio::test]
+    async fn status_table_renders_all_sections() {
+        let server = MockServer::start().await;
+        mount_status_endpoints(&server).await;
+        let mut api = ApiClient::new(&server.uri(), "test-token".to_string()).unwrap();
+        run(&mut api, OutputFormat::Table)
+            .await
+            .expect("status table should succeed");
+    }
+}

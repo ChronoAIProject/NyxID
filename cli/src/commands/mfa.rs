@@ -35,7 +35,7 @@ pub async fn run(command: MfaCommands) -> Result<()> {
             // working. Note this prints the TOTP secret + URL to
             // the terminal; that's exactly the leak the wizard
             // closes for the default interactive path.
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let result: Value = api.post("/auth/mfa/setup", &serde_json::json!({})).await?;
 
             match auth.output {
@@ -62,7 +62,7 @@ pub async fn run(command: MfaCommands) -> Result<()> {
         }
 
         MfaCommands::Verify { code, auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let body = serde_json::json!({ "code": code });
             // Backend route is `/auth/mfa/confirm` — MFA endpoints are
             // nested under `/auth` in `backend/src/routes.rs:63`. The
@@ -93,7 +93,7 @@ pub async fn run(command: MfaCommands) -> Result<()> {
         }
 
         MfaCommands::Status { auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let user: Value = api.get("/users/me").await?;
 
             match auth.output {
@@ -115,5 +115,76 @@ pub async fn run(command: MfaCommands) -> Result<()> {
             }
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::mock_auth;
+    use wiremock::matchers::{body_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn setup_posts_to_mfa_setup_scripted() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/mfa/setup"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "secret": "ABCDEF234567", "qr_code_url": "otpauth://totp/NyxID:a@b.com"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // terminal: true forces the scripted path past the browser-wizard gate.
+        run(MfaCommands::Setup {
+            terminal: true,
+            no_wait: false,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("mfa setup should succeed");
+    }
+
+    #[tokio::test]
+    async fn verify_posts_code_to_confirm() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/mfa/confirm"))
+            .and(body_json(serde_json::json!({ "code": "123456" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "recovery_codes": ["aaaa-bbbb", "cccc-dddd"]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(MfaCommands::Verify {
+            code: "123456".to_string(),
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("mfa verify should succeed");
+    }
+
+    #[tokio::test]
+    async fn status_fetches_user_me() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/users/me"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "mfa_enabled": true })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(MfaCommands::Status {
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("mfa status should succeed");
     }
 }

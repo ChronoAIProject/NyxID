@@ -64,7 +64,8 @@ html {
   will-change: auto;
 }
 
-/* Navbar purple glow — animated wave light (brand primary #5A2AF1) */
+/* Navbar purple glow — consumed by the blog shell (features/blog/components/blog-shell.tsx).
+   The landing navbar no longer uses this (it has a quiet static border); kept for the blog. */
 @keyframes navbar-wave {
   0% {
     background-position: -100% 0;
@@ -156,47 +157,11 @@ html {
   animation: fab-glow-pulse 3s ease-in-out infinite;
 }
 
-/* Star twinkle */
-@keyframes star-twinkle {
-  0%,
-  100% {
-    opacity: 0.2;
-  }
-  50% {
-    opacity: 1;
-  }
-}
-
-.animate-star-twinkle {
-  animation: star-twinkle 3s ease-in-out infinite;
-}
-
-/* Scroll indicator bounce */
-@keyframes scroll-down {
-  0% {
-    transform: translateY(-100%);
-    opacity: 0;
-  }
-  30% {
-    opacity: 1;
-  }
-  100% {
-    transform: translateY(100%);
-    opacity: 0;
-  }
-}
-
-.animate-scroll-down {
-  animation: scroll-down 1.5s ease-in-out infinite;
-}
-
-/* Reduced motion support for parallax */
+/* Reduced motion: pause looping decorative landing animations */
 @media (prefers-reduced-motion: reduce) {
-  .animate-star-twinkle {
-    animation: none;
-    opacity: 0.5;
-  }
-  .animate-scroll-down {
+  .animate-scroll,
+  .glow-pulse,
+  .fab-glow-full {
     animation: none;
   }
 }

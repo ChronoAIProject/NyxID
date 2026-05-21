@@ -63,9 +63,6 @@ import {
 } from "@/components/ui/table";
 import {
   Trash2,
-  Monitor,
-  Smartphone,
-  Globe,
   ExternalLink,
   Copy,
   Check,
@@ -74,6 +71,15 @@ import {
 } from "lucide-react";
 import { PowerButtonIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
+import {
+  getDeviceIcon,
+  buildCursorDeeplink,
+  buildClaudeCodeCommand,
+  buildCursorConfig,
+  buildClaudeCodeConfig,
+  buildCodexCommand,
+  buildCodexConfig,
+} from "./settings.helpers";
 
 interface DeleteAccountResponse {
   readonly status: string;
@@ -600,65 +606,9 @@ function SecurityTab() {
   );
 }
 
-function getDeviceIcon(userAgent: string | null | undefined) {
-  const ua = (userAgent ?? "").toLowerCase();
-  if (
-    ua.includes("mobile") ||
-    ua.includes("android") ||
-    ua.includes("iphone")
-  ) {
-    return <Smartphone className="h-4 w-4" aria-hidden="true" />;
-  }
-  if (
-    ua.includes("mozilla") ||
-    ua.includes("chrome") ||
-    ua.includes("safari")
-  ) {
-    return <Monitor className="h-4 w-4" aria-hidden="true" />;
-  }
-  return <Globe className="h-4 w-4" aria-hidden="true" />;
-}
-
 // ---------------------------------------------------------------------------
 // MCP Install Tab
 // ---------------------------------------------------------------------------
-
-function buildCursorDeeplink(mcpUrl: string): string {
-  const config = JSON.stringify({ url: mcpUrl });
-  const encoded = encodeURIComponent(btoa(config));
-  return `cursor://anysphere.cursor-deeplink/mcp/install?name=nyxid&config=${encoded}`;
-}
-
-function buildClaudeCodeCommand(mcpUrl: string): string {
-  return `claude mcp add --transport http --scope user nyxid ${mcpUrl}`;
-}
-
-function buildCursorConfig(mcpUrl: string): string {
-  return JSON.stringify({ mcpServers: { nyxid: { url: mcpUrl } } }, null, 2);
-}
-
-function buildClaudeCodeConfig(mcpUrl: string): string {
-  return JSON.stringify(
-    {
-      mcpServers: {
-        nyxid: {
-          type: "http",
-          url: mcpUrl,
-        },
-      },
-    },
-    null,
-    2,
-  );
-}
-
-function buildCodexCommand(mcpUrl: string): string {
-  return `codex mcp add nyxid --url ${mcpUrl}`;
-}
-
-function buildCodexConfig(mcpUrl: string): string {
-  return `[mcp_servers.nyxid]\nurl = "${mcpUrl}"`;
-}
 
 function CopyInlineButton({
   text,

@@ -185,7 +185,7 @@ async fn create_org(
     contact_email: Option<&str>,
     avatar_url: Option<&str>,
 ) -> Result<()> {
-    let mut api = ApiClient::from_auth(auth)?;
+    let mut api = ApiClient::from_auth_checked(auth).await?;
 
     let mut body = serde_json::json!({ "display_name": display_name });
     if let Some(email) = contact_email
@@ -222,7 +222,7 @@ async fn create_org(
 }
 
 async fn list_orgs(auth: &AuthArgs) -> Result<()> {
-    let mut api = ApiClient::from_auth(auth)?;
+    let mut api = ApiClient::from_auth_checked(auth).await?;
     let resp: Value = api.get("/orgs").await?;
 
     match auth.output {
@@ -258,7 +258,7 @@ async fn list_orgs(auth: &AuthArgs) -> Result<()> {
 }
 
 async fn show_org(auth: &AuthArgs, id: &str) -> Result<()> {
-    let mut api = ApiClient::from_auth(auth)?;
+    let mut api = ApiClient::from_auth_checked(auth).await?;
     let org: Value = api.get(&format!("/orgs/{id}")).await?;
 
     match auth.output {
@@ -292,7 +292,7 @@ async fn update_org(
     slug: Option<&str>,
     avatar_url: Option<&str>,
 ) -> Result<()> {
-    let mut api = ApiClient::from_auth(auth)?;
+    let mut api = ApiClient::from_auth_checked(auth).await?;
     let mut body = serde_json::Map::new();
     if let Some(name) = display_name {
         body.insert("display_name".into(), Value::String(name.to_string()));
@@ -329,7 +329,7 @@ async fn delete_org(auth: &AuthArgs, id: &str, yes: bool) -> Result<()> {
         }
     }
 
-    let mut api = ApiClient::from_auth(auth)?;
+    let mut api = ApiClient::from_auth_checked(auth).await?;
     api.delete_empty(&format!("/orgs/{id}")).await?;
     match auth.output {
         OutputFormat::Json => println!(
@@ -365,7 +365,7 @@ async fn join_org(auth: &AuthArgs, nonce_or_url: &str) -> Result<()> {
         return Err(anyhow!("Empty invite nonce"));
     }
 
-    let mut api = ApiClient::from_auth(auth)?;
+    let mut api = ApiClient::from_auth_checked(auth).await?;
     let resp: Value = api
         .post(&format!("/orgs/join/{nonce}"), &serde_json::json!({}))
         .await
@@ -387,7 +387,7 @@ async fn join_org(auth: &AuthArgs, nonce_or_url: &str) -> Result<()> {
 }
 
 async fn set_primary_org(auth: &AuthArgs, org_id: Option<&str>, clear: bool) -> Result<()> {
-    let mut api = ApiClient::from_auth(auth)?;
+    let mut api = ApiClient::from_auth_checked(auth).await?;
 
     let body = if clear {
         serde_json::json!({ "primary_org_id": Value::Null })
@@ -416,7 +416,7 @@ async fn set_primary_org(auth: &AuthArgs, org_id: Option<&str>, clear: bool) -> 
 // ─────────────────────────────────────────────────────────────────────────────
 
 async fn list_members(auth: &AuthArgs, org_id: &str) -> Result<()> {
-    let mut api = ApiClient::from_auth(auth)?;
+    let mut api = ApiClient::from_auth_checked(auth).await?;
     let resp: Value = api.get(&format!("/orgs/{org_id}/members")).await?;
 
     match auth.output {
@@ -476,7 +476,7 @@ async fn add_member(
     if let Some(src) = scope_source {
         validate_scope_source(src)?;
     }
-    let mut api = ApiClient::from_auth(auth)?;
+    let mut api = ApiClient::from_auth_checked(auth).await?;
 
     let mut body = serde_json::json!({
         "user_id": user_id,
@@ -526,7 +526,7 @@ async fn update_member(
         ));
     }
 
-    let mut api = ApiClient::from_auth(auth)?;
+    let mut api = ApiClient::from_auth_checked(auth).await?;
     let mut body = serde_json::Map::new();
     if let Some(role) = role {
         body.insert("role".into(), Value::String(role.to_string()));
@@ -570,7 +570,7 @@ async fn remove_member(auth: &AuthArgs, org_id: &str, member_id: &str, yes: bool
         }
     }
 
-    let mut api = ApiClient::from_auth(auth)?;
+    let mut api = ApiClient::from_auth_checked(auth).await?;
     api.delete_empty(&format!("/orgs/{org_id}/members/{member_id}"))
         .await?;
     match auth.output {
@@ -599,7 +599,7 @@ async fn create_invite(
     if let Some(src) = scope_source {
         validate_scope_source(src)?;
     }
-    let mut api = ApiClient::from_auth(auth)?;
+    let mut api = ApiClient::from_auth_checked(auth).await?;
 
     let mut body = serde_json::json!({ "role": role });
     if let Some(src) = scope_source {
@@ -663,7 +663,7 @@ fn build_join_url(auth: &AuthArgs, nonce: &str) -> String {
 }
 
 async fn list_invites(auth: &AuthArgs, org_id: &str) -> Result<()> {
-    let mut api = ApiClient::from_auth(auth)?;
+    let mut api = ApiClient::from_auth_checked(auth).await?;
     let resp: Value = api.get(&format!("/orgs/{org_id}/invites")).await?;
 
     match auth.output {
@@ -723,7 +723,7 @@ async fn cancel_invite(auth: &AuthArgs, org_id: &str, invite_id: &str, yes: bool
             return Ok(());
         }
     }
-    let mut api = ApiClient::from_auth(auth)?;
+    let mut api = ApiClient::from_auth_checked(auth).await?;
     api.delete_empty(&format!("/orgs/{org_id}/invites/{invite_id}"))
         .await?;
     match auth.output {
@@ -741,7 +741,7 @@ async fn cancel_invite(auth: &AuthArgs, org_id: &str, invite_id: &str, yes: bool
 // ─────────────────────────────────────────────────────────────────────────────
 
 async fn list_role_scopes(auth: &AuthArgs, org_id: &str) -> Result<()> {
-    let mut api = ApiClient::from_auth(auth)?;
+    let mut api = ApiClient::from_auth_checked(auth).await?;
     let resp: Value = api.get(&format!("/orgs/{org_id}/role-scopes")).await?;
 
     match auth.output {
@@ -804,7 +804,7 @@ async fn set_role_scope(
         serde_json::json!({ "allowed_service_ids": ids })
     };
 
-    let mut api = ApiClient::from_auth(auth)?;
+    let mut api = ApiClient::from_auth_checked(auth).await?;
     let updated: Value = api
         .put(&format!("/orgs/{org_id}/role-scopes/{role}"), &body)
         .await?;
@@ -827,7 +827,7 @@ async fn set_role_scope(
 
 async fn clear_role_scope(auth: &AuthArgs, org_id: &str, role: &str) -> Result<()> {
     validate_role(role)?;
-    let mut api = ApiClient::from_auth(auth)?;
+    let mut api = ApiClient::from_auth_checked(auth).await?;
     api.delete_empty(&format!("/orgs/{org_id}/role-scopes/{role}"))
         .await?;
     match auth.output {
@@ -917,5 +917,864 @@ mod tests {
         assert!(validate_scope_source("custom").is_err());
         assert!(validate_scope_source("INHERIT").is_err());
         assert!(validate_scope_source("").is_err());
+    }
+}
+
+#[cfg(test)]
+mod command_tests {
+    use super::*;
+    use crate::test_support::{mock_auth, mock_auth_with_output};
+    use wiremock::matchers::{body_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // A UUID org id short-circuits `resolve_org_id` (no `/orgs/{slug}` lookup),
+    // so command bodies hit the real endpoint with a single request.
+    const ORG: &str = "11111111-1111-1111-1111-111111111111";
+
+    // ── Org CRUD ────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn create_posts_only_display_name_when_optionals_absent() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/orgs"))
+            .and(body_json(serde_json::json!({ "display_name": "Acme" })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "id": "org-1", "your_role": "admin" })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(OrgCommands::Create {
+            display_name: "Acme".to_string(),
+            contact_email: None,
+            avatar_url: None,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("create should succeed");
+    }
+
+    #[tokio::test]
+    async fn create_includes_contact_email_and_avatar_when_present() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/orgs"))
+            .and(body_json(serde_json::json!({
+                "display_name": "Acme",
+                "contact_email": "team@acme.test",
+                "avatar_url": "https://acme.test/a.png",
+            })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "id": "org-1" })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(OrgCommands::Create {
+            display_name: "Acme".to_string(),
+            contact_email: Some("team@acme.test".to_string()),
+            avatar_url: Some("https://acme.test/a.png".to_string()),
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("create should succeed");
+    }
+
+    #[tokio::test]
+    async fn create_omits_empty_optional_strings() {
+        // Empty contact_email / avatar_url must NOT be sent (guarded by
+        // `!email.is_empty()`); body stays display_name-only.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/orgs"))
+            .and(body_json(serde_json::json!({ "display_name": "Acme" })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "id": "org-1" })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(OrgCommands::Create {
+            display_name: "Acme".to_string(),
+            contact_email: Some(String::new()),
+            avatar_url: Some(String::new()),
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("create should succeed");
+    }
+
+    #[tokio::test]
+    async fn list_gets_orgs() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orgs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "orgs": [{ "id": "org-1", "slug": "acme", "display_name": "Acme",
+                           "your_role": "admin", "created_at": "2026-01-01T00:00:00Z" }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(OrgCommands::List {
+            auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
+        })
+        .await
+        .expect("list should succeed");
+    }
+
+    #[tokio::test]
+    async fn show_gets_org_by_id() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/orgs/{ORG}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": ORG, "slug": "acme", "display_name": "Acme", "your_role": "admin",
+                "member_count": 3, "created_at": "2026-01-01T00:00:00Z"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(OrgCommands::Show {
+            id: ORG.to_string(),
+            auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
+        })
+        .await
+        .expect("show should succeed");
+    }
+
+    #[tokio::test]
+    async fn show_surfaces_404_as_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/orgs/{ORG}")))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .mount(&server)
+            .await;
+
+        let result = run(OrgCommands::Show {
+            id: ORG.to_string(),
+            auth: mock_auth(server.uri()),
+        })
+        .await;
+        assert!(result.is_err(), "404 should surface as an error");
+    }
+
+    #[tokio::test]
+    async fn update_patches_only_provided_fields() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path(format!("/api/v1/orgs/{ORG}")))
+            .and(body_json(
+                serde_json::json!({ "display_name": "Renamed", "slug": "renamed" }),
+            ))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "id": ORG })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(OrgCommands::Update {
+            id: ORG.to_string(),
+            display_name: Some("Renamed".to_string()),
+            slug: Some("renamed".to_string()),
+            avatar_url: None,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("update should succeed");
+    }
+
+    #[tokio::test]
+    async fn update_sends_empty_avatar_to_clear_it() {
+        // Empty avatar_url IS meaningful for update (clears it), unlike create.
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path(format!("/api/v1/orgs/{ORG}")))
+            .and(body_json(serde_json::json!({ "avatar_url": "" })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "id": ORG })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(OrgCommands::Update {
+            id: ORG.to_string(),
+            display_name: None,
+            slug: None,
+            avatar_url: Some(String::new()),
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("update should succeed");
+    }
+
+    #[tokio::test]
+    async fn update_with_no_fields_bails_without_request() {
+        // No mocks mounted: any HTTP call would 404 → error. The bail must
+        // happen before the request, so the only error is the validation one.
+        let server = MockServer::start().await;
+        let result = run(OrgCommands::Update {
+            id: ORG.to_string(),
+            display_name: None,
+            slug: None,
+            avatar_url: None,
+            auth: mock_auth(server.uri()),
+        })
+        .await;
+        assert!(result.is_err(), "empty update should bail");
+        assert!(
+            result.unwrap_err().to_string().contains("at least one"),
+            "should be the validation message"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_with_yes_issues_delete() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path(format!("/api/v1/orgs/{ORG}")))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(OrgCommands::Delete {
+            id: ORG.to_string(),
+            yes: true,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("delete should succeed");
+    }
+
+    #[tokio::test]
+    async fn delete_surfaces_conflict_error() {
+        // Server refuses delete (org still owns resources) → 409.
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path(format!("/api/v1/orgs/{ORG}")))
+            .respond_with(ResponseTemplate::new(409).set_body_string("org owns resources"))
+            .mount(&server)
+            .await;
+
+        let result = run(OrgCommands::Delete {
+            id: ORG.to_string(),
+            yes: true,
+            auth: mock_auth(server.uri()),
+        })
+        .await;
+        assert!(result.is_err(), "409 should surface as an error");
+    }
+
+    // ── Join + primary org ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn join_redeems_parsed_nonce_from_url() {
+        // Verifies parse_nonce feeds the POST path: the URL form must collapse
+        // to the bare nonce in /orgs/join/{nonce}.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/orgs/join/ORGINV-ABC123"))
+            .and(body_json(serde_json::json!({})))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "org_id": "org-1", "role": "member" })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(OrgCommands::Join {
+            nonce_or_url: "https://nyx.example/orgs/join/ORGINV-ABC123".to_string(),
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("join should succeed");
+    }
+
+    #[tokio::test]
+    async fn join_empty_nonce_bails() {
+        let server = MockServer::start().await;
+        let result = run(OrgCommands::Join {
+            nonce_or_url: "   ".to_string(),
+            auth: mock_auth(server.uri()),
+        })
+        .await;
+        assert!(result.is_err(), "empty nonce should bail");
+    }
+
+    #[tokio::test]
+    async fn set_primary_sets_org_id() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/api/v1/users/me/primary-org"))
+            .and(body_json(serde_json::json!({ "primary_org_id": ORG })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": 1 })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(OrgCommands::SetPrimary {
+            org_id: Some(ORG.to_string()),
+            clear: false,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("set primary should succeed");
+    }
+
+    #[tokio::test]
+    async fn set_primary_clear_sends_null() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/api/v1/users/me/primary-org"))
+            .and(body_json(serde_json::json!({ "primary_org_id": null })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": 1 })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(OrgCommands::SetPrimary {
+            org_id: None,
+            clear: true,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("clear primary should succeed");
+    }
+
+    #[tokio::test]
+    async fn set_primary_without_args_bails() {
+        let server = MockServer::start().await;
+        let result = run(OrgCommands::SetPrimary {
+            org_id: None,
+            clear: false,
+            auth: mock_auth(server.uri()),
+        })
+        .await;
+        assert!(result.is_err(), "no org-id and no --clear should bail");
+    }
+
+    // ── Members ─────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn member_add_posts_user_and_role() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/api/v1/orgs/{ORG}/members")))
+            .and(body_json(
+                serde_json::json!({ "user_id": "u-9", "role": "member" }),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": 1 })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(OrgCommands::Member {
+            command: OrgMemberCommands::Add {
+                org_id: ORG.to_string(),
+                user_id: "u-9".to_string(),
+                role: "member".to_string(),
+                scope_source: None,
+                allowed_service_ids: None,
+                auth: mock_auth(server.uri()),
+            },
+        })
+        .await
+        .expect("member add should succeed");
+    }
+
+    #[tokio::test]
+    async fn member_add_parses_csv_into_service_id_array() {
+        // CSV is split, trimmed, and empties dropped before send.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/api/v1/orgs/{ORG}/members")))
+            .and(body_json(serde_json::json!({
+                "user_id": "u-9",
+                "role": "admin",
+                "scope_source": "override",
+                "allowed_service_ids": ["svc-a", "svc-b", "svc-c"],
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": 1 })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(OrgCommands::Member {
+            command: OrgMemberCommands::Add {
+                org_id: ORG.to_string(),
+                user_id: "u-9".to_string(),
+                role: "admin".to_string(),
+                scope_source: Some("override".to_string()),
+                allowed_service_ids: Some(" svc-a, svc-b ,, svc-c ".to_string()),
+                auth: mock_auth(server.uri()),
+            },
+        })
+        .await
+        .expect("member add with scope should succeed");
+    }
+
+    #[tokio::test]
+    async fn member_add_rejects_invalid_role_before_request() {
+        let server = MockServer::start().await;
+        let result = run(OrgCommands::Member {
+            command: OrgMemberCommands::Add {
+                org_id: ORG.to_string(),
+                user_id: "u-9".to_string(),
+                role: "owner".to_string(),
+                scope_source: None,
+                allowed_service_ids: None,
+                auth: mock_auth(server.uri()),
+            },
+        })
+        .await;
+        assert!(result.is_err(), "invalid role should bail before request");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Role must be one of")
+        );
+    }
+
+    #[tokio::test]
+    async fn member_add_rejects_invalid_scope_source() {
+        let server = MockServer::start().await;
+        let result = run(OrgCommands::Member {
+            command: OrgMemberCommands::Add {
+                org_id: ORG.to_string(),
+                user_id: "u-9".to_string(),
+                role: "member".to_string(),
+                scope_source: Some("custom".to_string()),
+                allowed_service_ids: None,
+                auth: mock_auth(server.uri()),
+            },
+        })
+        .await;
+        assert!(result.is_err(), "invalid scope source should bail");
+        assert!(result.unwrap_err().to_string().contains("Scope source"));
+    }
+
+    #[tokio::test]
+    async fn member_list_gets_members() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/orgs/{ORG}/members")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "members": [{ "user_id": "u-1", "role": "admin", "scope_source": "inherit" }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(OrgCommands::Member {
+            command: OrgMemberCommands::List {
+                org_id: ORG.to_string(),
+                auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
+            },
+        })
+        .await
+        .expect("member list should succeed");
+    }
+
+    #[tokio::test]
+    async fn member_update_patches_role() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path(format!("/api/v1/orgs/{ORG}/members/u-9")))
+            .and(body_json(serde_json::json!({ "role": "viewer" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": 1 })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(OrgCommands::Member {
+            command: OrgMemberCommands::Update {
+                org_id: ORG.to_string(),
+                member_id: "u-9".to_string(),
+                role: Some("viewer".to_string()),
+                scope_source: None,
+                allowed_service_ids: None,
+                auth: mock_auth(server.uri()),
+            },
+        })
+        .await
+        .expect("member update should succeed");
+    }
+
+    #[tokio::test]
+    async fn member_update_empty_service_ids_clears_with_null() {
+        // Empty --allowed-service-ids string maps to JSON null (clear scope),
+        // a distinct branch from the CSV-parsing path.
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path(format!("/api/v1/orgs/{ORG}/members/u-9")))
+            .and(body_json(
+                serde_json::json!({ "allowed_service_ids": null }),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": 1 })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(OrgCommands::Member {
+            command: OrgMemberCommands::Update {
+                org_id: ORG.to_string(),
+                member_id: "u-9".to_string(),
+                role: None,
+                scope_source: None,
+                allowed_service_ids: Some(String::new()),
+                auth: mock_auth(server.uri()),
+            },
+        })
+        .await
+        .expect("member update clear should succeed");
+    }
+
+    #[tokio::test]
+    async fn member_update_with_no_fields_bails() {
+        let server = MockServer::start().await;
+        let result = run(OrgCommands::Member {
+            command: OrgMemberCommands::Update {
+                org_id: ORG.to_string(),
+                member_id: "u-9".to_string(),
+                role: None,
+                scope_source: None,
+                allowed_service_ids: None,
+                auth: mock_auth(server.uri()),
+            },
+        })
+        .await;
+        assert!(result.is_err(), "empty member update should bail");
+    }
+
+    #[tokio::test]
+    async fn member_remove_with_yes_deletes() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path(format!("/api/v1/orgs/{ORG}/members/u-9")))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(OrgCommands::Member {
+            command: OrgMemberCommands::Remove {
+                org_id: ORG.to_string(),
+                member_id: "u-9".to_string(),
+                yes: true,
+                auth: mock_auth(server.uri()),
+            },
+        })
+        .await
+        .expect("member remove should succeed");
+    }
+
+    // ── Invites ─────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn invite_create_posts_role_and_ttl() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/api/v1/orgs/{ORG}/invites")))
+            .and(body_json(
+                serde_json::json!({ "role": "member", "ttl_hours": 48 }),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "inv-1", "nonce": "ORGINV-XYZ", "expires_at": "2026-02-01T00:00:00Z"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(OrgCommands::Invite {
+            command: OrgInviteCommands::Create {
+                org_id: ORG.to_string(),
+                role: "member".to_string(),
+                scope_source: None,
+                allowed_service_ids: None,
+                ttl_hours: Some(48),
+                auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
+            },
+        })
+        .await
+        .expect("invite create should succeed");
+    }
+
+    #[tokio::test]
+    async fn invite_create_includes_scope_and_service_ids() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/api/v1/orgs/{ORG}/invites")))
+            .and(body_json(serde_json::json!({
+                "role": "viewer",
+                "scope_source": "override",
+                "allowed_service_ids": ["svc-a", "svc-b"],
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "inv-1", "nonce": "ORGINV-XYZ", "expires_at": "2026-02-01T00:00:00Z"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(OrgCommands::Invite {
+            command: OrgInviteCommands::Create {
+                org_id: ORG.to_string(),
+                role: "viewer".to_string(),
+                scope_source: Some("override".to_string()),
+                allowed_service_ids: Some("svc-a, svc-b".to_string()),
+                ttl_hours: None,
+                auth: mock_auth(server.uri()),
+            },
+        })
+        .await
+        .expect("invite create with scope should succeed");
+    }
+
+    #[tokio::test]
+    async fn invite_create_rejects_out_of_range_ttl() {
+        // ttl bound 1..=720 enforced client-side, before any request.
+        let server = MockServer::start().await;
+        let result = run(OrgCommands::Invite {
+            command: OrgInviteCommands::Create {
+                org_id: ORG.to_string(),
+                role: "member".to_string(),
+                scope_source: None,
+                allowed_service_ids: None,
+                ttl_hours: Some(721),
+                auth: mock_auth(server.uri()),
+            },
+        })
+        .await;
+        assert!(result.is_err(), "ttl > 720 should bail");
+        assert!(result.unwrap_err().to_string().contains("ttl-hours"));
+    }
+
+    #[tokio::test]
+    async fn invite_create_rejects_invalid_role() {
+        let server = MockServer::start().await;
+        let result = run(OrgCommands::Invite {
+            command: OrgInviteCommands::Create {
+                org_id: ORG.to_string(),
+                role: "superuser".to_string(),
+                scope_source: None,
+                allowed_service_ids: None,
+                ttl_hours: None,
+                auth: mock_auth(server.uri()),
+            },
+        })
+        .await;
+        assert!(result.is_err(), "invalid role should bail");
+    }
+
+    #[tokio::test]
+    async fn invite_list_gets_invites() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/orgs/{ORG}/invites")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "invites": [{ "id": "inv-1", "role": "member",
+                              "expires_at": "2099-01-01T00:00:00Z", "redeemed_at": null }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(OrgCommands::Invite {
+            command: OrgInviteCommands::List {
+                org_id: ORG.to_string(),
+                auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
+            },
+        })
+        .await
+        .expect("invite list should succeed");
+    }
+
+    #[tokio::test]
+    async fn invite_cancel_with_yes_deletes() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path(format!("/api/v1/orgs/{ORG}/invites/inv-1")))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(OrgCommands::Invite {
+            command: OrgInviteCommands::Cancel {
+                org_id: ORG.to_string(),
+                invite_id: "inv-1".to_string(),
+                yes: true,
+                auth: mock_auth(server.uri()),
+            },
+        })
+        .await
+        .expect("invite cancel should succeed");
+    }
+
+    // ── Role scopes ─────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn role_scope_list_gets_scopes() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/orgs/{ORG}/role-scopes")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "role_scopes": [{ "role": "member", "is_default": true,
+                                  "allowed_service_ids": null }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(OrgCommands::RoleScope {
+            command: OrgRoleScopeCommands::List {
+                org_id: ORG.to_string(),
+                auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
+            },
+        })
+        .await
+        .expect("role-scope list should succeed");
+    }
+
+    #[tokio::test]
+    async fn role_scope_set_with_service_ids_puts_array() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path(format!("/api/v1/orgs/{ORG}/role-scopes/member")))
+            .and(body_json(
+                serde_json::json!({ "allowed_service_ids": ["svc-a", "svc-b"] }),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "role": "member", "allowed_service_ids": ["svc-a", "svc-b"]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(OrgCommands::RoleScope {
+            command: OrgRoleScopeCommands::Set {
+                org_id: ORG.to_string(),
+                role: "member".to_string(),
+                allowed_service_ids: Some("svc-a, svc-b".to_string()),
+                full_access: false,
+                auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
+            },
+        })
+        .await
+        .expect("role-scope set should succeed");
+    }
+
+    #[tokio::test]
+    async fn role_scope_set_full_access_puts_null() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path(format!("/api/v1/orgs/{ORG}/role-scopes/admin")))
+            .and(body_json(
+                serde_json::json!({ "allowed_service_ids": null }),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "role": "admin", "allowed_service_ids": null
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(OrgCommands::RoleScope {
+            command: OrgRoleScopeCommands::Set {
+                org_id: ORG.to_string(),
+                role: "admin".to_string(),
+                allowed_service_ids: None,
+                full_access: true,
+                auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
+            },
+        })
+        .await
+        .expect("role-scope full-access should succeed");
+    }
+
+    #[tokio::test]
+    async fn role_scope_set_without_ids_or_full_access_bails() {
+        let server = MockServer::start().await;
+        let result = run(OrgCommands::RoleScope {
+            command: OrgRoleScopeCommands::Set {
+                org_id: ORG.to_string(),
+                role: "member".to_string(),
+                allowed_service_ids: None,
+                full_access: false,
+                auth: mock_auth(server.uri()),
+            },
+        })
+        .await;
+        assert!(result.is_err(), "set with neither flag should bail");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("--allowed-service-ids")
+        );
+    }
+
+    #[tokio::test]
+    async fn role_scope_set_rejects_invalid_role() {
+        let server = MockServer::start().await;
+        let result = run(OrgCommands::RoleScope {
+            command: OrgRoleScopeCommands::Set {
+                org_id: ORG.to_string(),
+                role: "root".to_string(),
+                allowed_service_ids: None,
+                full_access: true,
+                auth: mock_auth(server.uri()),
+            },
+        })
+        .await;
+        assert!(result.is_err(), "invalid role should bail before request");
+    }
+
+    #[tokio::test]
+    async fn role_scope_clear_deletes_row() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path(format!("/api/v1/orgs/{ORG}/role-scopes/viewer")))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(OrgCommands::RoleScope {
+            command: OrgRoleScopeCommands::Clear {
+                org_id: ORG.to_string(),
+                role: "viewer".to_string(),
+                auth: mock_auth(server.uri()),
+            },
+        })
+        .await
+        .expect("role-scope clear should succeed");
+    }
+
+    #[tokio::test]
+    async fn role_scope_clear_rejects_invalid_role() {
+        let server = MockServer::start().await;
+        let result = run(OrgCommands::RoleScope {
+            command: OrgRoleScopeCommands::Clear {
+                org_id: ORG.to_string(),
+                role: "boss".to_string(),
+                auth: mock_auth(server.uri()),
+            },
+        })
+        .await;
+        assert!(result.is_err(), "invalid role should bail before delete");
     }
 }

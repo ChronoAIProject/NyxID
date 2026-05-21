@@ -410,7 +410,7 @@ async fn pending_credential_poll_loop(
                             node_id = %node_id,
                             service_slug = %item.service_slug,
                             pending_credential_id = %item.id,
-                            "Pending credential available; run `nyxid node credentials pending` on this node to review"
+                            "Pending credential available; run `nyxid node credentials pending` on this node-agent machine to review (`nyxid node credentials` is node-side only, not available on the user-side CLI)"
                         );
                     }
                 }

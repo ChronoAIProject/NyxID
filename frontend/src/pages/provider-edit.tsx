@@ -32,29 +32,11 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { toast } from "sonner";
-
-const PROVIDER_TYPE_LABELS: Readonly<Record<string, string>> = {
-  oauth2: "OAuth 2.0",
-  api_key: "API Key",
-  device_code: "Device Code",
-  telegram_widget: "Telegram Widget",
-};
-
-function splitScopes(raw: string | undefined): readonly string[] | undefined {
-  if (!raw || raw.trim() === "") return undefined;
-  return raw
-    .split(",")
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
-}
-
-function stripEmptyStrings<T extends Record<string, unknown>>(
-  obj: T,
-): Record<string, unknown> {
-  return Object.fromEntries(
-    Object.entries(obj).filter(([, v]) => v !== "" && v !== undefined),
-  );
-}
+import {
+  PROVIDER_TYPE_LABELS,
+  splitScopes,
+  stripEmptyStrings,
+} from "./provider-edit.helpers";
 
 export function ProviderEditPage() {
   const { providerId } = useParams({ strict: false }) as {

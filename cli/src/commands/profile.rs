@@ -10,7 +10,7 @@ use crate::cli::{OutputFormat, ProfileCommands};
 pub async fn run(command: ProfileCommands) -> Result<()> {
     match command {
         ProfileCommands::Update { name, auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let mut body = serde_json::Map::new();
 
             if let Some(name) = name {
@@ -50,7 +50,7 @@ pub async fn run(command: ProfileCommands) -> Result<()> {
                 }
             }
 
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             api.delete_empty("/users/me").await?;
             match auth.output {
                 OutputFormat::Json => println!(
@@ -63,7 +63,7 @@ pub async fn run(command: ProfileCommands) -> Result<()> {
         }
 
         ProfileCommands::Consents { auth } => {
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let consents: Value = api.get("/users/me/consents").await?;
 
             match auth.output {
@@ -115,7 +115,7 @@ pub async fn run(command: ProfileCommands) -> Result<()> {
                 }
             }
 
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             api.delete_empty(&format!("/users/me/consents/{client_id}"))
                 .await?;
             match auth.output {
@@ -127,5 +127,140 @@ pub async fn run(command: ProfileCommands) -> Result<()> {
             }
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::mock_auth;
+    use wiremock::matchers::{body_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // `Update` maps the optional `--name` flag onto a `display_name` field
+    // in the PUT body. Assert the exact request body so the field-name
+    // mapping (name -> display_name) is locked in.
+    #[tokio::test]
+    async fn update_sends_name_as_display_name() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/api/v1/users/me"))
+            .and(body_json(serde_json::json!({ "display_name": "Alice" })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "display_name": "Alice" })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ProfileCommands::Update {
+            name: Some("Alice".to_string()),
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("profile update should succeed");
+    }
+
+    // With no fields to update the handler must short-circuit and make no
+    // HTTP call at all. A mock with `.expect(0)` fails the test (on server
+    // drop) if any request reaches it, proving the early return fired.
+    #[tokio::test]
+    async fn update_with_no_fields_makes_no_request() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/api/v1/users/me"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        run(ProfileCommands::Update {
+            name: None,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("empty update should be a no-op Ok");
+    }
+
+    // `--yes` bypasses the interactive confirmation prompt and issues the
+    // account-deletion DELETE directly.
+    #[tokio::test]
+    async fn delete_with_yes_issues_delete() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/users/me"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ProfileCommands::Delete {
+            yes: true,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("account delete should succeed");
+    }
+
+    #[tokio::test]
+    async fn consents_lists_via_get() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/users/me/consents"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "consents": [
+                    {"client_id": "c-1", "client_name": "App", "scopes": "openid",
+                     "granted_at": "2026-01-01"}
+                ]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ProfileCommands::Consents {
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("consents list should succeed");
+    }
+
+    // The client_id argument must be interpolated into the DELETE path.
+    // The mock only matches the exact `/consents/client-1` path, so a
+    // mismatched/missing interpolation fails the `.expect(1)` assertion.
+    #[tokio::test]
+    async fn revoke_consent_with_yes_targets_client_id_path() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/users/me/consents/client-1"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ProfileCommands::RevokeConsent {
+            client_id: "client-1".to_string(),
+            yes: true,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("revoke consent should succeed");
+    }
+
+    // 5xx from the upstream must surface as an error, not be swallowed.
+    #[tokio::test]
+    async fn consents_surfaces_server_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/users/me/consents"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+            .mount(&server)
+            .await;
+
+        let result = run(ProfileCommands::Consents {
+            auth: mock_auth(server.uri()),
+        })
+        .await;
+        assert!(result.is_err(), "5xx should surface as an error");
     }
 }

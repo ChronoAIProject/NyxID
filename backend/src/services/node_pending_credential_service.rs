@@ -28,7 +28,7 @@ pub async fn create_pending_credential(
     validate_field_name(&input.field_name, &input.injection_method)?;
     let target_url = clean_optional_string(input.target_url);
     if let Some(url) = target_url.as_deref() {
-        url_validation::validate_public_http_url(url, "target_url").await?;
+        url_validation::validate_advisory_http_url(url, "target_url", url_validation::MAX_URL_LEN)?;
     }
     let label = clean_optional_string(input.label);
     if let Some(label) = label.as_deref()
@@ -580,7 +580,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn push_rejects_internal_target_url() {
+    async fn push_accepts_internal_target_url() {
         let Some(db) = connect_test_database("pending_credential_internal_url").await else {
             eprintln!("skipping pending credential test: no local MongoDB available");
             return;
@@ -593,10 +593,10 @@ mod tests {
         let mut input = credential_input("openclaw");
         input.target_url = Some("http://127.0.0.1:8080".to_string());
 
-        let err = create_pending_credential(&db, &actor_id, &node.id, input)
+        let pending = create_pending_credential(&db, &actor_id, &node.id, input)
             .await
-            .expect_err("internal URL should fail");
-        assert!(matches!(err, AppError::ValidationError(_)));
+            .expect("internal URL is node-local advisory metadata");
+        assert_eq!(pending.target_url.as_deref(), Some("http://127.0.0.1:8080"));
     }
 
     #[tokio::test]
