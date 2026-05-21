@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Link } from "@tanstack/react-router";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { Link, useNavigate } from "@tanstack/react-router";
 import { Search, X } from "lucide-react";
 import { docTabForSlug } from "./manifest";
 
@@ -26,7 +26,10 @@ export function DocsSearch({
 }) {
   const [entries, setEntries] = useState<IndexEntry[]>([]);
   const [query, setQuery] = useState("");
+  const [activeIndex, setActiveIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLUListElement>(null);
+  const navigate = useNavigate();
 
   useEffect(() => {
     if (!open) return;
@@ -36,7 +39,10 @@ export function DocsSearch({
         .then((d) => setEntries(Array.isArray(d) ? (d as IndexEntry[]) : []))
         .catch(() => {});
     }
-    const id = window.setTimeout(() => inputRef.current?.focus(), 20);
+    const id = window.setTimeout(() => {
+      inputRef.current?.focus();
+      setActiveIndex(0); // start each open at the top of the result list
+    }, 20);
     return () => window.clearTimeout(id);
   }, [open, entries.length]);
 
@@ -60,7 +66,35 @@ export function DocsSearch({
       .slice(0, 24);
   }, [query, entries]);
 
+  // Keep the highlighted result scrolled into view as you arrow through.
+  useEffect(() => {
+    listRef.current?.children[activeIndex]?.scrollIntoView({ block: "nearest" });
+  }, [activeIndex]);
+
   if (!open) return null;
+
+  const go = (slug: string) => {
+    onClose();
+    navigate({ to: "/docs/$", params: { _splat: slug } });
+  };
+
+  // ↑/↓ move the highlight (wrapping), Enter opens it. Handled on the input —
+  // it always holds focus while the palette is open — so the keys never reach
+  // the page behind. Escape is handled by the window listener above.
+  const onInputKeyDown = (e: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (results.length === 0) return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setActiveIndex((i) => (i + 1) % results.length);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setActiveIndex((i) => (i - 1 + results.length) % results.length);
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      const r = results[Math.min(activeIndex, results.length - 1)];
+      if (r) go(r.source.replace(/\.md$/, ""));
+    }
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center p-4 pt-[12vh] font-sans">
@@ -71,8 +105,18 @@ export function DocsSearch({
           <input
             ref={inputRef}
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
+            onChange={(e) => {
+              setQuery(e.target.value);
+              setActiveIndex(0); // a new query resets the highlight to the top
+            }}
+            onKeyDown={onInputKeyDown}
             placeholder="Search the docs…"
+            role="combobox"
+            aria-expanded={results.length > 0}
+            aria-controls="docs-search-results"
+            aria-activedescendant={
+              results.length > 0 ? `docs-search-opt-${activeIndex}` : undefined
+            }
             className="h-12 flex-1 bg-transparent text-sm text-foreground placeholder:text-text-tertiary focus:outline-none"
           />
           <button type="button" aria-label="Close search" onClick={onClose}>
@@ -87,16 +131,20 @@ export function DocsSearch({
           ) : results.length === 0 ? (
             <p className="px-3 py-6 text-center text-sm text-text-tertiary">No results for “{query}”.</p>
           ) : (
-            <ul className="space-y-0.5">
-              {results.map((e) => {
+            <ul className="space-y-0.5" id="docs-search-results" role="listbox" ref={listRef}>
+              {results.map((e, i) => {
                 const slug = e.source.replace(/\.md$/, "");
+                const active = i === activeIndex;
                 return (
-                  <li key={slug}>
+                  <li key={slug} role="option" aria-selected={active} id={`docs-search-opt-${i}`}>
                     <Link
                       to="/docs/$"
                       params={{ _splat: slug }}
                       onClick={onClose}
-                      className="block rounded-lg px-3 py-2 transition-colors hover:bg-white/[0.04]"
+                      onMouseEnter={() => setActiveIndex(i)}
+                      className={`block rounded-lg px-3 py-2 transition-colors ${
+                        active ? "bg-white/[0.06]" : "hover:bg-white/[0.04]"
+                      }`}
                     >
                       <div className="flex items-center gap-2">
                         <span className="font-mono text-[10px] tracking-wider text-nyx-secondary-400 uppercase">
@@ -113,6 +161,21 @@ export function DocsSearch({
               })}
             </ul>
           )}
+        </div>
+        <div className="flex items-center gap-4 border-t border-border px-4 py-2 text-[11px] text-text-tertiary">
+          <span className="flex items-center gap-1">
+            <kbd className="rounded border border-border px-1 font-mono">↑</kbd>
+            <kbd className="rounded border border-border px-1 font-mono">↓</kbd>
+            navigate
+          </span>
+          <span className="flex items-center gap-1">
+            <kbd className="rounded border border-border px-1 font-mono">↵</kbd>
+            open
+          </span>
+          <span className="flex items-center gap-1">
+            <kbd className="rounded border border-border px-1 font-mono">esc</kbd>
+            close
+          </span>
         </div>
       </div>
     </div>

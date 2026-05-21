@@ -59,6 +59,9 @@ export function DocsPage() {
   const [toc, setToc] = useState<TocItem[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const contentRef = useRef<HTMLDivElement>(null);
+  // Tracks the slug we've already handled an incoming `#hash` for, so the
+  // load-time deep-link scroll fires exactly once per page.
+  const deepLinkedRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!known) return;
@@ -99,6 +102,35 @@ export function DocsPage() {
     setToc(items);
   }, [status, doc]);
 
+  // Honor an incoming `#section` deep link. The markdown is fetched async, so
+  // the browser's native on-load anchor scroll fires before the heading exists
+  // and silently misses — we re-run it once the content is in the DOM. Declared
+  // before the scroll-spy effect so the scroll lands before scroll-spy reads
+  // positions (otherwise it would clear the hash as "still at the top").
+  useEffect(() => {
+    if (status !== "ok") return;
+    const root = contentRef.current;
+    if (!root || deepLinkedRef.current === slug) return;
+    deepLinkedRef.current = slug;
+    const id = decodeURIComponent(window.location.hash.replace(/^#/, ""));
+    if (!id) return;
+    // Only move the viewport — the scroll-spy effect (declared below) reads the
+    // post-scroll position and sets the highlight, keeping setState out of here.
+    root.querySelector<HTMLElement>(`#${CSS.escape(id)}`)?.scrollIntoView();
+  }, [status, slug]);
+
+  // The URL hash is the source of truth for the highlight: clicking a TOC link
+  // (or back/forward between sections) updates `#hash`, which we mirror into the
+  // active id. Scroll-driven hash updates use replaceState and don't fire this.
+  useEffect(() => {
+    const onHash = () => {
+      const id = decodeURIComponent(window.location.hash.replace(/^#/, ""));
+      if (id) setActiveId(id);
+    };
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+
   // Scroll-spy: highlight the TOC entry for the section currently being read.
   // Active = the last h2 whose top has scrolled above a trigger line just below
   // the fixed header. An IntersectionObserver fires the (cheap) recompute only
@@ -119,7 +151,25 @@ export function DocsPage() {
         if (h.getBoundingClientRect().top - TRIGGER <= 1) current = h.id;
         else break;
       }
-      setActiveId(current ?? headings[0]?.id ?? null);
+      // At the bottom of the page the last section can't reach the trigger line,
+      // so short trailing sections would never highlight — pin to the last
+      // heading once scrolled to the end (also fixes deep-links to them).
+      const atBottom =
+        window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 2;
+      const next = atBottom ? (headings[headings.length - 1]?.id ?? null) : (current ?? headings[0]?.id ?? null);
+      setActiveId(next);
+      // Mirror the section being read into the URL so it stays the shareable
+      // source of truth for the active heading. replaceState (not pushState)
+      // keeps the back button clean; an empty hash above the first section
+      // keeps a freshly-loaded URL untouched until the reader scrolls in.
+      const desiredHash = (atBottom || current) && next ? `#${next}` : "";
+      if (desiredHash !== window.location.hash) {
+        window.history.replaceState(
+          window.history.state,
+          "",
+          `${window.location.pathname}${window.location.search}${desiredHash}`,
+        );
+      }
     };
     recompute();
     const observer = new IntersectionObserver(recompute, {
