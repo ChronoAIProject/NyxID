@@ -237,3 +237,9 @@ export const BlogPreviewPage = lazy(() =>
 export const DesignSystemPage = lazy(() =>
   import("@/pages/design-system").then((m) => ({ default: m.DesignSystemPage })),
 );
+export const DocsIndexPage = lazy(() =>
+  import("@/features/docs/docs-index-page").then((m) => ({ default: m.DocsIndexPage })),
+);
+export const DocsPage = lazy(() =>
+  import("@/features/docs/docs-page").then((m) => ({ default: m.DocsPage })),
+);

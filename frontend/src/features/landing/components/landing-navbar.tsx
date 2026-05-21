@@ -28,6 +28,12 @@ export function LandingNavbar() {
         </a>
 
         <div className="flex items-center gap-3">
+          <a
+            href="/docs"
+            className="hidden text-sm font-medium text-gray-300 transition-colors hover:text-white sm:inline-block"
+          >
+            {t("nav.docs")}
+          </a>
           <LanguageSwitcher />
           <a
             href={loginHref}

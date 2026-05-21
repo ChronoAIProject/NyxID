@@ -1,6 +1,7 @@
 {
   "nav.register": "註冊",
   "nav.login": "登入",
+  "nav.docs": "文件",
 
   "hero.eyebrow": "開源智慧代理連接閘道",
   "hero.title": "將 Claude、Cursor 或你自己的代理連接到公共、內部和本地 API — 並具備安全存取控制。",

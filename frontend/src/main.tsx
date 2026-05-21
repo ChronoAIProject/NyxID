@@ -31,6 +31,8 @@ function isPublicPath(path: string): boolean {
     path === "/terms" ||
     path === "/blog" ||
     path.startsWith("/blog/") ||
+    path === "/docs" ||
+    path.startsWith("/docs/") ||
     path.startsWith("/preview/") ||
     path.startsWith("/error") ||
     path.startsWith("/oauth-consent") ||

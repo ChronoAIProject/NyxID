@@ -47,7 +47,7 @@ export const MAIN_NAV = [
   { to: "/channel-bots", icon: Radio, label: "Channel Bots" },
   { to: "/settings", icon: Settings, label: "Settings" },
   { to: "/settings/consents", icon: KeyRound, label: "Access & Auth" },
-  { to: "/guide", icon: BookOpen, label: "Guide" },
+  { to: "/docs", icon: BookOpen, label: "Docs" },
 ] as const;
 
 export const APPROVALS_NAV = [

@@ -26,7 +26,6 @@ import {
   ServiceDetailPage,
   ServiceEditPage,
   SettingsPage,
-  GuidePage,
   ProvidersLayout,
   ProvidersPage,
   ProvidersCallbackPage,
@@ -74,6 +73,8 @@ import {
   BlogDetailPage,
   BlogPreviewPage,
   DesignSystemPage,
+  DocsIndexPage,
+  DocsPage,
 } from "@/pages/lazy";
 
 // ── Route tree ──
@@ -197,6 +198,18 @@ const blogPreviewRoute = createRoute({
   path: "/preview/$id",
   getParentRoute: () => rootRoute,
   component: BlogPreviewPage,
+});
+
+const docsIndexRoute = createRoute({
+  path: "/docs",
+  getParentRoute: () => rootRoute,
+  component: DocsIndexPage,
+});
+
+const docsDetailRoute = createRoute({
+  path: "/docs/$",
+  getParentRoute: () => rootRoute,
+  component: DocsPage,
 });
 
 const cliAuthRoute = createRoute({
@@ -389,7 +402,11 @@ const settingsRoute = createRoute({
 const guideRoute = createRoute({
   path: "/guide",
   getParentRoute: () => dashboardLayout,
-  component: GuidePage,
+  // Legacy path — content moved to the public /docs site (Web + Concepts).
+  beforeLoad: () => {
+    throw redirect({ to: "/docs" });
+  },
+  component: () => null,
 });
 
 const consentsRoute = createRoute({
@@ -664,6 +681,8 @@ const routeTree = rootRoute.addChildren([
   blogIndexRoute,
   blogDetailRoute,
   blogPreviewRoute,
+  docsIndexRoute,
+  docsDetailRoute,
   cliAuthRoute,
   cliPairRoute,
   sshTerminalRoute,

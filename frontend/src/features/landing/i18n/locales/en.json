@@ -1,6 +1,7 @@
 {
   "nav.register": "Register",
   "nav.login": "Login",
+  "nav.docs": "Docs",
 
   "hero.eyebrow": "Open-source Agent Connectivity Gateway",
   "hero.title": "Connect Claude, Cursor, or your own agents to public, internal, and localhost APIs — with secure access control.",

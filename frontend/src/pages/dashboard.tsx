@@ -248,7 +248,7 @@ export function DashboardPage() {
             Quick Links
           </p>
           <div className="flex flex-col gap-1.5">
-            <QuickLink to="/guide" label="Documentation" />
+            <QuickLink to="/docs" label="Documentation" />
             <QuickLink to="/ai-setup" label="AI Setup Guide" />
             <QuickLink to="/integration-guide" label="Integration Guide" />
           </div>
@@ -686,7 +686,7 @@ function RightPanelContent() {
           Quick Links
         </p>
         <div className="flex flex-col gap-1.5">
-          <QuickLink to="/guide" label="Documentation" />
+          <QuickLink to="/docs" label="Documentation" />
           <QuickLink to="/ai-setup" label="AI Setup Guide" />
           <QuickLink to="/integration-guide" label="Integration Guide" />
         </div>
