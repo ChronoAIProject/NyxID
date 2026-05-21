@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
+import { GitHubButton } from "@/components/shared/github-button";
 import { LanguageSwitcher } from "./language-switcher";
 import { useScroll } from "../hooks/use-scroll";
 
@@ -28,6 +29,7 @@ export function LandingNavbar() {
         </a>
 
         <div className="flex items-center gap-3">
+          <GitHubButton className="text-gray-400 hover:text-white" />
           <LanguageSwitcher />
           <a
             href={loginHref}
