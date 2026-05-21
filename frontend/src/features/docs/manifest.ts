@@ -5,7 +5,8 @@
 // fetched at runtime). Files under `/docs` that are NOT referenced here stay private.
 //
 // Phase 1 ships three surfaces (AI-assisted leads) plus a pinned shared Concepts
-// group. CLI command reference + a shared Developers group land in Phase 2.
+// group. Phase 2 adds the CLI Guides + Command reference groups (below); a shared
+// Developers group is still to come.
 
 export type DocTabId = "ai" | "web" | "cli";
 
@@ -92,6 +93,31 @@ export const DOCS_TABS: readonly DocTab[] = [
           { slug: "cli/getting-started/install", title: "Install the CLI" },
           { slug: "cli/getting-started/authenticate", title: "Authenticate" },
           { slug: "cli/getting-started/first-connection", title: "Your first connection" },
+        ],
+      },
+      {
+        group: "Guides",
+        pages: [
+          { slug: "cli/guides/connect-a-service", title: "Connect an AI service" },
+          { slug: "cli/guides/credential-node", title: "Set up a credential node" },
+          { slug: "cli/guides/ssh-node", title: "Set up an SSH node" },
+          { slug: "cli/guides/scoped-agent-keys", title: "Create scoped agent keys" },
+          { slug: "cli/guides/organizations", title: "Manage organizations" },
+          { slug: "cli/guides/channel-bots", title: "Connect a channel bot" },
+        ],
+      },
+      {
+        group: "Command reference",
+        pages: [
+          { slug: "cli/reference/service", title: "nyxid service" },
+          { slug: "cli/reference/api-key", title: "nyxid api-key" },
+          { slug: "cli/reference/node", title: "nyxid node" },
+          { slug: "cli/reference/ssh", title: "nyxid ssh" },
+          { slug: "cli/reference/proxy", title: "nyxid proxy" },
+          { slug: "cli/reference/catalog", title: "nyxid catalog" },
+          { slug: "cli/reference/org", title: "nyxid org" },
+          { slug: "cli/reference/mcp", title: "nyxid mcp" },
+          { slug: "cli/reference/others", title: "Other commands" },
         ],
       },
     ],

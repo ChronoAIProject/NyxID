@@ -46,4 +46,4 @@ Success is an `HTTP/1.1 200` carrying a real provider JSON body — for OpenAI's
 
 - [Wire your AI agent to NyxID](/docs/ai/getting-started/first-agent-call) — let Claude Code, Cursor, or Codex call this service through MCP.
 - [The proxy](/docs/shared/concepts/the-proxy) — how a proxied request flows and where the credential is injected.
-- [Browse the catalog](/docs/cli/getting-started/install): `nyxid catalog list`, `nyxid catalog show <slug>`, `nyxid catalog endpoints <slug>`.
+- [Browse the catalog](/docs/cli/reference/catalog): `nyxid catalog list`, `nyxid catalog show <slug>`, `nyxid catalog endpoints <slug>`.

@@ -26,6 +26,17 @@ You should see the top-level command list. If `nyxid` is not found, re-run the `
 **Windows:** run `nyxid` from a Unix-compatible shell — WSL Ubuntu (recommended) or Git Bash. The raw Windows command prompt is not supported.
 :::
 
+## Update
+
+Keep the CLI current with its built-in updater — it upgrades the binary to the latest release, then refreshes any installed AI skills:
+
+```bash
+nyxid update           # update the CLI, then skills
+nyxid update --check   # see installed vs. latest without installing
+```
+
+See [Other commands → update](/docs/cli/reference/others#update) for version pinning, rollback, and source builds.
+
 ## Build from source (contributors)
 
 If you are working on NyxID itself rather than just using it, build the CLI from the repository:
