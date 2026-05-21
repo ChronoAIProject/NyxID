@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { Link, Outlet } from "@tanstack/react-router";
+import { GitHubButton } from "@/components/shared/github-button";
 
 import { useLogoHref } from "@/hooks/use-logo-href";
 
@@ -53,8 +54,15 @@ export function AuthLayout() {
           </div>
         </div>
 
-        {/* Footer — bottom-left */}
-        <div className="shrink-0 px-10 pb-8">
+        {/* Footer — sticky bottom */}
+        <div className="mt-auto shrink-0 px-10 pb-8">
+          <div className="mb-4 flex justify-center">
+            <GitHubButton
+              label="View source on GitHub"
+              size={16}
+              className="text-[11px] font-medium text-muted-foreground hover:text-foreground"
+            />
+          </div>
           <p className="text-center text-[11px] leading-relaxed text-muted-foreground">
             By continuing, you agree to NyxID&apos;s{" "}
             <Link to={"/terms" as string} className="text-muted-foreground underline underline-offset-2 hover:text-foreground">Terms of Service</Link>{" "}
