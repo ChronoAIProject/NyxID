@@ -228,6 +228,22 @@ describe("per-service approval configs", () => {
     });
   });
 
+  it("useSetServiceApprovalConfig forwards approval_required:false (not just true)", async () => {
+    mockPut.mockResolvedValue({});
+    const { result } = renderHook(() => useSetServiceApprovalConfig(), {
+      wrapper: wrapperFactory(),
+    });
+    // The `!== undefined` guard must keep an explicit `false`; a truthy
+    // check would silently drop it and make approval impossible to turn off.
+    await result.current.mutateAsync({
+      serviceId: "svc-1",
+      approvalRequired: false,
+    });
+    expect(mockPut).toHaveBeenCalledWith("/approvals/service-configs/svc-1", {
+      approval_required: false,
+    });
+  });
+
   it("useSetServiceApprovalConfig omits unset fields and routes through the org path", async () => {
     mockPut.mockResolvedValue({});
     const { result } = renderHook(() => useSetServiceApprovalConfig(), {

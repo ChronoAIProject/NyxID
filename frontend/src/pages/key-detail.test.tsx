@@ -530,6 +530,39 @@ describe("KeyDetailPage — provider connect callback", () => {
       replace: true,
     });
   });
+
+  it("toasts the backend message and clears the search param when provider_status is error", async () => {
+    routerState.search = {
+      provider_status: "error",
+      message: "OAuth was denied by the provider",
+    };
+
+    render(<KeyDetailPage />);
+
+    await waitFor(() =>
+      expect(mockToastError).toHaveBeenCalledWith(
+        "OAuth was denied by the provider",
+      ),
+    );
+    expect(mockToastSuccess).not.toHaveBeenCalled();
+    expect(mockNavigate).toHaveBeenCalledWith({
+      to: ".",
+      search: {},
+      replace: true,
+    });
+  });
+
+  it("falls back to a generic message when provider_status is error with no message", async () => {
+    routerState.search = { provider_status: "error" };
+
+    render(<KeyDetailPage />);
+
+    // `search.message ?? "Failed to connect service"` — the fallback fires
+    // when the callback carried no human-readable reason.
+    await waitFor(() =>
+      expect(mockToastError).toHaveBeenCalledWith("Failed to connect service"),
+    );
+  });
 });
 
 describe("KeyDetailPage — node-routed extras", () => {

@@ -261,6 +261,38 @@ describe("ApprovalHistoryPage", () => {
     expect(mockToastSuccess).toHaveBeenCalledWith("Request approved");
   });
 
+  it("shows the reusable-grant copy in the approve dialog for a grant-mode request", async () => {
+    const user = userEvent.setup();
+    fixtures.requests = [
+      makeRequest({
+        id: "req-grant",
+        service_name: "OpenAI",
+        status: "pending",
+        approval_mode: "grant",
+      }),
+    ];
+    fixtures.total = 1;
+
+    render(<ApprovalHistoryPage />);
+
+    const approveTriggers = screen.getAllByRole("button", { name: /approve/i });
+    await user.click(approveTriggers[0]!);
+
+    const dialog = await screen.findByRole("dialog");
+    // grant mode swaps the per-request copy for the reusable-grant copy.
+    expect(
+      within(dialog).getByText(
+        /A reusable approval grant will be created using your configured expiry\./i,
+      ),
+    ).toBeInTheDocument();
+    // ...and the per-request sentence is NOT shown for a grant-mode request.
+    expect(
+      within(dialog).queryByText(
+        /This approval applies only to the current request\./i,
+      ),
+    ).not.toBeInTheDocument();
+  });
+
   it("surfaces the ApiError message via toast.error when a decision fails", async () => {
     const user = userEvent.setup();
     fixtures.requests = [

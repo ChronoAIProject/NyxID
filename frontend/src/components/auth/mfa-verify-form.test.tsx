@@ -88,6 +88,49 @@ describe("MfaVerifyForm", () => {
     assignSpy.mockRestore();
   });
 
+  it("rejects an untrusted-origin returnTo: navigates to /dashboard and never calls window.location.assign (open-redirect guard)", async () => {
+    const user = userEvent.setup();
+    mockVerifyMutateAsync.mockResolvedValue(undefined);
+    const assignSpy = vi
+      .spyOn(window.location, "assign")
+      .mockImplementation(() => undefined);
+    // A returnTo whose origin is neither the frontend nor the backend must
+    // be discarded -- the user lands on /dashboard, not the attacker host.
+    const returnTo = "https://evil.example/x";
+
+    render(<MfaVerifyForm returnTo={returnTo} />);
+
+    await user.type(
+      screen.getByLabelText("Enter 6-digit verification code"),
+      "654321",
+    );
+    await user.click(screen.getByRole("button", { name: "Verify" }));
+
+    await waitFor(() => {
+      expect(mockNavigate).toHaveBeenCalledWith({ to: "/dashboard" });
+    });
+    expect(assignSpy).not.toHaveBeenCalled();
+    assignSpy.mockRestore();
+  });
+
+  it("does not verify when mfaToken is null (the !mfaToken submit guard)", async () => {
+    const user = userEvent.setup();
+    storeState.mfaToken = null;
+
+    render(<MfaVerifyForm />);
+
+    await user.type(
+      screen.getByLabelText("Enter 6-digit verification code"),
+      "123456",
+    );
+    await user.click(screen.getByRole("button", { name: "Verify" }));
+
+    // The submit handler short-circuits on `!mfaToken` before mutating, so
+    // a valid code with no session token never reaches the verify mutation.
+    expect(mockVerifyMutateAsync).not.toHaveBeenCalled();
+    expect(mockNavigate).not.toHaveBeenCalled();
+  });
+
   it("shows the ApiError message when verification is rejected and does not navigate", async () => {
     const user = userEvent.setup();
     mockVerifyMutateAsync.mockRejectedValue(

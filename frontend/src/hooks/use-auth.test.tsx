@@ -132,13 +132,20 @@ describe("useLogout", () => {
 
 describe("useMfaSetup", () => {
   it("posts to /auth/mfa/setup", async () => {
-    mockPost.mockResolvedValue({ secret: "S", otpauth_url: "otpauth://" });
+    // Mirror the real MfaSetupResponse shape so a field rename is caught.
+    const setupResponse = {
+      factor_id: "factor-1",
+      secret: "S",
+      qr_code_url: "otpauth://totp/NyxID",
+    };
+    mockPost.mockResolvedValue(setupResponse);
     const { wrapper } = setup();
     const { result } = renderHook(() => useMfaSetup(), { wrapper });
 
-    await result.current.mutateAsync();
+    const data = await result.current.mutateAsync();
 
     expect(mockPost).toHaveBeenCalledWith("/auth/mfa/setup");
+    expect(data).toEqual(setupResponse);
   });
 });
 

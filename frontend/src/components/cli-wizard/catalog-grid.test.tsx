@@ -209,6 +209,68 @@ describe("CatalogGrid — search filtering", () => {
   });
 });
 
+describe("CatalogGrid — flow meta-labels", () => {
+  it("labels a no-auth entry (requires_credential:false) '1-click connect'", async () => {
+    mockGet.mockResolvedValue({
+      entries: [
+        {
+          slug: "internal-health",
+          name: "Health Check",
+          description: "No credentials needed",
+          provider_type: "api_key",
+          requires_credential: false,
+        },
+      ],
+    });
+
+    render(<CatalogGrid onSelect={vi.fn()} />, { wrapper: createWrapper() });
+
+    await screen.findByText("Health Check");
+    expect(screen.getByText("1-click connect")).toBeInTheDocument();
+  });
+
+  it("labels a requires_gateway_url entry 'URL + API key'", async () => {
+    mockGet.mockResolvedValue({
+      entries: [
+        {
+          slug: "openclaw",
+          name: "OpenClaw",
+          description: "Self-hosted gateway",
+          provider_type: "api_key",
+          requires_credential: true,
+          requires_gateway_url: true,
+        },
+      ],
+    });
+
+    render(<CatalogGrid onSelect={vi.fn()} />, { wrapper: createWrapper() });
+
+    await screen.findByText("OpenClaw");
+    expect(screen.getByText("URL + API key")).toBeInTheDocument();
+  });
+
+  it("labels a token-exchange entry with the field count ('N fields')", async () => {
+    mockGet.mockResolvedValue({
+      entries: [
+        {
+          slug: "google-cloud",
+          name: "Google Cloud",
+          description: "Token exchange",
+          provider_type: "api_key",
+          requires_credential: true,
+          token_exchange_credential_fields: ["client_id", "client_secret"],
+        },
+      ],
+    });
+
+    render(<CatalogGrid onSelect={vi.fn()} />, { wrapper: createWrapper() });
+
+    await screen.findByText("Google Cloud");
+    // shapeLabel interpolates the field-array length: 2 entries → "2 fields".
+    expect(screen.getByText("2 fields")).toBeInTheDocument();
+  });
+});
+
 describe("CatalogGrid — empty / loading / error states", () => {
   it("shows the empty-catalog copy when the API returns no entries", async () => {
     mockGet.mockResolvedValue({ entries: [] });

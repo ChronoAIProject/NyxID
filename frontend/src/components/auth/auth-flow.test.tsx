@@ -103,6 +103,23 @@ describe("AuthFlow — login", () => {
     expect(mockNavigate).not.toHaveBeenCalled();
   });
 
+  it("ignores an untrusted-origin return_to and falls back to the dashboard", async () => {
+    loginFn.mockResolvedValue({ mfaRequired: false });
+    const assignSpy = vi
+      .spyOn(window.location, "assign")
+      .mockImplementation(() => {});
+    const user = userEvent.setup();
+    // Open-redirect guard: an off-origin return_to must NOT be assigned.
+    render(<AuthFlow initialPanel={0} returnTo="https://evil.example/keys" />);
+
+    await fillLoginAndSubmit(user);
+
+    await waitFor(() =>
+      expect(mockNavigate).toHaveBeenCalledWith({ to: "/dashboard" }),
+    );
+    expect(assignSpy).not.toHaveBeenCalled();
+  });
+
   it("shows the server error message and does not navigate on bad credentials", async () => {
     loginFn.mockRejectedValue(
       new ApiError(401, {

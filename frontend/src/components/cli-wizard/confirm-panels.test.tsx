@@ -155,6 +155,11 @@ describe("ApiKeyCreateConfirm", () => {
     await waitFor(() => {
       expect(mockReserve).toHaveBeenCalledWith(pairingId);
     });
+    // The mint MUST be routed through withRewindOnError(pairingId, fn) so a
+    // 4xx rewinds the reservation (duplicate-mint guard). Pin the wrapper is
+    // actually invoked — the stub is a pass-through, so without this nothing
+    // proves the panel didn't bypass it and call api.post directly.
+    expect(mockRewind).toHaveBeenCalledWith(pairingId, expect.any(Function));
     const body = bodyForCall("/api-keys");
     // Default access scope (no allowed_*_csv in prefill) → allow-all,
     // and the scopes string is space-joined from the prefilled set.
@@ -269,6 +274,9 @@ describe("ApiKeyRotateConfirm", () => {
         "/api-keys/key%209%2Fwith%20space/rotate",
       );
     });
+    // Rotate is also routed through the rewind wrapper (same 4xx-rewind /
+    // duplicate-mint guard as the create panels). Pin the wrapper invocation.
+    expect(mockRewind).toHaveBeenCalledWith(pairingId, expect.any(Function));
     await waitFor(() => {
       expect(onSuccess).toHaveBeenCalledWith({
         kind: "api-key-rotate",

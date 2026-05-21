@@ -187,4 +187,75 @@ describe("RecoveryCodesPanel — one-time reveal + copy-all", () => {
 
     expect(onAcknowledged).toHaveBeenCalledTimes(1);
   });
+
+  it("downloads the codes as nyxid-mfa-recovery-codes.txt, creating and revoking a Blob object URL", async () => {
+    const user = userEvent.setup();
+    // jsdom/happy-dom don't implement these; stub them so downloadTxt runs.
+    const createObjectURL = vi.fn(() => "blob:nyxid-recovery");
+    const revokeObjectURL = vi.fn();
+    const origCreate = (URL as { createObjectURL?: unknown }).createObjectURL;
+    const origRevoke = (URL as { revokeObjectURL?: unknown }).revokeObjectURL;
+    Object.defineProperty(URL, "createObjectURL", {
+      value: createObjectURL,
+      configurable: true,
+      writable: true,
+    });
+    Object.defineProperty(URL, "revokeObjectURL", {
+      value: revokeObjectURL,
+      configurable: true,
+      writable: true,
+    });
+
+    // Capture the synthesized <a> so we can assert its download filename +
+    // href without actually navigating.
+    const realCreateElement = document.createElement.bind(document);
+    let anchor: HTMLAnchorElement | null = null;
+    const createElementSpy = vi
+      .spyOn(document, "createElement")
+      .mockImplementation((tag: string) => {
+        const el = realCreateElement(tag) as HTMLElement;
+        if (tag === "a") {
+          anchor = el as HTMLAnchorElement;
+          // Neutralize the real click so it doesn't try to follow the href.
+          anchor.click = vi.fn();
+        }
+        return el;
+      });
+
+    render(<RecoveryCodesPanel codes={CODES} onAcknowledged={vi.fn()} />);
+
+    await user.click(screen.getByRole("button", { name: "Download .txt" }));
+
+    // A Blob was wrapped in an object URL and the anchor pointed at it.
+    expect(createObjectURL).toHaveBeenCalledTimes(1);
+    expect(createObjectURL.mock.calls[0]![0]).toBeInstanceOf(Blob);
+    expect(anchor).not.toBeNull();
+    expect(anchor!.download).toBe("nyxid-mfa-recovery-codes.txt");
+    expect(anchor!.href).toContain("blob:nyxid-recovery");
+    expect((anchor!.click as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(
+      1,
+    );
+    // The object URL is revoked after the click so it isn't leaked.
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:nyxid-recovery");
+
+    createElementSpy.mockRestore();
+    if (origCreate === undefined) {
+      delete (URL as { createObjectURL?: unknown }).createObjectURL;
+    } else {
+      Object.defineProperty(URL, "createObjectURL", {
+        value: origCreate,
+        configurable: true,
+        writable: true,
+      });
+    }
+    if (origRevoke === undefined) {
+      delete (URL as { revokeObjectURL?: unknown }).revokeObjectURL;
+    } else {
+      Object.defineProperty(URL, "revokeObjectURL", {
+        value: origRevoke,
+        configurable: true,
+        writable: true,
+      });
+    }
+  });
 });
