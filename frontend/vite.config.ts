@@ -93,5 +93,26 @@ export default defineConfig({
     environment: "happy-dom",
     setupFiles: ["./src/test-setup.ts"],
     include: ["src/**/*.test.{ts,tsx}"],
+    coverage: {
+      // Measurement only — no hard threshold gate here. The CI coverage gate
+      // is tracked separately (issue #785). Run `npm run test -- --coverage`
+      // and read per-file line % from the text table.
+      provider: "v8",
+      reporter: ["text", "json-summary", "html"],
+      reportsDirectory: "./coverage",
+      include: ["src/**/*.{ts,tsx}"],
+      exclude: [
+        "src/**/*.test.{ts,tsx}",
+        "src/**/*.d.ts",
+        // Entry points / framework wiring with no branching logic to test.
+        "src/main.tsx",
+        "src/router.tsx",
+        "src/wizard-entry.tsx",
+        "src/test-setup.ts",
+        // Vendored shadcn/Radix primitives — owned upstream, not our logic.
+        "src/components/ui/**",
+        "src/types/**",
+      ],
+    },
   },
 })
