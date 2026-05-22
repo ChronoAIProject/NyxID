@@ -41,7 +41,7 @@ Adversaries we defend against:
 
 | # | Adversary | Defense |
 |---|-----------|---------|
-| T1 | Fully-compromised NyxID server (malicious operator, RCE, hostile fork) | E2E encryption + **Code-integrity controls (Phase 4.5):** SRI hashes on crypto JS bundles, signed release channel, admin verification UX before secret submission |
+| T1 | Fully-compromised NyxID server (malicious operator, RCE, hostile fork) | E2E encryption + **Code-integrity controls (Phase 4.5)** — with an explicit operational caveat: NyxID serves the standalone HTML, the SRI hashes inside it, the displayed fingerprint, and the "verify" button. A fully-compromised server can substitute all of them in lockstep. Phase 4.5's defense is **detection assuming the admin independently verifies the displayed fingerprint out-of-band** (e.g., opens `releases.nyxid.dev` from a separate browser/device and compares). Without active admin verification, T1 degrades in practice to "T2 only" (passive-read protection). The signed manifest at a separate origin is what makes verification possible at all — see Phase 4.5 § "Admin verification UX" for the operational expectations the defense relies on. |
 | T2 | Passive read access to NyxID storage or memory (DB dump, backup leak, future operator with archive) | E2E encryption alone: server only stores ciphertext bound to a single pending credential |
 | T3 | Active MITM past TLS termination at NyxID (rogue middlebox, compromised CA proxy chain) | AEAD authenticity + freshness binding catch substitution |
 | T4 | Replay of a captured ciphertext blob against the same pending credential | Atomicity guard: first-push-wins, returns 409 on second push (per §"Race protection") |
@@ -97,6 +97,13 @@ pub struct CryptoBundle {
     /// AEAD nonce (24 bytes for XChaCha20-Poly1305, base64url).
     pub nonce: Option<String>,
     /// AEAD ciphertext + auth tag, opaque to NyxID. Capped at 16 KB.
+    ///
+    /// On the wire: base64url-encoded string when traversing JSON WSS
+    /// frames (`pending_credential_ciphertext`) and JSON HTTP request
+    /// bodies (`POST /ciphertext`). Stored as BSON binary in MongoDB.
+    /// The `Vec<u8>` here represents the raw bytes after base64url
+    /// decode; serde with a `#[serde(with = "base64url_bytes")]`
+    /// adapter handles both transports.
     pub ciphertext: Option<Vec<u8>>,
 }
 
@@ -113,7 +120,7 @@ created                           crypto = None
   ↓ node posts pubkey
 pubkey_posted                     crypto.node_pubkey = <set>, rest = None
   ↓ admin submits ciphertext (POST /ciphertext)
-  ↓ atomicity guard: findAndModify { crypto.ciphertext: null }
+  ↓ atomicity guard: find_one_and_update { crypto.ciphertext: null }
 ciphertext_received               crypto fully populated
   ↓ NyxID forwards over WSS to node
   ↓ node decrypts, validates AAD
@@ -134,13 +141,14 @@ sequenceDiagram
 
     Note over A,W: Phase 1 — push intent (unchanged from today)
     A->>N: POST /nodes/{id}/credentials/push<br/>{slug, injection_method, label, ...}<br/>NO secret value
-    N->>W: pending_credential_available {id, slug, ...}
+    N->>W: pending_credentials_available {} (existing plural nudge, no metadata)
+    W->>N: GET /api/v1/node-agent/pending-credentials (existing pull)
     activate W
 
     Note over W,LS: Phase 2 — node posts ephemeral pubkey
-    W->>W: generate X25519 keypair
-    W->>LS: seal privkey with node's long-lived auth key, persist keyed by pending_id
-    W->>N: pending_credential_pubkey {pending_id, node_pubkey}
+    W->>W: for each pending credential lacking a sealed privkey:<br/>generate X25519 keypair
+    W->>LS: seal privkey via SecretBackend (keychain / secret-tool / encrypted file), keyed by pending_id
+    W->>N: pending_credential_pubkey {pending_id, node_pubkey} (NEW frame)
     N->>N: store CryptoBundle{node_pubkey} on NodePendingCredential
 
     Note over A,W: Phase 3 — admin encrypts + posts
@@ -149,7 +157,7 @@ sequenceDiagram
     A->>A: verify frontend SRI hash + signed-release fingerprint<br/>(Phase 4.5 gate)
     A->>A: generate ephemeral keypair<br/>ECDH(admin_priv, node_pubkey) → shared<br/>HKDF(shared, info=node_id‖pending_id‖slug‖"v1")<br/>XChaCha20-Poly1305 encrypt secret<br/>AAD=node_id‖pending_id‖slug‖"v1"
     A->>N: POST /nodes/{id}/credentials/pending/{pending_id}/ciphertext<br/>{admin_pubkey, nonce, ciphertext (≤16 KB)}
-    N->>N: findAndModify guard: 409 if ciphertext already set<br/>per-pending rate limiter check
+    N->>N: find_one_and_update guard: 409 if ciphertext already set<br/>per-pending rate limiter check
     N->>W: pending_credential_ciphertext {pending_id, admin_pubkey, nonce, ciphertext}
 
     Note over W,CS: Phase 4 — node decrypts and (optionally) accepts
@@ -166,7 +174,7 @@ sequenceDiagram
         Note over W: Operator runs `nyxid node credentials accept` on the node<br/>(no paste required — just confirmation)
     else Decryption fails
         W->>LS: drop sealed privkey (single-use)
-        W->>N: pending_credential_error {pending_id, code=8004 decrypt_failed}
+        W->>N: pending_credential_error {pending_id, code=8006 decrypt_failed}
         N->>A: 4xx with reason
     end
     deactivate W
@@ -182,21 +190,46 @@ For services with `fallback_node_ids`, the admin can fan out one logical push to
 4. Each node decrypts independently; per-node state tracked on the pending credential.
 5. **All-N semantics with retry:** the logical pending credential is marked `consumed` only when all N nodes successfully decrypt + accept. Partial success is held in `partial_decrypted` state with a per-node breakdown; admin sees which nodes succeeded and which failed.
 6. **Retry-only-failed nodes:** the frontend exposes a "retry failed nodes" action that re-runs Phase 3 against the subset of nodes still in `decrypt_failed` state — fresh ephemeral keypairs on those nodes, fresh ciphertext from the admin's browser. Successful nodes are untouched (their credentials are idempotent — see Design Review Feedback §2). Logical credential transitions `partial_decrypted → consumed` only when all N nodes have accepted.
+7. **Expiry while in `partial_decrypted`:** when `NodePendingCredential.expires_at` fires and the logical credential is still in `partial_decrypted`, the logical state moves to `expired`. Previously-accepted node-level credentials are **not** rolled back — by the idempotency principle from §2 they are safe to leave in place, and the operator can rotate them via a fresh push if needed. The admin is shown which nodes succeeded so they can decide whether to start over or live with the partial state.
 
 ### Race protection
 
-POST `/ciphertext` is atomic: backend uses MongoDB `findAndModify` with the guard `{ "crypto.ciphertext": null }`. The first successful push wins; subsequent POSTs return `409 Conflict` until the pending expires or admin cancels.
+POST `/ciphertext` is atomic: backend uses the Rust `mongodb` driver's `find_one_and_update` (MongoDB `findAndModify` semantics) with the guard `{ "crypto.ciphertext": null }` to claim the slot. The first successful push wins; subsequent POSTs return `409 Conflict` until the pending expires or admin cancels. The handler also checks `crypto: { $exists: true, $ne: null }` so legacy pending credentials (no `CryptoBundle` at all) cannot accidentally satisfy the guard.
 
-Per-pending-credential rate limit: 1 successful POST, max 3 failed POSTs in a 60-second window. After 3 failed attempts, the pending is locked for 5 minutes. Decrypt failures from the node are NOT counted against this limit (they happen after NyxID has already forwarded the ciphertext); they trigger an immediate `decrypt_failed` state which is terminal for that pending credential.
+Per-pending-credential rate limit: 1 successful POST, max 3 failed POSTs in a 60-second window. After 3 failed attempts, the pending is locked for 5 minutes. **Mechanism:** an in-memory `DashMap<PendingId, RateLimitState>` keyed by `pending_credential_id` (TTL-ephemeral, never persisted to MongoDB) — distinct from the global per-actor `RATE_LIMIT_PER_SECOND` middleware, which still applies on top. Decrypt failures from the node are NOT counted against this limit (they happen after NyxID has already forwarded the ciphertext); they trigger an immediate `decrypt_failed` state which is terminal for that pending credential.
+
+### Sync vs async response semantics
+
+`POST /ciphertext` must reflect the node's decryption outcome in its HTTP response — implementers cannot fire-and-forget. The pattern already exists at `backend/src/services/node_ws_manager.rs:1558` (`send_credential_update_and_wait`):
+
+1. Handler allocates a `request_id`, registers a `oneshot::channel` waiter on the node connection's `credential_acks` map.
+2. Sends the `pending_credential_ciphertext` WSS frame with the `request_id`.
+3. Awaits the node's reply (`pending_credential_consumed {request_id, ok}` or `pending_credential_error {request_id, code, reason}`) with a configurable timeout (suggest 15s, matching the existing pattern).
+4. HTTP response shape:
+   - 200 on `consumed`
+   - 4xx with error code 8006-8011 on `pending_credential_error`
+   - 503 `NodeOffline` (code 8010) on timeout / WSS disconnect
+
+Reuse the `oneshot` + timeout machinery — do not invent a new mechanism. The handler MUST block on the ack before returning; committing the ciphertext to MongoDB and returning 200 without confirmation would leave admin and node out of sync (same failure class as the historical issue captured in the `send_credential_update_and_wait` comments at lines 1599-1632).
 
 ### Backward compatibility & version detection
 
-Node agents advertise `supported_features` in their WSS authentication frame. The new flow contributes `crypto_v1` to that set. NyxID persists `Node.supported_features` so the frontend can query it and decide UI:
+Two separate signals — do not conflate them:
+
+**1. Feature detection (synchronous, cached).** Node agents advertise `supported_features` (a new field added in Phase 1; current node agents do not advertise it). The new flow contributes `crypto_v1` to that set. NyxID persists `Node.supported_features` (new model field; populated from the existing in-memory `record_capabilities` path in `node_ws_manager.rs:1705` if the codebase already has it, or added in Phase 1 if not). The frontend queries it before rendering UI:
 
 - `crypto_v1 ∈ supported_features` → show browser accept UI
-- `crypto_v1 ∉ supported_features` (older node agent) → show legacy "SSH to node and run `nyxid node credentials accept`" instructions
+- `crypto_v1 ∉ supported_features` (older agent or unupgraded node) → show legacy "SSH to node and run `nyxid node credentials accept`" instructions
 
-No timing guesses, no polling fallback. Naturally extensible for future feature flags.
+Feature detection is fast and cached. No polling for this step.
+
+**2. Per-pending pubkey readiness (asynchronous).** Once the admin pushes a pending credential, the node — if it supports `crypto_v1` — must generate its X25519 keypair and post the pubkey. This is async (the node may be currently busy, briefly disconnected from WSS, etc.). The frontend polls `GET /credentials/pending/{id}` with exponential backoff up to ~30s:
+
+- Pubkey arrives → proceed with the encrypt+POST flow
+- Times out → surface a clear "node not responding for crypto exchange" error (distinct from "legacy node" — this is a supported but unresponsive node)
+- Error code `8009 PendingCredentialPubkeyAwaiting` covers the in-flight 404 state
+
+Polling is bounded to a `crypto_v1`-supporting node. There is no polling against legacy nodes — feature detection already steered the UI to the SSH instructions.
 
 The existing two-party CLI flow keeps working regardless. A pending credential with `crypto: None` continues to accept secrets via the legacy CLI path.
 
@@ -222,7 +255,7 @@ Defends T1 ("fully-compromised NyxID server"). The protocol's e2e encryption is 
 The credential-accept page is served as a **minimal standalone HTML document**, not as a route inside the main SPA bundle. Goal: minimize the "what else could be subverted" surface on this high-value page.
 
 - Strict CSP: `default-src 'none'; script-src 'self' 'sha384-...' 'sha384-...'; connect-src 'self'; style-src 'self' 'unsafe-inline'` — no third-party origins, no inline scripts, no remote fetches except back to NyxID.
-- No main SPA bundle, no shared dependencies beyond the crypto modules and a tiny form-handling shim (~5 KB).
+- No main SPA bundle, no shared dependencies. Just: a tiny form-handling shim (~5 KB), `@noble/curves` x25519 (~6 KB minified), `@noble/ciphers` xchacha20-poly1305 (~5 KB minified), and the NyxID crypto-wrap module (~2 KB). Realistic page weight: **≤30 KB gzipped total**, not 5 KB. If the SubtleCrypto X25519 polyfill is needed (older browsers), lazy-load `@noble/curves` only on miss to keep the cold-cache bundle leaner for the majority case where SubtleCrypto works natively.
 - Page bundle is itself part of the signed release manifest (see below); its top-level HTML hash is published the same way as the JS bundles.
 - Route: `/credentials/pending/.../accept` is served by a dedicated handler that emits this standalone HTML, separate from the SPA's catch-all route.
 
@@ -273,18 +306,18 @@ Implementer should document the chosen answers in `docs/RELEASE_INTEGRITY.md` or
 
 ## Error codes
 
-Reserved range **8004–8009** for remote credential injection errors:
+Reserved range **8006–8011** for remote credential injection errors. The next-available slot in the existing node-error block: `backend/src/errors/mod.rs` already assigns 8000-8005 (8000 `NodeNotFound`, 8001 `NodeOffline`, 8002 `NodeProxyTimeout`, 8003 `NodeRegistrationFailed`, 8004 `NodeCredentialMissing`, 8005 `WsProxyDownstream`).
 
 | Code | Name | Returned by | Meaning |
 |------|------|-------------|---------|
-| 8004 | `PendingCredentialDecryptFailed` | Node → NyxID | AEAD decrypt or AAD verify failed. Terminal for this pending. |
-| 8005 | `PendingCredentialVersionUnsupported` | Node → NyxID | `crypto.version` not recognized. Likely a protocol drift. |
-| 8006 | `PendingCredentialCiphertextTooLarge` | NyxID POST handler | `len(ciphertext) > 16 * 1024`. Returns 413. |
-| 8007 | `PendingCredentialPubkeyNotPosted` | NyxID GET handler | Node hasn't yet posted pubkey. Returns 404. Frontend polls or falls back. |
-| 8008 | `PendingCredentialNodeOffline` | NyxID POST handler | Node currently not connected via WSS. Ciphertext queued; admin sees "waiting for node" state. |
-| 8009 | `PendingCredentialQueueFull` | NyxID POST handler | Per-node ciphertext queue at the 5-pending-per-node cap (per Design Review Feedback §3). Returns 429. |
+| 8006 | `PendingCredentialDecryptFailed` | Node → NyxID | AEAD decrypt or AAD verify failed. Terminal for this pending. |
+| 8007 | `PendingCredentialVersionUnsupported` | Node → NyxID | `crypto.version` not recognized. Likely a protocol drift. |
+| 8008 | `PendingCredentialCiphertextTooLarge` | NyxID POST handler | `len(ciphertext) > 16 * 1024`. Returns 413. |
+| 8009 | `PendingCredentialPubkeyAwaiting` | NyxID GET handler | Node has not yet posted the per-pending pubkey. Returns 404. Frontend polls with backoff up to ~30s (see §"Backward compatibility & version detection") — distinct from feature-detection fallback to legacy SSH UI. |
+| 8010 | `PendingCredentialNodeOffline` | NyxID POST handler | Node currently not connected via WSS. Ciphertext queued; admin sees "waiting for node" state. |
+| 8011 | `PendingCredentialQueueFull` | NyxID POST handler | Per-node ciphertext queue at the 5-pending-per-node cap (per Design Review Feedback §3). Returns 429. |
 
-The authoritative error-code listing lives in `AGENTS.md` (currently line 85: *"Error codes 8000-8003 are reserved for node errors..."*). Phase 1 must extend that line to include 8004-8009 with the names above, so the documentation source of truth stays consistent with the code.
+The authoritative error-code listing lives in `AGENTS.md` under the node-error bullet (currently states "Error codes 8000-8003 are reserved for node errors" — that text is itself out of date: 8004 `NodeCredentialMissing` and 8005 `WsProxyDownstream` already exist in `backend/src/errors/mod.rs`). Phase 1 must update that bullet to reflect the actual occupied range (8000-8005) plus the new RCI range (8006-8011), so the documentation source of truth stays consistent with the code.
 
 ## Test Strategy
 
@@ -308,10 +341,10 @@ Mandatory test coverage, locked at design time. Implementer must produce tests f
 
 | Test | File | Asserts |
 |------|------|---------|
-| `post_ciphertext_rejects_over_16kb` | `node_admin::tests` | 16385-byte ciphertext returns 413 with code 8006 |
+| `post_ciphertext_rejects_over_16kb` | `node_admin::tests` | 16385-byte ciphertext returns 413 with code 8008 |
 | `post_ciphertext_first_push_wins` | `node_admin::tests` | Two concurrent POSTs: one returns 200, the other returns 409 |
 | `post_ciphertext_per_pending_rate_limit` | `node_admin::tests` | 4 failed POSTs within 60s: 4th returns 429 + 5min lockout |
-| `get_pubkey_404_until_node_posts` | `node_admin::tests` | Pre-pubkey-post, GET returns 404 with code 8007 |
+| `get_pubkey_404_until_node_posts` | `node_admin::tests` | Pre-pubkey-post, GET returns 404 with code 8009 (`PendingCredentialPubkeyAwaiting`) |
 | `crypto_bundle_serde_roundtrip` | `models::node_pending_credential::tests` | CryptoBundle serialize → BSON → deserialize, all fields preserved |
 
 ### Frontend (TypeScript, `frontend/src/lib/crypto/`)
@@ -320,7 +353,7 @@ Mandatory test coverage, locked at design time. Implementer must produce tests f
 |------|------|---------|
 | `noble_curves_x25519_ecdh_roundtrip` | `crypto.test.ts` | Browser-side keygen + ECDH produces same shared secret in both directions |
 | `noble_ciphers_xchacha_roundtrip` | `crypto.test.ts` | Encrypt + decrypt round-trip succeeds with various plaintext sizes |
-| `srl_hash_mismatch_blocks_submit` | `credential-accept.test.ts` | Tampered bundle hash blocks the submit button |
+| `sri_hash_mismatch_blocks_submit` | `credential-accept.test.ts` | Tampered bundle hash blocks the submit button |
 
 ### Interop (cross-language fixture tests)
 
@@ -355,7 +388,7 @@ These two fixtures catch encoding-mismatch bugs (e.g., base64 vs base64url, big-
 
 | Test | File | Asserts |
 |------|------|---------|
-| `eval_srl_hash_format` | `tests/eval/sri.spec.ts` | Generated SRI tag matches the published manifest format |
+| `eval_sri_hash_format` | `tests/eval/sri.spec.ts` | Generated SRI tag matches the published manifest format |
 
 Implementer should run `cargo test`, `npm run test`, and the e2e suite before requesting review. Coverage target: 100% of paths in the table above.
 
@@ -413,8 +446,8 @@ Phase 1 alone gates everything; once it lands, B and C can launch as parallel wo
 | Browser fetches pubkey | Node hasn't posted yet (legacy node) | ✓ | 404 + `supported_features` flag fallback | ✓ legacy SSH-UI fallback |
 | Browser encrypts | `@noble/curves` keygen fails on weak entropy | ✓ | fail loud, retry | ✓ |
 | Browser SRI verify | Bundle hash mismatch (tampered or stale) | ✓ | block submit, surface mismatch | ✓ clear warning |
-| NyxID forwards ciphertext | Node offline at forward time | ✓ | queue + retry on reconnect (code 8008) | ✓ "waiting for node" state |
-| Node decrypts | Wrong AAD (cross-credential replay) | ✓ | emit error 8004 | ✓ decrypt_failed state |
+| NyxID forwards ciphertext | Node offline at forward time | ✓ | queue + retry on reconnect (code 8010) | ✓ "waiting for node" state |
+| Node decrypts | Wrong AAD (cross-credential replay) | ✓ | emit error 8006 | ✓ decrypt_failed state |
 | Node accepts + stores | Secret backend write fails | ✓ | preserve ciphertext, retry | ✓ recoverable state |
 | Multi-node fan-out | Partial decryption (some succeed, some fail) | ✓ | partial_decrypted state with per-node breakdown | ✓ |
 
@@ -466,7 +499,7 @@ During the architecture review of the remote credential injection proposal, the 
 
 ## References
 
-- Tracking issue: [#769](https://github.com/ChronoAIProject/issues/769)
-- This issue: [#773](https://github.com/ChronoAIProject/issues/773)
-- Already shipped on the tracking issue: [#775](https://github.com/ChronoAIProject/issues/775), [#770](https://github.com/ChronoAIProject/issues/770), [#771](https://github.com/ChronoAIProject/issues/771), [#772](https://github.com/ChronoAIProject/issues/772), [#774](https://github.com/ChronoAIProject/issues/774)
+- Tracking issue: [#769](https://github.com/ChronoAIProject/NyxID/issues/769)
+- This issue: [#773](https://github.com/ChronoAIProject/NyxID/issues/773)
+- Already shipped on the tracking issue: [#775](https://github.com/ChronoAIProject/NyxID/issues/775), [#770](https://github.com/ChronoAIProject/NyxID/issues/770), [#771](https://github.com/ChronoAIProject/NyxID/issues/771), [#772](https://github.com/ChronoAIProject/NyxID/issues/772), [#774](https://github.com/ChronoAIProject/NyxID/issues/774)
 - Related architecture docs: [ENCRYPTION_ARCHITECTURE.md](./ENCRYPTION_ARCHITECTURE.md), [NODE_PROXY_PROTOCOL.md](./NODE_PROXY_PROTOCOL.md), [SECURITY.md](./SECURITY.md)
