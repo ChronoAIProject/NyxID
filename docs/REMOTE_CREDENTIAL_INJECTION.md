@@ -180,8 +180,8 @@ For services with `fallback_node_ids`, the admin can fan out one logical push to
 2. Browser encrypts the same plaintext secret N times — once per node's pubkey, with N distinct ciphertexts.
 3. All N ciphertexts posted in a single POST `/credentials/push/fan-out` request, atomically.
 4. Each node decrypts independently; per-node state tracked on the pending credential.
-5. **All-N semantics:** the logical pending credential is marked `consumed` only when all N nodes successfully decrypt + accept. Partial success is held in `partial_decrypted` state with a per-node breakdown; admin sees which nodes succeeded.
-6. Decrypt failure on any one node bricks the logical credential (admin re-pushes).
+5. **All-N semantics with retry:** the logical pending credential is marked `consumed` only when all N nodes successfully decrypt + accept. Partial success is held in `partial_decrypted` state with a per-node breakdown; admin sees which nodes succeeded and which failed.
+6. **Retry-only-failed nodes:** the frontend exposes a "retry failed nodes" action that re-runs Phase 3 against the subset of nodes still in `decrypt_failed` state — fresh ephemeral keypairs on those nodes, fresh ciphertext from the admin's browser. Successful nodes are untouched (their credentials are idempotent — see Design Review Feedback §2). Logical credential transitions `partial_decrypted → consumed` only when all N nodes have accepted.
 
 ### Race protection
 
@@ -254,7 +254,7 @@ Reserved range **8004–8009** for remote credential injection errors:
 | 8006 | `PendingCredentialCiphertextTooLarge` | NyxID POST handler | `len(ciphertext) > 16 * 1024`. Returns 413. |
 | 8007 | `PendingCredentialPubkeyNotPosted` | NyxID GET handler | Node hasn't yet posted pubkey. Returns 404. Frontend polls or falls back. |
 | 8008 | `PendingCredentialNodeOffline` | NyxID POST handler | Node currently not connected via WSS. Ciphertext queued; admin sees "waiting for node" state. |
-| 8009 | (reserved) | — | For future use. |
+| 8009 | `PendingCredentialQueueFull` | NyxID POST handler | Per-node ciphertext queue at the 5-pending-per-node cap (per Design Review Feedback §3). Returns 429. |
 
 CLAUDE.md error code block should be updated with this range as part of Phase 1.
 
@@ -313,7 +313,7 @@ These two fixtures catch encoding-mismatch bugs (e.g., base64 vs base64url, big-
 | `e2e_node_restart_mid_flight` | `tests/e2e/credential_push.spec.ts` | Push pubkey, restart node agent, restart loads sealed privkey, then ciphertext decrypts successfully |
 | `e2e_legacy_node_fallback` | `tests/e2e/credential_push.spec.ts` | Node without `crypto_v1` feature flag: frontend shows legacy SSH instructions |
 | `e2e_multi_node_fan_out_all_succeed` | `tests/e2e/credential_push.spec.ts` | 3 nodes, all decrypt, all accept, logical consumed state reached |
-| `e2e_multi_node_partial_failure` | `tests/e2e/credential_push.spec.ts` | 3 nodes, 1 decrypt failure, logical state `partial_decrypted`, admin sees per-node breakdown |
+| `e2e_multi_node_partial_failure_then_retry` | `tests/e2e/credential_push.spec.ts` | 3 nodes, 1 decrypt failure → state `partial_decrypted` with per-node breakdown; admin retries the failed node only; succeeds → logical state `consumed`; idempotency: previously-accepted nodes unchanged |
 
 ### Audit / security regression
 
@@ -422,8 +422,8 @@ No silent-failure gaps. All paths have explicit error handling and user-visible 
 During the architecture review of the remote credential injection proposal, the following best practices were established to address critical edge cases:
 
 1. **Local Sweep Mechanism (Hybrid Local + Push Eviction)**
-   - The node agent will independently enforce a local TTL (e.g., matching or slightly exceeding the server's TTL of 1 hour) for any sealed ephemeral private keys.
-   - A periodic background sweep task in the node daemon will clean up expired keys, and a cleanup check will run on daemon startup. This handles scenarios where the node goes offline or is abruptly shut down.
+   - The node agent independently enforces a local TTL on any sealed ephemeral private keys, derived from the `NodePendingCredential.expires_at` value at the time of pubkey generation (so the local TTL stays aligned with the server-side TTL even if the server default changes).
+   - A periodic background sweep task in the node daemon cleans up expired keys, and a cleanup check runs on daemon startup. This handles scenarios where the node goes offline or is abruptly shut down (SIGKILL, hardware failure) and never receives the consume/decline/cancel WSS frame that would normally evict the key.
 
 2. **Multi-Node Fan-Out Idempotency**
    - Ensure the node-side `CredentialStore::accept` is idempotent (i.e., overwriting an existing credential for the same slug is a safe operation, and writing the same secret value is a no-op). This supports retry logic when a fan-out fails on some nodes and the admin re-pushes to all nodes.
@@ -434,7 +434,7 @@ During the architecture review of the remote credential injection proposal, the 
    - The server will shorten the TTL of the queued ciphertext (e.g., 15 minutes) compared to the standard metadata TTL (1 hour).
 
 4. **Admin Verification Security Policy**
-   - Disabling or bypassing the "I verified the fingerprint" verification checkbox via the per-org policy flag must require multi-admin approval or MFA confirmation to ensure a single compromised admin cannot lower the organization's defense-in-depth against code-substitution attacks.
+   - Disabling or bypassing the "I verified the fingerprint" verification checkbox via the per-org policy flag requires fresh MFA confirmation at the moment the flag is flipped. NyxID already exposes the MFA verification endpoints (`/auth/mfa/verify`) and the existing MFA factor on the admin's account is the gate. Multi-admin approval is not used here because NyxID does not currently have a multi-admin approval queue subsystem; introducing one would be a separate project. The MFA gate ensures that a single compromised admin's session cannot silently lower the organization's defense-in-depth against code-substitution attacks.
 
 ## References
 
