@@ -78,7 +78,7 @@ Rejected as primary. Reuses the existing `nyxid ssh` infrastructure but directly
 | Key exchange | X25519 ECDH | Compact, widely supported, suitable for ephemeral use |
 | Key derivation | HKDF-SHA256 | Standard, takes ECDH shared secret + binding context as `info` |
 | Authenticated encryption | XChaCha20-Poly1305 | Random-nonce-safe AEAD, good cross-stack support |
-| Privkey sealing at rest | XChaCha20-Poly1305 with the node's long-lived signing key as KEK | Reuses existing node sealing pattern from `crypto/aes.rs` style |
+| Privkey sealing at rest | Stored via the existing `cli/src/node/secret_backend.rs::SecretBackend` trait (same mechanism that backs `store_auth_token` / `store_signing_secret` / `store_credential_value`) — keychain on macOS, `secret-tool` on Linux, encrypted file otherwise | No new sealing primitive; reuse the backend that already protects the node's long-lived auth token and per-service credentials |
 | Encoding | Base64url for keys/nonces, raw bytes for ciphertext over WSS | URL-safe for HTTP, compact for WSS binary frames |
 
 ### Data model
@@ -200,6 +200,10 @@ No timing guesses, no polling fallback. Naturally extensible for future feature 
 
 The existing two-party CLI flow keeps working regardless. A pending credential with `crypto: None` continues to accept secrets via the legacy CLI path.
 
+### WSS frame classification
+
+The new `pending_credential_pubkey` and `pending_credential_ciphertext` frames are **internal node-control protocol traffic** — same class as `node_metrics`, `proxy_request`, `proxy_response_*`, `pending_credential_available`, and `pending_credential_consumed`. They bypass the `ws_frame_injections` rules on `DownstreamService` / `UserService` (which apply only to downstream-service WS passthrough). Implementation note for Phase 1: register the new frame types in `node_ws.rs` alongside the existing node-control variants, not via the injection plumbing in `cli/src/node/ws_frame_injector.rs`.
+
 ### Accept gate
 
 Per-node config flag `enable_remote_credential_injection: bool` (default **false** — opt-in). Even when enabled, the node defaults to manual-accept:
@@ -213,9 +217,18 @@ Default behavior of any node remains "legacy two-party CLI flow" until an admin 
 
 Defends T1 ("fully-compromised NyxID server"). The protocol's e2e encryption is only as strong as the JS that performs it; if NyxID can substitute the JS, it can capture plaintext before encryption. This phase makes that substitution detectable.
 
+### Standalone credential-accept page
+
+The credential-accept page is served as a **minimal standalone HTML document**, not as a route inside the main SPA bundle. Goal: minimize the "what else could be subverted" surface on this high-value page.
+
+- Strict CSP: `default-src 'none'; script-src 'self' 'sha384-...' 'sha384-...'; connect-src 'self'; style-src 'self' 'unsafe-inline'` — no third-party origins, no inline scripts, no remote fetches except back to NyxID.
+- No main SPA bundle, no shared dependencies beyond the crypto modules and a tiny form-handling shim (~5 KB).
+- Page bundle is itself part of the signed release manifest (see below); its top-level HTML hash is published the same way as the JS bundles.
+- Route: `/credentials/pending/.../accept` is served by a dedicated handler that emits this standalone HTML, separate from the SPA's catch-all route.
+
 ### SRI hashes on crypto JS bundles
 
-The HTML page serving the credential-accept UI (`/credentials/pending/.../accept`) carries SHA-384 SRI hashes on every `<script>` tag for `@noble/curves`, `@noble/ciphers`, and the NyxID crypto-wrapping module. Browsers refuse to execute scripts that don't match the hash. NyxID server cannot silently substitute the JS without changing the HTML's SRI attribute, which is itself loaded over TLS.
+The standalone HTML page carries SHA-384 SRI hashes on every `<script>` tag for `@noble/curves`, `@noble/ciphers`, and the NyxID crypto-wrapping module. Browsers refuse to execute scripts that don't match the hash. NyxID server cannot silently substitute the JS without changing the HTML's SRI attribute, which is itself loaded over TLS.
 
 ### Signed release channel
 
@@ -243,6 +256,21 @@ Verification is per-session, not per-push. Session expiry is 30 minutes (matches
 - Rollback paths: if a release is found compromised, the manifest is invalidated and admins see a "manifest mismatch" error gating new submits.
 - Bundle changes require a coordinated release (HTML + JS + manifest update in lockstep).
 
+### Phase 4.5 runbook items (must be answered before this phase starts)
+
+These are infrastructure questions that should be scheduled, not discovered late:
+
+| Question | Owner |
+|---|---|
+| Who holds the GPG signing key for the release manifest? Is it a hardware-backed key (YubiKey, HSM) or a software key in CI? | Infra |
+| Key rotation procedure: when, how, who has the authority, how is the rotation announced to admins (so they know to refresh their trust anchor)? | Infra + Security |
+| Where does `releases.nyxid.dev` actually live? DNS records, CDN provider, TLS cert chain — and is it operationally separable from the main NyxID server (i.e., compromise of the main server should not enable manifest tampering). | Infra |
+| How does the frontend build pipeline publish the manifest? Is it part of the same CI job that builds the bundle, or a separate signing step requiring human approval? | Release engineering |
+| Manifest format: schema, signature scheme (GPG detached signature? signify? cosign?), versioning. | Security |
+| How long is a manifest valid? Does it expire (forcing periodic re-signing) or live indefinitely until superseded? | Security |
+
+Implementer should document the chosen answers in `docs/RELEASE_INTEGRITY.md` or equivalent before Phase 4.5 lands.
+
 ## Error codes
 
 Reserved range **8004–8009** for remote credential injection errors:
@@ -256,7 +284,7 @@ Reserved range **8004–8009** for remote credential injection errors:
 | 8008 | `PendingCredentialNodeOffline` | NyxID POST handler | Node currently not connected via WSS. Ciphertext queued; admin sees "waiting for node" state. |
 | 8009 | `PendingCredentialQueueFull` | NyxID POST handler | Per-node ciphertext queue at the 5-pending-per-node cap (per Design Review Feedback §3). Returns 429. |
 
-CLAUDE.md error code block should be updated with this range as part of Phase 1.
+The authoritative error-code listing lives in `AGENTS.md` (currently line 85: *"Error codes 8000-8003 are reserved for node errors..."*). Phase 1 must extend that line to include 8004-8009 with the names above, so the documentation source of truth stays consistent with the code.
 
 ## Test Strategy
 
@@ -413,8 +441,8 @@ No silent-failure gaps. All paths have explicit error handling and user-visible 
 
 ## Open questions for review
 
-- **Browser compatibility floor.** SubtleCrypto X25519 is Chrome 123+, Firefox 130+, Safari 17+. `@noble/curves` covers older browsers. Confirm analytics show acceptable coverage.
-- **Releases domain.** `releases.nyxid.dev` (or chosen alternative) needs DNS, CDN, and signing-key infrastructure. Coordinate with infra ahead of Phase 4.5.
+- **Browser compatibility floor — sample real analytics before Phase 3.** SubtleCrypto X25519 is Chrome 123+, Firefox 130+, Safari 17+; `@noble/curves` covers older browsers but adds ~30 KB to the standalone page bundle. Before Phase 3 starts, sample admin-population user-agent analytics (or a small canary slice) and report: *"X% of sessions get native SubtleCrypto, Y% fall back to @noble."* If `X` is overwhelmingly high (e.g. >95%), consider lazy-loading the noble polyfill only on miss to keep the standalone page leaner.
+- **Releases domain.** `releases.nyxid.dev` (or chosen alternative) needs DNS, CDN, and signing-key infrastructure. Coordinate with infra ahead of Phase 4.5; see the runbook items table under §"Code-integrity infrastructure".
 - **Auto-accept vs manual-accept default discoverability.** Per-org policy needs admin UI to flip the flag; covered in Phase 3 scope but worth scoping the per-org settings page changes explicitly during implementation.
 
 ## Design Review Feedback & Best Practices
@@ -442,18 +470,3 @@ During the architecture review of the remote credential injection proposal, the 
 - This issue: [#773](https://github.com/ChronoAIProject/issues/773)
 - Already shipped on the tracking issue: [#775](https://github.com/ChronoAIProject/issues/775), [#770](https://github.com/ChronoAIProject/issues/770), [#771](https://github.com/ChronoAIProject/issues/771), [#772](https://github.com/ChronoAIProject/issues/772), [#774](https://github.com/ChronoAIProject/issues/774)
 - Related architecture docs: [ENCRYPTION_ARCHITECTURE.md](./ENCRYPTION_ARCHITECTURE.md), [NODE_PROXY_PROTOCOL.md](./NODE_PROXY_PROTOCOL.md), [SECURITY.md](./SECURITY.md)
-
----
-
-## GSTACK REVIEW REPORT
-
-| Review | Trigger | Why | Runs | Status | Findings |
-|--------|---------|-----|------|--------|----------|
-| CEO Review | `/plan-ceo-review` | Scope & strategy | 0 | — | — |
-| Codex Review | `/codex review` | Independent 2nd opinion | 0 | — | — |
-| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 1 | CLEAR (PLAN) | 9 issues, 0 critical gaps, 0 unresolved |
-| Design Review | `/plan-design-review` | UI/UX gaps | 0 | — | — |
-| DX Review | `/plan-devex-review` | Developer experience gaps | 0 | — | — |
-
-**UNRESOLVED:** 0
-**VERDICT:** ENG CLEARED — ready to implement (3 phase-additions folded in: Phase 3.5 multi-node fan-out, Phase 4.5 code-integrity infrastructure, expanded Test Strategy)
