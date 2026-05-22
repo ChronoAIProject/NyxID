@@ -417,6 +417,25 @@ No silent-failure gaps. All paths have explicit error handling and user-visible 
 - **Releases domain.** `releases.nyxid.dev` (or chosen alternative) needs DNS, CDN, and signing-key infrastructure. Coordinate with infra ahead of Phase 4.5.
 - **Auto-accept vs manual-accept default discoverability.** Per-org policy needs admin UI to flip the flag; covered in Phase 3 scope but worth scoping the per-org settings page changes explicitly during implementation.
 
+## Design Review Feedback & Best Practices
+
+During the architecture review of the remote credential injection proposal, the following best practices were established to address critical edge cases:
+
+1. **Local Sweep Mechanism (Hybrid Local + Push Eviction)**
+   - The node agent will independently enforce a local TTL (e.g., matching or slightly exceeding the server's TTL of 1 hour) for any sealed ephemeral private keys.
+   - A periodic background sweep task in the node daemon will clean up expired keys, and a cleanup check will run on daemon startup. This handles scenarios where the node goes offline or is abruptly shut down.
+
+2. **Multi-Node Fan-Out Idempotency**
+   - Ensure the node-side `CredentialStore::accept` is idempotent (i.e., overwriting an existing credential for the same slug is a safe operation, and writing the same secret value is a no-op). This supports retry logic when a fan-out fails on some nodes and the admin re-pushes to all nodes.
+   - The frontend will display a per-node status and support retrying only the failed nodes to avoid redundant re-encryptions.
+
+3. **Queue Size & Resource Limits**
+   - Enforce strict quotas on queued ciphertexts for offline nodes to prevent database bloating. Limit the maximum pending credentials in the "waiting for node" state to 5 per node.
+   - The server will shorten the TTL of the queued ciphertext (e.g., 15 minutes) compared to the standard metadata TTL (1 hour).
+
+4. **Admin Verification Security Policy**
+   - Disabling or bypassing the "I verified the fingerprint" verification checkbox via the per-org policy flag must require multi-admin approval or MFA confirmation to ensure a single compromised admin cannot lower the organization's defense-in-depth against code-substitution attacks.
+
 ## References
 
 - Tracking issue: [#769](https://github.com/ChronoAIProject/issues/769)
