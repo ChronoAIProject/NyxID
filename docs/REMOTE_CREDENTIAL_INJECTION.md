@@ -24,7 +24,7 @@ This document proposes a protocol that lets an org admin supply the secret from 
 - **G3.** Existing CLI two-party flow continues to work unchanged. The new flow is additive, not a replacement.
 - **G4.** Forward secrecy: compromise of NyxID server data at rest does not reveal past secrets even if a node's long-lived state is later compromised.
 - **G5.** For the remote browser crypto path, the operator-on-node "accept" gate is opt-in, not the default. With `enable_remote_credential_injection: true` and `require_operator_confirm_for_remote: false` (the default for the remote path), no one needs to SSH into or be physically present at the node. Legacy CLI paste acceptance remains manual.
-- **G6.** Protection against malicious code-substitution by a fully-compromised NyxID server. Achieved via Subresource Integrity (SRI), signed release channel, and admin verification UX (Phase 4.5 below).
+- **G6.** Detection of malicious code-substitution by a fully-compromised NyxID server, assuming the admin independently verifies the SRI fingerprint out-of-band against the signed release manifest at a separate origin (Phase 4.5 below). This is a detection control, not a prevention guarantee — see T1 for the operational caveat.
 
 ## Non-goals
 
@@ -99,7 +99,7 @@ CLI path:
 | Key derivation | HKDF-SHA256 | Standard, takes ECDH shared secret + binding context as `info` |
 | Authenticated encryption | XChaCha20-Poly1305 | Random-nonce-safe AEAD, good cross-stack support |
 | Privkey sealing at rest | Stored via the existing `cli/src/node/secret_backend.rs::SecretBackend` trait (same mechanism that backs `store_auth_token` / `store_signing_secret` / `store_credential_value`) — keychain on macOS, `secret-tool` on Linux, encrypted file otherwise | No new sealing primitive; reuse the backend that already protects the node's long-lived auth token and per-service credentials |
-| Encoding | Base64url for keys/nonces, raw bytes for ciphertext over WSS | URL-safe for HTTP, compact for WSS binary frames |
+| Encoding | Base64url for keys, nonces, and ciphertext in JSON HTTP bodies + JSON WSS frames; BSON binary for ciphertext in MongoDB | Consistent base64url on all JSON transports (see `CryptoBundle` struct comment for the serde adapter) |
 
 ### Data model
 
@@ -127,8 +127,48 @@ pub struct CryptoBundle {
     pub ciphertext: Option<Vec<u8>>,
 }
 
+/// Tracks the lifecycle of the remote crypto flow on a single pending
+/// credential (or, for fan-out, on each target node independently).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub enum RemoteCryptoState {
+    /// Node generated keypair and posted pubkey; awaiting admin ciphertext.
+    PubkeyPosted,
+    /// Admin submitted ciphertext; NyxID forwarded to node (or queued for
+    /// offline node — see §"Offline queuing").
+    CiphertextReceived,
+    /// Ciphertext forwarded to offline node; stored server-side with a
+    /// shortened TTL (see Best Practice §3). Will be forwarded when the
+    /// node reconnects within the queue TTL.
+    CiphertextQueued,
+    /// Node decrypted successfully; secret stored (auto-accept) or held
+    /// in volatile queue (require_operator_confirm_for_remote).
+    Consumed,
+    /// Node decrypted successfully but operator confirmation is pending.
+    DecryptedPendingConfirmation,
+    /// AEAD decryption or AAD verification failed. Terminal.
+    DecryptFailed,
+    /// Pending credential expired before the flow completed.
+    Expired,
+}
+
 // On NodePendingCredential:
 pub crypto: Option<CryptoBundle>,
+/// State of the remote crypto flow. None for legacy CLI-only pending
+/// credentials (crypto: None).
+pub remote_state: Option<RemoteCryptoState>,
+
+// For multi-node fan-out: per-node state subdocument
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FanOutNodeState {
+    pub node_id: String,
+    pub crypto: CryptoBundle,
+    pub remote_state: RemoteCryptoState,
+    pub error_code: Option<u32>,
+    pub updated_at: DateTime<Utc>,
+}
+
+// On NodePendingCredential (only present for fan-out pushes):
+pub fan_out_nodes: Option<Vec<FanOutNodeState>>,
 ```
 
 State transitions:
@@ -241,11 +281,12 @@ Per-pending-credential rate limit: 1 successful POST, max 3 failed POSTs in a 60
 1. Handler allocates a `request_id`, registers a `oneshot::channel` waiter on the node connection's `credential_acks` map.
 2. Sends the `pending_credential_ciphertext` WSS frame with the `request_id`.
 3. Awaits the node's reply (`pending_credential_consumed {request_id, ok}`, `pending_credential_decrypted {request_id, pending_id}` when `require_operator_confirm_for_remote: true`, or `pending_credential_error {request_id, code, reason}`) with a configurable timeout (suggest 15s, matching the existing pattern).
-4. HTTP response shape:
-   - 200 on `consumed` (default remote auto-accept path)
-   - 202 on `pending_credential_decrypted` (strict confirmation policy; browser shows "waiting for operator confirmation")
-   - 4xx with error code 8006-8011 on `pending_credential_error`
-   - 503 `NodeOffline` (code 8010) on timeout / WSS disconnect
+4. HTTP response shape (first 202 in this codebase — intentionally chosen per RFC 7231 §6.3.3; frontend MUST handle explicitly rather than treating as error):
+   - **200** on `consumed` — default remote auto-accept path; secret stored
+   - **202** on `pending_credential_decrypted` — strict confirmation policy (`require_operator_confirm_for_remote: true`); browser shows "waiting for operator confirmation" with polling
+   - **202** on `ciphertext_queued` — node offline at POST time; ciphertext stored server-side with shortened TTL (Best Practice §3: 15 min); will be forwarded when the node reconnects. `remote_state` transitions to `CiphertextQueued`. Browser shows "waiting for node to come online" with polling. Distinguished from the sync-wait timeout (below) because the server knows the node is offline before even attempting the WSS send.
+   - **4xx** with error code 8006-8011 on `pending_credential_error`
+   - **504** Gateway Timeout on sync-wait timeout — node WAS online, WSS send succeeded, but no ack within 15s. The ciphertext was forwarded but the node didn't respond. `remote_state` stays `CiphertextReceived`. Admin can poll for eventual state change or cancel + re-push.
 
 Reuse the `oneshot` + timeout machinery — do not invent a new mechanism. The handler MUST block on the ack before returning; committing the ciphertext to MongoDB and returning 200 without confirmation would leave admin and node out of sync (same failure class as the historical issue captured in the `send_credential_update_and_wait` comments at lines 1599-1632).
 
@@ -253,12 +294,13 @@ Reuse the `oneshot` + timeout machinery — do not invent a new mechanism. The h
 
 Two separate signals — do not conflate them:
 
-**1. Feature detection (synchronous, cached).** Node agents advertise `supported_features` (a new field added in Phase 1; current node agents do not advertise it). The new flow contributes `crypto_v1` to that set. NyxID persists `Node.supported_features` (new model field; populated from the existing in-memory `record_capabilities` path in `node_ws_manager.rs:1705` if the codebase already has it, or added in Phase 1 if not). The frontend queries it before rendering UI:
+**1. Feature + policy detection (synchronous, cached).** Node agents advertise `supported_features` (a new field added in Phase 1; current node agents do not advertise it). The new flow contributes `crypto_v1` to that set. Additionally, the per-node policy flags (`enable_remote_credential_injection`, `require_operator_confirm_for_remote`) are persisted on the `Node` model and returned in the `GET /nodes/{id}` response so the frontend can make the correct UI decision without guessing:
 
-- `crypto_v1 ∈ supported_features` → show browser push + accept UI
+- `crypto_v1 ∈ supported_features` AND `enable_remote_credential_injection == true` → show browser push + accept UI
+- `crypto_v1 ∈ supported_features` AND `enable_remote_credential_injection == false` → show "this node supports remote injection but the feature is not yet enabled; an admin must enable it via the node settings page or `nyxid node config set enable_remote_credential_injection true`"
 - `crypto_v1 ∉ supported_features` (older agent or unupgraded node) → show legacy "SSH to node and run `nyxid node credentials accept`" instructions
 
-Feature detection is fast and cached. No polling for this step.
+NyxID persists `Node.supported_features` (new model field; populated from the existing in-memory `record_capabilities` path in `node_ws_manager.rs:1705` if the codebase already has it, or added in Phase 1 if not). Feature + policy detection is fast and cached. No polling for this step.
 
 **2. Per-pending pubkey readiness (asynchronous).** Once the admin pushes a pending credential, the node — if it supports `crypto_v1` — must generate its X25519 keypair and post the pubkey. This is async (the node may be currently busy, briefly disconnected from WSS, etc.). The frontend polls `GET /credentials/pending/{id}` with exponential backoff up to ~30s:
 
@@ -272,7 +314,7 @@ The existing two-party CLI flow keeps working regardless. A pending credential w
 
 ### WSS frame classification
 
-The new `pending_credential_pubkey` and `pending_credential_ciphertext` frames are **internal node-control protocol traffic** — same class as `node_metrics`, `proxy_request`, `proxy_response_*`, `pending_credential_available`, and `pending_credential_consumed`. They bypass the `ws_frame_injections` rules on `DownstreamService` / `UserService` (which apply only to downstream-service WS passthrough). Implementation note for Phase 1: register the new frame types in `node_ws.rs` alongside the existing node-control variants, not via the injection plumbing in `cli/src/node/ws_frame_injector.rs`.
+The new `pending_credential_pubkey` and `pending_credential_ciphertext` frames are **internal node-control protocol traffic** — same class as `node_metrics`, `proxy_request`, `proxy_response_*`, `pending_credentials_available` (plural, existing nudge), and `pending_credential_consumed`. They bypass the `ws_frame_injections` rules on `DownstreamService` / `UserService` (which apply only to downstream-service WS passthrough). Implementation note for Phase 1: register the new frame types in `node_ws.rs` alongside the existing node-control variants, not via the injection plumbing in `cli/src/node/ws_frame_injector.rs`.
 
 ### Accept gate
 
@@ -289,9 +331,13 @@ Behavior by path:
 
 Default behavior of any node remains "legacy two-party CLI flow" until an admin explicitly enables remote credential injection. Once enabled, auto-accept is the remote crypto default; the operator-confirm gate is an explicit per-node policy choice.
 
+**Migration UX:** When `enable_remote_credential_injection` is first set to `true` on a node, the admin UI should display a one-time banner explaining that by default, secrets pushed via the browser crypto path will be stored without operator confirmation. Orgs that require the confirmation gate should set `require_operator_confirm_for_remote: true` before pushing any credentials through the new path.
+
+**Security tradeoff note:** Auto-accept trades T1 resistance for operational convenience. When the admin auto-accepts without pausing to verify the SRI fingerprint, Phase 4.5's code-integrity defense becomes ineffective in practice (the admin never checks the separate-origin manifest). Orgs that need T1 defense-in-depth should set `require_operator_confirm_for_remote: true`, which forces a pause in the flow where fingerprint verification is feasible before the secret lands in the credential store.
+
 ## Code-integrity infrastructure (Phase 4.5)
 
-Defends T1 ("fully-compromised NyxID server"). The protocol's e2e encryption is only as strong as the JS that performs it; if NyxID can substitute the JS, it can capture plaintext before encryption. This phase makes that substitution detectable.
+Supports detection for T1 ("fully-compromised NyxID server"). The protocol's e2e encryption is only as strong as the JS that performs it; if NyxID can substitute the JS, it can capture plaintext before encryption. This phase makes that substitution **detectable by an admin who independently verifies the SRI fingerprint out-of-band** — it does not prevent substitution. See T1 for the full operational caveat.
 
 ### Standalone credential-accept page
 
@@ -357,7 +403,7 @@ Reserved range **8006–8011** for remote credential injection errors. The next-
 | 8007 | `PendingCredentialVersionUnsupported` | Node → NyxID | `crypto.version` not recognized. Likely a protocol drift. |
 | 8008 | `PendingCredentialCiphertextTooLarge` | NyxID POST handler | `len(ciphertext) > 16 * 1024`. Returns 413. |
 | 8009 | `PendingCredentialPubkeyAwaiting` | NyxID GET handler | Node has not yet posted the per-pending pubkey. Returns 404. Frontend polls with backoff up to ~30s (see §"Backward compatibility & version detection") — distinct from feature-detection fallback to legacy SSH UI. |
-| 8010 | `PendingCredentialNodeOffline` | NyxID POST handler | Node currently not connected via WSS. Ciphertext queued; admin sees "waiting for node" state. |
+| 8010 | `PendingCredentialNodeOffline` | NyxID POST handler | Node not connected via WSS at POST time. Ciphertext stored server-side with shortened queue TTL (Best Practice §3). Returns **202** with `remote_state: CiphertextQueued`. Frontend shows "waiting for node" with polling. |
 | 8011 | `PendingCredentialQueueFull` | NyxID POST handler | Per-node ciphertext queue at the 5-pending-per-node cap (per Design Review Feedback §3). Returns 429. |
 
 The authoritative error-code listing lives in `AGENTS.md` under the node-error bullet (currently states "Error codes 8000-8003 are reserved for node errors" — that text is itself out of date: 8004 `NodeCredentialMissing` and 8005 `WsProxyDownstream` already exist in `backend/src/errors/mod.rs`). Phase 1 must update that bullet to reflect the actual occupied range (8000-8005) plus the new RCI range (8006-8011), so the documentation source of truth stays consistent with the code.
@@ -389,6 +435,10 @@ Mandatory test coverage, locked at design time. Implementer must produce tests f
 | `post_ciphertext_per_pending_rate_limit` | `node_admin::tests` | 4 failed POSTs within 60s: 4th returns 429 + 5min lockout |
 | `get_pubkey_404_until_node_posts` | `node_admin::tests` | Pre-pubkey-post, GET returns 404 with code 8009 (`PendingCredentialPubkeyAwaiting`) |
 | `crypto_bundle_serde_roundtrip` | `models::node_pending_credential::tests` | CryptoBundle serialize → BSON → deserialize, all fields preserved |
+| `remote_state_enum_serde_roundtrip` | `models::node_pending_credential::tests` | All `RemoteCryptoState` variants survive BSON round-trip |
+| `post_ciphertext_node_offline_returns_202_queued` | `node_admin::tests` | When node is offline, ciphertext stored with 15-min TTL, returns 202 with `remote_state: CiphertextQueued` |
+| `queued_ciphertext_forwarded_on_reconnect` | `node_admin::tests` | After node reconnects, queued ciphertext forwarded via WSS, node decrypts, `remote_state` transitions to Consumed |
+| `queued_ciphertext_expires_after_ttl` | `node_admin::tests` | Ciphertext queued for offline node; after 15 min, cleanup sweep removes it and `remote_state` transitions to Expired |
 
 ### Frontend (TypeScript, `frontend/src/lib/crypto/`)
 
@@ -442,7 +492,7 @@ Implementer should run `cargo test`, `npm run test`, and the e2e suite before re
 |-------|----------------|-------------------|------------|
 | 1 — Backend protocol stubs | `backend/handlers/`, `backend/services/`, `backend/models/`, error codes | 1d / 2h | — |
 | 2 — Node crypto | `cli/src/node/credentials/crypto.rs`, `cli/src/node/agent.rs`, sealed privkey persistence | 3d / 4h | Phase 1 |
-| 3 — Frontend UI | `frontend/src/pages/service-detail.tsx`, `frontend/src/pages/node-detail.tsx`, `frontend/src/pages/credential-accept.tsx`, `frontend/src/lib/crypto/` | 3d / 4h | Phase 1 |
+| 3 — Frontend UI | `frontend/src/pages/service-detail.tsx`, `frontend/src/pages/node-detail.tsx`, `frontend/src/pages/credential-accept.tsx`, `frontend/src/lib/crypto/` | 4d / 6h | Phase 1 |
 | 3.5 — Multi-node fan-out | All three layers (per-node ephemeral pubkeys, fan-out endpoint, partial-state UI) | 2d / 4h | Phases 1, 2, 3 |
 | 4 — Audit + observability | `backend/services/audit_service` | 1d / 2h | Phase 1 |
 | 4.5 — Code-integrity infrastructure | `.github/workflows/release-publish.yml`, `frontend/index.html` SRI tags, `releases.nyxid.dev` host setup, admin-verification UX | 1w / 1d | Phase 3 |
@@ -489,10 +539,10 @@ Phase 1 alone gates everything; once it lands, B and C can launch as parallel wo
 | Node generates X25519 keypair | OS entropy source temporarily unavailable | ✓ | retry once, then surface error | ✓ clear error state |
 | Node posts pubkey via WSS | WSS drops between generation and post | ✓ | regenerate on reconnect | eventually consistent |
 | NyxID stores pubkey | Concurrent push for same pending_id (race) | ✓ | 409 first-push-wins | ✓ clear conflict message |
-| Browser fetches pubkey | Node hasn't posted yet (legacy node) | ✓ | 404 + `supported_features` flag fallback | ✓ legacy SSH-UI fallback |
+| Browser fetches pubkey | Node has `crypto_v1` but hasn't posted pubkey yet (async delay, not legacy) | ✓ | 404 (code 8009 `PubkeyAwaiting`) + exponential backoff polling up to 30s; distinct from legacy-node feature-detection fallback | ✓ "node not responding for crypto exchange" error |
 | Browser encrypts | `@noble/curves` keygen fails on weak entropy | ✓ | fail loud, retry | ✓ |
 | Browser SRI verify | Bundle hash mismatch (tampered or stale) | ✓ | block submit, surface mismatch | ✓ clear warning |
-| NyxID forwards ciphertext | Node offline at forward time | ✓ | queue + retry on reconnect (code 8010) | ✓ "waiting for node" state |
+| NyxID forwards ciphertext | Node offline at POST time | ✓ | ciphertext stored with 15-min queue TTL, `remote_state: CiphertextQueued`, forwarded on reconnect (code 8010, returns 202) | ✓ "waiting for node to come online" with polling |
 | Node decrypts | Wrong AAD (cross-credential replay) | ✓ | emit error 8006 | ✓ decrypt_failed state |
 | Node accepts + stores | Secret backend write fails | ✓ | preserve ciphertext, retry | ✓ recoverable state |
 | Multi-node fan-out | Partial decryption (some succeed, some fail) | ✓ | partial_decrypted state with per-node breakdown | ✓ |
@@ -538,7 +588,7 @@ During the architecture review of the remote credential injection proposal, the 
 
 3. **Queue Size & Resource Limits**
    - Enforce strict quotas on queued ciphertexts for offline nodes to prevent database bloating. Limit the maximum pending credentials in the "waiting for node" state to 5 per node.
-   - The server will shorten the TTL of the queued ciphertext (e.g., 15 minutes) compared to the standard metadata TTL (1 hour).
+   - The server will shorten the TTL of the queued ciphertext (e.g., 15 minutes) compared to the standard metadata TTL (1 hour). The ciphertext queue TTL and the metadata `expires_at` TTL are independent: the node's local sweep uses `expires_at` (1 hour) for sealed privkey eviction, while the server discards orphaned ciphertexts after 15 minutes. A sealed privkey without a matching ciphertext is harmless (can't decrypt anything).
 
 4. **Admin Verification Security Policy**
    - Disabling or bypassing the "I verified the fingerprint" verification checkbox via the per-org policy flag requires fresh MFA confirmation at the moment the flag is flipped. NyxID already exposes the MFA verification endpoints (`/auth/mfa/verify`) and the existing MFA factor on the admin's account is the gate. Multi-admin approval is not used here because NyxID does not currently have a multi-admin approval queue subsystem; introducing one would be a separate project. The MFA gate ensures that a single compromised admin's session cannot silently lower the organization's defense-in-depth against code-substitution attacks.
