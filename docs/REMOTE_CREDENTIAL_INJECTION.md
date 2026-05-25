@@ -116,15 +116,37 @@ nyxid node-credential inject <node-id> --slug home-assistant \
 
 Same flow but reads the secret from the named environment variable instead of prompting. Exits with 0 on success, non-zero on failure. Suitable for cron jobs, CI pipelines, and rotation scripts.
 
-**Fallback** (push only, continue in browser):
+**Browser wizard mode** (secret never touches the terminal — safe for AI-agent-assisted sessions):
+
+```bash
+nyxid node-credential inject <node-id> --slug home-assistant \
+    --injection-method header --field-name Authorization \
+    --browser [--org <org>]
+```
+
+For admins working alongside AI coding agents (Claude Code, Codex, OpenClaw, etc.) where the agent has full terminal visibility. A masked `Enter secret value:` prompt in mode 1 would still expose the secret through the terminal session the agent can read. The `--browser` flag avoids this:
+
+1. CLI creates the pending credential via the API (same as mode 1).
+2. CLI opens the default browser to the standalone credential-accept page (same page as the full-browser flow from Phase 3).
+3. Admin enters the secret in the browser (the AI agent cannot see browser input).
+4. Browser encrypts + submits ciphertext (Phase 3 e2e crypto).
+5. CLI polls `GET /credentials/pending/{id}` for state changes (exponential backoff).
+6. CLI prints the result: "Credential accepted and stored on node" or the relevant error.
+
+The AI agent sees only: `nyxid node-credential inject ... --browser` followed by `Opening browser... Waiting for browser submission... Credential accepted.` The secret value never appears in the terminal transcript.
+
+This follows the existing CLI wizard pattern (see `docs/CLI_WIZARD_V3.md`) used for OAuth device-code flows where browser-based interaction is already the established UX.
+
+**Fallback** (push only, continue later via any path):
 
 ```bash
 nyxid node-credential push <node-id> --slug home-assistant ...
 ```
 
-Unchanged from today's command. After creating the pending credential, prints both:
+Unchanged from today's command. After creating the pending credential, prints all three continuation paths:
 - The browser URL: `https://nyx.example.com/credentials/pending/{id}/accept`
-- The CLI command: `nyxid node-credential inject --pending {id}`
+- The CLI interactive command: `nyxid node-credential inject --pending {id}`
+- The CLI browser-wizard command: `nyxid node-credential inject --pending {id} --browser`
 
 so the admin can choose their preferred path for the secret-submission step.
 
@@ -483,7 +505,9 @@ Mandatory test coverage, locked at design time. Implementer must produce tests f
 | `inject_secret_env_reads_from_env` | `commands::node_credential::tests` | `--secret-env FOO` reads from `FOO` env var, never prompts stdin |
 | `inject_pubkey_timeout_errors_cleanly` | `commands::node_credential::tests` | If pubkey never arrives within 30s, prints clear error + suggests retry |
 | `inject_org_flag_resolves_correctly` | `commands::node_credential::tests` | `--org` accepts UUID, slug, and display name (per existing convention) |
-| `push_fallback_prints_both_paths` | `commands::node_credential::tests` | `push` (without inject) prints both browser URL and `inject --pending` CLI command |
+| `inject_browser_wizard_opens_url_and_polls` | `commands::node_credential::tests` | `--browser` opens the accept URL, CLI polls pending status, returns success when consumed |
+| `inject_browser_wizard_secret_not_in_terminal` | `commands::node_credential::tests` | With `--browser`, no secret value or masked prompt appears in stdout/stderr transcript |
+| `push_fallback_prints_all_three_paths` | `commands::node_credential::tests` | `push` (without inject) prints browser URL, `inject --pending`, and `inject --pending --browser` |
 
 ### Backend endpoints (Rust, `backend/src/handlers/node_admin.rs`)
 
@@ -525,7 +549,8 @@ These two fixtures catch encoding-mismatch bugs (e.g., base64 vs base64url, big-
 | `e2e_cli_inject_interactive` | `tests/e2e/credential_push.spec.ts` | `nyxid node-credential inject` does full flow: push → poll pubkey → encrypt → post ciphertext → 200 consumed; secret reaches node credential store |
 | `e2e_cli_inject_secret_env` | `tests/e2e/credential_push.spec.ts` | `nyxid node-credential inject --secret-env` reads from env, same flow, suitable for CI |
 | `e2e_cli_inject_org_node` | `tests/e2e/credential_push.spec.ts` | `nyxid node-credential inject --org <org> <node>` resolves org ownership, same crypto flow, credential stored on org-owned node |
-| `e2e_cli_push_prints_both_paths` | `tests/e2e/credential_push.spec.ts` | `nyxid node-credential push` creates pending and prints both browser URL and `inject --pending` CLI command |
+| `e2e_cli_inject_browser_wizard` | `tests/e2e/credential_push.spec.ts` | `nyxid node-credential inject --browser` opens browser, admin enters secret there (not in terminal), CLI polls and reports success |
+| `e2e_cli_push_prints_all_paths` | `tests/e2e/credential_push.spec.ts` | `nyxid node-credential push` creates pending and prints browser URL, `inject --pending`, and `inject --pending --browser` |
 | `e2e_remote_operator_confirm_opt_in` | `tests/e2e/credential_push.spec.ts` | With `require_operator_confirm_for_remote=true`, decrypted secret waits for operator confirmation and the browser shows the waiting state |
 | `e2e_node_restart_mid_flight` | `tests/e2e/credential_push.spec.ts` | Push pubkey, restart node agent, restart loads sealed privkey, then ciphertext decrypts successfully |
 | `e2e_legacy_node_fallback` | `tests/e2e/credential_push.spec.ts` | Node without `crypto_v1` feature flag: frontend shows legacy SSH instructions |
@@ -558,7 +583,7 @@ Implementer should run `cargo test`, `npm run test`, and the e2e suite before re
 | 3.5 — Multi-node fan-out | All three layers (per-node ephemeral pubkeys, fan-out endpoint, partial-state UI) | 2d / 4h | Phases 1, 2, 3 |
 | 4 — Audit + observability | `backend/services/audit_service` | 1d / 2h | Phase 1 |
 | 4.5 — Code-integrity infrastructure | `.github/workflows/release-publish.yml`, `frontend/index.html` SRI tags, `releases.nyxid.dev` host setup, admin-verification UX | 1w / 1d | Phase 3 |
-| 5 — CLI full e2e | `cli/src/commands/node_credential.rs` new `inject` subcommand (interactive + `--secret-env` non-interactive); `nyxid-crypto` shared workspace crate (ECDH+HKDF+AEAD shared with Phase 2 node-side) | 3d / 4h | Phase 2 (shares crypto crate) |
+| 5 — CLI full e2e | `cli/src/commands/node_credential.rs` new `inject` subcommand: interactive prompt, `--secret-env` for CI, `--browser` wizard (opens browser, secret never touches terminal — safe for AI-agent sessions); `nyxid-crypto` shared workspace crate | 3d / 4h | Phase 2 (shares crypto crate) + Phase 3 (browser wizard reuses the accept page) |
 | 6 — Hint rewrites | `cli/src/commands/service.rs`, `cli/src/commands/node_credential.rs` | <1d / 30m | All others |
 
 Phase 3 must include both the push metadata form and the secret accept form.
