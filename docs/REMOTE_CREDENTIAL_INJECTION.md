@@ -24,7 +24,7 @@ This document proposes a protocol that lets an org admin supply the secret from 
 - **G3.** Existing CLI two-party flow continues to work unchanged. The new flow is additive, not a replacement.
 - **G4.** Forward secrecy: compromise of NyxID server data at rest does not reveal past secrets even if a node's long-lived state is later compromised.
 - **G5.** For the remote browser crypto path, the operator-on-node "accept" gate is opt-in, not the default. With `enable_remote_credential_injection: true` and `require_operator_confirm_for_remote: false` (the default for the remote path), no one needs to SSH into or be physically present at the node. Legacy CLI paste acceptance remains manual.
-- **G6.** Detection of malicious code-substitution by a fully-compromised NyxID server, assuming the admin independently verifies the SRI fingerprint out-of-band against the signed release manifest at a separate origin (Phase 4.5 below). This is a detection control, not a prevention guarantee — see T1 for the operational caveat.
+- **G6.** Detection of malicious **JS code-substitution** (not pubkey substitution) by a fully-compromised NyxID server, assuming the admin independently verifies the SRI fingerprint out-of-band (Phase 4.5 below). This is a code-integrity detection control only — it does not defend against the T1 pubkey-MITM described in the threat model. Full T1 confidentiality defense requires node-signed pubkeys (future v2).
 
 ## Non-goals
 
@@ -37,18 +37,23 @@ This document proposes a protocol that lets an org admin supply the secret from 
 
 ## Threat model
 
-Adversaries we defend against:
+Adversaries defended in v1:
 
 | # | Adversary | Defense |
 |---|-----------|---------|
-| T1 | Fully-compromised NyxID server (malicious operator, RCE, hostile fork) | E2E encryption + **Code-integrity controls (Phase 4.5)** — with an explicit operational caveat: NyxID serves the standalone HTML, the SRI hashes inside it, the displayed fingerprint, and the "verify" button. A fully-compromised server can substitute all of them in lockstep. Phase 4.5's defense is **detection assuming the admin independently verifies the displayed fingerprint out-of-band** (e.g., opens `releases.nyxid.dev` from a separate browser/device and compares). Without active admin verification, T1 degrades in practice to "T2 only" (passive-read protection). The signed manifest at a separate origin is what makes verification possible at all — see Phase 4.5 § "Admin verification UX" for the operational expectations the defense relies on. |
-| T2 | Passive read access to NyxID storage or memory (DB dump, backup leak, future operator with archive) | E2E encryption alone: server only stores ciphertext bound to a single pending credential |
-| T3 | Active MITM past TLS termination at NyxID (rogue middlebox, compromised CA proxy chain) | AEAD authenticity + freshness binding catch substitution |
+| T2 | Passive read access to NyxID storage or memory (DB dump, backup leak, future operator with archive) | E2E encryption: server only stores opaque ciphertext bound to a single pending credential. **This is the primary confidentiality guarantee of the v1 protocol.** |
 | T4 | Replay of a captured ciphertext blob against the same pending credential | Atomicity guard: first-push-wins, returns 409 on second push (per §"Race protection") |
 | T5 | Replay of a captured ciphertext blob against a *different* pending credential or node, or metadata tampering (changing injection target after admin submission) | AEAD associated data binds ciphertext to `(node_id, pending_credential_id, slug, injection_method, field_name, target_url, "v1")` — any alteration of these fields invalidates the auth tag on decrypt |
 | T6 | Adversary later steals the node's persistent state and decrypts past pushes | Ephemeral X25519 keypair per pending credential, sealed at rest by the node's long-lived auth key, dropped on consume — gives forward secrecy |
 | T7 | Race-to-brick: attacker submits garbage ciphertext faster than the legitimate admin | Per-pending-credential rate limit (1 successful POST, 3 failed in 60s, then 5-min lockout); pending IDs have ~256 bits of entropy |
 | T8 | Node restart between pubkey post and ciphertext receipt | Ephemeral privkey persisted to node's local secret backend, sealed by long-lived auth key (survives restart, dropped on consume/decline/expire) |
+
+Acknowledged threats — NOT defended in v1 (future work: node-signed ephemeral pubkeys via TOFU-pinned Ed25519 identity):
+
+| # | Adversary | Why not defended | Mitigation available today |
+|---|-----------|-----------------|---------------------------|
+| T1 | Fully-compromised NyxID server (malicious operator, RCE, hostile fork) | A compromised server can substitute the node's ephemeral X25519 pubkey with its own, decrypt the admin's ciphertext, re-encrypt to the real node, and forward — classic key-exchange MITM. The AEAD AAD binds metadata but does not authenticate the pubkey's origin. Phase 4.5 code-integrity controls (SRI, signed manifest) detect JS substitution only, not pubkey substitution. | Admin independently verifies the node's pubkey fingerprint out-of-band (node agent logs the fingerprint to local console; admin compares before submitting). See §"T1 data-substitution caveat" in the CLI section. **Future v2:** node signs its ephemeral pubkey with its long-lived Ed25519 identity, verified via TOFU-pinned node public key. |
+| T3 | Active MITM past TLS termination at NyxID (rogue middlebox, compromised CA proxy chain) | Same pubkey-substitution attack as T1 — any actor that can alter the `GET /pending/{id}` response can substitute the pubkey. AEAD catches metadata tampering (T5) but not key-exchange MITM because the attacker chooses the pubkey before encryption. | Same as T1: out-of-band pubkey fingerprint verification. |
 
 Out of scope:
 
