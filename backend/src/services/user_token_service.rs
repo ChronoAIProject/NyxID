@@ -1092,58 +1092,63 @@ pub async fn poll_device_code(
     }
 
     if !status_code.is_success() {
-        // Parse RFC 8628 error response (used by both formats as fallback)
-        if let Ok(resp_data) = response.json::<serde_json::Value>().await
-            && let Some(error) = resp_data["error"].as_str()
-        {
-            match error {
-                "authorization_pending" => {
-                    return Ok(DeviceCodePollResult {
-                        status: "pending".to_string(),
-                        interval: oauth_state.poll_interval,
-                        effective_user_id: None,
-                    });
-                }
-                "slow_down" => {
-                    let new_interval = oauth_state.poll_interval.unwrap_or(5) + 5;
-                    db.collection::<OAuthState>(OAUTH_STATES)
-                        .update_one(
-                            doc! { "_id": state },
-                            doc! { "$set": { "poll_interval": new_interval } },
-                        )
-                        .await?;
-                    return Ok(DeviceCodePollResult {
-                        status: "slow_down".to_string(),
-                        interval: Some(new_interval),
-                        effective_user_id: None,
-                    });
-                }
-                "expired_token" => {
-                    db.collection::<OAuthState>(OAUTH_STATES)
-                        .delete_one(doc! { "_id": state })
-                        .await?;
-                    return Ok(DeviceCodePollResult {
-                        status: "expired".to_string(),
-                        interval: None,
-                        effective_user_id: None,
-                    });
-                }
-                "access_denied" => {
-                    db.collection::<OAuthState>(OAUTH_STATES)
-                        .delete_one(doc! { "_id": state })
-                        .await?;
-                    return Ok(DeviceCodePollResult {
-                        status: "denied".to_string(),
-                        interval: None,
-                        effective_user_id: None,
-                    });
-                }
-                _ => {}
+        let raw_body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "unknown".to_string());
+
+        match classify_device_poll_failure(status_code, &raw_body) {
+            Ok(DevicePollFlow::Pending) => {
+                return Ok(DeviceCodePollResult {
+                    status: "pending".to_string(),
+                    interval: oauth_state.poll_interval,
+                    effective_user_id: None,
+                });
+            }
+            Ok(DevicePollFlow::SlowDown) => {
+                let new_interval = oauth_state.poll_interval.unwrap_or(5) + 5;
+                db.collection::<OAuthState>(OAUTH_STATES)
+                    .update_one(
+                        doc! { "_id": state },
+                        doc! { "$set": { "poll_interval": new_interval } },
+                    )
+                    .await?;
+                return Ok(DeviceCodePollResult {
+                    status: "slow_down".to_string(),
+                    interval: Some(new_interval),
+                    effective_user_id: None,
+                });
+            }
+            Ok(DevicePollFlow::Expired) => {
+                db.collection::<OAuthState>(OAUTH_STATES)
+                    .delete_one(doc! { "_id": state })
+                    .await?;
+                return Ok(DeviceCodePollResult {
+                    status: "expired".to_string(),
+                    interval: None,
+                    effective_user_id: None,
+                });
+            }
+            Ok(DevicePollFlow::Denied) => {
+                db.collection::<OAuthState>(OAUTH_STATES)
+                    .delete_one(doc! { "_id": state })
+                    .await?;
+                return Ok(DeviceCodePollResult {
+                    status: "denied".to_string(),
+                    interval: None,
+                    effective_user_id: None,
+                });
+            }
+            Err(err) => {
+                tracing::error!(
+                    provider_id = %provider_id,
+                    status = %status_code,
+                    body = %raw_body,
+                    "Device code poll failed with provider error"
+                );
+                return Err(err);
             }
         }
-        return Err(AppError::Internal(format!(
-            "Device code poll returned unexpected status: {status_code}"
-        )));
     }
 
     // Success (2xx): parse response
@@ -1187,23 +1192,24 @@ pub async fn poll_device_code(
                     AppError::Internal(format!("Device code token exchange failed: {e}"))
                 })?;
 
-        if !token_response.status().is_success() {
-            let err_status = token_response.status();
-            let err_body = token_response.text().await.unwrap_or_default();
-            let truncated_err_body: String = err_body.chars().take(200).collect();
-            tracing::error!(
-                status = %err_status,
-                body = %truncated_err_body,
-                "Device code token exchange returned error"
-            );
-            return Err(AppError::Internal(format!(
-                "Device code token exchange failed with status {err_status}"
-            )));
-        }
+        let status = token_response.status();
+        let raw_body = token_response
+            .text()
+            .await
+            .unwrap_or_else(|_| "unknown".to_string());
 
-        let token_data: serde_json::Value = token_response.json().await.map_err(|e| {
-            AppError::Internal(format!("Failed to parse token exchange response: {e}"))
-        })?;
+        let token_data = match parse_token_exchange_response(status, &raw_body) {
+            Ok(value) => value,
+            Err(err) => {
+                tracing::error!(
+                    provider_id = %provider_id,
+                    status = %status,
+                    body = %raw_body,
+                    "Device code token exchange returned error"
+                );
+                return Err(err);
+            }
+        };
 
         return store_device_code_tokens(
             db,
@@ -1553,48 +1559,57 @@ pub async fn handle_oauth_callback(
         .await
         .map_err(|e| AppError::Internal(format!("OAuth token exchange failed: {e}")))?;
 
-    if !token_response.status().is_success() {
-        let status = token_response.status();
-        let body = token_response
-            .text()
-            .await
-            .unwrap_or_else(|_| "unknown".to_string());
-        tracing::error!(
-            provider_id = %provider_id,
-            status = %status,
-            body = %body,
-            "OAuth token exchange returned error"
-        );
-        return Err(AppError::Internal(format!(
-            "OAuth token exchange failed with status {status}"
-        )));
-    }
-
-    let token_data: serde_json::Value = token_response
-        .json()
+    let status = token_response.status();
+    // Read the body once as text so we can both (a) parse provider-shaped
+    // error envelopes that come back with HTTP 200 (Lark / Feishu return
+    // `{"code": <non-zero>, "msg": "..."}` with a 200 status) and (b) keep
+    // the full body for the server-side audit log without consuming the
+    // response twice.
+    let raw_body = token_response
+        .text()
         .await
-        .map_err(|e| AppError::Internal(format!("Failed to parse token response: {e}")))?;
+        .unwrap_or_else(|_| "unknown".to_string());
 
-    if token_data
-        .get("code")
-        .and_then(|value| value.as_i64())
-        .is_some_and(|code| code != 0)
-    {
-        tracing::error!(
-            provider_id = %provider_id,
-            response = %token_data,
-            "OAuth token exchange returned provider error"
-        );
-        return Err(AppError::Internal(
-            "OAuth token exchange failed".to_string(),
-        ));
-    }
+    let token_data = match parse_token_exchange_response(status, &raw_body) {
+        Ok(value) => value,
+        Err(err) => {
+            // Log the full status + raw body server-side; `err` only carries
+            // the provider's own returned error text (see
+            // `parse_token_exchange_response`), never internal/DB details.
+            tracing::error!(
+                provider_id = %provider_id,
+                status = %status,
+                body = %raw_body,
+                "OAuth token exchange returned error"
+            );
+            return Err(err);
+        }
+    };
 
     let token_payload = oauth_token_payload(&token_data);
 
-    let access_token = token_payload["access_token"]
-        .as_str()
-        .ok_or_else(|| AppError::Internal("Missing access_token in response".to_string()))?;
+    let access_token = match token_payload["access_token"].as_str() {
+        Some(token) => token,
+        None => {
+            tracing::error!(
+                provider_id = %provider_id,
+                status = %status,
+                body = %raw_body,
+                "OAuth token exchange response missing access_token"
+            );
+            // Surface any provider-returned error text rather than a generic
+            // internal error so the wizard shows something actionable.
+            return Err(
+                token_exchange_provider_error(&token_data).unwrap_or_else(|| {
+                    AppError::BadRequest(
+                        "Identity provider did not return an access token. \
+                     Re-check the app credentials and try connecting again."
+                            .to_string(),
+                    )
+                }),
+            );
+        }
+    };
 
     let refresh_token = token_payload["refresh_token"].as_str();
     let expires_in = token_payload["expires_in"].as_i64();
@@ -1757,6 +1772,145 @@ fn oauth_token_payload(token_data: &serde_json::Value) -> &serde_json::Value {
                 .is_some()
         })
         .unwrap_or(token_data)
+}
+
+/// Extract a user-surfaceable error from an OAuth token-exchange response
+/// body, if it carries one.
+///
+/// Two provider error shapes are recognized:
+///
+/// - **Lark / Feishu**: HTTP 200 with `{"code": <non-zero>, "msg": "..."}`.
+///   These providers do NOT use the OAuth-standard error envelope and do
+///   NOT signal failure via the HTTP status, so a generic parser that only
+///   inspects the status or looks for `access_token` would otherwise miss
+///   the real cause (issue #694).
+/// - **RFC 6749 §5.2**: `{"error": "...", "error_description": "..."}`.
+///
+/// Returns a [`AppError::BadRequest`] carrying ONLY the provider's own
+/// returned `code`/`msg`/`error` text. This is intentionally a surfaceable
+/// variant (not `Internal`/`DatabaseError`) so `safe_error_message` passes
+/// it through to the user. The raw body and HTTP status are logged by the
+/// caller for ops; they are never embedded in the returned error.
+fn token_exchange_provider_error(token_data: &serde_json::Value) -> Option<AppError> {
+    // Lark / Feishu envelope: non-zero integer `code` means failure.
+    if let Some(code) = token_data.get("code").and_then(serde_json::Value::as_i64)
+        && code != 0
+    {
+        let msg = token_data
+            .get("msg")
+            .and_then(serde_json::Value::as_str)
+            .filter(|m| !m.trim().is_empty())
+            .unwrap_or("unknown error");
+        return Some(AppError::BadRequest(format!(
+            "Identity provider rejected the authorization (code {code}): {msg}"
+        )));
+    }
+
+    // RFC 6749 §5.2 error envelope.
+    if let Some(error) = token_data
+        .get("error")
+        .and_then(serde_json::Value::as_str)
+        .filter(|e| !e.trim().is_empty())
+    {
+        let description = token_data
+            .get("error_description")
+            .and_then(serde_json::Value::as_str)
+            .filter(|d| !d.trim().is_empty());
+        let message = match description {
+            Some(desc) => format!("Identity provider rejected the authorization: {error} ({desc})"),
+            None => format!("Identity provider rejected the authorization: {error}"),
+        };
+        return Some(AppError::BadRequest(message));
+    }
+
+    None
+}
+
+/// Evaluate a raw OAuth token-exchange response body and return the parsed
+/// JSON value on success, or a user-surfaceable [`AppError`] on failure.
+///
+/// Failure handling never leaks internal/transport details to the returned
+/// error: only provider-returned error text (via
+/// [`token_exchange_provider_error`]) or a generic-but-actionable message is
+/// surfaced. The caller logs the full status + raw body for ops.
+fn parse_token_exchange_response(
+    status: reqwest::StatusCode,
+    raw_body: &str,
+) -> AppResult<serde_json::Value> {
+    let parsed: Option<serde_json::Value> = serde_json::from_str(raw_body).ok();
+
+    // A provider-shaped error can appear regardless of HTTP status (Lark
+    // returns it with 200). Prefer it whenever present so the user sees the
+    // provider's own message.
+    if let Some(ref value) = parsed
+        && let Some(provider_err) = token_exchange_provider_error(value)
+    {
+        return Err(provider_err);
+    }
+
+    if !status.is_success() {
+        // Non-2xx with no recognizable provider error envelope. Surface the
+        // status (RFC-style "the provider returned an error") without echoing
+        // the raw body, which may contain HTML or sensitive transport noise.
+        return Err(AppError::BadRequest(format!(
+            "Identity provider returned an error during token exchange (HTTP {}). \
+             Re-check the app credentials and try connecting again.",
+            status.as_u16()
+        )));
+    }
+
+    // 2xx: require a JSON object we can read tokens out of.
+    match parsed {
+        Some(value @ serde_json::Value::Object(_)) => Ok(value),
+        _ => Err(AppError::BadRequest(
+            "Identity provider returned an unreadable token response. \
+             Re-check the app credentials and try connecting again."
+                .to_string(),
+        )),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DevicePollFlow {
+    Pending,
+    SlowDown,
+    Expired,
+    Denied,
+}
+
+/// Classify a non-2xx device-code poll response body. Returns:
+/// - `Ok(DevicePollFlow)` for the four RFC 8628 flow-control states the
+///   caller maps to "pending"/"slow_down"/"expired"/"denied",
+/// - `Err(AppError::BadRequest)` for any other recognizable provider error
+///   (RFC 6749 / Lark envelope) or an opaque non-2xx. The error carries only
+///   the provider's own message or a generic-but-actionable hint — never the
+///   raw body.
+fn classify_device_poll_failure(
+    status: reqwest::StatusCode,
+    raw_body: &str,
+) -> AppResult<DevicePollFlow> {
+    let parsed: Option<serde_json::Value> = serde_json::from_str(raw_body).ok();
+
+    if let Some(ref value) = parsed {
+        if let Some(error) = value.get("error").and_then(serde_json::Value::as_str) {
+            match error {
+                "authorization_pending" => return Ok(DevicePollFlow::Pending),
+                "slow_down" => return Ok(DevicePollFlow::SlowDown),
+                "expired_token" => return Ok(DevicePollFlow::Expired),
+                "access_denied" => return Ok(DevicePollFlow::Denied),
+                _ => {}
+            }
+        }
+
+        if let Some(provider_err) = token_exchange_provider_error(value) {
+            return Err(provider_err);
+        }
+    }
+
+    Err(AppError::BadRequest(format!(
+        "Identity provider returned an error during device authorization (HTTP {}). Re-check the app credentials and try again.",
+        status.as_u16()
+    )))
 }
 
 /// Multi-connection OAuth refresh path: refresh an access token using the
@@ -2452,12 +2606,14 @@ pub async fn list_user_tokens(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_telegram_identity_metadata, build_telegram_identity_update_doc,
-        build_user_token_summary, ensure_additional_scopes_supported, merge_scopes,
-        normalize_telegram_bot_api_key, oauth_token_payload, params_to_json_body,
-        parse_additional_scopes, uses_json_oauth_token_exchange,
+        DevicePollFlow, build_telegram_identity_metadata, build_telegram_identity_update_doc,
+        build_user_token_summary, classify_device_poll_failure, ensure_additional_scopes_supported,
+        merge_scopes, normalize_telegram_bot_api_key, oauth_token_payload, params_to_json_body,
+        parse_additional_scopes, parse_token_exchange_response, token_exchange_provider_error,
+        uses_json_oauth_token_exchange,
     };
     use crate::crypto::telegram::TelegramLoginData;
+    use crate::errors::AppError;
     use crate::models::provider_config::ProviderConfig;
     use crate::models::user_provider_token::UserProviderToken;
     use chrono::Utc;
@@ -2598,6 +2754,150 @@ mod tests {
         assert_eq!(payload["access_token"], "lark-access");
         assert_eq!(payload["refresh_token"], "lark-refresh");
         assert_eq!(payload["expires_in"], 7200);
+    }
+
+    /// Regression for issue #694: Lark / Feishu return HTTP 200 with a
+    /// non-zero `code` + `msg` instead of an OAuth error envelope. Before the
+    /// fix this surfaced as `AppError::Internal`, which `safe_error_message`
+    /// flattens to the generic "An internal error occurred" string, leaving
+    /// the wizard with no clue why the credential landed in `failed`. The
+    /// parsed error must now be a surfaceable variant carrying the provider's
+    /// own `code`/`msg`.
+    #[test]
+    fn lark_style_200_with_nonzero_code_surfaces_provider_message() {
+        // Lark sends HTTP 200 even on failure.
+        let body = r#"{"code": 99991663, "msg": "app ticket invalid"}"#;
+        let err = parse_token_exchange_response(reqwest::StatusCode::OK, body)
+            .expect_err("non-zero Lark code must be an error");
+
+        // Must NOT be Internal/DatabaseError, otherwise safe_error_message
+        // would hide it behind the generic string.
+        assert!(
+            matches!(err, AppError::BadRequest(_)),
+            "expected surfaceable BadRequest, got {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("99991663"), "missing provider code: {msg}");
+        assert!(
+            msg.contains("app ticket invalid"),
+            "missing provider msg: {msg}"
+        );
+    }
+
+    /// `safe_error_message` (in `handlers/user_tokens.rs`) only flattens
+    /// `Internal`/`DatabaseError`. Verify the Lark error is none of those, so
+    /// the actionable text reaches the user-facing redirect.
+    #[test]
+    fn lark_error_passes_through_safe_error_filter() {
+        let body = r#"{"code": 20029, "msg": "redirect_uri mismatch"}"#;
+        let err = parse_token_exchange_response(reqwest::StatusCode::OK, body)
+            .expect_err("non-zero Lark code must be an error");
+        // Mirror safe_error_message's filter: only Internal/DatabaseError are masked.
+        let masked = matches!(err, AppError::Internal(_) | AppError::DatabaseError(_));
+        assert!(!masked, "Lark error should not be masked as internal");
+        assert!(err.to_string().contains("redirect_uri mismatch"));
+    }
+
+    #[test]
+    fn missing_access_token_without_provider_error_is_actionable_bad_request() {
+        // 200 OK, valid JSON, but no access_token and no provider error code.
+        let body = r#"{"token_type": "bearer"}"#;
+        let value = parse_token_exchange_response(reqwest::StatusCode::OK, body)
+            .expect("body with no provider error parses as Ok value");
+        // Caller path: no access_token -> token_exchange_provider_error is None
+        // -> falls back to the generic-but-actionable BadRequest.
+        assert!(token_exchange_provider_error(&value).is_none());
+    }
+
+    #[test]
+    fn standard_oauth_error_envelope_surfaces_description() {
+        let body = r#"{"error": "invalid_grant", "error_description": "code expired"}"#;
+        let err = parse_token_exchange_response(reqwest::StatusCode::BAD_REQUEST, body)
+            .expect_err("OAuth error envelope must be an error");
+        assert!(matches!(err, AppError::BadRequest(_)));
+        let msg = err.to_string();
+        assert!(msg.contains("invalid_grant"), "msg: {msg}");
+        assert!(msg.contains("code expired"), "msg: {msg}");
+    }
+
+    #[test]
+    fn non_success_without_envelope_does_not_leak_raw_body() {
+        // A 500 with an HTML/transport body and no recognizable envelope must
+        // NOT echo the raw body to the user.
+        let body = "<html><body>internal proxy stack trace: secret.db.host</body></html>";
+        let err = parse_token_exchange_response(reqwest::StatusCode::INTERNAL_SERVER_ERROR, body)
+            .expect_err("non-2xx without envelope must be an error");
+        assert!(matches!(err, AppError::BadRequest(_)));
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("secret.db.host") && !msg.contains("stack trace"),
+            "raw body must not leak into user message: {msg}"
+        );
+        assert!(msg.contains("500"), "status code should be surfaced: {msg}");
+    }
+
+    #[test]
+    fn successful_standard_response_parses_through() {
+        let body = r#"{"access_token": "abc", "token_type": "bearer", "expires_in": 3600}"#;
+        let value = parse_token_exchange_response(reqwest::StatusCode::OK, body)
+            .expect("valid token response parses");
+        assert_eq!(value["access_token"], "abc");
+    }
+
+    #[test]
+    fn classify_device_poll_failure_handles_flow_control() {
+        let status = reqwest::StatusCode::BAD_REQUEST;
+
+        // Pending
+        let res =
+            classify_device_poll_failure(status, r#"{"error":"authorization_pending"}"#).unwrap();
+        assert_eq!(res, DevicePollFlow::Pending);
+
+        // Slow Down
+        let res = classify_device_poll_failure(status, r#"{"error":"slow_down"}"#).unwrap();
+        assert_eq!(res, DevicePollFlow::SlowDown);
+
+        // Expired
+        let res = classify_device_poll_failure(status, r#"{"error":"expired_token"}"#).unwrap();
+        assert_eq!(res, DevicePollFlow::Expired);
+
+        // Denied
+        let res = classify_device_poll_failure(status, r#"{"error":"access_denied"}"#).unwrap();
+        assert_eq!(res, DevicePollFlow::Denied);
+    }
+
+    #[test]
+    fn classify_device_poll_failure_surfaces_provider_error() {
+        let status = reqwest::StatusCode::BAD_REQUEST;
+
+        // Standard OAuth provider error (RFC 6749)
+        let body = r#"{"error":"invalid_client","error_description":"client secret mismatch"}"#;
+        let err = classify_device_poll_failure(status, body).unwrap_err();
+        assert!(matches!(err, AppError::BadRequest(_)));
+        let msg = err.to_string();
+        assert!(msg.contains("invalid_client"));
+        assert!(msg.contains("client secret mismatch"));
+
+        // Lark-style non-zero code error envelope
+        let body = r#"{"code": 20029, "msg": "redirect_uri mismatch"}"#;
+        let err = classify_device_poll_failure(status, body).unwrap_err();
+        assert!(matches!(err, AppError::BadRequest(_)));
+        let msg = err.to_string();
+        assert!(msg.contains("20029"));
+        assert!(msg.contains("redirect_uri mismatch"));
+    }
+
+    #[test]
+    fn classify_device_poll_failure_handles_opaque_failures_without_leak() {
+        let status = reqwest::StatusCode::INTERNAL_SERVER_ERROR;
+        let body = "<html><body>sensitive raw response stacktrace with secrets</body></html>";
+        let err = classify_device_poll_failure(status, body).unwrap_err();
+        assert!(matches!(err, AppError::BadRequest(_)));
+        let msg = err.to_string();
+        assert!(msg.contains("500"));
+        assert!(!msg.contains("sensitive"));
+        assert!(!msg.contains("secrets"));
+        assert!(!msg.contains("stacktrace"));
     }
 
     #[test]
@@ -2837,7 +3137,7 @@ mod tests {
     // refresh_user_api_key_in_place tests (multi-connection refresh path)
     // ───────────────────────────────────────────────────────────────────
 
-    use super::{AppError, Duration, PROVIDER_CONFIGS};
+    use super::{Duration, PROVIDER_CONFIGS};
     use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
     use crate::test_utils::{connect_test_database, test_encryption_keys};
     use mongodb::bson::doc;

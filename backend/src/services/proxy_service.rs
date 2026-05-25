@@ -2296,13 +2296,19 @@ pub async fn forward_request(
                 ProxyBody::Buffered(None) => &[][..],
             };
             let creds = AwsCredentials::from_json(&target.credential).map_err(|e| {
-                AppError::Internal(format!(
-                    "aws_sigv4 credential is malformed: {e}. Expected JSON with access_key_id, secret_access_key, region, service."
-                ))
+                tracing::error!(error = %e, "aws_sigv4 credential malformed");
+                AppError::BadRequest(
+                    "The aws_sigv4 credential is malformed. Expected JSON with fields: access_key_id, secret_access_key, region, service.".to_string()
+                )
             })?;
             let signed_headers =
                 aws_sigv4::sign_request(method.as_str(), &url, &signed_input, body_bytes, &creds)
-                    .map_err(|e| AppError::Internal(format!("aws_sigv4 signing failed: {e}")))?;
+                    .map_err(|e| {
+                        tracing::error!(error = %e, "aws_sigv4 request signing failed");
+                        AppError::BadRequest(
+                            "Failed to sign the request for aws_sigv4. Verify the credential's region and service are correct.".to_string()
+                        )
+                    })?;
             for header in signed_headers {
                 request = request.header(&header.name, &header.value);
             }
