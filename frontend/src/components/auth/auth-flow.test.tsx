@@ -165,6 +165,18 @@ describe("AuthFlow — login", () => {
     );
   });
 
+  it("maps invite_code_already_redeemed to the already-redeemed message", () => {
+    render(
+      <AuthFlow
+        initialPanel={0}
+        socialError="invite_code_already_redeemed"
+      />,
+    );
+    expect(screen.getByTestId("social-error")).toHaveTextContent(
+      "This invite code has already been redeemed with this account.",
+    );
+  });
+
   it("hides the email/password form when email auth is disabled", () => {
     config.value = {
       invite_code_required: true,

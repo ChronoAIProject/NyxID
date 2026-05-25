@@ -9,6 +9,10 @@ pub struct InviteCodeUsage {
     pub user_id: String,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub used_at: DateTime<Utc>,
+    /// Normalized (trimmed + lowercased) email of the registrant. Absent on
+    /// legacy usages recorded before per-identity enforcement was added.
+    #[serde(default)]
+    pub email: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
