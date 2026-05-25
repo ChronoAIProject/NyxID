@@ -23,14 +23,14 @@ This document proposes a protocol that lets an org admin supply the secret from 
 - **G2.** NyxID server only ever sees opaque ciphertext. The plaintext secret never traverses NyxID memory, never enters NyxID storage, never appears in NyxID audit logs.
 - **G3.** Existing CLI two-party flow continues to work unchanged. The new flow is additive, not a replacement.
 - **G4.** Forward secrecy: compromise of NyxID server data at rest does not reveal past secrets even if a node's long-lived state is later compromised.
-- **G5.** Existing operator-on-node "accept" gate remains the default; the new flow is opt-in per node. Orgs running strict separation-of-duties today do not get a behavior change by default.
+- **G5.** For the remote browser crypto path, the operator-on-node "accept" gate is opt-in, not the default. With `enable_remote_credential_injection: true` and `require_operator_confirm_for_remote: false` (the default for the remote path), no one needs to SSH into or be physically present at the node. Legacy CLI paste acceptance remains manual.
 - **G6.** Protection against malicious code-substitution by a fully-compromised NyxID server. Achieved via Subresource Integrity (SRI), signed release channel, and admin verification UX (Phase 4.5 below).
 
 ## Non-goals
 
 - Protection against a malicious node agent (the node holds credentials by design).
 - Protection against an admin who is themselves malicious or compromised.
-- Replacing the existing CLI push flow. The intent / metadata side stays the same.
+- Replacing the existing CLI push flow. CLI push remains available for scripted / CI workflows, but the same pending credential can also be created from the web dashboard.
 - Per-credential audit of secret content. Audit remains metadata-only.
 - HSM-backed node X25519 keypairs (uses existing local secret backend).
 - Mobile native client support (mobile browser works against the browser flow).
@@ -53,7 +53,7 @@ Adversaries we defend against:
 Out of scope:
 
 - Phishing of the admin (attacker tricks admin into supplying secret to attacker-controlled UI). Same risk surface as the current CLI prompt today.
-- Malicious admin pushing a legitimately-encrypted credential pointing at an attacker URL. The operator-on-node accept step (manual-accept mode, default per §"Accept gate") and the existing cloud-metadata target_url block (#770) are the relevant defenses.
+- Malicious or compromised admin pushing a legitimately-encrypted credential pointing at an attacker URL. The remote crypto path intentionally trusts an authenticated admin session authorized for the node to initiate and submit the encrypted secret; AEAD/AAD binding ensures the node accepts only ciphertext generated for that pending credential, but it does not make a malicious admin benign. The existing cloud-metadata target_url block (#770) remains the baseline defense, and strict separation-of-duties orgs can set `require_operator_confirm_for_remote: true` to add the operator-on-node review gate for the remote path.
 
 ## Options considered
 
@@ -70,6 +70,26 @@ Rejected. Introduces a new distributed secret (the passphrase) that the admin mu
 Rejected as primary. Reuses the existing `nyxid ssh` infrastructure but directly contradicts the issue's stated goal of removing SSH as a hard prerequisite. Retained as a *fallback* documented in `nyxid node-credential push` help text for admins who already have SSH set up.
 
 ## Proposed protocol (Option A)
+
+### Browser-based push (web UI entry point)
+
+The web dashboard is a first-class entry point for creating the pending credential. The CLI remains an alternative for automation, but an admin no longer needs a terminal for step 1.
+
+Browser-only path:
+
+1. Admin opens either the service detail page or the node detail page in the NyxID web UI.
+2. Admin clicks **Push credential** and fills in the same metadata accepted by `nyxid node-credential push`: `slug`, `injection_method`, `field_name`, `label`, `target_url`, and related display / routing fields. No secret value is accepted in this form.
+3. Frontend calls the same backend endpoint as the CLI: `POST /nodes/{id}/credentials/push`.
+4. Node agent receives the pending-credential nudge, pulls the pending record, generates the per-pending X25519 keypair, seals the private key locally, and posts `node_pubkey` exactly as in the protocol below.
+5. Browser navigates to `/credentials/pending/{pending_id}/accept` (or transitions the same dashboard panel to the accept step once the pubkey is ready).
+6. Admin enters the secret in the browser; browser verifies the crypto bundle fingerprint, encrypts to the node pubkey, and posts ciphertext. NyxID only sees opaque ciphertext.
+7. Node decrypts and, by default for the remote crypto path, stores the secret without operator confirmation. Nodes that set `require_operator_confirm_for_remote: true` hold the decrypted secret for operator confirmation instead.
+
+CLI path:
+
+1. Admin runs `nyxid node-credential push <node> --slug <s> ...` for scripted / CI workflows.
+2. CLI prints the pending-credential browser URL after the backend creates the pending credential.
+3. Admin continues in the browser for the secret-submission step, using the same accept page and e2e encryption path as above.
 
 ### Cryptographic primitives
 
@@ -124,7 +144,8 @@ pubkey_posted                     crypto.node_pubkey = <set>, rest = None
 ciphertext_received               crypto fully populated
   ↓ NyxID forwards over WSS to node
   ↓ node decrypts, validates AAD
-  ├── success → consumed (existing accept path) → privkey dropped from sealed store
+  ├── success + remote auto-accept default → consumed (existing accept path) → privkey dropped from sealed store
+  ├── success + require operator confirm → decrypted_pending_confirmation → operator confirms → consumed
   └── failure → decrypt_failed state, admin can cancel + re-create (NOT retry on same pending)
 ```
 
@@ -134,13 +155,22 @@ ciphertext_received               crypto fully populated
 sequenceDiagram
     autonumber
     participant A as Admin Browser
+    participant C as Admin CLI
     participant N as NyxID Server
     participant W as Node Agent (WSS)
     participant LS as Node Local Sealed Store
     participant CS as Node Credential Store
 
-    Note over A,W: Phase 1 — push intent (unchanged from today)
-    A->>N: POST /nodes/{id}/credentials/push<br/>{slug, injection_method, label, ...}<br/>NO secret value
+    Note over A,W: Phase 1 — push intent (browser UI or CLI)
+    alt Browser UI entry point
+        A->>N: POST /nodes/{id}/credentials/push<br/>{slug, injection_method, field_name, label, target_url, ...}<br/>NO secret value
+        N-->>A: {pending_id, accept_url}
+    else CLI entry point for scripted / CI workflows
+        C->>N: POST /nodes/{id}/credentials/push<br/>{slug, injection_method, field_name, label, target_url, ...}<br/>NO secret value
+        N-->>C: {pending_id, accept_url}
+        C-->>C: print browser URL for secret-submission step
+        Note over A,C: Admin opens printed URL in browser for Phase 3
+    end
     N->>W: pending_credentials_available {} (existing plural nudge, no metadata)
     W->>N: GET /api/v1/node-agent/pending-credentials (existing pull)
     activate W
@@ -160,22 +190,28 @@ sequenceDiagram
     N->>N: find_one_and_update guard: 409 if ciphertext already set<br/>per-pending rate limiter check
     N->>W: pending_credential_ciphertext {pending_id, admin_pubkey, nonce, ciphertext}
 
-    Note over W,CS: Phase 4 — node decrypts and (optionally) accepts
-    W->>LS: load sealed privkey for pending_id
-    W->>W: ECDH(node_priv, admin_pubkey) → shared<br/>HKDF(shared, info=...)<br/>AEAD decrypt + verify AAD
-    alt Decryption succeeds AND node has auto_accept enabled for this binding
-        W->>CS: store secret via existing CredentialStore::accept
-        W->>LS: drop sealed privkey
+    Note over W,CS: Phase 4 — node applies secret
+    alt Remote crypto path
+        W->>LS: load sealed privkey for pending_id
+        W->>W: ECDH(node_priv, admin_pubkey) → shared<br/>HKDF(shared, info=...)<br/>AEAD decrypt + verify AAD
+        alt Decryption succeeds AND require_operator_confirm_for_remote=false (default)
+            W->>CS: store secret via existing CredentialStore::accept
+            W->>LS: drop sealed privkey
+            W->>N: pending_credential_consumed {pending_id, ok}
+            N->>N: mark pending consumed, emit metadata-only audit event
+        else Decryption succeeds AND require_operator_confirm_for_remote=true
+            W->>W: hold decrypted secret in volatile ready-to-accept queue with TTL
+            W->>N: pending_credential_decrypted {pending_id} (operator confirmation required)
+            Note over W: Operator runs `nyxid node credentials accept` on the node<br/>(no paste required — just confirmation)
+        else Decryption fails
+            W->>LS: drop sealed privkey (single-use)
+            W->>N: pending_credential_error {pending_id, code=8006 decrypt_failed}
+            N->>A: 4xx with reason
+        end
+    else Legacy CLI paste path
+        Note over W: Operator runs `nyxid node credentials accept` on the node<br/>and pastes the secret locally
+        W->>CS: store pasted secret via existing CredentialStore::accept
         W->>N: pending_credential_consumed {pending_id, ok}
-        N->>N: mark pending consumed, emit metadata-only audit event
-    else Decryption succeeds AND manual-accept (default)
-        W->>W: hold decrypted secret in volatile ready-to-accept queue with TTL
-        W->>N: pending_credential_decrypted {pending_id} (operator confirmation required)
-        Note over W: Operator runs `nyxid node credentials accept` on the node<br/>(no paste required — just confirmation)
-    else Decryption fails
-        W->>LS: drop sealed privkey (single-use)
-        W->>N: pending_credential_error {pending_id, code=8006 decrypt_failed}
-        N->>A: 4xx with reason
     end
     deactivate W
 ```
@@ -204,9 +240,10 @@ Per-pending-credential rate limit: 1 successful POST, max 3 failed POSTs in a 60
 
 1. Handler allocates a `request_id`, registers a `oneshot::channel` waiter on the node connection's `credential_acks` map.
 2. Sends the `pending_credential_ciphertext` WSS frame with the `request_id`.
-3. Awaits the node's reply (`pending_credential_consumed {request_id, ok}` or `pending_credential_error {request_id, code, reason}`) with a configurable timeout (suggest 15s, matching the existing pattern).
+3. Awaits the node's reply (`pending_credential_consumed {request_id, ok}`, `pending_credential_decrypted {request_id, pending_id}` when `require_operator_confirm_for_remote: true`, or `pending_credential_error {request_id, code, reason}`) with a configurable timeout (suggest 15s, matching the existing pattern).
 4. HTTP response shape:
-   - 200 on `consumed`
+   - 200 on `consumed` (default remote auto-accept path)
+   - 202 on `pending_credential_decrypted` (strict confirmation policy; browser shows "waiting for operator confirmation")
    - 4xx with error code 8006-8011 on `pending_credential_error`
    - 503 `NodeOffline` (code 8010) on timeout / WSS disconnect
 
@@ -218,7 +255,7 @@ Two separate signals — do not conflate them:
 
 **1. Feature detection (synchronous, cached).** Node agents advertise `supported_features` (a new field added in Phase 1; current node agents do not advertise it). The new flow contributes `crypto_v1` to that set. NyxID persists `Node.supported_features` (new model field; populated from the existing in-memory `record_capabilities` path in `node_ws_manager.rs:1705` if the codebase already has it, or added in Phase 1 if not). The frontend queries it before rendering UI:
 
-- `crypto_v1 ∈ supported_features` → show browser accept UI
+- `crypto_v1 ∈ supported_features` → show browser push + accept UI
 - `crypto_v1 ∉ supported_features` (older agent or unupgraded node) → show legacy "SSH to node and run `nyxid node credentials accept`" instructions
 
 Feature detection is fast and cached. No polling for this step.
@@ -239,12 +276,18 @@ The new `pending_credential_pubkey` and `pending_credential_ciphertext` frames a
 
 ### Accept gate
 
-Per-node config flag `enable_remote_credential_injection: bool` (default **false** — opt-in). Even when enabled, the node defaults to manual-accept:
+Per-node config flags:
 
-- **Manual accept (default when `enable_remote_credential_injection: true`):** decrypted secret sits in a volatile ready-to-accept queue. Operator on the node runs `nyxid node credentials accept` to confirm — no paste required, just a `y/N` prompt. Preserves separation-of-duties.
-- **Auto-accept (per-binding opt-in, second flag):** decrypted secret is stored immediately. Skips operator confirmation. Recommended only for orgs that explicitly want unattended remote rotation.
+- `enable_remote_credential_injection: bool` (default **false**) gates the browser crypto path.
+- `require_operator_confirm_for_remote: bool` (default **false**) restores the operator-on-node review gate for orgs that require strict separation of duties.
 
-Default behavior of any node remains "legacy two-party CLI flow" until an admin explicitly opts in.
+Behavior by path:
+
+- **Legacy CLI paste (`crypto: None`):** unchanged manual flow. Operator on the node runs `nyxid node credentials accept <slug>` and pastes the secret locally. Because the operator is already on the node, there is no separate remote auto-accept decision.
+- **Remote browser crypto path with `enable_remote_credential_injection: true` and `require_operator_confirm_for_remote: false` (default):** node decrypts the browser ciphertext and immediately stores the secret via the existing `CredentialStore::accept` path. This is the intended unattended remote-management behavior: no one needs to SSH into or be physically present at the node.
+- **Remote browser crypto path with `require_operator_confirm_for_remote: true`:** node decrypts and holds the secret in a volatile ready-to-accept queue with TTL. Operator on the node runs `nyxid node credentials accept` to confirm — no paste required, just a `y/N` prompt.
+
+Default behavior of any node remains "legacy two-party CLI flow" until an admin explicitly enables remote credential injection. Once enabled, auto-accept is the remote crypto default; the operator-confirm gate is an explicit per-node policy choice.
 
 ## Code-integrity infrastructure (Phase 4.5)
 
@@ -351,6 +394,7 @@ Mandatory test coverage, locked at design time. Implementer must produce tests f
 
 | Test | File | Asserts |
 |------|------|---------|
+| `push_form_posts_pending_without_secret` | `credential-push.test.ts` | Service / node detail "Push credential" form submits metadata to `POST /nodes/{id}/credentials/push` and never includes a secret field |
 | `noble_curves_x25519_ecdh_roundtrip` | `crypto.test.ts` | Browser-side keygen + ECDH produces same shared secret in both directions |
 | `noble_ciphers_xchacha_roundtrip` | `crypto.test.ts` | Encrypt + decrypt round-trip succeeds with various plaintext sizes |
 | `sri_hash_mismatch_blocks_submit` | `credential-accept.test.ts` | Tampered bundle hash blocks the submit button |
@@ -368,12 +412,12 @@ These two fixtures catch encoding-mismatch bugs (e.g., base64 vs base64url, big-
 
 | Test | File | Asserts |
 |------|------|---------|
-| `e2e_full_push_accept` | `tests/e2e/credential_push.spec.ts` | Admin pushes, browser encrypts, node decrypts, operator accepts, secret reaches credential store |
-| `e2e_manual_accept_gate` | `tests/e2e/credential_push.spec.ts` | Default opt-in flag set, decrypted secret waits for operator confirmation |
-| `e2e_auto_accept_path` | `tests/e2e/credential_push.spec.ts` | With auto-accept flag enabled, secret stored without operator confirmation |
+| `e2e_browser_only_push_auto_accept` | `tests/e2e/credential_push.spec.ts` | Admin opens service or node detail, fills the Push credential form, browser encrypts, node decrypts, default remote auto-accept stores the secret, and no operator command runs |
+| `e2e_cli_push_prints_accept_url` | `tests/e2e/credential_push.spec.ts` | `nyxid node-credential push` creates the same pending credential and prints the browser URL for the secret-submission step |
+| `e2e_remote_operator_confirm_opt_in` | `tests/e2e/credential_push.spec.ts` | With `require_operator_confirm_for_remote=true`, decrypted secret waits for operator confirmation and the browser shows the waiting state |
 | `e2e_node_restart_mid_flight` | `tests/e2e/credential_push.spec.ts` | Push pubkey, restart node agent, restart loads sealed privkey, then ciphertext decrypts successfully |
 | `e2e_legacy_node_fallback` | `tests/e2e/credential_push.spec.ts` | Node without `crypto_v1` feature flag: frontend shows legacy SSH instructions |
-| `e2e_multi_node_fan_out_all_succeed` | `tests/e2e/credential_push.spec.ts` | 3 nodes, all decrypt, all accept, logical consumed state reached |
+| `e2e_multi_node_fan_out_all_succeed` | `tests/e2e/credential_push.spec.ts` | 3 nodes, all decrypt, all auto-accept by default, logical consumed state reached |
 | `e2e_multi_node_partial_failure_then_retry` | `tests/e2e/credential_push.spec.ts` | 3 nodes, 1 decrypt failure → state `partial_decrypted` with per-node breakdown; admin retries the failed node only; succeeds → logical state `consumed`; idempotency: previously-accepted nodes unchanged |
 
 ### Audit / security regression
@@ -398,12 +442,14 @@ Implementer should run `cargo test`, `npm run test`, and the e2e suite before re
 |-------|----------------|-------------------|------------|
 | 1 — Backend protocol stubs | `backend/handlers/`, `backend/services/`, `backend/models/`, error codes | 1d / 2h | — |
 | 2 — Node crypto | `cli/src/node/credentials/crypto.rs`, `cli/src/node/agent.rs`, sealed privkey persistence | 3d / 4h | Phase 1 |
-| 3 — Frontend UI | `frontend/src/pages/credential-accept.tsx`, `frontend/src/lib/crypto/` | 3d / 4h | Phase 1 |
+| 3 — Frontend UI | `frontend/src/pages/service-detail.tsx`, `frontend/src/pages/node-detail.tsx`, `frontend/src/pages/credential-accept.tsx`, `frontend/src/lib/crypto/` | 3d / 4h | Phase 1 |
 | 3.5 — Multi-node fan-out | All three layers (per-node ephemeral pubkeys, fan-out endpoint, partial-state UI) | 2d / 4h | Phases 1, 2, 3 |
 | 4 — Audit + observability | `backend/services/audit_service` | 1d / 2h | Phase 1 |
 | 4.5 — Code-integrity infrastructure | `.github/workflows/release-publish.yml`, `frontend/index.html` SRI tags, `releases.nyxid.dev` host setup, admin-verification UX | 1w / 1d | Phase 3 |
-| 5 — CLI parity | `cli/src/commands/node_credential.rs accept-remote` subcommand | 2d / 3h | Phase 2 |
+| 5 — CLI parity | `cli/src/commands/node_credential.rs` prints `accept_url` after `push`; `accept-remote` helper if still desired | 2d / 3h | Phase 2 |
 | 6 — Hint rewrites | `cli/src/commands/service.rs`, `cli/src/commands/node_credential.rs` | <1d / 30m | All others |
+
+Phase 3 must include both the push metadata form and the secret accept form. The UI can be a single two-step page / panel or two pages navigated in sequence from service / node detail to the standalone accept page.
 
 **Worktree parallelization:** Phase 1 alone first. Phases 2 + 3 + 4 in parallel lanes. Phase 3.5 after 1+2+3. Phases 4.5 + 5 + 6 in parallel after their deps. See "Parallelization" section below.
 
@@ -476,7 +522,7 @@ No silent-failure gaps. All paths have explicit error handling and user-visible 
 
 - **Browser compatibility floor — sample real analytics before Phase 3.** SubtleCrypto X25519 is Chrome 123+, Firefox 130+, Safari 17+; `@noble/curves` covers older browsers but adds ~30 KB to the standalone page bundle. Before Phase 3 starts, sample admin-population user-agent analytics (or a small canary slice) and report: *"X% of sessions get native SubtleCrypto, Y% fall back to @noble."* If `X` is overwhelmingly high (e.g. >95%), consider lazy-loading the noble polyfill only on miss to keep the standalone page leaner.
 - **Releases domain.** `releases.nyxid.dev` (or chosen alternative) needs DNS, CDN, and signing-key infrastructure. Coordinate with infra ahead of Phase 4.5; see the runbook items table under §"Code-integrity infrastructure".
-- **Auto-accept vs manual-accept default discoverability.** Per-org policy needs admin UI to flip the flag; covered in Phase 3 scope but worth scoping the per-org settings page changes explicitly during implementation.
+- **Remote confirm policy discoverability.** The per-node `require_operator_confirm_for_remote` flag needs admin UI that makes the default unattended remote path explicit; covered in Phase 3 scope but worth scoping the node settings changes explicitly during implementation.
 
 ## Design Review Feedback & Best Practices
 
