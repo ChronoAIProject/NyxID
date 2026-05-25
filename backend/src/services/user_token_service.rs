@@ -1092,58 +1092,63 @@ pub async fn poll_device_code(
     }
 
     if !status_code.is_success() {
-        // Parse RFC 8628 error response (used by both formats as fallback)
-        if let Ok(resp_data) = response.json::<serde_json::Value>().await
-            && let Some(error) = resp_data["error"].as_str()
-        {
-            match error {
-                "authorization_pending" => {
-                    return Ok(DeviceCodePollResult {
-                        status: "pending".to_string(),
-                        interval: oauth_state.poll_interval,
-                        effective_user_id: None,
-                    });
-                }
-                "slow_down" => {
-                    let new_interval = oauth_state.poll_interval.unwrap_or(5) + 5;
-                    db.collection::<OAuthState>(OAUTH_STATES)
-                        .update_one(
-                            doc! { "_id": state },
-                            doc! { "$set": { "poll_interval": new_interval } },
-                        )
-                        .await?;
-                    return Ok(DeviceCodePollResult {
-                        status: "slow_down".to_string(),
-                        interval: Some(new_interval),
-                        effective_user_id: None,
-                    });
-                }
-                "expired_token" => {
-                    db.collection::<OAuthState>(OAUTH_STATES)
-                        .delete_one(doc! { "_id": state })
-                        .await?;
-                    return Ok(DeviceCodePollResult {
-                        status: "expired".to_string(),
-                        interval: None,
-                        effective_user_id: None,
-                    });
-                }
-                "access_denied" => {
-                    db.collection::<OAuthState>(OAUTH_STATES)
-                        .delete_one(doc! { "_id": state })
-                        .await?;
-                    return Ok(DeviceCodePollResult {
-                        status: "denied".to_string(),
-                        interval: None,
-                        effective_user_id: None,
-                    });
-                }
-                _ => {}
+        let raw_body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "unknown".to_string());
+
+        match classify_device_poll_failure(status_code, &raw_body) {
+            Ok(DevicePollFlow::Pending) => {
+                return Ok(DeviceCodePollResult {
+                    status: "pending".to_string(),
+                    interval: oauth_state.poll_interval,
+                    effective_user_id: None,
+                });
+            }
+            Ok(DevicePollFlow::SlowDown) => {
+                let new_interval = oauth_state.poll_interval.unwrap_or(5) + 5;
+                db.collection::<OAuthState>(OAUTH_STATES)
+                    .update_one(
+                        doc! { "_id": state },
+                        doc! { "$set": { "poll_interval": new_interval } },
+                    )
+                    .await?;
+                return Ok(DeviceCodePollResult {
+                    status: "slow_down".to_string(),
+                    interval: Some(new_interval),
+                    effective_user_id: None,
+                });
+            }
+            Ok(DevicePollFlow::Expired) => {
+                db.collection::<OAuthState>(OAUTH_STATES)
+                    .delete_one(doc! { "_id": state })
+                    .await?;
+                return Ok(DeviceCodePollResult {
+                    status: "expired".to_string(),
+                    interval: None,
+                    effective_user_id: None,
+                });
+            }
+            Ok(DevicePollFlow::Denied) => {
+                db.collection::<OAuthState>(OAUTH_STATES)
+                    .delete_one(doc! { "_id": state })
+                    .await?;
+                return Ok(DeviceCodePollResult {
+                    status: "denied".to_string(),
+                    interval: None,
+                    effective_user_id: None,
+                });
+            }
+            Err(err) => {
+                tracing::error!(
+                    provider_id = %provider_id,
+                    status = %status_code,
+                    body = %raw_body,
+                    "Device code poll failed with provider error"
+                );
+                return Err(err);
             }
         }
-        return Err(AppError::Internal(format!(
-            "Device code poll returned unexpected status: {status_code}"
-        )));
     }
 
     // Success (2xx): parse response
@@ -1187,23 +1192,24 @@ pub async fn poll_device_code(
                     AppError::Internal(format!("Device code token exchange failed: {e}"))
                 })?;
 
-        if !token_response.status().is_success() {
-            let err_status = token_response.status();
-            let err_body = token_response.text().await.unwrap_or_default();
-            let truncated_err_body: String = err_body.chars().take(200).collect();
-            tracing::error!(
-                status = %err_status,
-                body = %truncated_err_body,
-                "Device code token exchange returned error"
-            );
-            return Err(AppError::Internal(format!(
-                "Device code token exchange failed with status {err_status}"
-            )));
-        }
+        let status = token_response.status();
+        let raw_body = token_response
+            .text()
+            .await
+            .unwrap_or_else(|_| "unknown".to_string());
 
-        let token_data: serde_json::Value = token_response.json().await.map_err(|e| {
-            AppError::Internal(format!("Failed to parse token exchange response: {e}"))
-        })?;
+        let token_data = match parse_token_exchange_response(status, &raw_body) {
+            Ok(value) => value,
+            Err(err) => {
+                tracing::error!(
+                    provider_id = %provider_id,
+                    status = %status,
+                    body = %raw_body,
+                    "Device code token exchange returned error"
+                );
+                return Err(err);
+            }
+        };
 
         return store_device_code_tokens(
             db,
@@ -1862,6 +1868,49 @@ fn parse_token_exchange_response(
                 .to_string(),
         )),
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DevicePollFlow {
+    Pending,
+    SlowDown,
+    Expired,
+    Denied,
+}
+
+/// Classify a non-2xx device-code poll response body. Returns:
+/// - `Ok(DevicePollFlow)` for the four RFC 8628 flow-control states the
+///   caller maps to "pending"/"slow_down"/"expired"/"denied",
+/// - `Err(AppError::BadRequest)` for any other recognizable provider error
+///   (RFC 6749 / Lark envelope) or an opaque non-2xx. The error carries only
+///   the provider's own message or a generic-but-actionable hint — never the
+///   raw body.
+fn classify_device_poll_failure(
+    status: reqwest::StatusCode,
+    raw_body: &str,
+) -> AppResult<DevicePollFlow> {
+    let parsed: Option<serde_json::Value> = serde_json::from_str(raw_body).ok();
+
+    if let Some(ref value) = parsed {
+        if let Some(error) = value.get("error").and_then(serde_json::Value::as_str) {
+            match error {
+                "authorization_pending" => return Ok(DevicePollFlow::Pending),
+                "slow_down" => return Ok(DevicePollFlow::SlowDown),
+                "expired_token" => return Ok(DevicePollFlow::Expired),
+                "access_denied" => return Ok(DevicePollFlow::Denied),
+                _ => {}
+            }
+        }
+
+        if let Some(provider_err) = token_exchange_provider_error(value) {
+            return Err(provider_err);
+        }
+    }
+
+    Err(AppError::BadRequest(format!(
+        "Identity provider returned an error during device authorization (HTTP {}). Re-check the app credentials and try again.",
+        status.as_u16()
+    )))
 }
 
 /// Multi-connection OAuth refresh path: refresh an access token using the
@@ -2557,9 +2606,9 @@ pub async fn list_user_tokens(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_telegram_identity_metadata, build_telegram_identity_update_doc,
-        build_user_token_summary, ensure_additional_scopes_supported, merge_scopes,
-        normalize_telegram_bot_api_key, oauth_token_payload, params_to_json_body,
+        DevicePollFlow, build_telegram_identity_metadata, build_telegram_identity_update_doc,
+        build_user_token_summary, classify_device_poll_failure, ensure_additional_scopes_supported,
+        merge_scopes, normalize_telegram_bot_api_key, oauth_token_payload, params_to_json_body,
         parse_additional_scopes, parse_token_exchange_response, token_exchange_provider_error,
         uses_json_oauth_token_exchange,
     };
@@ -2793,6 +2842,62 @@ mod tests {
         let value = parse_token_exchange_response(reqwest::StatusCode::OK, body)
             .expect("valid token response parses");
         assert_eq!(value["access_token"], "abc");
+    }
+
+    #[test]
+    fn classify_device_poll_failure_handles_flow_control() {
+        let status = reqwest::StatusCode::BAD_REQUEST;
+
+        // Pending
+        let res =
+            classify_device_poll_failure(status, r#"{"error":"authorization_pending"}"#).unwrap();
+        assert_eq!(res, DevicePollFlow::Pending);
+
+        // Slow Down
+        let res = classify_device_poll_failure(status, r#"{"error":"slow_down"}"#).unwrap();
+        assert_eq!(res, DevicePollFlow::SlowDown);
+
+        // Expired
+        let res = classify_device_poll_failure(status, r#"{"error":"expired_token"}"#).unwrap();
+        assert_eq!(res, DevicePollFlow::Expired);
+
+        // Denied
+        let res = classify_device_poll_failure(status, r#"{"error":"access_denied"}"#).unwrap();
+        assert_eq!(res, DevicePollFlow::Denied);
+    }
+
+    #[test]
+    fn classify_device_poll_failure_surfaces_provider_error() {
+        let status = reqwest::StatusCode::BAD_REQUEST;
+
+        // Standard OAuth provider error (RFC 6749)
+        let body = r#"{"error":"invalid_client","error_description":"client secret mismatch"}"#;
+        let err = classify_device_poll_failure(status, body).unwrap_err();
+        assert!(matches!(err, AppError::BadRequest(_)));
+        let msg = err.to_string();
+        assert!(msg.contains("invalid_client"));
+        assert!(msg.contains("client secret mismatch"));
+
+        // Lark-style non-zero code error envelope
+        let body = r#"{"code": 20029, "msg": "redirect_uri mismatch"}"#;
+        let err = classify_device_poll_failure(status, body).unwrap_err();
+        assert!(matches!(err, AppError::BadRequest(_)));
+        let msg = err.to_string();
+        assert!(msg.contains("20029"));
+        assert!(msg.contains("redirect_uri mismatch"));
+    }
+
+    #[test]
+    fn classify_device_poll_failure_handles_opaque_failures_without_leak() {
+        let status = reqwest::StatusCode::INTERNAL_SERVER_ERROR;
+        let body = "<html><body>sensitive raw response stacktrace with secrets</body></html>";
+        let err = classify_device_poll_failure(status, body).unwrap_err();
+        assert!(matches!(err, AppError::BadRequest(_)));
+        let msg = err.to_string();
+        assert!(msg.contains("500"));
+        assert!(!msg.contains("sensitive"));
+        assert!(!msg.contains("secrets"));
+        assert!(!msg.contains("stacktrace"));
     }
 
     #[test]
