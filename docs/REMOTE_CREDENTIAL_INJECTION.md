@@ -85,11 +85,50 @@ Browser-only path:
 6. Admin enters the secret in the browser; browser verifies the crypto bundle fingerprint, encrypts to the node pubkey, and posts ciphertext. NyxID only sees opaque ciphertext.
 7. Node decrypts and, by default for the remote crypto path, stores the secret without operator confirmation. Nodes that set `require_operator_confirm_for_remote: true` hold the decrypted secret for operator confirmation instead.
 
-CLI path:
+CLI path (full e2e — no browser required):
 
-1. Admin runs `nyxid node-credential push <node> --slug <s> ...` for scripted / CI workflows.
-2. CLI prints the pending-credential browser URL after the backend creates the pending credential.
-3. Admin continues in the browser for the secret-submission step, using the same accept page and e2e encryption path as above.
+The CLI is a first-class entry point for the entire remote credential injection flow, not just a "push intent then switch to browser" helper. The admin's locally-installed binary IS the trust anchor — unlike the browser path, there is no NyxID-served JS to substitute, so the CLI path is **immune to T1 code-substitution by design** without needing Phase 4.5's SRI/fingerprint machinery.
+
+**Interactive mode** (admin types the secret):
+
+```bash
+nyxid node-credential inject <node-id> --slug home-assistant \
+    --injection-method header --field-name Authorization \
+    [--org <org>]
+```
+
+One command does the full flow:
+1. Creates the pending credential via `POST /nodes/{id}/credentials/push` (same endpoint as the browser).
+2. Polls `GET /credentials/pending/{id}` for the node's ephemeral pubkey (exponential backoff, up to 30s).
+3. Prompts the admin: `Enter secret value:` (masked input, like `nyxid node credentials accept` today).
+4. Encrypts locally: X25519 ECDH + HKDF + XChaCha20-Poly1305 (same `x25519-dalek` + `chacha20poly1305` crates as Phase 2 node-side, shared via a `nyxid-crypto` workspace crate).
+5. Posts the ciphertext via `POST /credentials/pending/{id}/ciphertext`.
+6. Waits for the response (200 consumed / 202 pending confirmation / 4xx / 504 timeout).
+7. Prints result: "Credential accepted and stored on node" or the relevant error.
+
+**Non-interactive mode** (for CI / automation):
+
+```bash
+nyxid node-credential inject <node-id> --slug home-assistant \
+    --injection-method header --field-name Authorization \
+    --secret-env HA_TOKEN [--org <org>]
+```
+
+Same flow but reads the secret from the named environment variable instead of prompting. Exits with 0 on success, non-zero on failure. Suitable for cron jobs, CI pipelines, and rotation scripts.
+
+**Fallback** (push only, continue in browser):
+
+```bash
+nyxid node-credential push <node-id> --slug home-assistant ...
+```
+
+Unchanged from today's command. After creating the pending credential, prints both:
+- The browser URL: `https://nyx.example.com/credentials/pending/{id}/accept`
+- The CLI command: `nyxid node-credential inject --pending {id}`
+
+so the admin can choose their preferred path for the secret-submission step.
+
+The `--org` flag follows existing conventions (accepts UUID, slug, or display name — see CLAUDE.md §9). Org-owned nodes are resolved the same way as `nyxid service add --org`.
 
 ### Cryptographic primitives
 
@@ -426,6 +465,26 @@ Mandatory test coverage, locked at design time. Implementer must produce tests f
 | `privkey_evicted_on_cancel` | `agent::tests` | After admin cancels, sealed privkey removed |
 | `privkey_evicted_on_expire` | `agent::tests` | After TTL passes, sealed privkey removed by sweep |
 
+### Shared crypto crate (Rust, `nyxid-crypto/src/lib.rs`)
+
+| Test | File | Asserts |
+|------|------|---------|
+| `encrypt_decrypt_roundtrip` | `nyxid_crypto::tests` | `decrypt(encrypt(plaintext, pubkey, aad), privkey, aad) == plaintext` for various sizes |
+| `wrong_aad_rejected` | `nyxid_crypto::tests` | Encrypt with AAD=A, decrypt with AAD=B, returns Err |
+| `wrong_recipient_rejected` | `nyxid_crypto::tests` | Encrypt to pubkey_A, decrypt with privkey_B, returns Err |
+| `ciphertext_is_authenticated` | `nyxid_crypto::tests` | Flip one ciphertext byte, decrypt returns Err (AEAD tag fails) |
+| `nonce_is_random_per_call` | `nyxid_crypto::tests` | Two encryptions of same plaintext produce different ciphertexts |
+
+### CLI inject command (Rust, `cli/src/commands/node_credential.rs`)
+
+| Test | File | Asserts |
+|------|------|---------|
+| `inject_interactive_full_flow` | `commands::node_credential::tests` | Mock server: push → poll pubkey → encrypt → post ciphertext → 200 consumed |
+| `inject_secret_env_reads_from_env` | `commands::node_credential::tests` | `--secret-env FOO` reads from `FOO` env var, never prompts stdin |
+| `inject_pubkey_timeout_errors_cleanly` | `commands::node_credential::tests` | If pubkey never arrives within 30s, prints clear error + suggests retry |
+| `inject_org_flag_resolves_correctly` | `commands::node_credential::tests` | `--org` accepts UUID, slug, and display name (per existing convention) |
+| `push_fallback_prints_both_paths` | `commands::node_credential::tests` | `push` (without inject) prints both browser URL and `inject --pending` CLI command |
+
 ### Backend endpoints (Rust, `backend/src/handlers/node_admin.rs`)
 
 | Test | File | Asserts |
@@ -463,7 +522,10 @@ These two fixtures catch encoding-mismatch bugs (e.g., base64 vs base64url, big-
 | Test | File | Asserts |
 |------|------|---------|
 | `e2e_browser_only_push_auto_accept` | `tests/e2e/credential_push.spec.ts` | Admin opens service or node detail, fills the Push credential form, browser encrypts, node decrypts, default remote auto-accept stores the secret, and no operator command runs |
-| `e2e_cli_push_prints_accept_url` | `tests/e2e/credential_push.spec.ts` | `nyxid node-credential push` creates the same pending credential and prints the browser URL for the secret-submission step |
+| `e2e_cli_inject_interactive` | `tests/e2e/credential_push.spec.ts` | `nyxid node-credential inject` does full flow: push → poll pubkey → encrypt → post ciphertext → 200 consumed; secret reaches node credential store |
+| `e2e_cli_inject_secret_env` | `tests/e2e/credential_push.spec.ts` | `nyxid node-credential inject --secret-env` reads from env, same flow, suitable for CI |
+| `e2e_cli_inject_org_node` | `tests/e2e/credential_push.spec.ts` | `nyxid node-credential inject --org <org> <node>` resolves org ownership, same crypto flow, credential stored on org-owned node |
+| `e2e_cli_push_prints_both_paths` | `tests/e2e/credential_push.spec.ts` | `nyxid node-credential push` creates pending and prints both browser URL and `inject --pending` CLI command |
 | `e2e_remote_operator_confirm_opt_in` | `tests/e2e/credential_push.spec.ts` | With `require_operator_confirm_for_remote=true`, decrypted secret waits for operator confirmation and the browser shows the waiting state |
 | `e2e_node_restart_mid_flight` | `tests/e2e/credential_push.spec.ts` | Push pubkey, restart node agent, restart loads sealed privkey, then ciphertext decrypts successfully |
 | `e2e_legacy_node_fallback` | `tests/e2e/credential_push.spec.ts` | Node without `crypto_v1` feature flag: frontend shows legacy SSH instructions |
@@ -496,10 +558,12 @@ Implementer should run `cargo test`, `npm run test`, and the e2e suite before re
 | 3.5 — Multi-node fan-out | All three layers (per-node ephemeral pubkeys, fan-out endpoint, partial-state UI) | 2d / 4h | Phases 1, 2, 3 |
 | 4 — Audit + observability | `backend/services/audit_service` | 1d / 2h | Phase 1 |
 | 4.5 — Code-integrity infrastructure | `.github/workflows/release-publish.yml`, `frontend/index.html` SRI tags, `releases.nyxid.dev` host setup, admin-verification UX | 1w / 1d | Phase 3 |
-| 5 — CLI parity | `cli/src/commands/node_credential.rs` prints `accept_url` after `push`; `accept-remote` helper if still desired | 2d / 3h | Phase 2 |
+| 5 — CLI full e2e | `cli/src/commands/node_credential.rs` new `inject` subcommand (interactive + `--secret-env` non-interactive); `nyxid-crypto` shared workspace crate (ECDH+HKDF+AEAD shared with Phase 2 node-side) | 3d / 4h | Phase 2 (shares crypto crate) |
 | 6 — Hint rewrites | `cli/src/commands/service.rs`, `cli/src/commands/node_credential.rs` | <1d / 30m | All others |
 
-Phase 3 must include both the push metadata form and the secret accept form. The UI can be a single two-step page / panel or two pages navigated in sequence from service / node detail to the standalone accept page.
+Phase 3 must include both the push metadata form and the secret accept form.
+
+**Shared crypto crate:** Phase 2 (node-side decrypt) and Phase 5 (CLI-side encrypt) use the same primitives (`x25519-dalek`, `chacha20poly1305`, `hkdf`, `sha2`). Extract the ECDH + HKDF + AEAD envelope into a `nyxid-crypto` workspace crate (~400 LOC) that both `nyxid-cli` (for admin-side encrypt + node-side decrypt) and `nyxid` backend (for no-op — backend never encrypts/decrypts, just validates ciphertext size) can depend on. This follows the existing precedent for small shared crates (see `nyxid-cloud-auth` workspace crate). The shared crate exposes: `encrypt(plaintext, recipient_pubkey, aad_context) -> CiphertextEnvelope` and `decrypt(envelope, sealed_privkey, aad_context) -> plaintext`. Both the browser `@noble/*` implementation and this Rust crate must produce identical ciphertext for the same inputs — the interop test fixtures (Phase 2 test strategy) verify this. The UI can be a single two-step page / panel or two pages navigated in sequence from service / node detail to the standalone accept page.
 
 **Worktree parallelization:** Phase 1 alone first. Phases 2 + 3 + 4 in parallel lanes. Phase 3.5 after 1+2+3. Phases 4.5 + 5 + 6 in parallel after their deps. See "Parallelization" section below.
 
