@@ -452,10 +452,11 @@ async fn generic_oauth_callback_impl(
                         .target_user_id
                         .as_deref()
                         .unwrap_or(&oauth_state.user_id);
-                    match user_api_key_service::fail_pending_placeholders_for_provider(
+                    match user_api_key_service::fail_oauth_placeholders(
                         &state.db,
                         owner_id,
                         &oauth_state.provider_config_id,
+                        oauth_state.connection_id.as_deref(),
                         &msg,
                     )
                     .await
@@ -548,26 +549,26 @@ async fn generic_oauth_callback_impl(
             .target_user_id
             .as_deref()
             .unwrap_or(&oauth_state.user_id);
-        let failed_placeholders =
-            match user_api_key_service::fail_pending_placeholders_for_provider(
-                &state.db,
-                owner_id,
-                provider_id,
-                &message,
-            )
-            .await
-            {
-                Ok(count) => Some(count),
-                Err(error) => {
-                    tracing::warn!(
-                        user_id = %owner_id,
-                        provider_id = %provider_id,
-                        error = %error,
-                        "failed to mark OAuth placeholders as failed after session mismatch"
-                    );
-                    None
-                }
-            };
+        let failed_placeholders = match user_api_key_service::fail_oauth_placeholders(
+            &state.db,
+            owner_id,
+            provider_id,
+            oauth_state.connection_id.as_deref(),
+            &message,
+        )
+        .await
+        {
+            Ok(count) => Some(count),
+            Err(error) => {
+                tracing::warn!(
+                    user_id = %owner_id,
+                    provider_id = %provider_id,
+                    error = %error,
+                    "failed to mark OAuth placeholders as failed after session mismatch"
+                );
+                None
+            }
+        };
         audit_service::log_async(
             state.db.clone(),
             Some(oauth_state.user_id.clone()),
@@ -640,26 +641,26 @@ async fn generic_oauth_callback_impl(
             .await
             {
                 let user_msg = safe_error_message(&error);
-                let failed_placeholders =
-                    match user_api_key_service::fail_pending_placeholders_for_provider(
-                        &state.db,
-                        &outcome.user_id,
-                        provider_id,
-                        &user_msg,
-                    )
-                    .await
-                    {
-                        Ok(count) => Some(count),
-                        Err(e) => {
-                            tracing::warn!(
-                                user_id = %outcome.user_id,
-                                provider_id = %provider_id,
-                                error = %e,
-                                "failed to mark OAuth placeholders as failed after sync error"
-                            );
-                            None
-                        }
-                    };
+                let failed_placeholders = match user_api_key_service::fail_oauth_placeholders(
+                    &state.db,
+                    &outcome.user_id,
+                    provider_id,
+                    oauth_state.connection_id.as_deref(),
+                    &user_msg,
+                )
+                .await
+                {
+                    Ok(count) => Some(count),
+                    Err(e) => {
+                        tracing::warn!(
+                            user_id = %outcome.user_id,
+                            provider_id = %provider_id,
+                            error = %e,
+                            "failed to mark OAuth placeholders as failed after sync error"
+                        );
+                        None
+                    }
+                };
                 audit_service::log_async(
                     state.db.clone(),
                     Some(outcome.user_id.clone()),
@@ -693,26 +694,26 @@ async fn generic_oauth_callback_impl(
                 .as_deref()
                 .unwrap_or(&oauth_state.user_id);
             let user_msg = safe_error_message(&e);
-            let failed_placeholders =
-                match user_api_key_service::fail_pending_placeholders_for_provider(
-                    &state.db,
-                    owner_id,
-                    provider_id,
-                    &user_msg,
-                )
-                .await
-                {
-                    Ok(count) => Some(count),
-                    Err(error) => {
-                        tracing::warn!(
-                            user_id = %owner_id,
-                            provider_id = %provider_id,
-                            error = %error,
-                            "failed to mark OAuth placeholders as failed"
-                        );
-                        None
-                    }
-                };
+            let failed_placeholders = match user_api_key_service::fail_oauth_placeholders(
+                &state.db,
+                owner_id,
+                provider_id,
+                oauth_state.connection_id.as_deref(),
+                &user_msg,
+            )
+            .await
+            {
+                Ok(count) => Some(count),
+                Err(error) => {
+                    tracing::warn!(
+                        user_id = %owner_id,
+                        provider_id = %provider_id,
+                        error = %error,
+                        "failed to mark OAuth placeholders as failed"
+                    );
+                    None
+                }
+            };
             audit_service::log_async(
                 state.db.clone(),
                 Some(oauth_state.user_id.clone()),

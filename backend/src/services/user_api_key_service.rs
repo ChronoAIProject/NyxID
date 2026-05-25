@@ -489,6 +489,68 @@ pub async fn fail_pending_placeholders_for_provider(
     Ok(result.modified_count)
 }
 
+/// Mark a single multi-connection OAuth placeholder (identified by its
+/// `connection_id`) as `failed` with an actionable message. Used by the
+/// OAuth callback failure arms for wizard / BYO-Custom-App flows, where the
+/// placeholder carries a non-null `connection_id` and is therefore skipped by
+/// the legacy `connection_id: null` fan-out in
+/// `fail_pending_placeholders_for_provider`.
+///
+/// Race-safe: only `pending_auth` rows are touched, so a callback that
+/// already activated the credential, or a row the user revoked, is never
+/// overwritten by a late provider-error callback.
+pub async fn fail_connection_placeholder(
+    db: &mongodb::Database,
+    connection_id: &str,
+    error_message: &str,
+) -> AppResult<u64> {
+    let message = normalize_error_message(error_message);
+    let result = db
+        .collection::<UserApiKey>(COLLECTION_NAME)
+        .update_one(
+            doc! {
+                "connection_id": connection_id,
+                "status": { "$in": ["pending_auth"] },
+                "credential_type": { "$ne": "node_managed" },
+            },
+            doc! {
+                "$set": {
+                    "status": "failed",
+                    "error_message": message,
+                    "credential_encrypted": bson::Bson::Null,
+                    "access_token_encrypted": bson::Bson::Null,
+                    "refresh_token_encrypted": bson::Bson::Null,
+                    "token_scopes": bson::Bson::Null,
+                    "expires_at": bson::Bson::Null,
+                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                }
+            },
+        )
+        .await?;
+
+    Ok(result.modified_count)
+}
+
+/// Fail the OAuth placeholder(s) for a denied/failed callback, routing to the
+/// right strategy: multi-connection flows (non-null `connection_id`) fail
+/// their specific row; legacy flows fan out across `connection_id: null`
+/// placeholders for the provider.
+pub async fn fail_oauth_placeholders(
+    db: &mongodb::Database,
+    owner_id: &str,
+    provider_config_id: &str,
+    connection_id: Option<&str>,
+    error_message: &str,
+) -> AppResult<u64> {
+    match connection_id {
+        Some(conn_id) => fail_connection_placeholder(db, conn_id, error_message).await,
+        None => {
+            fail_pending_placeholders_for_provider(db, owner_id, provider_config_id, error_message)
+                .await
+        }
+    }
+}
+
 /// Lazy reconciliation of a single `pending_auth` OAuth placeholder. Called
 /// from the wizard's polling endpoint (`GET /api/v1/keys/{id}`) so each poll
 /// is a chance to converge the placeholder to a terminal status without
@@ -1079,9 +1141,10 @@ mod tests {
     use mongodb::bson::doc;
 
     use super::{
-        OAUTH_STATES, USER_PROVIDER_TOKENS, fail_pending_placeholders_for_provider,
-        has_server_credential, reconcile_pending_oauth_placeholder,
-        sync_provider_token_to_api_keys, write_oauth_tokens_to_key,
+        OAUTH_STATES, USER_PROVIDER_TOKENS, fail_connection_placeholder,
+        fail_pending_placeholders_for_provider, has_server_credential,
+        reconcile_pending_oauth_placeholder, sync_provider_token_to_api_keys,
+        write_oauth_tokens_to_key,
     };
     use crate::models::oauth_state::OAuthState;
     use crate::models::user_api_key::UserApiKey;
@@ -2302,6 +2365,116 @@ mod tests {
             "pending_auth",
             "multi-connection key must not be failed by a legacy denial"
         );
+    }
+
+    #[tokio::test]
+    async fn fail_connection_placeholder_marks_matching_placeholder_failed() {
+        let Some(db) = connect_test_database("user_api_key_fail_conn_marks_matching").await else {
+            eprintln!("skipping integration test: no local MongoDB available");
+            return;
+        };
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let provider_id = uuid::Uuid::new_v4().to_string();
+        let key_id = uuid::Uuid::new_v4().to_string();
+        let conn_id = uuid::Uuid::new_v4().to_string();
+
+        let mut key = provider_key(&key_id, &user_id, &provider_id, "pending_auth", "oauth2");
+        key.connection_id = Some(conn_id.clone());
+        key.credential_encrypted = Some(vec![1, 2]);
+        key.access_token_encrypted = Some(vec![3, 4]);
+        key.refresh_token_encrypted = Some(vec![5, 6]);
+        key.token_scopes = Some("scope1".to_string());
+        key.expires_at = Some(Utc::now());
+
+        db.collection::<UserApiKey>(super::COLLECTION_NAME)
+            .insert_one(key)
+            .await
+            .unwrap();
+
+        let modified = fail_connection_placeholder(&db, &conn_id, "test_error_message")
+            .await
+            .unwrap();
+
+        assert_eq!(modified, 1);
+
+        let updated = get_key(&db, &key_id).await;
+        assert_eq!(updated.status, "failed");
+        assert_eq!(
+            updated.error_message,
+            Some("test_error_message".to_string())
+        );
+        assert!(updated.credential_encrypted.is_none());
+        assert!(updated.access_token_encrypted.is_none());
+        assert!(updated.refresh_token_encrypted.is_none());
+        assert!(updated.token_scopes.is_none());
+        assert!(updated.expires_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn fail_connection_placeholder_isolation() {
+        let Some(db) = connect_test_database("user_api_key_fail_conn_isolation").await else {
+            eprintln!("skipping integration test: no local MongoDB available");
+            return;
+        };
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let provider_id = uuid::Uuid::new_v4().to_string();
+        let key_x_id = uuid::Uuid::new_v4().to_string();
+        let key_y_id = uuid::Uuid::new_v4().to_string();
+        let conn_x = uuid::Uuid::new_v4().to_string();
+        let conn_y = uuid::Uuid::new_v4().to_string();
+
+        let mut key_x = provider_key(&key_x_id, &user_id, &provider_id, "pending_auth", "oauth2");
+        key_x.connection_id = Some(conn_x.clone());
+
+        let mut key_y = provider_key(&key_y_id, &user_id, &provider_id, "pending_auth", "oauth2");
+        key_y.connection_id = Some(conn_y.clone());
+
+        db.collection::<UserApiKey>(super::COLLECTION_NAME)
+            .insert_many(vec![key_x, key_y])
+            .await
+            .unwrap();
+
+        let modified = fail_connection_placeholder(&db, &conn_x, "error_x")
+            .await
+            .unwrap();
+
+        assert_eq!(modified, 1);
+
+        assert_eq!(get_key(&db, &key_x_id).await.status, "failed");
+        assert_eq!(get_key(&db, &key_y_id).await.status, "pending_auth");
+    }
+
+    #[tokio::test]
+    async fn fail_connection_placeholder_race_safety() {
+        let Some(db) = connect_test_database("user_api_key_fail_conn_race").await else {
+            eprintln!("skipping integration test: no local MongoDB available");
+            return;
+        };
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let provider_id = uuid::Uuid::new_v4().to_string();
+        let key_id = uuid::Uuid::new_v4().to_string();
+        let conn_id = uuid::Uuid::new_v4().to_string();
+
+        let mut key = provider_key(&key_id, &user_id, &provider_id, "active", "oauth2");
+        key.connection_id = Some(conn_id.clone());
+
+        db.collection::<UserApiKey>(super::COLLECTION_NAME)
+            .insert_one(key)
+            .await
+            .unwrap();
+
+        let modified = fail_connection_placeholder(&db, &conn_id, "late_error")
+            .await
+            .unwrap();
+
+        assert_eq!(modified, 0);
+
+        let updated = get_key(&db, &key_id).await;
+        assert_eq!(updated.status, "active");
+        assert!(updated.error_message.is_none());
     }
 
     #[tokio::test]
