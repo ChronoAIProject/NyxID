@@ -366,7 +366,41 @@ pub async fn register(
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .ok_or_else(|| AppError::ValidationError("Invite code is required".to_string()))?;
-        Some(invite_code_service::reserve_invite_code(&state.db, raw_code).await?)
+        match invite_code_service::reserve_invite_code(&state.db, raw_code, &body.email).await {
+            Ok(id) => Some(id),
+            // Enumeration-safe: treat an already-redeemed code as if the
+            // email address simply doesn't exist yet. Return the same
+            // fake-success response used for duplicate-email registrations so
+            // callers cannot distinguish "code used" from "email unknown".
+            // Nothing was reserved, so there is nothing to release. We mirror
+            // the duplicate-email path's audit side-effect (and add a warn) so
+            // the two paths are indistinguishable AND the reuse attempt is
+            // still recorded for audit/monitoring.
+            Err(AppError::InviteCodeAlreadyRedeemed) => {
+                tracing::warn!("Registration attempt with an already-redeemed invite code");
+                let message = if state.config.auto_verify_email {
+                    "Registration processed. You can now sign in.".to_string()
+                } else {
+                    "Check your email for a verification link to complete registration.".to_string()
+                };
+                let fake_user_id = uuid::Uuid::new_v4().to_string();
+                audit_service::log_async(
+                    state.db.clone(),
+                    Some(fake_user_id.clone()),
+                    "register".to_string(),
+                    Some(serde_json::json!({ "email": body.email })),
+                    extract_ip(&headers, Some(peer)),
+                    extract_user_agent(&headers),
+                    None,
+                    None,
+                );
+                return Ok(Json(RegisterResponse {
+                    user_id: fake_user_id,
+                    message,
+                }));
+            }
+            Err(e) => return Err(e),
+        }
     } else {
         None
     };
@@ -384,7 +418,8 @@ pub async fn register(
     let result = match register_result {
         Ok(r) if r.actually_created => {
             if let Some(ref code_id) = invite_code_id {
-                invite_code_service::record_usage(&state.db, code_id, &r.user_id).await;
+                invite_code_service::record_usage(&state.db, code_id, &r.user_id, &body.email)
+                    .await;
             }
             r
         }

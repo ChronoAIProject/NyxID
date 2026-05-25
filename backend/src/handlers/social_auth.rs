@@ -395,17 +395,26 @@ pub async fn callback(
         .map(|c| c.into_owned())
         .filter(|c| !c.is_empty());
 
-    let (allow_new_users, reserved_invite_id) = if state.config.invite_code_required {
-        match invite_code.as_deref() {
-            Some(code) => match invite_code_service::reserve_invite_code(&state.db, code).await {
-                Ok(invite_id) => (true, Some(invite_id)),
-                Err(_) => (false, None),
-            },
-            None => (false, None),
-        }
-    } else {
-        (true, None)
-    };
+    let (allow_new_users, reserved_invite_id, already_redeemed) =
+        if state.config.invite_code_required {
+            match invite_code.as_deref() {
+                Some(code) => {
+                    match invite_code_service::reserve_invite_code(&state.db, code, &profile.email)
+                        .await
+                    {
+                        Ok(invite_id) => (true, Some(invite_id), false),
+                        // The email already consumed a slot. Set allow_new_users=false
+                        // so find_or_create_user rejects new signups, but existing
+                        // users still log in (find_or_create_user returns Ok for them).
+                        Err(AppError::InviteCodeAlreadyRedeemed) => (false, None, true),
+                        Err(_) => (false, None, false),
+                    }
+                }
+                None => (false, None, false),
+            }
+        } else {
+            (true, None, false)
+        };
 
     let create_outcome =
         social_auth_service::find_or_create_user(&state.db, &profile, allow_new_users)
@@ -424,6 +433,12 @@ pub async fn callback(
                     AppError::SocialAuthConflict => "social_auth_conflict",
                     AppError::SocialAuthNoEmail => "social_auth_no_email",
                     AppError::SocialAuthDeactivated => "social_auth_deactivated",
+                    // Surface invite_code_already_redeemed when registration was
+                    // blocked because this email already consumed a slot. Existing
+                    // users never reach this arm (find_or_create_user returns Ok for them).
+                    AppError::SocialAuthRegistrationClosed if already_redeemed => {
+                        "invite_code_already_redeemed"
+                    }
                     AppError::SocialAuthRegistrationClosed => "social_auth_registration_closed",
                     _ => "social_auth_exchange",
                 };
@@ -434,7 +449,7 @@ pub async fn callback(
 
     // Record invite code usage after successful user creation / lookup.
     if let Some(ref iid) = reserved_invite_id {
-        let _ = invite_code_service::record_usage(&state.db, iid, &user.id).await;
+        let _ = invite_code_service::record_usage(&state.db, iid, &user.id, &profile.email).await;
     }
 
     let ip = extract_ip(&headers, Some(peer));
@@ -803,17 +818,23 @@ pub async fn apple_callback(
         .map(|c| c.into_owned())
         .filter(|c| !c.is_empty());
 
-    let (allow_new_users, reserved_invite_id) = if state.config.invite_code_required {
-        match invite_code.as_deref() {
-            Some(code) => match invite_code_service::reserve_invite_code(&state.db, code).await {
-                Ok(invite_id) => (true, Some(invite_id)),
-                Err(_) => (false, None),
-            },
-            None => (false, None),
-        }
-    } else {
-        (true, None)
-    };
+    let (allow_new_users, reserved_invite_id, already_redeemed) =
+        if state.config.invite_code_required {
+            match invite_code.as_deref() {
+                Some(code) => {
+                    match invite_code_service::reserve_invite_code(&state.db, code, &profile.email)
+                        .await
+                    {
+                        Ok(invite_id) => (true, Some(invite_id), false),
+                        Err(AppError::InviteCodeAlreadyRedeemed) => (false, None, true),
+                        Err(_) => (false, None, false),
+                    }
+                }
+                None => (false, None, false),
+            }
+        } else {
+            (true, None, false)
+        };
 
     let create_outcome =
         social_auth_service::find_or_create_user(&state.db, &profile, allow_new_users)
@@ -831,6 +852,9 @@ pub async fn apple_callback(
                     AppError::SocialAuthConflict => "social_auth_conflict",
                     AppError::SocialAuthNoEmail => "social_auth_no_email",
                     AppError::SocialAuthDeactivated => "social_auth_deactivated",
+                    AppError::SocialAuthRegistrationClosed if already_redeemed => {
+                        "invite_code_already_redeemed"
+                    }
                     AppError::SocialAuthRegistrationClosed => "social_auth_registration_closed",
                     _ => "social_auth_exchange",
                 };
@@ -841,7 +865,7 @@ pub async fn apple_callback(
 
     // Record invite code usage after successful user creation / lookup.
     if let Some(ref iid) = reserved_invite_id {
-        let _ = invite_code_service::record_usage(&state.db, iid, &user.id).await;
+        let _ = invite_code_service::record_usage(&state.db, iid, &user.id, &profile.email).await;
     }
 
     let ip = extract_ip(&headers, Some(peer));

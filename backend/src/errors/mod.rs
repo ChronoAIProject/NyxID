@@ -246,6 +246,9 @@ pub enum AppError {
 
     #[error("Invite code has been deactivated")]
     InviteCodeDeactivated,
+
+    #[error("Invite code has already been redeemed")]
+    InviteCodeAlreadyRedeemed,
 }
 
 impl AppError {
@@ -316,9 +319,10 @@ impl AppError {
             Self::OrgInviteInvalid(_) => StatusCode::BAD_REQUEST,
             Self::OrgInviteExpired => StatusCode::GONE,
             Self::OrgApprovalNoAdmin(_) => StatusCode::SERVICE_UNAVAILABLE,
-            Self::InviteCodeInvalid | Self::InviteCodeExhausted | Self::InviteCodeDeactivated => {
-                StatusCode::BAD_REQUEST
-            }
+            Self::InviteCodeInvalid
+            | Self::InviteCodeExhausted
+            | Self::InviteCodeDeactivated
+            | Self::InviteCodeAlreadyRedeemed => StatusCode::BAD_REQUEST,
             Self::Internal(_) | Self::DatabaseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -396,6 +400,7 @@ impl AppError {
             Self::InviteCodeInvalid => 8200,
             Self::InviteCodeExhausted => 8201,
             Self::InviteCodeDeactivated => 8202,
+            Self::InviteCodeAlreadyRedeemed => 8203,
         }
     }
 
@@ -505,6 +510,7 @@ impl AppError {
             Self::InviteCodeInvalid => "invite_code_invalid",
             Self::InviteCodeExhausted => "invite_code_exhausted",
             Self::InviteCodeDeactivated => "invite_code_deactivated",
+            Self::InviteCodeAlreadyRedeemed => "invite_code_already_redeemed",
         }
     }
 }
@@ -802,6 +808,10 @@ mod tests {
             AppError::InviteCodeDeactivated.status_code(),
             StatusCode::BAD_REQUEST
         );
+        assert_eq!(
+            AppError::InviteCodeAlreadyRedeemed.status_code(),
+            StatusCode::BAD_REQUEST
+        );
     }
 
     #[test]
@@ -871,6 +881,7 @@ mod tests {
             AppError::InviteCodeInvalid.error_code(),
             AppError::InviteCodeExhausted.error_code(),
             AppError::InviteCodeDeactivated.error_code(),
+            AppError::InviteCodeAlreadyRedeemed.error_code(),
         ];
         let unique: std::collections::HashSet<u32> = codes.iter().copied().collect();
         assert_eq!(
@@ -1099,6 +1110,15 @@ mod tests {
         assert_eq!(
             format!("{}", AppError::InviteCodeDeactivated),
             "Invite code has been deactivated"
+        );
+        assert_eq!(
+            AppError::InviteCodeAlreadyRedeemed.error_key(),
+            "invite_code_already_redeemed"
+        );
+        assert_eq!(AppError::InviteCodeAlreadyRedeemed.error_code(), 8203);
+        assert_eq!(
+            format!("{}", AppError::InviteCodeAlreadyRedeemed),
+            "Invite code has already been redeemed"
         );
     }
 

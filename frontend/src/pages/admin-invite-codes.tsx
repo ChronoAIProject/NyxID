@@ -76,7 +76,7 @@ export function AdminInviteCodesPage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [createdCode, setCreatedCode] = useState<InviteCode | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
-  const [, setCopiedLinkId] = useState<string | null>(null);
+  const [copiedLinkId, setCopiedLinkId] = useState<string | null>(null);
   const [deactivateTarget, setDeactivateTarget] = useState<InviteCode | null>(
     null,
   );
@@ -660,6 +660,52 @@ export function AdminInviteCodesPage() {
                 <SheetDescription>
                   Detailed usage and editable note for this invite code.
                 </SheetDescription>
+                <div className="flex items-center gap-2 pt-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() =>
+                      void handleCopyCode(selectedCode.code, selectedCode.id)
+                    }
+                  >
+                    {copiedId === selectedCode.id ? (
+                      <>
+                        <Check
+                          className="h-3 w-3 text-success"
+                          aria-hidden="true"
+                        />
+                        Copied
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="h-3 w-3" aria-hidden="true" />
+                        Copy code
+                      </>
+                    )}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() =>
+                      void handleCopyLink(selectedCode.code, selectedCode.id)
+                    }
+                  >
+                    {copiedLinkId === selectedCode.id ? (
+                      <>
+                        <Check
+                          className="h-3 w-3 text-success"
+                          aria-hidden="true"
+                        />
+                        Copied
+                      </>
+                    ) : (
+                      <>
+                        <Link2 className="h-3 w-3" aria-hidden="true" />
+                        Copy invite link
+                      </>
+                    )}
+                  </Button>
+                </div>
               </SheetHeader>
 
               <div className="grid grid-cols-2 gap-4 rounded-md border border-border bg-muted/20 p-4 text-sm">

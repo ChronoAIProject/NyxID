@@ -82,6 +82,14 @@ pub fn normalize_code(input: &str) -> String {
     input.trim().to_uppercase()
 }
 
+/// Normalize an email to its canonical form for per-identity deduplication.
+///
+/// Trims surrounding whitespace and lowercases, matching the storage
+/// convention used everywhere else in the auth layer.
+pub fn normalize_email(input: &str) -> String {
+    input.trim().to_lowercase()
+}
+
 /// Return true if the given MongoDB error represents a unique-index violation.
 fn is_duplicate_key_error(e: &mongodb::error::Error) -> bool {
     matches!(
@@ -140,22 +148,34 @@ pub async fn create_invite_code(
 
 /// Atomically reserve one slot on an invite code.
 ///
-/// Returns `Ok(invite_code_id)` on success. On failure, returns one of three
+/// Returns `Ok(invite_code_id)` on success. On failure, returns one of four
 /// distinct errors so the registration UI can show an actionable message:
 ///   * `AppError::InviteCodeInvalid` — no code matches (never existed, or typo).
 ///   * `AppError::InviteCodeDeactivated` — the admin disabled this code.
+///   * `AppError::InviteCodeAlreadyRedeemed` — this email already consumed a slot.
 ///   * `AppError::InviteCodeExhausted` — the code has reached `max_uses`.
 ///
 /// Implementation: the atomic `find_one_and_update` runs first so the happy
-/// path is a single round-trip. Only when the update matched nothing do we
-/// fall back to a `find_one` diagnostic lookup to determine *why* it missed.
-/// This keeps the hot path fast while still giving the user a specific error.
+/// path is a single round-trip. The filter includes `"usages.email": {$ne:
+/// normalized_email}` so a second reservation for the same identity is
+/// rejected atomically. Missing/legacy `email` fields on existing usages are
+/// treated as not-equal by MongoDB's `$ne` semantics, so old records never
+/// block new redemptions (forward-only).
+///
+/// Only when the update matched nothing do we fall back to a `find_one`
+/// diagnostic lookup to determine *why* it missed. This keeps the hot path
+/// fast while still giving the user a specific error.
 ///
 /// This only touches `used_count`; the caller is responsible for recording
 /// the usage (via `record_usage`) once the downstream user creation succeeds,
 /// and releasing (via `release_reservation`) if it fails.
-pub async fn reserve_invite_code(db: &mongodb::Database, code: &str) -> AppResult<String> {
+pub async fn reserve_invite_code(
+    db: &mongodb::Database,
+    code: &str,
+    email: &str,
+) -> AppResult<String> {
     let normalized = normalize_code(code);
+    let normalized_email = normalize_email(email);
     let now = bson::DateTime::from_chrono(Utc::now());
 
     let options = FindOneAndUpdateOptions::builder()
@@ -170,6 +190,7 @@ pub async fn reserve_invite_code(db: &mongodb::Database, code: &str) -> AppResul
                 "code": &normalized,
                 "is_active": true,
                 "$expr": { "$lt": ["$used_count", "$max_uses"] },
+                "usages.email": { "$ne": &normalized_email },
             },
             doc! {
                 "$inc": { "used_count": 1 },
@@ -183,12 +204,22 @@ pub async fn reserve_invite_code(db: &mongodb::Database, code: &str) -> AppResul
         return Ok(invite.id);
     }
 
-    // Diagnose why the reservation failed. Order matters: deactivated takes
-    // precedence over exhausted, since an admin may have deactivated a code
-    // that also happens to be full. Both are more informative than "invalid".
+    // Diagnose why the reservation failed. Ordering is intentional:
+    //   1. Deactivated — admin-disabled takes precedence over everything.
+    //   2. AlreadyRedeemed — per-identity enforcement (email in usages).
+    //   3. Exhausted — all slots consumed.
+    //   4. Invalid — race window (see below) or code never existed.
     match collection.find_one(doc! { "code": &normalized }).await? {
         None => Err(AppError::InviteCodeInvalid),
         Some(invite) if !invite.is_active => Err(AppError::InviteCodeDeactivated),
+        Some(invite)
+            if invite
+                .usages
+                .iter()
+                .any(|u| u.email.as_deref() == Some(normalized_email.as_str())) =>
+        {
+            Err(AppError::InviteCodeAlreadyRedeemed)
+        }
         Some(invite) if invite.used_count >= invite.max_uses => Err(AppError::InviteCodeExhausted),
         // Race: the code became valid between the update miss and the
         // diagnostic read (e.g. `release_reservation` landed in between).
@@ -203,10 +234,19 @@ pub async fn reserve_invite_code(db: &mongodb::Database, code: &str) -> AppResul
 /// Best-effort append to the `usages` array. Failures are logged but do not
 /// propagate: the user has already been successfully created, and the atomic
 /// reservation still accurately reflects that one slot was consumed.
-pub async fn record_usage(db: &mongodb::Database, invite_code_id: &str, user_id: &str) {
+///
+/// `email` is normalized (trimmed + lowercased) before storage so the
+/// per-identity deduplication filter in `reserve_invite_code` finds it.
+pub async fn record_usage(
+    db: &mongodb::Database,
+    invite_code_id: &str,
+    user_id: &str,
+    email: &str,
+) {
     let usage = InviteCodeUsage {
         user_id: user_id.to_string(),
         used_at: Utc::now(),
+        email: Some(normalize_email(email)),
     };
     let usage_bson = match bson::to_bson(&usage) {
         Ok(b) => b,
@@ -497,5 +537,150 @@ mod tests {
         assert_eq!(normalize_code(&generated), generated);
         // Lowercase variant of the same code should normalize to the generated form.
         assert_eq!(normalize_code(&generated.to_lowercase()), generated);
+    }
+
+    #[test]
+    fn normalize_email_lowercases_and_trims() {
+        assert_eq!(normalize_email("Alice@Example.COM"), "alice@example.com");
+        assert_eq!(normalize_email("  user@domain.io  "), "user@domain.io");
+        assert_eq!(normalize_email("UPPER@CASE.NET"), "upper@case.net");
+        assert_eq!(normalize_email(""), "");
+        assert_eq!(normalize_email("   "), "");
+        // Internal case is lowered; surrounding whitespace stripped
+        assert_eq!(normalize_email(" Mixed.Case@X.Y "), "mixed.case@x.y");
+    }
+
+    #[test]
+    fn normalize_email_idempotent() {
+        let addr = "already@normalized.com";
+        assert_eq!(normalize_email(addr), addr);
+        assert_eq!(
+            normalize_email(&normalize_email("USER@HOST.ORG")),
+            "user@host.org"
+        );
+    }
+
+    // ── Integration tests (require local MongoDB) ─────────────────────────────
+    // These tests use `connect_test_database`. If no MongoDB is reachable they
+    // skip cleanly. Each test uses a unique DB name so tests are isolated.
+
+    #[tokio::test]
+    async fn reserve_rejects_already_redeemed_email() {
+        let Some(db) = crate::test_utils::connect_test_database("invite_already_redeemed").await
+        else {
+            eprintln!("skipping integration test: no local MongoDB available");
+            return;
+        };
+
+        let code = create_invite_code(&db, "admin", 10, None).await.unwrap();
+
+        // First reservation for this email succeeds.
+        let id = reserve_invite_code(&db, &code.code, "alice@example.com")
+            .await
+            .unwrap();
+
+        // Record the usage so the email is persisted on the document.
+        record_usage(&db, &id, "user-1", "alice@example.com").await;
+
+        // Second reservation for the same email (case-insensitive) is rejected.
+        let err = reserve_invite_code(&db, &code.code, "Alice@Example.COM")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::errors::AppError::InviteCodeAlreadyRedeemed),
+            "expected InviteCodeAlreadyRedeemed, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reserve_allows_distinct_email_on_same_code() {
+        let Some(db) = crate::test_utils::connect_test_database("invite_distinct_email").await
+        else {
+            eprintln!("skipping integration test: no local MongoDB available");
+            return;
+        };
+
+        let code = create_invite_code(&db, "admin", 10, None).await.unwrap();
+
+        let id1 = reserve_invite_code(&db, &code.code, "alice@example.com")
+            .await
+            .unwrap();
+        record_usage(&db, &id1, "user-1", "alice@example.com").await;
+
+        // Different email on the same code — should succeed.
+        let result = reserve_invite_code(&db, &code.code, "bob@example.com").await;
+        assert!(
+            result.is_ok(),
+            "distinct email must be allowed; got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reserve_legacy_usage_without_email_does_not_block() {
+        use crate::models::invite_code::InviteCodeUsage;
+
+        let Some(db) = crate::test_utils::connect_test_database("invite_legacy_no_email").await
+        else {
+            eprintln!("skipping integration test: no local MongoDB available");
+            return;
+        };
+
+        let code = create_invite_code(&db, "admin", 10, None).await.unwrap();
+
+        // Manually push a legacy usage with no `email` field (simulates records
+        // written before per-identity enforcement).
+        let legacy_usage = InviteCodeUsage {
+            user_id: "legacy-user".to_string(),
+            used_at: chrono::Utc::now(),
+            email: None, // absent on old records
+        };
+        let usage_bson = bson::to_bson(&legacy_usage).unwrap();
+        db.collection::<InviteCode>(COLLECTION_NAME)
+            .update_one(
+                doc! { "_id": &code.id },
+                doc! {
+                    "$push": { "usages": usage_bson },
+                    "$inc": { "used_count": 1 },
+                },
+            )
+            .await
+            .unwrap();
+
+        // A new reservation for a real email must still succeed — legacy entry
+        // must not block it.
+        let result = reserve_invite_code(&db, &code.code, "newuser@example.com").await;
+        assert!(
+            result.is_ok(),
+            "legacy usage without email must not block new reservation; got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reserve_already_redeemed_ordering_vs_deactivated() {
+        // A deactivated code reports Deactivated even if the email is also in usages.
+        let Some(db) = crate::test_utils::connect_test_database("invite_order_deactivated").await
+        else {
+            eprintln!("skipping integration test: no local MongoDB available");
+            return;
+        };
+
+        let code = create_invite_code(&db, "admin", 10, None).await.unwrap();
+        // Record a usage for the email.
+        let id = reserve_invite_code(&db, &code.code, "eve@example.com")
+            .await
+            .unwrap();
+        record_usage(&db, &id, "user-eve", "eve@example.com").await;
+
+        // Now deactivate the code.
+        deactivate_invite_code(&db, &code.id).await.unwrap();
+
+        // Should report Deactivated, not AlreadyRedeemed.
+        let err = reserve_invite_code(&db, &code.code, "eve@example.com")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::errors::AppError::InviteCodeDeactivated),
+            "deactivated must take precedence over already-redeemed; got: {err:?}"
+        );
     }
 }

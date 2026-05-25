@@ -61,6 +61,8 @@ const SOCIAL_ERROR_MESSAGES: Record<string, string> = {
   social_auth_failed: "Social sign-in failed. Please try again.",
   social_auth_exchange:
     "Social sign-in failed due to a temporary error. Please try again.",
+  invite_code_already_redeemed:
+    "This invite code has already been redeemed with this account.",
 };
 
 /** Trusted origins for return_to redirect validation (open-redirect prevention). */
