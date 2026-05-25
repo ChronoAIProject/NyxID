@@ -45,7 +45,7 @@ Adversaries we defend against:
 | T2 | Passive read access to NyxID storage or memory (DB dump, backup leak, future operator with archive) | E2E encryption alone: server only stores ciphertext bound to a single pending credential |
 | T3 | Active MITM past TLS termination at NyxID (rogue middlebox, compromised CA proxy chain) | AEAD authenticity + freshness binding catch substitution |
 | T4 | Replay of a captured ciphertext blob against the same pending credential | Atomicity guard: first-push-wins, returns 409 on second push (per §"Race protection") |
-| T5 | Replay of a captured ciphertext blob against a *different* pending credential or node | AEAD associated data binds ciphertext to `(node_id, pending_credential_id, slug)` |
+| T5 | Replay of a captured ciphertext blob against a *different* pending credential or node, or metadata tampering (changing injection target after admin submission) | AEAD associated data binds ciphertext to `(node_id, pending_credential_id, slug, injection_method, field_name, target_url, "v1")` — any alteration of these fields invalidates the auth tag on decrypt |
 | T6 | Adversary later steals the node's persistent state and decrypts past pushes | Ephemeral X25519 keypair per pending credential, sealed at rest by the node's long-lived auth key, dropped on consume — gives forward secrecy |
 | T7 | Race-to-brick: attacker submits garbage ciphertext faster than the legitimate admin | Per-pending-credential rate limit (1 successful POST, 3 failed in 60s, then 5-min lockout); pending IDs have ~256 bits of entropy |
 | T8 | Node restart between pubkey post and ciphertext receipt | Ephemeral privkey persisted to node's local secret backend, sealed by long-lived auth key (survives restart, dropped on consume/decline/expire) |
@@ -87,7 +87,9 @@ Browser-only path:
 
 CLI path (full e2e — no browser required):
 
-The CLI is a first-class entry point for the entire remote credential injection flow, not just a "push intent then switch to browser" helper. The admin's locally-installed binary IS the trust anchor — unlike the browser path, there is no NyxID-served JS to substitute, so the CLI path is **immune to T1 code-substitution by design** without needing Phase 4.5's SRI/fingerprint machinery.
+The CLI is a first-class entry point for the entire remote credential injection flow, not just a "push intent then switch to browser" helper. The admin's locally-installed binary cannot be substituted by a compromised NyxID server (unlike the browser JS), so the CLI path is **immune to T1 code-substitution** without needing Phase 4.5's SRI/fingerprint machinery.
+
+**Important caveat (T1 data-substitution):** the CLI still fetches the node's ephemeral pubkey via `GET /credentials/pending/{id}` from NyxID. A fully-compromised NyxID server can substitute its own X25519 pubkey in this response, decrypt the admin's ciphertext, re-encrypt to the real node pubkey, and forward — a classic MITM on the key exchange. The AEAD AAD binds `(node_id, pending_id, slug, version)` but does not authenticate the pubkey's origin. This data-substitution attack applies equally to the browser path. The CLI's T1 advantage is strictly limited to code-substitution immunity; for data-substitution, both paths rely on T2 (passive-read) protection unless the admin independently verifies the node's pubkey fingerprint out-of-band (e.g., the node agent logs its per-pending pubkey fingerprint to its local console, and the admin compares before submitting). A future protocol revision could add node-signed pubkeys (Ed25519 signature over the ephemeral X25519 pubkey, verified via TOFU-pinned node identity) to close this gap fully.
 
 **Interactive mode** (admin types the secret):
 
@@ -201,13 +203,19 @@ pub enum RemoteCryptoState {
     /// shortened TTL (see Best Practice §3). Will be forwarded when the
     /// node reconnects within the queue TTL.
     CiphertextQueued,
-    /// Node decrypted successfully; secret stored (auto-accept) or held
-    /// in volatile queue (require_operator_confirm_for_remote).
+    /// Terminal success state: node decrypted AND stored the secret in
+    /// CredentialStore. For the operator-confirm path, this state is
+    /// reached only AFTER the operator confirms — the intermediate
+    /// "decrypted but not yet stored" state is DecryptedPendingConfirmation.
     Consumed,
     /// Node decrypted successfully but operator confirmation is pending.
     DecryptedPendingConfirmation,
     /// AEAD decryption or AAD verification failed. Terminal.
     DecryptFailed,
+    /// Multi-node fan-out: some nodes accepted, some failed or are still
+    /// in-flight. The aggregate logical credential is not yet consumed.
+    /// Per-node breakdown in `fan_out_nodes` shows individual states.
+    PartialDecrypted,
     /// Pending credential expired before the flow completed.
     Expired,
 }
@@ -243,11 +251,16 @@ pubkey_posted                     crypto.node_pubkey = <set>, rest = None
   ↓ admin submits ciphertext (POST /ciphertext)
   ↓ atomicity guard: find_one_and_update { crypto.ciphertext: null }
 ciphertext_received               crypto fully populated
-  ↓ NyxID forwards over WSS to node
-  ↓ node decrypts, validates AAD
-  ├── success + remote auto-accept default → consumed (existing accept path) → privkey dropped from sealed store
-  ├── success + require operator confirm → decrypted_pending_confirmation → operator confirms → consumed
-  └── failure → decrypt_failed state, admin can cancel + re-create (NOT retry on same pending)
+  ├── node online → NyxID forwards over WSS immediately
+  │     ↓ node decrypts, validates AAD
+  │     ├── success + auto-accept (default) → consumed → privkey dropped
+  │     ├── success + require confirm → decrypted_pending_confirmation → operator confirms → consumed
+  │     └── failure → decrypt_failed, admin can cancel + re-create
+  └── node offline → ciphertext_queued (15-min TTL)
+        ↓ node reconnects within TTL
+        ↓ NyxID forwards queued ciphertext
+        ├── success → consumed (same as above)
+        └── TTL expires → expired
 ```
 
 ### Flow
@@ -286,7 +299,7 @@ sequenceDiagram
     A->>N: GET /nodes/{id}/credentials/pending/{pending_id}
     N->>A: {pending_id, crypto.node_pubkey, slug, node_id, ...}
     A->>A: verify frontend SRI hash + signed-release fingerprint<br/>(Phase 4.5 gate)
-    A->>A: generate ephemeral keypair<br/>ECDH(admin_priv, node_pubkey) → shared<br/>HKDF(shared, info=node_id‖pending_id‖slug‖"v1")<br/>XChaCha20-Poly1305 encrypt secret<br/>AAD=node_id‖pending_id‖slug‖"v1"
+    A->>A: generate ephemeral keypair<br/>ECDH(admin_priv, node_pubkey) → shared<br/>HKDF(shared, info=node_id‖pending_id‖slug‖"v1")<br/>XChaCha20-Poly1305 encrypt secret<br/>AAD=node_id‖pending_id‖slug‖injection_method‖field_name‖target_url‖"v1"
     A->>N: POST /nodes/{id}/credentials/pending/{pending_id}/ciphertext<br/>{admin_pubkey, nonce, ciphertext (≤16 KB)}
     N->>N: find_one_and_update guard: 409 if ciphertext already set<br/>per-pending rate limiter check
     N->>W: pending_credential_ciphertext {pending_id, admin_pubkey, nonce, ciphertext}
@@ -347,7 +360,7 @@ Per-pending-credential rate limit: 1 successful POST, max 3 failed POSTs in a 60
    - **202** on `pending_credential_decrypted` — strict confirmation policy (`require_operator_confirm_for_remote: true`); browser shows "waiting for operator confirmation" with polling
    - **202** on `ciphertext_queued` — node offline at POST time; ciphertext stored server-side with shortened TTL (Best Practice §3: 15 min); will be forwarded when the node reconnects. `remote_state` transitions to `CiphertextQueued`. Browser shows "waiting for node to come online" with polling. Distinguished from the sync-wait timeout (below) because the server knows the node is offline before even attempting the WSS send.
    - **4xx** with error code 8006-8011 on `pending_credential_error`
-   - **504** Gateway Timeout on sync-wait timeout — node WAS online, WSS send succeeded, but no ack within 15s. The ciphertext was forwarded but the node didn't respond. `remote_state` stays `CiphertextReceived`. Admin can poll for eventual state change or cancel + re-push.
+   - **504** Gateway Timeout on sync-wait timeout — node WAS online, WSS send succeeded, but no ack within 15s. The ciphertext was forwarded but the node didn't respond. `remote_state` stays `CiphertextReceived`. **Polling guidance:** the admin's browser (or CLI) should poll `GET /credentials/pending/{id}` with exponential backoff (2s, 4s, 8s, cap 30s) watching for `remote_state` to transition to `Consumed`, `DecryptedPendingConfirmation`, or `DecryptFailed`. If still `CiphertextReceived` after 2 minutes, surface a "node may be unresponsive" warning with options to keep waiting or cancel + re-push.
 
 Reuse the `oneshot` + timeout machinery — do not invent a new mechanism. The handler MUST block on the ack before returning; committing the ciphertext to MongoDB and returning 200 without confirmation would leave admin and node out of sync (same failure class as the historical issue captured in the `send_credential_update_and_wait` comments at lines 1599-1632).
 
@@ -358,7 +371,7 @@ Two separate signals — do not conflate them:
 **1. Feature + policy detection (synchronous, cached).** Node agents advertise `supported_features` (a new field added in Phase 1; current node agents do not advertise it). The new flow contributes `crypto_v1` to that set. Additionally, the per-node policy flags (`enable_remote_credential_injection`, `require_operator_confirm_for_remote`) are persisted on the `Node` model and returned in the `GET /nodes/{id}` response so the frontend can make the correct UI decision without guessing:
 
 - `crypto_v1 ∈ supported_features` AND `enable_remote_credential_injection == true` → show browser push + accept UI
-- `crypto_v1 ∈ supported_features` AND `enable_remote_credential_injection == false` → show "this node supports remote injection but the feature is not yet enabled; an admin must enable it via the node settings page or `nyxid node config set enable_remote_credential_injection true`"
+- `crypto_v1 ∈ supported_features` AND `enable_remote_credential_injection == false` → show "this node supports remote injection but the feature is not yet enabled; an admin can enable it via the node settings page in the web UI or via `PATCH /api/v1/nodes/{id}` with `{ enable_remote_credential_injection: true }`" (note: no `nyxid node config set` CLI subcommand exists today; Phase 1 should add one, or the web UI + API are the only enablement paths)
 - `crypto_v1 ∉ supported_features` (older agent or unupgraded node) → show legacy "SSH to node and run `nyxid node credentials accept`" instructions
 
 NyxID persists `Node.supported_features` (new model field; populated from the existing in-memory `record_capabilities` path in `node_ws_manager.rs:1705` if the codebase already has it, or added in Phase 1 if not). Feature + policy detection is fast and cached. No polling for this step.
@@ -588,7 +601,7 @@ Implementer should run `cargo test`, `npm run test`, and the e2e suite before re
 
 Phase 3 must include both the push metadata form and the secret accept form.
 
-**Shared crypto crate:** Phase 2 (node-side decrypt) and Phase 5 (CLI-side encrypt) use the same primitives (`x25519-dalek`, `chacha20poly1305`, `hkdf`, `sha2`). Extract the ECDH + HKDF + AEAD envelope into a `nyxid-crypto` workspace crate (~400 LOC) that both `nyxid-cli` (for admin-side encrypt + node-side decrypt) and `nyxid` backend (for no-op — backend never encrypts/decrypts, just validates ciphertext size) can depend on. This follows the existing precedent for small shared crates (see `nyxid-cloud-auth` workspace crate). The shared crate exposes: `encrypt(plaintext, recipient_pubkey, aad_context) -> CiphertextEnvelope` and `decrypt(envelope, sealed_privkey, aad_context) -> plaintext`. Both the browser `@noble/*` implementation and this Rust crate must produce identical ciphertext for the same inputs — the interop test fixtures (Phase 2 test strategy) verify this. The UI can be a single two-step page / panel or two pages navigated in sequence from service / node detail to the standalone accept page.
+**Shared crypto crate:** Phase 2 (node-side decrypt) and Phase 5 (CLI-side encrypt) use the same primitives (`x25519-dalek`, `chacha20poly1305`, `hkdf`, `sha2`). Extract the ECDH + HKDF + AEAD envelope into a `nyxid-crypto` workspace crate (~400 LOC) that both `nyxid-cli` (for admin-side encrypt + node-side decrypt) and `nyxid` backend (for no-op — backend never encrypts/decrypts, just validates ciphertext size) can depend on. This follows the existing precedent for small shared crates (see `nyxid-cloud-auth` workspace crate). The shared crate exposes: `encrypt(plaintext, recipient_pubkey, aad_context) -> CiphertextEnvelope` (always available) and `decrypt(envelope, sealed_privkey, aad_context) -> plaintext` (behind `#[cfg(feature = "decrypt")]` feature gate). The backend binary depends on `nyxid-crypto` for `CiphertextEnvelope` serialization and `MAX_CIPHERTEXT_SIZE` validation only — the `decrypt` feature is NOT enabled for the backend, preventing accidental server-side decryption. Only `nyxid-cli` (for both admin-side encrypt and node-side decrypt) enables the `decrypt` feature. Both the browser `@noble/*` implementation and this Rust crate must be **mutually decryptable** — ciphertext produced by one must be decryptable by the other, and vice versa. With random nonces, identical plaintext will NOT produce identical ciphertext (by design). The interop test fixtures use **fixed test vectors** (pinned keys + pinned nonce) to verify byte-level compatibility; in production, nonces are random and ciphertexts will differ between runs. The UI can be a single two-step page / panel or two pages navigated in sequence from service / node detail to the standalone accept page.
 
 **Worktree parallelization:** Phase 1 alone first. Phases 2 + 3 + 4 in parallel lanes. Phase 3.5 after 1+2+3. Phases 4.5 + 5 + 6 in parallel after their deps. See "Parallelization" section below.
 
