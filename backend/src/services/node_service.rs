@@ -1824,6 +1824,7 @@ mod tests {
             os: None,
             arch: None,
             ip_address: None,
+            provisioning_source: None,
         };
         validate_node_metadata(&meta).expect("all-None metadata should be valid");
     }
@@ -1835,6 +1836,7 @@ mod tests {
             os: Some("linux".to_string()),
             arch: Some("x86_64".to_string()),
             ip_address: Some("192.168.1.1".to_string()),
+            provisioning_source: None,
         };
         validate_node_metadata(&meta).expect("valid metadata should pass");
     }
@@ -1846,6 +1848,7 @@ mod tests {
             os: None,
             arch: None,
             ip_address: Some("::1".to_string()),
+            provisioning_source: None,
         };
         validate_node_metadata(&meta).expect("IPv6 loopback should be valid");
     }
@@ -1857,6 +1860,7 @@ mod tests {
             os: None,
             arch: None,
             ip_address: Some("2001:0db8:85a3:0000:0000:8a2e:0370:7334".to_string()),
+            provisioning_source: None,
         };
         validate_node_metadata(&meta).expect("full IPv6 should be valid");
     }
@@ -1868,6 +1872,7 @@ mod tests {
             os: None,
             arch: None,
             ip_address: None,
+            provisioning_source: None,
         };
         let err = validate_node_metadata(&meta).expect_err("agent_version too long");
         assert!(matches!(err, AppError::ValidationError(msg) if msg.contains("agent_version")));
@@ -1880,6 +1885,7 @@ mod tests {
             os: None,
             arch: None,
             ip_address: None,
+            provisioning_source: None,
         };
         validate_node_metadata(&meta).expect("64-char agent_version should pass");
     }
@@ -1891,6 +1897,7 @@ mod tests {
             os: Some("x".repeat(65)),
             arch: None,
             ip_address: None,
+            provisioning_source: None,
         };
         let err = validate_node_metadata(&meta).expect_err("os too long");
         assert!(matches!(err, AppError::ValidationError(msg) if msg.contains("os")));
@@ -1903,6 +1910,7 @@ mod tests {
             os: None,
             arch: Some("a".repeat(65)),
             ip_address: None,
+            provisioning_source: None,
         };
         let err = validate_node_metadata(&meta).expect_err("arch too long");
         assert!(matches!(err, AppError::ValidationError(msg) if msg.contains("arch")));
@@ -1915,6 +1923,7 @@ mod tests {
             os: None,
             arch: None,
             ip_address: Some("not-an-ip".to_string()),
+            provisioning_source: None,
         };
         let err = validate_node_metadata(&meta).expect_err("invalid IP");
         assert!(matches!(err, AppError::ValidationError(msg) if msg.contains("Invalid IP")));
@@ -1927,6 +1936,7 @@ mod tests {
             os: None,
             arch: None,
             ip_address: Some(String::new()),
+            provisioning_source: None,
         };
         let err = validate_node_metadata(&meta).expect_err("empty IP");
         assert!(matches!(err, AppError::ValidationError(msg) if msg.contains("Invalid IP")));
