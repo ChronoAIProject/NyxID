@@ -1988,16 +1988,11 @@ async fn execute_proxy_inner(
                         )),
                     );
 
-                    if let Some(ref agent_id) = auth_user.api_key_id
-                        && let Ok(val) = axum::http::HeaderValue::from_str(agent_id)
-                    {
-                        response.headers_mut().insert("x-nyxid-agent-id", val);
-                    }
-                    if let Some(ref conn_id) = target.connection_id
-                        && let Ok(val) = axum::http::HeaderValue::from_str(conn_id)
-                    {
-                        response.headers_mut().insert("x-nyxid-connection-id", val);
-                    }
+                    apply_agent_attribution_headers(
+                        &mut response,
+                        auth_user.api_key_id.as_deref(),
+                        target.connection_id.as_deref(),
+                    );
 
                     return Ok(response);
                 }
@@ -2184,16 +2179,11 @@ async fn execute_proxy_inner(
             })),
         );
 
-        if let Some(ref agent_id) = auth_user.api_key_id
-            && let Ok(val) = axum::http::HeaderValue::from_str(agent_id)
-        {
-            response.headers_mut().insert("x-nyxid-agent-id", val);
-        }
-        if let Some(ref conn_id) = target.connection_id
-            && let Ok(val) = axum::http::HeaderValue::from_str(conn_id)
-        {
-            response.headers_mut().insert("x-nyxid-connection-id", val);
-        }
+        apply_agent_attribution_headers(
+            &mut response,
+            auth_user.api_key_id.as_deref(),
+            target.connection_id.as_deref(),
+        );
 
         return Ok(response);
     }
@@ -2438,18 +2428,38 @@ async fn execute_proxy_inner(
         })),
     );
 
-    if let Some(ref agent_id) = auth_user.api_key_id
+    apply_agent_attribution_headers(
+        &mut response,
+        auth_user.api_key_id.as_deref(),
+        target.connection_id.as_deref(),
+    );
+
+    Ok(response)
+}
+
+/// Attach agent/connection attribution headers to a proxy response.
+///
+/// `X-NyxID-Agent-Id` is set only when the request authenticated via an API
+/// key (`AuthUser.api_key_id` is `Some`), letting callers confirm which agent
+/// identity NyxID attributed the request to. Session-token (browser) auth
+/// leaves `api_key_id` `None`, so the header is omitted. `X-NyxID-Connection-Id`
+/// is set when the resolved target carries a connection id. Values that cannot
+/// be encoded as header values are silently skipped.
+fn apply_agent_attribution_headers(
+    response: &mut Response,
+    api_key_id: Option<&str>,
+    connection_id: Option<&str>,
+) {
+    if let Some(agent_id) = api_key_id
         && let Ok(val) = axum::http::HeaderValue::from_str(agent_id)
     {
         response.headers_mut().insert("x-nyxid-agent-id", val);
     }
-    if let Some(ref conn_id) = target.connection_id
+    if let Some(conn_id) = connection_id
         && let Ok(val) = axum::http::HeaderValue::from_str(conn_id)
     {
         response.headers_mut().insert("x-nyxid-connection-id", val);
     }
-
-    Ok(response)
 }
 
 async fn read_proxy_request_body(
@@ -3762,9 +3772,10 @@ async fn bridge_websockets_via_node(
 mod tests {
     use super::{
         ALLOWED_FORWARD_HEADER_PREFIXES, ALLOWED_FORWARD_HEADERS, ALLOWED_WS_FORWARD_HEADERS,
-        WsPassthroughGuard, auth_kind_label, collect_forward_headers_with_prefixes,
-        compose_pre_resolved_node_ids, is_chat_completions_proxy_path, is_codex_transport_path,
-        is_ws_upgrade_request, should_enforce_runtime_approval, validate_range_header,
+        WsPassthroughGuard, apply_agent_attribution_headers, auth_kind_label,
+        collect_forward_headers_with_prefixes, compose_pre_resolved_node_ids,
+        is_chat_completions_proxy_path, is_codex_transport_path, is_ws_upgrade_request,
+        should_enforce_runtime_approval, validate_range_header,
     };
     use crate::mw::auth::AuthMethod;
     use crate::services::proxy_service::validate_requested_proxy_path;
@@ -3800,6 +3811,63 @@ mod tests {
             "service_account"
         );
         assert_eq!(auth_kind_label(&AuthMethod::Delegated), "delegated");
+    }
+
+    // ---- X-NyxID-Agent-Id attribution header tests (issue #788) ----
+
+    #[test]
+    fn agent_attribution_sets_agent_id_header_for_api_key_auth() {
+        // API-key-authed proxy request (api_key_id = Some) must surface the
+        // agent identity to the caller via X-NyxID-Agent-Id.
+        let mut response = Body::empty().into_response();
+        apply_agent_attribution_headers(&mut response, Some("ag-key-123"), None);
+
+        assert_eq!(
+            response
+                .headers()
+                .get("x-nyxid-agent-id")
+                .and_then(|v| v.to_str().ok()),
+            Some("ag-key-123"),
+            "X-NyxID-Agent-Id must equal the authenticating API key id"
+        );
+        // No connection id was resolved, so that header stays absent.
+        assert!(!response.headers().contains_key("x-nyxid-connection-id"));
+    }
+
+    #[test]
+    fn agent_attribution_omits_agent_id_header_for_session_auth() {
+        // Session/browser auth leaves api_key_id = None; the header must be
+        // omitted entirely (callers rely on its absence to distinguish auth).
+        let mut response = Body::empty().into_response();
+        apply_agent_attribution_headers(&mut response, None, None);
+
+        assert!(
+            !response.headers().contains_key("x-nyxid-agent-id"),
+            "session-authed responses must not carry X-NyxID-Agent-Id"
+        );
+    }
+
+    #[test]
+    fn agent_attribution_sets_connection_id_header_independently() {
+        // Connection id is attached whenever the resolved target has one,
+        // independent of the agent-id header.
+        let mut response = Body::empty().into_response();
+        apply_agent_attribution_headers(&mut response, Some("ag-key-9"), Some("conn-42"));
+
+        assert_eq!(
+            response
+                .headers()
+                .get("x-nyxid-agent-id")
+                .and_then(|v| v.to_str().ok()),
+            Some("ag-key-9")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("x-nyxid-connection-id")
+                .and_then(|v| v.to_str().ok()),
+            Some("conn-42")
+        );
     }
 
     #[test]

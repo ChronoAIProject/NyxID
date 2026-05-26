@@ -535,6 +535,37 @@ mod tests {
             .unwrap();
     }
 
+    /// Insert a node marked `Offline` in MongoDB. Routing filters on
+    /// `status: "online"`, so this node is dropped from candidate selection
+    /// even if a WS connection happens to be registered for it.
+    async fn insert_offline_node(db: &mongodb::Database, node_id: &str, owner_id: &str) {
+        let mut n = node(node_id, owner_id);
+        n.status = NodeStatus::Offline;
+        db.collection(NODES).insert_one(n).await.unwrap();
+    }
+
+    async fn insert_node_binding_with_priority(
+        db: &mongodb::Database,
+        node_id: &str,
+        owner_id: &str,
+        catalog_service_id: &str,
+        priority: i32,
+    ) {
+        db.collection(NODE_SERVICE_BINDINGS)
+            .insert_one(NodeServiceBinding {
+                id: uuid::Uuid::new_v4().to_string(),
+                node_id: node_id.to_string(),
+                user_id: owner_id.to_string(),
+                service_id: catalog_service_id.to_string(),
+                is_active: true,
+                priority,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+    }
+
     async fn insert_node_binding(
         db: &mongodb::Database,
         node_id: &str,
@@ -844,5 +875,78 @@ mod tests {
                 .unwrap();
 
         assert_eq!(node_ids, vec![node_id.to_string()]);
+    }
+
+    /// Node-OFFLINE failover (issue #788): when the highest-priority node
+    /// binding points at a node that is offline in MongoDB, routing must skip
+    /// it and promote the next online node, with any remaining online node
+    /// landing in `fallback_node_ids`. This proves the proxy's primary->
+    /// fallback failover path, not just the happy-path ordering.
+    #[tokio::test]
+    async fn resolve_node_route_fails_over_from_offline_node_to_online_fallback() {
+        let Some(db) = connect_test_database("node_route_offline_failover").await else {
+            eprintln!("skipping node routing integration test: no local MongoDB available");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        let catalog_service_id = "catalog-failover";
+        let offline_node = "node-offline-primary";
+        let online_primary = "node-online-1";
+        let online_fallback = "node-online-2";
+
+        // The user seeds a personal user service (no explicit UserService.node_id)
+        // so routing comes entirely from priority-ordered bindings.
+        db.collection(USERS)
+            .insert_one(test_user(&user_id, UserType::Person))
+            .await
+            .unwrap();
+        insert_user_service(
+            &db,
+            &service_id,
+            &user_id,
+            "failoveros",
+            catalog_service_id,
+            None,
+        )
+        .await;
+
+        // Priority 0 (highest) is OFFLINE -> must be skipped.
+        insert_offline_node(&db, offline_node, &user_id).await;
+        insert_node_binding_with_priority(&db, offline_node, &user_id, catalog_service_id, 0).await;
+        // Priority 1 and 2 are online + WS-connected.
+        insert_node(&db, online_primary, &user_id).await;
+        insert_node_binding_with_priority(&db, online_primary, &user_id, catalog_service_id, 1)
+            .await;
+        insert_node(&db, online_fallback, &user_id).await;
+        insert_node_binding_with_priority(&db, online_fallback, &user_id, catalog_service_id, 2)
+            .await;
+
+        // WS connections exist for all three nodes (including the offline one),
+        // so the only thing dropping the offline node is its DB status.
+        let ws_manager = NodeWsManager::new(30, 100);
+        for nid in [offline_node, online_primary, online_fallback] {
+            let (tx, _rx) = tokio::sync::mpsc::channel(8);
+            ws_manager.register_connection(nid, tx);
+        }
+
+        let route = resolve_node_route(&db, &user_id, catalog_service_id, &ws_manager)
+            .await
+            .unwrap()
+            .expect("an online fallback node should be routable");
+
+        assert_eq!(
+            route.node_id, online_primary,
+            "offline highest-priority node must be skipped in favor of the next online node"
+        );
+        assert_eq!(
+            route.fallback_node_ids,
+            vec![online_fallback.to_string()],
+            "remaining online node must be available as a failover fallback"
+        );
+        assert!(
+            !route.fallback_node_ids.contains(&offline_node.to_string()),
+            "offline node must never appear in the routable set"
+        );
     }
 }

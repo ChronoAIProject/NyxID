@@ -2680,6 +2680,132 @@ mod tests {
         assert!(matches!(denied, AppError::OrgRoleInsufficient(_)));
     }
 
+    // ---- agent credential override resolution (issue #788) ----
+    //
+    // `resolve_agent_credential_override` is the proxy hot-path entry point
+    // for per-agent credential isolation. It has three branches:
+    //   1. No binding for (api_key_id, user_service_id) -> returns None, so the
+    //      proxy falls back to the service's own default credential.
+    //   2. A binding exists -> the bound UserApiKey is fetched, decrypted, and
+    //      its credential string is returned (the agent override).
+    //   3. (Covered elsewhere) inactive / missing override credential errors.
+    // This test exercises branches (1) and (2) end-to-end including the
+    // envelope decryption step, which `agent_binding_service`'s binding-level
+    // test does not reach.
+    #[tokio::test]
+    async fn resolve_agent_credential_override_falls_back_then_returns_override() {
+        let Some(db) = connect_test_database("proxy_agent_override").await else {
+            eprintln!("skipping agent override integration test: no local MongoDB available");
+            return;
+        };
+
+        use crate::models::api_key::{ApiKey, COLLECTION_NAME as API_KEYS};
+
+        let keys = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let api_key_id = uuid::Uuid::new_v4().to_string();
+        let user_service_id = uuid::Uuid::new_v4().to_string();
+        let endpoint_id = uuid::Uuid::new_v4().to_string();
+        let override_credential_id = uuid::Uuid::new_v4().to_string();
+        let override_secret = "sk-agent-override-secret";
+
+        // Seed the agent identity (ApiKey), the user service, and an external
+        // credential whose secret is envelope-encrypted with the test keys.
+        db.collection::<ApiKey>(API_KEYS)
+            .insert_one(ApiKey {
+                id: api_key_id.clone(),
+                user_id: user_id.clone(),
+                name: "coding-agent".to_string(),
+                key_prefix: "nyxid_ag".to_string(),
+                key_hash: "deadbeef".repeat(8),
+                scopes: "proxy".to_string(),
+                last_used_at: None,
+                expires_at: None,
+                is_active: true,
+                created_at: Utc::now(),
+                description: None,
+                allowed_service_ids: vec![],
+                allowed_node_ids: vec![],
+                allow_all_services: true,
+                allow_all_nodes: true,
+                rate_limit_per_second: None,
+                rate_limit_burst: None,
+                platform: Some("claude-code".to_string()),
+                callback_url: None,
+            })
+            .await
+            .unwrap();
+        db.collection::<crate::models::user_service::UserService>(USER_SERVICES)
+            .insert_one(test_user_service(
+                &user_service_id,
+                &user_id,
+                "svc-override",
+                &endpoint_id,
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        let encrypted = keys.encrypt(override_secret.as_bytes()).await.unwrap();
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .insert_one(UserApiKey {
+                id: override_credential_id.clone(),
+                user_id: user_id.clone(),
+                label: "agent-specific-key".to_string(),
+                credential_type: "api_key".to_string(),
+                credential_encrypted: Some(encrypted),
+                access_token_encrypted: None,
+                refresh_token_encrypted: None,
+                token_scopes: None,
+                expires_at: None,
+                provider_config_id: None,
+                connection_id: None,
+                user_oauth_client_id_encrypted: None,
+                user_oauth_client_secret_encrypted: None,
+                status: "active".to_string(),
+                last_used_at: None,
+                error_message: None,
+                source: None,
+                source_id: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+
+        // Branch 1: no binding -> None (proxy uses the service default).
+        let no_override =
+            resolve_agent_credential_override(&db, &keys, &user_id, &api_key_id, &user_service_id)
+                .await
+                .unwrap();
+        assert!(
+            no_override.is_none(),
+            "with no binding the agent must fall back to the service default credential"
+        );
+
+        // Branch 2: bind the agent to the override credential, then resolve
+        // must return the decrypted override secret.
+        agent_binding_service::create_binding(
+            &db,
+            &user_id,
+            &api_key_id,
+            &user_service_id,
+            &override_credential_id,
+        )
+        .await
+        .unwrap();
+
+        let override_value =
+            resolve_agent_credential_override(&db, &keys, &user_id, &api_key_id, &user_service_id)
+                .await
+                .unwrap();
+        assert_eq!(
+            override_value.as_deref(),
+            Some(override_secret),
+            "bound agent must receive the decrypted override credential, not the service default"
+        );
+    }
+
     // ---- credential_header_name tests (NyxID#356) ----
 
     #[test]
