@@ -7,6 +7,7 @@ use crate::models::device_code::DeviceCode;
 mod approve;
 mod initiate;
 mod lockout;
+mod onboard;
 mod poll;
 mod rotation;
 
@@ -14,6 +15,7 @@ pub use approve::approve;
 pub use initiate::initiate;
 pub use lockout::{claim_lockout_notification, is_locked};
 use lockout::{is_pubkey_locked, record_pubkey_signature_failure, reset_pubkey_lockout};
+pub use onboard::onboard;
 pub use poll::poll;
 
 pub const DEVICE_CODE_SIGNATURE_FAILURE_LOCK_THRESHOLD: u32 = 3;
@@ -90,6 +92,24 @@ pub struct DeviceCodeApprove {
     pub node_id: String,
     pub owner_user_id: String,
     pub org_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DeviceOnboardInput {
+    pub org_id: Option<String>,
+    pub label: String,
+    pub wifi_ssid: String,
+    pub wifi_password: String,
+    pub default_services: Option<Vec<String>>,
+    pub base_url: String,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct DeviceOnboard {
+    pub qr_payload: String,
+    pub node_id: String,
+    pub api_key_id: String,
+    pub label: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]

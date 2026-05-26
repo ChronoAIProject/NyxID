@@ -27,7 +27,7 @@ import {
   ServiceEditPage,
   SettingsPage,
   DevicesBindPage,
-  GuidePage,
+  DevicesOnboardPage,
   ProvidersLayout,
   ProvidersPage,
   ProvidersCallbackPage,
@@ -424,6 +424,12 @@ const devicesBindRoute = createRoute({
   component: DevicesBindPage,
 });
 
+const devicesOnboardRoute = createRoute({
+  path: "/settings/devices/onboard",
+  getParentRoute: () => dashboardLayout,
+  component: DevicesOnboardPage,
+});
+
 const guideRoute = createRoute({
   path: "/guide",
   getParentRoute: () => dashboardLayout,
@@ -730,6 +736,7 @@ const routeTree = rootRoute.addChildren([
     ]),
     settingsRoute,
     devicesBindRoute,
+    devicesOnboardRoute,
     consentsRoute,
     authorizationsRedirectRoute,
     guideRoute,

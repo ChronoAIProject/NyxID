@@ -5,6 +5,8 @@ import {
   formatDeviceUserCodeInput,
   maskIdentifier,
   normalizeDeviceUserCode,
+  onboardDeviceFormSchema,
+  onboardDeviceResponseSchema,
 } from "./devices";
 
 describe("normalizeDeviceUserCode", () => {
@@ -114,6 +116,90 @@ describe("approveDeviceResponseSchema", () => {
       node_id: "4df27e8f-8cb5-47b7-8d29-e6529f2c1c40",
       owner_user_id: "131ff391-d7d6-49ed-a2ef-c94b9ed95d40",
       org_id: null,
+    });
+
+    expect(result.success).toBe(true);
+  });
+});
+
+describe("onboardDeviceFormSchema", () => {
+  it("normalizes the onboard request payload", () => {
+    const result = onboardDeviceFormSchema.parse({
+      org_id: null,
+      label: "  Kitchen Camera  ",
+      wifi_ssid: "  MyHomeNetwork  ",
+      wifi_password: "hunter22",
+      default_services: ["llm-openai"],
+    });
+
+    expect(result).toEqual({
+      org_id: undefined,
+      label: "Kitchen Camera",
+      wifi_ssid: "MyHomeNetwork",
+      wifi_password: "hunter22",
+      default_services: ["llm-openai"],
+    });
+  });
+
+  it("accepts undefined and empty default services", () => {
+    expect(
+      onboardDeviceFormSchema.parse({
+        org_id: null,
+        label: "Kitchen Camera",
+        wifi_ssid: "MyHomeNetwork",
+        wifi_password: "hunter22",
+      }),
+    ).not.toHaveProperty("default_services");
+
+    expect(
+      onboardDeviceFormSchema.parse({
+        org_id: null,
+        label: "Kitchen Camera",
+        wifi_ssid: "MyHomeNetwork",
+        wifi_password: "hunter22",
+        default_services: [],
+      }),
+    ).toMatchObject({ default_services: [] });
+  });
+
+  it("rejects invalid WiFi fields and non-string default services", () => {
+    expect(
+      onboardDeviceFormSchema.safeParse({
+        org_id: null,
+        label: "Kitchen Camera",
+        wifi_ssid: "x".repeat(33),
+        wifi_password: "hunter22",
+      }).success,
+    ).toBe(false);
+
+    expect(
+      onboardDeviceFormSchema.safeParse({
+        org_id: null,
+        label: "Kitchen Camera",
+        wifi_ssid: "MyHomeNetwork",
+        wifi_password: "short",
+      }).success,
+    ).toBe(false);
+
+    expect(
+      onboardDeviceFormSchema.safeParse({
+        org_id: null,
+        label: "Kitchen Camera",
+        wifi_ssid: "MyHomeNetwork",
+        wifi_password: "hunter22",
+        default_services: ["llm-openai", 123],
+      }).success,
+    ).toBe(false);
+  });
+});
+
+describe("onboardDeviceResponseSchema", () => {
+  it("parses the backend onboard response", () => {
+    const result = onboardDeviceResponseSchema.safeParse({
+      qr_payload: "nyxprov://full?ssid=Home",
+      node_id: "4df27e8f-8cb5-47b7-8d29-e6529f2c1c40",
+      api_key_id: "7ef9c1a4-8df9-43af-9f92-98a6c9a7f45d",
+      label: "Kitchen Camera",
     });
 
     expect(result.success).toBe(true);

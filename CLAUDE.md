@@ -284,6 +284,7 @@ All API routes under `/api/v1`:
 - `/devices/code/request` -- unauthenticated device-code binding start for headless devices; returns `device_code`, `user_code`, and verification URLs
 - `/devices/code/poll` -- unauthenticated but Ed25519-signed device poll; returns pending user-code rotations or one-time credentials after approval
 - `/devices/code/approve` -- authenticated user approval endpoint for web and CLI; creates the scoped API key, node row, and refresh token. `DeviceCodeApprove` accepts `default_services` as an opt-in list of user-service UUIDs or slugs to grant proxy access at approval time; omit it for an empty service allowlist.
+- `/devices/onboard` -- authenticated server-side QR provisioning for no-WiFi headless devices; creates the scoped API key and device node stub, embeds WiFi + raw one-time credentials in a `nyxprov://` QR payload, stores only the refresh-token hash, and never persists the WiFi password.
 - `/nodes` -- node management (register-token, list, get, delete, rotate-token, bindings CRUD + priority update)
 - `/nodes/ws` -- WebSocket upgrade for node agent connections (auth via WS protocol, not middleware)
 - `/admin/nodes` -- admin node management (list all, get, disconnect, delete -- no ownership check)
@@ -496,6 +497,7 @@ nyxid api-key delete <ID_OR_NAME>       # Delete API key
 
 # Device-code binding
 nyxid device approve XXXX-XXXX-XXXX [--org <ID|SLUG|NAME>] [--label <LABEL>] [--service <SLUG_OR_UUID>]...
+nyxid device onboard --label "Kitchen Camera" --ssid "MyNetwork" --password-env WIFI_PASSWORD [--org <ID|SLUG|NAME>] [--service <SLUG_OR_UUID>]...
 nyxid device factory-key [--count N] [--out FILE] [--ndjson]
 
 # Channel bots

@@ -837,6 +837,7 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
             "/devices/code/approve",
             post(handlers::devices::approve_device_code),
         )
+        .route("/devices/onboard", post(handlers::devices::onboard_device))
         .nest("/users", user_routes)
         .nest("/api-keys", api_key_routes)
         .nest("/services", service_routes)

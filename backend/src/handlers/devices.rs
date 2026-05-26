@@ -16,8 +16,8 @@ use crate::handlers::auth::{extract_ip, extract_user_agent};
 use crate::mw::auth::AuthUser;
 use crate::services::device_code_service::{
     DeviceCodeApprove, DeviceCodeApproveInput, DeviceCodeInitiate, DeviceCodeInitiateInput,
-    DeviceCodeLockoutNotification, DeviceCodePoll, DeviceCodePollInput, approve,
-    claim_lockout_notification, initiate, poll,
+    DeviceCodeLockoutNotification, DeviceCodePoll, DeviceCodePollInput, DeviceOnboard,
+    DeviceOnboardInput, approve, claim_lockout_notification, initiate, onboard, poll,
 };
 use crate::services::notification_service::{
     DeviceNotificationContext, DeviceNotificationTemplate,
@@ -46,6 +46,17 @@ pub struct ApproveDeviceCodeRequest {
     pub org_id: Option<String>,
     #[serde(default)]
     pub label: Option<String>,
+    #[serde(default)]
+    pub default_services: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OnboardDeviceRequest {
+    #[serde(default)]
+    pub org_id: Option<String>,
+    pub label: String,
+    pub wifi_ssid: String,
+    pub wifi_password: String,
     #[serde(default)]
     pub default_services: Option<Vec<String>>,
 }
@@ -123,6 +134,46 @@ pub async fn approve_device_code(
         spawn_bind_success_notification,
     )
     .await
+}
+
+pub async fn onboard_device(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Json(req): Json<OnboardDeviceRequest>,
+) -> AppResult<Json<DeviceOnboard>> {
+    let actor_user_id = auth_user.user_id.to_string();
+    let org_id = normalize_org_id(req.org_id)?;
+    let label = normalize_onboard_label(&req.label)?;
+    let wifi_ssid = normalize_wifi_ssid(&req.wifi_ssid)?;
+    let wifi_password = normalize_wifi_password(&req.wifi_password)?;
+
+    let response = onboard(
+        &state.db,
+        &actor_user_id,
+        DeviceOnboardInput {
+            org_id: org_id.clone(),
+            label,
+            wifi_ssid,
+            wifi_password,
+            default_services: req.default_services,
+            base_url: state.config.base_url.clone(),
+        },
+    )
+    .await?;
+
+    audit_service::log_for_user(
+        state.db.clone(),
+        &auth_user,
+        "device_onboard_created",
+        Some(json!({
+            "node_id": response.node_id.clone(),
+            "api_key_id": response.api_key_id.clone(),
+            "label": response.label.clone(),
+            "org_id": org_id,
+        })),
+    );
+
+    Ok(Json(response))
 }
 
 async fn approve_device_code_with_notification_dispatcher<F>(
@@ -472,6 +523,35 @@ fn normalize_label(value: Option<String>) -> AppResult<Option<String>> {
     Ok(Some(trimmed.to_string()))
 }
 
+fn normalize_onboard_label(value: &str) -> AppResult<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.len() > 128 {
+        return Err(AppError::BadRequest(
+            "label must be between 1 and 128 characters".to_string(),
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn normalize_wifi_ssid(value: &str) -> AppResult<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.len() > 32 {
+        return Err(AppError::BadRequest(
+            "wifi_ssid must be between 1 and 32 characters".to_string(),
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn normalize_wifi_password(value: &str) -> AppResult<String> {
+    if value.len() < 8 || value.len() > 63 {
+        return Err(AppError::BadRequest(
+            "wifi_password must be between 8 and 63 characters".to_string(),
+        ));
+    }
+    Ok(value.to_string())
+}
+
 fn normalize_org_id(value: Option<String>) -> AppResult<Option<String>> {
     let Some(value) = value else {
         return Ok(None);
@@ -684,6 +764,58 @@ mod tests {
     }
 
     #[test]
+    fn normalize_onboard_fields_trim_and_enforce_wifi_bounds() {
+        assert_eq!(normalize_onboard_label(" Kitchen ").unwrap(), "Kitchen");
+        assert_eq!(normalize_wifi_ssid(" Home ").unwrap(), "Home");
+        assert_eq!(normalize_wifi_password("hunter22").unwrap(), "hunter22");
+        assert!(normalize_onboard_label("").is_err());
+        assert!(normalize_onboard_label(&"x".repeat(129)).is_err());
+        assert!(normalize_wifi_ssid("").is_err());
+        assert!(normalize_wifi_ssid(&"x".repeat(33)).is_err());
+        assert!(normalize_wifi_password("short").is_err());
+        assert!(normalize_wifi_password(&"x".repeat(64)).is_err());
+    }
+
+    #[tokio::test]
+    async fn onboard_handler_creates_payload_and_audits_without_secrets() {
+        let Some(db) = connect_test_database("device_onboard_handler_happy").await else {
+            return;
+        };
+        crate::db::ensure_indexes(&db).await.expect("indexes");
+        let state = test_app_state(db.clone());
+        let actor_user_id = uuid::Uuid::new_v4().to_string();
+        let auth_user = test_auth_user(&actor_user_id);
+
+        let Json(response) = onboard_device(
+            State(state),
+            auth_user,
+            Json(OnboardDeviceRequest {
+                org_id: None,
+                label: "Kitchen Camera".to_string(),
+                wifi_ssid: "MyHomeNetwork".to_string(),
+                wifi_password: "hunter22".to_string(),
+                default_services: None,
+            }),
+        )
+        .await
+        .expect("onboard");
+
+        assert_eq!(response.label, "Kitchen Camera");
+        assert!(response.qr_payload.contains("nyxid_ag_"));
+        assert!(response.qr_payload.contains("psw=hunter22"));
+
+        let audit = wait_for_onboard_audit(&db, &actor_user_id).await;
+        let event = audit.event_data.expect("device_onboard_created event data");
+        assert_eq!(event["node_id"], response.node_id);
+        assert_eq!(event["api_key_id"], response.api_key_id);
+        assert_eq!(event["label"], "Kitchen Camera");
+        let serialized = serde_json::to_string(&event).expect("event json");
+        assert!(!serialized.contains("hunter22"));
+        assert!(!serialized.contains("nyxid_ag_"));
+        assert!(!serialized.contains("MyHomeNetwork"));
+    }
+
+    #[test]
     fn normalize_org_id_accepts_uuid_and_rejects_names() {
         let id = uuid::Uuid::new_v4().to_string();
         assert_eq!(normalize_org_id(Some(id.clone())).unwrap(), Some(id));
@@ -729,5 +861,23 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         panic!("device_code_approve_failed audit entry was not written");
+    }
+
+    async fn wait_for_onboard_audit(db: &mongodb::Database, user_id: &str) -> AuditLog {
+        for _ in 0..100 {
+            if let Some(audit) = db
+                .collection::<AuditLog>(AUDIT_LOG)
+                .find_one(doc! {
+                    "user_id": user_id,
+                    "event_type": "device_onboard_created",
+                })
+                .await
+                .expect("query audit")
+            {
+                return audit;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("device_onboard_created audit entry was not written");
     }
 }

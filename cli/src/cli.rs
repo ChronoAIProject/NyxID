@@ -1591,6 +1591,34 @@ pub enum DeviceCommands {
         #[command(flatten)]
         auth: AuthArgs,
     },
+    /// Provision a no-WiFi headless device and print a nyxprov QR payload
+    Onboard {
+        /// Device label to store on the provisioned API key and node
+        #[arg(long)]
+        label: String,
+        /// WiFi SSID to embed in the QR payload
+        #[arg(long)]
+        ssid: String,
+        /// Environment variable containing the WiFi password
+        #[arg(
+            long = "password-env",
+            value_name = "ENV_VAR",
+            help = "Environment variable containing the WiFi password. A bare --password flag is intentionally unsupported so secrets do not land in shell history or process listings."
+        )]
+        password_env: String,
+        /// Approve the device under this org (admin required)
+        #[arg(
+            long,
+            value_name = "ID|SLUG|NAME",
+            help = "Organization to act on (UUID, slug, or display name)"
+        )]
+        org: Option<String>,
+        /// Service(s) to grant the device proxy access to at onboard time. Repeatable. Accepts slugs or service IDs.
+        #[arg(long = "service", value_name = "SLUG_OR_UUID")]
+        service: Vec<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
     /// Generate Ed25519 factory provisioning keys
     FactoryKey {
         /// Number of keypairs to generate
@@ -1813,6 +1841,86 @@ mod tests {
             ),
             _ => panic!("unexpected parse result"),
         }
+    }
+
+    #[test]
+    fn device_onboard_requires_password_env_and_accepts_services() {
+        let cli = Cli::try_parse_from([
+            "nyxid",
+            "device",
+            "onboard",
+            "--label",
+            "Kitchen Camera",
+            "--ssid",
+            "MyNetwork",
+            "--password-env",
+            "WIFI_PASSWORD",
+            "--org",
+            "team-ai",
+            "--service",
+            "llm-openai",
+            "--service",
+            "550e8400-e29b-41d4-a716-446655440000",
+        ])
+        .expect("device onboard should parse");
+
+        match cli.command {
+            Commands::Device {
+                command:
+                    DeviceCommands::Onboard {
+                        label,
+                        ssid,
+                        password_env,
+                        org,
+                        service,
+                        ..
+                    },
+            } => {
+                assert_eq!(label, "Kitchen Camera");
+                assert_eq!(ssid, "MyNetwork");
+                assert_eq!(password_env, "WIFI_PASSWORD");
+                assert_eq!(org.as_deref(), Some("team-ai"));
+                assert_eq!(
+                    service,
+                    vec![
+                        "llm-openai".to_string(),
+                        "550e8400-e29b-41d4-a716-446655440000".to_string()
+                    ]
+                );
+            }
+            _ => panic!("unexpected parse result"),
+        }
+
+        assert!(
+            Cli::try_parse_from([
+                "nyxid",
+                "device",
+                "onboard",
+                "--label",
+                "Kitchen Camera",
+                "--ssid",
+                "MyNetwork",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn device_onboard_does_not_accept_bare_password_flag() {
+        assert!(
+            Cli::try_parse_from([
+                "nyxid",
+                "device",
+                "onboard",
+                "--label",
+                "Kitchen Camera",
+                "--ssid",
+                "MyNetwork",
+                "--password",
+                "hunter22",
+            ])
+            .is_err()
+        );
     }
 
     #[test]

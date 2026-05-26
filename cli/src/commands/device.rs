@@ -25,6 +25,15 @@ pub struct FactoryKeyArgs {
     pub ndjson: bool,
 }
 
+pub struct OnboardDeviceArgs {
+    pub label: String,
+    pub ssid: String,
+    pub password_env: String,
+    pub org: Option<String>,
+    pub service: Vec<String>,
+    pub auth: AuthArgs,
+}
+
 #[derive(Debug, Serialize)]
 struct ApproveDeviceRequest {
     user_code: String,
@@ -46,6 +55,25 @@ struct ApproveDeviceResponse {
     org_id: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+struct OnboardDeviceRequest {
+    label: String,
+    wifi_ssid: String,
+    wifi_password: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    org_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    default_services: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct OnboardDeviceResponse {
+    qr_payload: String,
+    node_id: String,
+    api_key_id: String,
+    label: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 struct FactoryKey {
     pubkey_hex: String,
@@ -65,6 +93,24 @@ pub async fn run(command: DeviceCommands) -> Result<()> {
                 user_code,
                 org,
                 label,
+                service,
+                auth,
+            })
+            .await
+        }
+        DeviceCommands::Onboard {
+            label,
+            ssid,
+            password_env,
+            org,
+            service,
+            auth,
+        } => {
+            onboard_cmd(OnboardDeviceArgs {
+                label,
+                ssid,
+                password_env,
+                org,
                 service,
                 auth,
             })
@@ -98,6 +144,32 @@ pub async fn approve_cmd(args: ApproveDeviceArgs) -> Result<()> {
         }
         OutputFormat::Table => print_approval_table(&response),
     }
+
+    Ok(())
+}
+
+pub async fn onboard_cmd(args: OnboardDeviceArgs) -> Result<()> {
+    let mut api = ApiClient::from_auth(&args.auth)?;
+    let org_id = match args.org {
+        Some(raw) => Some(resolve_org_id(&mut api, &raw).await?),
+        None => None,
+    };
+    let wifi_password = std::env::var(&args.password_env)
+        .with_context(|| format!("Environment variable {} is not set", args.password_env))?;
+
+    let request = OnboardDeviceRequest {
+        label: normalize_onboard_label(&args.label)?,
+        wifi_ssid: normalize_wifi_ssid(&args.ssid)?,
+        wifi_password: normalize_wifi_password(wifi_password)?,
+        org_id,
+        default_services: normalize_default_services(args.service)?,
+    };
+    let response: OnboardDeviceResponse = api.post("/devices/onboard", &request).await?;
+
+    println!("{}", response.qr_payload);
+    eprintln!("Device onboarded: {}", response.label);
+    eprintln!("Node ID: {}", response.node_id);
+    eprintln!("API key ID: {}", response.api_key_id);
 
     Ok(())
 }
@@ -210,6 +282,29 @@ fn normalize_label(value: Option<String>) -> Result<Option<String>> {
         bail!("Device label must be at most 200 characters");
     }
     Ok(Some(trimmed.to_string()))
+}
+
+fn normalize_onboard_label(value: &str) -> Result<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.len() > 128 {
+        bail!("Device label must be between 1 and 128 characters");
+    }
+    Ok(trimmed.to_string())
+}
+
+fn normalize_wifi_ssid(value: &str) -> Result<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.len() > 32 {
+        bail!("WiFi SSID must be between 1 and 32 characters");
+    }
+    Ok(trimmed.to_string())
+}
+
+fn normalize_wifi_password(value: String) -> Result<String> {
+    if value.len() < 8 || value.len() > 63 {
+        bail!("WiFi password must be between 8 and 63 characters");
+    }
+    Ok(value)
 }
 
 fn normalize_default_services(values: Vec<String>) -> Result<Option<Vec<String>>> {
@@ -346,6 +441,22 @@ mod tests {
             ])
         );
         assert!(normalize_default_services(vec!["  ".to_string()]).is_err());
+    }
+
+    #[test]
+    fn normalize_onboard_fields_enforce_secret_safe_bounds() {
+        assert_eq!(normalize_onboard_label(" Kitchen ").unwrap(), "Kitchen");
+        assert_eq!(normalize_wifi_ssid(" MyNetwork ").unwrap(), "MyNetwork");
+        assert_eq!(
+            normalize_wifi_password("hunter22".to_string()).unwrap(),
+            "hunter22"
+        );
+        assert!(normalize_onboard_label("").is_err());
+        assert!(normalize_onboard_label(&"x".repeat(129)).is_err());
+        assert!(normalize_wifi_ssid("").is_err());
+        assert!(normalize_wifi_ssid(&"x".repeat(33)).is_err());
+        assert!(normalize_wifi_password("short".to_string()).is_err());
+        assert!(normalize_wifi_password("x".repeat(64)).is_err());
     }
 
     #[test]

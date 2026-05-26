@@ -127,6 +127,8 @@ The approval service creates an API key and a device-code node stub, stores only
 
 Approvers can optionally pass `default_services` (web form: multi-select; CLI: `--service <SLUG>` repeatable) to grant the device proxy access to specific services in one step. Without it, the device's api_key is issued with no service access and must be granted scopes separately via the API Keys page.
 
+QR onboarding uses the same least-privilege API key defaults. It stores only a SHA-256 hash of the generated refresh token in `device_onboard_credentials`; the WiFi password is used only to build the QR payload and is never persisted.
+
 ## Endpoints
 
 ### Request a code
@@ -215,6 +217,43 @@ CLI equivalent:
 nyxid device approve ABCD-EFGH-JKLM --label "Hall camera"
 nyxid device approve ABCDEFGHJKLM --org my-team --label "Lab camera" --service llm-openai --service api-weather
 ```
+
+### Onboard with a QR payload
+
+Authenticated as a user. This server-side flow is for a device that has no WiFi yet but can scan a QR code from a browser or printed page. The backend creates the scoped API key and device node stub immediately, embeds the raw one-time credentials in the `nyxprov://` payload, and returns only the QR payload plus stable identifiers in the JSON response. The WiFi password is not stored.
+
+```bash
+curl -sS -X POST "$NYXID_BASE_URL/api/v1/devices/onboard" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $NYXID_ACCESS_TOKEN" \
+  -d '{
+    "org_id": null,
+    "label": "Kitchen Camera",
+    "wifi_ssid": "MyHomeNetwork",
+    "wifi_password": "hunter2",
+    "default_services": ["llm-openai", "550e8400-e29b-41d4-a716-446655440000"]
+  }'
+```
+
+Example response:
+
+```json
+{
+  "qr_payload": "nyxprov://full?ssid=MyHomeNetwork&psw=hunter2&key=nyxid_ag_...&node=1d16ddfe-89f1-4ec1-a316-4a5c8960d55f&refresh=...&url=https%3A%2F%2Fapi.example.com",
+  "node_id": "1d16ddfe-89f1-4ec1-a316-4a5c8960d55f",
+  "api_key_id": "4ae1830c-45c6-4f0d-9f04-0c66c8925a73",
+  "label": "Kitchen Camera"
+}
+```
+
+CLI equivalent:
+
+```bash
+export WIFI_PASSWORD='hunter2'
+nyxid device onboard --label "Kitchen Camera" --ssid "MyHomeNetwork" --password-env WIFI_PASSWORD --service llm-openai
+```
+
+The CLI writes the raw `nyxprov://` payload to stdout so it can be piped to a QR renderer. It intentionally has no `--password` flag; WiFi passwords are read from an environment variable to avoid shell history and process-list exposure.
 
 ### Poll after approval
 

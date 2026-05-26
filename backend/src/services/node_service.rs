@@ -76,10 +76,16 @@ pub struct DeviceNodeInput<'a> {
     pub api_key_id: &'a str,
     pub hw_id: &'a str,
     pub label: &'a str,
-    pub device_pubkey: &'a [u8; 32],
+    pub device_pubkey: Option<&'a [u8; 32]>,
+    pub provisioning_source: &'a str,
 }
 
-const DEVICE_CODE_PROVISIONING_SOURCE: &str = "device-code";
+pub const DEVICE_CODE_PROVISIONING_SOURCE: &str = "device-code";
+pub const DEVICE_ONBOARD_PROVISIONING_SOURCE: &str = "device-onboard";
+const DEVICE_PROVISIONING_SOURCES: &[&str] = &[
+    DEVICE_CODE_PROVISIONING_SOURCE,
+    DEVICE_ONBOARD_PROVISIONING_SOURCE,
+];
 
 /// Create a one-time registration token for a new node.
 /// Returns (token_id, raw_token, expires_at). The raw token is shown once and never stored.
@@ -230,13 +236,13 @@ pub async fn register_node(
     Ok((node, raw_auth_token, raw_signing_secret))
 }
 
-/// Create a Node row for a device-code-provisioned device.
+/// Create a Node row for an API-key-provisioned headless device.
 ///
-/// Device-code devices receive their scoped NyxID API key through the poll
-/// endpoint and authenticate through the proxy API, not the node WebSocket
-/// protocol. This creates a discriminator-bearing stub row with empty auth
-/// fields rather than fabricating auth-token/signing-secret hashes whose
-/// plaintext is not held by any device.
+/// Device-code and QR-onboarded devices receive a scoped NyxID API key and
+/// authenticate through the proxy API, not the node WebSocket protocol. This
+/// creates a discriminator-bearing stub row with empty auth fields rather than
+/// fabricating auth-token/signing-secret hashes whose plaintext is not held by
+/// any device.
 pub async fn create_for_device(
     db: &mongodb::Database,
     input: DeviceNodeInput<'_>,
@@ -251,11 +257,18 @@ pub async fn create_for_device(
             "Device label must be between 1 and 200 characters".to_string(),
         ));
     }
+    if input.provisioning_source.trim().is_empty() || input.provisioning_source.len() > 64 {
+        return Err(AppError::ValidationError(
+            "Device provisioning source must be between 1 and 64 characters".to_string(),
+        ));
+    }
 
     let now = Utc::now();
     let node_id = uuid::Uuid::new_v4().to_string();
-    let pubkey_digest = Sha256::digest(input.device_pubkey);
-    let pubkey_fingerprint = hex::encode(&pubkey_digest[..8]);
+    let pubkey_fingerprint = input.device_pubkey.map(|device_pubkey| {
+        let pubkey_digest = Sha256::digest(device_pubkey);
+        hex::encode(&pubkey_digest[..8])
+    });
 
     let node = Node {
         id: node_id.clone(),
@@ -272,7 +285,7 @@ pub async fn create_for_device(
             os: None,
             arch: None,
             ip_address: None,
-            provisioning_source: Some(DEVICE_CODE_PROVISIONING_SOURCE.to_string()),
+            provisioning_source: Some(input.provisioning_source.to_string()),
         }),
         metrics: crate::models::node::NodeMetrics::default(),
         is_active: true,
@@ -287,8 +300,9 @@ pub async fn create_for_device(
         user_id = %node.user_id,
         api_key_id = %input.api_key_id,
         hw_id = %input.hw_id,
-        device_pubkey_fingerprint = %pubkey_fingerprint,
-        "Device-code node created"
+        device_pubkey_fingerprint = pubkey_fingerprint.as_deref(),
+        provisioning_source = %input.provisioning_source,
+        "Device node stub created"
     );
 
     Ok(node)
@@ -778,7 +792,7 @@ pub async fn list_all_nodes(
 ) -> AppResult<(Vec<Node>, u64)> {
     let mut filter = doc! {
         "is_active": true,
-        "metadata.provisioning_source": { "$ne": DEVICE_CODE_PROVISIONING_SOURCE },
+        "metadata.provisioning_source": { "$nin": DEVICE_PROVISIONING_SOURCES },
     };
     if let Some(status) = status_filter {
         filter.insert("status", status);
@@ -1366,7 +1380,8 @@ mod tests {
                 api_key_id: "api-key-1",
                 hw_id: "esp32-p4-cam",
                 label: "Kitchen Camera",
-                device_pubkey: &[7u8; 32],
+                device_pubkey: Some(&[7u8; 32]),
+                provisioning_source: DEVICE_CODE_PROVISIONING_SOURCE,
             },
         )
         .await
@@ -1401,7 +1416,8 @@ mod tests {
                 api_key_id: "api-key-1",
                 hw_id: "esp32-p4-cam",
                 label: "Kitchen Camera",
-                device_pubkey: &[7u8; 32],
+                device_pubkey: Some(&[7u8; 32]),
+                provisioning_source: DEVICE_CODE_PROVISIONING_SOURCE,
             },
         )
         .await

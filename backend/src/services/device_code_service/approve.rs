@@ -10,7 +10,7 @@ use crate::errors::{AppError, AppResult};
 use crate::models::api_key::{ApiKey, COLLECTION_NAME as API_KEYS};
 use crate::models::device_code::{COLLECTION_NAME as DEVICE_CODES, DeviceCode, DeviceCodeStatus};
 use crate::models::node::{COLLECTION_NAME as NODES, Node};
-use crate::services::node_service::DeviceNodeInput;
+use crate::services::node_service::{DEVICE_CODE_PROVISIONING_SOURCE, DeviceNodeInput};
 use crate::services::{key_service, node_service, org_service, user_service_service};
 
 use super::{
@@ -84,7 +84,8 @@ pub async fn approve(
             api_key_id: &created_key.id,
             hw_id: &row.hw_id,
             label: &label,
-            device_pubkey: &pubkey,
+            device_pubkey: Some(&pubkey),
+            provisioning_source: DEVICE_CODE_PROVISIONING_SOURCE,
         },
     )
     .await
@@ -208,7 +209,7 @@ async fn ensure_row_approvable(
     }
 }
 
-async fn resolve_default_service_ids(
+pub(super) async fn resolve_default_service_ids(
     db: &Database,
     owner_user_id: &str,
     default_services: Option<&[String]>,
@@ -228,7 +229,7 @@ async fn resolve_default_service_ids(
     Ok(resolved)
 }
 
-async fn scope_api_key_to_node(
+pub(super) async fn scope_api_key_to_node(
     db: &Database,
     owner_user_id: &str,
     api_key_id: &str,
@@ -256,7 +257,7 @@ async fn scope_api_key_to_node(
     Ok(())
 }
 
-async fn cleanup_partial_approval(
+pub(super) async fn cleanup_partial_approval(
     db: &Database,
     owner_user_id: &str,
     api_key_id: Option<&str>,
@@ -838,7 +839,8 @@ mod tests {
                 api_key_id: &created_key.id,
                 hw_id: "esp32-cleanup",
                 label: "Cleanup Device",
-                device_pubkey: &pubkey,
+                device_pubkey: Some(&pubkey),
+                provisioning_source: DEVICE_CODE_PROVISIONING_SOURCE,
             },
         )
         .await

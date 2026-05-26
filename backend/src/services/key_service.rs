@@ -53,6 +53,7 @@ const VALID_PLATFORMS: &[&str] = &[
     "openclaw",
     "generic",
     "device-code",
+    "device-onboard",
 ];
 
 /// Validate the platform field if provided.

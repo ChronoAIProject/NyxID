@@ -50,6 +50,11 @@ export const DevicesBindPage = lazy(() =>
     default: m.DevicesBindPage,
   })),
 );
+export const DevicesOnboardPage = lazy(() =>
+  import("@/pages/devices-onboard").then((m) => ({
+    default: m.DevicesOnboardPage,
+  })),
+);
 export const GuidePage = lazy(() =>
   import("@/pages/guide").then((m) => ({ default: m.GuidePage })),
 );
@@ -240,10 +245,14 @@ export const BlogPreviewPage = lazy(() =>
   import("@/pages/blog-preview").then((m) => ({ default: m.BlogPreviewPage })),
 );
 export const DesignSystemPage = lazy(() =>
-  import("@/pages/design-system").then((m) => ({ default: m.DesignSystemPage })),
+  import("@/pages/design-system").then((m) => ({
+    default: m.DesignSystemPage,
+  })),
 );
 export const DocsIndexPage = lazy(() =>
-  import("@/features/docs/docs-index-page").then((m) => ({ default: m.DocsIndexPage })),
+  import("@/features/docs/docs-index-page").then((m) => ({
+    default: m.DocsIndexPage,
+  })),
 );
 export const DocsPage = lazy(() =>
   import("@/features/docs/docs-page").then((m) => ({ default: m.DocsPage })),
