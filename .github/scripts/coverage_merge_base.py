@@ -9,10 +9,11 @@ Usage:
     coverage_merge_base.py <summary.json> <base-report.json>
 """
 import json
+import os
 import sys
 
 # Reuse the shape detection from the sibling summary script.
-sys.path.insert(0, __file__.rsplit("/", 1)[0])
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from coverage_summary import line_pct  # noqa: E402
 
 

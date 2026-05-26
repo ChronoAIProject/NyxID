@@ -420,13 +420,17 @@ jobs:
           key: coverage-backend
       - uses: taiki-e/install-action@cargo-llvm-cov
 
-      # Head: enforce the gate (this is the one that can fail the PR) and emit
-      # an lcov report + a one-line summary JSON in the same instrumented run.
-      - name: Measure + gate (head)
+      # Head: instrument + measure WITHOUT the gate, emitting an lcov report and
+      # a one-line summary JSON. The threshold is enforced as the final step in
+      # this job (below) so the report, summary, and base delta are always
+      # produced — even on a regression — and surface in the PR comment.
+      # `report` is package-scoped so the % isn't diluted by the rest of the
+      # workspace (whose tests this job does not run).
+      - name: Measure (head)
         run: |
-          cargo llvm-cov --package nyxid --summary-only --fail-under-lines 40
-          cargo llvm-cov report --lcov --output-path coverage-backend.lcov
-          cargo llvm-cov report --json --summary-only --output-path coverage-backend.raw.json
+          cargo llvm-cov --package nyxid --summary-only
+          cargo llvm-cov report --package nyxid --lcov --output-path coverage-backend.lcov
+          cargo llvm-cov report --package nyxid --json --summary-only --output-path coverage-backend.raw.json
 
       - name: Build head summary JSON
         run: |
@@ -443,7 +447,7 @@ jobs:
         run: |
           git worktree add ../base-coverage "$BASE_REF"
           ( cd ../base-coverage && cargo llvm-cov --package nyxid --summary-only \
-              && cargo llvm-cov report --json --summary-only \
+              && cargo llvm-cov report --package nyxid --json --summary-only \
                  --output-path "$GITHUB_WORKSPACE/coverage-backend.base.json" )
 
       - name: Merge base line % into summary
@@ -451,6 +455,12 @@ jobs:
         run: |
           python3 .github/scripts/coverage_merge_base.py \
             coverage-backend.json coverage-backend.base.json
+
+      # Enforce the threshold LAST, after the report + summary + delta are built,
+      # so a regression fails the job *and* still surfaces the failing number in
+      # the PR comment. Re-reads the existing profdata (no re-run).
+      - name: Enforce coverage gate (head)
+        run: cargo llvm-cov report --package nyxid --fail-under-lines 40
 
       - name: Upload coverage artifact
         if: always()
@@ -484,11 +494,13 @@ jobs:
           key: coverage-cli
       - uses: taiki-e/install-action@cargo-llvm-cov
 
-      - name: Measure + gate (head)
+      # Measure WITHOUT the gate (enforced as the final step below). `report` is
+      # package-scoped so the % isn't diluted by the rest of the workspace.
+      - name: Measure (head)
         run: |
-          cargo llvm-cov --package nyxid-cli --summary-only --fail-under-lines 30
-          cargo llvm-cov report --lcov --output-path coverage-cli.lcov
-          cargo llvm-cov report --json --summary-only --output-path coverage-cli.raw.json
+          cargo llvm-cov --package nyxid-cli --summary-only
+          cargo llvm-cov report --package nyxid-cli --lcov --output-path coverage-cli.lcov
+          cargo llvm-cov report --package nyxid-cli --json --summary-only --output-path coverage-cli.raw.json
 
       - name: Build head summary JSON
         run: |
@@ -504,7 +516,7 @@ jobs:
         run: |
           git worktree add ../base-coverage "$BASE_REF"
           ( cd ../base-coverage && cargo llvm-cov --package nyxid-cli --summary-only \
-              && cargo llvm-cov report --json --summary-only \
+              && cargo llvm-cov report --package nyxid-cli --json --summary-only \
                  --output-path "$GITHUB_WORKSPACE/coverage-cli.base.json" )
 
       - name: Merge base line % into summary
@@ -512,6 +524,10 @@ jobs:
         run: |
           python3 .github/scripts/coverage_merge_base.py \
             coverage-cli.json coverage-cli.base.json
+
+      # Enforce the threshold LAST (see backend job for rationale).
+      - name: Enforce coverage gate (head)
+        run: cargo llvm-cov report --package nyxid-cli --fail-under-lines 30
 
       - name: Upload coverage artifact
         if: always()
@@ -548,9 +564,12 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
 
-      # Head: enforce the gate (vite.config.ts thresholds.lines) + emit summary.
-      - name: Measure + gate (head)
-        run: npm run test:coverage
+      # Head: measure WITHOUT the gate (override the line threshold to 0) so the
+      # coverage summary is always produced; the threshold is enforced as the
+      # final step below — mirroring the Rust jobs — so a regression still
+      # surfaces the failing number in the PR comment.
+      - name: Measure (head)
+        run: npm run test:coverage -- --coverage.thresholds.lines=0
 
       - name: Build head summary JSON
         working-directory: ${{ github.workspace }}
@@ -583,6 +602,21 @@ jobs:
           python3 .github/scripts/coverage_merge_base.py \
             coverage-frontend.json frontend-coverage-base.json
 
+      # Enforce the FE threshold LAST, reading the already-produced summary (no
+      # re-run) so a regression fails the job *and* still surfaces in the PR
+      # comment. Keep this threshold in sync with vite.config.ts (lines: 15).
+      - name: Enforce coverage gate (head)
+        working-directory: ${{ github.workspace }}
+        run: |
+          python3 - <<'PY'
+          import json, sys
+          total = json.load(open("frontend/coverage/coverage-summary.json"))["total"]
+          pct = float(total["lines"]["pct"])
+          threshold = 15.0
+          print(f"Frontend line coverage: {pct}% (threshold {threshold}%)")
+          sys.exit(0 if pct >= threshold else 1)
+          PY
+
       - name: Upload coverage artifact
         if: always()
         uses: actions/upload-artifact@v4
@@ -609,6 +643,9 @@ jobs:
       - coverage-frontend
     runs-on: ubuntu-latest
     permissions:
+      # `actions/checkout` needs contents:read; declaring any permissions block
+      # otherwise drops all unlisted scopes to none and the checkout 403s.
+      contents: read
       pull-requests: write
     steps:
       - uses: actions/checkout@v6

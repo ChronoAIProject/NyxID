@@ -25,12 +25,17 @@ def line_pct(doc: dict) -> float:
         lines = totals.get("lines", {})
         if "percent" in lines:
             return float(lines["percent"])
-    # vitest v8 json-summary: {"total": {"lines": {"pct": ...}}}
+    # vitest v8 json-summary: {"total": {"lines": {"pct": ...}}}. v8 emits the
+    # string "Unknown" when no files match the include glob — treat that (and
+    # any non-numeric value) as 0% so the gate fails loudly instead of crashing.
     total = doc.get("total")
     if isinstance(total, dict):
         lines = total.get("lines", {})
         if "pct" in lines:
-            return float(lines["pct"])
+            try:
+                return float(lines["pct"])
+            except (TypeError, ValueError):
+                return 0.0
     raise SystemExit(f"unrecognized coverage report shape; keys={list(doc)}")
 
 
