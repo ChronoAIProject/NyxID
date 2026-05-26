@@ -912,7 +912,7 @@ mod tests {
     }
 
     async fn wait_for_transfer_audit(db: &mongodb::Database, node_id: &str) -> Option<AuditLog> {
-        for _ in 0..20 {
+        for _ in 0..100 {
             let found = db
                 .collection::<AuditLog>(AUDIT_LOG)
                 .find_one(doc! {

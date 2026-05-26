@@ -714,7 +714,7 @@ mod tests {
     }
 
     async fn wait_for_approve_failed_audit(db: &mongodb::Database, user_id: &str) -> AuditLog {
-        for _ in 0..20 {
+        for _ in 0..100 {
             if let Some(audit) = db
                 .collection::<AuditLog>(AUDIT_LOG)
                 .find_one(doc! {

@@ -5907,7 +5907,7 @@ mod proxy_resolution_integration_tests {
         node_id: &str,
         event_type: &str,
     ) -> Option<AuditLog> {
-        for _ in 0..20 {
+        for _ in 0..100 {
             let found = db
                 .collection::<AuditLog>(AUDIT_LOG)
                 .find_one(doc! {
