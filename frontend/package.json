@@ -13,6 +13,7 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "test": "NODE_ENV=test vitest run",
+    "test:coverage": "NODE_ENV=test vitest run --coverage",
     "test:watch": "NODE_ENV=test vitest"
   },
   "dependencies": {

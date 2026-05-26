@@ -253,12 +253,28 @@ export default defineConfig({
     setupFiles: ["./src/test-setup.ts"],
     include: ["src/**/*.test.{ts,tsx}"],
     coverage: {
-      // Measurement only — no hard threshold gate here. The CI coverage gate
-      // is tracked separately (issue #785). Run `npm run test -- --coverage`
-      // and read per-file line % from the text table.
+      // CI coverage gate (issue #785). `npm run test:coverage` (vitest run
+      // --coverage) enforces the line threshold below and fails the run if FE
+      // line coverage drops under it. The CI workflow (.github/workflows/ci.yml
+      // → "Coverage (Frontend)") also publishes the summary, uploads the report
+      // as an artifact, and feeds the per-component PR-comment delta.
+      //
+      // Run locally with `npm run test:coverage` and read per-file line % from
+      // the text table.
+      //
+      // Ratchet plan (W21 coverage push, issues #782-#787): raise FE lines to
+      // 30% by quarter end as those issues land. Keep this number and the CI
+      // PR-comment baseline in sync; bump only — never lower to force a pass.
       provider: "v8",
-      reporter: ["text", "json-summary", "html"],
+      // `json-summary` feeds the CI delta comment + threshold gate; `lcov` is
+      // the artifact + Codecov-compatible format; `text`/`html` are for humans.
+      reporter: ["text", "json-summary", "json", "html", "lcov"],
       reportsDirectory: "./coverage",
+      // Fail the run (and therefore CI) when line coverage drops below the
+      // enforced gate. Mirrors `cargo llvm-cov --fail-under-lines` for Rust.
+      thresholds: {
+        lines: 15,
+      },
       include: ["src/**/*.{ts,tsx}"],
       exclude: [
         "src/**/*.test.{ts,tsx}",

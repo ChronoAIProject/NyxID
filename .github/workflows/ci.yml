@@ -352,6 +352,301 @@ jobs:
       - run: npm ci
       - run: npm run build
 
+  # ===========================================================================
+  # Code coverage gates (issue #785).
+  #
+  # Three measurement jobs (Backend / CLI / Frontend) each:
+  #   1. Measure line coverage on the PR head and FAIL if it drops below the
+  #      enforced threshold (Rust: `cargo llvm-cov --fail-under-lines`;
+  #      Frontend: vitest `coverage.thresholds.lines` in vite.config.ts).
+  #   2. Emit a machine-readable line-% number + an lcov report.
+  #   3. On pull_request events, also measure the BASE branch so the comment
+  #      job can show a per-component line-% delta (AC #4). The base measurement
+  #      is best-effort (`continue-on-error`): if it can't be produced the head
+  #      gate still runs and the delta simply renders as "n/a". It never blocks.
+  #   4. Upload the report + a tiny `coverage-<component>.json` summary as a CI
+  #      artifact (AC #6). The summary files feed the PR-comment job.
+  #
+  # Enforced thresholds (fail the PR if line % drops below):
+  #   Backend (nyxid)     >= 40%   (currently ~43.7%, PR #836)
+  #   CLI (nyxid-cli)      >= 30%   (currently ~63.5%, PR #836)
+  #   Frontend (vitest)    >= 15%   (currently ~41%)
+  #
+  # RATCHET PLAN (W21 coverage push, issues #782-#787): as those test issues
+  # land, raise the gates to BE -> 55%, CLI -> 50%, FE -> 30% by quarter end.
+  # Bump the `--fail-under-lines` values below AND the matching FE
+  # `coverage.thresholds.lines` in frontend/vite.config.ts together. Only ever
+  # ratchet UP — never lower a threshold to make a red PR pass.
+  #
+  # NOTE on Rust % vs PR #836: `cargo-llvm-cov` counts inline `#[cfg(test)]`
+  # modules in the denominator, so the reported % is a few points lower than a
+  # production-only measurement. The gates are set conservatively against the
+  # PR #836 numbers to absorb that and normal churn.
+  # ===========================================================================
+
+  # ---------------------------------------------------------------------------
+  # Backend (nyxid) line coverage. Mirrors `backend-test`: needs MongoDB on
+  # 27017 so DB-gated handler/service tests run instead of skipping (otherwise
+  # coverage would be understated). The instrumented run is slow (~15 min); the
+  # base-branch comparison adds a second run, so it is gated to pull_request
+  # only and allowed to fail without blocking the gate.
+  # ---------------------------------------------------------------------------
+  coverage-backend:
+    name: Coverage (Backend)
+    needs: changes
+    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+    services:
+      mongodb:
+        image: mongo:8.0
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.adminCommand({ ping: 1 })'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: coverage-backend
+      - uses: taiki-e/install-action@cargo-llvm-cov
+
+      # Head: enforce the gate (this is the one that can fail the PR) and emit
+      # an lcov report + a one-line summary JSON in the same instrumented run.
+      - name: Measure + gate (head)
+        run: |
+          cargo llvm-cov --package nyxid --summary-only --fail-under-lines 40
+          cargo llvm-cov report --lcov --output-path coverage-backend.lcov
+          cargo llvm-cov report --json --summary-only --output-path coverage-backend.raw.json
+
+      - name: Build head summary JSON
+        run: |
+          python3 .github/scripts/coverage_summary.py \
+            backend "Backend (nyxid)" 40 \
+            coverage-backend.raw.json coverage-backend.json
+
+      # Base: best-effort second run for the delta. Never blocks the gate.
+      - name: Measure base branch
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git worktree add ../base-coverage "$BASE_REF"
+          ( cd ../base-coverage && cargo llvm-cov --package nyxid --summary-only \
+              && cargo llvm-cov report --json --summary-only \
+                 --output-path "$GITHUB_WORKSPACE/coverage-backend.base.json" )
+
+      - name: Merge base line % into summary
+        if: github.event_name == 'pull_request'
+        run: |
+          python3 .github/scripts/coverage_merge_base.py \
+            coverage-backend.json coverage-backend.base.json
+
+      - name: Upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-backend
+          path: |
+            coverage-backend.lcov
+            coverage-backend.json
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # CLI (nyxid-cli) line coverage. No DB needed (mirrors `cli-test`).
+  # ---------------------------------------------------------------------------
+  coverage-cli:
+    name: Coverage (CLI)
+    needs: changes
+    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.cli == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: coverage-cli
+      - uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Measure + gate (head)
+        run: |
+          cargo llvm-cov --package nyxid-cli --summary-only --fail-under-lines 30
+          cargo llvm-cov report --lcov --output-path coverage-cli.lcov
+          cargo llvm-cov report --json --summary-only --output-path coverage-cli.raw.json
+
+      - name: Build head summary JSON
+        run: |
+          python3 .github/scripts/coverage_summary.py \
+            cli "CLI (nyxid-cli)" 30 \
+            coverage-cli.raw.json coverage-cli.json
+
+      - name: Measure base branch
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git worktree add ../base-coverage "$BASE_REF"
+          ( cd ../base-coverage && cargo llvm-cov --package nyxid-cli --summary-only \
+              && cargo llvm-cov report --json --summary-only \
+                 --output-path "$GITHUB_WORKSPACE/coverage-cli.base.json" )
+
+      - name: Merge base line % into summary
+        if: github.event_name == 'pull_request'
+        run: |
+          python3 .github/scripts/coverage_merge_base.py \
+            coverage-cli.json coverage-cli.base.json
+
+      - name: Upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-cli
+          path: |
+            coverage-cli.lcov
+            coverage-cli.json
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # Frontend (vitest --coverage). The line threshold is enforced by
+  # `coverage.thresholds.lines` in frontend/vite.config.ts, so `test:coverage`
+  # exits non-zero on a regression. We read the line % from the v8
+  # json-summary reporter (coverage/coverage-summary.json).
+  # ---------------------------------------------------------------------------
+  coverage-frontend:
+    name: Coverage (Frontend)
+    needs: changes
+    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.frontend == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+
+      # Head: enforce the gate (vite.config.ts thresholds.lines) + emit summary.
+      - name: Measure + gate (head)
+        run: npm run test:coverage
+
+      - name: Build head summary JSON
+        working-directory: ${{ github.workspace }}
+        run: |
+          python3 .github/scripts/coverage_summary.py \
+            frontend "Frontend (vitest)" 15 \
+            frontend/coverage/coverage-summary.json coverage-frontend.json
+
+      # Base: best-effort. Check out the base tree, install, run coverage
+      # WITHOUT the threshold gate (--coverage.thresholds.lines=0) so a low base
+      # never errors here.
+      - name: Measure base branch
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        working-directory: ${{ github.workspace }}
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git worktree add ../base-coverage "$BASE_REF"
+          ( cd ../base-coverage/frontend \
+              && npm ci \
+              && env NODE_ENV=test npx vitest run --coverage --coverage.thresholds.lines=0 )
+          cp ../base-coverage/frontend/coverage/coverage-summary.json \
+             frontend-coverage-base.json
+
+      - name: Merge base line % into summary
+        if: github.event_name == 'pull_request'
+        working-directory: ${{ github.workspace }}
+        run: |
+          python3 .github/scripts/coverage_merge_base.py \
+            coverage-frontend.json frontend-coverage-base.json
+
+      - name: Upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-frontend
+          path: |
+            frontend/coverage/lcov.info
+            frontend/coverage/coverage-summary.json
+            coverage-frontend.json
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # PR comment: aggregate the three coverage summaries into one sticky comment
+  # showing each component's line %, its enforced threshold, and the delta vs.
+  # the base branch (AC #4). Runs only on pull_request, after the measurement
+  # jobs, and tolerates skipped components (docs-only PR -> some jobs skip).
+  # ---------------------------------------------------------------------------
+  coverage-comment:
+    name: Coverage PR Comment
+    if: always() && github.event_name == 'pull_request'
+    needs:
+      - coverage-backend
+      - coverage-cli
+      - coverage-frontend
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v6
+      - name: Download coverage summaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-*
+          path: coverage-artifacts
+          merge-multiple: true
+      - name: Build comment body
+        id: body
+        run: |
+          python3 .github/scripts/coverage_comment.py \
+            coverage-artifacts > coverage-comment.md
+          cat coverage-comment.md
+      - name: Post or update PR comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('coverage-comment.md', 'utf8');
+            const marker = '<!-- nyxid-coverage-report -->';
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const { data: comments } = await github.rest.issues.listComments({
+              owner, repo, issue_number, per_page: 100,
+            });
+            const existing = comments.find((c) => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner, repo, comment_id: existing.id, body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number, body,
+              });
+            }
+
   # ---------------------------------------------------------------------------
   # Aggregator: a single status check that summarises the whole pipeline.
   #
@@ -377,10 +672,17 @@ jobs:
       - frontend
       - wizard-bundle-freshness
       - sdk
+      - coverage-backend
+      - coverage-cli
+      - coverage-frontend
     runs-on: ubuntu-latest
     steps:
       - name: Verify all jobs succeeded or were skipped intentionally
         env:
+          # NOTE: `coverage-comment` is intentionally NOT gated here -- it is an
+          # informational PR comment, not a correctness check. The three
+          # `coverage-*` measurement jobs ARE gated: they fail when line
+          # coverage drops below the enforced threshold.
           RESULTS: |
             changes=${{ needs.changes.result }}
             rust-fmt=${{ needs.rust-fmt.result }}
@@ -391,6 +693,9 @@ jobs:
             frontend=${{ needs.frontend.result }}
             wizard-bundle-freshness=${{ needs.wizard-bundle-freshness.result }}
             sdk=${{ needs.sdk.result }}
+            coverage-backend=${{ needs.coverage-backend.result }}
+            coverage-cli=${{ needs.coverage-cli.result }}
+            coverage-frontend=${{ needs.coverage-frontend.result }}
         run: |
           set -eu
           echo "Job results:"
