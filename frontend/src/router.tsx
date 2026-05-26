@@ -675,6 +675,11 @@ const adminAuditLogRoute = createRoute({
 const adminInviteCodesRoute = createRoute({
   path: "invite-codes",
   getParentRoute: () => adminLayout,
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { view?: string } => ({
+    ...(typeof search.view === "string" ? { view: search.view } : {}),
+  }),
   component: AdminInviteCodesPage,
 });
 

@@ -41,6 +41,10 @@ export const KEYS_TAB_DEFAULT: KeysTab = "services";
 export const KEYS_ACTIONS = ["add-service", "create-key"] as const;
 export type KeysAction = (typeof KEYS_ACTIONS)[number];
 
+export const INVITE_CODES_TABS = ["codes", "users"] as const;
+export type InviteCodesTab = (typeof INVITE_CODES_TABS)[number];
+export const INVITE_CODES_TAB_DEFAULT: InviteCodesTab = "codes";
+
 export const AI_SETUP_SKILL_TABS = [
   "claude-code",
   "cursor",

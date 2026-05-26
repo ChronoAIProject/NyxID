@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
+import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import {
   useAdminInviteCodes,
   useCreateInviteCode,
@@ -21,6 +22,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Dialog,
   DialogContent,
@@ -58,10 +60,16 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Copy, Check, Ban, Link2, MoreVertical } from "lucide-react";
+import { Copy, Check, Ban, Link2, MoreVertical, ArrowUpRight } from "lucide-react";
 import { MysteryBoxIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
 import type { InviteCode } from "@/types/admin";
+import {
+  INVITE_CODES_TABS,
+  INVITE_CODES_TAB_DEFAULT,
+  parseTab,
+} from "@/lib/url-tabs";
+import { flattenRedemptions } from "./admin-invite-codes.helpers";
 
 const DEFAULT_MAX_USES = 10;
 
@@ -72,6 +80,17 @@ export function AdminInviteCodesPage() {
   const createMutation = useCreateInviteCode();
   const deactivateMutation = useDeactivateInviteCode();
   const updateMutation = useUpdateInviteCode();
+
+  const search: { view?: string } = useSearch({ strict: false });
+  const navigate = useNavigate();
+  const view = parseTab(search.view, INVITE_CODES_TABS, INVITE_CODES_TAB_DEFAULT);
+  function setView(value: string) {
+    void navigate({
+      to: "/admin/invite-codes",
+      search: { view: value },
+      replace: true,
+    });
+  }
 
   const [createOpen, setCreateOpen] = useState(false);
   const [createdCode, setCreatedCode] = useState<InviteCode | null>(null);
@@ -232,228 +251,267 @@ export function AdminInviteCodesPage() {
       <PageHeader
         title="Invite Codes"
         description="Create and manage invite codes that gate new user registration. Each code can grant a bounded number of registrations and can be deactivated at any time."
-        actions={
-          canWrite ? (
-            <AddCtaButton label="Create Invite Code" onClick={openCreateDialog} />
-          ) : null
-        }
+        actions={null}
       />
 
-      {isLoading ? (
-        <div className="space-y-2">
-          {Array.from({ length: 4 }).map((_, i) => (
-            <Skeleton
-              key={`invite-skel-${String(i)}`}
-              className="h-12 w-full"
-            />
-          ))}
-        </div>
-      ) : error ? (
-        <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
-          <MysteryBoxIcon className="h-64 w-64 text-muted-foreground/30" />
-          <div className="space-y-1">
-            <p className="text-[12px] font-medium text-muted-foreground/30">Failed to load invite codes</p>
-            <p className="text-xs text-muted-foreground/30">Please try again later.</p>
-          </div>
-        </div>
-      ) : inviteCodes.length === 0 ? (
-        <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
-          <MysteryBoxIcon className="h-64 w-64 text-muted-foreground/30" />
-          <div className="space-y-1">
-            <p className="text-[12px] font-medium text-muted-foreground/30">No invite codes found</p>
-            <p className="text-xs text-muted-foreground/30">Create one to allow a new user to register.</p>
-          </div>
-        </div>
-      ) : (
-        <>
-        {/* Mobile cards */}
-        <div className="flex flex-col gap-3 md:hidden">
-          {inviteCodes.map((ic) => (
-            <div
-              key={ic.id}
-              className={cn(
-                "rounded-xl border border-border/50 bg-card p-4 transition-colors hover:bg-white/[0.03] cursor-pointer",
-                isSaving && "pointer-events-none opacity-60",
-              )}
-              onClick={() => {
-                if (isSaving) return;
-                setSelectedCodeId(ic.id);
-              }}
-            >
-              <div className="flex items-start justify-between gap-2">
-                <div className="min-w-0 flex-1">
-                  <p className="text-sm font-medium font-mono text-foreground truncate">
-                    {ic.code}
-                  </p>
-                </div>
-                <div className="flex items-center gap-1.5 shrink-0">
-                  {getStatusBadge(ic)}
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-7 w-7 text-muted-foreground hover:text-foreground"
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        <MoreVertical className="h-3 w-3" />
-                      </Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end">
-                      <DropdownMenuItem
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          void handleCopyCode(ic.code, ic.id);
-                        }}
-                      >
-                        <Copy className="h-3 w-3" />
-                        Copy code
-                      </DropdownMenuItem>
-                      <DropdownMenuItem
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          void handleCopyLink(ic.code, ic.id);
-                        }}
-                      >
-                        <Link2 className="h-3 w-3" />
-                        Copy invite link
-                      </DropdownMenuItem>
-                      {canWrite && ic.is_active && (
-                        <DropdownMenuItem
-                          className="text-destructive focus:text-destructive"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setDeactivateTarget(ic);
-                          }}
-                        >
-                          <Ban className="h-3 w-3" />
-                          Deactivate
-                        </DropdownMenuItem>
-                      )}
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-                </div>
-              </div>
-              <div className="mt-2 text-xs text-muted-foreground">
-                <span className="tabular-nums">
-                  {String(ic.used_count)}/{String(ic.max_uses)} uses
-                </span>
-                {ic.note && (
-                  <>
-                    <span className="text-border mx-1.5">|</span>
-                    <span className="truncate">{ic.note}</span>
-                  </>
-                )}
-              </div>
-              <div className="mt-1.5 text-xs text-muted-foreground">
-                <span>Created {formatDate(ic.created_at)}</span>
-              </div>
+      <Tabs value={view} onValueChange={setView}>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between sm:gap-4">
+          <TabsList className="min-w-0">
+            <TabsTrigger value="codes">Codes</TabsTrigger>
+            <TabsTrigger value="users">By User</TabsTrigger>
+          </TabsList>
+          {canWrite && view === "codes" && (
+            <div className="flex shrink-0 items-center gap-4 sm:pb-1">
+              <AddCtaButton label="Create Invite Code" onClick={openCreateDialog} />
             </div>
-          ))}
+          )}
         </div>
 
-        {/* Desktop table */}
-        <div className="hidden md:block rounded-xl border border-border/50 bg-card overflow-hidden">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Code</TableHead>
-                <TableHead>Uses</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead>Note</TableHead>
-                <TableHead>Created</TableHead>
-                <TableHead className="w-[100px]">Actions</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
+        <TabsContent value="codes" className="mt-6">
+          {isLoading ? (
+            <div className="space-y-2">
+              {Array.from({ length: 4 }).map((_, i) => (
+                <Skeleton
+                  key={`invite-skel-${String(i)}`}
+                  className="h-12 w-full"
+                />
+              ))}
+            </div>
+          ) : error ? (
+            <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+              <MysteryBoxIcon className="h-64 w-64 text-muted-foreground/30" />
+              <div className="space-y-1">
+                <p className="text-[12px] font-medium text-muted-foreground/30">Failed to load invite codes</p>
+                <p className="text-xs text-muted-foreground/30">Please try again later.</p>
+              </div>
+            </div>
+          ) : inviteCodes.length === 0 ? (
+            <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+              <MysteryBoxIcon className="h-64 w-64 text-muted-foreground/30" />
+              <div className="space-y-1">
+                <p className="text-[12px] font-medium text-muted-foreground/30">No invite codes found</p>
+                <p className="text-xs text-muted-foreground/30">Create one to allow a new user to register.</p>
+              </div>
+            </div>
+          ) : (
+            <>
+            {/* Mobile cards */}
+            <div className="flex flex-col gap-3 md:hidden">
               {inviteCodes.map((ic) => (
-                <TableRow
+                <div
                   key={ic.id}
+                  className={cn(
+                    "rounded-xl border border-border/50 bg-card p-4 transition-colors hover:bg-white/[0.03] cursor-pointer",
+                    isSaving && "pointer-events-none opacity-60",
+                  )}
                   onClick={() => {
                     if (isSaving) return;
                     setSelectedCodeId(ic.id);
                   }}
-                  className={cn(
-                    "cursor-pointer",
-                    isSaving && "pointer-events-none opacity-60",
-                  )}
                 >
-                  <TableCell>
-                    <span className="font-mono text-sm font-medium text-foreground">
-                      {ic.code}
-                    </span>
-                  </TableCell>
-                  <TableCell>
-                    <span className="text-sm tabular-nums text-muted-foreground">
-                      {String(ic.used_count)}/{String(ic.max_uses)}
-                    </span>
-                  </TableCell>
-                  <TableCell>{getStatusBadge(ic)}</TableCell>
-                  <TableCell>
-                    {ic.note ? (
-                      <span className="text-[11px] text-text-tertiary">
-                        {ic.note}
-                      </span>
-                    ) : (
-                      <span className="text-muted-foreground">--</span>
-                    )}
-                  </TableCell>
-                  <TableCell className="text-muted-foreground">
-                    {formatDate(ic.created_at)}
-                  </TableCell>
-                  <TableCell>
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-8 w-8 text-muted-foreground hover:text-foreground"
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          <MoreVertical className="h-3 w-3" />
-                        </Button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end">
-                        <DropdownMenuItem
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            void handleCopyCode(ic.code, ic.id);
-                          }}
-                        >
-                          <Copy className="h-3 w-3" />
-                          Copy code
-                        </DropdownMenuItem>
-                        <DropdownMenuItem
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            void handleCopyLink(ic.code, ic.id);
-                          }}
-                        >
-                          <Link2 className="h-3 w-3" />
-                          Copy invite link
-                        </DropdownMenuItem>
-                        {canWrite && ic.is_active && (
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-medium font-mono text-foreground truncate">
+                        {ic.code}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      {getStatusBadge(ic)}
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-7 w-7 text-muted-foreground hover:text-foreground"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <MoreVertical className="h-3 w-3" />
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end">
                           <DropdownMenuItem
-                            className="text-destructive focus:text-destructive"
                             onClick={(e) => {
                               e.stopPropagation();
-                              setDeactivateTarget(ic);
+                              void handleCopyCode(ic.code, ic.id);
                             }}
                           >
-                            <Ban className="h-3 w-3" />
-                            Deactivate
+                            <Copy className="h-3 w-3" />
+                            Copy code
                           </DropdownMenuItem>
-                        )}
-                      </DropdownMenuContent>
-                    </DropdownMenu>
-                  </TableCell>
-                </TableRow>
+                          <DropdownMenuItem
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void handleCopyLink(ic.code, ic.id);
+                            }}
+                          >
+                            <Link2 className="h-3 w-3" />
+                            Copy invite link
+                          </DropdownMenuItem>
+                          {canWrite && ic.is_active && (
+                            <DropdownMenuItem
+                              className="text-destructive focus:text-destructive"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setDeactivateTarget(ic);
+                              }}
+                            >
+                              <Ban className="h-3 w-3" />
+                              Deactivate
+                            </DropdownMenuItem>
+                          )}
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    </div>
+                  </div>
+                  <div className="mt-2 text-xs text-muted-foreground">
+                    <span className="tabular-nums">
+                      {String(ic.used_count)}/{String(ic.max_uses)} uses
+                    </span>
+                    {ic.note && (
+                      <>
+                        <span className="text-border mx-1.5">|</span>
+                        <span className="truncate">{ic.note}</span>
+                      </>
+                    )}
+                  </div>
+                  <div className="mt-1.5 text-xs text-muted-foreground">
+                    <span>Created {formatDate(ic.created_at)}</span>
+                  </div>
+                </div>
               ))}
-            </TableBody>
-          </Table>
-        </div>
-        </>
-      )}
+            </div>
+
+            {/* Desktop table */}
+            <div className="hidden md:block rounded-xl border border-border/50 bg-card overflow-hidden">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Code</TableHead>
+                    <TableHead>Uses</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead>Note</TableHead>
+                    <TableHead>Created</TableHead>
+                    <TableHead className="w-[100px]">Actions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {inviteCodes.map((ic) => (
+                    <TableRow
+                      key={ic.id}
+                      onClick={() => {
+                        if (isSaving) return;
+                        setSelectedCodeId(ic.id);
+                      }}
+                      className={cn(
+                        "cursor-pointer",
+                        isSaving && "pointer-events-none opacity-60",
+                      )}
+                    >
+                      <TableCell>
+                        <span className="font-mono text-sm font-medium text-foreground">
+                          {ic.code}
+                        </span>
+                      </TableCell>
+                      <TableCell>
+                        <span className="text-sm tabular-nums text-muted-foreground">
+                          {String(ic.used_count)}/{String(ic.max_uses)}
+                        </span>
+                      </TableCell>
+                      <TableCell>{getStatusBadge(ic)}</TableCell>
+                      <TableCell>
+                        {ic.note ? (
+                          <span className="text-[11px] text-text-tertiary">
+                            {ic.note}
+                          </span>
+                        ) : (
+                          <span className="text-muted-foreground">--</span>
+                        )}
+                      </TableCell>
+                      <TableCell className="text-muted-foreground">
+                        {formatDate(ic.created_at)}
+                      </TableCell>
+                      <TableCell>
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              <MoreVertical className="h-3 w-3" />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end">
+                            <DropdownMenuItem
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void handleCopyCode(ic.code, ic.id);
+                              }}
+                            >
+                              <Copy className="h-3 w-3" />
+                              Copy code
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void handleCopyLink(ic.code, ic.id);
+                              }}
+                            >
+                              <Link2 className="h-3 w-3" />
+                              Copy invite link
+                            </DropdownMenuItem>
+                            {canWrite && ic.is_active && (
+                              <DropdownMenuItem
+                                className="text-destructive focus:text-destructive"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setDeactivateTarget(ic);
+                                }}
+                              >
+                                <Ban className="h-3 w-3" />
+                                Deactivate
+                              </DropdownMenuItem>
+                            )}
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+            </>
+          )}
+        </TabsContent>
+
+        <TabsContent value="users" className="mt-6">
+          {isLoading ? (
+            <div className="space-y-2">
+              {Array.from({ length: 4 }).map((_, i) => (
+                <Skeleton
+                  key={`invite-skel-users-${String(i)}`}
+                  className="h-12 w-full"
+                />
+              ))}
+            </div>
+          ) : error ? (
+            <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+              <MysteryBoxIcon className="h-64 w-64 text-muted-foreground/30" />
+              <div className="space-y-1">
+                <p className="text-[12px] font-medium text-muted-foreground/30">Failed to load invite codes</p>
+                <p className="text-xs text-muted-foreground/30">Please try again later.</p>
+              </div>
+            </div>
+          ) : (
+            <InviteCodesByUserView
+              inviteCodes={inviteCodes}
+              onOpenCode={(codeId) => setSelectedCodeId(codeId)}
+              isSaving={isSaving}
+            />
+          )}
+        </TabsContent>
+      </Tabs>
 
       {/* Create Invite Code Dialog */}
       <Dialog
@@ -856,5 +914,171 @@ export function AdminInviteCodesPage() {
         </SheetContent>
       </Sheet>
     </div>
+  );
+}
+
+interface UserNameLinkProps {
+  readonly email: string | null;
+  readonly displayName: string | null;
+  readonly userId: string;
+}
+
+function UserNameLink({ email, displayName, userId }: UserNameLinkProps) {
+  // A deleted account loses its users join, leaving both fields null.
+  if (email === null) {
+    return (
+      <span className="font-mono text-xs text-muted-foreground">
+        account deleted
+      </span>
+    );
+  }
+
+  return (
+    <Link
+      to="/admin/users/$userId"
+      params={{ userId }}
+      className="inline-flex items-center gap-1 text-sm font-medium text-primary hover:underline underline-offset-2 cursor-pointer"
+    >
+      <span className="truncate max-w-[200px]">{displayName || email}</span>
+      <ArrowUpRight className="h-3 w-3 shrink-0" />
+    </Link>
+  );
+}
+
+interface InviteCodesByUserViewProps {
+  readonly inviteCodes: readonly InviteCode[];
+  readonly onOpenCode: (codeId: string) => void;
+  readonly isSaving: boolean;
+}
+
+function InviteCodesByUserView({
+  inviteCodes,
+  onOpenCode,
+  isSaving,
+}: InviteCodesByUserViewProps) {
+  const redemptions = useMemo(() => flattenRedemptions(inviteCodes), [inviteCodes]);
+
+  if (redemptions.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+        <MysteryBoxIcon className="h-64 w-64 text-muted-foreground/30" />
+        <div className="space-y-1">
+          <p className="text-[12px] font-medium text-muted-foreground/30">No redemptions found</p>
+          <p className="text-xs text-muted-foreground/30">Invite codes will appear here once they are redeemed by users.</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      {/* Mobile cards */}
+      <div className="flex flex-col gap-3 md:hidden">
+        {redemptions.map((r) => (
+          <div
+            key={r.id}
+            className={cn(
+              "rounded-xl border border-border/50 bg-card p-4 transition-colors hover:bg-white/[0.03]",
+              isSaving && "pointer-events-none opacity-60",
+            )}
+          >
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <UserNameLink
+                  userId={r.userId}
+                  email={r.userEmail}
+                  displayName={r.userDisplayName}
+                />
+                {r.userDisplayName && r.userEmail && (
+                  <p className="truncate text-xs text-muted-foreground max-w-[250px]">
+                    {r.userEmail}
+                  </p>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={() => onOpenCode(r.codeId)}
+                className="font-mono text-sm font-medium text-primary hover:underline underline-offset-2 cursor-pointer shrink-0 text-left focus:outline-none"
+                disabled={isSaving}
+              >
+                {r.code}
+              </button>
+            </div>
+            <div className="mt-2 text-xs text-muted-foreground flex items-center justify-between">
+              <div className="truncate flex-1 min-w-0 mr-4 text-left">
+                {r.note ? (
+                  <span>{r.note}</span>
+                ) : (
+                  <span className="text-muted-foreground/50">No note</span>
+                )}
+              </div>
+              <span className="shrink-0 tabular-nums">
+                {formatDate(r.usedAt)}
+              </span>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Desktop table */}
+      <div className="hidden md:block rounded-xl border border-border/50 bg-card overflow-hidden">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Name</TableHead>
+              <TableHead>Email</TableHead>
+              <TableHead>Code</TableHead>
+              <TableHead>Remarks</TableHead>
+              <TableHead>Redeemed</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {redemptions.map((r) => (
+              <TableRow
+                key={r.id}
+                className={cn(
+                  isSaving && "pointer-events-none opacity-60",
+                )}
+              >
+                <TableCell>
+                  <UserNameLink
+                    userId={r.userId}
+                    email={r.userEmail}
+                    displayName={r.userDisplayName}
+                  />
+                </TableCell>
+                <TableCell className="text-muted-foreground">
+                  {r.userEmail ?? (
+                    <span className="text-muted-foreground">--</span>
+                  )}
+                </TableCell>
+                <TableCell>
+                  <button
+                    type="button"
+                    onClick={() => onOpenCode(r.codeId)}
+                    className="font-mono text-sm font-medium text-primary hover:underline underline-offset-2 cursor-pointer text-left focus:outline-none"
+                    disabled={isSaving}
+                  >
+                    {r.code}
+                  </button>
+                </TableCell>
+                <TableCell>
+                  {r.note ? (
+                    <span className="text-[11px] text-text-tertiary">
+                      {r.note}
+                    </span>
+                  ) : (
+                    <span className="text-muted-foreground">--</span>
+                  )}
+                </TableCell>
+                <TableCell className="text-muted-foreground">
+                  {formatDate(r.usedAt)}
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </div>
+    </>
   );
 }
