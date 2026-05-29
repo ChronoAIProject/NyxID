@@ -1318,12 +1318,15 @@ async fn authorize_mcp_operation(
     request_id: Option<serde_json::Value>,
 ) -> Result<(), Response> {
     let approval_owner_user_id = auth.effective_approval_owner_user_id();
-    let approval_resolution = approval_service::resolve_org_aware_approval(
+    let approval_outcome = approval_service::evaluate_and_check(
         &state.db,
         &approval_owner_user_id,
         &target.service_owner_user_id,
         &target.service_id,
         operation,
+        auth.approval_requester_type(),
+        &auth.approval_requester_id(),
+        auth.auth_method == AuthMethod::Session,
     )
     .await
     .map_err(|e| {
@@ -1334,83 +1337,31 @@ async fn authorize_mcp_operation(
         )
     })?;
 
-    if approval_resolution.effect == crate::models::service_approval_config::ApprovalEffect::Deny {
-        return Err(tool_result(
-            request_id,
-            "Operation denied by approval policy",
-            true,
-        ));
-    }
-
-    if !approval_resolution.required || auth.auth_method == AuthMethod::Session {
-        return Ok(());
-    }
-
-    let requester_type = auth.approval_requester_type().ok_or_else(|| {
-        tool_result(
-            request_id.clone(),
-            "Session auth does not require approval",
-            true,
-        )
-    })?;
-    let requester_id = auth.approval_requester_id();
-    let primary_owner = approval_resolution.primary_owner_user_id.clone();
-
-    let has_grant = if approval_resolution.mode
-        == crate::models::service_approval_config::ApprovalMode::Grant
-    {
-        approval_service::check_approval(
-            &state.db,
-            &primary_owner,
-            &target.service_id,
-            requester_type,
-            &requester_id,
-            approval_resolution.from_org_policy,
-            operation,
-        )
-        .await
-        .map_err(|e| {
-            tool_result(
-                request_id.clone(),
-                &format!("Approval check failed: {e}"),
-                true,
-            )
-        })?
-    } else {
-        false
-    };
-
-    if has_grant {
-        return Ok(());
-    }
-
-    let notify_user_ids: Vec<String> = if approval_resolution.from_org_policy {
-        let mut admins =
-            crate::services::org_service::list_admin_user_ids(&state.db, &primary_owner)
-                .await
-                .map_err(|e| {
-                    tool_result(
-                        request_id.clone(),
-                        &format!("Approval check failed: {e}"),
-                        true,
-                    )
-                })?;
-        admins.sort();
-        admins.dedup();
-        if admins.is_empty() {
+    let pending = match approval_outcome {
+        approval_service::ApprovalOutcome::Allowed { .. } => return Ok(()),
+        approval_service::ApprovalOutcome::Denied => {
             return Err(tool_result(
                 request_id,
-                &format!(
-                    "Org {primary_owner} has an approval policy on this service but no active admins to decide. Add an admin to the org and retry."
-                ),
+                "Operation denied by approval policy",
                 true,
             ));
         }
-        admins
-    } else {
-        vec![approval_owner_user_id.clone()]
+        approval_service::ApprovalOutcome::NeedsApproval(pending) => pending,
     };
 
+    let notify_user_ids = approval_service::approval_notification_recipients(
+        &state.db,
+        &approval_owner_user_id,
+        &pending,
+    )
+    .await
+    .map_err(|e| {
+        tool_result(
+            request_id.clone(),
+            &format!("Approval check failed: {e}"),
+            true,
+        )
+    })?;
     let timeout_recipient = notify_user_ids.first().cloned().ok_or_else(|| {
         tool_result(
             request_id.clone(),
@@ -1430,7 +1381,7 @@ async fn authorize_mcp_operation(
     let timeout_secs = channel.approval_timeout_secs;
     let request_operation = approval_service::ApprovalRequestOperation::from_descriptor(
         operation,
-        approval_resolution.grant_scope.clone(),
+        pending.resolution.grant_scope.clone(),
     );
     let approval_request = approval_service::create_approval_request(
         &state.db,
@@ -1438,18 +1389,18 @@ async fn authorize_mcp_operation(
         &state.http_client,
         state.fcm_auth.as_deref(),
         state.apns_auth.as_deref(),
-        &primary_owner,
+        &pending.primary_owner_user_id,
         &target.service_id,
         &target.service_name,
         &target.service_slug,
-        requester_type,
-        &requester_id,
+        &pending.requester_type,
+        &pending.requester_id,
         auth.api_key_name.as_deref(),
         request_operation,
-        approval_resolution.mode.clone(),
+        pending.resolution.mode.clone(),
         timeout_secs,
         notify_user_ids,
-        approval_resolution.from_org_policy,
+        pending.resolution.from_org_policy,
     )
     .await
     .map_err(|e| {

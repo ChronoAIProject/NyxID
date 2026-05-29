@@ -1,4 +1,6 @@
-use globset::{Glob, GlobBuilder};
+use globset::{Glob, GlobBuilder, GlobMatcher};
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 
 use crate::models::service_approval_config::{
     ApprovalEffect, ApprovalMode, ApprovalRule, ApprovalVerb, ServiceApprovalConfig,
@@ -25,6 +27,8 @@ pub fn evaluate(
             return ApprovalPolicyDecision {
                 effect: rule.effect.clone(),
                 mode: rule.mode.clone(),
+                // Rule matches mint the rule pattern so one approval covers
+                // the user's declared operation class; defaults stay concrete.
                 grant_scope: require_approval_scope(&rule.effect, || {
                     scope_from_rule(descriptor, rule)
                 }),
@@ -69,7 +73,7 @@ pub fn grant_scope_covers(scope: Option<&str>, descriptor: &OperationDescriptor)
     let Some(parsed) = ParsedScope::parse(scope) else {
         return false;
     };
-    if parsed.protocol != protocol_scope_label(&descriptor.protocol) {
+    if scope_protocol_family(parsed.protocol) != Some(protocol_scope_label(&descriptor.protocol)) {
         return false;
     }
 
@@ -98,7 +102,8 @@ pub fn validate_rules(rules: &[ApprovalRule]) -> Result<(), String> {
             ));
         }
         validate_methods(idx, &rule.methods)?;
-        compile_resource_pattern(&resource_pattern)
+        compile_resource_pattern(&resource_pattern, true)
+            .and_then(|_| compile_resource_pattern(&resource_pattern, false))
             .map_err(|e| format!("approval rule {idx} resource_pattern is invalid: {e}"))?;
     }
 
@@ -167,10 +172,16 @@ fn build_scope(protocol: &str, methods: String, verbs: String, resource_pattern:
 
 fn protocol_scope_label(protocol: &Protocol) -> &'static str {
     match protocol {
-        Protocol::Http => "http",
-        Protocol::Llm => "llm",
-        Protocol::Mcp => "mcp",
+        Protocol::Http | Protocol::Llm | Protocol::Mcp => "http",
         Protocol::Ssh => "ssh",
+    }
+}
+
+fn scope_protocol_family(protocol: &str) -> Option<&'static str> {
+    match protocol {
+        "http" | "llm" | "mcp" => Some("http"),
+        "ssh" => Some("ssh"),
+        _ => None,
     }
 }
 
@@ -297,13 +308,64 @@ fn resource_pattern_matches(pattern: &str, descriptor: &OperationDescriptor) -> 
     let Some(resource) = descriptor.normalized_resource() else {
         return false;
     };
-    compile_resource_pattern(&pattern).is_ok_and(|glob| glob.compile_matcher().is_match(resource))
+    cached_resource_matcher(
+        &pattern,
+        literal_separator_for_protocol(&descriptor.protocol),
+    )
+    .is_ok_and(|glob| glob.is_match(resource))
 }
 
-fn compile_resource_pattern(pattern: &str) -> Result<Glob, globset::Error> {
+fn literal_separator_for_protocol(protocol: &Protocol) -> bool {
+    !matches!(protocol, Protocol::Ssh)
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct GlobCacheKey {
+    pattern: String,
+    literal_separator: bool,
+}
+
+fn glob_matcher_cache() -> &'static Mutex<HashMap<GlobCacheKey, GlobMatcher>> {
+    static CACHE: OnceLock<Mutex<HashMap<GlobCacheKey, GlobMatcher>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cached_resource_matcher(
+    pattern: &str,
+    literal_separator: bool,
+) -> Result<GlobMatcher, globset::Error> {
+    const MAX_CACHED_GLOBS: usize = 1024;
+
+    let key = GlobCacheKey {
+        pattern: normalized_rule_resource_pattern(pattern),
+        literal_separator,
+    };
+    if let Some(matcher) = glob_matcher_cache()
+        .lock()
+        .expect("glob matcher cache poisoned")
+        .get(&key)
+        .cloned()
+    {
+        return Ok(matcher);
+    }
+
+    let matcher = compile_resource_pattern(&key.pattern, key.literal_separator)?.compile_matcher();
+    let mut cache = glob_matcher_cache()
+        .lock()
+        .expect("glob matcher cache poisoned");
+    if cache.len() < MAX_CACHED_GLOBS {
+        cache.insert(key, matcher.clone());
+    }
+    Ok(matcher)
+}
+
+fn compile_resource_pattern(
+    pattern: &str,
+    literal_separator: bool,
+) -> Result<Glob, globset::Error> {
     let pattern = normalized_rule_resource_pattern(pattern);
     GlobBuilder::new(&pattern)
-        .literal_separator(true)
+        .literal_separator(literal_separator)
         .backslash_escape(true)
         .build()
 }
@@ -561,6 +623,32 @@ mod tests {
     }
 
     #[test]
+    fn http_star_globs_do_not_cross_path_separator() {
+        let cfg = config(
+            false,
+            ApprovalMode::PerRequest,
+            vec![rule_with_pattern(
+                &["GET"],
+                "/repos/*",
+                vec![ApprovalVerb::Read],
+                ApprovalEffect::RequireApproval,
+                ApprovalMode::PerRequest,
+            )],
+            None,
+        );
+        let nested =
+            crate::services::operation_descriptor::build_http_descriptor("GET", "/repos/a/b", None);
+        let single =
+            crate::services::operation_descriptor::build_http_descriptor("GET", "/repos/a", None);
+
+        assert_eq!(evaluate(&cfg, &nested).effect, ApprovalEffect::AutoAllow);
+        assert_eq!(
+            evaluate(&cfg, &single).effect,
+            ApprovalEffect::RequireApproval
+        );
+    }
+
+    #[test]
     fn command_globs_match_ssh_exec_resources() {
         let cfg = config(
             false,
@@ -591,6 +679,64 @@ mod tests {
     }
 
     #[test]
+    fn ssh_star_globs_match_slashes_inside_commands() {
+        let cfg = config(
+            false,
+            ApprovalMode::PerRequest,
+            vec![rule_with_pattern(
+                &["EXEC"],
+                "rm *",
+                vec![ApprovalVerb::Write],
+                ApprovalEffect::RequireApproval,
+                ApprovalMode::PerRequest,
+            )],
+            None,
+        );
+        let descriptor = crate::services::operation_descriptor::build_ssh_descriptor(
+            crate::services::operation_descriptor::SshOperationKind::Exec,
+            Some("rm /etc/passwd"),
+        );
+
+        assert_eq!(
+            evaluate(&cfg, &descriptor).effect,
+            ApprovalEffect::RequireApproval
+        );
+    }
+
+    #[test]
+    fn ssh_absolute_command_globs_match_expected_prefix() {
+        let cfg = config(
+            false,
+            ApprovalMode::PerRequest,
+            vec![rule_with_pattern(
+                &["EXEC"],
+                "/usr/bin/*",
+                vec![ApprovalVerb::Write],
+                ApprovalEffect::RequireApproval,
+                ApprovalMode::PerRequest,
+            )],
+            None,
+        );
+        let matching = crate::services::operation_descriptor::build_ssh_descriptor(
+            crate::services::operation_descriptor::SshOperationKind::Exec,
+            Some("/usr/bin/python --version"),
+        );
+        let non_matching = crate::services::operation_descriptor::build_ssh_descriptor(
+            crate::services::operation_descriptor::SshOperationKind::Exec,
+            Some("/bin/python --version"),
+        );
+
+        assert_eq!(
+            evaluate(&cfg, &matching).effect,
+            ApprovalEffect::RequireApproval
+        );
+        assert_eq!(
+            evaluate(&cfg, &non_matching).effect,
+            ApprovalEffect::AutoAllow
+        );
+    }
+
+    #[test]
     fn deny_is_a_first_class_effect() {
         let cfg = config(
             false,
@@ -617,6 +763,37 @@ mod tests {
         assert!(grant_scope_covers(write_scope, &post_descriptor()));
         assert!(!grant_scope_covers(write_scope, &get_descriptor()));
         assert!(grant_scope_covers(None, &get_descriptor()));
+    }
+
+    #[test]
+    fn http_family_grants_cover_mcp_for_same_endpoint() {
+        let http_scope = Some("v1:http:delete:destructive:/repos/*");
+        let mcp_descriptor = crate::services::operation_descriptor::build_mcp_descriptor(
+            "DELETE",
+            "/repos/acme",
+            None,
+        );
+
+        assert!(grant_scope_covers(http_scope, &mcp_descriptor));
+    }
+
+    #[test]
+    fn mcp_family_grants_cover_http_for_same_endpoint() {
+        let legacy_mcp_scope = Some("v1:mcp:delete:destructive:/repos/*");
+        let http_descriptor = crate::services::operation_descriptor::build_http_descriptor(
+            "DELETE",
+            "/repos/acme",
+            None,
+        );
+
+        assert!(grant_scope_covers(legacy_mcp_scope, &http_descriptor));
+    }
+
+    #[test]
+    fn ssh_grants_do_not_cover_http_descriptors() {
+        let ssh_scope = Some("v1:ssh:exec:write:*");
+
+        assert!(!grant_scope_covers(ssh_scope, &post_descriptor()));
     }
 
     #[test]

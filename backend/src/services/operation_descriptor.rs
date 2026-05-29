@@ -1,5 +1,9 @@
 use crate::models::service_approval_config::ApprovalVerb;
 use crate::services::action_description;
+use regex::Regex;
+use std::sync::OnceLock;
+
+const MAX_STORED_RESOURCE_LEN: usize = 200;
 
 #[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -65,7 +69,10 @@ impl OperationDescriptor {
     pub fn normalized_resource(&self) -> Option<String> {
         self.resource
             .as_deref()
-            .map(normalize_resource)
+            .map(|resource| match self.protocol {
+                Protocol::Ssh => resource.trim().to_string(),
+                _ => normalize_resource(resource),
+            })
             .filter(|resource| !resource.is_empty())
     }
 }
@@ -115,7 +122,7 @@ pub fn build_mcp_meta_descriptor(tool_name: &str) -> OperationDescriptor {
 pub fn build_ssh_descriptor(kind: SshOperationKind, command: Option<&str>) -> OperationDescriptor {
     match kind {
         SshOperationKind::Exec => {
-            let command = command.unwrap_or_default().trim().to_string();
+            let command = sanitize_ssh_command(command.unwrap_or_default());
             OperationDescriptor {
                 protocol: Protocol::Ssh,
                 verb: ApprovalVerb::Write,
@@ -183,6 +190,61 @@ fn normalize_resource(resource: &str) -> String {
         .map_or(resource, |(path, _)| path)
         .trim()
         .to_string()
+}
+
+fn sanitize_ssh_command(command: &str) -> String {
+    truncate_stored_resource(&redact_ssh_command_secrets(command.trim()))
+}
+
+fn redact_ssh_command_secrets(command: &str) -> String {
+    let mut redacted = command.to_string();
+    for (regex, replacement) in ssh_redaction_patterns() {
+        redacted = regex
+            .replace_all(&redacted, replacement.as_str())
+            .into_owned();
+    }
+    redacted
+}
+
+fn ssh_redaction_patterns() -> &'static [(Regex, String)] {
+    static PATTERNS: OnceLock<Vec<(Regex, String)>> = OnceLock::new();
+    PATTERNS.get_or_init(|| {
+        vec![
+            (
+                Regex::new(r"(?i)(^|\s)(-p)(\S+)").expect("valid ssh redaction regex"),
+                "$1$2***".to_string(),
+            ),
+            (
+                Regex::new(r"(?i)(--password(?:=|\s+))(\S+)").expect("valid ssh redaction regex"),
+                "$1***".to_string(),
+            ),
+            (
+                Regex::new(r#"(?i)(authorization:\s*(?:bearer\s+)?)([^\s"']+)"#)
+                    .expect("valid ssh redaction regex"),
+                "$1***".to_string(),
+            ),
+            (
+                Regex::new(r#"(?i)(\btoken=)([^\s&;"']+)"#).expect("valid ssh redaction regex"),
+                "$1***".to_string(),
+            ),
+            (
+                Regex::new(r#"(?i)(\bapi[-_]?key=)([^\s&;"']+)"#)
+                    .expect("valid ssh redaction regex"),
+                "$1***".to_string(),
+            ),
+        ]
+    })
+}
+
+fn truncate_stored_resource(resource: &str) -> String {
+    if resource.len() <= MAX_STORED_RESOURCE_LEN {
+        return resource.to_string();
+    }
+    let mut end = MAX_STORED_RESOURCE_LEN - 3;
+    while !resource.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &resource[..end])
 }
 
 fn truncate_summary(summary: &str) -> String {
@@ -318,5 +380,42 @@ mod tests {
         assert_eq!(descriptor.verb, ApprovalVerb::Read);
         assert_eq!(descriptor.method.as_deref(), Some("tools/call"));
         assert_eq!(descriptor.resource.as_deref(), Some("nyx__search_tools"));
+    }
+
+    #[test]
+    fn ssh_exec_descriptor_redacts_common_secret_patterns() {
+        let descriptor = build_ssh_descriptor(
+            SshOperationKind::Exec,
+            Some(
+                "mysql -pPASS --password hunter2 curl -H 'Authorization: Bearer abc-secret' \
+                 token=token-secret api_key=apikey-secret api-key=apikey2-secret",
+            ),
+        );
+        let resource = descriptor.resource.as_deref().unwrap();
+
+        assert!(resource.contains("-p***"));
+        assert!(resource.contains("--password ***"));
+        assert!(resource.contains("Authorization: Bearer ***"));
+        assert!(resource.contains("token=***"));
+        assert!(resource.contains("api_key=***"));
+        assert!(resource.contains("api-key=***"));
+        assert!(!resource.contains("PASS"));
+        assert!(!resource.contains("hunter2"));
+        assert!(!resource.contains("abc-secret"));
+        assert!(!resource.contains("token-secret"));
+        assert!(!resource.contains("apikey-secret"));
+        assert!(!resource.contains("apikey2-secret"));
+        assert_eq!(descriptor.summary, format!("SSH exec: {resource}"));
+    }
+
+    #[test]
+    fn ssh_exec_descriptor_truncates_stored_resource() {
+        let long = format!("echo {}", "a".repeat(400));
+        let descriptor = build_ssh_descriptor(SshOperationKind::Exec, Some(&long));
+        let resource = descriptor.resource.as_deref().unwrap();
+
+        assert!(resource.len() <= MAX_STORED_RESOURCE_LEN);
+        assert!(resource.ends_with("..."));
+        assert!(descriptor.summary.len() <= 200);
     }
 }

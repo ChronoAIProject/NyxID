@@ -81,6 +81,21 @@ pub struct ApprovalResolution {
     pub from_org_policy: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct PendingApproval {
+    pub resolution: ApprovalResolution,
+    pub primary_owner_user_id: String,
+    pub requester_type: String,
+    pub requester_id: String,
+}
+
+#[derive(Debug, Clone)]
+pub enum ApprovalOutcome {
+    Allowed { required: bool },
+    Denied,
+    NeedsApproval(PendingApproval),
+}
+
 /// Resolve the effective approval policy for a proxy call, accounting for
 /// org-owned services that may carry their own per-service approval config.
 ///
@@ -162,6 +177,107 @@ pub async fn resolve_org_aware_approval(
         primary_owner_user_id: actor_user_id.to_string(),
         from_org_policy: false,
     })
+}
+
+pub async fn evaluate_deny_only(
+    db: &Database,
+    actor_user_id: &str,
+    service_owner_user_id: &str,
+    service_id: &str,
+    descriptor: &OperationDescriptor,
+) -> AppResult<bool> {
+    let resolution = resolve_org_aware_approval(
+        db,
+        actor_user_id,
+        service_owner_user_id,
+        service_id,
+        descriptor,
+    )
+    .await?;
+    Ok(resolution.effect == ApprovalEffect::Deny)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn evaluate_and_check(
+    db: &Database,
+    actor_user_id: &str,
+    service_owner_user_id: &str,
+    service_id: &str,
+    descriptor: &OperationDescriptor,
+    requester_type: Option<&str>,
+    requester_id: &str,
+    bypass_approval_flow: bool,
+) -> AppResult<ApprovalOutcome> {
+    let resolution = resolve_org_aware_approval(
+        db,
+        actor_user_id,
+        service_owner_user_id,
+        service_id,
+        descriptor,
+    )
+    .await?;
+
+    if resolution.effect == ApprovalEffect::Deny {
+        return Ok(ApprovalOutcome::Denied);
+    }
+
+    if !resolution.required || bypass_approval_flow {
+        return Ok(ApprovalOutcome::Allowed {
+            required: resolution.required,
+        });
+    }
+
+    let requester_type = requester_type
+        .ok_or_else(|| AppError::Forbidden("Session auth does not require approval".to_string()))?;
+    let primary_owner_user_id = resolution.primary_owner_user_id.clone();
+    let has_grant = if resolution.mode == ApprovalMode::Grant {
+        check_approval(
+            db,
+            &primary_owner_user_id,
+            service_id,
+            requester_type,
+            requester_id,
+            resolution.from_org_policy,
+            descriptor,
+        )
+        .await?
+    } else {
+        false
+    };
+
+    if has_grant {
+        return Ok(ApprovalOutcome::Allowed {
+            required: resolution.required,
+        });
+    }
+
+    Ok(ApprovalOutcome::NeedsApproval(PendingApproval {
+        resolution,
+        primary_owner_user_id,
+        requester_type: requester_type.to_string(),
+        requester_id: requester_id.to_string(),
+    }))
+}
+
+pub async fn approval_notification_recipients(
+    db: &Database,
+    approval_owner_user_id: &str,
+    pending: &PendingApproval,
+) -> AppResult<Vec<String>> {
+    if !pending.resolution.from_org_policy {
+        return Ok(vec![approval_owner_user_id.to_string()]);
+    }
+
+    let primary_owner = &pending.primary_owner_user_id;
+    let mut admins = crate::services::org_service::list_admin_user_ids(db, primary_owner).await?;
+    admins.sort();
+    admins.dedup();
+    if admins.is_empty() {
+        return Err(AppError::OrgApprovalNoAdmin(format!(
+            "Org {primary_owner} has an approval policy on this service but no active admins to decide. Add an admin to the org and retry."
+        )));
+    }
+    Ok(admins)
 }
 
 async fn user_global_approval_setting(db: &Database, user_id: &str) -> AppResult<Option<bool>> {

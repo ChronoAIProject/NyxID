@@ -1114,7 +1114,7 @@ async fn preflight_proxy_deny_before_resolution(
     };
 
     let operation = operation_descriptor::build_http_descriptor(method, path, None);
-    let approval_resolution = approval_service::resolve_org_aware_approval(
+    let denied = approval_service::evaluate_deny_only(
         &state.db,
         &approval_owner_user_id,
         &hint.service_owner_id,
@@ -1123,7 +1123,7 @@ async fn preflight_proxy_deny_before_resolution(
     )
     .await?;
 
-    if approval_resolution.effect == crate::models::service_approval_config::ApprovalEffect::Deny {
+    if denied {
         return Err(AppError::Forbidden(
             "Operation denied by approval policy".to_string(),
         ));
@@ -1432,88 +1432,40 @@ async fn execute_proxy_inner(
     let service_owner_for_approval = effective_owner_for_approval
         .as_deref()
         .unwrap_or(&approval_owner_user_id);
-    let approval_resolution = approval_service::resolve_org_aware_approval(
+    let approval_outcome = approval_service::evaluate_and_check(
         &state.db,
         &approval_owner_user_id,
         service_owner_for_approval,
         service_id,
         &operation,
+        auth_user.approval_requester_type(),
+        &auth_user.approval_requester_id(),
+        auth_user.auth_method == crate::mw::auth::AuthMethod::Session,
     )
     .await?;
-    if approval_resolution.effect == crate::models::service_approval_config::ApprovalEffect::Deny {
-        return Err(AppError::Forbidden(
-            "Operation denied by approval policy".to_string(),
-        ));
-    }
-    let enforce_approval =
-        should_enforce_runtime_approval(approval_resolution.required, &auth_user.auth_method);
 
-    // Approval enforcement.
-    if enforce_approval {
-        let requester_type = auth_user.approval_requester_type().ok_or_else(|| {
-            AppError::Forbidden("Session auth does not require approval".to_string())
-        })?;
-        let requester_id = auth_user.approval_requester_id();
+    let enforce_approval = match &approval_outcome {
+        approval_service::ApprovalOutcome::Allowed { required } => {
+            *required && auth_user.auth_method != crate::mw::auth::AuthMethod::Session
+        }
+        approval_service::ApprovalOutcome::Denied => false,
+        approval_service::ApprovalOutcome::NeedsApproval(_) => true,
+    };
 
-        // The "primary owner" of the request is whoever the policy came
-        // from -- the org for org-policy, the actor otherwise. Grants are
-        // scoped under this owner so the next call from the same actor
-        // (under the same policy) reuses the existing grant.
-        let primary_owner = &approval_resolution.primary_owner_user_id;
-
-        // In grant mode, check for existing grant first.
-        // In per_request mode, skip grant check -- every request needs fresh approval.
-        let has_grant = if approval_resolution.mode
-            == crate::models::service_approval_config::ApprovalMode::Grant
-        {
-            // For org-policy requests the grant is minted as org-scoped and
-            // must be reused across every member of the owning org (see
-            // ChronoAIProject/NyxID#364); pass the resolution flag through so
-            // check_approval widens the lookup to ignore requester identity.
-            approval_service::check_approval(
+    match approval_outcome {
+        approval_service::ApprovalOutcome::Allowed { .. } => {}
+        approval_service::ApprovalOutcome::Denied => {
+            return Err(AppError::Forbidden(
+                "Operation denied by approval policy".to_string(),
+            ));
+        }
+        approval_service::ApprovalOutcome::NeedsApproval(pending) => {
+            let notify_user_ids = approval_service::approval_notification_recipients(
                 &state.db,
-                primary_owner,
-                service_id,
-                requester_type,
-                &requester_id,
-                approval_resolution.from_org_policy,
-                &operation,
+                &approval_owner_user_id,
+                &pending,
             )
-            .await?
-        } else {
-            false
-        };
-
-        if !has_grant {
-            // Compute the notification recipients. For an actor-policy
-            // request the actor is the only recipient. For an org-policy
-            // request the recipients are every active admin of the
-            // owning org. If the org has no admins we MUST fail closed:
-            // falling back to the actor would let a normal member
-            // self-approve their own org-gated request (and in grant mode
-            // mint an org-wide grant) since `decide_request` authorizes
-            // anyone in `notify_user_ids`.
-            let notify_user_ids: Vec<String> = if approval_resolution.from_org_policy {
-                let mut admins =
-                    crate::services::org_service::list_admin_user_ids(&state.db, primary_owner)
-                        .await?;
-                admins.sort();
-                admins.dedup();
-                if admins.is_empty() {
-                    return Err(AppError::OrgApprovalNoAdmin(format!(
-                        "Org {primary_owner} has an approval policy on this service but no active admins to decide. Add an admin to the org and retry."
-                    )));
-                }
-                admins
-            } else {
-                vec![approval_owner_user_id.clone()]
-            };
-
-            // Use the FIRST recipient's notification channel for the
-            // primary timeout (subsequent recipients still get notified
-            // independently in fan-out). The recipient list is guaranteed
-            // non-empty: the org branch errors out above if there are no
-            // admins, and the actor branch always pushes the actor.
+            .await?;
             let timeout_recipient = notify_user_ids.first().cloned().ok_or_else(|| {
                 AppError::Internal("approval recipient list unexpectedly empty".to_string())
             })?;
@@ -1523,7 +1475,7 @@ async fn execute_proxy_inner(
             let timeout_secs = channel.approval_timeout_secs;
             let request_operation = approval_service::ApprovalRequestOperation::from_descriptor(
                 &operation,
-                approval_resolution.grant_scope.clone(),
+                pending.resolution.grant_scope.clone(),
             );
             let approval_request = approval_service::create_approval_request(
                 &state.db,
@@ -1531,18 +1483,18 @@ async fn execute_proxy_inner(
                 &state.http_client,
                 state.fcm_auth.as_deref(),
                 state.apns_auth.as_deref(),
-                primary_owner,
+                &pending.primary_owner_user_id,
                 service_id,
                 &target.service.name,
                 &target.service.slug,
-                requester_type,
-                &requester_id,
+                &pending.requester_type,
+                &pending.requester_id,
                 None,
                 request_operation,
-                approval_resolution.mode.clone(),
+                pending.resolution.mode.clone(),
                 timeout_secs,
                 notify_user_ids,
-                approval_resolution.from_org_policy,
+                pending.resolution.from_org_policy,
             )
             .await?;
 
@@ -2584,6 +2536,7 @@ fn is_chat_completions_proxy_path(path: &str) -> bool {
     normalized == "chat/completions" || normalized.ends_with("/chat/completions")
 }
 
+#[cfg(test)]
 fn should_enforce_runtime_approval(
     requires_approval: bool,
     auth_method: &crate::mw::auth::AuthMethod,
