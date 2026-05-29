@@ -22,7 +22,7 @@ use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::{AuthMethod, AuthUser};
 use crate::services::{
     approval_service, audit_service, node_routing_service, node_service, notification_service,
-    ssh_service, user_service_service,
+    operation_descriptor, ssh_service, user_service_service,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
@@ -912,6 +912,19 @@ pub(crate) async fn authorize_ssh_access(
     auth_user: &AuthUser,
     service_id: &str,
 ) -> AppResult<()> {
+    let operation = operation_descriptor::build_ssh_descriptor(
+        operation_descriptor::SshOperationKind::Tunnel,
+        None,
+    );
+    authorize_ssh_access_for_operation(state, auth_user, service_id, &operation).await
+}
+
+pub(crate) async fn authorize_ssh_access_for_operation(
+    state: &AppState,
+    auth_user: &AuthUser,
+    service_id: &str,
+    operation: &operation_descriptor::OperationDescriptor,
+) -> AppResult<()> {
     let approval_owner_user_id = auth_user.effective_approval_owner_user_id();
     let service = fetch_service(state, service_id).await?;
     if !service.is_active {
@@ -957,6 +970,7 @@ pub(crate) async fn authorize_ssh_access(
         &approval_owner_user_id,
         owner_for_resolution,
         service_id,
+        operation,
     )
     .await?;
 
@@ -1017,6 +1031,7 @@ pub(crate) async fn authorize_ssh_access(
             let approval_service_slug =
                 resolve_ssh_approval_service_slug(&state.db, owner_for_resolution, &service)
                     .await?;
+            let operation_summary = operation.operation_summary();
             let approval_request = approval_service::create_approval_request(
                 &state.db,
                 &state.config,
@@ -1030,8 +1045,8 @@ pub(crate) async fn authorize_ssh_access(
                 requester_type,
                 &auth_user.approval_requester_id(),
                 None,
-                "ssh:tunnel",
-                None,
+                &operation_summary,
+                Some(&operation.summary),
                 approval_resolution.mode.clone(),
                 timeout_secs,
                 notify_user_ids,

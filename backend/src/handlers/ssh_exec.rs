@@ -11,12 +11,13 @@ use crate::errors::{AppError, AppResult};
 use crate::models::ssh_auth_mode::SshAuthMode;
 use crate::mw::auth::AuthUser;
 use crate::services::{
-    audit_service, node_metrics_service, node_routing_service, node_service, ssh_service,
+    audit_service, node_metrics_service, node_routing_service, node_service, operation_descriptor,
+    ssh_service,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 use super::services_helpers::fetch_service;
-use super::ssh_tunnel::authorize_ssh_access;
+use super::ssh_tunnel::authorize_ssh_access_for_operation;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -97,7 +98,11 @@ pub async fn ssh_exec(
     Json(body): Json<SshExecRequest>,
 ) -> AppResult<Json<SshExecResponse>> {
     // -- Auth --
-    authorize_ssh_access(&state, &auth_user, &service_id).await?;
+    let operation = operation_descriptor::build_ssh_descriptor(
+        operation_descriptor::SshOperationKind::Exec,
+        Some(&body.command),
+    );
+    authorize_ssh_access_for_operation(&state, &auth_user, &service_id, &operation).await?;
 
     let ssh_svc = ssh_service::get_ssh_service(&state.db, &service_id).await?;
     // Resolve the catalog slug for telemetry -- best-effort so exec

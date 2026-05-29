@@ -13,8 +13,8 @@ use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::mw::auth::AuthUser;
 use crate::services::{
-    action_description, approval_service, audit_service, chatgpt_translator, delegation_service,
-    llm_gateway_service, llm_usage_service, notification_service, proxy_service, sse_parser,
+    approval_service, audit_service, chatgpt_translator, delegation_service, llm_gateway_service,
+    llm_usage_service, notification_service, operation_descriptor, proxy_service, sse_parser,
 };
 
 /// Maximum size for upstream response bodies (50 MB).
@@ -1108,11 +1108,13 @@ async fn check_llm_approval(
 ) -> AppResult<()> {
     let approval_owner_user_id = auth_user.effective_approval_owner_user_id();
     let owner_for_resolution = service_owner_user_id.unwrap_or(&approval_owner_user_id);
+    let operation = operation_descriptor::build_llm_descriptor(method_str, path, body);
     let approval_resolution = approval_service::resolve_org_aware_approval(
         &state.db,
         &approval_owner_user_id,
         owner_for_resolution,
         service_id,
+        &operation,
     )
     .await?;
 
@@ -1176,9 +1178,8 @@ async fn check_llm_approval(
     let channel =
         notification_service::get_or_create_channel(&state.db, &timeout_recipient).await?;
 
-    let action_desc = action_description::build_action_description(method_str, path, body);
-
     let timeout_secs = channel.approval_timeout_secs;
+    let operation_summary = operation.operation_summary();
     let approval_request = approval_service::create_approval_request(
         &state.db,
         &state.config,
@@ -1192,8 +1193,8 @@ async fn check_llm_approval(
         requester_type,
         &requester_id,
         None,
-        &format!("llm:{} {}", method_str, path),
-        Some(&action_desc),
+        &operation_summary,
+        Some(&operation.summary),
         approval_resolution.mode.clone(),
         timeout_secs,
         notify_user_ids,

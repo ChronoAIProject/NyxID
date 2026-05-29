@@ -46,6 +46,7 @@ pub mod oauth_flow;
 pub mod oauth_service;
 pub mod openapi_parser;
 pub mod openclaw_channel_service;
+pub mod operation_descriptor;
 pub mod org_invite_service;
 pub mod org_role_scope_service;
 pub mod org_service;

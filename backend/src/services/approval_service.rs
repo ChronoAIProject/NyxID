@@ -17,6 +17,7 @@ use crate::models::service_approval_config::{
 };
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::services::notification_service;
+use crate::services::operation_descriptor::OperationDescriptor;
 use crate::services::push_service::{ApnsAuth, FcmAuth};
 use crate::telemetry::{TelemetryClient, TelemetryContext, TelemetryEvent, emit_event};
 
@@ -87,6 +88,7 @@ pub async fn resolve_org_aware_approval(
     actor_user_id: &str,
     service_owner_user_id: &str,
     service_id: &str,
+    _descriptor: &OperationDescriptor,
 ) -> AppResult<ApprovalResolution> {
     // Step 1: if the resolved service is org-owned and the org has a
     // policy, use it. We detect "org-owned" by looking up the owner's
@@ -1637,6 +1639,10 @@ fn is_duplicate_key_error(e: &mongodb::error::Error) -> bool {
 mod tests {
     use super::*;
 
+    fn test_operation() -> OperationDescriptor {
+        crate::services::operation_descriptor::build_http_descriptor("GET", "/v1/models", None)
+    }
+
     fn make_request(id: &str, status: &str) -> ApprovalRequest {
         let now = Utc::now();
         ApprovalRequest {
@@ -2896,9 +2902,11 @@ mod tests {
         let actor_config = make_service_config(&actor_id, &service_id, true, ApprovalMode::Grant);
         insert_config(&db, &actor_config).await;
 
-        let resolution = resolve_org_aware_approval(&db, &actor_id, &org_user_id, &service_id)
-            .await
-            .unwrap();
+        let operation = test_operation();
+        let resolution =
+            resolve_org_aware_approval(&db, &actor_id, &org_user_id, &service_id, &operation)
+                .await
+                .unwrap();
         assert!(resolution.required);
         assert_eq!(resolution.mode, ApprovalMode::Grant);
         assert_eq!(resolution.primary_owner_user_id, actor_id);
@@ -2926,9 +2934,11 @@ mod tests {
         let org_config = make_service_config(&org_user_id, &service_id, true, ApprovalMode::Grant);
         insert_config(&db, &org_config).await;
 
-        let resolution = resolve_org_aware_approval(&db, &actor_id, &org_user_id, &service_id)
-            .await
-            .unwrap();
+        let operation = test_operation();
+        let resolution =
+            resolve_org_aware_approval(&db, &actor_id, &org_user_id, &service_id, &operation)
+                .await
+                .unwrap();
         assert!(resolution.required);
         assert_eq!(resolution.mode, ApprovalMode::Grant);
         assert_eq!(resolution.primary_owner_user_id, org_user_id);
@@ -2955,9 +2965,11 @@ mod tests {
         let channel = make_channel(&actor_id, true);
         insert_channel(&db, &channel).await;
 
-        let resolution = resolve_org_aware_approval(&db, &actor_id, &actor_id, &service_id)
-            .await
-            .unwrap();
+        let operation = test_operation();
+        let resolution =
+            resolve_org_aware_approval(&db, &actor_id, &actor_id, &service_id, &operation)
+                .await
+                .unwrap();
         assert!(resolution.required);
         assert_eq!(resolution.mode, ApprovalMode::default());
         assert_eq!(resolution.primary_owner_user_id, actor_id);

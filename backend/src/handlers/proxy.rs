@@ -25,9 +25,10 @@ use crate::models::user_service_connection::{
 use crate::mw::auth::AuthUser;
 use crate::services::node_ws_manager::{NodeProxyRequest, ProxyResponseType, StreamChunk};
 use crate::services::{
-    action_description, approval_service, audit_service, chatgpt_translator, delegation_service,
-    identity_service, llm_usage_service, node_metrics_service, node_routing_service, node_service,
-    notification_service, proxy_service, sse_parser, user_service_service, ws_frame_injector,
+    approval_service, audit_service, chatgpt_translator, delegation_service, identity_service,
+    llm_usage_service, node_metrics_service, node_routing_service, node_service,
+    notification_service, operation_descriptor, proxy_service, sse_parser, user_service_service,
+    ws_frame_injector,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
@@ -1310,24 +1311,6 @@ async fn execute_proxy_inner(
     );
 
     // === Request body handling ===
-    // Resolve approval policy with org-cascade. The "service owner" (the
-    // user_id that owns the resolved UserService) determines whether an
-    // org policy applies. For the legacy DownstreamService fallback path
-    // where no PreResolved was supplied, the service owner is the actor
-    // (no org context available).
-    let service_owner_for_approval = effective_owner_for_approval
-        .as_deref()
-        .unwrap_or(&approval_owner_user_id);
-    let approval_resolution = approval_service::resolve_org_aware_approval(
-        &state.db,
-        &approval_owner_user_id,
-        service_owner_for_approval,
-        service_id,
-    )
-    .await?;
-    let enforce_approval =
-        should_enforce_runtime_approval(approval_resolution.required, &auth_user.auth_method);
-
     // For WebSocket upgrades, skip body buffering -- WS handshakes have no
     // meaningful body, and consuming it would prevent the protocol upgrade.
     // The request is kept intact for WebSocketUpgrade extraction later.
@@ -1341,6 +1324,35 @@ async fn execute_proxy_inner(
         let bytes = read_proxy_request_body(request, state.config.proxy_max_body_size).await?;
         (bytes, None)
     };
+
+    let operation = operation_descriptor::build_http_descriptor(
+        &method_str,
+        path,
+        if body_bytes.is_empty() {
+            None
+        } else {
+            Some(body_bytes.as_ref())
+        },
+    );
+
+    // Resolve approval policy with org-cascade. The "service owner" (the
+    // user_id that owns the resolved UserService) determines whether an
+    // org policy applies. For the legacy DownstreamService fallback path
+    // where no PreResolved was supplied, the service owner is the actor
+    // (no org context available).
+    let service_owner_for_approval = effective_owner_for_approval
+        .as_deref()
+        .unwrap_or(&approval_owner_user_id);
+    let approval_resolution = approval_service::resolve_org_aware_approval(
+        &state.db,
+        &approval_owner_user_id,
+        service_owner_for_approval,
+        service_id,
+        &operation,
+    )
+    .await?;
+    let enforce_approval =
+        should_enforce_runtime_approval(approval_resolution.required, &auth_user.auth_method);
 
     // Approval enforcement.
     if enforce_approval {
@@ -1413,17 +1425,8 @@ async fn execute_proxy_inner(
             let channel =
                 notification_service::get_or_create_channel(&state.db, &timeout_recipient).await?;
 
-            let action_desc = action_description::build_action_description(
-                &method_str,
-                path,
-                if body_bytes.is_empty() {
-                    None
-                } else {
-                    Some(body_bytes.as_ref())
-                },
-            );
-
             let timeout_secs = channel.approval_timeout_secs;
+            let operation_summary = operation.operation_summary();
             let approval_request = approval_service::create_approval_request(
                 &state.db,
                 &state.config,
@@ -1437,8 +1440,8 @@ async fn execute_proxy_inner(
                 requester_type,
                 &requester_id,
                 None,
-                &format!("proxy:{} {}", method_str, path),
-                Some(&action_desc),
+                &operation_summary,
+                Some(&operation.summary),
                 approval_resolution.mode.clone(),
                 timeout_secs,
                 notify_user_ids,
