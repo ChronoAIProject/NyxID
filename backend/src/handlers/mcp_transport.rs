@@ -2235,7 +2235,7 @@ async fn execute_ssh_command_internal(
                     Some(serde_json::json!({
                         "service_id": service_id,
                         "principal": principal,
-                        "command": super::ssh_exec::truncate_for_audit(command),
+                        "command": super::ssh_exec::redact_command_for_audit(command),
                         "exit_code": response.exit_code,
                         "duration_ms": response.duration_ms,
                         "timed_out": response.timed_out,

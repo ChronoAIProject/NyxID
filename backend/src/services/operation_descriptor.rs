@@ -196,7 +196,7 @@ fn sanitize_ssh_command(command: &str) -> String {
     truncate_stored_resource(&redact_ssh_command_secrets(command.trim()))
 }
 
-fn redact_ssh_command_secrets(command: &str) -> String {
+pub(crate) fn redact_ssh_command_secrets(command: &str) -> String {
     let mut redacted = command.to_string();
     for (regex, replacement) in ssh_redaction_patterns() {
         redacted = regex
