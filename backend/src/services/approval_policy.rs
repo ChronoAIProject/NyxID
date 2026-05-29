@@ -1,3 +1,5 @@
+use globset::{Glob, GlobBuilder};
+
 use crate::models::service_approval_config::{
     ApprovalEffect, ApprovalMode, ApprovalRule, ApprovalVerb, ServiceApprovalConfig,
 };
@@ -89,12 +91,15 @@ pub fn validate_rules(rules: &[ApprovalRule]) -> Result<(), String> {
                 "approval rule {idx} cannot list more than {MAX_RULE_METHODS} methods"
             ));
         }
-        if rule.resource_pattern.len() > MAX_RULE_RESOURCE_PATTERN_LEN {
+        let resource_pattern = normalized_rule_resource_pattern(&rule.resource_pattern);
+        if resource_pattern.len() > MAX_RULE_RESOURCE_PATTERN_LEN {
             return Err(format!(
                 "approval rule {idx} resource_pattern exceeds {MAX_RULE_RESOURCE_PATTERN_LEN} characters"
             ));
         }
         validate_methods(idx, &rule.methods)?;
+        compile_resource_pattern(&resource_pattern)
+            .map_err(|e| format!("approval rule {idx} resource_pattern is invalid: {e}"))?;
     }
 
     Ok(())
@@ -116,7 +121,7 @@ pub fn concrete_scope(descriptor: &OperationDescriptor) -> String {
 fn rule_matches(rule: &ApprovalRule, descriptor: &OperationDescriptor) -> bool {
     methods_match(&rule.methods, descriptor)
         && verbs_match(&rule.verbs, descriptor)
-        && phase_one_resource_matches(&rule.resource_pattern)
+        && resource_pattern_matches(&rule.resource_pattern, descriptor)
 }
 
 fn methods_match(methods: &[String], descriptor: &OperationDescriptor) -> bool {
@@ -134,11 +139,6 @@ fn methods_match(methods: &[String], descriptor: &OperationDescriptor) -> bool {
 
 fn verbs_match(verbs: &[ApprovalVerb], descriptor: &OperationDescriptor) -> bool {
     verbs.is_empty() || verbs.iter().any(|verb| verb == &descriptor.verb)
-}
-
-fn phase_one_resource_matches(pattern: &str) -> bool {
-    let pattern = pattern.trim();
-    pattern.is_empty() || pattern == "*"
 }
 
 fn require_approval_scope(
@@ -290,12 +290,22 @@ fn verb_set_matches(verbs: &[&str], descriptor: &OperationDescriptor) -> bool {
 }
 
 fn resource_pattern_matches(pattern: &str, descriptor: &OperationDescriptor) -> bool {
-    if pattern.is_empty() || pattern == "*" {
+    let pattern = normalized_rule_resource_pattern(pattern);
+    if pattern == "*" {
         return true;
     }
-    descriptor
-        .normalized_resource()
-        .is_some_and(|resource| resource == pattern)
+    let Some(resource) = descriptor.normalized_resource() else {
+        return false;
+    };
+    compile_resource_pattern(&pattern).is_ok_and(|glob| glob.compile_matcher().is_match(resource))
+}
+
+fn compile_resource_pattern(pattern: &str) -> Result<Glob, globset::Error> {
+    let pattern = normalized_rule_resource_pattern(pattern);
+    GlobBuilder::new(&pattern)
+        .literal_separator(true)
+        .backslash_escape(true)
+        .build()
 }
 
 #[cfg(test)]
@@ -339,6 +349,19 @@ mod tests {
         }
     }
 
+    fn rule_with_pattern(
+        methods: &[&str],
+        resource_pattern: &str,
+        verbs: Vec<ApprovalVerb>,
+        effect: ApprovalEffect,
+        mode: ApprovalMode,
+    ) -> ApprovalRule {
+        ApprovalRule {
+            resource_pattern: resource_pattern.to_string(),
+            ..rule(methods, verbs, effect, mode)
+        }
+    }
+
     fn post_descriptor() -> OperationDescriptor {
         crate::services::operation_descriptor::build_http_descriptor(
             "POST",
@@ -349,6 +372,10 @@ mod tests {
 
     fn get_descriptor() -> OperationDescriptor {
         crate::services::operation_descriptor::build_http_descriptor("GET", "/v1/models", None)
+    }
+
+    fn github_contents_descriptor(path: &str) -> OperationDescriptor {
+        crate::services::operation_descriptor::build_http_descriptor("PUT", path, None)
     }
 
     #[test]
@@ -474,6 +501,96 @@ mod tests {
     }
 
     #[test]
+    fn resource_glob_must_match_when_present() {
+        let cfg = config(
+            false,
+            ApprovalMode::Grant,
+            vec![rule_with_pattern(
+                &["PUT"],
+                "/repos/*/contents/**",
+                vec![ApprovalVerb::Write],
+                ApprovalEffect::RequireApproval,
+                ApprovalMode::Grant,
+            )],
+            None,
+        );
+
+        let matching = evaluate(
+            &cfg,
+            &github_contents_descriptor("/repos/nyx/contents/src/main.rs"),
+        );
+        let non_matching = evaluate(
+            &cfg,
+            &github_contents_descriptor("/repos/nyx/issues/1/comments"),
+        );
+
+        assert_eq!(matching.effect, ApprovalEffect::RequireApproval);
+        assert_eq!(
+            matching.grant_scope.as_deref(),
+            Some("v1:http:put:write:/repos/*/contents/**")
+        );
+        assert_eq!(non_matching.effect, ApprovalEffect::AutoAllow);
+    }
+
+    #[test]
+    fn single_segment_star_does_not_cross_path_separator() {
+        let cfg = config(
+            false,
+            ApprovalMode::PerRequest,
+            vec![rule_with_pattern(
+                &["PUT"],
+                "/repos/*/contents/*",
+                vec![],
+                ApprovalEffect::RequireApproval,
+                ApprovalMode::PerRequest,
+            )],
+            None,
+        );
+
+        let nested = evaluate(
+            &cfg,
+            &github_contents_descriptor("/repos/nyx/contents/src/main.rs"),
+        );
+        let single = evaluate(
+            &cfg,
+            &github_contents_descriptor("/repos/nyx/contents/main.rs"),
+        );
+
+        assert_eq!(nested.effect, ApprovalEffect::AutoAllow);
+        assert_eq!(single.effect, ApprovalEffect::RequireApproval);
+    }
+
+    #[test]
+    fn command_globs_match_ssh_exec_resources() {
+        let cfg = config(
+            false,
+            ApprovalMode::PerRequest,
+            vec![rule_with_pattern(
+                &["EXEC"],
+                "git push*",
+                vec![ApprovalVerb::Write],
+                ApprovalEffect::RequireApproval,
+                ApprovalMode::PerRequest,
+            )],
+            None,
+        );
+        let push = crate::services::operation_descriptor::build_ssh_descriptor(
+            crate::services::operation_descriptor::SshOperationKind::Exec,
+            Some("git push origin main"),
+        );
+        let status = crate::services::operation_descriptor::build_ssh_descriptor(
+            crate::services::operation_descriptor::SshOperationKind::Exec,
+            Some("git status"),
+        );
+
+        assert_eq!(
+            evaluate(&cfg, &push).effect,
+            ApprovalEffect::RequireApproval
+        );
+        assert_eq!(evaluate(&cfg, &status).effect, ApprovalEffect::AutoAllow);
+    }
+
+    #[test]
     fn deny_is_a_first_class_effect() {
         let cfg = config(
             false,
@@ -511,6 +628,20 @@ mod tests {
     }
 
     #[test]
+    fn glob_scoped_grant_covers_matching_resources_only() {
+        let scope = Some("v1:http:put:write:/repos/*/contents/**");
+
+        assert!(grant_scope_covers(
+            scope,
+            &github_contents_descriptor("/repos/nyx/contents/src/main.rs")
+        ));
+        assert!(!grant_scope_covers(
+            scope,
+            &github_contents_descriptor("/repos/nyx/issues/1/comments")
+        ));
+    }
+
+    #[test]
     fn validates_method_sets_and_rule_count() {
         let invalid = vec![rule(
             &["POST", "*"],
@@ -538,5 +669,14 @@ mod tests {
             MAX_APPROVAL_RULES + 1
         ];
         assert!(validate_rules(&too_many).is_err());
+
+        let invalid_glob = vec![rule_with_pattern(
+            &["GET"],
+            "[",
+            vec![],
+            ApprovalEffect::AutoAllow,
+            ApprovalMode::PerRequest,
+        )];
+        assert!(validate_rules(&invalid_glob).is_err());
     }
 }

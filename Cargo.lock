@@ -3964,6 +3964,7 @@ dependencies = [
  "dotenvy",
  "ed25519-dalek",
  "futures",
+ "globset",
  "google-cloud-kms",
  "governor",
  "hex",

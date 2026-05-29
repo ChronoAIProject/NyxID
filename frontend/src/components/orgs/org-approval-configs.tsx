@@ -13,6 +13,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Dialog,
   DialogContent,
@@ -31,6 +32,7 @@ import {
 } from "@/hooks/use-approvals";
 import { useKeys } from "@/hooks/use-keys";
 import { formatDate } from "@/lib/utils";
+import { ApprovalPolicyEditor } from "@/components/shared/approval-policy-editor";
 import {
   approvalPolicyLabel,
   approvalVerbLabels,
@@ -38,7 +40,13 @@ import {
   buildSimpleApprovalRules,
   enabledSimpleApprovalVerbs,
 } from "@/lib/approval-policies";
-import type { ApprovalMode, ApprovalVerb, ServiceApprovalConfigItem } from "@/types/approvals";
+import type {
+  ApprovalEffect,
+  ApprovalMode,
+  ApprovalRule,
+  ApprovalVerb,
+  ServiceApprovalConfigItem,
+} from "@/types/approvals";
 
 interface OrgApprovalConfigsProps {
   readonly orgId: string;
@@ -231,6 +239,34 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
     }
   }
 
+  async function handleSaveAdvancedRules(
+    serviceId: string,
+    config: ServiceApprovalConfigItem,
+    rules: readonly ApprovalRule[],
+    defaultEffect: ApprovalEffect,
+  ) {
+    try {
+      await setConfigMutation.mutateAsync({
+        serviceId,
+        approvalRequired:
+          rules.length > 0 ||
+          defaultEffect === "require_approval" ||
+          defaultEffect === "deny",
+        approvalMode: config.approval_mode,
+        rules,
+        defaultEffect,
+        orgId,
+      });
+      toast.success("Org approval rules updated");
+    } catch (err) {
+      toast.error(
+        err instanceof ApiError
+          ? err.message
+          : "Failed to update approval rules",
+      );
+    }
+  }
+
   async function handleDelete(serviceId: string) {
     try {
       await deleteConfigMutation.mutateAsync({ serviceId, orgId });
@@ -307,6 +343,10 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
                   config.user_service_id ?? config.service_id;
                 const enabledVerbs = enabledSimpleApprovalVerbs(config);
                 const hasApproval = enabledVerbs.length > 0;
+                const hasPolicy =
+                  hasApproval ||
+                  config.rules.length > 0 ||
+                  config.default_effect === "deny";
                 return (
                 <div
                   key={config.service_id}
@@ -323,7 +363,7 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
                     </div>
                     <div className="flex items-center gap-3">
                       <Switch
-                        checked={hasApproval}
+                        checked={hasPolicy}
                         onCheckedChange={(checked) =>
                           void handleToggle(mutationKey, checked)
                         }
@@ -338,62 +378,87 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
                       </Button>
                     </div>
                   </div>
-                  {hasApproval && (
-                    <div className="mt-3 flex flex-col gap-3 border-t border-border pt-3">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="text-xs text-muted-foreground">
-                          Mode:
-                        </span>
-                        <Select
-                          value={config.approval_mode}
-                          onValueChange={(value) =>
-                            void handleChangeMode(
-                              mutationKey,
-                              config,
-                              value as ApprovalMode,
-                            )
-                          }
-                        >
-                          <SelectTrigger className="h-7 w-[180px] text-xs">
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="per_request">
-                              Per request
-                            </SelectItem>
-                            <SelectItem value="grant">
-                              Time-based grant
-                            </SelectItem>
-                          </SelectContent>
-                        </Select>
-                        <span className="text-xs text-muted-foreground">
-                          {config.approval_mode === "grant"
-                            ? "Approval creates a reusable grant"
-                            : "Every request needs fresh approval"}
-                        </span>
-                      </div>
-                      <div className="flex flex-wrap gap-3">
-                        {approvalVerbs.map((verb) => (
-                          <label
-                            key={verb}
-                            className="flex items-center gap-2 text-xs text-muted-foreground"
-                          >
-                            <Switch
-                              checked={enabledVerbs.includes(verb)}
-                              onCheckedChange={(checked) =>
-                                void handleChangeVerb(
+                  {hasPolicy && (
+                    <Tabs defaultValue="simple" className="mt-3 border-t border-border pt-3">
+                      <TabsList>
+                        <TabsTrigger value="simple">Simple</TabsTrigger>
+                        <TabsTrigger value="advanced">Advanced</TabsTrigger>
+                      </TabsList>
+                      <TabsContent value="simple" className="mt-3">
+                        <div className="flex flex-col gap-3">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="text-xs text-muted-foreground">
+                              Mode:
+                            </span>
+                            <Select
+                              value={config.approval_mode}
+                              onValueChange={(value) =>
+                                void handleChangeMode(
                                   mutationKey,
                                   config,
-                                  verb,
-                                  checked,
+                                  value as ApprovalMode,
                                 )
                               }
-                            />
-                            {approvalVerbLabels[verb]}
-                          </label>
-                        ))}
-                      </div>
-                    </div>
+                            >
+                              <SelectTrigger className="h-7 w-[180px] text-xs">
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="per_request">
+                                  Per request
+                                </SelectItem>
+                                <SelectItem value="grant">
+                                  Time-based grant
+                                </SelectItem>
+                              </SelectContent>
+                            </Select>
+                            <span className="text-xs text-muted-foreground">
+                              {config.approval_mode === "grant"
+                                ? "Approval creates a reusable grant"
+                                : "Every request needs fresh approval"}
+                            </span>
+                          </div>
+                          <div className="flex flex-wrap gap-3">
+                            {approvalVerbs.map((verb) => (
+                              <label
+                                key={verb}
+                                className="flex items-center gap-2 text-xs text-muted-foreground"
+                              >
+                                <Switch
+                                  checked={enabledVerbs.includes(verb)}
+                                  onCheckedChange={(checked) =>
+                                    void handleChangeVerb(
+                                      mutationKey,
+                                      config,
+                                      verb,
+                                      checked,
+                                    )
+                                  }
+                                />
+                                {approvalVerbLabels[verb]}
+                              </label>
+                            ))}
+                          </div>
+                        </div>
+                      </TabsContent>
+                      <TabsContent value="advanced" className="mt-3">
+                        <ApprovalPolicyEditor
+                          key={`${config.updated_at}:${config.rules.length}:${config.default_effect ?? "legacy"}`}
+                          approvalMode={config.approval_mode}
+                          defaultEffect={config.default_effect}
+                          disabled={setConfigMutation.isPending}
+                          rules={config.rules}
+                          onSave={(rules, defaultEffect) =>
+                            void handleSaveAdvancedRules(
+                              mutationKey,
+                              config,
+                              rules,
+                              defaultEffect,
+                            )
+                          }
+                        />
+                      </TabsContent>
+                    </Tabs>
                   )}
                 </div>
                 );

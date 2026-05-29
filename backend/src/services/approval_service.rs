@@ -702,7 +702,7 @@ pub async fn process_decision(
     // mode-switch time (#153), but this catches any that slip through a
     // TOCTOU race. We roll back the decision so the request stays "pending"
     // (and will be picked up by the next expiry sweep).
-    if approved && updated.approval_mode == ApprovalMode::Grant {
+    if approved && requires_legacy_grant_mode_recheck(&updated) {
         let current_mode = resolve_approval_mode(db, &updated.user_id, &updated.service_id).await?;
         if current_mode != ApprovalMode::Grant {
             // Roll back the decision atomically. The filter guards against a
@@ -796,6 +796,10 @@ pub async fn process_decision(
     });
 
     Ok(updated)
+}
+
+fn requires_legacy_grant_mode_recheck(request: &ApprovalRequest) -> bool {
+    request.approval_mode == ApprovalMode::Grant && request.grant_scope.is_none()
 }
 
 fn is_idempotent_replay(
@@ -1779,6 +1783,21 @@ mod tests {
             from_org_policy: false,
             created_at: now,
         }
+    }
+
+    #[test]
+    fn grant_mode_recheck_only_applies_to_legacy_unscoped_grants() {
+        let mut request = make_request("req-1", "pending");
+        request.approval_mode = ApprovalMode::Grant;
+        request.grant_scope = None;
+        assert!(requires_legacy_grant_mode_recheck(&request));
+
+        request.grant_scope = Some("v1:http:post:write:/v1/chat/**".to_string());
+        assert!(!requires_legacy_grant_mode_recheck(&request));
+
+        request.approval_mode = ApprovalMode::PerRequest;
+        request.grant_scope = None;
+        assert!(!requires_legacy_grant_mode_recheck(&request));
     }
 
     #[test]

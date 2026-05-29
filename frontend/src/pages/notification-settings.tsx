@@ -63,6 +63,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   RotateCcw,
   Smartphone,
@@ -71,8 +72,15 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { ApprovalSetupWizard } from "@/components/shared/approval-setup-wizard";
+import { ApprovalPolicyEditor } from "@/components/shared/approval-policy-editor";
 import { AddCtaButton } from "@/components/shared/add-cta-button";
-import type { ApprovalMode, ApprovalVerb, ServiceApprovalConfigItem } from "@/types/approvals";
+import type {
+  ApprovalEffect,
+  ApprovalMode,
+  ApprovalRule,
+  ApprovalVerb,
+  ServiceApprovalConfigItem,
+} from "@/types/approvals";
 
 export function NotificationSettingsPage() {
   const { data: rawSettings, isLoading, error, refetch } = useNotificationSettings();
@@ -404,6 +412,33 @@ export function NotificationSettingsPage() {
         err instanceof ApiError
           ? err.message
           : "Failed to update approval rule",
+      );
+    }
+  }
+
+  async function handleSaveAdvancedRules(
+    serviceId: string,
+    config: ServiceApprovalConfigItem,
+    rules: readonly ApprovalRule[],
+    defaultEffect: ApprovalEffect,
+  ) {
+    try {
+      await setConfigMutation.mutateAsync({
+        serviceId,
+        approvalRequired:
+          rules.length > 0 ||
+          defaultEffect === "require_approval" ||
+          defaultEffect === "deny",
+        approvalMode: config.approval_mode,
+        rules,
+        defaultEffect,
+      });
+      toast.success("Approval rules updated");
+    } catch (err) {
+      toast.error(
+        err instanceof ApiError
+          ? err.message
+          : "Failed to update approval rules",
       );
     }
   }
@@ -805,6 +840,10 @@ export function NotificationSettingsPage() {
                       config.user_service_id ?? config.service_id;
                     const enabledVerbs = enabledSimpleApprovalVerbs(config);
                     const hasApproval = enabledVerbs.length > 0;
+                    const hasPolicy =
+                      hasApproval ||
+                      config.rules.length > 0 ||
+                      config.default_effect === "deny";
                     return (
                     <div
                       key={config.service_id}
@@ -824,7 +863,7 @@ export function NotificationSettingsPage() {
                         </div>
                         <div className="flex items-center gap-3">
                           <Switch
-                            checked={hasApproval}
+                            checked={hasPolicy}
                             onCheckedChange={(checked) =>
                               void handleToggleServiceConfig(
                                 mutationKey,
@@ -844,62 +883,87 @@ export function NotificationSettingsPage() {
                           </Button>
                         </div>
                       </div>
-                      {hasApproval && (
-                        <div className="mt-3 flex flex-col gap-3 border-t border-border pt-3">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <span className="text-xs text-muted-foreground">
-                              Mode:
-                            </span>
-                            <Select
-                              value={config.approval_mode}
-                              onValueChange={(value) =>
-                                void handleChangeApprovalMode(
-                                  mutationKey,
-                                  config,
-                                  value as ApprovalMode,
-                                )
-                              }
-                            >
-                              <SelectTrigger className="h-7 w-[180px] text-xs">
-                                <SelectValue />
-                              </SelectTrigger>
-                              <SelectContent>
-                                <SelectItem value="per_request">
-                                  Per request
-                                </SelectItem>
-                                <SelectItem value="grant">
-                                  Time-based grant
-                                </SelectItem>
-                              </SelectContent>
-                            </Select>
-                            <span className="text-xs text-muted-foreground">
-                              {config.approval_mode === "grant"
-                                ? "Approval creates a reusable grant"
-                                : "Every request needs fresh approval"}
-                            </span>
-                          </div>
-                          <div className="flex flex-wrap gap-3">
-                            {approvalVerbs.map((verb) => (
-                              <label
-                                key={verb}
-                                className="flex items-center gap-2 text-xs text-muted-foreground"
-                              >
-                                <Switch
-                                  checked={enabledVerbs.includes(verb)}
-                                  onCheckedChange={(checked) =>
-                                    void handleChangeVerbApproval(
+                      {hasPolicy && (
+                        <Tabs defaultValue="simple" className="mt-3 border-t border-border pt-3">
+                          <TabsList>
+                            <TabsTrigger value="simple">Simple</TabsTrigger>
+                            <TabsTrigger value="advanced">Advanced</TabsTrigger>
+                          </TabsList>
+                          <TabsContent value="simple" className="mt-3">
+                            <div className="flex flex-col gap-3">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span className="text-xs text-muted-foreground">
+                                  Mode:
+                                </span>
+                                <Select
+                                  value={config.approval_mode}
+                                  onValueChange={(value) =>
+                                    void handleChangeApprovalMode(
                                       mutationKey,
                                       config,
-                                      verb,
-                                      checked,
+                                      value as ApprovalMode,
                                     )
                                   }
-                                />
-                                {approvalVerbLabels[verb]}
-                              </label>
-                            ))}
-                          </div>
-                        </div>
+                                >
+                                  <SelectTrigger className="h-7 w-[180px] text-xs">
+                                    <SelectValue />
+                                  </SelectTrigger>
+                                  <SelectContent>
+                                    <SelectItem value="per_request">
+                                      Per request
+                                    </SelectItem>
+                                    <SelectItem value="grant">
+                                      Time-based grant
+                                    </SelectItem>
+                                  </SelectContent>
+                                </Select>
+                                <span className="text-xs text-muted-foreground">
+                                  {config.approval_mode === "grant"
+                                    ? "Approval creates a reusable grant"
+                                    : "Every request needs fresh approval"}
+                                </span>
+                              </div>
+                              <div className="flex flex-wrap gap-3">
+                                {approvalVerbs.map((verb) => (
+                                  <label
+                                    key={verb}
+                                    className="flex items-center gap-2 text-xs text-muted-foreground"
+                                  >
+                                    <Switch
+                                      checked={enabledVerbs.includes(verb)}
+                                      onCheckedChange={(checked) =>
+                                        void handleChangeVerbApproval(
+                                          mutationKey,
+                                          config,
+                                          verb,
+                                          checked,
+                                        )
+                                      }
+                                    />
+                                    {approvalVerbLabels[verb]}
+                                  </label>
+                                ))}
+                              </div>
+                            </div>
+                          </TabsContent>
+                          <TabsContent value="advanced" className="mt-3">
+                            <ApprovalPolicyEditor
+                              key={`${config.updated_at}:${config.rules.length}:${config.default_effect ?? "legacy"}`}
+                              approvalMode={config.approval_mode}
+                              defaultEffect={config.default_effect}
+                              disabled={setConfigMutation.isPending}
+                              rules={config.rules}
+                              onSave={(rules, defaultEffect) =>
+                                void handleSaveAdvancedRules(
+                                  mutationKey,
+                                  config,
+                                  rules,
+                                  defaultEffect,
+                                )
+                              }
+                            />
+                          </TabsContent>
+                        </Tabs>
                       )}
                     </div>
                     );
