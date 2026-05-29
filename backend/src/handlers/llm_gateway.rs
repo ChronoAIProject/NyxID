@@ -1118,6 +1118,12 @@ async fn check_llm_approval(
     )
     .await?;
 
+    if approval_resolution.effect == crate::models::service_approval_config::ApprovalEffect::Deny {
+        return Err(AppError::Forbidden(
+            "Operation denied by approval policy".to_string(),
+        ));
+    }
+
     if should_bypass_approval_flow(approval_resolution.required, &auth_user.auth_method) {
         return Ok(());
     }
@@ -1143,6 +1149,7 @@ async fn check_llm_approval(
             requester_type,
             &requester_id,
             approval_resolution.from_org_policy,
+            &operation,
         )
         .await?
     } else {
@@ -1179,7 +1186,10 @@ async fn check_llm_approval(
         notification_service::get_or_create_channel(&state.db, &timeout_recipient).await?;
 
     let timeout_secs = channel.approval_timeout_secs;
-    let operation_summary = operation.operation_summary();
+    let request_operation = approval_service::ApprovalRequestOperation::from_descriptor(
+        &operation,
+        approval_resolution.grant_scope.clone(),
+    );
     let approval_request = approval_service::create_approval_request(
         &state.db,
         &state.config,
@@ -1193,8 +1203,7 @@ async fn check_llm_approval(
         requester_type,
         &requester_id,
         None,
-        &operation_summary,
-        Some(&operation.summary),
+        request_operation,
         approval_resolution.mode.clone(),
         timeout_secs,
         notify_user_ids,

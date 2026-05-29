@@ -111,6 +111,15 @@ pub async fn send_approval_notification(
             "deeplink".to_string(),
             format!("nyxid://challenge/{}", request.id),
         );
+        if let Some(method) = &request.http_method {
+            data.insert("http_method".to_string(), method.clone());
+        }
+        if let Some(resource) = &request.resource {
+            data.insert("resource".to_string(), resource.clone());
+        }
+        if let Some(verb) = &request.verb {
+            data.insert("verb".to_string(), verb.clone());
+        }
         // When the request is created under an org policy, inject the
         // org context so the mobile app can render the org badge on
         // the detail screen opened via the deeplink before the list

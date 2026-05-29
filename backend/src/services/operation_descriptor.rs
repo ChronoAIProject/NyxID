@@ -1,3 +1,4 @@
+use crate::models::service_approval_config::ApprovalVerb;
 use crate::services::action_description;
 
 #[allow(dead_code)]
@@ -21,16 +22,9 @@ impl Protocol {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Verb {
-    Read,
-    Write,
-    Destructive,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OperationDescriptor {
     pub protocol: Protocol,
-    pub verb: Verb,
+    pub verb: ApprovalVerb,
     pub method: Option<String>,
     pub resource: Option<String>,
     pub summary: String,
@@ -109,7 +103,7 @@ pub fn build_ssh_descriptor(kind: SshOperationKind, command: Option<&str>) -> Op
             let command = command.unwrap_or_default().trim().to_string();
             OperationDescriptor {
                 protocol: Protocol::Ssh,
-                verb: Verb::Write,
+                verb: ApprovalVerb::Write,
                 method: Some("EXEC".to_string()),
                 resource: Some(command.clone()),
                 summary: truncate_summary(&format!("SSH exec: {command}")),
@@ -117,7 +111,7 @@ pub fn build_ssh_descriptor(kind: SshOperationKind, command: Option<&str>) -> Op
         }
         SshOperationKind::Tunnel => OperationDescriptor {
             protocol: Protocol::Ssh,
-            verb: Verb::Write,
+            verb: ApprovalVerb::Write,
             method: Some("TUNNEL".to_string()),
             resource: Some(String::new()),
             summary: "SSH tunnel session".to_string(),
@@ -125,11 +119,11 @@ pub fn build_ssh_descriptor(kind: SshOperationKind, command: Option<&str>) -> Op
     }
 }
 
-pub fn derive_verb_from_method(method: &str) -> Verb {
+pub fn derive_verb_from_method(method: &str) -> ApprovalVerb {
     match method.trim().to_ascii_uppercase().as_str() {
-        "GET" | "HEAD" | "OPTIONS" => Verb::Read,
-        "DELETE" => Verb::Destructive,
-        _ => Verb::Write,
+        "GET" | "HEAD" | "OPTIONS" => ApprovalVerb::Read,
+        "DELETE" => ApprovalVerb::Destructive,
+        _ => ApprovalVerb::Write,
     }
 }
 
@@ -195,15 +189,15 @@ mod tests {
     fn http_descriptor_derives_read_write_destructive_verbs() {
         assert_eq!(
             build_http_descriptor("GET", "/v1/models", None).verb,
-            Verb::Read
+            ApprovalVerb::Read
         );
         assert_eq!(
             build_http_descriptor("post", "/v1/chat/completions", None).verb,
-            Verb::Write
+            ApprovalVerb::Write
         );
         assert_eq!(
             build_http_descriptor("DELETE", "/v1/files/file-1", None).verb,
-            Verb::Destructive
+            ApprovalVerb::Destructive
         );
     }
 
@@ -232,7 +226,7 @@ mod tests {
         let descriptor = build_llm_descriptor("POST", "/openai/v1/chat/completions", Some(&body));
 
         assert_eq!(descriptor.protocol, Protocol::Llm);
-        assert_eq!(descriptor.verb, Verb::Write);
+        assert_eq!(descriptor.verb, ApprovalVerb::Write);
         assert!(descriptor.summary.contains("model: gpt-4"));
         assert!(descriptor.summary.contains("1 messages"));
         assert!(!descriptor.summary.contains("secret"));
@@ -247,7 +241,7 @@ mod tests {
         let descriptor = build_ssh_descriptor(SshOperationKind::Tunnel, None);
 
         assert_eq!(descriptor.protocol, Protocol::Ssh);
-        assert_eq!(descriptor.verb, Verb::Write);
+        assert_eq!(descriptor.verb, ApprovalVerb::Write);
         assert_eq!(descriptor.method.as_deref(), Some("TUNNEL"));
         assert_eq!(descriptor.resource.as_deref(), Some(""));
         assert_eq!(descriptor.operation_summary(), "ssh:tunnel");
@@ -275,7 +269,7 @@ mod tests {
         let descriptor = build_mcp_endpoint_descriptor("delete", "/repos/{owner}/{repo}");
 
         assert_eq!(descriptor.protocol, Protocol::Mcp);
-        assert_eq!(descriptor.verb, Verb::Destructive);
+        assert_eq!(descriptor.verb, ApprovalVerb::Destructive);
         assert_eq!(descriptor.method.as_deref(), Some("DELETE"));
         assert_eq!(
             descriptor.resource.as_deref(),

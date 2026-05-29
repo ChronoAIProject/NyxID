@@ -862,8 +862,8 @@ const MOCK_API_KEY_USAGE_LIST = MOCK_API_KEYS.map((k, i) => {
 // ── Approval Service Configs ──
 const MOCK_SERVICE_APPROVAL_CONFIGS = {
   configs: [
-    { service_id: "svc-openai", service_name: "OpenAI", approval_required: true, approval_mode: "grant" as const, created_at: "2026-03-01T00:00:00Z", updated_at: "2026-03-01T00:00:00Z", user_service_id: "key-openai-1", user_service_slug: "openai" },
-    { service_id: "svc-github", service_name: "GitHub", approval_required: true, approval_mode: "per_request" as const, created_at: "2026-03-01T00:00:00Z", updated_at: "2026-03-01T00:00:00Z", user_service_id: "key-github-1", user_service_slug: "github" },
+    { service_id: "svc-openai", service_name: "OpenAI", approval_required: true, approval_mode: "grant" as const, rules: [], default_effect: null, created_at: "2026-03-01T00:00:00Z", updated_at: "2026-03-01T00:00:00Z", user_service_id: "key-openai-1", user_service_slug: "openai" },
+    { service_id: "svc-github", service_name: "GitHub", approval_required: true, approval_mode: "per_request" as const, rules: [], default_effect: null, created_at: "2026-03-01T00:00:00Z", updated_at: "2026-03-01T00:00:00Z", user_service_id: "key-github-1", user_service_slug: "github" },
   ],
   dominant_org_policies: [],
 };

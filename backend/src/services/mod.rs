@@ -2,6 +2,7 @@ pub mod action_description;
 pub mod admin_user_service;
 pub mod agent_binding_service;
 pub mod api_docs_service;
+pub mod approval_policy;
 pub mod approval_service;
 pub mod audit_service;
 pub mod auth_service;

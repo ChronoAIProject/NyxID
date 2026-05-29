@@ -53,6 +53,9 @@ export interface ApprovalRequestItem {
   readonly requester_label: string | null;
   readonly operation_summary: string;
   readonly action_description: string | null;
+  readonly http_method?: string | null;
+  readonly resource?: string | null;
+  readonly verb?: ApprovalVerb | string | null;
   /** Tool approval fields (null/undefined for proxy-initiated approvals) */
   readonly tool_name?: string | null;
   readonly tool_call_id?: string | null;
@@ -79,6 +82,7 @@ export interface ApprovalGrantItem {
   readonly requester_type: string;
   readonly requester_id: string;
   readonly requester_label: string | null;
+  readonly scope?: string | null;
   readonly granted_at: string;
   readonly expires_at: string;
 }
@@ -105,12 +109,24 @@ export interface RevokeGrantResponse {
 }
 
 export type ApprovalMode = "per_request" | "grant";
+export type ApprovalEffect = "require_approval" | "auto_allow" | "deny";
+export type ApprovalVerb = "read" | "write" | "destructive";
+
+export interface ApprovalRule {
+  readonly methods: readonly string[];
+  readonly resource_pattern: string;
+  readonly verbs: readonly ApprovalVerb[];
+  readonly effect: ApprovalEffect;
+  readonly mode: ApprovalMode;
+}
 
 export interface ServiceApprovalConfigItem {
   readonly service_id: string;
   readonly service_name: string;
   readonly approval_required: boolean;
   readonly approval_mode: ApprovalMode;
+  readonly rules: readonly ApprovalRule[];
+  readonly default_effect: ApprovalEffect | null;
   readonly created_at: string;
   readonly updated_at: string;
   /**
@@ -151,6 +167,8 @@ export interface ServiceApprovalConfigsResponse {
 export interface SetServiceApprovalConfigRequest {
   readonly approval_required?: boolean;
   readonly approval_mode?: ApprovalMode;
+  readonly rules?: readonly ApprovalRule[];
+  readonly default_effect?: ApprovalEffect;
 }
 
 export interface SetServiceApprovalConfigResponse {
@@ -158,6 +176,8 @@ export interface SetServiceApprovalConfigResponse {
   readonly service_name: string;
   readonly approval_required: boolean;
   readonly approval_mode: ApprovalMode;
+  readonly rules: readonly ApprovalRule[];
+  readonly default_effect: ApprovalEffect | null;
   readonly created_at: string;
   readonly updated_at: string;
   readonly user_service_id?: string;

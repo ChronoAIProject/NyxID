@@ -10,7 +10,7 @@ use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
 };
-use crate::models::service_approval_config::ApprovalMode;
+use crate::models::service_approval_config::{ApprovalEffect, ApprovalMode, ApprovalRule};
 use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
 use crate::mw::auth::AuthUser;
@@ -28,6 +28,12 @@ pub struct ApprovalRequestItem {
     pub requester_label: Option<String>,
     pub operation_summary: String,
     pub action_description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub http_method: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verb: Option<String>,
     /// Tool approval fields (null for proxy-initiated approvals)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_name: Option<String>,
@@ -74,6 +80,7 @@ pub struct ApprovalGrantItem {
     pub requester_type: String,
     pub requester_id: String,
     pub requester_label: Option<String>,
+    pub scope: Option<String>,
     pub granted_at: String,
     pub expires_at: String,
     /// True when the grant is owned by an org (reusable by any member of
@@ -155,6 +162,9 @@ fn to_approval_request_item(
         requester_label: request.requester_label,
         operation_summary: request.operation_summary,
         action_description: request.action_description,
+        http_method: request.http_method,
+        resource: request.resource,
+        verb: request.verb,
         tool_name: request.tool_name,
         tool_call_id: request.tool_call_id,
         tool_arguments: request.tool_arguments,
@@ -191,6 +201,7 @@ fn to_approval_grant_item(
         requester_type: grant.requester_type,
         requester_id: grant.requester_id,
         requester_label: grant.requester_label,
+        scope: grant.scope,
         granted_at: grant.granted_at.to_rfc3339(),
         expires_at: grant.expires_at.to_rfc3339(),
         org_scoped,
@@ -1032,6 +1043,8 @@ pub struct ServiceApprovalConfigItem {
     pub service_name: String,
     pub approval_required: bool,
     pub approval_mode: ApprovalMode,
+    pub rules: Vec<ApprovalRule>,
+    pub default_effect: Option<ApprovalEffect>,
     pub created_at: String,
     pub updated_at: String,
     /// The `UserService.id` that this policy applies to, when the config can
@@ -1075,6 +1088,8 @@ pub struct DominantOrgPolicy {
 pub struct SetServiceApprovalConfigRequest {
     pub approval_required: Option<bool>,
     pub approval_mode: Option<ApprovalMode>,
+    pub rules: Option<Vec<ApprovalRule>>,
+    pub default_effect: Option<ApprovalEffect>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -1410,6 +1425,8 @@ pub async fn list_service_configs(
             service_name: c.service_name,
             approval_required: c.approval_required,
             approval_mode: c.approval_mode,
+            rules: c.rules,
+            default_effect: c.default_effect,
             created_at: c.created_at.to_rfc3339(),
             updated_at: c.updated_at.to_rfc3339(),
             user_service_id,
@@ -1513,10 +1530,19 @@ pub async fn set_service_config(
     let (user_id, access) =
         resolve_service_config_owner(&state, &actor, query.org_id.as_deref()).await?;
 
-    if body.approval_required.is_none() && body.approval_mode.is_none() {
+    if body.approval_required.is_none()
+        && body.approval_mode.is_none()
+        && body.rules.is_none()
+        && body.default_effect.is_none()
+    {
         return Err(AppError::ValidationError(
-            "At least one of approval_required or approval_mode must be provided".to_string(),
+            "At least one approval config field must be provided".to_string(),
         ));
+    }
+
+    if let Some(ref rules) = body.rules {
+        crate::services::approval_policy::validate_rules(rules)
+            .map_err(AppError::ValidationError)?;
     }
 
     let target = resolve_approval_target(&state.db, &user_id, &service_id).await?;
@@ -1546,6 +1572,8 @@ pub async fn set_service_config(
         &target.display_name,
         body.approval_required,
         body.approval_mode.as_ref(),
+        body.rules.as_deref(),
+        body.default_effect.as_ref(),
     )
     .await?;
 
@@ -1560,6 +1588,8 @@ pub async fn set_service_config(
             "policy_owner_user_id": user_id,
             "approval_required": config.approval_required,
             "approval_mode": config.approval_mode.as_str(),
+            "approval_rule_count": config.rules.len(),
+            "default_effect": config.default_effect.as_ref().map(ApprovalEffect::as_str),
         })),
     );
 
@@ -1587,6 +1617,8 @@ pub async fn set_service_config(
         service_name: config.service_name,
         approval_required: config.approval_required,
         approval_mode: config.approval_mode,
+        rules: config.rules,
+        default_effect: config.default_effect,
         created_at: config.created_at.to_rfc3339(),
         updated_at: config.updated_at.to_rfc3339(),
         user_service_id: target.user_service_id,
@@ -1661,6 +1693,10 @@ mod tests {
             requester_label: Some("CI bot".to_string()),
             operation_summary: "proxy:POST /v1/chat/completions".to_string(),
             action_description: Some("POST /v1/chat/completions (model: gpt-4)".to_string()),
+            http_method: Some("POST".to_string()),
+            resource: Some("/v1/chat/completions".to_string()),
+            verb: Some("write".to_string()),
+            grant_scope: None,
             tool_name: None,
             tool_call_id: None,
             tool_arguments: None,
@@ -1764,6 +1800,7 @@ mod tests {
             requester_id: "sa_123".to_string(),
             requester_label: Some("CI bot".to_string()),
             approval_request_id: uuid::Uuid::new_v4().to_string(),
+            scope: None,
             granted_at: Utc::now(),
             expires_at: Utc::now() + chrono::Duration::days(30),
             revoked: false,
@@ -1789,6 +1826,7 @@ mod tests {
             requester_id: "sa_123".to_string(),
             requester_label: None,
             approval_request_id: uuid::Uuid::new_v4().to_string(),
+            scope: None,
             granted_at: Utc::now(),
             expires_at: Utc::now() + chrono::Duration::days(30),
             revoked: false,
@@ -1901,6 +1939,7 @@ mod tests {
             requester_label: None,
             granted_at: "2025-01-01T00:00:00Z".to_string(),
             expires_at: "2025-02-01T00:00:00Z".to_string(),
+            scope: None,
             org_scoped: false,
             org_id: None,
             org_name: None,

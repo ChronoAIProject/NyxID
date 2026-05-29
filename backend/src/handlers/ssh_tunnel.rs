@@ -974,6 +974,12 @@ pub(crate) async fn authorize_ssh_access_for_operation(
     )
     .await?;
 
+    if approval_resolution.effect == crate::models::service_approval_config::ApprovalEffect::Deny {
+        return Err(AppError::Forbidden(
+            "Operation denied by approval policy".to_string(),
+        ));
+    }
+
     if approval_resolution.required && auth_user.auth_method != AuthMethod::Session {
         let requester_type = auth_user.approval_requester_type().ok_or_else(|| {
             AppError::Forbidden("Session auth does not require approval".to_string())
@@ -996,6 +1002,7 @@ pub(crate) async fn authorize_ssh_access_for_operation(
                 requester_type,
                 &auth_user.approval_requester_id(),
                 approval_resolution.from_org_policy,
+                operation,
             )
             .await?
         } else {
@@ -1031,7 +1038,10 @@ pub(crate) async fn authorize_ssh_access_for_operation(
             let approval_service_slug =
                 resolve_ssh_approval_service_slug(&state.db, owner_for_resolution, &service)
                     .await?;
-            let operation_summary = operation.operation_summary();
+            let request_operation = approval_service::ApprovalRequestOperation::from_descriptor(
+                operation,
+                approval_resolution.grant_scope.clone(),
+            );
             let approval_request = approval_service::create_approval_request(
                 &state.db,
                 &state.config,
@@ -1045,8 +1055,7 @@ pub(crate) async fn authorize_ssh_access_for_operation(
                 requester_type,
                 &auth_user.approval_requester_id(),
                 None,
-                &operation_summary,
-                Some(&operation.summary),
+                request_operation,
                 approval_resolution.mode.clone(),
                 timeout_secs,
                 notify_user_ids,

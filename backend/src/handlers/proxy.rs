@@ -1351,6 +1351,11 @@ async fn execute_proxy_inner(
         &operation,
     )
     .await?;
+    if approval_resolution.effect == crate::models::service_approval_config::ApprovalEffect::Deny {
+        return Err(AppError::Forbidden(
+            "Operation denied by approval policy".to_string(),
+        ));
+    }
     let enforce_approval =
         should_enforce_runtime_approval(approval_resolution.required, &auth_user.auth_method);
 
@@ -1383,6 +1388,7 @@ async fn execute_proxy_inner(
                 requester_type,
                 &requester_id,
                 approval_resolution.from_org_policy,
+                &operation,
             )
             .await?
         } else {
@@ -1426,7 +1432,10 @@ async fn execute_proxy_inner(
                 notification_service::get_or_create_channel(&state.db, &timeout_recipient).await?;
 
             let timeout_secs = channel.approval_timeout_secs;
-            let operation_summary = operation.operation_summary();
+            let request_operation = approval_service::ApprovalRequestOperation::from_descriptor(
+                &operation,
+                approval_resolution.grant_scope.clone(),
+            );
             let approval_request = approval_service::create_approval_request(
                 &state.db,
                 &state.config,
@@ -1440,8 +1449,7 @@ async fn execute_proxy_inner(
                 requester_type,
                 &requester_id,
                 None,
-                &operation_summary,
-                Some(&operation.summary),
+                request_operation,
                 approval_resolution.mode.clone(),
                 timeout_secs,
                 notify_user_ids,
@@ -5857,6 +5865,8 @@ mod proxy_resolution_integration_tests {
             service_name: "Org Proxy Target".to_string(),
             approval_required: true,
             approval_mode: ApprovalMode::PerRequest,
+            rules: vec![],
+            default_effect: None,
             created_at: now,
             updated_at: now,
         }
