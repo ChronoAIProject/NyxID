@@ -487,6 +487,16 @@ async fn proxy_request_inner(
 
     let user_id_str = auth_user.proxy_resolution_user_id();
     let via_service = extract_via_service(&request);
+    preflight_proxy_deny_before_resolution(
+        state,
+        auth_user,
+        via_service.as_deref(),
+        None,
+        Some(service_id),
+        path,
+        request.method().as_str(),
+    )
+    .await?;
 
     // Direct resolution by UserService ID if ?_nyxid_via= is present.
     // Constrained to the catalog service_id in the route path so the
@@ -684,6 +694,16 @@ async fn proxy_request_by_slug_inner(
 
     let user_id_str = auth_user.proxy_resolution_user_id();
     let via_service = extract_via_service(&request);
+    preflight_proxy_deny_before_resolution(
+        state,
+        auth_user,
+        via_service.as_deref(),
+        Some(slug),
+        None,
+        path,
+        request.method().as_str(),
+    )
+    .await?;
 
     // Direct resolution by UserService ID if ?_nyxid_via= is present.
     // Constrained to the slug in the route path so the override cannot
@@ -1041,6 +1061,75 @@ fn compose_pre_resolved_node_ids(
     } else {
         fallback_node_ids
     }
+}
+
+async fn preflight_proxy_deny_before_resolution(
+    state: &AppState,
+    auth_user: &AuthUser,
+    via_service: Option<&str>,
+    slug: Option<&str>,
+    catalog_service_id: Option<&str>,
+    path: &str,
+    method: &str,
+) -> AppResult<()> {
+    let approval_owner_user_id = auth_user.effective_approval_owner_user_id();
+    let hint = if let Some(user_service_id) = via_service {
+        proxy_service::find_approval_resolution_hint_by_user_service_id(
+            &state.db,
+            &approval_owner_user_id,
+            user_service_id,
+            slug,
+            catalog_service_id,
+        )
+        .await?
+    } else {
+        proxy_service::find_approval_resolution_hint(
+            &state.db,
+            &approval_owner_user_id,
+            slug,
+            catalog_service_id,
+        )
+        .await?
+    };
+
+    let hint = if let Some(hint) = hint {
+        Some(hint)
+    } else if let Some(service_id) = catalog_service_id {
+        Some(proxy_service::ApprovalResolutionHint {
+            service_id: service_id.to_string(),
+            service_owner_id: approval_owner_user_id.clone(),
+        })
+    } else if let Some(slug) = slug {
+        let service = proxy_service::resolve_service_by_slug(&state.db, slug).await?;
+        Some(proxy_service::ApprovalResolutionHint {
+            service_id: service.id,
+            service_owner_id: approval_owner_user_id.clone(),
+        })
+    } else {
+        None
+    };
+
+    let Some(hint) = hint else {
+        return Ok(());
+    };
+
+    let operation = operation_descriptor::build_http_descriptor(method, path, None);
+    let approval_resolution = approval_service::resolve_org_aware_approval(
+        &state.db,
+        &approval_owner_user_id,
+        &hint.service_owner_id,
+        &hint.service_id,
+        &operation,
+    )
+    .await?;
+
+    if approval_resolution.effect == crate::models::service_approval_config::ApprovalEffect::Deny {
+        return Err(AppError::Forbidden(
+            "Operation denied by approval policy".to_string(),
+        ));
+    }
+
+    Ok(())
 }
 
 /// Inner proxy execution with optional pre-resolved target from UserService path.

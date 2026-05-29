@@ -86,6 +86,10 @@ pub fn build_llm_descriptor(method: &str, path: &str, body: Option<&[u8]>) -> Op
 
 #[allow(dead_code)]
 pub fn build_mcp_endpoint_descriptor(method: &str, path: &str) -> OperationDescriptor {
+    build_mcp_descriptor(method, path, None)
+}
+
+pub fn build_mcp_descriptor(method: &str, path: &str, body: Option<&[u8]>) -> OperationDescriptor {
     let method = normalize_method_for_display(method);
     let resource = normalize_http_path(path);
     OperationDescriptor {
@@ -93,7 +97,18 @@ pub fn build_mcp_endpoint_descriptor(method: &str, path: &str) -> OperationDescr
         verb: derive_verb_from_method(&method),
         method: Some(method.clone()),
         resource: Some(resource.clone()),
-        summary: action_description::build_action_description(&method, &resource, None),
+        summary: action_description::build_action_description(&method, &resource, body),
+    }
+}
+
+#[allow(dead_code)]
+pub fn build_mcp_meta_descriptor(tool_name: &str) -> OperationDescriptor {
+    OperationDescriptor {
+        protocol: Protocol::Mcp,
+        verb: ApprovalVerb::Read,
+        method: Some("tools/call".to_string()),
+        resource: Some(tool_name.trim().to_string()),
+        summary: format!("MCP meta-tool: {}", tool_name.trim()),
     }
 }
 
@@ -275,5 +290,33 @@ mod tests {
             descriptor.resource.as_deref(),
             Some("/repos/{owner}/{repo}")
         );
+    }
+
+    #[test]
+    fn mcp_descriptor_summarizes_body_with_existing_scrubber() {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "model": "gpt-4.1",
+            "api_key": "secret",
+            "messages": [{"role": "user", "content": "private"}]
+        }))
+        .unwrap();
+
+        let descriptor = build_mcp_descriptor("post", "/v1/chat/completions", Some(&body));
+
+        assert_eq!(descriptor.verb, ApprovalVerb::Write);
+        assert!(descriptor.summary.contains("model: gpt-4.1"));
+        assert!(descriptor.summary.contains("1 messages"));
+        assert!(!descriptor.summary.contains("secret"));
+        assert!(!descriptor.summary.contains("private"));
+    }
+
+    #[test]
+    fn mcp_meta_descriptor_is_read_only() {
+        let descriptor = build_mcp_meta_descriptor("nyx__search_tools");
+
+        assert_eq!(descriptor.protocol, Protocol::Mcp);
+        assert_eq!(descriptor.verb, ApprovalVerb::Read);
+        assert_eq!(descriptor.method.as_deref(), Some("tools/call"));
+        assert_eq!(descriptor.resource.as_deref(), Some("nyx__search_tools"));
     }
 }

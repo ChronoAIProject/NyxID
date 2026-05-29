@@ -376,6 +376,20 @@ pub async fn gateway_request(
     // Get the translator
     let translator = llm_gateway_service::get_translator(&provider_slug);
 
+    preflight_llm_deny_before_resolution(
+        &state,
+        &auth_user,
+        &service_id,
+        &path,
+        "POST",
+        if body_bytes.is_empty() {
+            None
+        } else {
+            Some(&body_bytes)
+        },
+    )
+    .await?;
+
     // Two-tier proxy target resolution (mirrors `llm_proxy_request`):
     //   1. Prefer the new UserService / UserApiKey model, which bakes the
     //      credential into `target` (via auth_method + credential).
@@ -1095,6 +1109,46 @@ fn parse_next_sse_event(buffer: &mut String) -> Option<sse_parser::SseEvent> {
 /// `UserService` (the actor for personal credentials, an org for
 /// org-shared credentials). When `None`, the caller couldn't determine
 /// the owner -- the function falls back to the actor's policy only.
+async fn preflight_llm_deny_before_resolution(
+    state: &AppState,
+    auth_user: &AuthUser,
+    service_id: &str,
+    path: &str,
+    method_str: &str,
+    body: Option<&[u8]>,
+) -> AppResult<()> {
+    let approval_owner_user_id = auth_user.effective_approval_owner_user_id();
+    let hint = proxy_service::find_approval_resolution_hint(
+        &state.db,
+        &approval_owner_user_id,
+        None,
+        Some(service_id),
+    )
+    .await?
+    .unwrap_or_else(|| proxy_service::ApprovalResolutionHint {
+        service_id: service_id.to_string(),
+        service_owner_id: approval_owner_user_id.clone(),
+    });
+
+    let operation = operation_descriptor::build_llm_descriptor(method_str, path, body);
+    let approval_resolution = approval_service::resolve_org_aware_approval(
+        &state.db,
+        &approval_owner_user_id,
+        &hint.service_owner_id,
+        &hint.service_id,
+        &operation,
+    )
+    .await?;
+
+    if approval_resolution.effect == crate::models::service_approval_config::ApprovalEffect::Deny {
+        return Err(AppError::Forbidden(
+            "Operation denied by approval policy".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn check_llm_approval(
     state: &AppState,

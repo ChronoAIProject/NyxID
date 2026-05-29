@@ -20,7 +20,8 @@ use crate::services::content_type::{
 };
 use crate::services::node_ws_manager::NodeWsManager;
 use crate::services::{
-    api_docs_service, connection_service, node_routing_service, openapi_parser, proxy_service,
+    api_docs_service, connection_service, node_routing_service, openapi_parser,
+    operation_descriptor, proxy_service,
 };
 
 // ---------------------------------------------------------------------------
@@ -1755,6 +1756,24 @@ pub fn build_proxy_args(
     Ok((method, path, query, parameter_headers, body))
 }
 
+pub fn build_mcp_operation_descriptor(
+    service: &McpToolService,
+    endpoint: &McpToolEndpoint,
+    args: &serde_json::Value,
+) -> AppResult<operation_descriptor::OperationDescriptor> {
+    let (method, path, _query, _parameter_headers, body) = if service.is_generic_proxy {
+        build_generic_proxy_args(args)?
+    } else {
+        build_proxy_args(endpoint, args)?
+    };
+
+    Ok(operation_descriptor::build_mcp_descriptor(
+        method.as_str(),
+        &path,
+        body.as_ref().map(|bytes| bytes.as_ref()),
+    ))
+}
+
 fn build_request_body(
     endpoint: &McpToolEndpoint,
     body_fields: serde_json::Map<String, serde_json::Value>,
@@ -2784,6 +2803,55 @@ mod tests {
             },
             is_generic_proxy: false,
         }
+    }
+
+    #[test]
+    fn mcp_operation_descriptor_reuses_endpoint_method_and_path() {
+        let mut endpoint = make_endpoint("delete_repo_file", "Delete file");
+        endpoint.method = "DELETE".to_string();
+        endpoint.path = "/repos/acme/project/contents/README.md".to_string();
+        let service = make_service("svc-1", "GitHub", "github", vec![endpoint]);
+
+        let descriptor =
+            build_mcp_operation_descriptor(&service, &service.endpoints[0], &serde_json::json!({}))
+                .unwrap();
+
+        assert_eq!(descriptor.protocol, operation_descriptor::Protocol::Mcp);
+        assert_eq!(
+            descriptor.verb,
+            crate::models::service_approval_config::ApprovalVerb::Destructive
+        );
+        assert_eq!(descriptor.method.as_deref(), Some("DELETE"));
+        assert_eq!(
+            descriptor.resource.as_deref(),
+            Some("/repos/acme/project/contents/README.md")
+        );
+    }
+
+    #[test]
+    fn mcp_operation_descriptor_extracts_generic_proxy_method_and_path() {
+        let endpoint = build_generic_proxy_endpoint("custom");
+        let mut service = make_service("svc-1", "Custom", "custom", vec![endpoint]);
+        service.is_generic_proxy = true;
+        let args = serde_json::json!({
+            "method": "PATCH",
+            "path": "v1/resources/123",
+            "body": {
+                "name": "updated",
+                "api_key": "secret-value"
+            }
+        });
+
+        let descriptor =
+            build_mcp_operation_descriptor(&service, &service.endpoints[0], &args).unwrap();
+
+        assert_eq!(
+            descriptor.verb,
+            crate::models::service_approval_config::ApprovalVerb::Write
+        );
+        assert_eq!(descriptor.method.as_deref(), Some("PATCH"));
+        assert_eq!(descriptor.resource.as_deref(), Some("/v1/resources/123"));
+        assert!(!descriptor.summary.contains("secret-value"));
     }
 
     // -- search_all_tools tests --

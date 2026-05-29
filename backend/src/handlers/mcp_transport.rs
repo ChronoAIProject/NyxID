@@ -14,9 +14,14 @@ use crate::crypto::jwt;
 use crate::models::mcp_session::{MCP_SESSION_COLLECTION, McpSessionRecord};
 use crate::models::service_account::{COLLECTION_NAME as SERVICE_ACCOUNTS, ServiceAccount};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
-use crate::mw::auth;
-use crate::services::{audit_service, mcp_service, ssh_service, user_service_service};
+use crate::mw::auth::{self, AuthMethod};
+use crate::services::{
+    approval_service, audit_service, mcp_service, notification_service, operation_descriptor,
+    proxy_service, ssh_service, user_service_service,
+};
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
+
+use super::services_helpers::fetch_service;
 
 // ---------------------------------------------------------------------------
 // JSON-RPC 2.0 types
@@ -233,6 +238,9 @@ fn rpc_scope_forbidden(id: Option<serde_json::Value>, message: &str) -> Response
 #[derive(Debug, Clone)]
 struct McpAuthContext {
     user_id: String,
+    auth_method: AuthMethod,
+    acting_client_id: Option<String>,
+    approval_owner_user_id: Option<String>,
     /// True when auth was via `x-api-key`. API-key requests are stateless: each
     /// request authenticates independently, no MCP session is created or required.
     is_api_key: bool,
@@ -251,9 +259,12 @@ struct McpAuthContext {
 }
 
 impl McpAuthContext {
-    fn user(user_id: String) -> Self {
+    fn user(user_id: String, auth_method: AuthMethod) -> Self {
         Self {
             user_id,
+            auth_method,
+            acting_client_id: None,
+            approval_owner_user_id: None,
             is_api_key: false,
             api_key_id: None,
             api_key_name: None,
@@ -266,6 +277,29 @@ impl McpAuthContext {
             ip_address: None,
             user_agent: None,
         }
+    }
+
+    fn effective_approval_owner_user_id(&self) -> String {
+        self.approval_owner_user_id
+            .clone()
+            .unwrap_or_else(|| self.user_id.clone())
+    }
+
+    fn approval_requester_type(&self) -> Option<&'static str> {
+        match &self.auth_method {
+            AuthMethod::ApiKey => Some("api_key"),
+            AuthMethod::Delegated => Some("delegated"),
+            AuthMethod::ServiceAccount => Some("service_account"),
+            AuthMethod::AccessToken => Some("access_token"),
+            AuthMethod::Relay => Some("relay"),
+            AuthMethod::Session => None,
+        }
+    }
+
+    fn approval_requester_id(&self) -> String {
+        self.acting_client_id
+            .clone()
+            .unwrap_or_else(|| self.user_id.clone())
     }
 }
 
@@ -327,6 +361,9 @@ async fn authenticate_mcp(
                 let user_id = verify_user_active(state, user_id).await?;
                 return Ok(McpAuthContext {
                     user_id,
+                    auth_method: AuthMethod::ApiKey,
+                    acting_client_id: None,
+                    approval_owner_user_id: None,
                     is_api_key: true,
                     api_key_id: Some(api_key.id.clone()),
                     api_key_name: Some(api_key.name.clone()),
@@ -359,12 +396,27 @@ async fn authenticate_mcp(
 
                 // Service account tokens have sa=true; verify against
                 // the service_accounts collection instead of users.
-                let user_id = if claims.sa == Some(true) {
-                    verify_service_account_active(state, claims.sub).await?
+                let (user_id, approval_owner_user_id) = if claims.sa == Some(true) {
+                    let (sa_id, owner_id) =
+                        verify_service_account_active(state, claims.sub).await?;
+                    (sa_id, Some(owner_id))
                 } else {
-                    verify_user_active(state, claims.sub).await?
+                    (verify_user_active(state, claims.sub).await?, None)
                 };
-                let mut ctx = McpAuthContext::user(user_id);
+
+                let auth_method = if claims.sa == Some(true) {
+                    AuthMethod::ServiceAccount
+                } else if claims.act.is_some() {
+                    AuthMethod::Delegated
+                } else if claims.relay == Some(true) {
+                    AuthMethod::Relay
+                } else {
+                    AuthMethod::AccessToken
+                };
+
+                let mut ctx = McpAuthContext::user(user_id, auth_method);
+                ctx.acting_client_id = claims.act.map(|a| a.sub);
+                ctx.approval_owner_user_id = approval_owner_user_id;
                 ctx.ip_address = request_ip.clone();
                 ctx.user_agent = request_ua.clone();
                 return Ok(ctx);
@@ -392,7 +444,7 @@ async fn authenticate_mcp(
             return Err(mcp_403_insufficient_scope());
         }
         let user_id = verify_user_active(state, user_id).await?;
-        let mut ctx = McpAuthContext::user(user_id);
+        let mut ctx = McpAuthContext::user(user_id, AuthMethod::Session);
         ctx.ip_address = request_ip;
         ctx.user_agent = request_ua;
         return Ok(ctx);
@@ -420,7 +472,7 @@ async fn verify_user_active(state: &AppState, user_id: String) -> Result<String,
 async fn verify_service_account_active(
     state: &AppState,
     sa_id: String,
-) -> Result<String, Response> {
+) -> Result<(String, String), Response> {
     let sa = state
         .db
         .collection::<ServiceAccount>(SERVICE_ACCOUNTS)
@@ -429,7 +481,7 @@ async fn verify_service_account_active(
         .map_err(|_| rpc_error(None, -32603, "Internal error"))?;
 
     match sa {
-        Some(_) => Ok(sa_id),
+        Some(sa) => Ok((sa_id, sa.effective_owner_user_id().to_string())),
         None => Err(mcp_401(&state.config.base_url)),
     }
 }
@@ -1126,6 +1178,29 @@ async fn handle_tools_call(
         );
     }
 
+    let operation = match mcp_service::build_mcp_operation_descriptor(service, endpoint, &arguments)
+    {
+        Ok(operation) => operation,
+        Err(e) => {
+            return tool_result(
+                request.id.clone(),
+                &format!("Invalid tool arguments: {e}"),
+                true,
+            );
+        }
+    };
+    if let Err(resp) = authorize_mcp_operation(
+        state,
+        auth,
+        approval_target_for_tool(auth, service),
+        &operation,
+        request.id.clone(),
+    )
+    .await
+    {
+        return resp;
+    }
+
     let exec_ctx = mcp_exec_context(auth);
     let (status, body) = match mcp_service::execute_tool(
         &state.http_client,
@@ -1205,6 +1280,199 @@ fn mcp_node_scope<'a>(auth: &'a McpAuthContext) -> mcp_service::NodeScope<'a> {
     } else {
         mcp_service::NodeScope::Allowed(auth.allowed_node_ids.as_slice())
     }
+}
+
+#[derive(Clone, Debug)]
+struct McpApprovalTarget {
+    service_id: String,
+    service_name: String,
+    service_slug: String,
+    service_owner_user_id: String,
+}
+
+fn approval_target_for_tool(
+    auth: &McpAuthContext,
+    service: &mcp_service::McpToolService,
+) -> McpApprovalTarget {
+    let service_owner_user_id = match &service.source {
+        mcp_service::McpToolSource::UserManaged {
+            effective_owner_id, ..
+        } => effective_owner_id.clone(),
+        mcp_service::McpToolSource::Platform { .. } => auth.effective_approval_owner_user_id(),
+    };
+
+    McpApprovalTarget {
+        service_id: service.service_id.clone(),
+        service_name: service.service_name.clone(),
+        service_slug: service.service_slug.clone(),
+        service_owner_user_id,
+    }
+}
+
+#[allow(clippy::result_large_err)]
+async fn authorize_mcp_operation(
+    state: &AppState,
+    auth: &McpAuthContext,
+    target: McpApprovalTarget,
+    operation: &operation_descriptor::OperationDescriptor,
+    request_id: Option<serde_json::Value>,
+) -> Result<(), Response> {
+    let approval_owner_user_id = auth.effective_approval_owner_user_id();
+    let approval_resolution = approval_service::resolve_org_aware_approval(
+        &state.db,
+        &approval_owner_user_id,
+        &target.service_owner_user_id,
+        &target.service_id,
+        operation,
+    )
+    .await
+    .map_err(|e| {
+        tool_result(
+            request_id.clone(),
+            &format!("Approval check failed: {e}"),
+            true,
+        )
+    })?;
+
+    if approval_resolution.effect == crate::models::service_approval_config::ApprovalEffect::Deny {
+        return Err(tool_result(
+            request_id,
+            "Operation denied by approval policy",
+            true,
+        ));
+    }
+
+    if !approval_resolution.required || auth.auth_method == AuthMethod::Session {
+        return Ok(());
+    }
+
+    let requester_type = auth.approval_requester_type().ok_or_else(|| {
+        tool_result(
+            request_id.clone(),
+            "Session auth does not require approval",
+            true,
+        )
+    })?;
+    let requester_id = auth.approval_requester_id();
+    let primary_owner = approval_resolution.primary_owner_user_id.clone();
+
+    let has_grant = if approval_resolution.mode
+        == crate::models::service_approval_config::ApprovalMode::Grant
+    {
+        approval_service::check_approval(
+            &state.db,
+            &primary_owner,
+            &target.service_id,
+            requester_type,
+            &requester_id,
+            approval_resolution.from_org_policy,
+            operation,
+        )
+        .await
+        .map_err(|e| {
+            tool_result(
+                request_id.clone(),
+                &format!("Approval check failed: {e}"),
+                true,
+            )
+        })?
+    } else {
+        false
+    };
+
+    if has_grant {
+        return Ok(());
+    }
+
+    let notify_user_ids: Vec<String> = if approval_resolution.from_org_policy {
+        let mut admins =
+            crate::services::org_service::list_admin_user_ids(&state.db, &primary_owner)
+                .await
+                .map_err(|e| {
+                    tool_result(
+                        request_id.clone(),
+                        &format!("Approval check failed: {e}"),
+                        true,
+                    )
+                })?;
+        admins.sort();
+        admins.dedup();
+        if admins.is_empty() {
+            return Err(tool_result(
+                request_id,
+                &format!(
+                    "Org {primary_owner} has an approval policy on this service but no active admins to decide. Add an admin to the org and retry."
+                ),
+                true,
+            ));
+        }
+        admins
+    } else {
+        vec![approval_owner_user_id.clone()]
+    };
+
+    let timeout_recipient = notify_user_ids.first().cloned().ok_or_else(|| {
+        tool_result(
+            request_id.clone(),
+            "Approval recipient list unexpectedly empty",
+            true,
+        )
+    })?;
+    let channel = notification_service::get_or_create_channel(&state.db, &timeout_recipient)
+        .await
+        .map_err(|e| {
+            tool_result(
+                request_id.clone(),
+                &format!("Approval channel lookup failed: {e}"),
+                true,
+            )
+        })?;
+    let timeout_secs = channel.approval_timeout_secs;
+    let request_operation = approval_service::ApprovalRequestOperation::from_descriptor(
+        operation,
+        approval_resolution.grant_scope.clone(),
+    );
+    let approval_request = approval_service::create_approval_request(
+        &state.db,
+        &state.config,
+        &state.http_client,
+        state.fcm_auth.as_deref(),
+        state.apns_auth.as_deref(),
+        &primary_owner,
+        &target.service_id,
+        &target.service_name,
+        &target.service_slug,
+        requester_type,
+        &requester_id,
+        auth.api_key_name.as_deref(),
+        request_operation,
+        approval_resolution.mode.clone(),
+        timeout_secs,
+        notify_user_ids,
+        approval_resolution.from_org_policy,
+    )
+    .await
+    .map_err(|e| {
+        tool_result(
+            request_id.clone(),
+            &format!("Approval request failed: {e}"),
+            true,
+        )
+    })?;
+
+    let req_id = approval_request.id.clone();
+    approval_service::wait_for_decision(&state.db, &approval_request.id, timeout_secs)
+        .await
+        .map_err(|error| {
+            let mapped = approval_service::map_wait_for_decision_error(
+                error,
+                &req_id,
+                &state.config.frontend_url,
+            );
+            tool_result(request_id, &format!("{mapped}"), true)
+        })?;
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1299,6 +1567,25 @@ async fn handle_meta_call_tool(
             );
         }
     };
+
+    let operation =
+        match mcp_service::build_mcp_operation_descriptor(service, endpoint, &inner_args) {
+            Ok(operation) => operation,
+            Err(e) => {
+                return tool_result(request_id, &format!("Invalid tool arguments: {e}"), true);
+            }
+        };
+    if let Err(resp) = authorize_mcp_operation(
+        state,
+        auth,
+        approval_target_for_tool(auth, service),
+        &operation,
+        request_id.clone(),
+    )
+    .await
+    {
+        return resp;
+    }
 
     // Auto-activate so future tools/list responses include this service.
     // Stateless (API-key, no session) requests skip activation tracking.
@@ -1662,6 +1949,44 @@ async fn handle_mcp_ssh_exec(
         );
     }
 
+    let service = match fetch_service(state, &service_id).await {
+        Ok(service) => service,
+        Err(e) => return tool_result(request_id, &format!("SSH service error: {e}"), true),
+    };
+    let approval_owner_user_id = auth.effective_approval_owner_user_id();
+    let service_owner_user_id = match proxy_service::find_effective_service_owner(
+        &state.db,
+        &approval_owner_user_id,
+        None,
+        Some(&service_id),
+    )
+    .await
+    {
+        Ok(Some(owner)) => owner,
+        Ok(None) => approval_owner_user_id.clone(),
+        Err(e) => return tool_result(request_id, &format!("SSH service error: {e}"), true),
+    };
+    let operation = operation_descriptor::build_ssh_descriptor(
+        operation_descriptor::SshOperationKind::Exec,
+        Some(command),
+    );
+    if let Err(resp) = authorize_mcp_operation(
+        state,
+        auth,
+        McpApprovalTarget {
+            service_id: service_id.clone(),
+            service_name: service.name,
+            service_slug: service.slug,
+            service_owner_user_id,
+        },
+        &operation,
+        request_id.clone(),
+    )
+    .await
+    {
+        return resp;
+    }
+
     // Build the request body and call the SSH exec endpoint internally
     let body = super::ssh_exec::SshExecRequest {
         command: command.to_string(),
@@ -2006,6 +2331,9 @@ mod tests {
     fn api_key_auth(allowed_service_ids: Vec<String>) -> McpAuthContext {
         McpAuthContext {
             user_id: "user-1".into(),
+            auth_method: AuthMethod::ApiKey,
+            acting_client_id: None,
+            approval_owner_user_id: None,
             is_api_key: true,
             api_key_id: Some("key-1".into()),
             api_key_name: Some("agent".into()),
@@ -2078,7 +2406,7 @@ mod tests {
 
     #[test]
     fn filter_is_noop_for_unrestricted_auth() {
-        let auth = McpAuthContext::user("user-1".into());
+        let auth = McpAuthContext::user("user-1".into(), AuthMethod::Session);
         let services = vec![user_managed("svc-a"), platform("svc-b")];
         assert_eq!(filter_services_by_scope(services, &auth).len(), 2);
     }
@@ -2093,9 +2421,38 @@ mod tests {
 
     #[test]
     fn ensure_scope_allows_unrestricted_auth() {
-        let auth = McpAuthContext::user("user-1".into());
+        let auth = McpAuthContext::user("user-1".into(), AuthMethod::Session);
         let svc = platform("svc-x");
         assert!(ensure_service_in_scope(&auth, &svc, None).is_ok());
+    }
+
+    #[test]
+    fn approval_target_for_user_managed_service_uses_effective_owner() {
+        let auth = McpAuthContext::user("actor-1".into(), AuthMethod::AccessToken);
+        let mut svc = user_managed("svc-a");
+        svc.source = McpToolSource::UserManaged {
+            user_service_id: "svc-a".into(),
+            effective_owner_id: "org-1".into(),
+            node_id: None,
+            has_server_credential: true,
+        };
+
+        let target = approval_target_for_tool(&auth, &svc);
+
+        assert_eq!(target.service_id, "svc-a");
+        assert_eq!(target.service_owner_user_id, "org-1");
+    }
+
+    #[test]
+    fn approval_target_for_platform_service_uses_approval_owner() {
+        let mut auth = McpAuthContext::user("sa-1".into(), AuthMethod::ServiceAccount);
+        auth.approval_owner_user_id = Some("owner-1".into());
+        let svc = platform("svc-a");
+
+        let target = approval_target_for_tool(&auth, &svc);
+
+        assert_eq!(target.service_id, "svc-a");
+        assert_eq!(target.service_owner_user_id, "owner-1");
     }
 
     #[test]
@@ -2116,7 +2473,7 @@ mod tests {
         assert!(is_scoped_api_key(&auth));
 
         // OAuth/session auth is never "scoped" in this sense.
-        let oauth = McpAuthContext::user("user-1".into());
+        let oauth = McpAuthContext::user("user-1".into(), AuthMethod::Session);
         assert!(!is_scoped_api_key(&oauth));
     }
 
@@ -2188,7 +2545,7 @@ mod tests {
 
     #[test]
     fn mcp_auth_context_user_has_unrestricted_access() {
-        let ctx = McpAuthContext::user("user-1".to_string());
+        let ctx = McpAuthContext::user("user-1".to_string(), AuthMethod::Session);
         assert!(!ctx.is_api_key);
         assert!(ctx.allow_all_services);
         assert!(ctx.allow_all_nodes);
@@ -2463,7 +2820,7 @@ mod tests {
 
     #[test]
     fn mcp_exec_context_from_user_auth() {
-        let auth = McpAuthContext::user("user-1".into());
+        let auth = McpAuthContext::user("user-1".into(), AuthMethod::Session);
         let ctx = mcp_exec_context(&auth);
         assert!(ctx.api_key_id.is_none());
         assert!(ctx.allow_all_nodes);
@@ -2475,7 +2832,7 @@ mod tests {
 
     #[test]
     fn mcp_node_scope_unrestricted_for_user_auth() {
-        let auth = McpAuthContext::user("user-1".into());
+        let auth = McpAuthContext::user("user-1".into(), AuthMethod::Session);
         assert!(matches!(
             mcp_node_scope(&auth),
             crate::services::mcp_service::NodeScope::Unrestricted
@@ -2549,8 +2906,11 @@ mod tests {
 
     #[test]
     fn mcp_auth_context_user_defaults() {
-        let ctx = McpAuthContext::user("u-xyz".to_string());
+        let ctx = McpAuthContext::user("u-xyz".to_string(), AuthMethod::Session);
         assert_eq!(ctx.user_id, "u-xyz");
+        assert_eq!(ctx.auth_method, AuthMethod::Session);
+        assert!(ctx.acting_client_id.is_none());
+        assert!(ctx.approval_owner_user_id.is_none());
         assert!(!ctx.is_api_key);
         assert!(ctx.api_key_id.is_none());
         assert!(ctx.api_key_name.is_none());
@@ -2564,6 +2924,18 @@ mod tests {
         assert!(ctx.user_agent.is_none());
     }
 
+    #[test]
+    fn mcp_auth_context_requester_identity_matches_auth_method() {
+        let mut delegated = McpAuthContext::user("user-1".into(), AuthMethod::Delegated);
+        delegated.acting_client_id = Some("client-1".into());
+        assert_eq!(delegated.approval_requester_type(), Some("delegated"));
+        assert_eq!(delegated.approval_requester_id(), "client-1");
+
+        let session = McpAuthContext::user("user-1".into(), AuthMethod::Session);
+        assert_eq!(session.approval_requester_type(), None);
+        assert_eq!(session.approval_requester_id(), "user-1");
+    }
+
     // -----------------------------------------------------------------------
     // is_scoped_api_key extended edge cases
     // -----------------------------------------------------------------------
@@ -2571,7 +2943,7 @@ mod tests {
     #[test]
     fn is_scoped_api_key_false_for_non_api_key_even_with_restrictions() {
         // User auth (not API key) is never "scoped" even with mismatched fields
-        let mut auth = McpAuthContext::user("u-1".into());
+        let mut auth = McpAuthContext::user("u-1".into(), AuthMethod::Session);
         auth.allow_all_services = false;
         auth.allow_all_nodes = false;
         assert!(!is_scoped_api_key(&auth));
