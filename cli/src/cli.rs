@@ -2702,6 +2702,29 @@ pub enum ExternalKeyCommands {
         #[command(flatten)]
         auth: AuthArgs,
     },
+    /// Register a Google Cloud service-account JSON key as a proxy credential.
+    ///
+    /// Service accounts give unattended, never-reauth access to Google
+    /// Cloud APIs (BigQuery, Cloud Billing) -- unlike user OAuth, which
+    /// Google rejects with `invalid_rapt` after its ~16h session lapses.
+    AddGcpServiceAccount {
+        /// Path to the Google service-account JSON key file
+        #[arg(long, value_name = "PATH")]
+        key_file: PathBuf,
+        /// Display label (defaults to the service-account client_email)
+        #[arg(long)]
+        label: Option<String>,
+        /// OAuth scope(s) to mint, space-separated
+        /// (default: https://www.googleapis.com/auth/cloud-platform)
+        #[arg(long)]
+        scopes: Option<String>,
+        /// Service slug(s) to (re)bind to this credential, e.g.
+        /// `google-bigquery`. Repeatable.
+        #[arg(long = "service", value_name = "SLUG")]
+        services: Vec<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
 }
 
 // ---- Service Account (SUP-030) ----

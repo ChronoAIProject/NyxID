@@ -24,6 +24,7 @@ pub mod credential_push_service;
 pub mod delegation_service;
 pub mod dpop_jti_cache;
 pub mod event_dedup_cache;
+pub mod gcp_sa_service;
 pub mod group_service;
 pub mod identity_service;
 pub mod invite_code_service;

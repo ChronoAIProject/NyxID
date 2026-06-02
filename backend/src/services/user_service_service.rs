@@ -1298,6 +1298,54 @@ pub async fn link_api_key(
     Ok(())
 }
 
+/// Re-point an existing `UserService` (looked up by `slug`) at a
+/// different API key, scoped to the owner. Unlike `link_api_key` (which
+/// only binds when `api_key_id` is currently null), this deliberately
+/// *replaces* an existing binding — the use case is switching a Google
+/// Cloud service off a (failed) user-OAuth credential and onto a
+/// service-account credential. It also forces `auth_method: "bearer"`,
+/// since the minted GCP access token is injected as `Authorization:
+/// Bearer`.
+///
+/// The new key is validated to belong to `user_id` so a rebind can't
+/// point a service at someone else's credential.
+pub async fn rebind_user_service_api_key(
+    db: &mongodb::Database,
+    user_id: &str,
+    slug: &str,
+    api_key_id: &str,
+) -> AppResult<()> {
+    let ak_count = db
+        .collection::<mongodb::bson::Document>(USER_API_KEYS)
+        .count_documents(doc! { "_id": api_key_id, "user_id": user_id })
+        .await?;
+    if ak_count == 0 {
+        return Err(AppError::NotFound(
+            "API key not found or does not belong to user".to_string(),
+        ));
+    }
+
+    let result = db
+        .collection::<UserService>(COLLECTION_NAME)
+        .update_one(
+            doc! { "user_id": user_id, "slug": slug },
+            doc! { "$set": {
+                "api_key_id": api_key_id,
+                "auth_method": "bearer",
+                "updated_at": bson::DateTime::from_chrono(Utc::now()),
+            }},
+        )
+        .await?;
+
+    if result.matched_count == 0 {
+        return Err(AppError::NotFound(format!(
+            "Service '{slug}' not found for this user"
+        )));
+    }
+
+    Ok(())
+}
+
 pub(crate) fn ssh_node_keys_stale_after_transition(
     current_stale: bool,
     from: SshAuthMode,

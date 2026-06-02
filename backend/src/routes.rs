@@ -600,6 +600,10 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
             get(handlers::user_api_keys_external::list_external_api_keys),
         )
         .route(
+            "/gcp-service-account",
+            post(handlers::user_api_keys_external::create_gcp_service_account_key),
+        )
+        .route(
             "/{key_id}",
             put(handlers::user_api_keys_external::update_external_api_key)
                 .delete(handlers::user_api_keys_external::delete_external_api_key),

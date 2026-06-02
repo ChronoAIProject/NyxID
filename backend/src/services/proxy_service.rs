@@ -26,7 +26,8 @@ use crate::services::delegation_service::DelegatedCredential;
 use crate::services::node_ws_manager::NodeWsManager;
 use crate::services::provider_token_exchange_service::{self, TokenExchangeCache};
 use crate::services::{
-    agent_binding_service, user_api_key_service, user_service_service, user_token_service,
+    agent_binding_service, gcp_sa_service, user_api_key_service, user_service_service,
+    user_token_service,
 };
 use nyxid_cloud_auth::aws_sigv4::{self, AwsCredentials};
 
@@ -1666,6 +1667,37 @@ async fn maybe_refresh_provider_backed_api_key(
     user_id: &str,
     api_key: UserApiKey,
 ) -> AppResult<UserApiKey> {
+    // GCP service account: mint a fresh Google access token from the
+    // stored SA key when the cached token is missing or within the
+    // 5-minute buffer. Unlike user OAuth, this never hits `invalid_rapt`
+    // — service-account tokens carry no session/reauth policy and renew
+    // indefinitely with no human in the loop, so this is the durable
+    // alternative to the (impossible) unattended user-OAuth refresh for
+    // BigQuery / Cloud Billing.
+    if api_key.credential_type == "gcp_service_account" {
+        if api_key.status != "active" {
+            // A terminally-failed key short-circuits: the status check
+            // downstream surfaces it without a wasted mint attempt.
+            return Ok(api_key);
+        }
+        let needs_mint = api_key.access_token_encrypted.is_none()
+            || api_key
+                .expires_at
+                .is_some_and(|exp| exp <= chrono::Utc::now() + chrono::Duration::minutes(5));
+        if !needs_mint {
+            return Ok(api_key);
+        }
+        return match gcp_sa_service::mint_and_store(db, encryption_keys, &api_key).await {
+            Ok(refreshed) => Ok(refreshed),
+            // Transient mint failures (5xx / 429 / network) leave the row
+            // active so the proxy can fall back on any still-valid cached
+            // token and a later request retries; terminal failures are
+            // already persisted as `status: "failed"` by `mint_and_store`.
+            Err(AppError::Internal(_)) => Ok(api_key),
+            Err(error) => Err(error),
+        };
+    }
+
     let needs_refresh = api_key.credential_type == "oauth2"
         && (api_key.access_token_encrypted.is_none()
             || api_key
@@ -1746,7 +1778,9 @@ async fn resolve_user_api_key_credential(
     encryption_keys: &EncryptionKeys,
 ) -> AppResult<Option<String>> {
     let encrypted = match api_key.credential_type.as_str() {
-        "oauth2" => api_key.access_token_encrypted.as_ref(),
+        // Both inject a minted/refreshed access token (kept in
+        // `access_token_encrypted`), not the durable seed credential.
+        "oauth2" | "gcp_service_account" => api_key.access_token_encrypted.as_ref(),
         "node_managed" | "ssh_certificate" => None,
         _ => api_key.credential_encrypted.as_ref(),
     };

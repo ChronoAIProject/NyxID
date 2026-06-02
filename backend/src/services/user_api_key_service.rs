@@ -22,6 +22,11 @@ const VALID_CREDENTIAL_TYPES: &[&str] = &[
     "basic",
     "ssh_certificate",
     "node_managed",
+    // Google Cloud service-account JSON key. The durable secret (the key
+    // file) is stored in `credential_encrypted`; the proxy mints a short-
+    // lived Google access token from it via JWT-bearer and caches that in
+    // `access_token_encrypted` (see `gcp_sa_service`).
+    "gcp_service_account",
 ];
 const VALID_STATUSES: &[&str] = &[
     "active",
@@ -64,7 +69,9 @@ pub struct CreateApiKeyParams<'a> {
 
 pub fn has_server_credential(api_key: &UserApiKey) -> bool {
     match api_key.credential_type.as_str() {
-        "oauth2" => api_key
+        // The minted access token is the injected credential; the SA key
+        // in `credential_encrypted` is the durable seed it's minted from.
+        "oauth2" | "gcp_service_account" => api_key
             .access_token_encrypted
             .as_ref()
             .is_some_and(|value| !value.is_empty()),
