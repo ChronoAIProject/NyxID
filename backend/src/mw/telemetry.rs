@@ -40,3 +40,93 @@ pub async fn telemetry_mw(mut req: Request, next: Next) -> Response {
 
     next.run(req).await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        Extension, Json, Router,
+        body::{Body, to_bytes},
+        http::StatusCode,
+        middleware,
+        routing::get,
+    };
+    use serde_json::{Value, json};
+    use tower::ServiceExt;
+
+    async fn echo_context(Extension(ctx): Extension<TelemetryContext>) -> Json<Value> {
+        Json(json!({
+            "surface": ctx.surface,
+            "client_version": ctx.client_version,
+        }))
+    }
+
+    fn test_router() -> Router {
+        Router::new()
+            .route("/", get(echo_context))
+            .layer(middleware::from_fn(telemetry_mw))
+    }
+
+    #[tokio::test]
+    async fn telemetry_middleware_inserts_context_from_headers() {
+        let response = test_router()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/")
+                    .header(CLIENT_HEADER, "cli")
+                    .header(CLIENT_VERSION_HEADER, "1.2.3")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["surface"], "cli");
+        assert_eq!(json["client_version"], "1.2.3");
+    }
+
+    #[tokio::test]
+    async fn telemetry_middleware_falls_back_for_unknown_client() {
+        let response = test_router()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/")
+                    .header(CLIENT_HEADER, "browser-extension")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["surface"], "backend");
+        assert!(json["client_version"].is_null());
+    }
+
+    #[tokio::test]
+    async fn telemetry_middleware_drops_oversized_client_version() {
+        let long_version = "v".repeat(65);
+        let response = test_router()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/")
+                    .header(CLIENT_HEADER, "sdk")
+                    .header(CLIENT_VERSION_HEADER, long_version)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["surface"], "sdk");
+        assert!(json["client_version"].is_null());
+    }
+}

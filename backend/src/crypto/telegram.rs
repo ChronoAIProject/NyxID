@@ -191,4 +191,63 @@ mod tests {
             "Should mention expiry"
         );
     }
+
+    #[test]
+    fn debug_redacts_telegram_hash() {
+        let data = TelegramLoginData {
+            id: 12345678,
+            first_name: "John".to_string(),
+            last_name: Some("Doe".to_string()),
+            username: Some("johndoe".to_string()),
+            photo_url: Some("https://cdn.example.com/avatar.png".to_string()),
+            auth_date: chrono::Utc::now().timestamp(),
+            hash: "secret-hash".to_string(),
+        };
+
+        let debug = format!("{data:?}");
+
+        assert!(debug.contains("TelegramLoginData"));
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("secret-hash"));
+    }
+
+    #[test]
+    fn reject_future_auth_date_before_hash_validation() {
+        let bot_token = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11";
+        let data = TelegramLoginData {
+            id: 12345678,
+            first_name: "John".to_string(),
+            last_name: None,
+            username: None,
+            photo_url: None,
+            auth_date: chrono::Utc::now().timestamp() + 61,
+            hash: "not-hex".to_string(),
+        };
+
+        let result = verify_telegram_login(bot_token, &data);
+
+        assert!(
+            matches!(result, Err(AppError::Unauthorized(message)) if message == "Telegram login data has invalid auth_date")
+        );
+    }
+
+    #[test]
+    fn reject_non_hex_hash_format() {
+        let bot_token = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11";
+        let data = TelegramLoginData {
+            id: 12345678,
+            first_name: "John".to_string(),
+            last_name: None,
+            username: None,
+            photo_url: None,
+            auth_date: chrono::Utc::now().timestamp(),
+            hash: "not-hex".to_string(),
+        };
+
+        let result = verify_telegram_login(bot_token, &data);
+
+        assert!(
+            matches!(result, Err(AppError::ValidationError(message)) if message == "Invalid hash format in Telegram login data")
+        );
+    }
 }

@@ -586,6 +586,8 @@ pub type AppResult<T> = Result<T, AppError>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::to_bytes;
+    use serde_json::Value;
 
     #[test]
     fn status_codes() {
@@ -1259,5 +1261,188 @@ mod tests {
         };
         let json = serde_json::to_value(&resp).expect("serialize");
         assert_eq!(json["session_token"], "mfa-session-tok");
+    }
+
+    #[test]
+    fn newer_variant_status_key_and_code_mappings() {
+        let cases = vec![
+            (
+                AppError::SshNodeKeyMissing("missing".into()),
+                StatusCode::NOT_FOUND,
+                "ssh_node_key_missing",
+                1011,
+            ),
+            (
+                AppError::SshHostKeyMismatch("bad host".into()),
+                StatusCode::BAD_GATEWAY,
+                "ssh_host_key_mismatch",
+                1012,
+            ),
+            (
+                AppError::SshNodeExecChannelClosed("closed".into()),
+                StatusCode::BAD_GATEWAY,
+                "ssh_node_exec_channel_closed",
+                1013,
+            ),
+            (
+                AppError::SshPrincipalAmbiguous("alice".into()),
+                StatusCode::BAD_REQUEST,
+                "ssh_principal_ambiguous",
+                1014,
+            ),
+            (
+                AppError::SshAuthModeUnsupportedForOperation("node_key".into()),
+                StatusCode::BAD_REQUEST,
+                "ssh_auth_mode_unsupported_for_operation",
+                1015,
+            ),
+            (
+                AppError::ChannelPlatformEditUnsupported,
+                StatusCode::NOT_IMPLEMENTED,
+                "edit_unsupported",
+                10007,
+            ),
+            (
+                AppError::DeviceChannelReplyNotAllowed,
+                StatusCode::BAD_REQUEST,
+                "device_channel_reply_not_allowed",
+                10006,
+            ),
+            (
+                AppError::OrgCannotAuthenticate,
+                StatusCode::FORBIDDEN,
+                "org_cannot_authenticate",
+                1403,
+            ),
+            (
+                AppError::OrgQueryTimeout,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "org_query_timeout",
+                8100,
+            ),
+            (
+                AppError::OrgNotFound("org".into()),
+                StatusCode::NOT_FOUND,
+                "org_not_found",
+                8101,
+            ),
+            (
+                AppError::OrgSlugTaken("slug".into()),
+                StatusCode::CONFLICT,
+                "org_slug_taken",
+                8107,
+            ),
+            (
+                AppError::OrgMembershipRequired,
+                StatusCode::FORBIDDEN,
+                "org_membership_required",
+                8102,
+            ),
+            (
+                AppError::OrgRoleInsufficient("admin".into()),
+                StatusCode::FORBIDDEN,
+                "org_role_insufficient",
+                8103,
+            ),
+            (
+                AppError::OrgInviteInvalid("bad".into()),
+                StatusCode::BAD_REQUEST,
+                "org_invite_invalid",
+                8104,
+            ),
+            (
+                AppError::OrgInviteExpired,
+                StatusCode::GONE,
+                "org_invite_expired",
+                8105,
+            ),
+            (
+                AppError::OrgApprovalNoAdmin("org".into()),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "org_approval_no_admin",
+                8106,
+            ),
+        ];
+
+        for (err, status, key, code) in cases {
+            assert_eq!(err.status_code(), status, "{err}");
+            assert_eq!(err.error_key(), key, "{err}");
+            assert_eq!(err.error_code(), code, "{err}");
+        }
+    }
+
+    #[test]
+    fn oauth_status_mappings() {
+        assert_eq!(
+            AppError::Unauthorized("bad client".into()).oauth_status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            AppError::ServiceAccountInactive.oauth_status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            AppError::Internal("boom".into()).oauth_status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            AppError::InvalidScope("bad".into()).oauth_status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    async fn response_json(err: AppError) -> (StatusCode, Value) {
+        let response = err.into_response();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read response body");
+        let json = serde_json::from_slice(&body).expect("json response");
+        (status, json)
+    }
+
+    #[tokio::test]
+    async fn internal_response_redacts_internal_details() {
+        let (status, json) =
+            response_json(AppError::Internal("database password leaked".into())).await;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(json["error"], "internal_error");
+        assert_eq!(json["error_code"], 1006);
+        assert_eq!(json["message"], "An internal error occurred");
+    }
+
+    #[tokio::test]
+    async fn special_response_fields_are_serialized_for_mfa_consent_and_approval() {
+        let (status, json) = response_json(AppError::MfaRequired {
+            session_token: "mfa-token".into(),
+        })
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(json["error"], "mfa_required");
+        assert_eq!(json["session_token"], "mfa-token");
+
+        let (status, json) = response_json(AppError::ConsentRequired {
+            consent_url: "https://app.example.com/consent".into(),
+        })
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(json["error"], "consent_required");
+        assert_eq!(json["consent_url"], "https://app.example.com/consent");
+
+        let (status, json) = response_json(AppError::ApprovalFailed {
+            request_id: "approval-1".into(),
+            approve_url: "https://app.example.com/approvals".into(),
+            reason: "rejected".into(),
+        })
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(json["error"], "approval_failed");
+        assert_eq!(json["request_id"], "approval-1");
+        assert_eq!(json["approve_url"], "https://app.example.com/approvals");
+        assert_eq!(
+            json["message"],
+            "Approval failed: rejected. Review pending approvals at https://app.example.com/approvals"
+        );
     }
 }

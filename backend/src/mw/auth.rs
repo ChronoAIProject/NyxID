@@ -926,6 +926,86 @@ mod tests {
         }
     }
 
+    fn request_parts_with_headers(headers: &[(&str, &str)]) -> Parts {
+        let mut builder = Request::builder().uri("/api/v1/keys");
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+        let request = builder.body(Body::empty()).unwrap();
+        request.into_parts().0
+    }
+
+    #[test]
+    fn extract_request_ip_prefers_first_forwarded_for_hop() {
+        let mut parts = request_parts_with_headers(&[
+            ("x-forwarded-for", " 203.0.113.7, 10.0.0.1 "),
+            ("x-real-ip", "198.51.100.9"),
+        ]);
+        parts
+            .extensions
+            .insert(ConnectInfo(SocketAddr::from(([192, 0, 2, 55], 443))));
+
+        assert_eq!(extract_request_ip(&parts), Some("203.0.113.7".to_string()));
+    }
+
+    #[test]
+    fn extract_request_ip_falls_back_to_real_ip_when_forwarded_for_empty() {
+        let parts = request_parts_with_headers(&[
+            ("x-forwarded-for", " , 10.0.0.1"),
+            ("x-real-ip", " 198.51.100.9 "),
+        ]);
+
+        assert_eq!(extract_request_ip(&parts), Some("198.51.100.9".to_string()));
+    }
+
+    #[test]
+    fn extract_request_ip_falls_back_to_connect_info_peer() {
+        let mut parts = request_parts_with_headers(&[]);
+        parts
+            .extensions
+            .insert(ConnectInfo(SocketAddr::from(([192, 0, 2, 55], 443))));
+
+        assert_eq!(extract_request_ip(&parts), Some("192.0.2.55".to_string()));
+    }
+
+    #[test]
+    fn extract_request_ip_returns_none_without_headers_or_peer() {
+        let parts = request_parts_with_headers(&[]);
+
+        assert_eq!(extract_request_ip(&parts), None);
+    }
+
+    #[test]
+    fn extract_request_user_agent_returns_header_value() {
+        let parts = request_parts_with_headers(&[(header::USER_AGENT.as_str(), "NyxID CLI/0.6.0")]);
+
+        assert_eq!(
+            extract_request_user_agent(&parts),
+            Some("NyxID CLI/0.6.0".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_request_user_agent_returns_none_when_absent() {
+        let parts = request_parts_with_headers(&[]);
+
+        assert_eq!(extract_request_user_agent(&parts), None);
+    }
+
+    #[tokio::test]
+    async fn validate_dpop_bound_access_requires_dpop_header() {
+        let Some(db) = crate::test_utils::connect_test_database("auth_dpop_missing").await else {
+            return;
+        };
+        let state = crate::test_utils::test_app_state(db);
+        let parts = request_parts_with_headers(&[]);
+
+        let err =
+            validate_dpop_bound_access(&parts, &state, "expected-jkt").expect_err("missing DPoP");
+
+        assert!(matches!(err, AppError::Unauthorized(message) if message == "DPoP proof required"));
+    }
+
     #[test]
     fn parse_cookie_single() {
         assert_eq!(

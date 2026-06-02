@@ -784,6 +784,7 @@ impl TelemetryEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn name_is_dot_namespaced_lowercase() {
@@ -875,5 +876,512 @@ mod tests {
         let v = e.properties();
         assert_eq!(v["decision"], "approved");
         assert_eq!(v["decision_ms"], 1234);
+    }
+
+    #[test]
+    fn canonical_events_emit_expected_names_and_properties() {
+        let cases = vec![
+            (
+                TelemetryEvent::UserEmailVerified,
+                "user.email_verified",
+                json!({}),
+            ),
+            (
+                TelemetryEvent::AuthLoggedIn {
+                    method: "email".into(),
+                    mfa_required: true,
+                },
+                "auth.logged_in",
+                json!({"method": "email", "mfa_required": true}),
+            ),
+            (TelemetryEvent::AuthLoggedOut, "auth.logged_out", json!({})),
+            (
+                TelemetryEvent::AuthPasswordResetRequested,
+                "auth.password_reset_requested",
+                json!({}),
+            ),
+            (
+                TelemetryEvent::AuthPasswordResetCompleted,
+                "auth.password_reset_completed",
+                json!({}),
+            ),
+            (
+                TelemetryEvent::AuthTokenRefreshed,
+                "auth.token_refreshed",
+                json!({}),
+            ),
+            (
+                TelemetryEvent::AuthTokenExchanged {
+                    subject_token_type: "id_token".into(),
+                    exchange_provider: Some("google".into()),
+                },
+                "auth.token_exchanged",
+                json!({"subject_token_type": "id_token", "exchange_provider": "google"}),
+            ),
+            (
+                TelemetryEvent::AuthDelegationRefreshed {
+                    client_id: "client-1".into(),
+                },
+                "auth.delegation_refreshed",
+                json!({"client_id": "client-1"}),
+            ),
+            (
+                TelemetryEvent::InviteCodeGenerated {
+                    generated_by_role: "admin".into(),
+                },
+                "invite.code_generated",
+                json!({"generated_by_role": "admin"}),
+            ),
+            (
+                TelemetryEvent::UserDeleted {
+                    reason: Some("self_serve".into()),
+                },
+                "user.deleted",
+                json!({"reason": "self_serve"}),
+            ),
+            (
+                TelemetryEvent::MfaEnrollmentStarted {
+                    factor_type: "totp".into(),
+                },
+                "mfa.enrollment_started",
+                json!({"factor_type": "totp"}),
+            ),
+            (
+                TelemetryEvent::MfaEnrollmentCompleted {
+                    factor_type: "totp".into(),
+                },
+                "mfa.enrollment_completed",
+                json!({"factor_type": "totp"}),
+            ),
+            (
+                TelemetryEvent::MfaChallengeSucceeded {
+                    factor_type: "totp".into(),
+                },
+                "mfa.challenge_succeeded",
+                json!({"factor_type": "totp"}),
+            ),
+            (
+                TelemetryEvent::MfaChallengeFailed {
+                    factor_type: "totp".into(),
+                    reason: "bad_code".into(),
+                },
+                "mfa.challenge_failed",
+                json!({"factor_type": "totp", "reason": "bad_code"}),
+            ),
+            (
+                TelemetryEvent::KeyDeleted {
+                    source: "custom".into(),
+                },
+                "key.deleted",
+                json!({"source": "custom"}),
+            ),
+            (
+                TelemetryEvent::ServiceConnected {
+                    provider_slug: "openai".into(),
+                    flow: "api_key".into(),
+                },
+                "service.connected",
+                json!({"provider_slug": "openai", "flow": "api_key"}),
+            ),
+            (
+                TelemetryEvent::ServiceDisconnected {
+                    provider_slug: "openai".into(),
+                },
+                "service.disconnected",
+                json!({"provider_slug": "openai"}),
+            ),
+            (
+                TelemetryEvent::ServiceUserAgentCustomized {
+                    provider_slug: "openai".into(),
+                },
+                "service.user_agent_customized",
+                json!({"provider_slug": "openai"}),
+            ),
+            (
+                TelemetryEvent::EndpointUpdated {
+                    endpoint_type: "custom".into(),
+                },
+                "endpoint.updated",
+                json!({"endpoint_type": "custom"}),
+            ),
+            (
+                TelemetryEvent::EndpointDeleted {
+                    endpoint_type: "catalog".into(),
+                },
+                "endpoint.deleted",
+                json!({"endpoint_type": "catalog"}),
+            ),
+            (
+                TelemetryEvent::CatalogBrowsed {
+                    filter: Some("ai".into()),
+                    result_count: 7,
+                },
+                "catalog.browsed",
+                json!({"filter": "ai", "result_count": 7}),
+            ),
+            (
+                TelemetryEvent::CatalogEntryViewed {
+                    catalog_slug: "openai".into(),
+                    has_openapi_spec: true,
+                },
+                "catalog.entry_viewed",
+                json!({"catalog_slug": "openai", "has_openapi_spec": true}),
+            ),
+            (
+                TelemetryEvent::CatalogEndpointsFetched {
+                    catalog_slug: "openai".into(),
+                    endpoint_count: 12,
+                },
+                "catalog.endpoints_fetched",
+                json!({"catalog_slug": "openai", "endpoint_count": 12}),
+            ),
+            (
+                TelemetryEvent::ApiKeyCreated {
+                    platform: Some("codex".into()),
+                    scope_mode: "custom".into(),
+                    rate_limit_per_second: Some(5),
+                },
+                "api_key.created",
+                json!({"platform": "codex", "scope_mode": "custom", "rate_limit_per_second": 5}),
+            ),
+            (
+                TelemetryEvent::ApiKeyRotated {
+                    platform: Some("codex".into()),
+                },
+                "api_key.rotated",
+                json!({"platform": "codex"}),
+            ),
+            (
+                TelemetryEvent::ApiKeyDeleted { platform: None },
+                "api_key.deleted",
+                json!({"platform": null}),
+            ),
+            (
+                TelemetryEvent::AgentBindingCreated {
+                    platform: Some("codex".into()),
+                    service_slug: "openai".into(),
+                },
+                "agent_binding.created",
+                json!({"platform": "codex", "service_slug": "openai"}),
+            ),
+            (
+                TelemetryEvent::AgentBindingDeleted {
+                    platform: None,
+                    service_slug: "openai".into(),
+                },
+                "agent_binding.deleted",
+                json!({"platform": null, "service_slug": "openai"}),
+            ),
+            (
+                TelemetryEvent::ApprovalRequested {
+                    service_slug: "openai".into(),
+                    mode: "grant".into(),
+                    channel: "mobile".into(),
+                },
+                "approval.requested",
+                json!({"service_slug": "openai", "mode": "grant", "channel": "mobile"}),
+            ),
+            (
+                TelemetryEvent::ApprovalExpired {
+                    service_slug: "openai".into(),
+                    mode: "grant".into(),
+                },
+                "approval.expired",
+                json!({"service_slug": "openai", "mode": "grant"}),
+            ),
+            (
+                TelemetryEvent::ApprovalGrantRevoked {
+                    service_slug: "openai".into(),
+                },
+                "approval.grant_revoked",
+                json!({"service_slug": "openai"}),
+            ),
+            (
+                TelemetryEvent::ApprovalConfigUpdated {
+                    service_slug: "openai".into(),
+                    mode: "per_request".into(),
+                },
+                "approval.config_updated",
+                json!({"service_slug": "openai", "mode": "per_request"}),
+            ),
+            (
+                TelemetryEvent::NodeRegistered {
+                    node_platform: "linux".into(),
+                    profile: "default".into(),
+                },
+                "node.registered",
+                json!({"node_platform": "linux", "profile": "default"}),
+            ),
+            (
+                TelemetryEvent::NodeConnected {
+                    node_id: "node-1".into(),
+                    profile: "edge".into(),
+                },
+                "node.connected",
+                json!({"node_id": "node-1", "profile": "edge"}),
+            ),
+            (
+                TelemetryEvent::NodeDisconnected {
+                    node_id: "node-1".into(),
+                    reason: "offline".into(),
+                },
+                "node.disconnected",
+                json!({"node_id": "node-1", "reason": "offline"}),
+            ),
+            (
+                TelemetryEvent::NodeDeleted {
+                    node_id: "node-1".into(),
+                },
+                "node.deleted",
+                json!({"node_id": "node-1"}),
+            ),
+            (
+                TelemetryEvent::NodeCredentialConfigured {
+                    credential_type: "ssh_node_key".into(),
+                },
+                "node.credential_configured",
+                json!({"credential_type": "ssh_node_key"}),
+            ),
+            (
+                TelemetryEvent::ChannelBotRegistered {
+                    platform: "lark".into(),
+                },
+                "channel.bot_registered",
+                json!({"platform": "lark"}),
+            ),
+            (
+                TelemetryEvent::ChannelBotDeleted {
+                    platform: "telegram".into(),
+                },
+                "channel.bot_deleted",
+                json!({"platform": "telegram"}),
+            ),
+            (
+                TelemetryEvent::ChannelMappingCreated {
+                    platform: "discord".into(),
+                    conversation_id_hash: "abc123".into(),
+                },
+                "channel.mapping_created",
+                json!({"platform": "discord", "conversation_id_hash": "abc123"}),
+            ),
+            (
+                TelemetryEvent::ChannelMappingDeleted {
+                    platform: "discord".into(),
+                    conversation_id_hash: "abc123".into(),
+                },
+                "channel.mapping_deleted",
+                json!({"platform": "discord", "conversation_id_hash": "abc123"}),
+            ),
+            (
+                TelemetryEvent::ChannelMessageReceived {
+                    platform: "telegram".into(),
+                    conversation_id_hash: "convhash".into(),
+                },
+                "channel.message_received",
+                json!({"platform": "telegram", "conversation_id_hash": "convhash", "sample_percent": 10}),
+            ),
+            (
+                TelemetryEvent::ChannelReplySent {
+                    platform: "telegram".into(),
+                    reply_mode: "async".into(),
+                    agent_api_key_id: Some("agent-key-1".into()),
+                },
+                "channel.reply_sent",
+                json!({"platform": "telegram", "reply_mode": "async", "agent_api_key_id": "agent-key-1", "sample_percent": 10}),
+            ),
+            (
+                TelemetryEvent::ChannelEventReceived {
+                    source: "device".into(),
+                    event_type: "button.clicked".into(),
+                    deduplicated: false,
+                },
+                "channel.event_received",
+                json!({"source": "device", "event_type": "button.clicked", "deduplicated": false}),
+            ),
+            (
+                TelemetryEvent::McpSessionStarted {
+                    client: Some("claude".into()),
+                },
+                "mcp.session_started",
+                json!({"client": "claude"}),
+            ),
+            (
+                TelemetryEvent::McpSessionEnded {
+                    duration_ms: 99,
+                    reason: "closed".into(),
+                },
+                "mcp.session_ended",
+                json!({"duration_ms": 99, "reason": "closed"}),
+            ),
+            (
+                TelemetryEvent::SshCertificateIssued {
+                    service_slug: "prod".into(),
+                    ttl_secs: 600,
+                },
+                "ssh.certificate_issued",
+                json!({"service_slug": "prod", "ttl_secs": 600}),
+            ),
+            (
+                TelemetryEvent::SshTunnelOpened {
+                    service_slug: "prod".into(),
+                    mode: "terminal".into(),
+                },
+                "ssh.tunnel_opened",
+                json!({"service_slug": "prod", "mode": "terminal"}),
+            ),
+            (
+                TelemetryEvent::SshTunnelClosed {
+                    service_slug: "prod".into(),
+                    duration_ms: 321,
+                },
+                "ssh.tunnel_closed",
+                json!({"service_slug": "prod", "duration_ms": 321}),
+            ),
+            (
+                TelemetryEvent::OauthClientRegistered,
+                "oauth.client_registered",
+                json!({}),
+            ),
+            (
+                TelemetryEvent::OauthClientSecretRotated {
+                    client_id: "client-1".into(),
+                },
+                "oauth.client_secret_rotated",
+                json!({"client_id": "client-1"}),
+            ),
+            (
+                TelemetryEvent::OauthAuthorizationGranted {
+                    client_id: "client-1".into(),
+                    grant_type: "authorization_code".into(),
+                },
+                "oauth.authorization_granted",
+                json!({"client_id": "client-1", "grant_type": "authorization_code"}),
+            ),
+            (
+                TelemetryEvent::OauthTokenIssued {
+                    client_id: "client-1".into(),
+                    grant_type: "client_credentials".into(),
+                },
+                "oauth.token_issued",
+                json!({"client_id": "client-1", "grant_type": "client_credentials"}),
+            ),
+            (
+                TelemetryEvent::NotificationChannelLinked {
+                    channel: "telegram".into(),
+                },
+                "notification.channel_linked",
+                json!({"channel": "telegram"}),
+            ),
+            (
+                TelemetryEvent::NotificationChannelUnlinked {
+                    channel: "telegram".into(),
+                },
+                "notification.channel_unlinked",
+                json!({"channel": "telegram"}),
+            ),
+            (
+                TelemetryEvent::NotificationDeviceRegistered {
+                    platform: "ios".into(),
+                },
+                "notification.device_registered",
+                json!({"platform": "ios"}),
+            ),
+            (
+                TelemetryEvent::NotificationDeviceRemoved {
+                    platform: "android".into(),
+                },
+                "notification.device_removed",
+                json!({"platform": "android"}),
+            ),
+            (
+                TelemetryEvent::AdminUserSuspended,
+                "admin.user_suspended",
+                json!({}),
+            ),
+            (
+                TelemetryEvent::AdminUserUnsuspended,
+                "admin.user_unsuspended",
+                json!({}),
+            ),
+            (
+                TelemetryEvent::AdminAuditLogViewed {
+                    filter: Some("node".into()),
+                },
+                "admin.audit_log_viewed",
+                json!({"filter": "node"}),
+            ),
+            (
+                TelemetryEvent::AdminOauthClientRegistered,
+                "admin.oauth_client_registered",
+                json!({}),
+            ),
+            (
+                TelemetryEvent::AdminServiceAccountCreated,
+                "admin.service_account_created",
+                json!({}),
+            ),
+            (
+                TelemetryEvent::AdminServiceAccountRotated,
+                "admin.service_account_rotated",
+                json!({}),
+            ),
+            (
+                TelemetryEvent::AdminServiceAccountDeleted,
+                "admin.service_account_deleted",
+                json!({}),
+            ),
+            (
+                TelemetryEvent::AdminNodeDisconnected {
+                    node_id: "node-1".into(),
+                },
+                "admin.node_disconnected",
+                json!({"node_id": "node-1"}),
+            ),
+            (
+                TelemetryEvent::AdminNodeDeleted {
+                    node_id: "node-1".into(),
+                },
+                "admin.node_deleted",
+                json!({"node_id": "node-1"}),
+            ),
+            (
+                TelemetryEvent::AdminServiceCreated {
+                    slug: "openai".into(),
+                },
+                "admin.service_created",
+                json!({"slug": "openai"}),
+            ),
+            (
+                TelemetryEvent::AdminServiceUpdated {
+                    slug: "openai".into(),
+                },
+                "admin.service_updated",
+                json!({"slug": "openai"}),
+            ),
+            (
+                TelemetryEvent::ProxyError {
+                    service_slug: "openai".into(),
+                    error_code: 8001,
+                    status: 503,
+                },
+                "proxy.error",
+                json!({"service_slug": "openai", "error_code": 8001, "status": 503}),
+            ),
+            (
+                TelemetryEvent::ApiRateLimited {
+                    route: "/api/v1/proxy".into(),
+                    limit_type: "agent".into(),
+                    limit_per_second: 10,
+                    api_key_id: Some("agent-key-1".into()),
+                },
+                "api.rate_limited",
+                json!({"route": "/api/v1/proxy", "limit_type": "agent", "limit_per_second": 10, "api_key_id": "agent-key-1"}),
+            ),
+        ];
+
+        for (event, expected_name, expected_properties) in cases {
+            assert_eq!(event.name(), expected_name);
+            assert_eq!(event.properties(), expected_properties, "{expected_name}");
+        }
     }
 }

@@ -266,3 +266,135 @@ async fn drain_loop(mut rx: mpsc::Receiver<CaptureJob>, http: Client, dsn: Strin
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::test_app_config;
+
+    fn test_client_with_sender(tx: Sender<CaptureJob>) -> TelemetryClient {
+        TelemetryClient {
+            dsn: "test-dsn".to_string(),
+            host: "https://telemetry.example.com".to_string(),
+            environment: "staging",
+            app_version: "0.0-test",
+            tx,
+        }
+    }
+
+    #[test]
+    fn from_config_returns_none_when_telemetry_is_hard_off() {
+        let cfg = test_app_config();
+
+        assert!(TelemetryClient::from_config(&cfg).is_none());
+    }
+
+    #[tokio::test]
+    async fn from_config_prefers_configured_dsn_and_normalizes_host() {
+        let mut cfg = test_app_config();
+        cfg.telemetry_dsn = Some("phc_self_hosted".to_string());
+        cfg.telemetry_host = Some("https://telemetry.example.com/capture/".to_string());
+        cfg.environment = "production".to_string();
+
+        let client = TelemetryClient::from_config(&cfg).expect("configured DSN should enable");
+
+        assert_eq!(client.dsn, "phc_self_hosted");
+        assert_eq!(client.host, "https://telemetry.example.com");
+        assert_eq!(client.environment, "production");
+        assert_eq!(client.app_version, env!("CARGO_PKG_VERSION"));
+    }
+
+    #[tokio::test]
+    async fn from_config_blank_dsn_uses_public_share_back_when_enabled() {
+        let mut cfg = test_app_config();
+        cfg.telemetry_dsn = Some("   ".to_string());
+        cfg.telemetry_host = Some("https://ignored.example.com".to_string());
+        cfg.share_analytics = true;
+        cfg.environment = "staging".to_string();
+
+        let client = TelemetryClient::from_config(&cfg).expect("share analytics should enable");
+
+        assert_eq!(client.dsn, NYXID_PUBLIC_TELEMETRY_DSN);
+        assert_eq!(client.host, NYXID_PUBLIC_TELEMETRY_HOST);
+        assert_eq!(client.environment, "staging");
+    }
+
+    #[tokio::test]
+    async fn from_config_defaults_unknown_environment_to_development() {
+        let mut cfg = test_app_config();
+        cfg.telemetry_dsn = Some("phc_test".to_string());
+        cfg.telemetry_host = None;
+        cfg.environment = "qa".to_string();
+
+        let client = TelemetryClient::from_config(&cfg).expect("configured DSN should enable");
+
+        assert_eq!(client.host, DEFAULT_HOST);
+        assert_eq!(client.environment, "development");
+    }
+
+    #[test]
+    fn track_enqueues_scrubbed_capture_job_with_common_properties() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let client = test_client_with_sender(tx);
+        let ctx = TelemetryContext {
+            surface: "cli",
+            client_version: Some("1.2.3 alice@example.com".to_string()),
+        };
+        let api_key_id = "4b9d8f21-9b9d-41f4-9963-3c822f4fbbed";
+
+        client.track(
+            "user-1",
+            TelemetryEvent::KeyCreated {
+                source: "catalog".to_string(),
+                catalog_slug: Some("openai".to_string()),
+                has_node_binding: true,
+            },
+            &ctx,
+            Some(api_key_id),
+        );
+
+        let job = rx.try_recv().expect("capture job should be queued");
+        assert_eq!(job.distinct_id, "user-1");
+        assert_eq!(job.event_name, "key.created");
+        assert_eq!(job.properties["source"], "catalog");
+        assert_eq!(job.properties["catalog_slug"], "openai");
+        assert_eq!(job.properties["has_node_binding"], true);
+        assert_eq!(job.properties["surface"], "cli");
+        assert_eq!(job.properties["app_version"], "0.0-test");
+        assert_eq!(job.properties["environment"], "staging");
+        assert_eq!(job.properties["client_version"], "1.2.3 [EMAIL_REDACTED]");
+        assert_eq!(
+            job.properties["api_key_id"],
+            sampling::hash_short_id(api_key_id)
+        );
+    }
+
+    #[test]
+    fn track_silently_drops_when_channel_is_full() {
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.try_send(CaptureJob {
+            distinct_id: "first".to_string(),
+            event_name: "auth.logged_in",
+            properties: json!({"queued": true}),
+            timestamp: chrono::Utc::now(),
+        })
+        .expect("pre-fill telemetry queue");
+        let client = test_client_with_sender(tx);
+
+        client.track(
+            "second",
+            TelemetryEvent::AuthLoggedOut,
+            &TelemetryContext::default(),
+            None,
+        );
+
+        let job = rx.try_recv().expect("original job should remain queued");
+        assert_eq!(job.distinct_id, "first");
+        assert_eq!(job.event_name, "auth.logged_in");
+        assert_eq!(job.properties, json!({"queued": true}));
+        assert!(
+            rx.try_recv().is_err(),
+            "full-channel send should be dropped"
+        );
+    }
+}

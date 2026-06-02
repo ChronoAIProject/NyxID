@@ -135,11 +135,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn unsafe_method_matrix_matches_browser_csrf_rules() {
+        for method in [Method::GET, Method::HEAD, Method::OPTIONS, Method::TRACE] {
+            assert!(!is_unsafe_method(&method), "{method} should be safe");
+        }
+
+        for method in [
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+            Method::CONNECT,
+        ] {
+            assert!(is_unsafe_method(&method), "{method} should be unsafe");
+        }
+    }
+
+    #[test]
     fn parse_origin_extracts_origin_only() {
         assert_eq!(
             parse_origin("https://app.example.com/path?x=1"),
             Some("https://app.example.com".to_string())
         );
+    }
+
+    #[test]
+    fn parse_origin_rejects_non_url_values() {
+        assert_eq!(parse_origin("not a url"), None);
+        assert_eq!(parse_origin("/relative/path"), None);
     }
 
     #[test]
@@ -172,6 +195,23 @@ mod tests {
     }
 
     #[test]
+    fn trusted_browser_origins_deduplicate_equivalent_origins() {
+        let extras = vec![
+            "https://app.example.com/extra-path".to_string(),
+            "https://auth.example.com".to_string(),
+        ];
+        let allowed = allowed_origins(
+            "https://app.example.com",
+            "https://auth.example.com/",
+            &extras,
+        );
+
+        assert_eq!(allowed.len(), 2);
+        assert!(allowed.contains("https://app.example.com"));
+        assert!(allowed.contains("https://auth.example.com"));
+    }
+
+    #[test]
     fn social_callback_path_is_exempt() {
         assert!(is_social_callback_path(
             "/api/v1/auth/social/apple/callback"
@@ -180,6 +220,14 @@ mod tests {
             "/api/v1/auth/social/google/callback"
         ));
         assert!(!is_social_callback_path("/api/v1/auth/social/google"));
+    }
+
+    #[test]
+    fn social_callback_exemption_requires_exact_prefix_and_suffix_shape() {
+        assert!(!is_social_callback_path(
+            "/api/v1/auth/social/google/callback/extra"
+        ));
+        assert!(!is_social_callback_path("/auth/social/google/callback"));
     }
 
     #[test]
@@ -197,6 +245,16 @@ mod tests {
             "nyx_access_token=jwt; other=value".parse().unwrap(),
         );
         assert!(has_browser_auth_cookie(&headers));
+    }
+
+    #[test]
+    fn browser_auth_cookie_detection_ignores_malformed_and_similar_cookie_names() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            "nyx_session_extra=abc; flag; other=value".parse().unwrap(),
+        );
+        assert!(!has_browser_auth_cookie(&headers));
     }
 
     #[test]
@@ -239,6 +297,44 @@ mod tests {
         headers.insert(header::ORIGIN, "https://app.example.com".parse().unwrap());
 
         assert!(looks_like_browser_request(&headers));
+        assert_eq!(
+            extract_request_origin(&headers),
+            Some("https://app.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn fetch_metadata_headers_mark_request_as_browser_originated() {
+        for name in ["sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest"] {
+            let mut headers = HeaderMap::new();
+            headers.insert(name, "same-origin".parse().unwrap());
+            assert!(looks_like_browser_request(&headers), "{name} should match");
+        }
+    }
+
+    #[test]
+    fn extract_request_origin_prefers_origin_over_referer() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::ORIGIN, "https://app.example.com".parse().unwrap());
+        headers.insert(
+            header::REFERER,
+            "https://other.example.com/path".parse().unwrap(),
+        );
+
+        assert_eq!(
+            extract_request_origin(&headers),
+            Some("https://app.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_request_origin_falls_back_to_referer_origin() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::REFERER,
+            "https://app.example.com/path?token=secret".parse().unwrap(),
+        );
+
         assert_eq!(
             extract_request_origin(&headers),
             Some("https://app.example.com".to_string())
