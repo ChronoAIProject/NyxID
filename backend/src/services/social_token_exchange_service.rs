@@ -365,6 +365,34 @@ struct GitHubTokenCheckApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crypto::token::hash_token;
+    use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
+    use crate::test_utils::{cached_test_jwt_keys, connect_test_database, test_app_config};
+    use chrono::Utc;
+
+    async fn insert_public_oauth_client(db: &mongodb::Database, client_id: &str) {
+        let now = Utc::now();
+        db.collection::<OauthClient>(OAUTH_CLIENTS)
+            .insert_one(OauthClient {
+                id: client_id.to_string(),
+                client_name: "Public test client".to_string(),
+                client_secret_hash: hash_token(""),
+                redirect_uris: vec!["https://app.example/callback".to_string()],
+                allowed_scopes: "openid profile email".to_string(),
+                grant_types: "authorization_code".to_string(),
+                client_type: "public".to_string(),
+                is_active: true,
+                delegation_scopes: String::new(),
+                broker_capability_enabled: false,
+                revocation_webhook_url: None,
+                revocation_webhook_secret_encrypted: None,
+                created_by: Some("test".to_string()),
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .expect("insert oauth client");
+    }
 
     #[test]
     fn provider_parsing_valid() {
@@ -432,5 +460,138 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn google_token_verification_requires_config_before_jwks_fetch() {
+        let config = test_app_config();
+        let http_client = reqwest::Client::new();
+        let jwks_cache = JwksCache::new(http_client);
+
+        let err = match verify_google_token(&jwks_cache, &config, "not-a-jwt").await {
+            Ok(_) => panic!("missing Google client id rejected first"),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err,
+            AppError::ExternalProviderNotConfigured(message)
+                if message == "Google provider not configured (missing GOOGLE_CLIENT_ID)"
+        ));
+    }
+
+    #[tokio::test]
+    async fn apple_token_verification_requires_config_before_jwks_fetch() {
+        let config = test_app_config();
+        let http_client = reqwest::Client::new();
+        let jwks_cache = JwksCache::new(http_client);
+
+        let err = match verify_apple_token(&jwks_cache, &config, "not-a-jwt").await {
+            Ok(_) => panic!("missing Apple client id rejected first"),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err,
+            AppError::ExternalProviderNotConfigured(message)
+                if message == "Apple provider not configured (missing APPLE_CLIENT_ID)"
+        ));
+    }
+
+    #[tokio::test]
+    async fn github_app_binding_requires_client_id_and_secret_before_http() {
+        let http_client = reqwest::Client::new();
+
+        let missing_id =
+            verify_github_token_bound_to_app(&test_app_config(), &http_client, "gho_subject_token")
+                .await
+                .expect_err("missing GitHub client id rejected");
+        assert!(matches!(
+            missing_id,
+            AppError::ExternalProviderNotConfigured(message)
+                if message == "GitHub provider not configured (missing GITHUB_CLIENT_ID)"
+        ));
+
+        let mut missing_secret = test_app_config();
+        missing_secret.github_client_id = Some("github-client".to_string());
+        let err =
+            verify_github_token_bound_to_app(&missing_secret, &http_client, "gho_subject_token")
+                .await
+                .expect_err("missing GitHub secret rejected");
+        assert!(matches!(
+            err,
+            AppError::ExternalProviderNotConfigured(message)
+                if message == "GitHub provider not configured (missing GITHUB_CLIENT_SECRET)"
+        ));
+    }
+
+    #[tokio::test]
+    async fn exchange_social_token_rejects_unsupported_provider_after_client_auth() {
+        let db = connect_test_database("soc_badprov")
+            .await
+            .expect("local MongoDB required for social_token_exchange_service tests");
+        let client_id = "social-public-client";
+        insert_public_oauth_client(&db, client_id).await;
+
+        let config = test_app_config();
+        let http_client = reqwest::Client::new();
+        let jwks_cache = JwksCache::new(http_client.clone());
+        let jwt_keys = cached_test_jwt_keys();
+        let err = match exchange_social_token_inner(
+            &db,
+            &config,
+            &jwt_keys,
+            &jwks_cache,
+            &http_client,
+            client_id,
+            None,
+            "subject-token",
+            SUBJECT_TOKEN_TYPE_ID_TOKEN,
+            "facebook",
+        )
+        .await
+        {
+            Ok(_) => panic!("unsupported provider rejected"),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err,
+            AppError::ExternalProviderNotConfigured(message)
+                if message == "Unsupported or unconfigured provider"
+        ));
+    }
+
+    #[tokio::test]
+    async fn exchange_social_token_rejects_wrong_subject_token_type_before_provider_io() {
+        let db = connect_test_database("soc_wrong_type")
+            .await
+            .expect("local MongoDB required for social_token_exchange_service tests");
+        let client_id = "social-public-client";
+        insert_public_oauth_client(&db, client_id).await;
+
+        let config = test_app_config();
+        let http_client = reqwest::Client::new();
+        let jwks_cache = JwksCache::new(http_client.clone());
+        let jwt_keys = cached_test_jwt_keys();
+        let err = match exchange_social_token_inner(
+            &db,
+            &config,
+            &jwt_keys,
+            &jwks_cache,
+            &http_client,
+            client_id,
+            None,
+            "subject-token",
+            SUBJECT_TOKEN_TYPE_ID_TOKEN,
+            "github",
+        )
+        .await
+        {
+            Ok(_) => panic!("GitHub requires access token subject type"),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err,
+            AppError::BadRequest(message)
+                if message == "GitHub social exchange requires subject_token_type=urn:ietf:params:oauth:token-type:access_token"
+        ));
     }
 }

@@ -441,6 +441,39 @@ fn is_private_use_uri_scheme(uri: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crypto::token::hash_token;
+    use crate::models::oauth_client::OauthClient;
+    use crate::models::refresh_token::RefreshToken;
+    use crate::test_utils::connect_test_database;
+    use mongodb::bson::doc;
+
+    fn test_client(client_id: &str, client_type: &str, secret: &str) -> OauthClient {
+        let now = Utc::now();
+        OauthClient {
+            id: client_id.to_string(),
+            client_name: format!("client {client_id}"),
+            client_secret_hash: hash_token(secret),
+            redirect_uris: vec!["https://app.example/callback".to_string()],
+            allowed_scopes: "openid profile email".to_string(),
+            grant_types: "authorization_code".to_string(),
+            client_type: client_type.to_string(),
+            is_active: true,
+            delegation_scopes: String::new(),
+            broker_capability_enabled: false,
+            revocation_webhook_url: None,
+            revocation_webhook_secret_encrypted: None,
+            created_by: Some("test".to_string()),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    async fn insert_client(db: &mongodb::Database, client: &OauthClient) {
+        db.collection::<OauthClient>(OAUTH_CLIENTS)
+            .insert_one(client)
+            .await
+            .expect("insert oauth client");
+    }
 
     #[test]
     fn authorize_scope_defaults_to_client_allowed_scopes() {
@@ -461,5 +494,252 @@ mod tests {
 
         let invalid = resolve_authorize_scope(Some("openid email"), "openid");
         assert!(invalid.is_err());
+    }
+
+    #[test]
+    fn validate_scopes_preserves_requested_order_and_duplicates() {
+        let result = validate_scopes("email openid email", "openid profile email").unwrap();
+        assert_eq!(result, "email openid email");
+    }
+
+    #[test]
+    fn loopback_redirect_uri_requires_http_loopback_host_and_port() {
+        assert!(is_loopback_redirect_uri("http://127.0.0.1:49152/callback"));
+        assert!(is_loopback_redirect_uri("http://localhost:3000/callback"));
+        assert!(is_loopback_redirect_uri("http://[::1]:31337/callback"));
+
+        assert!(!is_loopback_redirect_uri(
+            "https://127.0.0.1:49152/callback"
+        ));
+        assert!(!is_loopback_redirect_uri("http://127.0.0.1/callback"));
+        assert!(!is_loopback_redirect_uri(
+            "http://192.168.1.10:3000/callback"
+        ));
+        assert!(!is_loopback_redirect_uri("not a uri"));
+    }
+
+    #[test]
+    fn private_use_redirect_uri_rejects_standard_web_schemes() {
+        assert!(is_private_use_uri_scheme("cursor://oauth/callback"));
+        assert!(is_private_use_uri_scheme("vscode://nyxid/auth"));
+
+        assert!(!is_private_use_uri_scheme("http://localhost:3000/callback"));
+        assert!(!is_private_use_uri_scheme("https://app.example/callback"));
+        assert!(!is_private_use_uri_scheme("not a uri"));
+    }
+
+    #[tokio::test]
+    async fn validate_client_accepts_exact_and_public_native_redirects() {
+        let db = connect_test_database("oauth_val_ok")
+            .await
+            .expect("local MongoDB required for oauth_service tests");
+        let public = test_client("public-client", "public", "");
+        insert_client(&db, &public).await;
+
+        let exact = validate_client(&db, &public.id, "https://app.example/callback")
+            .await
+            .expect("registered redirect accepted");
+        assert_eq!(exact.id, public.id);
+
+        let loopback = validate_client(&db, &public.id, "http://127.0.0.1:54321/callback")
+            .await
+            .expect("public loopback redirect accepted");
+        assert_eq!(loopback.id, public.id);
+
+        let private_scheme = validate_client(&db, &public.id, "cursor://nyxid/callback")
+            .await
+            .expect("public private-use redirect accepted");
+        assert_eq!(private_scheme.id, public.id);
+    }
+
+    #[tokio::test]
+    async fn validate_client_rejects_inactive_confidential_and_unknown_redirects() {
+        let db = connect_test_database("oauth_val_bad")
+            .await
+            .expect("local MongoDB required for oauth_service tests");
+
+        let confidential = test_client("confidential-client", "confidential", "secret");
+        insert_client(&db, &confidential).await;
+        let err = validate_client(&db, &confidential.id, "http://127.0.0.1:54321/callback")
+            .await
+            .expect_err("confidential clients must not get dynamic native redirects");
+        assert!(matches!(err, AppError::InvalidRedirectUri));
+
+        let mut inactive = test_client("inactive-client", "public", "");
+        inactive.is_active = false;
+        insert_client(&db, &inactive).await;
+        let err = validate_client(&db, &inactive.id, "https://app.example/callback")
+            .await
+            .expect_err("inactive client rejected");
+        assert!(
+            matches!(err, AppError::BadRequest(message) if message == "OAuth client is inactive")
+        );
+
+        let err = validate_client(&db, "missing-client", "https://app.example/callback")
+            .await
+            .expect_err("missing client rejected");
+        assert!(matches!(err, AppError::NotFound(message) if message == "OAuth client not found"));
+    }
+
+    #[tokio::test]
+    async fn authenticate_client_handles_public_and_confidential_secret_paths() {
+        let db = connect_test_database("oauth_auth")
+            .await
+            .expect("local MongoDB required for oauth_service tests");
+
+        let public = test_client("public-auth", "public", "");
+        let confidential = test_client("conf-auth", "confidential", "correct-secret");
+        insert_client(&db, &public).await;
+        insert_client(&db, &confidential).await;
+
+        let authenticated_public = authenticate_client(&db, &public.id, None)
+            .await
+            .expect("public client does not require secret");
+        assert_eq!(authenticated_public.id, public.id);
+
+        let authenticated_confidential =
+            authenticate_client(&db, &confidential.id, Some("correct-secret"))
+                .await
+                .expect("confidential client accepts matching secret");
+        assert_eq!(authenticated_confidential.id, confidential.id);
+
+        let missing = authenticate_client(&db, &confidential.id, None)
+            .await
+            .expect_err("missing secret rejected");
+        assert!(matches!(
+            missing,
+            AppError::Unauthorized(message)
+                if message == "client_secret is required for confidential clients"
+        ));
+
+        let wrong = authenticate_client(&db, &confidential.id, Some("wrong-secret"))
+            .await
+            .expect_err("wrong secret rejected");
+        assert!(
+            matches!(wrong, AppError::Unauthorized(message) if message == "Invalid client_secret")
+        );
+    }
+
+    #[tokio::test]
+    async fn create_authorization_code_persists_hashed_code_and_metadata() {
+        let db = connect_test_database("oauth_code")
+            .await
+            .expect("local MongoDB required for oauth_service tests");
+        let external = ExternalSubjectRef {
+            platform: "lark".to_string(),
+            tenant: Some("tenant-1".to_string()),
+            external_user_id: "ou_123".to_string(),
+        };
+
+        let code = create_authorization_code(
+            &db,
+            "client-1",
+            "user-1",
+            "https://app.example/callback",
+            "openid profile",
+            Some("challenge"),
+            Some("S256"),
+            Some("nonce-1"),
+            Some(&external),
+        )
+        .await
+        .expect("create authorization code");
+
+        assert!(!code.is_empty());
+        let stored = db
+            .collection::<AuthorizationCode>(AUTH_CODES)
+            .find_one(doc! { "code_hash": hash_token(&code) })
+            .await
+            .expect("query auth code")
+            .expect("stored auth code");
+        assert_ne!(stored.code_hash, code);
+        assert_eq!(stored.client_id, "client-1");
+        assert_eq!(stored.user_id, "user-1");
+        assert_eq!(stored.redirect_uri, "https://app.example/callback");
+        assert_eq!(stored.scope, "openid profile");
+        assert_eq!(stored.code_challenge.as_deref(), Some("challenge"));
+        assert_eq!(stored.code_challenge_method.as_deref(), Some("S256"));
+        assert_eq!(stored.nonce.as_deref(), Some("nonce-1"));
+        assert_eq!(stored.external_subject, Some(external));
+        assert!(!stored.used);
+        assert!(stored.expires_at > Utc::now());
+    }
+
+    #[tokio::test]
+    async fn exchange_authorization_code_replay_revokes_existing_refresh_tokens() {
+        let db = connect_test_database("oauth_replay")
+            .await
+            .expect("local MongoDB required for oauth_service tests");
+        let code = "used-code";
+        let user_id = Uuid::new_v4().to_string();
+        let client_id = "client-replay";
+        let now = Utc::now();
+
+        db.collection::<AuthorizationCode>(AUTH_CODES)
+            .insert_one(AuthorizationCode {
+                id: Uuid::new_v4().to_string(),
+                code_hash: hash_token(code),
+                client_id: client_id.to_string(),
+                user_id: user_id.clone(),
+                redirect_uri: "https://app.example/callback".to_string(),
+                scope: "openid".to_string(),
+                code_challenge: None,
+                code_challenge_method: None,
+                nonce: None,
+                external_subject: None,
+                expires_at: now + Duration::minutes(5),
+                used: true,
+                created_at: now,
+            })
+            .await
+            .expect("insert used auth code");
+
+        let refresh = RefreshToken {
+            id: Uuid::new_v4().to_string(),
+            jti: "jti-replay".to_string(),
+            client_id: client_id.to_string(),
+            user_id: user_id.clone(),
+            session_id: None,
+            expires_at: now + Duration::days(1),
+            revoked: false,
+            replaced_by: None,
+            revoked_at: None,
+            created_at: now,
+        };
+        db.collection::<RefreshToken>(REFRESH_TOKENS)
+            .insert_one(&refresh)
+            .await
+            .expect("insert refresh token");
+
+        let config = crate::test_utils::test_app_config();
+        let jwt_keys = crate::test_utils::cached_test_jwt_keys();
+        let err = match exchange_authorization_code(
+            &db,
+            &config,
+            &jwt_keys,
+            code,
+            client_id,
+            "https://app.example/callback",
+            None,
+            None,
+            None,
+        )
+        .await
+        {
+            Ok(_) => panic!("used code rejected as replay"),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err,
+            AppError::BadRequest(message) if message == "Authorization code has already been used"
+        ));
+
+        let revoked = db
+            .collection::<RefreshToken>(REFRESH_TOKENS)
+            .find_one(doc! { "_id": &refresh.id })
+            .await
+            .expect("query refresh")
+            .expect("refresh token remains");
+        assert!(revoked.revoked);
     }
 }
