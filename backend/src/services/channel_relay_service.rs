@@ -8,12 +8,13 @@
 use chrono::Utc;
 use futures::TryStreamExt;
 use hmac::{Hmac, Mac};
-use mongodb::bson::doc;
+use mongodb::bson::{Bson, doc};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::config::AppConfig;
 use crate::errors::{AppError, AppResult};
+use crate::models::channel_conversation::COLLECTION_NAME as CONVERSATIONS;
 use crate::models::channel_message::{COLLECTION_NAME, ChannelMessage};
 use crate::services::channel_platform::InboundMessage;
 
@@ -439,6 +440,64 @@ pub async fn get_outbound_message_by_platform_id(
         .ok_or_else(|| {
             AppError::NotFound(format!("Outbound message not found: {platform_message_id}"))
         })
+}
+
+/// Resolve a single outbound message editable by an assigned agent API key.
+pub async fn get_outbound_message_for_api_key(
+    db: &mongodb::Database,
+    api_key_id: &str,
+    platform_message_id: &str,
+) -> AppResult<ChannelMessage> {
+    let platforms = db
+        .collection::<mongodb::bson::Document>(CONVERSATIONS)
+        .distinct("platform", doc! { "agent_api_key_id": api_key_id })
+        .await?;
+
+    let mut found: Option<ChannelMessage> = None;
+
+    for platform in platforms {
+        let Bson::String(platform) = platform else {
+            continue;
+        };
+
+        match get_outbound_message_by_platform_id(db, &platform, platform_message_id).await {
+            Ok(message) => {
+                if found.is_some() {
+                    return Err(AppError::Conflict(format!(
+                        "Multiple outbound messages found for platform message ID: {platform_message_id}"
+                    )));
+                }
+                found = Some(message);
+            }
+            Err(AppError::NotFound(_)) => {}
+            Err(err) => return Err(err),
+        }
+    }
+
+    if let Some(message) = found {
+        return Ok(message);
+    }
+
+    let matches: Vec<ChannelMessage> = db
+        .collection::<ChannelMessage>(COLLECTION_NAME)
+        .find(doc! {
+            "direction": "outbound",
+            "agent_api_key_id": api_key_id,
+            "platform_message_id": platform_message_id,
+        })
+        .await?
+        .try_collect()
+        .await?;
+
+    match matches.as_slice() {
+        [message] => Ok(message.clone()),
+        [] => Err(AppError::NotFound(format!(
+            "Outbound message not found: {platform_message_id}"
+        ))),
+        _ => Err(AppError::Conflict(format!(
+            "Multiple outbound messages found for platform message ID: {platform_message_id}"
+        ))),
+    }
 }
 
 /// Update the outbound row's `updated_at` timestamp after a successful edit.

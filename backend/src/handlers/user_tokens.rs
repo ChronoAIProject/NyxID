@@ -1522,7 +1522,6 @@ mod tests {
 
         let location = redirect_location(redirect);
         assert!(location.contains("/providers/callback"));
-        // Previously silently skipped before the Mongo test DB prefix fix.
         assert_eq!(
             redirect_query_param(&location, "status").as_deref(),
             Some("error")
@@ -1997,7 +1996,6 @@ mod tests {
         .await;
 
         let location = redirect_location(redirect);
-        // Previously silently skipped before the Mongo test DB prefix fix.
         assert_eq!(
             redirect_query_param(&location, "status").as_deref(),
             Some("error")
@@ -2040,7 +2038,6 @@ mod tests {
         .await;
 
         let location = redirect_location(redirect);
-        // Previously silently skipped before the Mongo test DB prefix fix.
         assert_eq!(
             redirect_query_param(&location, "status").as_deref(),
             Some("error")

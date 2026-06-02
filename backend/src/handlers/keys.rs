@@ -3147,7 +3147,6 @@ mod tests {
         let user_id = uuid::Uuid::new_v4().to_string();
         insert_user(&db, &user_id, UserType::Person).await;
 
-        // Previously silently skipped before the Mongo test DB prefix fix.
         // Current custom-key creation derives the slug from the label when
         // service_slug and slug are both omitted.
         let body = make_create_key_request(

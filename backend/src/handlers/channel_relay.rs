@@ -17,8 +17,7 @@ use axum::{
 };
 use base64::Engine as _;
 use chrono::{Duration, Utc};
-use futures::TryStreamExt;
-use mongodb::bson::{Bson, doc};
+use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
@@ -28,7 +27,7 @@ use crate::handlers::channel_bots::{hash_conversation_id, resolve_adapter};
 use crate::models::api_key::{ApiKey, COLLECTION_NAME as API_KEYS};
 use crate::models::channel_bot::ChannelBot;
 use crate::models::channel_conversation::{COLLECTION_NAME as CONVERSATIONS, ChannelConversation};
-use crate::models::channel_message::{COLLECTION_NAME as CHANNEL_MESSAGES, ChannelMessage};
+use crate::models::channel_message::ChannelMessage;
 use crate::models::notification_channel::{
     COLLECTION_NAME as NOTIFICATION_CHANNELS, NotificationChannel,
 };
@@ -492,75 +491,6 @@ async fn resolve_api_key_reply_context(
     })
 }
 
-async fn find_outbound_message_for_api_key(
-    state: &AppState,
-    api_key_id: &str,
-    platform_message_id: &str,
-) -> AppResult<ChannelMessage> {
-    let platforms = state
-        .db
-        .collection::<ChannelConversation>(CONVERSATIONS)
-        .distinct("platform", doc! { "agent_api_key_id": api_key_id })
-        .await?;
-
-    let mut found: Option<ChannelMessage> = None;
-
-    for platform in platforms {
-        let Bson::String(platform) = platform else {
-            continue;
-        };
-
-        match channel_relay_service::get_outbound_message_by_platform_id(
-            &state.db,
-            &platform,
-            platform_message_id,
-        )
-        .await
-        {
-            Ok(message) => {
-                if found.is_some() {
-                    return Err(AppError::Conflict(format!(
-                        "Multiple outbound messages found for platform message ID: {platform_message_id}"
-                    )));
-                }
-                found = Some(message);
-            }
-            Err(AppError::NotFound(_)) => {}
-            Err(err) => return Err(err),
-        }
-    }
-
-    if let Some(message) = found {
-        return Ok(message);
-    }
-
-    // Conversations can change platform to `device` while older outbound rows
-    // keep their original bot platform. Fall back to the agent-attributed
-    // message row so the caller can load the conversation and hit the device
-    // edit guard instead of returning a misleading 404.
-    let matches: Vec<ChannelMessage> = state
-        .db
-        .collection::<ChannelMessage>(CHANNEL_MESSAGES)
-        .find(doc! {
-            "direction": "outbound",
-            "agent_api_key_id": api_key_id,
-            "platform_message_id": platform_message_id,
-        })
-        .await?
-        .try_collect()
-        .await?;
-
-    match matches.as_slice() {
-        [message] => Ok(message.clone()),
-        [] => Err(AppError::NotFound(format!(
-            "Outbound message not found: {platform_message_id}"
-        ))),
-        _ => Err(AppError::Conflict(format!(
-            "Multiple outbound messages found for platform message ID: {platform_message_id}"
-        ))),
-    }
-}
-
 async fn resolve_reply_token_edit_context(
     state: &AppState,
     token: &str,
@@ -624,8 +554,12 @@ async fn resolve_api_key_edit_context(
         AppError::Forbidden("This endpoint requires API key authentication".to_string())
     })?;
 
-    let outbound =
-        find_outbound_message_for_api_key(state, caller_api_key_id, &body.message_id).await?;
+    let outbound = channel_relay_service::get_outbound_message_for_api_key(
+        &state.db,
+        caller_api_key_id,
+        &body.message_id,
+    )
+    .await?;
     let conversation = load_active_conversation(state, &outbound.conversation_id).await?;
 
     if conversation.agent_api_key_id != caller_api_key_id {

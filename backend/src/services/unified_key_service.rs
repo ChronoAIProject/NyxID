@@ -6534,7 +6534,6 @@ mod tests {
             identity_jwt_audience: Some("https://my-api.example.com".to_string()),
             forward_access_token: true,
             inject_delegation_token: false,
-            // Previously silently skipped before the Mongo test DB prefix fix.
             delegation_token_scope: "proxy:*".to_string(),
         };
 

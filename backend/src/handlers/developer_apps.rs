@@ -663,7 +663,6 @@ mod tests {
 
         assert_eq!(resp["message"], "OAuth client deactivated");
 
-        // Previously silently skipped before the Mongo test DB prefix fix.
         let Json(fetched) = get_my_oauth_client(State(state), auth, Path(created.id))
             .await
             .unwrap();
