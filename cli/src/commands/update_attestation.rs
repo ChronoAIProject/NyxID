@@ -669,4 +669,153 @@ mod tests {
         assert_eq!(parse_json_u64(&Value::from("42")).unwrap(), 42);
         assert!(parse_json_u64(&Value::from("nope")).is_err());
     }
+
+    #[test]
+    fn parse_json_u64_rejects_non_integer_json_values() {
+        assert!(parse_json_u64(&Value::Bool(true)).is_err());
+        assert!(parse_json_u64(&serde_json::json!({ "n": 42 })).is_err());
+    }
+
+    #[test]
+    fn decodes_json_bytes_from_base64_or_plain_json_text() {
+        let encoded = BASE64.encode(br#"{"ok":true}"#);
+        assert_eq!(decode_json_bytes(&encoded).unwrap(), br#"{"ok":true}"#);
+        assert_eq!(
+            decode_json_bytes(r#"{"ok":true}"#).unwrap(),
+            br#"{"ok":true}"#
+        );
+    }
+
+    #[test]
+    fn extracts_single_certificate_from_raw_bytes() {
+        let material = serde_json::json!({
+            "certificate": {
+                "rawBytes": BASE64.encode(b"leaf-cert")
+            }
+        });
+
+        assert_eq!(
+            extract_certificate_chain(&material).unwrap(),
+            vec![b"leaf-cert".to_vec()]
+        );
+    }
+
+    #[test]
+    fn extracts_certificate_chain_array_in_order() {
+        let material = serde_json::json!({
+            "x509CertificateChain": {
+                "certificates": [
+                    {"rawBytes": BASE64.encode(b"leaf")},
+                    {"rawBytes": BASE64.encode(b"intermediate")}
+                ]
+            }
+        });
+
+        assert_eq!(
+            extract_certificate_chain(&material).unwrap(),
+            vec![b"leaf".to_vec(), b"intermediate".to_vec()]
+        );
+    }
+
+    #[test]
+    fn extract_certificate_chain_rejects_missing_or_malformed_material() {
+        assert!(extract_certificate_chain(&serde_json::json!({})).is_err());
+
+        let malformed = serde_json::json!({
+            "x509CertificateChain": {
+                "certificates": [
+                    {"rawBytes": "***not-base64***"}
+                ]
+            }
+        });
+        let err = extract_certificate_chain(&malformed).expect_err("malformed chain");
+        assert!(err.to_string().contains("Failed to decode"));
+    }
+
+    #[test]
+    fn extracts_tlog_entries_from_array_or_rekor_bundle() {
+        let material = serde_json::json!({
+            "tlogEntries": [
+                {"logIndex": 7}
+            ]
+        });
+        assert_eq!(extract_tlog_entries(&material).unwrap()[0]["logIndex"], 7);
+
+        let legacy = serde_json::json!({
+            "rekorBundle": {"logIndex": 9}
+        });
+        assert_eq!(extract_tlog_entries(&legacy).unwrap()[0]["logIndex"], 9);
+
+        assert!(extract_tlog_entries(&serde_json::json!({})).is_err());
+    }
+
+    #[test]
+    fn parse_bundle_extracts_payload_certificate_chain_and_tlog_entries() {
+        let payload = br#"{"subject":[]}"#;
+        let attestation = Attestation {
+            bundle_url: None,
+            bundle: Some(SigstoreBundle {
+                dsse_envelope: Some(DsseEnvelope {
+                    payload: BASE64.encode(payload),
+                    payload_type: "application/vnd.in-toto+json".to_string(),
+                    signatures: vec![DsseSignature {
+                        sig: BASE64.encode(b"sig"),
+                    }],
+                }),
+                verification_material: Some(serde_json::json!({
+                    "certificate": {
+                        "rawBytes": BASE64.encode(b"leaf-cert")
+                    },
+                    "tlogEntries": [
+                        {"logIndex": 1}
+                    ]
+                })),
+            }),
+        };
+
+        let parsed = parse_bundle(&attestation).expect("parsed bundle");
+        assert_eq!(parsed.payload, payload);
+        assert_eq!(parsed.envelope.payload_type, "application/vnd.in-toto+json");
+        assert_eq!(parsed.envelope.signatures[0].sig, BASE64.encode(b"sig"));
+        assert_eq!(parsed.certificate_chain, vec![b"leaf-cert".to_vec()]);
+        assert_eq!(parsed.tlog_entries[0]["logIndex"], 1);
+        assert!(parsed.envelope.payload.len() > parsed.payload.len());
+        assert!(attestation.bundle_url.is_none());
+    }
+
+    #[test]
+    fn parse_bundle_rejects_missing_bundle_sections() {
+        let missing_bundle = Attestation {
+            bundle: None,
+            bundle_url: None,
+        };
+        assert!(parse_bundle(&missing_bundle).is_err());
+
+        let missing_envelope = Attestation {
+            bundle_url: None,
+            bundle: Some(SigstoreBundle {
+                dsse_envelope: None,
+                verification_material: Some(serde_json::json!({})),
+            }),
+        };
+        let err = parse_bundle(&missing_envelope).expect_err("missing envelope");
+        assert!(err.to_string().contains("DSSE envelope"));
+    }
+
+    #[test]
+    fn writes_big_endian_u16_and_u24_lengths() {
+        let mut out = Vec::new();
+        write_u16(&mut out, 0x1234).unwrap();
+        write_u24(&mut out, 0x00ab_cdef).unwrap();
+        assert_eq!(out, vec![0x12, 0x34, 0xab, 0xcd, 0xef]);
+
+        assert!(write_u16(&mut Vec::new(), 0x1_0000).is_err());
+        assert!(write_u24(&mut Vec::new(), 0x0100_0000).is_err());
+    }
+
+    #[test]
+    fn normalize_log_key_id_trims_hex_and_rejects_invalid_base64() {
+        assert_eq!(normalize_log_key_id("  ABcd42  ").unwrap(), "abcd42");
+        assert!(normalize_log_key_id("not valid base64!").is_err());
+    }
 }
