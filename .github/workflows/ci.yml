@@ -368,20 +368,15 @@ jobs:
   #      artifact (AC #6). The summary files feed the PR-comment job.
   #
   # Enforced thresholds (fail the PR if line % drops below):
-  #   Backend (nyxid)     >= 40%   (currently ~43.7%, PR #836)
-  #   CLI (nyxid-cli)      >= 30%   (currently ~63.5%, PR #836)
+  #   Backend (nyxid)      >= 73%   (currently ~74.8%)
+  #   CLI (nyxid-cli)      >= 64%   (currently ~65.5%)
   #   Frontend (vitest)    >= 15%   (currently ~41%)
   #
-  # RATCHET PLAN (W21 coverage push, issues #782-#787): as those test issues
-  # land, raise the gates to BE -> 55%, CLI -> 50%, FE -> 30% by quarter end.
-  # Bump the `--fail-under-lines` values below AND the matching FE
-  # `coverage.thresholds.lines` in frontend/vite.config.ts together. Only ever
-  # ratchet UP — never lower a threshold to make a red PR pass.
-  #
-  # NOTE on Rust % vs PR #836: `cargo-llvm-cov` counts inline `#[cfg(test)]`
-  # modules in the denominator, so the reported % is a few points lower than a
-  # production-only measurement. The gates are set conservatively against the
-  # PR #836 numbers to absorb that and normal churn.
+  # RATCHET PLAN: Future ratchets must only move thresholds UP. Raise each Rust
+  # `--fail-under-lines` gate and matching `coverage_summary.py` summary
+  # threshold together when coverage rises; never lower a threshold to make a
+  # failing run pass. Keep the frontend summary threshold in sync with
+  # `coverage.thresholds.lines` in frontend/vite.config.ts.
   # ===========================================================================
 
   # ---------------------------------------------------------------------------
@@ -435,7 +430,7 @@ jobs:
       - name: Build head summary JSON
         run: |
           python3 .github/scripts/coverage_summary.py \
-            backend "Backend (nyxid)" 40 \
+            backend "Backend (nyxid)" 73 \
             coverage-backend.raw.json coverage-backend.json
 
       # Base: best-effort second run for the delta. Never blocks the gate.
@@ -460,7 +455,7 @@ jobs:
       # so a regression fails the job *and* still surfaces the failing number in
       # the PR comment. Re-reads the existing profdata (no re-run).
       - name: Enforce coverage gate (head)
-        run: cargo llvm-cov report --package nyxid --fail-under-lines 40
+        run: cargo llvm-cov report --package nyxid --fail-under-lines 73
 
       - name: Upload coverage artifact
         if: always()
@@ -505,7 +500,7 @@ jobs:
       - name: Build head summary JSON
         run: |
           python3 .github/scripts/coverage_summary.py \
-            cli "CLI (nyxid-cli)" 30 \
+            cli "CLI (nyxid-cli)" 64 \
             coverage-cli.raw.json coverage-cli.json
 
       - name: Measure base branch
@@ -527,7 +522,7 @@ jobs:
 
       # Enforce the threshold LAST (see backend job for rationale).
       - name: Enforce coverage gate (head)
-        run: cargo llvm-cov report --package nyxid-cli --fail-under-lines 30
+        run: cargo llvm-cov report --package nyxid-cli --fail-under-lines 64
 
       - name: Upload coverage artifact
         if: always()
