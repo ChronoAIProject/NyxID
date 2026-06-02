@@ -247,7 +247,7 @@ fn html_response_with_csp(html: String, csp: &str) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use super::service_openapi_json;
+    use super::{catalog_ui, docs_ui, openapi_json, service_openapi_json};
     use crate::errors::AppError;
     use crate::models::user::COLLECTION_NAME as USERS;
     use crate::models::user::UserType;
@@ -261,6 +261,8 @@ mod tests {
     use axum::{
         body::to_bytes,
         extract::{Path, State},
+        http::header,
+        response::IntoResponse,
     };
     use uuid::Uuid;
 
@@ -280,6 +282,88 @@ mod tests {
                 }
             }
         })
+    }
+
+    async fn body_string(response: axum::response::Response) -> String {
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn docs_ui_renders_scalar_html_with_csp_and_trimmed_spec_url() {
+        let mut state = crate::test_utils::test_app_state_no_db().await;
+        state.config.base_url = "https://api.example.test/".to_string();
+        let auth = test_auth_user(&Uuid::new_v4().to_string());
+
+        let response = docs_ui(State(state), auth).await.into_response();
+
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("text/html; charset=utf-8")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_SECURITY_POLICY)
+                .and_then(|value| value.to_str().ok()),
+            Some(
+                "default-src 'none'; script-src https://cdn.jsdelivr.net; style-src 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data: https:; connect-src 'self'; frame-ancestors 'none'"
+            )
+        );
+
+        let body = body_string(response).await;
+        assert!(body.contains("<title>NyxID API Docs</title>"));
+        assert!(body.contains(r#"data-url="https://api.example.test/api/v1/docs/openapi.json""#));
+        assert!(body.contains(r#"id="api-reference""#));
+    }
+
+    #[tokio::test]
+    async fn catalog_ui_renders_catalog_html_with_csp() {
+        let state = crate::test_utils::test_app_state_no_db().await;
+        let auth = test_auth_user(&Uuid::new_v4().to_string());
+
+        let response = catalog_ui(State(state), auth).await.into_response();
+
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("text/html; charset=utf-8")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_SECURITY_POLICY)
+                .and_then(|value| value.to_str().ok()),
+            Some(
+                "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data: https:; connect-src 'self'; frame-ancestors 'none'"
+            )
+        );
+
+        let body = body_string(response).await;
+        assert!(body.contains("<title>NyxID API Catalog</title>"));
+        assert!(body.contains("<h1>NyxID API Catalog</h1>"));
+        assert!(body.contains("Discover NyxID proxy services"));
+    }
+
+    #[tokio::test]
+    async fn openapi_json_returns_31_document_with_trimmed_server_url() {
+        let mut state = crate::test_utils::test_app_state_no_db().await;
+        state.config.base_url = "https://api.example.test/".to_string();
+        let auth = test_auth_user(&Uuid::new_v4().to_string());
+
+        let axum::Json(value) = openapi_json(State(state), auth).await.unwrap();
+
+        assert_eq!(value["openapi"], "3.1.0");
+        assert_eq!(value["servers"][0]["url"], "https://api.example.test");
+        assert_eq!(value["info"]["title"], "nyxid");
+        assert_eq!(value["info"]["version"], env!("CARGO_PKG_VERSION"));
+        assert!(value["paths"]["/api/v1/demo"].is_object());
+        assert!(value["components"]["schemas"].is_object());
     }
 
     #[tokio::test]

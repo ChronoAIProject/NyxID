@@ -347,4 +347,123 @@ mod tests {
                 .unwrap();
         assert!(!after.has_credentials);
     }
+
+    #[tokio::test]
+    async fn test_set_my_credentials_rejects_inactive_provider() {
+        let Some(db) = connect_test_database("h_user_creds_inactive_provider").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let provider_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(test_provider(&provider_id, "user", false))
+            .await
+            .unwrap();
+
+        let state = test_app_state(db);
+        let err = set_my_credentials(
+            State(state),
+            test_auth_user(&user_id),
+            TelemetryContext::default(),
+            Path(provider_id),
+            Json(SetUserCredentialsRequest {
+                client_id: "client-id".to_string(),
+                client_secret: None,
+                label: None,
+            }),
+        )
+        .await
+        .expect_err("inactive provider should be rejected");
+
+        assert!(matches!(
+            err,
+            AppError::BadRequest(message) if message == "Provider is not active"
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_set_my_credentials_rejects_admin_credential_mode() {
+        let Some(db) = connect_test_database("h_user_creds_admin_mode").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let provider_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(test_provider(&provider_id, "admin", true))
+            .await
+            .unwrap();
+
+        let state = test_app_state(db);
+        let err = set_my_credentials(
+            State(state),
+            test_auth_user(&user_id),
+            TelemetryContext::default(),
+            Path(provider_id),
+            Json(SetUserCredentialsRequest {
+                client_id: "client-id".to_string(),
+                client_secret: None,
+                label: None,
+            }),
+        )
+        .await
+        .expect_err("admin-only provider should reject user credentials");
+
+        assert!(matches!(
+            err,
+            AppError::BadRequest(message)
+                if message == "This provider does not accept user-provided credentials"
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_set_my_credentials_rejects_invalid_client_id_and_secret_lengths() {
+        let Some(db) = connect_test_database("h_user_creds_validation").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let provider_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(test_provider(&provider_id, "user", true))
+            .await
+            .unwrap();
+
+        let state = test_app_state(db);
+        let empty_client_id = set_my_credentials(
+            State(state.clone()),
+            test_auth_user(&user_id),
+            TelemetryContext::default(),
+            Path(provider_id.clone()),
+            Json(SetUserCredentialsRequest {
+                client_id: String::new(),
+                client_secret: None,
+                label: None,
+            }),
+        )
+        .await
+        .expect_err("empty client_id should fail validation");
+        assert!(matches!(
+            empty_client_id,
+            AppError::ValidationError(message)
+                if message == "client_id must be between 1 and 500 characters"
+        ));
+
+        let long_secret = set_my_credentials(
+            State(state),
+            test_auth_user(&user_id),
+            TelemetryContext::default(),
+            Path(provider_id),
+            Json(SetUserCredentialsRequest {
+                client_id: "client-id".to_string(),
+                client_secret: Some("s".repeat(2001)),
+                label: None,
+            }),
+        )
+        .await
+        .expect_err("oversized client_secret should fail validation");
+        assert!(matches!(
+            long_secret,
+            AppError::ValidationError(message)
+                if message == "client_secret must be at most 2000 characters"
+        ));
+    }
 }

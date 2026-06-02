@@ -315,11 +315,76 @@ fn external_api_key_response(key: UserApiKey) -> ExternalApiKeyResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::org_membership::{
+        COLLECTION_NAME as ORG_MEMBERSHIPS, OrgMembership, OrgRole,
+    };
     use crate::models::user::UserType;
     use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
+    use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
+    use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
     use crate::services::user_api_key_service;
     use crate::test_utils::*;
     use axum::extract::{Path, State};
+    use chrono::Utc;
+
+    fn fixture_external_key(key_id: &str, user_id: &str, label: &str) -> UserApiKey {
+        UserApiKey {
+            id: key_id.to_string(),
+            user_id: user_id.to_string(),
+            label: label.to_string(),
+            credential_type: "api_key".to_string(),
+            credential_encrypted: Some(vec![1, 2, 3]),
+            access_token_encrypted: None,
+            refresh_token_encrypted: None,
+            token_scopes: None,
+            expires_at: None,
+            provider_config_id: None,
+            connection_id: None,
+            user_oauth_client_id_encrypted: None,
+            user_oauth_client_secret_encrypted: None,
+            status: "active".to_string(),
+            last_used_at: None,
+            error_message: None,
+            source: Some("user_created".to_string()),
+            source_id: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    async fn seed_service_for_key(
+        db: &mongodb::Database,
+        owner_id: &str,
+        service_id: &str,
+        key_id: &str,
+    ) {
+        let endpoint_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(test_user_endpoint(
+                &endpoint_id,
+                owner_id,
+                "External Key Endpoint",
+                "https://service.example.com",
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        let mut service = test_user_service(
+            service_id,
+            owner_id,
+            "external-key-service",
+            &endpoint_id,
+            None,
+            None,
+        );
+        service.api_key_id = Some(key_id.to_string());
+        service.auth_method = "bearer".to_string();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(service)
+            .await
+            .unwrap();
+    }
 
     #[tokio::test]
     async fn test_list_external_api_keys_empty() {
@@ -518,5 +583,171 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(remaining, 0);
+    }
+
+    #[tokio::test]
+    async fn resolve_api_key_write_owner_allows_scoped_org_admin_for_bound_service() {
+        let Some(db) = connect_test_database("h_ext_keys_org_admin_scoped").await else {
+            return;
+        };
+        let actor_id = uuid::Uuid::new_v4().to_string();
+        let org_id = uuid::Uuid::new_v4().to_string();
+        let key_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_many([
+                test_user(&actor_id, UserType::Person),
+                test_user(&org_id, UserType::Org),
+            ])
+            .await
+            .unwrap();
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(
+                &org_id,
+                &actor_id,
+                OrgRole::Admin,
+                Some(vec![service_id.clone()]),
+            ))
+            .await
+            .unwrap();
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .insert_one(fixture_external_key(&key_id, &org_id, "Org Credential"))
+            .await
+            .unwrap();
+        seed_service_for_key(&db, &org_id, &service_id, &key_id).await;
+
+        let state = test_app_state(db);
+        let owner_id = resolve_api_key_write_owner(&state, &actor_id, &key_id)
+            .await
+            .unwrap();
+
+        assert_eq!(owner_id, org_id);
+    }
+
+    #[tokio::test]
+    async fn resolve_api_key_write_owner_hides_scoped_org_orphan_key() {
+        let Some(db) = connect_test_database("h_ext_keys_org_orphan_scoped").await else {
+            return;
+        };
+        let actor_id = uuid::Uuid::new_v4().to_string();
+        let org_id = uuid::Uuid::new_v4().to_string();
+        let key_id = uuid::Uuid::new_v4().to_string();
+
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_many([
+                test_user(&actor_id, UserType::Person),
+                test_user(&org_id, UserType::Org),
+            ])
+            .await
+            .unwrap();
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(
+                &org_id,
+                &actor_id,
+                OrgRole::Admin,
+                Some(vec![uuid::Uuid::new_v4().to_string()]),
+            ))
+            .await
+            .unwrap();
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .insert_one(fixture_external_key(
+                &key_id,
+                &org_id,
+                "Unbound Org Credential",
+            ))
+            .await
+            .unwrap();
+
+        let state = test_app_state(db);
+        let err = resolve_api_key_write_owner(&state, &actor_id, &key_id)
+            .await
+            .expect_err("scoped admin has no resource claim on orphan credential");
+
+        assert!(matches!(
+            err,
+            AppError::NotFound(message) if message == "API key not found"
+        ));
+    }
+
+    #[tokio::test]
+    async fn update_external_api_key_denies_org_viewer_write() {
+        let Some(db) = connect_test_database("h_ext_keys_org_viewer_denied").await else {
+            return;
+        };
+        let actor_id = uuid::Uuid::new_v4().to_string();
+        let org_id = uuid::Uuid::new_v4().to_string();
+        let key_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_many([
+                test_user(&actor_id, UserType::Person),
+                test_user(&org_id, UserType::Org),
+            ])
+            .await
+            .unwrap();
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(&org_id, &actor_id, OrgRole::Viewer, None))
+            .await
+            .unwrap();
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .insert_one(fixture_external_key(&key_id, &org_id, "Org Credential"))
+            .await
+            .unwrap();
+        seed_service_for_key(&db, &org_id, &service_id, &key_id).await;
+
+        let state = test_app_state(db);
+        let err = update_external_api_key(
+            State(state),
+            test_auth_user(&actor_id),
+            Path(key_id),
+            Json(UpdateExternalApiKeyRequest {
+                label: Some("Viewer Edit".to_string()),
+                credential: None,
+            }),
+        )
+        .await
+        .expect_err("org viewer cannot update external API keys");
+
+        assert!(matches!(
+            err,
+            AppError::OrgRoleInsufficient(message)
+                if message == "you do not have permission to modify this API key"
+        ));
+    }
+
+    #[tokio::test]
+    async fn delete_external_api_key_returns_conflict_when_active_service_uses_key() {
+        let Some(db) = connect_test_database("h_ext_keys_delete_in_use").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let key_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(test_user(&user_id, UserType::Person))
+            .await
+            .unwrap();
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .insert_one(fixture_external_key(&key_id, &user_id, "In Use"))
+            .await
+            .unwrap();
+        seed_service_for_key(&db, &user_id, &service_id, &key_id).await;
+
+        let state = test_app_state(db);
+        let err =
+            match delete_external_api_key(State(state), test_auth_user(&user_id), Path(key_id))
+                .await
+            {
+                Ok(_) => panic!("active service reference should prevent credential delete"),
+                Err(err) => err,
+            };
+
+        assert!(matches!(
+            err,
+            AppError::Conflict(message) if message == "API key is in use by active services"
+        ));
     }
 }
