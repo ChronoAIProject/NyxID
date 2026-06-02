@@ -171,6 +171,11 @@ fn is_duplicate_key_error(error: &mongodb::error::Error) -> bool {
 
 fn is_duplicate_slug_app_error(error: &AppError) -> bool {
     matches!(error, AppError::DatabaseError(db_error) if is_duplicate_key_error(db_error))
+        || matches!(
+            error,
+            AppError::Conflict(message)
+                if message.starts_with("You already have an active service with slug '")
+        )
 }
 
 fn identity_config_from_downstream_service(
@@ -3003,7 +3008,7 @@ mod tests {
 
     use chrono::Utc;
     use futures::TryStreamExt;
-    use mongodb::bson::doc;
+    use mongodb::{IndexModel, bson::doc, options::IndexOptions};
 
     use super::{
         AUTO_PROVISION_SOURCE, MAX_SERVICE_SLUG_LEN, OauthClientCredentialsInput,
@@ -3037,6 +3042,23 @@ mod tests {
     use crate::models::user_service::UserService;
     use crate::services::user_service_service::validate_slug;
     use crate::test_utils::{connect_test_database, test_encryption_keys};
+
+    async fn ensure_user_services_slug_unique_index_for_test(db: &mongodb::Database) {
+        db.collection::<mongodb::bson::Document>(USER_SERVICES)
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! { "user_id": 1, "slug": 1 })
+                    .options(
+                        IndexOptions::builder()
+                            .unique(true)
+                            .partial_filter_expression(doc! { "is_active": true })
+                            .build(),
+                    )
+                    .build(),
+            )
+            .await
+            .expect("create production user_services slug uniqueness index");
+    }
 
     fn sample_api_key(credential_type: &str) -> UserApiKey {
         UserApiKey {
@@ -3528,6 +3550,7 @@ mod tests {
             eprintln!("skipping unified_key_service integration test: no local MongoDB available");
             return;
         };
+        ensure_user_services_slug_unique_index_for_test(&db).await;
 
         let encryption_keys = test_encryption_keys();
         let user_id = uuid::Uuid::new_v4().to_string();
@@ -6511,7 +6534,8 @@ mod tests {
             identity_jwt_audience: Some("https://my-api.example.com".to_string()),
             forward_access_token: true,
             inject_delegation_token: false,
-            delegation_token_scope: "read:all".to_string(),
+            // Previously silently skipped before the Mongo test DB prefix fix.
+            delegation_token_scope: "proxy:*".to_string(),
         };
 
         let result = create_key(
@@ -6542,6 +6566,7 @@ mod tests {
         assert!(result.service.identity_include_email);
         assert!(!result.service.identity_include_name);
         assert!(result.service.forward_access_token);
+        assert_eq!(result.service.delegation_token_scope, "proxy:*");
     }
 
     // ── list_keys / get_key integration ─────────────────────────────

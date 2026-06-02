@@ -5708,7 +5708,9 @@ mod proxy_resolution_integration_tests {
     use axum::{
         Router,
         body::Body,
+        extract::{Path, State},
         http::{Method, Request, StatusCode, Uri},
+        response::{IntoResponse, Response},
         routing::get,
     };
     use chrono::Utc;
@@ -5743,16 +5745,42 @@ mod proxy_resolution_integration_tests {
             .expect("build proxy request")
     }
 
-    fn ws_proxy_request(uri: &str) -> Request<Body> {
-        Request::builder()
-            .method(Method::GET)
-            .uri(uri)
-            .header("connection", "Upgrade")
-            .header("upgrade", "websocket")
-            .header("sec-websocket-version", "13")
-            .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
-            .body(Body::empty())
-            .expect("build websocket proxy request")
+    async fn ws_proxy_test_route(
+        State((state, auth)): State<(AppState, AuthUser)>,
+        Path((slug, path)): Path<(String, String)>,
+        request: Request<Body>,
+    ) -> Response {
+        let mut resolved_slug = String::new();
+        match proxy_request_by_slug_inner(&state, &auth, &slug, &path, request, &mut resolved_slug)
+            .await
+        {
+            Ok(response) if resolved_slug == slug => response,
+            Ok(_) => AppError::Internal("proxy resolved unexpected service slug".to_string())
+                .into_response(),
+            Err(error) => error.into_response(),
+        }
+    }
+
+    async fn assert_ws_proxy_upgrade(state: AppState, auth: AuthUser, path: &str) {
+        let app = Router::new()
+            .route("/proxy/s/{slug}/{*path}", get(ws_proxy_test_route))
+            .with_state((state, auth));
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ws proxy test listener");
+        let addr = listener.local_addr().expect("ws proxy listener addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve ws proxy test app");
+        });
+
+        let url = format!("ws://{addr}{path}");
+        let (_socket, response) = tokio_tungstenite::connect_async(&url)
+            .await
+            .expect("websocket proxy should upgrade");
+        assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
+        server.abort();
     }
 
     fn service_account_auth(service_account_id: &str, owner_user_id: &str) -> AuthUser {
@@ -6157,20 +6185,12 @@ mod proxy_resolution_integration_tests {
         state.node_ws_manager.register_connection(&node.id, tx);
         let responder = spawn_ws_open_responder(&state, &node.id, rx, service.slug.clone());
 
-        let mut resolved_slug = String::new();
-        let response = proxy_request_by_slug_inner(
-            &state,
-            &access_token_auth(&member_id),
-            &service.slug,
-            "socket",
-            ws_proxy_request("/proxy/s/org-node-ws-target/socket"),
-            &mut resolved_slug,
+        assert_ws_proxy_upgrade(
+            state.clone(),
+            access_token_auth(&member_id),
+            "/proxy/s/org-node-ws-target/socket",
         )
-        .await
-        .expect("org member should open ws through org node");
-
-        assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
-        assert_eq!(resolved_slug, service.slug);
+        .await;
         responder.await.expect("node ws responder task");
 
         let audit = wait_for_node_audit_event(&db, &node.id, "proxy_ws_upgrade")
@@ -6222,20 +6242,12 @@ mod proxy_resolution_integration_tests {
         state.node_ws_manager.register_connection(&node.id, tx);
         let responder = spawn_ws_open_responder(&state, &node.id, rx, service.slug.clone());
 
-        let mut resolved_slug = String::new();
-        let response = proxy_request_by_slug_inner(
-            &state,
-            &access_token_auth(&owner_id),
-            &service.slug,
-            "socket",
-            ws_proxy_request("/proxy/s/personal-node-ws-target/socket"),
-            &mut resolved_slug,
+        assert_ws_proxy_upgrade(
+            state.clone(),
+            access_token_auth(&owner_id),
+            "/proxy/s/personal-node-ws-target/socket",
         )
-        .await
-        .expect("owner should open ws through personal node");
-
-        assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
-        assert_eq!(resolved_slug, service.slug);
+        .await;
         responder.await.expect("node ws responder task");
 
         let audit = wait_for_node_audit_event(&db, &node.id, "proxy_ws_upgrade")

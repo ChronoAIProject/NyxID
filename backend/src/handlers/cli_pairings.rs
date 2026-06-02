@@ -453,7 +453,8 @@ mod tests {
             auth,
             Path(created.id),
             Json(CompletePairingRequest {
-                ack: serde_json::json!({"api_key_id": "abc-123"}),
+                // Previously silently skipped before the Mongo test DB prefix fix.
+                ack: serde_json::json!({"acknowledged": true, "api_key_id": "abc-123"}),
             }),
         )
         .await

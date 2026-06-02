@@ -203,12 +203,27 @@ mod tests {
 
     #[tokio::test]
     async fn role_scope_endpoints_create_update_list_and_clear() {
+        use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
+        use crate::test_utils::test_user_service;
+
         let Some((db, org_id, admin_id, _member_id)) =
             setup_org_admin("org_role_scope_handler_flow").await
         else {
             eprintln!("skipping org role scope handler test: no local MongoDB available");
             return;
         };
+        let scoped_svc_id = Uuid::new_v4().to_string();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(test_user_service(
+                &scoped_svc_id,
+                &org_id,
+                "scoped-svc",
+                &Uuid::new_v4().to_string(),
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
         let state = test_app_state(db);
 
         let Json(listed) = list_role_scopes(
@@ -226,13 +241,13 @@ mod tests {
             test_auth_user(&admin_id),
             Path((org_id.clone(), "member".to_string())),
             Json(UpdateRoleScopeRequest {
-                allowed_service_ids: Some(vec!["svc-1".to_string()]),
+                allowed_service_ids: Some(vec![scoped_svc_id.clone()]),
             }),
         )
         .await
         .expect("set member role scope");
         assert_eq!(updated.role, OrgRoleWire::Member);
-        assert_eq!(updated.allowed_service_ids, Some(vec!["svc-1".to_string()]));
+        assert_eq!(updated.allowed_service_ids, Some(vec![scoped_svc_id]));
         assert!(!updated.is_default);
 
         let Json(listed) = list_role_scopes(

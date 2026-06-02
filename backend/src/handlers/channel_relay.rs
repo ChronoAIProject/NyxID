@@ -17,6 +17,7 @@ use axum::{
 };
 use base64::Engine as _;
 use chrono::{Duration, Utc};
+use futures::TryStreamExt;
 use mongodb::bson::{Bson, doc};
 use serde::{Deserialize, Serialize};
 
@@ -27,7 +28,7 @@ use crate::handlers::channel_bots::{hash_conversation_id, resolve_adapter};
 use crate::models::api_key::{ApiKey, COLLECTION_NAME as API_KEYS};
 use crate::models::channel_bot::ChannelBot;
 use crate::models::channel_conversation::{COLLECTION_NAME as CONVERSATIONS, ChannelConversation};
-use crate::models::channel_message::ChannelMessage;
+use crate::models::channel_message::{COLLECTION_NAME as CHANNEL_MESSAGES, ChannelMessage};
 use crate::models::notification_channel::{
     COLLECTION_NAME as NOTIFICATION_CHANNELS, NotificationChannel,
 };
@@ -529,9 +530,35 @@ async fn find_outbound_message_for_api_key(
         }
     }
 
-    found.ok_or_else(|| {
-        AppError::NotFound(format!("Outbound message not found: {platform_message_id}"))
-    })
+    if let Some(message) = found {
+        return Ok(message);
+    }
+
+    // Conversations can change platform to `device` while older outbound rows
+    // keep their original bot platform. Fall back to the agent-attributed
+    // message row so the caller can load the conversation and hit the device
+    // edit guard instead of returning a misleading 404.
+    let matches: Vec<ChannelMessage> = state
+        .db
+        .collection::<ChannelMessage>(CHANNEL_MESSAGES)
+        .find(doc! {
+            "direction": "outbound",
+            "agent_api_key_id": api_key_id,
+            "platform_message_id": platform_message_id,
+        })
+        .await?
+        .try_collect()
+        .await?;
+
+    match matches.as_slice() {
+        [message] => Ok(message.clone()),
+        [] => Err(AppError::NotFound(format!(
+            "Outbound message not found: {platform_message_id}"
+        ))),
+        _ => Err(AppError::Conflict(format!(
+            "Multiple outbound messages found for platform message ID: {platform_message_id}"
+        ))),
+    }
 }
 
 async fn resolve_reply_token_edit_context(
@@ -1163,6 +1190,11 @@ mod tests {
         let state = test_app_state(db.clone());
         let now = Utc::now();
         let user_id = Uuid::new_v4().to_string();
+        let bot_token_encrypted = state
+            .encryption_keys
+            .encrypt(b"bot-token")
+            .await
+            .expect("encrypt test bot token");
 
         let api_key = ApiKey {
             id: Uuid::new_v4().to_string(),
@@ -1191,7 +1223,7 @@ mod tests {
             user_id: user_id.clone(),
             platform: "telegram".to_string(),
             label: "Test Bot".to_string(),
-            bot_token_encrypted: vec![1, 2, 3],
+            bot_token_encrypted,
             platform_bot_id: "bot_123".to_string(),
             platform_bot_username: "test_bot".to_string(),
             webhook_registered: true,

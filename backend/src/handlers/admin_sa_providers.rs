@@ -447,7 +447,8 @@ mod tests {
             .await
             .expect_err("missing SA should fail");
 
-        assert!(matches!(err, AppError::NotFound(_)));
+        // Previously silently skipped before the Mongo test DB prefix fix.
+        assert!(matches!(err, AppError::ServiceAccountNotFound(_)));
     }
 
     #[tokio::test]
