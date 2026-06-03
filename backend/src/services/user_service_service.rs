@@ -2635,4 +2635,63 @@ mod tests {
             SshAuthMode::ProxyOnly
         ));
     }
+
+    #[tokio::test]
+    async fn rebind_user_service_api_key_repoints_and_forces_bearer() {
+        let Some(db) = connect_test_database("rebind_user_service_api_key").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let key_id = uuid::Uuid::new_v4().to_string();
+
+        // A service currently bound to nothing (auth_method "none").
+        let svc = test_user_service(
+            &uuid::Uuid::new_v4().to_string(),
+            &user_id,
+            "google-bigquery",
+            &uuid::Uuid::new_v4().to_string(),
+            None,
+            None,
+        );
+        db.collection::<UserService>(COLLECTION_NAME)
+            .insert_one(&svc)
+            .await
+            .unwrap();
+        // The destination key (ownership is verified by the rebind).
+        db.collection::<mongodb::bson::Document>(USER_API_KEYS)
+            .insert_one(doc! { "_id": &key_id, "user_id": &user_id })
+            .await
+            .unwrap();
+
+        rebind_user_service_api_key(&db, &user_id, "google-bigquery", &key_id)
+            .await
+            .unwrap();
+
+        let rebound = db
+            .collection::<UserService>(COLLECTION_NAME)
+            .find_one(doc! { "slug": "google-bigquery", "user_id": &user_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(rebound.api_key_id.as_deref(), Some(key_id.as_str()));
+        assert_eq!(rebound.auth_method, "bearer");
+
+        // Unknown slug is rejected.
+        let err = rebind_user_service_api_key(&db, &user_id, "no-such-slug", &key_id)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::NotFound(_)), "got {err:?}");
+
+        // A key that doesn't belong to the user is rejected (no rebind to
+        // someone else's credential).
+        let foreign = rebind_user_service_api_key(
+            &db,
+            &user_id,
+            "google-bigquery",
+            &uuid::Uuid::new_v4().to_string(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(foreign, AppError::NotFound(_)), "got {foreign:?}");
+    }
 }

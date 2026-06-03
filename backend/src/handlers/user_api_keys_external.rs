@@ -878,4 +878,96 @@ mod tests {
             AppError::Conflict(message) if message == "API key is in use by active services"
         ));
     }
+
+    #[tokio::test]
+    async fn test_create_gcp_service_account_stores_and_rebinds() {
+        use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
+
+        let Some(db) = connect_test_database("h_ext_gcp_sa_create").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let state = test_app_state(db.clone());
+
+        let (token_uri, _handle) = spawn_mock_token_server(
+            serde_json::json!({ "access_token": "ya29.minted", "expires_in": 3600 }),
+            axum::http::StatusCode::OK,
+        )
+        .await;
+
+        // A pre-existing service for the rebind target.
+        let svc = test_user_service(
+            &uuid::Uuid::new_v4().to_string(),
+            &user_id,
+            "google-bigquery",
+            &uuid::Uuid::new_v4().to_string(),
+            None,
+            None,
+        );
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(&svc)
+            .await
+            .unwrap();
+
+        let body = CreateGcpServiceAccountRequest {
+            label: Some("GCP Cost Reader".to_string()),
+            key_json: test_gcp_sa_json(&token_uri),
+            scopes: None,
+            service_slugs: vec!["google-bigquery".to_string()],
+        };
+
+        let (status, Json(resp)) =
+            create_gcp_service_account_key(State(state), test_auth_user(&user_id), Json(body))
+                .await
+                .unwrap();
+
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(resp.credential_type, "gcp_service_account");
+        assert_eq!(resp.status, "active");
+
+        // The durable SA key and the minted token are both stored.
+        let stored = db
+            .collection::<UserApiKey>(USER_API_KEYS)
+            .find_one(doc! { "_id": &resp.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored.credential_encrypted.is_some());
+        assert!(stored.access_token_encrypted.is_some());
+        assert_eq!(
+            stored.token_scopes.as_deref(),
+            Some("https://www.googleapis.com/auth/cloud-platform")
+        );
+
+        // The named service was re-pointed onto the new key as bearer.
+        let rebound = db
+            .collection::<UserService>(USER_SERVICES)
+            .find_one(doc! { "slug": "google-bigquery", "user_id": &user_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(rebound.api_key_id.as_deref(), Some(resp.id.as_str()));
+        assert_eq!(rebound.auth_method, "bearer");
+    }
+
+    #[tokio::test]
+    async fn test_create_gcp_service_account_rejects_invalid_json() {
+        let Some(db) = connect_test_database("h_ext_gcp_sa_badjson").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let state = test_app_state(db);
+
+        let body = CreateGcpServiceAccountRequest {
+            label: None,
+            key_json: "not json".to_string(),
+            scopes: None,
+            service_slugs: vec![],
+        };
+
+        let result =
+            create_gcp_service_account_key(State(state), test_auth_user(&user_id), Json(body))
+                .await;
+        assert!(matches!(result, Err(AppError::ValidationError(_))));
+    }
 }
