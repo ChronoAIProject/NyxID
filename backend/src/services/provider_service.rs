@@ -4061,22 +4061,28 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn seed_default_providers_and_services_populates_catalog_and_is_idempotent() {
-        let db = connect_test_database("prov_seed_def")
-            .await
-            .expect("local MongoDB required for provider_service seed tests");
+    async fn seed_default_catalog(db_name: &str) -> Option<mongodb::Database> {
+        let Some(db) = connect_test_database(db_name).await else {
+            eprintln!("skipping: no MongoDB");
+            return None;
+        };
         let enc = test_encryption_keys();
-        let provider_col = db.collection::<ProviderConfig>(COLLECTION_NAME);
-        let service_col = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
-        let req_col = db.collection::<ServiceProviderRequirement>(REQUIREMENTS);
-
         super::seed_default_providers(&db, &enc)
             .await
             .expect("seed providers");
         super::seed_default_services(&db, &enc)
             .await
             .expect("seed services");
+        Some(db)
+    }
+
+    #[tokio::test]
+    async fn seed_default_services_populates_catalog_from_seed_table() {
+        let Some(db) = seed_default_catalog("prov_seed_catalog").await else {
+            return;
+        };
+        let provider_col = db.collection::<ProviderConfig>(COLLECTION_NAME);
+        let service_col = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
 
         for seed in DEFAULT_SERVICE_SEEDS {
             let provider = provider_col
@@ -4108,24 +4114,6 @@ mod tests {
                 service.auth_key_name,
                 seed.service_auth_key_name.unwrap_or("")
             );
-
-            let req_count = req_col
-                .count_documents(doc! { "service_id": &service.id })
-                .await
-                .expect("count service requirements");
-            if seed.service_auth_method.is_some() {
-                assert_eq!(
-                    req_count, 0,
-                    "direct-auth service '{}' must not get a provider requirement",
-                    seed.service_slug
-                );
-            } else {
-                assert_eq!(
-                    req_count, 1,
-                    "delegated service '{}' must get exactly one provider requirement",
-                    seed.service_slug
-                );
-            }
         }
 
         let service_count = service_col
@@ -4133,17 +4121,14 @@ mod tests {
             .await
             .expect("count seeded services");
         assert_eq!(service_count, DEFAULT_SERVICE_SEEDS.len() as u64);
+    }
 
-        let delegated_seed_count = DEFAULT_SERVICE_SEEDS
-            .iter()
-            .filter(|seed| seed.service_auth_method.is_none())
-            .count() as u64;
-        let requirement_count = req_col
-            .count_documents(doc! {})
-            .await
-            .expect("count requirements");
-        assert_eq!(requirement_count, delegated_seed_count);
-
+    #[tokio::test]
+    async fn seed_default_services_seeds_anthropic_default_headers() {
+        let Some(db) = seed_default_catalog("prov_seed_anthropic_headers").await else {
+            return;
+        };
+        let service_col = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
         let anthropic = service_col
             .find_one(doc! { "slug": "llm-anthropic" })
             .await
@@ -4155,7 +4140,14 @@ mod tests {
         assert_eq!(headers.len(), ANTHROPIC_DEFAULT_HEADERS.len());
         assert!(headers.iter().any(|h| h.name == "anthropic-version"));
         assert!(headers.iter().any(|h| h.name == "content-type"));
+    }
 
+    #[tokio::test]
+    async fn seed_default_services_seeds_openclaw_capabilities() {
+        let Some(db) = seed_default_catalog("prov_seed_openclaw_caps").await else {
+            return;
+        };
+        let service_col = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
         let openclaw = service_col
             .find_one(doc! { "slug": "llm-openclaw" })
             .await
@@ -4165,7 +4157,15 @@ mod tests {
         let caps = openclaw.capabilities.expect("openclaw capabilities");
         assert!(caps.supports_websocket);
         assert!(caps.supports_streaming);
+    }
 
+    #[tokio::test]
+    async fn seed_default_services_seeds_telegram_bot_as_direct_path_auth() {
+        let Some(db) = seed_default_catalog("prov_seed_telegram_bot").await else {
+            return;
+        };
+        let service_col = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
+        let req_col = db.collection::<ServiceProviderRequirement>(REQUIREMENTS);
         let telegram = service_col
             .find_one(doc! { "slug": "api-telegram-bot" })
             .await
@@ -4180,7 +4180,14 @@ mod tests {
                 .expect("count telegram requirements"),
             0
         );
+    }
 
+    #[tokio::test]
+    async fn seed_default_services_seeds_lark_bot_token_exchange() {
+        let Some(db) = seed_default_catalog("prov_seed_lark_bot").await else {
+            return;
+        };
+        let service_col = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
         let lark_bot = service_col
             .find_one(doc! { "slug": "api-lark-bot" })
             .await
@@ -4189,48 +4196,6 @@ mod tests {
         assert_eq!(lark_bot.auth_method, "token_exchange");
         assert_eq!(lark_bot.auth_key_name, "");
         assert!(lark_bot.token_exchange_config.is_some());
-
-        let provider_count_before = provider_col
-            .count_documents(doc! {})
-            .await
-            .expect("count providers before second seed");
-        let service_count_before = service_col
-            .count_documents(doc! {})
-            .await
-            .expect("count services before second seed");
-        let requirement_count_before = req_col
-            .count_documents(doc! {})
-            .await
-            .expect("count requirements before second seed");
-
-        super::seed_default_providers(&db, &enc)
-            .await
-            .expect("second provider seed is idempotent");
-        super::seed_default_services(&db, &enc)
-            .await
-            .expect("second service seed is idempotent");
-
-        assert_eq!(
-            provider_col
-                .count_documents(doc! {})
-                .await
-                .expect("count providers after second seed"),
-            provider_count_before
-        );
-        assert_eq!(
-            service_col
-                .count_documents(doc! {})
-                .await
-                .expect("count services after second seed"),
-            service_count_before
-        );
-        assert_eq!(
-            req_col
-                .count_documents(doc! {})
-                .await
-                .expect("count requirements after second seed"),
-            requirement_count_before
-        );
     }
 
     #[tokio::test]
@@ -5836,12 +5801,23 @@ mod tests {
 
         super::seed_default_services(&db, &enc).await.unwrap();
         let service_col = db.collection::<super::DownstreamService>(super::DOWNSTREAM_SERVICES);
+        let req_col = db.collection::<super::ServiceProviderRequirement>(super::REQUIREMENTS);
         let count_1 = service_col.count_documents(doc! {}).await.unwrap();
+        let req_count_1 = req_col.count_documents(doc! {}).await.unwrap();
         assert!(count_1 > 0, "should have seeded at least one service");
+        assert!(
+            req_count_1 > 0,
+            "should have seeded at least one provider requirement"
+        );
 
         super::seed_default_services(&db, &enc).await.unwrap();
         let count_2 = service_col.count_documents(doc! {}).await.unwrap();
+        let req_count_2 = req_col.count_documents(doc! {}).await.unwrap();
         assert_eq!(count_1, count_2, "idempotent: count must not change");
+        assert_eq!(
+            req_count_1, req_count_2,
+            "idempotent: requirement count must not change"
+        );
     }
 
     #[tokio::test]
@@ -6303,9 +6279,38 @@ mod tests {
         let req_col = db.collection::<super::ServiceProviderRequirement>(super::REQUIREMENTS);
         let count = req_col.count_documents(doc! {}).await.unwrap();
         assert!(count > 0, "should have created at least one requirement");
+        let delegated_seed_count = DEFAULT_SERVICE_SEEDS
+            .iter()
+            .filter(|seed| seed.service_auth_method.is_none())
+            .count() as u64;
+        assert_eq!(count, delegated_seed_count);
 
         // Verify a specific requirement (openai -> llm-openai)
         let service_col = db.collection::<super::DownstreamService>(super::DOWNSTREAM_SERVICES);
+        for seed in DEFAULT_SERVICE_SEEDS {
+            let service = service_col
+                .find_one(doc! { "slug": seed.service_slug })
+                .await
+                .unwrap()
+                .unwrap_or_else(|| panic!("service '{}' should be seeded", seed.service_slug));
+            let req_count = req_col
+                .count_documents(doc! { "service_id": &service.id })
+                .await
+                .unwrap();
+            if seed.service_auth_method.is_some() {
+                assert_eq!(
+                    req_count, 0,
+                    "direct-auth service '{}' must not get a provider requirement",
+                    seed.service_slug
+                );
+            } else {
+                assert_eq!(
+                    req_count, 1,
+                    "delegated service '{}' must get exactly one provider requirement",
+                    seed.service_slug
+                );
+            }
+        }
         if let Some(openai_svc) = service_col
             .find_one(doc! { "slug": "llm-openai" })
             .await

@@ -567,6 +567,79 @@ mod tests {
         }
     }
 
+    struct EnrichInvalidFixtures {
+        user_id: String,
+        api_key_id: String,
+        active_service_id: String,
+        inactive_service_id: String,
+        credential_id: String,
+    }
+
+    async fn seed_enrich_invalid_fixtures(db: &mongodb::Database) -> EnrichInvalidFixtures {
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let api_key_id = uuid::Uuid::new_v4().to_string();
+        let active_endpoint_id = uuid::Uuid::new_v4().to_string();
+        let inactive_endpoint_id = uuid::Uuid::new_v4().to_string();
+        let active_service_id = uuid::Uuid::new_v4().to_string();
+        let inactive_service_id = uuid::Uuid::new_v4().to_string();
+        let credential_id = uuid::Uuid::new_v4().to_string();
+
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_many([
+                test_user_endpoint(
+                    &active_endpoint_id,
+                    &user_id,
+                    "Active Endpoint",
+                    "https://active.example.com",
+                    None,
+                    None,
+                ),
+                test_user_endpoint(
+                    &inactive_endpoint_id,
+                    &user_id,
+                    "Inactive Endpoint",
+                    "https://inactive.example.com",
+                    None,
+                    None,
+                ),
+            ])
+            .await
+            .unwrap();
+        let active_service = test_user_service(
+            &active_service_id,
+            &user_id,
+            "active-service",
+            &active_endpoint_id,
+            None,
+            None,
+        );
+        let mut inactive_service = test_user_service(
+            &inactive_service_id,
+            &user_id,
+            "inactive-service",
+            &inactive_endpoint_id,
+            None,
+            None,
+        );
+        inactive_service.is_active = false;
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_many([active_service, inactive_service])
+            .await
+            .unwrap();
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .insert_one(fixture_user_api_key(&credential_id, &user_id))
+            .await
+            .unwrap();
+
+        EnrichInvalidFixtures {
+            user_id,
+            api_key_id,
+            active_service_id,
+            inactive_service_id,
+            credential_id,
+        }
+    }
+
     #[tokio::test]
     async fn create_and_list_binding() {
         let Some(db) = connect_test_database("h_agent_bind_create_list").await else {
@@ -890,85 +963,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn enrich_bindings_marks_missing_and_inactive_references() {
-        let Some(db) = connect_test_database("h_agent_bind_enrich_invalid").await else {
+    async fn enrich_bindings_marks_missing_service_reference() {
+        let Some(db) = connect_test_database("h_agent_bind_enrich_missing_svc").await else {
             return;
         };
-        let user_id = uuid::Uuid::new_v4().to_string();
-        let api_key_id = uuid::Uuid::new_v4().to_string();
-        let active_endpoint_id = uuid::Uuid::new_v4().to_string();
-        let inactive_endpoint_id = uuid::Uuid::new_v4().to_string();
-        let active_service_id = uuid::Uuid::new_v4().to_string();
-        let inactive_service_id = uuid::Uuid::new_v4().to_string();
-        let credential_id = uuid::Uuid::new_v4().to_string();
+        let f = seed_enrich_invalid_fixtures(&db).await;
         let missing_service_id = uuid::Uuid::new_v4().to_string();
-        let missing_credential_id = uuid::Uuid::new_v4().to_string();
-
-        db.collection::<UserEndpoint>(USER_ENDPOINTS)
-            .insert_many([
-                test_user_endpoint(
-                    &active_endpoint_id,
-                    &user_id,
-                    "Active Endpoint",
-                    "https://active.example.com",
-                    None,
-                    None,
-                ),
-                test_user_endpoint(
-                    &inactive_endpoint_id,
-                    &user_id,
-                    "Inactive Endpoint",
-                    "https://inactive.example.com",
-                    None,
-                    None,
-                ),
-            ])
-            .await
-            .unwrap();
-        let active_service = test_user_service(
-            &active_service_id,
-            &user_id,
-            "active-service",
-            &active_endpoint_id,
-            None,
-            None,
-        );
-        let mut inactive_service = test_user_service(
-            &inactive_service_id,
-            &user_id,
-            "inactive-service",
-            &inactive_endpoint_id,
-            None,
-            None,
-        );
-        inactive_service.is_active = false;
-        db.collection::<UserService>(USER_SERVICES)
-            .insert_many([active_service, inactive_service])
-            .await
-            .unwrap();
-        db.collection::<UserApiKey>(USER_API_KEYS)
-            .insert_one(fixture_user_api_key(&credential_id, &user_id))
-            .await
-            .unwrap();
 
         let state = test_app_state(db);
         let responses = enrich_bindings(
             &state,
-            vec![
-                fixture_binding(&api_key_id, &user_id, &missing_service_id, &credential_id),
-                fixture_binding(&api_key_id, &user_id, &inactive_service_id, &credential_id),
-                fixture_binding(
-                    &api_key_id,
-                    &user_id,
-                    &active_service_id,
-                    &missing_credential_id,
-                ),
-            ],
+            vec![fixture_binding(
+                &f.api_key_id,
+                &f.user_id,
+                &missing_service_id,
+                &f.credential_id,
+            )],
         )
         .await
         .unwrap();
 
-        assert_eq!(responses.len(), 3);
+        assert_eq!(responses.len(), 1);
         assert_eq!(responses[0].service_slug, missing_service_id);
         assert_eq!(responses[0].service_label, responses[0].service_slug);
         assert_eq!(responses[0].credential_label, "test-credential");
@@ -977,22 +992,67 @@ mod tests {
             responses[0].invalid_reason.as_deref(),
             Some("missing_service")
         );
+    }
 
-        assert_eq!(responses[1].service_slug, "inactive-service");
-        assert_eq!(responses[1].service_label, "Inactive Endpoint");
-        assert_eq!(responses[1].credential_label, "test-credential");
-        assert!(responses[1].is_invalid);
+    #[tokio::test]
+    async fn enrich_bindings_marks_inactive_service_reference() {
+        let Some(db) = connect_test_database("h_agent_bind_enrich_inactive_svc").await else {
+            return;
+        };
+        let f = seed_enrich_invalid_fixtures(&db).await;
+
+        let state = test_app_state(db);
+        let responses = enrich_bindings(
+            &state,
+            vec![fixture_binding(
+                &f.api_key_id,
+                &f.user_id,
+                &f.inactive_service_id,
+                &f.credential_id,
+            )],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(responses.len(), 1);
+        assert_eq!(responses[0].service_slug, "inactive-service");
+        assert_eq!(responses[0].service_label, "Inactive Endpoint");
+        assert_eq!(responses[0].credential_label, "test-credential");
+        assert!(responses[0].is_invalid);
         assert_eq!(
-            responses[1].invalid_reason.as_deref(),
+            responses[0].invalid_reason.as_deref(),
             Some("inactive_service")
         );
+    }
 
-        assert_eq!(responses[2].service_slug, "active-service");
-        assert_eq!(responses[2].service_label, "Active Endpoint");
-        assert_eq!(responses[2].credential_label, missing_credential_id);
-        assert!(responses[2].is_invalid);
+    #[tokio::test]
+    async fn enrich_bindings_marks_missing_credential_reference() {
+        let Some(db) = connect_test_database("h_agent_bind_enrich_missing_cred").await else {
+            return;
+        };
+        let f = seed_enrich_invalid_fixtures(&db).await;
+        let missing_credential_id = uuid::Uuid::new_v4().to_string();
+
+        let state = test_app_state(db);
+        let responses = enrich_bindings(
+            &state,
+            vec![fixture_binding(
+                &f.api_key_id,
+                &f.user_id,
+                &f.active_service_id,
+                &missing_credential_id,
+            )],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(responses.len(), 1);
+        assert_eq!(responses[0].service_slug, "active-service");
+        assert_eq!(responses[0].service_label, "Active Endpoint");
+        assert_eq!(responses[0].credential_label, missing_credential_id);
+        assert!(responses[0].is_invalid);
         assert_eq!(
-            responses[2].invalid_reason.as_deref(),
+            responses[0].invalid_reason.as_deref(),
             Some("missing_credential")
         );
     }
