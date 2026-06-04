@@ -1,3 +1,5 @@
+use std::fmt;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -5,7 +7,7 @@ use crate::models::{bson_bytes, bson_datetime};
 
 pub const COLLECTION_NAME: &str = "node_pending_credentials";
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CryptoBundle {
     pub version: String,
     pub node_pubkey: String,
@@ -15,6 +17,27 @@ pub struct CryptoBundle {
     pub nonce: Option<String>,
     #[serde(default, with = "bson_bytes::optional")]
     pub ciphertext: Option<Vec<u8>>,
+}
+
+impl fmt::Debug for CryptoBundle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CryptoBundle")
+            .field("version", &self.version)
+            .field("node_pubkey", &"[REDACTED]")
+            .field(
+                "admin_pubkey",
+                &self.admin_pubkey.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("nonce", &self.nonce.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "ciphertext",
+                &self
+                    .ciphertext
+                    .as_ref()
+                    .map(|ciphertext| format!("[REDACTED; {} bytes]", ciphertext.len())),
+            )
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -47,7 +70,7 @@ impl InjectionMethod {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct NodePendingCredential {
     #[serde(rename = "_id")]
     pub id: String,
@@ -76,6 +99,31 @@ pub struct NodePendingCredential {
     #[serde(default, with = "bson_datetime::optional")]
     pub ciphertext_expires_at: Option<DateTime<Utc>>,
     pub is_active: bool,
+}
+
+impl fmt::Debug for NodePendingCredential {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NodePendingCredential")
+            .field("id", &self.id)
+            .field("node_id", &self.node_id)
+            .field("service_slug", &self.service_slug)
+            .field("injection_method", &self.injection_method)
+            .field("field_name", &self.field_name)
+            .field("target_url", &self.target_url)
+            .field("label", &self.label)
+            .field("created_by_user_id", &self.created_by_user_id)
+            .field("owner_user_id", &self.owner_user_id)
+            .field("created_at", &self.created_at)
+            .field("expires_at", &self.expires_at)
+            .field("consumed_at", &self.consumed_at)
+            .field("declined_at", &self.declined_at)
+            .field("crypto", &self.crypto.as_ref().map(|_| "[REDACTED]"))
+            .field("remote_state", &self.remote_state)
+            .field("ciphertext_queued_at", &self.ciphertext_queued_at)
+            .field("ciphertext_expires_at", &self.ciphertext_expires_at)
+            .field("is_active", &self.is_active)
+            .finish()
+    }
 }
 
 #[cfg(test)]
@@ -117,6 +165,25 @@ mod tests {
 
         assert_eq!(restored, bundle);
         assert!(matches!(doc.get("ciphertext"), Some(bson::Bson::Binary(_))));
+    }
+
+    #[test]
+    fn crypto_bundle_debug_redacts_key_material_and_ciphertext() {
+        let bundle = CryptoBundle {
+            version: "v1".to_string(),
+            node_pubkey: "node-pubkey".to_string(),
+            admin_pubkey: Some("admin-pubkey".to_string()),
+            nonce: Some("nonce-value-secret".to_string()),
+            ciphertext: Some(vec![1, 2, 3, 255]),
+        };
+
+        let debug = format!("{bundle:?}");
+
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("node-pubkey"));
+        assert!(!debug.contains("admin-pubkey"));
+        assert!(!debug.contains("nonce-value-secret"));
+        assert!(!debug.contains("[1, 2, 3, 255]"));
     }
 
     #[test]
@@ -177,7 +244,7 @@ mod tests {
                 version: "v1".to_string(),
                 node_pubkey: "node-pubkey".to_string(),
                 admin_pubkey: Some("admin-pubkey".to_string()),
-                nonce: Some("nonce".to_string()),
+                nonce: Some("nonce-secret".to_string()),
                 ciphertext: Some(vec![4, 5, 6]),
             }),
             remote_state: Some(RemoteCryptoState::CiphertextQueued),
@@ -205,6 +272,45 @@ mod tests {
             now.timestamp_millis()
         );
         assert!(restored.ciphertext_expires_at.is_some());
+    }
+
+    #[test]
+    fn node_pending_credential_debug_redacts_crypto_bundle() {
+        let now = Utc::now();
+        let cred = NodePendingCredential {
+            id: "queued".to_string(),
+            node_id: "node-1".to_string(),
+            service_slug: "openai".to_string(),
+            injection_method: InjectionMethod::Header,
+            field_name: "Authorization".to_string(),
+            target_url: None,
+            label: None,
+            created_by_user_id: "user-1".to_string(),
+            owner_user_id: "user-1".to_string(),
+            created_at: now,
+            expires_at: now + chrono::Duration::hours(1),
+            consumed_at: None,
+            declined_at: None,
+            crypto: Some(CryptoBundle {
+                version: "v1".to_string(),
+                node_pubkey: "node-pubkey".to_string(),
+                admin_pubkey: Some("admin-pubkey".to_string()),
+                nonce: Some("nonce-value-secret".to_string()),
+                ciphertext: Some(vec![4, 5, 6]),
+            }),
+            remote_state: Some(RemoteCryptoState::CiphertextQueued),
+            ciphertext_queued_at: Some(now),
+            ciphertext_expires_at: Some(now + chrono::Duration::minutes(15)),
+            is_active: true,
+        };
+
+        let debug = format!("{cred:?}");
+
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("node-pubkey"));
+        assert!(!debug.contains("admin-pubkey"));
+        assert!(!debug.contains("nonce-value-secret"));
+        assert!(!debug.contains("[4, 5, 6]"));
     }
 
     #[test]
