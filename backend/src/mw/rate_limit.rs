@@ -619,8 +619,12 @@ fn extract_device_pubkey_from_json(bytes: &[u8]) -> Option<[u8; 32]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{Json, Router, http::StatusCode, middleware, routing::post};
+    use mongodb::bson::doc;
+    use serde::{Deserialize, Serialize};
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     use std::sync::Arc;
+    use tower::ServiceExt;
 
     #[test]
     fn per_ip_allows_under_limit() {
@@ -1007,6 +1011,139 @@ mod tests {
 
         assert_eq!(first, Some(client_ip));
         assert!(matches!(second, AppError::DeviceCodeRateLimited));
+    }
+
+    #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+    struct DeviceCodeEchoBody {
+        device_code: String,
+        hw_id: String,
+        metadata: serde_json::Value,
+    }
+
+    async fn echo_device_code_body(
+        Json(body): Json<DeviceCodeEchoBody>,
+    ) -> Json<DeviceCodeEchoBody> {
+        Json(body)
+    }
+
+    fn device_code_test_router(limiters: DeviceCodeRateLimiters) -> Router {
+        Router::new()
+            .route("/api/v1/devices/code/poll", post(echo_device_code_body))
+            .layer(middleware::from_fn_with_state(
+                limiters,
+                device_code_rate_limit_middleware,
+            ))
+    }
+
+    fn request_with_json_body(path: &str, body: serde_json::Value) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&body).expect("serialize body"),
+            ))
+            .expect("build request")
+    }
+
+    async fn json_response(response: Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("read response body");
+        serde_json::from_slice(&bytes).expect("json response")
+    }
+
+    #[tokio::test]
+    async fn device_code_middleware_rebuilds_json_body_for_downstream_handler() {
+        let limiters = DeviceCodeRateLimiters {
+            per_ip: Arc::new(PerIpRateLimiter::new(100, 60)),
+            per_pubkey: Arc::new(PerPubkeyRateLimiter::new()),
+            db: None,
+            trusted_proxies: Arc::new(vec![]),
+        };
+        let app = device_code_test_router(limiters);
+        let expected = DeviceCodeEchoBody {
+            device_code: "nyx_dc_body_rebuild_test".to_string(),
+            hw_id: "esp32-p4-cam-1".to_string(),
+            metadata: serde_json::json!({
+                "nested": { "answer": 42 },
+                "list": ["alpha", "beta"],
+            }),
+        };
+        let request_body = serde_json::to_value(&expected).expect("body value");
+
+        let response = app
+            .oneshot(request_with_json_body(
+                "/api/v1/devices/code/poll",
+                request_body,
+            ))
+            .await
+            .expect("middleware response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let echoed: DeviceCodeEchoBody =
+            serde_json::from_value(json_response(response).await).expect("echo body");
+        assert_eq!(echoed, expected);
+    }
+
+    #[tokio::test]
+    async fn device_code_middleware_rate_limits_db_derived_pubkey_when_body_omits_pubkey() {
+        let Some((db, device_code, signing_key)) =
+            crate::services::device_code_service::tests_support::setup_pending_row(
+                "rate_limit_db_pubkey",
+            )
+            .await
+        else {
+            return;
+        };
+        let stored = db
+            .collection::<DeviceCode>(DEVICE_CODES)
+            .find_one(doc! {
+                "device_code_hash": crate::crypto::token::hash_token(&device_code.device_code),
+            })
+            .await
+            .expect("query seeded device code")
+            .expect("seeded device code exists");
+        assert_eq!(
+            stored.device_pubkey,
+            signing_key.verifying_key().to_bytes().to_vec()
+        );
+
+        let limiters = DeviceCodeRateLimiters {
+            per_ip: Arc::new(PerIpRateLimiter::new(100, 60)),
+            per_pubkey: Arc::new(PerPubkeyRateLimiter::new_with_rate(0.0, 1)),
+            db: Some(db),
+            trusted_proxies: Arc::new(vec![]),
+        };
+        let app = device_code_test_router(limiters);
+        let request_body = serde_json::json!({
+            "device_code": device_code.device_code,
+            "hw_id": "esp32-p4-cam-1",
+            "metadata": { "source": "db-derived-pubkey" },
+        });
+
+        let first_response = app
+            .clone()
+            .oneshot(request_with_json_body(
+                "/api/v1/devices/code/poll",
+                request_body.clone(),
+            ))
+            .await
+            .expect("first middleware response");
+        assert_eq!(first_response.status(), StatusCode::OK);
+        assert_eq!(json_response(first_response).await, request_body);
+
+        let second_response = app
+            .oneshot(request_with_json_body(
+                "/api/v1/devices/code/poll",
+                request_body,
+            ))
+            .await
+            .expect("second middleware response");
+        assert_eq!(second_response.status(), StatusCode::TOO_MANY_REQUESTS);
+        let error = json_response(second_response).await;
+        assert_eq!(error["error"], "device_code_rate_limited");
+        assert_eq!(error["error_code"], 9506);
     }
 
     #[test]

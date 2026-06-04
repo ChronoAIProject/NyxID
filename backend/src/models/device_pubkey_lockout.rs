@@ -9,6 +9,10 @@ pub const COLLECTION_NAME: &str = "device_pubkey_lockouts";
 
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub struct DevicePubkeyLockout {
+    /// Natural `_id`: SHA-256 hex of the device public key rather than a UUID.
+    /// Lockouts are one row per public key, and MongoDB's unique primary key
+    /// makes the upsert-once transition atomic, matching the
+    /// `oauth_broker_bindings` binding-hash `_id` pattern.
     #[serde(rename = "_id")]
     pub id: String,
     pub failed_poll_count: u32,
