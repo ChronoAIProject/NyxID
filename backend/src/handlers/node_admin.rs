@@ -1375,6 +1375,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn route_post_push_pending_credential_nudges_connected_node() {
+        let db = test_db("pending_route_push_nudge").await;
+        let actor_id = Uuid::new_v4().to_string();
+        insert_users(&db, vec![test_user(&actor_id, UserType::Person)]).await;
+        let node = test_node(&actor_id, "push-nudge-node");
+        insert_node(&db, &node).await;
+
+        let state = test_app_state(db.clone());
+        let (tx, mut rx) = mpsc::channel(1);
+        state.node_ws_manager.register_connection(&node.id, tx);
+        let token = access_token(&state, &actor_id);
+        let app = api_app(state);
+
+        let (status, body) = route_json(
+            app,
+            Method::POST,
+            format!("/api/v1/nodes/{}/credentials/push", node.id),
+            &token,
+            Some(serde_json::json!({
+                "service_slug": "openclaw",
+                "injection_method": "header",
+                "field_name": "X-API-Key",
+                "target_url": "https://gateway.example.com/v1",
+                "label": "Production",
+                "remote_crypto": false,
+            })),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["node_id"], node.id);
+        assert_eq!(body["service_slug"], "openclaw");
+        assert_eq!(body["injection_method"], "header");
+        assert_eq!(body["field_name"], "X-API-Key");
+        assert_eq!(body["target_url"], "https://gateway.example.com/v1");
+        assert_eq!(body["label"], "Production");
+        assert_eq!(body["is_active"], true);
+
+        let NodeOutboundMessage::Text(frame) = rx.try_recv().expect("nudge frame") else {
+            panic!("expected text outbound frame");
+        };
+        let frame: Value = serde_json::from_str(&frame).expect("frame json");
+        assert_eq!(
+            frame,
+            serde_json::json!({ "type": "pending_credentials_available" })
+        );
+
+        let stored = load_pending(&db, body["id"].as_str().expect("pending id")).await;
+        assert_eq!(stored.node_id, node.id);
+        assert_eq!(stored.service_slug, "openclaw");
+    }
+
+    #[tokio::test]
     async fn route_get_pending_credential_pubkey_returns_awaiting_then_public_fields() {
         let (db, _state, app, token, node, pending) =
             pending_route_fixture("pending_route_get_pubkey", "pubkey-node", "openclaw", false)

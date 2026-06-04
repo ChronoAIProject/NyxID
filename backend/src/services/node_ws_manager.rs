@@ -3957,6 +3957,41 @@ mod tests {
         assert!(!debug.contains("ciphertext-secret"));
     }
 
+    #[test]
+    fn send_pending_credentials_available_uses_expected_frame_and_offline_outcomes() {
+        let mgr = NodeWsManager::new(30, 100);
+        let (tx, mut rx) = mpsc::channel(1);
+        mgr.register_connection("node-pending", tx);
+
+        mgr.send_pending_credentials_available("node-pending")
+            .expect("send pending credential nudge");
+
+        let NodeOutboundMessage::Text(json) = rx.try_recv().expect("outbound frame") else {
+            panic!("expected text frame");
+        };
+        let value: Value = serde_json::from_str(&json).expect("json");
+        assert_eq!(
+            value,
+            serde_json::json!({ "type": "pending_credentials_available" })
+        );
+
+        let err = mgr
+            .send_pending_credentials_available("unknown-node")
+            .expect_err("disconnected node maps to offline");
+        assert!(matches!(err, AppError::NodeOffline(_)));
+
+        let full_mgr = NodeWsManager::new(30, 100);
+        let (full_tx, _full_rx) = mpsc::channel(1);
+        full_mgr.register_connection("node-full", full_tx);
+        full_mgr
+            .send_pending_credentials_available("node-full")
+            .expect("first send fills buffer");
+        let err = full_mgr
+            .send_pending_credentials_available("node-full")
+            .expect_err("full buffer maps to offline");
+        assert!(matches!(err, AppError::NodeOffline(_)));
+    }
+
     #[tokio::test]
     async fn send_pending_credential_ciphertext_uses_bounded_writer_and_expected_json() {
         let mgr = NodeWsManager::new(30, 100);
