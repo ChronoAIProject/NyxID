@@ -1234,6 +1234,9 @@ pub async fn list_my_bound_services(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::errors::{
+        PENDING_CREDENTIAL_CIPHERTEXT_TOO_LARGE_CODE, PENDING_CREDENTIAL_QUEUE_FULL_CODE,
+    };
     use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};
     use crate::models::node::{COLLECTION_NAME as NODES, Node, NodeMetrics, NodeStatus};
     use crate::models::node_pending_credential::{
@@ -1255,8 +1258,8 @@ mod tests {
         node_ws_manager::{NodeCapabilitiesMsg, NodeOutboundMessage},
     };
     use crate::test_utils::{
-        connect_test_database, test_app_state, test_auth_user, test_membership, test_user,
-        test_user_service,
+        assert_rci_audit_row, connect_test_database, test_app_state, test_auth_user,
+        test_membership, test_user, test_user_service,
     };
     use axum::body::{Body, to_bytes};
     use axum::http::{Method, Request, StatusCode};
@@ -1339,106 +1342,6 @@ mod tests {
             .await
             .expect("query audit log")
             .expect("audit log exists")
-    }
-
-    fn sorted_strings(values: &[&str]) -> Vec<String> {
-        let mut values: Vec<String> = values.iter().map(|value| value.to_string()).collect();
-        values.sort();
-        values
-    }
-
-    fn assert_rci_audit_row(
-        entry: &AuditLog,
-        expected_event_type: &str,
-        pending: &NodePendingCredential,
-        expected_remote_state: Option<&str>,
-        extra_keys: &[&str],
-    ) {
-        assert_eq!(entry.event_type, expected_event_type);
-        assert_eq!(
-            entry.user_id.as_deref(),
-            Some(pending.owner_user_id.as_str())
-        );
-        let event_data = entry.event_data.as_ref().expect("audit event data");
-        let object = event_data.as_object().expect("audit event data object");
-        let mut expected_keys = vec![
-            "event_at",
-            "flow",
-            "node_id",
-            "owner_user_id",
-            "pending_created_at",
-            "pending_credential_id",
-            "pending_expires_at",
-            "routed_via",
-            "service_slug",
-        ];
-        if expected_remote_state.is_some() {
-            expected_keys.push("remote_state");
-        }
-        expected_keys.extend(extra_keys.iter().copied());
-        let mut actual_keys: Vec<String> = object.keys().cloned().collect();
-        actual_keys.sort();
-        assert_eq!(actual_keys, sorted_strings(&expected_keys));
-
-        assert_eq!(object["flow"], "remote_credential_injection");
-        assert_eq!(object["routed_via"], "node");
-        assert_eq!(object["node_id"], pending.node_id);
-        assert_eq!(object["pending_credential_id"], pending.id);
-        assert_eq!(object["service_slug"], pending.service_slug);
-        assert_eq!(object["owner_user_id"], pending.owner_user_id);
-        assert_eq!(
-            object["pending_created_at"],
-            pending.created_at.to_rfc3339()
-        );
-        assert_eq!(
-            object["pending_expires_at"],
-            pending.expires_at.to_rfc3339()
-        );
-        if let Some(remote_state) = expected_remote_state {
-            assert_eq!(object["remote_state"], remote_state);
-        } else {
-            assert!(object.get("remote_state").is_none());
-        }
-
-        for forbidden_key in [
-            "plaintext",
-            "secret",
-            "ciphertext",
-            "nonce",
-            "node_pubkey",
-            "admin_pubkey",
-            "hash",
-            "fingerprint",
-            "length",
-            "bytes",
-            "target_url",
-            "field_name",
-            "injection_method",
-            "raw_version",
-            "raw_status",
-            "raw_node_error",
-            "raw_decline_reason",
-            "queue_count",
-            "queued_pending_ids",
-        ] {
-            assert!(
-                !object.contains_key(forbidden_key),
-                "{expected_event_type}: {forbidden_key}"
-            );
-        }
-
-        let event_json = event_data.to_string();
-        for forbidden_value in [
-            b64url(10, 32),
-            b64url(11, 24),
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([1, 2, 3]),
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([42]),
-            "super-secret-plaintext-fixture".to_string(),
-            "raw-node-error-fixture".to_string(),
-            "raw-decline-reason-fixture".to_string(),
-        ] {
-            assert!(!event_json.contains(&forbidden_value), "{forbidden_value}");
-        }
     }
 
     fn assert_pubkey_only_pending(pending: &NodePendingCredential, expected_node_pubkey: &str) {
@@ -1969,6 +1872,10 @@ mod tests {
         let pending =
             create_remote_pending_with_pubkey(&db, &node.user_id, &node.id, "queue-full-final")
                 .await;
+        let queue_full_audit = audit_service::notify_on_audit_write(
+            "node_credential_rci_queue_full",
+            Some(pending.id.clone()),
+        );
 
         let (status, body) = route_json(
             app,
@@ -1983,8 +1890,21 @@ mod tests {
         .await;
 
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(body["error_code"], 8011);
+        assert_eq!(body["error_code"], PENDING_CREDENTIAL_QUEUE_FULL_CODE);
         assert_eq!(body["error"], "pending_credential_queue_full");
+
+        let stored = load_pending(&db, &pending.id).await;
+        let audit = load_audit_entry(&db, queue_full_audit).await;
+        assert_rci_audit_row(
+            &audit,
+            "node_credential_rci_queue_full",
+            &stored,
+            Some("pubkey_posted"),
+            &["error_code", "error_kind"],
+        );
+        let event_data = audit.event_data.as_ref().unwrap();
+        assert_eq!(event_data["error_code"], PENDING_CREDENTIAL_QUEUE_FULL_CODE);
+        assert_eq!(event_data["error_kind"], "pending_credential_queue_full");
     }
 
     #[tokio::test]
@@ -2131,13 +2051,17 @@ mod tests {
 
     #[tokio::test]
     async fn route_post_pending_ciphertext_rejects_oversized_ciphertext() {
-        let (_db, _state, app, token, node, pending) = pending_route_fixture(
+        let (db, _state, app, token, node, pending) = pending_route_fixture(
             "pending_route_post_oversized",
             "oversized-node",
             "openclaw",
             true,
         )
         .await;
+        let too_large_audit = audit_service::notify_on_audit_write(
+            "node_credential_rci_ciphertext_too_large",
+            Some(pending.id.clone()),
+        );
 
         let (status, body) = route_json(
             app,
@@ -2156,8 +2080,30 @@ mod tests {
         .await;
 
         assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
-        assert_eq!(body["error_code"], 8008);
+        assert_eq!(
+            body["error_code"],
+            PENDING_CREDENTIAL_CIPHERTEXT_TOO_LARGE_CODE
+        );
         assert_eq!(body["error"], "pending_credential_ciphertext_too_large");
+
+        let stored = load_pending(&db, &pending.id).await;
+        let audit = load_audit_entry(&db, too_large_audit).await;
+        assert_rci_audit_row(
+            &audit,
+            "node_credential_rci_ciphertext_too_large",
+            &stored,
+            Some("pubkey_posted"),
+            &["error_code", "error_kind"],
+        );
+        let event_data = audit.event_data.as_ref().unwrap();
+        assert_eq!(
+            event_data["error_code"],
+            PENDING_CREDENTIAL_CIPHERTEXT_TOO_LARGE_CODE
+        );
+        assert_eq!(
+            event_data["error_kind"],
+            "pending_credential_ciphertext_too_large"
+        );
     }
 
     #[tokio::test]

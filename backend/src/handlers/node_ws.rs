@@ -445,6 +445,45 @@ async fn record_pending_credential_pubkey_frame(
     }
 }
 
+async fn handle_pending_credential_pubkey_message(
+    db: &mongodb::Database,
+    node_id: &str,
+    ip_address: Option<String>,
+    user_agent: Option<String>,
+    pending_id: String,
+    version: String,
+    node_pubkey: String,
+) {
+    if version != "v1"
+        && let Ok(summary) =
+            node_pending_credential_service::get_pending_credential_audit_summary_for_node(
+                db,
+                node_id,
+                &pending_id,
+            )
+            .await
+    {
+        log_rci_for_node_summary(
+            db.clone(),
+            ip_address.clone(),
+            user_agent.clone(),
+            &summary,
+            RciAuditEventKind::VersionUnsupported,
+        );
+    }
+    if let Some(pending) =
+        record_pending_credential_pubkey_frame(db, node_id, pending_id, version, node_pubkey).await
+    {
+        log_rci_for_node_pending(
+            db.clone(),
+            ip_address,
+            user_agent,
+            &pending,
+            RciAuditEventKind::PubkeyPosted,
+        );
+    }
+}
+
 async fn record_pending_credential_decrypt_result_frame(
     db: &mongodb::Database,
     node_id: &str,
@@ -1189,40 +1228,16 @@ async fn handle_node_connection(
                 version,
                 node_pubkey,
             } => {
-                if version != "v1"
-                    && let Ok(summary) =
-                        node_pending_credential_service::get_pending_credential_audit_summary_for_node(
-                            &db,
-                            &node_id_reader,
-                            &pending_id,
-                        )
-                        .await
-                {
-                    log_rci_for_node_summary(
-                        db.clone(),
-                        ip_address.clone(),
-                        user_agent.clone(),
-                        &summary,
-                        RciAuditEventKind::VersionUnsupported,
-                    );
-                }
-                if let Some(pending) = record_pending_credential_pubkey_frame(
+                handle_pending_credential_pubkey_message(
                     &db,
                     &node_id_reader,
+                    ip_address.clone(),
+                    user_agent.clone(),
                     pending_id,
                     version,
                     node_pubkey,
                 )
-                .await
-                {
-                    log_rci_for_node_pending(
-                        db.clone(),
-                        ip_address.clone(),
-                        user_agent.clone(),
-                        &pending,
-                        RciAuditEventKind::PubkeyPosted,
-                    );
-                }
+                .await;
             }
             NodeMessage::PendingCredentialDecryptResult {
                 pending_id,
@@ -1418,17 +1433,19 @@ mod tests {
     use super::{
         apply_status_update_capabilities, decode_base64_payload, decode_binary_stream_frame,
         drain_queued_pending_ciphertexts, handle_pending_credential_decrypt_result_message,
-        handle_proxy_response_chunk, record_pending_credential_decrypt_result_frame,
-        record_pending_credential_pubkey_frame, validate_base64url_no_pad_exact,
+        handle_pending_credential_pubkey_message, handle_proxy_response_chunk,
+        record_pending_credential_decrypt_result_frame, record_pending_credential_pubkey_frame,
+        validate_base64url_no_pad_exact,
     };
     use base64::Engine;
-    use chrono::Utc;
+    use chrono::{Duration, Utc};
     use mongodb::bson::{self, doc};
     use serde_json::Value;
     use std::sync::Arc;
     use tokio::sync::mpsc;
 
     use crate::crypto::token::hash_token;
+    use crate::errors::PENDING_CREDENTIAL_DECRYPT_FAILED_CODE;
     use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};
     use crate::models::node::{COLLECTION_NAME as NODES, Node, NodeMetrics, NodeStatus};
     use crate::models::node_pending_credential::{
@@ -1444,7 +1461,9 @@ mod tests {
         audit_service, node_pending_credential_service,
         rci_audit_service::{self, RciAuditEventKind, RciAuditSubject},
     };
-    use crate::test_utils::{connect_test_database, test_app_state, test_user};
+    use crate::test_utils::{
+        assert_rci_audit_row, connect_test_database, test_app_state, test_user,
+    };
 
     async fn test_db(prefix: &str) -> mongodb::Database {
         connect_test_database(prefix)
@@ -1574,96 +1593,6 @@ mod tests {
             .expect("audit log exists")
     }
 
-    fn sorted_strings(values: &[&str]) -> Vec<String> {
-        let mut values: Vec<String> = values.iter().map(|value| value.to_string()).collect();
-        values.sort();
-        values
-    }
-
-    fn assert_rci_audit_row(
-        entry: &AuditLog,
-        expected_event_type: &str,
-        pending: &NodePendingCredential,
-        expected_remote_state: Option<&str>,
-        extra_keys: &[&str],
-    ) {
-        assert_eq!(entry.event_type, expected_event_type);
-        assert_eq!(
-            entry.user_id.as_deref(),
-            Some(pending.owner_user_id.as_str())
-        );
-        let event_data = entry.event_data.as_ref().expect("audit event data");
-        let object = event_data.as_object().expect("audit event data object");
-        let mut expected_keys = vec![
-            "event_at",
-            "flow",
-            "node_id",
-            "owner_user_id",
-            "pending_created_at",
-            "pending_credential_id",
-            "pending_expires_at",
-            "routed_via",
-            "service_slug",
-        ];
-        if expected_remote_state.is_some() {
-            expected_keys.push("remote_state");
-        }
-        expected_keys.extend(extra_keys.iter().copied());
-        let mut actual_keys: Vec<String> = object.keys().cloned().collect();
-        actual_keys.sort();
-        assert_eq!(actual_keys, sorted_strings(&expected_keys));
-
-        assert_eq!(object["flow"], "remote_credential_injection");
-        assert_eq!(object["routed_via"], "node");
-        assert_eq!(object["node_id"], pending.node_id);
-        assert_eq!(object["pending_credential_id"], pending.id);
-        assert_eq!(object["service_slug"], pending.service_slug);
-        assert_eq!(object["owner_user_id"], pending.owner_user_id);
-        if let Some(remote_state) = expected_remote_state {
-            assert_eq!(object["remote_state"], remote_state);
-        } else {
-            assert!(object.get("remote_state").is_none());
-        }
-
-        for forbidden_key in [
-            "plaintext",
-            "secret",
-            "ciphertext",
-            "nonce",
-            "node_pubkey",
-            "admin_pubkey",
-            "hash",
-            "fingerprint",
-            "length",
-            "bytes",
-            "target_url",
-            "field_name",
-            "injection_method",
-            "raw_version",
-            "raw_status",
-            "raw_node_error",
-            "raw_decline_reason",
-            "queue_count",
-            "queued_pending_ids",
-        ] {
-            assert!(
-                !object.contains_key(forbidden_key),
-                "{expected_event_type}: {forbidden_key}"
-            );
-        }
-
-        let event_json = event_data.to_string();
-        for forbidden_value in [
-            b64url(6, 32),
-            b64url(7, 24),
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([1, 2, 3, 4]),
-            "raw-node-error-fixture".to_string(),
-            "super-secret-plaintext-fixture".to_string(),
-        ] {
-            assert!(!event_json.contains(&forbidden_value), "{forbidden_value}");
-        }
-    }
-
     #[tokio::test]
     async fn ws_pending_credential_pubkey_records_valid_and_ignores_invalid() {
         let db = test_db("ws_pending_pubkey_behavior").await;
@@ -1711,6 +1640,51 @@ mod tests {
                 .is_some_and(|crypto| crypto.node_pubkey.is_empty())
         );
         assert!(invalid.remote_state.is_none());
+    }
+
+    #[tokio::test]
+    async fn ws_pending_credential_pubkey_writes_metadata_audit_row() {
+        let db = test_db("ws_pending_pubkey_audit").await;
+        let owner_id = uuid::Uuid::new_v4().to_string();
+        let raw_auth_token = "nyx_nauth_test_pubkey_audit";
+        let node = test_node(&owner_id, "ws-pubkey-audit-node", raw_auth_token);
+        insert_user_and_node(&db, &owner_id, &node).await;
+        let pending = create_remote_pending(&db, &owner_id, &node.id, "pubkey-audit").await;
+        let audit_rx = audit_service::notify_on_audit_write(
+            "node_credential_rci_pubkey_posted",
+            Some(pending.id.clone()),
+        );
+
+        handle_pending_credential_pubkey_message(
+            &db,
+            &node.id,
+            Some("203.0.113.20".to_string()),
+            Some("nyxid-node-test".to_string()),
+            pending.id.clone(),
+            "v1".to_string(),
+            b64url(8, 32),
+        )
+        .await;
+
+        let stored = load_pending(&db, &pending.id).await;
+        assert_eq!(stored.remote_state, Some(RemoteCryptoState::PubkeyPosted));
+        assert_eq!(
+            stored
+                .crypto
+                .as_ref()
+                .map(|crypto| crypto.node_pubkey.as_str()),
+            Some(b64url(8, 32).as_str())
+        );
+        let audit = load_audit_entry(&db, audit_rx).await;
+        assert_eq!(audit.ip_address.as_deref(), Some("203.0.113.20"));
+        assert_eq!(audit.user_agent.as_deref(), Some("nyxid-node-test"));
+        assert_rci_audit_row(
+            &audit,
+            "node_credential_rci_pubkey_posted",
+            &stored,
+            Some("pubkey_posted"),
+            &[],
+        );
     }
 
     #[tokio::test]
@@ -1836,6 +1810,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ws_decrypt_result_success_and_default_failure_write_metadata_audit_rows() {
+        let db = test_db("ws_pending_decrypt_success_failure_audit").await;
+        let owner_id = uuid::Uuid::new_v4().to_string();
+        let raw_auth_token = "nyx_nauth_test_decrypt_success_failure";
+        let node = test_node(&owner_id, "ws-decrypt-success-failure-node", raw_auth_token);
+        insert_user_and_node(&db, &owner_id, &node).await;
+        let ok_pending =
+            create_remote_pending_with_pubkey(&db, &owner_id, &node.id, "decrypt-success").await;
+        let failed_pending =
+            create_remote_pending_with_pubkey(&db, &owner_id, &node.id, "decrypt-default-failed")
+                .await;
+        store_ciphertext(&db, &owner_id, &node.id, &ok_pending.id, true).await;
+        store_ciphertext(&db, &owner_id, &node.id, &failed_pending.id, true).await;
+        let success_audit = audit_service::notify_on_audit_write(
+            "node_credential_rci_decrypt_succeeded",
+            Some(ok_pending.id.clone()),
+        );
+        let failed_audit = audit_service::notify_on_audit_write(
+            "node_credential_rci_decrypt_failed",
+            Some(failed_pending.id.clone()),
+        );
+
+        handle_pending_credential_decrypt_result_message(
+            &db,
+            &node.id,
+            Some("203.0.113.30".to_string()),
+            Some("nyxid-node-test".to_string()),
+            ok_pending.id.clone(),
+            "ok".to_string(),
+            None,
+        )
+        .await;
+        handle_pending_credential_decrypt_result_message(
+            &db,
+            &node.id,
+            Some("203.0.113.31".to_string()),
+            Some("nyxid-node-test".to_string()),
+            failed_pending.id.clone(),
+            "error".to_string(),
+            Some(serde_json::json!("raw-node-error-fixture")),
+        )
+        .await;
+
+        let ok = load_pending(&db, &ok_pending.id).await;
+        assert_eq!(ok.remote_state, Some(RemoteCryptoState::Consumed));
+        assert!(!ok.is_active);
+        assert!(ok.consumed_at.is_some());
+        let ok_audit = load_audit_entry(&db, success_audit).await;
+        assert_eq!(ok_audit.ip_address.as_deref(), Some("203.0.113.30"));
+        assert_eq!(ok_audit.user_agent.as_deref(), Some("nyxid-node-test"));
+        assert_rci_audit_row(
+            &ok_audit,
+            "node_credential_rci_decrypt_succeeded",
+            &ok,
+            Some("consumed"),
+            &[],
+        );
+
+        let failed = load_pending(&db, &failed_pending.id).await;
+        assert_eq!(failed.remote_state, Some(RemoteCryptoState::DecryptFailed));
+        assert!(!failed.is_active);
+        assert!(failed.consumed_at.is_none());
+        let failed_audit = load_audit_entry(&db, failed_audit).await;
+        assert_eq!(failed_audit.ip_address.as_deref(), Some("203.0.113.31"));
+        assert_eq!(failed_audit.user_agent.as_deref(), Some("nyxid-node-test"));
+        assert_rci_audit_row(
+            &failed_audit,
+            "node_credential_rci_decrypt_failed",
+            &failed,
+            Some("decrypt_failed"),
+            &["error_code", "error_kind"],
+        );
+        let event_data = failed_audit.event_data.as_ref().unwrap();
+        assert_eq!(
+            event_data["error_code"],
+            PENDING_CREDENTIAL_DECRYPT_FAILED_CODE
+        );
+        assert_eq!(
+            event_data["error_kind"],
+            "pending_credential_decrypt_failed"
+        );
+    }
+
+    #[tokio::test]
     async fn ws_status_update_drains_queued_ciphertext_and_marks_sent() {
         let db = test_db("ws_pending_drain_sent").await;
         let owner_id = uuid::Uuid::new_v4().to_string();
@@ -1849,6 +1907,10 @@ mod tests {
         assert_eq!(
             queued.remote_state,
             Some(RemoteCryptoState::CiphertextQueued)
+        );
+        let replay_audit = audit_service::notify_on_audit_write(
+            "node_credential_rci_ciphertext_replayed",
+            Some(pending.id.clone()),
         );
 
         let state = test_app_state(db.clone());
@@ -1887,6 +1949,72 @@ mod tests {
         );
         assert!(sent.ciphertext_queued_at.is_none());
         assert!(sent.ciphertext_expires_at.is_none());
+
+        let audit = load_audit_entry(&db, replay_audit).await;
+        assert_rci_audit_row(
+            &audit,
+            "node_credential_rci_ciphertext_replayed",
+            &queued,
+            Some("ciphertext_received"),
+            &["ciphertext_expires_at", "ciphertext_queued_at", "delivery"],
+        );
+        assert_eq!(
+            audit.event_data.as_ref().unwrap()["delivery"],
+            "queued_replay"
+        );
+    }
+
+    #[tokio::test]
+    async fn ws_drain_expires_stale_queued_ciphertext_and_writes_metadata_audit_row() {
+        let db = test_db("ws_pending_drain_expired_audit").await;
+        let owner_id = uuid::Uuid::new_v4().to_string();
+        let raw_auth_token = "nyx_nauth_test_drain_expired";
+        let node = test_node(&owner_id, "ws-drain-expired-node", raw_auth_token);
+        insert_user_and_node(&db, &owner_id, &node).await;
+        let pending =
+            create_remote_pending_with_pubkey(&db, &owner_id, &node.id, "queued-expired").await;
+        store_ciphertext(&db, &owner_id, &node.id, &pending.id, false).await;
+        let expired_at = Utc::now() - Duration::seconds(1);
+        db.collection::<NodePendingCredential>(NODE_PENDING_CREDENTIALS)
+            .update_one(
+                doc! { "_id": &pending.id },
+                doc! {
+                    "$set": {
+                        "ciphertext_expires_at": bson::DateTime::from_chrono(expired_at),
+                    },
+                },
+            )
+            .await
+            .expect("force ciphertext expiry");
+        let queued = load_pending(&db, &pending.id).await;
+        assert_eq!(
+            queued.remote_state,
+            Some(RemoteCryptoState::CiphertextQueued)
+        );
+        assert!(queued.ciphertext_queued_at.is_some());
+        assert!(queued.ciphertext_expires_at.is_some());
+        let expired_audit = audit_service::notify_on_audit_write(
+            "node_credential_rci_expired",
+            Some(pending.id.clone()),
+        );
+
+        let state = test_app_state(db.clone());
+        drain_queued_pending_ciphertexts(&state, &node.id).await;
+
+        let stored = load_pending(&db, &pending.id).await;
+        assert_eq!(stored.remote_state, Some(RemoteCryptoState::Expired));
+        assert!(!stored.is_active);
+        assert!(stored.ciphertext_queued_at.is_none());
+        assert!(stored.ciphertext_expires_at.is_none());
+
+        let audit = load_audit_entry(&db, expired_audit).await;
+        assert_rci_audit_row(
+            &audit,
+            "node_credential_rci_expired",
+            &queued,
+            Some("expired"),
+            &["ciphertext_expires_at", "ciphertext_queued_at"],
+        );
     }
 
     #[tokio::test]

@@ -1,18 +1,16 @@
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
 
-use crate::errors::PENDING_CREDENTIAL_NODE_OFFLINE_CODE;
+use crate::errors::{
+    PENDING_CREDENTIAL_CIPHERTEXT_TOO_LARGE_CODE, PENDING_CREDENTIAL_DECRYPT_FAILED_CODE,
+    PENDING_CREDENTIAL_NODE_OFFLINE_CODE, PENDING_CREDENTIAL_PUBKEY_AWAITING_CODE,
+    PENDING_CREDENTIAL_QUEUE_FULL_CODE, PENDING_CREDENTIAL_VERSION_UNSUPPORTED_CODE,
+};
 use crate::models::node_pending_credential::{NodePendingCredential, RemoteCryptoState};
 use crate::mw::auth::AuthUser;
 use crate::services::{
     audit_service, node_pending_credential_service::PendingCredentialAuditSummary,
 };
-
-pub const PENDING_CREDENTIAL_DECRYPT_FAILED_CODE: u32 = 8006;
-pub const PENDING_CREDENTIAL_VERSION_UNSUPPORTED_CODE: u32 = 8007;
-pub const PENDING_CREDENTIAL_CIPHERTEXT_TOO_LARGE_CODE: u32 = 8008;
-pub const PENDING_CREDENTIAL_PUBKEY_AWAITING_CODE: u32 = 8009;
-pub const PENDING_CREDENTIAL_QUEUE_FULL_CODE: u32 = 8011;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RciAuditSubject {
