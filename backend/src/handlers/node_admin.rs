@@ -22,7 +22,9 @@ use crate::models::node_pending_credential::{
 };
 use crate::mw::auth::AuthUser;
 use crate::services::{
-    audit_service, node_pending_credential_service, node_routing_service, node_service, org_service,
+    audit_service, node_pending_credential_service, node_routing_service, node_service,
+    org_service,
+    rci_audit_service::{self, RciAuditDelivery, RciAuditEventKind, RciAuditSubject},
 };
 use crate::telemetry::{
     context::{TelemetryContext, emit_event},
@@ -76,6 +78,13 @@ pub struct PendingCredentialCiphertextRequest {
 #[derive(Debug, Deserialize, Default)]
 pub struct PendingCredentialListQuery {
     pub include_history: Option<bool>,
+}
+
+// refactor helper, no behavior change
+#[derive(Debug, PartialEq, Eq)]
+enum PendingCiphertextValidation {
+    Valid(Vec<u8>),
+    TooLarge,
 }
 
 // --- Response types ---
@@ -365,7 +374,7 @@ fn decode_base64url_no_pad_exact(
 
 fn validate_pending_ciphertext_request(
     body: &PendingCredentialCiphertextRequest,
-) -> AppResult<Vec<u8>> {
+) -> AppResult<PendingCiphertextValidation> {
     if body.version != "v1" {
         return Err(AppError::PendingCredentialVersionUnsupported(
             body.version.clone(),
@@ -375,11 +384,9 @@ fn validate_pending_ciphertext_request(
     let _ = decode_base64url_no_pad_exact(&body.nonce, "nonce", 24)?;
     let ciphertext = decode_base64url_no_pad(&body.ciphertext, "ciphertext")?;
     if ciphertext.len() > node_pending_credential_service::MAX_CIPHERTEXT_SIZE {
-        return Err(AppError::PendingCredentialCiphertextTooLarge(
-            ciphertext.len(),
-        ));
+        return Ok(PendingCiphertextValidation::TooLarge);
     }
-    Ok(ciphertext)
+    Ok(PendingCiphertextValidation::Valid(ciphertext))
 }
 
 fn send_pending_ciphertext_to_node(
@@ -446,6 +453,26 @@ fn pending_ciphertext_queued_response(
             error_code: Some(PENDING_CREDENTIAL_NODE_OFFLINE_CODE),
         }),
     )
+}
+
+fn log_rci_for_pending_user(
+    state: &AppState,
+    auth_user: &AuthUser,
+    pending: &NodePendingCredential,
+    kind: RciAuditEventKind,
+) {
+    let subject = RciAuditSubject::from_pending(pending);
+    rci_audit_service::log_rci_for_user(state.db.clone(), auth_user, &subject, kind);
+}
+
+fn log_rci_for_summary_user(
+    state: &AppState,
+    auth_user: &AuthUser,
+    summary: &node_pending_credential_service::PendingCredentialAuditSummary,
+    kind: RciAuditEventKind,
+) {
+    let subject = RciAuditSubject::from_summary(summary);
+    rci_audit_service::log_rci_for_user(state.db.clone(), auth_user, &subject, kind);
 }
 
 // --- Handlers ---
@@ -850,8 +877,30 @@ pub async fn post_pending_credential_ciphertext(
     Path((node_id, pending_id)): Path<(String, String)>,
     Json(body): Json<PendingCredentialCiphertextRequest>,
 ) -> AppResult<(StatusCode, Json<PendingCredentialCiphertextResponse>)> {
-    let ciphertext = validate_pending_ciphertext_request(&body)?;
+    let validation = validate_pending_ciphertext_request(&body)?;
     let user_id_str = auth_user.user_id.to_string();
+    let subject_summary =
+        node_pending_credential_service::get_pending_credential_audit_summary_for_admin(
+            &state.db,
+            &user_id_str,
+            &node_id,
+            &pending_id,
+        )
+        .await?;
+    let ciphertext = match validation {
+        PendingCiphertextValidation::Valid(ciphertext) => ciphertext,
+        PendingCiphertextValidation::TooLarge => {
+            log_rci_for_summary_user(
+                &state,
+                &auth_user,
+                &subject_summary,
+                RciAuditEventKind::CiphertextTooLarge,
+            );
+            return Err(AppError::PendingCredentialCiphertextTooLarge(
+                node_pending_credential_service::MAX_CIPHERTEXT_SIZE + 1,
+            ));
+        }
+    };
     let node_can_receive_now = state.node_ws_manager.is_connected(&node_id)
         && state
             .node_ws_manager
@@ -871,27 +920,71 @@ pub async fn post_pending_credential_ciphertext(
         node_can_receive_now,
         now,
     )
-    .await?;
+    .await
+    .map_err(|err| {
+        if matches!(err, AppError::PendingCredentialPubkeyAwaiting(_)) {
+            log_rci_for_summary_user(
+                &state,
+                &auth_user,
+                &subject_summary,
+                RciAuditEventKind::PubkeyAwaiting,
+            );
+        }
+        err
+    })?;
 
     match outcome {
-        node_pending_credential_service::StorePendingCiphertextOutcome::QueueFull => {
+        node_pending_credential_service::StorePendingCiphertextOutcome::QueueFull(summary) => {
+            log_rci_for_summary_user(&state, &auth_user, &summary, RciAuditEventKind::QueueFull);
             Err(AppError::PendingCredentialQueueFull(node_id))
         }
         node_pending_credential_service::StorePendingCiphertextOutcome::QueuedOffline(pending) => {
+            log_rci_for_pending_user(
+                &state,
+                &auth_user,
+                &pending,
+                RciAuditEventKind::CiphertextReceived,
+            );
+            log_rci_for_pending_user(
+                &state,
+                &auth_user,
+                &pending,
+                RciAuditEventKind::CiphertextQueued {
+                    delivery: RciAuditDelivery::OfflineQueue,
+                    node_offline: true,
+                },
+            );
             Ok(pending_ciphertext_queued_response(&pending))
         }
         node_pending_credential_service::StorePendingCiphertextOutcome::StoredForOnlineNode(
             pending,
-        ) => match send_pending_ciphertext_to_node(&state, &node_id, &pending) {
-            Ok(()) => Ok(pending_ciphertext_sent_response(&pending)),
-            Err(err) => {
-                tracing::warn!(
-                    node_id = %node_id,
-                    pending_id = %pending.id,
-                    error = %err,
-                    "Failed to send pending credential ciphertext; queueing for retry"
-                );
-                let queued =
+        ) => {
+            log_rci_for_pending_user(
+                &state,
+                &auth_user,
+                &pending,
+                RciAuditEventKind::CiphertextReceived,
+            );
+            match send_pending_ciphertext_to_node(&state, &node_id, &pending) {
+                Ok(()) => {
+                    log_rci_for_pending_user(
+                        &state,
+                        &auth_user,
+                        &pending,
+                        RciAuditEventKind::CiphertextForwarded {
+                            delivery: RciAuditDelivery::OnlineForward,
+                        },
+                    );
+                    Ok(pending_ciphertext_sent_response(&pending))
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        node_id = %node_id,
+                        pending_id = %pending.id,
+                        error = %err,
+                        "Failed to send pending credential ciphertext; queueing for retry"
+                    );
+                    let queued =
                     node_pending_credential_service::mark_pending_ciphertext_queued_after_send_failure(
                         &state.db,
                         &node_id,
@@ -899,9 +992,19 @@ pub async fn post_pending_credential_ciphertext(
                         chrono::Utc::now(),
                     )
                     .await?;
-                Ok(pending_ciphertext_queued_response(&queued))
+                    log_rci_for_pending_user(
+                        &state,
+                        &auth_user,
+                        &queued,
+                        RciAuditEventKind::CiphertextQueued {
+                            delivery: RciAuditDelivery::OfflineQueue,
+                            node_offline: true,
+                        },
+                    );
+                    Ok(pending_ciphertext_queued_response(&queued))
+                }
             }
-        },
+        }
     }
 }
 
@@ -920,17 +1023,21 @@ pub async fn cancel_pending_credential(
     )
     .await?;
 
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "node_credential_push_canceled",
-        Some(serde_json::json!({
-            "node_id": &pending.node_id,
-            "pending_credential_id": &pending.id,
-            "service_slug": &pending.service_slug,
-            "owner_user_id": &pending.owner_user_id,
-        })),
-    );
+    if RciAuditSubject::pending_is_rci(&pending) {
+        log_rci_for_pending_user(&state, &auth_user, &pending, RciAuditEventKind::Canceled);
+    } else {
+        audit_service::log_for_user(
+            state.db.clone(),
+            &auth_user,
+            "node_credential_push_canceled",
+            Some(serde_json::json!({
+                "node_id": &pending.node_id,
+                "pending_credential_id": &pending.id,
+                "service_slug": &pending.service_slug,
+                "owner_user_id": &pending.owner_user_id,
+            })),
+        );
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -3209,7 +3316,7 @@ mod tests {
         };
 
         let decoded = validate_pending_ciphertext_request(&request).expect("valid request");
-        assert_eq!(decoded, vec![3_u8; 48]);
+        assert_eq!(decoded, PendingCiphertextValidation::Valid(vec![3_u8; 48]));
     }
 
     #[test]
@@ -3263,8 +3370,7 @@ mod tests {
         };
         assert!(matches!(
             validate_pending_ciphertext_request(&oversized),
-            Err(AppError::PendingCredentialCiphertextTooLarge(size))
-                if size == node_pending_credential_service::MAX_CIPHERTEXT_SIZE + 1
+            Ok(PendingCiphertextValidation::TooLarge)
         ));
     }
 

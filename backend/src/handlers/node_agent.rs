@@ -11,7 +11,10 @@ use crate::errors::{AppError, AppResult};
 use crate::handlers::admin_helpers::{extract_ip, extract_user_agent};
 use crate::models::node::Node;
 use crate::models::node_pending_credential::NodePendingCredential;
-use crate::services::{audit_service, node_pending_credential_service, node_service};
+use crate::services::{
+    audit_service, node_pending_credential_service, node_service,
+    rci_audit_service::{self, RciAuditEventKind, RciAuditSubject},
+};
 
 #[derive(Debug, Deserialize)]
 pub struct DeclinePendingCredentialRequest {
@@ -84,6 +87,56 @@ fn pending_info(
     }
 }
 
+fn pending_completion_audit_event_type(
+    pending: &NodePendingCredential,
+    legacy_event_type: &'static str,
+    rci_kind: RciAuditEventKind,
+) -> &'static str {
+    if RciAuditSubject::pending_is_rci(pending) {
+        rci_kind.event_type()
+    } else {
+        legacy_event_type
+    }
+}
+
+fn log_pending_completion_audit(
+    state: &AppState,
+    headers: &HeaderMap,
+    pending: &NodePendingCredential,
+    legacy_event_type: &'static str,
+    rci_kind: RciAuditEventKind,
+) {
+    if pending_completion_audit_event_type(pending, legacy_event_type, rci_kind)
+        == rci_kind.event_type()
+    {
+        let subject = RciAuditSubject::from_pending(pending);
+        rci_audit_service::log_rci_for_node(
+            state.db.clone(),
+            &pending.owner_user_id,
+            extract_ip(headers),
+            extract_user_agent(headers),
+            &subject,
+            rci_kind,
+        );
+    } else {
+        audit_service::log_async(
+            state.db.clone(),
+            Some(pending.owner_user_id.clone()),
+            legacy_event_type.to_string(),
+            Some(serde_json::json!({
+                "node_id": &pending.node_id,
+                "pending_credential_id": &pending.id,
+                "service_slug": &pending.service_slug,
+                "owner_user_id": &pending.owner_user_id,
+            })),
+            extract_ip(headers),
+            extract_user_agent(headers),
+            None,
+            None,
+        );
+    }
+}
+
 /// GET /api/v1/node-agent/pending-credentials
 pub async fn list_pending_credentials(
     State(state): State<AppState>,
@@ -119,20 +172,12 @@ pub async fn consume_pending_credential(
     )
     .await?;
 
-    audit_service::log_async(
-        state.db.clone(),
-        Some(pending.owner_user_id.clone()),
-        "node_credential_push_consumed".to_string(),
-        Some(serde_json::json!({
-            "node_id": &node.id,
-            "pending_credential_id": &pending.id,
-            "service_slug": &pending.service_slug,
-            "owner_user_id": &pending.owner_user_id,
-        })),
-        extract_ip(&headers),
-        extract_user_agent(&headers),
-        None,
-        None,
+    log_pending_completion_audit(
+        &state,
+        &headers,
+        &pending,
+        "node_credential_push_consumed",
+        RciAuditEventKind::Consumed,
     );
 
     Ok(StatusCode::NO_CONTENT)
@@ -153,35 +198,49 @@ pub async fn decline_pending_credential(
     )
     .await?;
 
-    audit_service::log_async(
-        state.db.clone(),
-        Some(pending.owner_user_id.clone()),
-        "node_credential_push_declined".to_string(),
-        Some(serde_json::json!({
-            "node_id": &node.id,
-            "pending_credential_id": &pending.id,
-            "service_slug": &pending.service_slug,
-            "owner_user_id": &pending.owner_user_id,
-            "reason_present": body
-                .as_ref()
-                .and_then(|body| body.reason.as_deref())
-                .is_some_and(|reason| !reason.trim().is_empty()),
-        })),
-        extract_ip(&headers),
-        extract_user_agent(&headers),
-        None,
-        None,
-    );
+    let reason_present = body
+        .as_ref()
+        .and_then(|body| body.reason.as_deref())
+        .is_some_and(|reason| !reason.trim().is_empty());
+    if RciAuditSubject::pending_is_rci(&pending) {
+        log_pending_completion_audit(
+            &state,
+            &headers,
+            &pending,
+            "node_credential_push_declined",
+            RciAuditEventKind::Declined { reason_present },
+        );
+    } else {
+        audit_service::log_async(
+            state.db.clone(),
+            Some(pending.owner_user_id.clone()),
+            "node_credential_push_declined".to_string(),
+            Some(serde_json::json!({
+                "node_id": &node.id,
+                "pending_credential_id": &pending.id,
+                "service_slug": &pending.service_slug,
+                "owner_user_id": &pending.owner_user_id,
+                "reason_present": reason_present,
+            })),
+            extract_ip(&headers),
+            extract_user_agent(&headers),
+            None,
+            None,
+        );
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{DeclinePendingCredentialRequest, pending_info};
-    use crate::models::node_pending_credential::{
-        CryptoBundle, InjectionMethod, NodePendingCredential,
+    use super::{
+        DeclinePendingCredentialRequest, pending_completion_audit_event_type, pending_info,
     };
+    use crate::models::node_pending_credential::{
+        CryptoBundle, InjectionMethod, NodePendingCredential, RemoteCryptoState,
+    };
+    use crate::services::rci_audit_service::RciAuditEventKind;
     use chrono::{Duration, Utc};
 
     #[test]
@@ -248,5 +307,57 @@ mod tests {
         let json = serde_json::to_value(&info).expect("serialize");
         assert_eq!(json["crypto"]["version"], "v1");
         assert!(json["crypto"].get("node_pubkey").is_none());
+    }
+
+    #[test]
+    fn regression_legacy_cli_flow_unchanged() {
+        let legacy = test_pending(None);
+        assert_eq!(
+            pending_completion_audit_event_type(
+                &legacy,
+                "node_credential_push_consumed",
+                RciAuditEventKind::Consumed,
+            ),
+            "node_credential_push_consumed"
+        );
+        assert_eq!(
+            pending_completion_audit_event_type(
+                &legacy,
+                "node_credential_push_declined",
+                RciAuditEventKind::Declined {
+                    reason_present: true,
+                },
+            ),
+            "node_credential_push_declined"
+        );
+
+        let rci_crypto = test_pending(Some(CryptoBundle {
+            version: "v1".to_string(),
+            node_pubkey: String::new(),
+            admin_pubkey: None,
+            nonce: None,
+            ciphertext: None,
+        }));
+        assert_eq!(
+            pending_completion_audit_event_type(
+                &rci_crypto,
+                "node_credential_push_consumed",
+                RciAuditEventKind::Consumed,
+            ),
+            "node_credential_rci_consumed"
+        );
+
+        let mut rci_remote_state = test_pending(None);
+        rci_remote_state.remote_state = Some(RemoteCryptoState::PubkeyPosted);
+        assert_eq!(
+            pending_completion_audit_event_type(
+                &rci_remote_state,
+                "node_credential_push_declined",
+                RciAuditEventKind::Declined {
+                    reason_present: false,
+                },
+            ),
+            "node_credential_rci_declined"
+        );
     }
 }

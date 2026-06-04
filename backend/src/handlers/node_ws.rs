@@ -27,6 +27,9 @@ use crate::services::{
         WsSshNodeExecErrorMsg, WsSshTunnelClosedMsg, WsSshTunnelDataMsg, WsSshTunnelOpenedMsg,
         WsWebTerminalClosedMsg, WsWebTerminalDataMsg, WsWebTerminalStartedMsg,
     },
+    rci_audit_service::{
+        self, RciAuditDelivery, RciAuditErrorKind, RciAuditEventKind, RciAuditSubject,
+    },
 };
 use crate::telemetry::{
     context::{TelemetryContext, emit_event},
@@ -258,9 +261,67 @@ fn send_pending_ciphertext_to_node(
     ws_manager.send_pending_credential_ciphertext(node_id, &params)
 }
 
+fn log_rci_for_node_pending(
+    db: mongodb::Database,
+    ip_address: Option<String>,
+    user_agent: Option<String>,
+    pending: &NodePendingCredential,
+    kind: RciAuditEventKind,
+) {
+    let subject = RciAuditSubject::from_pending(pending);
+    rci_audit_service::log_rci_for_node(
+        db,
+        &pending.owner_user_id,
+        ip_address,
+        user_agent,
+        &subject,
+        kind,
+    );
+}
+
+fn log_rci_for_node_summary(
+    db: mongodb::Database,
+    ip_address: Option<String>,
+    user_agent: Option<String>,
+    summary: &node_pending_credential_service::PendingCredentialAuditSummary,
+    kind: RciAuditEventKind,
+) {
+    let subject = RciAuditSubject::from_summary(summary);
+    rci_audit_service::log_rci_for_node(
+        db,
+        &summary.owner_user_id,
+        ip_address,
+        user_agent,
+        &subject,
+        kind,
+    );
+}
+
 async fn drain_queued_pending_ciphertexts(state: &AppState, node_id: &str) {
     const DRAIN_LIMIT: i64 = 50;
     let now = chrono::Utc::now();
+    match node_pending_credential_service::expire_queued_ciphertexts_with_summaries(&state.db, now)
+        .await
+    {
+        Ok(summaries) => {
+            for summary in summaries {
+                log_rci_for_node_summary(
+                    state.db.clone(),
+                    None,
+                    None,
+                    &summary,
+                    RciAuditEventKind::Expired,
+                );
+            }
+        }
+        Err(err) => {
+            tracing::warn!(
+                node_id = %node_id,
+                error = %err,
+                "Failed to expire queued pending credential ciphertexts"
+            );
+        }
+    }
     let pending =
         match node_pending_credential_service::list_deliverable_queued_ciphertexts_for_node(
             &state.db,
@@ -307,6 +368,16 @@ async fn drain_queued_pending_ciphertexts(state: &AppState, node_id: &str) {
                 error = %err,
                 "Failed to mark queued pending credential ciphertext sent"
             );
+        } else {
+            log_rci_for_node_pending(
+                state.db.clone(),
+                None,
+                None,
+                &pending,
+                RciAuditEventKind::CiphertextReplayed {
+                    delivery: RciAuditDelivery::QueuedReplay,
+                },
+            );
         }
     }
 }
@@ -339,16 +410,15 @@ async fn record_pending_credential_pubkey_frame(
         tracing::warn!(
             node_id = %node_id,
             pending_id = %pending_id,
-            version = %version,
             "Ignoring pending credential pubkey with unsupported version"
         );
         return None;
     }
-    if let Err(message) = validate_base64url_no_pad_exact(&node_pubkey, "node_pubkey", 32) {
+    if validate_base64url_no_pad_exact(&node_pubkey, "node_pubkey", 32).is_err() {
         tracing::warn!(
             node_id = %node_id,
             pending_id = %pending_id,
-            error = %message,
+            error_kind = "invalid_pending_credential_pubkey",
             "Ignoring invalid pending credential pubkey"
         );
         return None;
@@ -375,40 +445,20 @@ async fn record_pending_credential_pubkey_frame(
     }
 }
 
-fn pending_decrypt_failed_event_data(
-    node_id: &str,
-    pending: &NodePendingCredential,
-    error_code: Option<serde_json::Value>,
-) -> serde_json::Value {
-    let mut event_data = serde_json::json!({
-        "node_id": node_id,
-        "pending_credential_id": &pending.id,
-        "service_slug": &pending.service_slug,
-        "owner_user_id": &pending.owner_user_id,
-    });
-    if let Some(error_code) = error_code
-        && let serde_json::Value::Object(ref mut object) = event_data
-    {
-        object.insert("error_code".to_string(), error_code);
-    }
-    event_data
-}
-
 async fn record_pending_credential_decrypt_result_frame(
     db: &mongodb::Database,
     node_id: &str,
     pending_id: String,
     status: String,
     error_code: Option<serde_json::Value>,
-) -> Option<(NodePendingCredential, Option<serde_json::Value>)> {
+) -> Option<(NodePendingCredential, RciAuditEventKind)> {
     let outcome = match status.as_str() {
         "ok" => node_pending_credential_service::PendingCredentialDecryptOutcome::Ok,
         "error" => node_pending_credential_service::PendingCredentialDecryptOutcome::Error,
-        other => {
+        _other => {
             tracing::warn!(
                 node_id = %node_id,
                 pending_id = %pending_id,
-                status = %other,
                 "Ignoring pending credential decrypt_result with unsupported status"
             );
             return None;
@@ -424,18 +474,31 @@ async fn record_pending_credential_decrypt_result_frame(
     .await
     {
         Ok(pending) => {
-            let audit_event_data = matches!(
-                outcome,
-                node_pending_credential_service::PendingCredentialDecryptOutcome::Error
-            )
-            .then(|| pending_decrypt_failed_event_data(node_id, &pending, error_code));
-            Some((pending, audit_event_data))
+            let event_kind = match outcome {
+                node_pending_credential_service::PendingCredentialDecryptOutcome::Ok => {
+                    RciAuditEventKind::DecryptSucceeded
+                }
+                node_pending_credential_service::PendingCredentialDecryptOutcome::Error => {
+                    match error_code
+                        .as_ref()
+                        .and_then(serde_json::Value::as_u64)
+                        .and_then(|code| RciAuditErrorKind::from_code(code as u32))
+                    {
+                        Some(RciAuditErrorKind::VersionUnsupported) => {
+                            RciAuditEventKind::from_error_kind(
+                                RciAuditErrorKind::VersionUnsupported,
+                            )
+                        }
+                        _ => RciAuditEventKind::from_error_kind(RciAuditErrorKind::DecryptFailed),
+                    }
+                }
+            };
+            Some((pending, event_kind))
         }
         Err(err) => {
             tracing::warn!(
                 node_id = %node_id,
                 pending_id = %pending_id,
-                status = %status,
                 error = %err,
                 "Failed to record pending credential decrypt_result"
             );
@@ -1109,39 +1172,61 @@ async fn handle_node_connection(
                 version,
                 node_pubkey,
             } => {
-                let _ = record_pending_credential_pubkey_frame(
+                if version != "v1"
+                    && let Ok(summary) =
+                        node_pending_credential_service::get_pending_credential_audit_summary_for_node(
+                            &db,
+                            &node_id_reader,
+                            &pending_id,
+                        )
+                        .await
+                {
+                    log_rci_for_node_summary(
+                        db.clone(),
+                        ip_address.clone(),
+                        user_agent.clone(),
+                        &summary,
+                        RciAuditEventKind::VersionUnsupported,
+                    );
+                }
+                if let Some(pending) = record_pending_credential_pubkey_frame(
                     &db,
                     &node_id_reader,
                     pending_id,
                     version,
                     node_pubkey,
                 )
-                .await;
+                .await
+                {
+                    log_rci_for_node_pending(
+                        db.clone(),
+                        ip_address.clone(),
+                        user_agent.clone(),
+                        &pending,
+                        RciAuditEventKind::PubkeyPosted,
+                    );
+                }
             }
             NodeMessage::PendingCredentialDecryptResult {
                 pending_id,
                 status,
                 error_code,
             } => {
-                if let Some((pending, Some(event_data))) =
-                    record_pending_credential_decrypt_result_frame(
-                        &db,
-                        &node_id_reader,
-                        pending_id,
-                        status,
-                        error_code,
-                    )
-                    .await
+                if let Some((pending, event_kind)) = record_pending_credential_decrypt_result_frame(
+                    &db,
+                    &node_id_reader,
+                    pending_id,
+                    status,
+                    error_code,
+                )
+                .await
                 {
-                    audit_service::log_async(
+                    log_rci_for_node_pending(
                         db.clone(),
-                        Some(pending.owner_user_id.clone()),
-                        "node_credential_remote_decrypt_failed".to_string(),
-                        Some(event_data),
                         ip_address.clone(),
                         user_agent.clone(),
-                        None,
-                        None,
+                        &pending,
+                        event_kind,
                     );
                 }
             }
@@ -1340,10 +1425,13 @@ mod tests {
         RemoteCryptoState,
     };
     use crate::models::user::{COLLECTION_NAME as USERS, UserType};
-    use crate::services::node_pending_credential_service;
     use crate::services::node_ws_manager::{
         NodeCapabilitiesMsg, NodeOutboundMessage, NodeProxyRequest, NodeWsManager,
         ProxyResponseType, StreamChunk, WsProxyResponseChunkMsg,
+    };
+    use crate::services::{
+        node_pending_credential_service,
+        rci_audit_service::{self, RciAuditEventKind, RciAuditSubject},
     };
     use crate::test_utils::{connect_test_database, test_app_state, test_user};
 
@@ -1526,7 +1614,7 @@ mod tests {
         store_ciphertext(&db, &owner_id, &node.id, &ok_pending.id, true).await;
         store_ciphertext(&db, &owner_id, &node.id, &error_pending.id, true).await;
 
-        let (ok, ok_audit) = record_pending_credential_decrypt_result_frame(
+        let (ok, ok_event_kind) = record_pending_credential_decrypt_result_frame(
             &db,
             &node.id,
             ok_pending.id.clone(),
@@ -1538,20 +1626,21 @@ mod tests {
         assert_eq!(ok.remote_state, Some(RemoteCryptoState::Consumed));
         assert!(!ok.is_active);
         assert!(ok.consumed_at.is_some());
-        assert!(ok_audit.is_none());
+        assert_eq!(ok_event_kind, RciAuditEventKind::DecryptSucceeded);
 
-        let (failed, audit_event_data) = record_pending_credential_decrypt_result_frame(
+        let (failed, event_kind) = record_pending_credential_decrypt_result_frame(
             &db,
             &node.id,
             error_pending.id.clone(),
             "error".to_string(),
-            Some(serde_json::json!("node_decrypt_failed")),
+            Some(serde_json::json!(8006)),
         )
         .await
         .expect("error decrypt result recorded");
         assert_eq!(failed.remote_state, Some(RemoteCryptoState::DecryptFailed));
         assert!(!failed.is_active);
         assert!(failed.consumed_at.is_none());
+        assert_eq!(event_kind, RciAuditEventKind::DecryptFailed);
 
         let raw = db
             .collection::<bson::Document>(NODE_PENDING_CREDENTIALS)
@@ -1566,12 +1655,20 @@ mod tests {
         assert!(crypto.get("nonce").is_none());
         assert!(crypto.get("ciphertext").is_none());
 
-        let event_data = audit_event_data.expect("error decrypt result returns audit metadata");
+        let event_data = rci_audit_service::rci_event_data(
+            &RciAuditSubject::from_pending(&failed),
+            event_kind,
+            Utc::now(),
+        );
         assert_eq!(event_data["node_id"], node.id);
         assert_eq!(event_data["pending_credential_id"], error_pending.id);
         assert_eq!(event_data["service_slug"], "decrypt-error");
         assert_eq!(event_data["owner_user_id"], owner_id);
-        assert_eq!(event_data["error_code"], "node_decrypt_failed");
+        assert_eq!(event_data["error_code"], 8006);
+        assert_eq!(
+            event_data["error_kind"],
+            "pending_credential_decrypt_failed"
+        );
         let audit_json = event_data.to_string();
         assert!(!audit_json.contains("admin_pubkey"));
         assert!(!audit_json.contains("nonce"));
