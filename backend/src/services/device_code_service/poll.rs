@@ -400,15 +400,15 @@ mod tests {
             tokio::join!(poll_for_test(&db, first), poll_for_test(&db, second));
         let results = [first_result, second_result];
 
+        assert!(results.iter().all(|result| matches!(
+            result,
+            Err(AppError::DevicePollSignatureInvalid(_)) | Err(AppError::DeviceCodeLocked)
+        )));
         assert!(
-            results.iter().all(|result| matches!(
-                result,
-                Err(AppError::DevicePollSignatureInvalid(_)) | Err(AppError::DeviceCodeLocked)
-            ))
+            results
+                .iter()
+                .any(|result| matches!(result, Err(AppError::DevicePollSignatureInvalid(_))))
         );
-        assert!(results
-            .iter()
-            .any(|result| matches!(result, Err(AppError::DevicePollSignatureInvalid(_)))));
 
         let row = db
             .collection::<DeviceCode>(DEVICE_CODES)

@@ -224,8 +224,7 @@ mod tests {
 
     #[tokio::test]
     async fn claim_lockout_notification_claims_once_and_returns_recipients() {
-        let Some((db, response, key)) = setup_pending_row("device_code_lockout_claim").await
-        else {
+        let Some((db, response, key)) = setup_pending_row("device_code_lockout_claim").await else {
             return;
         };
         let pubkey = key.verifying_key().to_bytes();
@@ -315,17 +314,29 @@ mod tests {
             .expect("duplicate claim check");
         assert!(duplicate_claim.is_none());
 
+        let expired_until = Utc::now() - Duration::seconds(1);
         db.collection::<DeviceCode>(DEVICE_CODES)
             .update_one(
                 doc! { "device_code_hash": hash_token(&response.device_code) },
                 doc! {
                     "$set": {
-                        "locked_until": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(1)),
+                        "locked_until": bson::DateTime::from_chrono(expired_until),
                     }
                 },
             )
             .await
             .expect("expire lockout");
+        db.collection::<DevicePubkeyLockout>(DEVICE_PUBKEY_LOCKOUTS)
+            .update_one(
+                doc! { "_id": device_pubkey_hash(&pubkey) },
+                doc! {
+                    "$set": {
+                        "locked_until": bson::DateTime::from_chrono(expired_until),
+                    }
+                },
+            )
+            .await
+            .expect("expire pubkey lockout");
 
         let timestamp = Utc::now().timestamp();
         let encryption_keys = test_encryption_keys();
