@@ -5,6 +5,8 @@ import {
   transferNodeSchema,
   nodePendingCredentialInjectionMethodSchema,
   pushNodeCredentialSchema,
+  acceptNodeCredentialSecretSchema,
+  MAX_REMOTE_CREDENTIAL_PLAINTEXT_SIZE,
 } from "./nodes";
 
 describe("createRegistrationTokenSchema", () => {
@@ -73,6 +75,26 @@ describe("pushNodeCredentialSchema", () => {
     expect(pushNodeCredentialSchema.safeParse(base).success).toBe(true);
   });
 
+  it("defaults remote_crypto to true", () => {
+    const result = pushNodeCredentialSchema.safeParse(base);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.remote_crypto).toBe(true);
+    }
+  });
+
+  it("rejects remote_crypto false and has no plaintext secret fields", () => {
+    expect(
+      pushNodeCredentialSchema.safeParse({ ...base, remote_crypto: false })
+        .success,
+    ).toBe(false);
+
+    const shape = pushNodeCredentialSchema.shape;
+    for (const field of ["secret", "credential", "token", "value"]) {
+      expect(shape).not.toHaveProperty(field);
+    }
+  });
+
   it("rejects an invalid service slug", () => {
     expect(
       pushNodeCredentialSchema.safeParse({ ...base, service_slug: "Open AI" }).success,
@@ -106,5 +128,24 @@ describe("pushNodeCredentialSchema", () => {
       pushNodeCredentialSchema.safeParse({ ...base, target_url: "https://api.openai.com" })
         .success,
     ).toBe(true);
+  });
+});
+
+describe("acceptNodeCredentialSecretSchema", () => {
+  it("accepts local non-empty secret bytes within the maximum size", () => {
+    expect(
+      acceptNodeCredentialSecretSchema.safeParse(new Uint8Array([1])).success,
+    ).toBe(true);
+  });
+
+  it("rejects empty and oversized local secret bytes", () => {
+    expect(
+      acceptNodeCredentialSecretSchema.safeParse(new Uint8Array()).success,
+    ).toBe(false);
+    expect(
+      acceptNodeCredentialSecretSchema.safeParse(
+        new Uint8Array(MAX_REMOTE_CREDENTIAL_PLAINTEXT_SIZE + 1),
+      ).success,
+    ).toBe(false);
   });
 });

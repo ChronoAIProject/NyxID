@@ -14,12 +14,15 @@ import {
   useMyNodeBindings,
   useNode,
   useNodeAdmins,
+  useNodePendingCredentialPubkey,
   useNodePendingCredentials,
   useNodes,
+  usePostNodePendingCredentialCiphertext,
   usePushNodeCredential,
   useRotateNodeToken,
   useTransferNode,
 } from "./use-nodes";
+import type { CiphertextEnvelope } from "@/lib/crypto";
 
 const { mockDelete, mockGet, mockPost } = vi.hoisted(() => ({
   mockDelete: vi.fn(),
@@ -127,6 +130,52 @@ describe("node queries", () => {
     expect(mockGet).toHaveBeenCalledWith("/nodes/node-1/credentials/pending");
     expect(on.result.current.data).toEqual([{ id: "pc-1" }]);
   });
+
+  it("useNodePendingCredentials includes history in both URL and cache key", async () => {
+    mockGet.mockResolvedValue({ pending_credentials: [{ id: "pc-old" }] });
+    const { result, rerender } = renderHook(
+      ({ includeHistory }: { readonly includeHistory: boolean }) =>
+        useNodePendingCredentials("node-1", true, includeHistory),
+      {
+        initialProps: { includeHistory: false },
+        wrapper: createWrapper(),
+      },
+    );
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(mockGet).toHaveBeenCalledWith("/nodes/node-1/credentials/pending");
+
+    rerender({ includeHistory: true });
+    await waitFor(() =>
+      expect(mockGet).toHaveBeenCalledWith(
+        "/nodes/node-1/credentials/pending?include_history=true",
+      ),
+    );
+    expect(mockGet).toHaveBeenCalledWith(
+      "/nodes/node-1/credentials/pending?include_history=true",
+    );
+  });
+
+  it("useNodePendingCredentialPubkey GETs the pending pubkey endpoint", async () => {
+    mockGet.mockResolvedValue({
+      pending_id: "pc-1",
+      node_id: "node-1",
+      service_slug: "openai",
+      version: "v1",
+      node_pubkey: "abc",
+    });
+
+    const { result } = renderHook(
+      () => useNodePendingCredentialPubkey("node-1", "pc-1"),
+      { wrapper: createWrapper() },
+    );
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(mockGet).toHaveBeenCalledWith(
+      "/nodes/node-1/credentials/pending/pc-1",
+    );
+    expect(result.current.data?.node_pubkey).toBe("abc");
+  });
 });
 
 describe("node mutations", () => {
@@ -186,6 +235,34 @@ describe("node mutations", () => {
     expect(mockPost).toHaveBeenCalledWith("/nodes/node-1/credentials/push", {
       service_slug: "openai",
     });
+  });
+
+  it("usePostNodePendingCredentialCiphertext POSTs only the ciphertext envelope", async () => {
+    mockPost.mockResolvedValue({
+      delivery_status: "sent",
+      remote_state: "ciphertext_received",
+    });
+    const envelope: CiphertextEnvelope = {
+      version: "v1",
+      admin_pubkey: "admin-key",
+      nonce: "nonce",
+      ciphertext: "ciphertext",
+    };
+    const { result } = renderHook(
+      () => usePostNodePendingCredentialCiphertext("node-1", "pc-1"),
+      { wrapper: createWrapper() },
+    );
+
+    await result.current.mutateAsync(envelope);
+
+    expect(mockPost).toHaveBeenCalledWith(
+      "/nodes/node-1/credentials/pending/pc-1/ciphertext",
+      envelope,
+    );
+    const body = mockPost.mock.calls[0]![1] as Record<string, unknown>;
+    for (const forbidden of ["secret", "credential", "token", "value"]) {
+      expect(body).not.toHaveProperty(forbidden);
+    }
   });
 
   it("useCancelNodePendingCredential DELETEs the pending credential by id", async () => {

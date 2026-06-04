@@ -10,7 +10,10 @@ import type {
   TransferNodeResponse,
   NodePendingCredentialInfo,
   NodePendingCredentialsResponse,
+  NodePendingCredentialPubkeyResponse,
+  NodePendingCredentialCiphertextResponse,
 } from "@/types/nodes";
+import type { CiphertextEnvelope } from "@/lib/crypto";
 import type {
   CreateRegistrationTokenFormData,
   TransferNodeFormData,
@@ -64,16 +67,43 @@ export function useNodeAdmins(nodeId: string) {
   });
 }
 
-export function useNodePendingCredentials(nodeId: string, enabled = true) {
+export function useNodePendingCredentials(
+  nodeId: string,
+  enabled = true,
+  includeHistory = false,
+) {
   return useQuery({
-    queryKey: ["nodes", nodeId, "pending-credentials"],
+    queryKey: ["nodes", nodeId, "pending-credentials", { includeHistory }],
     queryFn: async (): Promise<readonly NodePendingCredentialInfo[]> => {
+      const suffix = includeHistory ? "?include_history=true" : "";
       const res = await api.get<NodePendingCredentialsResponse>(
-        `/nodes/${nodeId}/credentials/pending`,
+        `/nodes/${nodeId}/credentials/pending${suffix}`,
       );
       return res.pending_credentials;
     },
     enabled: enabled && Boolean(nodeId),
+  });
+}
+
+export function useNodePendingCredentialPubkey(
+  nodeId: string,
+  pendingCredentialId: string,
+  enabled = true,
+) {
+  return useQuery({
+    queryKey: [
+      "nodes",
+      nodeId,
+      "pending-credentials",
+      pendingCredentialId,
+      "pubkey",
+    ],
+    queryFn: async (): Promise<NodePendingCredentialPubkeyResponse> => {
+      return api.get<NodePendingCredentialPubkeyResponse>(
+        `/nodes/${nodeId}/credentials/pending/${pendingCredentialId}`,
+      );
+    },
+    enabled: enabled && Boolean(nodeId) && Boolean(pendingCredentialId),
   });
 }
 
@@ -172,6 +202,29 @@ export function usePushNodeCredential(nodeId: string) {
   });
 }
 
+export function usePostNodePendingCredentialCiphertext(
+  nodeId: string,
+  pendingCredentialId: string,
+) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (
+      envelope: CiphertextEnvelope,
+    ): Promise<NodePendingCredentialCiphertextResponse> => {
+      return api.post<NodePendingCredentialCiphertextResponse>(
+        `/nodes/${nodeId}/credentials/pending/${pendingCredentialId}/ciphertext`,
+        envelope,
+      );
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({
+        queryKey: ["nodes", nodeId, "pending-credentials"],
+      });
+    },
+  });
+}
+
 export function useCancelNodePendingCredential(nodeId: string) {
   const queryClient = useQueryClient();
 
@@ -188,4 +241,3 @@ export function useCancelNodePendingCredential(nodeId: string) {
     },
   });
 }
-

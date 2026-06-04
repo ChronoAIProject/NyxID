@@ -53,6 +53,7 @@ import {
   ApprovalGrantsPage,
   NodesPage,
   NodeDetailPage,
+  CredentialAcceptPage,
   AdminNodesPage,
   AdminAuditLogPage,
   AdminInviteCodesPage,
@@ -275,7 +276,10 @@ const landingRoute = createRoute({
   path: "/",
   getParentRoute: () => rootRoute,
   beforeLoad: () => {
-    if (import.meta.env.DEV && new URLSearchParams(window.location.search).has("mock")) {
+    if (
+      import.meta.env.DEV &&
+      new URLSearchParams(window.location.search).has("mock")
+    ) {
       throw redirect({ to: "/dashboard", search: { mock: "" } });
     }
     const { isAuthenticated, isLoading } = useAuthStore.getState();
@@ -399,9 +403,7 @@ const settingsRoute = createRoute({
   path: "/settings",
   getParentRoute: () => dashboardLayout,
   component: SettingsPage,
-  validateSearch: (
-    search: Record<string, unknown>,
-  ): { tab?: string } => ({
+  validateSearch: (search: Record<string, unknown>): { tab?: string } => ({
     ...(typeof search.tab === "string" ? { tab: search.tab } : {}),
   }),
 });
@@ -420,9 +422,7 @@ const consentsRoute = createRoute({
   path: "/settings/consents",
   getParentRoute: () => dashboardLayout,
   component: ConsentsPage,
-  validateSearch: (
-    search: Record<string, unknown>,
-  ): { tab?: string } => ({
+  validateSearch: (search: Record<string, unknown>): { tab?: string } => ({
     ...(typeof search.tab === "string" ? { tab: search.tab } : {}),
   }),
 });
@@ -431,7 +431,10 @@ const authorizationsRedirectRoute = createRoute({
   path: "/settings/authorizations",
   getParentRoute: () => dashboardLayout,
   beforeLoad: () => {
-    throw redirect({ to: "/settings/consents", search: { tab: "authorizations" } });
+    throw redirect({
+      to: "/settings/consents",
+      search: { tab: "authorizations" },
+    });
   },
 });
 
@@ -451,9 +454,7 @@ const integrationGuideRoute = createRoute({
   path: "/integration-guide",
   getParentRoute: () => dashboardLayout,
   component: IntegrationGuidePage,
-  validateSearch: (
-    search: Record<string, unknown>,
-  ): { tab?: string } => ({
+  validateSearch: (search: Record<string, unknown>): { tab?: string } => ({
     ...(typeof search.tab === "string" ? { tab: search.tab } : {}),
   }),
 });
@@ -504,6 +505,21 @@ const nodeDetailRoute = createRoute({
   path: "/nodes/$nodeId",
   getParentRoute: () => dashboardLayout,
   component: NodeDetailPage,
+});
+
+const nodeCredentialAcceptRoute = createRoute({
+  path: "/nodes/$nodeId/credentials/pending/$pendingId/accept",
+  getParentRoute: () => dashboardLayout,
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { return_to?: string } => ({
+    ...(typeof search.return_to === "string" &&
+    search.return_to.length > 0 &&
+    search.return_to.length <= 2048
+      ? { return_to: search.return_to }
+      : {}),
+  }),
+  component: CredentialAcceptPage,
 });
 
 const keysRoute = createRoute({
@@ -569,9 +585,7 @@ const orgDetailRoute = createRoute({
   path: "/orgs/$orgId",
   getParentRoute: () => dashboardLayout,
   component: OrgDetailPage,
-  validateSearch: (
-    search: Record<string, unknown>,
-  ): { tab?: string } => ({
+  validateSearch: (search: Record<string, unknown>): { tab?: string } => ({
     ...(typeof search.tab === "string" ? { tab: search.tab } : {}),
   }),
 });
@@ -675,9 +689,7 @@ const adminAuditLogRoute = createRoute({
 const adminInviteCodesRoute = createRoute({
   path: "invite-codes",
   getParentRoute: () => adminLayout,
-  validateSearch: (
-    search: Record<string, unknown>,
-  ): { view?: string } => ({
+  validateSearch: (search: Record<string, unknown>): { view?: string } => ({
     ...(typeof search.view === "string" ? { view: search.view } : {}),
   }),
   component: AdminInviteCodesPage,
@@ -731,6 +743,7 @@ const routeTree = rootRoute.addChildren([
     apiKeyDetailRoute,
     nodesRoute,
     nodeDetailRoute,
+    nodeCredentialAcceptRoute,
     channelBotsRoute,
     channelBotDetailRoute,
     channelConversationDetailRoute,
