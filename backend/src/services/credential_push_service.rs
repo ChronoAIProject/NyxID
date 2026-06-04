@@ -985,6 +985,7 @@ mod no_auth_strict_push_tests {
             "node-1",
             &NodeCapabilitiesMsg {
                 credential_ack_correlation: true,
+                remote_credential_crypto_v1: false,
             },
         );
         mgr.mark_status_update_received("node-1");

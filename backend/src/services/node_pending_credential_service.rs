@@ -9,8 +9,8 @@ use zeroize::Zeroizing;
 
 use crate::errors::{AppError, AppResult};
 use crate::models::node_pending_credential::{
-    COLLECTION_NAME as NODE_PENDING_CREDENTIALS, InjectionMethod, NodePendingCredential,
-    RemoteCryptoState,
+    COLLECTION_NAME as NODE_PENDING_CREDENTIALS, CryptoBundle, InjectionMethod,
+    NodePendingCredential, RemoteCryptoState,
 };
 use crate::services::{node_service, url_validation};
 
@@ -25,6 +25,7 @@ pub struct CreatePendingCredentialInput {
     pub target_url: Option<String>,
     pub label: Option<String>,
     pub ttl_secs: i64,
+    pub remote_crypto: bool,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -82,6 +83,12 @@ impl fmt::Debug for StorePendingCiphertextOutcome {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingCredentialDecryptOutcome {
+    Ok,
+    Error,
+}
+
 pub async fn create_pending_credential(
     db: &mongodb::Database,
     actor_user_id: &str,
@@ -121,6 +128,13 @@ pub async fn create_pending_credential(
 
     let now = Utc::now();
     let expires_at = now + Duration::seconds(input.ttl_secs.max(1));
+    let crypto = input.remote_crypto.then(|| CryptoBundle {
+        version: "v1".to_string(),
+        node_pubkey: String::new(),
+        admin_pubkey: None,
+        nonce: None,
+        ciphertext: None,
+    });
     let pending = NodePendingCredential {
         id: Uuid::new_v4().to_string(),
         node_id: node_id.to_string(),
@@ -135,7 +149,7 @@ pub async fn create_pending_credential(
         expires_at,
         consumed_at: None,
         declined_at: None,
-        crypto: None,
+        crypto,
         remote_state: None,
         ciphertext_queued_at: None,
         ciphertext_expires_at: None,
@@ -199,32 +213,48 @@ pub async fn record_pending_credential_pubkey(
     version: &str,
     node_pubkey: &str,
 ) -> AppResult<NodePendingCredential> {
+    if version != "v1" {
+        return Err(AppError::PendingCredentialVersionUnsupported(
+            version.to_string(),
+        ));
+    }
     let now = Utc::now();
-    db.collection::<NodePendingCredential>(NODE_PENDING_CREDENTIALS)
+    let updated = db
+        .collection::<NodePendingCredential>(NODE_PENDING_CREDENTIALS)
         .find_one_and_update(
             doc! {
                 "_id": pending_id,
                 "node_id": node_id,
                 "is_active": true,
                 "expires_at": { "$gt": bson::DateTime::from_chrono(now) },
-                "$or": [
-                    { "crypto.ciphertext": { "$exists": false } },
-                    { "crypto.ciphertext": Bson::Null },
-                ],
+                "crypto.version": "v1",
+                "crypto.node_pubkey": "",
             },
             doc! {
                 "$set": {
-                    "crypto": {
-                        "version": version,
-                        "node_pubkey": node_pubkey,
-                    },
+                    "crypto.node_pubkey": node_pubkey,
                     "remote_state": remote_state_bson(RemoteCryptoState::PubkeyPosted)?,
                 },
             },
         )
         .return_document(ReturnDocument::After)
-        .await?
-        .ok_or_else(|| AppError::NotFound("Pending credential not found".to_string()))
+        .await?;
+
+    match updated {
+        Some(updated) => Ok(updated),
+        None => {
+            let current =
+                load_active_unexpired_pending_credential(db, node_id, pending_id, now).await?;
+            match current.crypto.as_ref() {
+                Some(crypto) if crypto.version == "v1" && !crypto.node_pubkey.is_empty() => {
+                    Ok(current)
+                }
+                _ => Err(AppError::NotFound(
+                    "Pending credential not found".to_string(),
+                )),
+            }
+        }
+    }
 }
 
 pub async fn get_pending_credential_for_admin(
@@ -343,6 +373,7 @@ pub async fn store_pending_ciphertext_first_writer_wins(
     }
 }
 
+#[cfg(test)]
 pub async fn expire_queued_ciphertexts(
     db: &mongodb::Database,
     now: DateTime<Utc>,
@@ -372,6 +403,141 @@ pub async fn expire_queued_ciphertexts(
         .await?;
 
     Ok(result.modified_count)
+}
+
+pub async fn mark_pending_ciphertext_queued_after_send_failure(
+    db: &mongodb::Database,
+    node_id: &str,
+    pending_id: &str,
+    now: DateTime<Utc>,
+) -> AppResult<NodePendingCredential> {
+    db.collection::<NodePendingCredential>(NODE_PENDING_CREDENTIALS)
+        .find_one_and_update(
+            doc! {
+                "_id": pending_id,
+                "node_id": node_id,
+                "is_active": true,
+                "expires_at": { "$gt": bson::DateTime::from_chrono(now) },
+                "crypto.admin_pubkey": { "$type": "string" },
+                "crypto.nonce": { "$type": "string" },
+                "crypto.ciphertext": { "$exists": true },
+            },
+            doc! {
+                "$set": {
+                    "remote_state": remote_state_bson(RemoteCryptoState::CiphertextQueued)?,
+                    "ciphertext_queued_at": bson::DateTime::from_chrono(now),
+                    "ciphertext_expires_at": bson::DateTime::from_chrono(now + Duration::seconds(OFFLINE_CIPHERTEXT_QUEUE_TTL_SECS)),
+                },
+            },
+        )
+        .return_document(ReturnDocument::After)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Pending credential not found".to_string()))
+}
+
+pub async fn mark_queued_ciphertext_sent(
+    db: &mongodb::Database,
+    node_id: &str,
+    pending_id: &str,
+    now: DateTime<Utc>,
+) -> AppResult<NodePendingCredential> {
+    db.collection::<NodePendingCredential>(NODE_PENDING_CREDENTIALS)
+        .find_one_and_update(
+            doc! {
+                "_id": pending_id,
+                "node_id": node_id,
+                "is_active": true,
+                "remote_state": "ciphertext_queued",
+                "expires_at": { "$gt": bson::DateTime::from_chrono(now) },
+                "ciphertext_expires_at": { "$gt": bson::DateTime::from_chrono(now) },
+                "crypto.admin_pubkey": { "$type": "string" },
+                "crypto.nonce": { "$type": "string" },
+                "crypto.ciphertext": { "$exists": true },
+            },
+            doc! {
+                "$set": {
+                    "remote_state": remote_state_bson(RemoteCryptoState::CiphertextReceived)?,
+                },
+                "$unset": {
+                    "ciphertext_queued_at": "",
+                    "ciphertext_expires_at": "",
+                },
+            },
+        )
+        .return_document(ReturnDocument::After)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Pending credential not found".to_string()))
+}
+
+pub async fn list_deliverable_queued_ciphertexts_for_node(
+    db: &mongodb::Database,
+    node_id: &str,
+    limit: i64,
+    now: DateTime<Utc>,
+) -> AppResult<Vec<NodePendingCredential>> {
+    db.collection::<NodePendingCredential>(NODE_PENDING_CREDENTIALS)
+        .find(doc! {
+            "node_id": node_id,
+            "is_active": true,
+            "remote_state": "ciphertext_queued",
+            "expires_at": { "$gt": bson::DateTime::from_chrono(now) },
+            "ciphertext_expires_at": { "$gt": bson::DateTime::from_chrono(now) },
+            "crypto.version": "v1",
+            "crypto.node_pubkey": { "$type": "string", "$ne": "" },
+            "crypto.admin_pubkey": { "$type": "string" },
+            "crypto.nonce": { "$type": "string" },
+            "crypto.ciphertext": { "$exists": true },
+        })
+        .sort(doc! { "ciphertext_queued_at": 1, "created_at": 1 })
+        .limit(limit.max(0))
+        .await?
+        .try_collect()
+        .await
+        .map_err(AppError::from)
+}
+
+pub async fn record_pending_credential_decrypt_result(
+    db: &mongodb::Database,
+    node_id: &str,
+    pending_id: &str,
+    outcome: PendingCredentialDecryptOutcome,
+    now: DateTime<Utc>,
+) -> AppResult<NodePendingCredential> {
+    let (state, consumed_at) = match outcome {
+        PendingCredentialDecryptOutcome::Ok => (RemoteCryptoState::Consumed, Some(now)),
+        PendingCredentialDecryptOutcome::Error => (RemoteCryptoState::DecryptFailed, None),
+    };
+
+    let mut set_doc = doc! {
+        "remote_state": remote_state_bson(state)?,
+        "is_active": false,
+    };
+    if let Some(consumed_at) = consumed_at {
+        set_doc.insert("consumed_at", bson::DateTime::from_chrono(consumed_at));
+    }
+
+    db.collection::<NodePendingCredential>(NODE_PENDING_CREDENTIALS)
+        .find_one_and_update(
+            doc! {
+                "_id": pending_id,
+                "node_id": node_id,
+                "is_active": true,
+                "expires_at": { "$gt": bson::DateTime::from_chrono(now) },
+            },
+            doc! {
+                "$set": set_doc,
+                "$unset": {
+                    "crypto.admin_pubkey": "",
+                    "crypto.nonce": "",
+                    "crypto.ciphertext": "",
+                    "ciphertext_queued_at": "",
+                    "ciphertext_expires_at": "",
+                },
+            },
+        )
+        .return_document(ReturnDocument::After)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Pending credential not found".to_string()))
 }
 
 pub async fn cancel_pending_credential(
@@ -666,6 +832,12 @@ mod tests {
     use crate::services::node_service;
     use crate::test_utils::{connect_test_database, test_membership, test_user};
 
+    async fn test_db(prefix: &str) -> mongodb::Database {
+        connect_test_database(prefix)
+            .await
+            .expect("local MongoDB required for pending credential tests")
+    }
+
     fn test_node(owner_id: &str, name: &str) -> Node {
         let now = Utc::now();
         Node {
@@ -694,6 +866,14 @@ mod tests {
             target_url: None,
             label: Some("Production".to_string()),
             ttl_secs: 86_400,
+            remote_crypto: false,
+        }
+    }
+
+    fn remote_credential_input(service_slug: &str) -> CreatePendingCredentialInput {
+        CreatePendingCredentialInput {
+            remote_crypto: true,
+            ..credential_input(service_slug)
         }
     }
 
@@ -835,10 +1015,7 @@ mod tests {
 
     #[tokio::test]
     async fn admin_push_creates_pending_credential_with_acl_fields() {
-        let Some(db) = connect_test_database("pending_credential_push").await else {
-            eprintln!("skipping pending credential test: no local MongoDB available");
-            return;
-        };
+        let db = test_db("pending_credential_push").await;
 
         let admin_id = Uuid::new_v4().to_string();
         let org_id = Uuid::new_v4().to_string();
@@ -877,11 +1054,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_remote_crypto_false_keeps_legacy_crypto_none() {
+        let db = test_db("pending_credential_remote_false").await;
+
+        let actor_id = Uuid::new_v4().to_string();
+        insert_users(&db, vec![test_user(&actor_id, UserType::Person)]).await;
+        let node = test_node(&actor_id, "personal-node");
+        insert_node(&db, &node).await;
+
+        let pending =
+            create_pending_credential(&db, &actor_id, &node.id, credential_input("openclaw"))
+                .await
+                .expect("push succeeds");
+
+        assert!(pending.crypto.is_none());
+        assert!(pending.remote_state.is_none());
+    }
+
+    #[tokio::test]
+    async fn create_remote_crypto_true_initializes_v1_without_pubkey() {
+        let db = test_db("pending_credential_remote_true").await;
+
+        let actor_id = Uuid::new_v4().to_string();
+        insert_users(&db, vec![test_user(&actor_id, UserType::Person)]).await;
+        let node = test_node(&actor_id, "personal-node");
+        insert_node(&db, &node).await;
+
+        let pending = create_pending_credential(
+            &db,
+            &actor_id,
+            &node.id,
+            remote_credential_input("openclaw"),
+        )
+        .await
+        .expect("remote push succeeds");
+
+        let crypto = pending.crypto.expect("remote crypto metadata");
+        assert_eq!(crypto.version, "v1");
+        assert!(crypto.node_pubkey.is_empty());
+        assert!(crypto.admin_pubkey.is_none());
+        assert!(crypto.nonce.is_none());
+        assert!(crypto.ciphertext.is_none());
+        assert!(pending.remote_state.is_none());
+    }
+
+    #[tokio::test]
     async fn member_cannot_push_pending_credential_for_org_node() {
-        let Some(db) = connect_test_database("pending_credential_member_denied").await else {
-            eprintln!("skipping pending credential test: no local MongoDB available");
-            return;
-        };
+        let db = test_db("pending_credential_member_denied").await;
 
         let member_id = Uuid::new_v4().to_string();
         let org_id = Uuid::new_v4().to_string();
@@ -910,10 +1129,7 @@ mod tests {
 
     #[tokio::test]
     async fn push_for_nonexistent_node_returns_not_found() {
-        let Some(db) = connect_test_database("pending_credential_missing_node").await else {
-            eprintln!("skipping pending credential test: no local MongoDB available");
-            return;
-        };
+        let db = test_db("pending_credential_missing_node").await;
 
         let actor_id = Uuid::new_v4().to_string();
         insert_users(&db, vec![test_user(&actor_id, UserType::Person)]).await;
@@ -931,10 +1147,7 @@ mod tests {
 
     #[tokio::test]
     async fn duplicate_pending_slug_returns_conflict_with_existing_id() {
-        let Some(db) = connect_test_database("pending_credential_duplicate").await else {
-            eprintln!("skipping pending credential test: no local MongoDB available");
-            return;
-        };
+        let db = test_db("pending_credential_duplicate").await;
 
         let actor_id = Uuid::new_v4().to_string();
         insert_users(&db, vec![test_user(&actor_id, UserType::Person)]).await;
@@ -959,10 +1172,7 @@ mod tests {
 
     #[tokio::test]
     async fn push_accepts_internal_target_url() {
-        let Some(db) = connect_test_database("pending_credential_internal_url").await else {
-            eprintln!("skipping pending credential test: no local MongoDB available");
-            return;
-        };
+        let db = test_db("pending_credential_internal_url").await;
 
         let actor_id = Uuid::new_v4().to_string();
         insert_users(&db, vec![test_user(&actor_id, UserType::Person)]).await;
@@ -979,10 +1189,7 @@ mod tests {
 
     #[tokio::test]
     async fn node_consumes_own_pending_credential() {
-        let Some(db) = connect_test_database("pending_credential_consume").await else {
-            eprintln!("skipping pending credential test: no local MongoDB available");
-            return;
-        };
+        let db = test_db("pending_credential_consume").await;
 
         let actor_id = Uuid::new_v4().to_string();
         insert_users(&db, vec![test_user(&actor_id, UserType::Person)]).await;
@@ -1006,10 +1213,7 @@ mod tests {
 
     #[tokio::test]
     async fn node_cannot_consume_another_nodes_pending_credential() {
-        let Some(db) = connect_test_database("pending_credential_wrong_node").await else {
-            eprintln!("skipping pending credential test: no local MongoDB available");
-            return;
-        };
+        let db = test_db("pending_credential_wrong_node").await;
 
         let actor_id = Uuid::new_v4().to_string();
         insert_users(&db, vec![test_user(&actor_id, UserType::Person)]).await;
@@ -1034,10 +1238,7 @@ mod tests {
 
     #[tokio::test]
     async fn node_declines_pending_credential() {
-        let Some(db) = connect_test_database("pending_credential_decline").await else {
-            eprintln!("skipping pending credential test: no local MongoDB available");
-            return;
-        };
+        let db = test_db("pending_credential_decline").await;
 
         let actor_id = Uuid::new_v4().to_string();
         insert_users(&db, vec![test_user(&actor_id, UserType::Person)]).await;
@@ -1060,10 +1261,7 @@ mod tests {
 
     #[tokio::test]
     async fn admin_cancel_prevents_later_consume() {
-        let Some(db) = connect_test_database("pending_credential_cancel").await else {
-            eprintln!("skipping pending credential test: no local MongoDB available");
-            return;
-        };
+        let db = test_db("pending_credential_cancel").await;
 
         let actor_id = Uuid::new_v4().to_string();
         insert_users(&db, vec![test_user(&actor_id, UserType::Person)]).await;
@@ -1090,10 +1288,7 @@ mod tests {
 
     #[tokio::test]
     async fn expired_pending_credentials_are_not_listed() {
-        let Some(db) = connect_test_database("pending_credential_expired").await else {
-            eprintln!("skipping pending credential test: no local MongoDB available");
-            return;
-        };
+        let db = test_db("pending_credential_expired").await;
 
         let actor_id = Uuid::new_v4().to_string();
         insert_users(&db, vec![test_user(&actor_id, UserType::Person)]).await;
@@ -1138,10 +1333,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_pending_credential_for_admin_returns_active_unexpired_row() {
-        let Some(db) = connect_test_database("pending_credential_admin_get").await else {
-            eprintln!("skipping pending credential test: no local MongoDB available");
-            return;
-        };
+        let db = test_db("pending_credential_admin_get").await;
 
         let actor_id = Uuid::new_v4().to_string();
         insert_users(&db, vec![test_user(&actor_id, UserType::Person)]).await;
@@ -1163,10 +1355,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_pending_credential_for_admin_rejects_actor_without_node_access() {
-        let Some(db) = connect_test_database("pending_credential_admin_get_acl").await else {
-            eprintln!("skipping pending credential test: no local MongoDB available");
-            return;
-        };
+        let db = test_db("pending_credential_admin_get_acl").await;
 
         let owner_id = Uuid::new_v4().to_string();
         let stranger_id = Uuid::new_v4().to_string();
@@ -1194,10 +1383,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_pending_credential_for_admin_filters_inactive_and_expired_rows() {
-        let Some(db) = connect_test_database("pending_credential_admin_get_filters").await else {
-            eprintln!("skipping pending credential test: no local MongoDB available");
-            return;
-        };
+        let db = test_db("pending_credential_admin_get_filters").await;
 
         let actor_id = Uuid::new_v4().to_string();
         insert_users(&db, vec![test_user(&actor_id, UserType::Person)]).await;
@@ -1243,20 +1429,20 @@ mod tests {
 
     #[tokio::test]
     async fn store_ciphertext_first_writer_wins_sets_ciphertext_once() {
-        let Some(db) = connect_test_database("pending_credential_ciphertext_first_writer").await
-        else {
-            eprintln!("skipping pending credential test: no local MongoDB available");
-            return;
-        };
+        let db = test_db("pending_credential_ciphertext_first_writer").await;
 
         let actor_id = Uuid::new_v4().to_string();
         insert_users(&db, vec![test_user(&actor_id, UserType::Person)]).await;
         let node = test_node(&actor_id, "personal-node");
         insert_node(&db, &node).await;
-        let pending =
-            create_pending_credential(&db, &actor_id, &node.id, credential_input("openclaw"))
-                .await
-                .expect("push succeeds");
+        let pending = create_pending_credential(
+            &db,
+            &actor_id,
+            &node.id,
+            remote_credential_input("openclaw"),
+        )
+        .await
+        .expect("push succeeds");
         record_pending_credential_pubkey(&db, &node.id, &pending.id, "v1", "node-pubkey")
             .await
             .expect("record pubkey");
@@ -1316,11 +1502,181 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn record_pubkey_is_first_writer_and_does_not_overwrite() {
+        let db = test_db("pending_credential_pubkey_first_writer").await;
+
+        let actor_id = Uuid::new_v4().to_string();
+        insert_users(&db, vec![test_user(&actor_id, UserType::Person)]).await;
+        let node = test_node(&actor_id, "personal-node");
+        insert_node(&db, &node).await;
+        let pending = create_pending_credential(
+            &db,
+            &actor_id,
+            &node.id,
+            remote_credential_input("openclaw"),
+        )
+        .await
+        .expect("push succeeds");
+
+        let first = record_pending_credential_pubkey(&db, &node.id, &pending.id, "v1", "node-1")
+            .await
+            .expect("first pubkey records");
+        let second = record_pending_credential_pubkey(&db, &node.id, &pending.id, "v1", "node-2")
+            .await
+            .expect("second pubkey returns existing");
+
+        assert_eq!(
+            first
+                .crypto
+                .as_ref()
+                .map(|crypto| crypto.node_pubkey.as_str()),
+            Some("node-1")
+        );
+        assert_eq!(
+            second
+                .crypto
+                .as_ref()
+                .map(|crypto| crypto.node_pubkey.as_str()),
+            Some("node-1")
+        );
+        assert_eq!(second.remote_state, Some(RemoteCryptoState::PubkeyPosted));
+    }
+
+    #[tokio::test]
+    async fn send_failure_queue_marking_and_mark_sent_transition() {
+        let db = test_db("pending_credential_send_failure_queue").await;
+
+        let actor_id = Uuid::new_v4().to_string();
+        insert_users(&db, vec![test_user(&actor_id, UserType::Person)]).await;
+        let node = test_node(&actor_id, "personal-node");
+        insert_node(&db, &node).await;
+        let pending = create_pending_credential(
+            &db,
+            &actor_id,
+            &node.id,
+            remote_credential_input("openclaw"),
+        )
+        .await
+        .expect("push succeeds");
+        record_pending_credential_pubkey(&db, &node.id, &pending.id, "v1", "node-pubkey")
+            .await
+            .expect("record pubkey");
+        let now = Utc::now();
+        let stored = store_pending_ciphertext_first_writer_wins(
+            &db,
+            &actor_id,
+            &node.id,
+            &pending.id,
+            ciphertext_input("admin-pubkey", "nonce", vec![1, 2, 3]),
+            true,
+            now,
+        )
+        .await
+        .expect("store online");
+        assert!(matches!(
+            stored,
+            StorePendingCiphertextOutcome::StoredForOnlineNode(_)
+        ));
+
+        let queued =
+            mark_pending_ciphertext_queued_after_send_failure(&db, &node.id, &pending.id, now)
+                .await
+                .expect("mark queued");
+        assert_eq!(
+            queued.remote_state,
+            Some(RemoteCryptoState::CiphertextQueued)
+        );
+        assert!(queued.ciphertext_queued_at.is_some());
+
+        let deliverable = list_deliverable_queued_ciphertexts_for_node(&db, &node.id, 10, now)
+            .await
+            .expect("list queued");
+        assert_eq!(deliverable.len(), 1);
+        assert_eq!(deliverable[0].id, pending.id);
+
+        let sent = mark_queued_ciphertext_sent(&db, &node.id, &pending.id, now)
+            .await
+            .expect("mark sent");
+        assert_eq!(
+            sent.remote_state,
+            Some(RemoteCryptoState::CiphertextReceived)
+        );
+        assert!(sent.ciphertext_queued_at.is_none());
+        assert!(sent.ciphertext_expires_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn decrypt_result_ok_and_error_clear_ciphertext_without_persisted_error_code() {
+        let db = test_db("pending_credential_decrypt_result").await;
+
+        let actor_id = Uuid::new_v4().to_string();
+        insert_users(&db, vec![test_user(&actor_id, UserType::Person)]).await;
+        let node = test_node(&actor_id, "personal-node");
+        insert_node(&db, &node).await;
+        let now = Utc::now();
+        for (service_slug, outcome, expected_state, expect_consumed) in [
+            (
+                "decrypt-ok",
+                PendingCredentialDecryptOutcome::Ok,
+                RemoteCryptoState::Consumed,
+                true,
+            ),
+            (
+                "decrypt-error",
+                PendingCredentialDecryptOutcome::Error,
+                RemoteCryptoState::DecryptFailed,
+                false,
+            ),
+        ] {
+            let pending = create_pending_credential(
+                &db,
+                &actor_id,
+                &node.id,
+                remote_credential_input(service_slug),
+            )
+            .await
+            .expect("push succeeds");
+            record_pending_credential_pubkey(&db, &node.id, &pending.id, "v1", "node-pubkey")
+                .await
+                .expect("record pubkey");
+            store_pending_ciphertext_first_writer_wins(
+                &db,
+                &actor_id,
+                &node.id,
+                &pending.id,
+                ciphertext_input("admin-pubkey", "nonce", vec![1, 2, 3]),
+                true,
+                now,
+            )
+            .await
+            .expect("store ciphertext");
+
+            let returned =
+                record_pending_credential_decrypt_result(&db, &node.id, &pending.id, outcome, now)
+                    .await
+                    .expect("record decrypt result");
+            assert!(!returned.is_active);
+            assert_eq!(returned.remote_state, Some(expected_state));
+            assert_eq!(returned.consumed_at.is_some(), expect_consumed);
+
+            let stored = db
+                .collection::<bson::Document>(NODE_PENDING_CREDENTIALS)
+                .find_one(doc! { "_id": &pending.id })
+                .await
+                .expect("query raw pending")
+                .expect("pending exists");
+            let forbidden_field = ["remote", "error", "code"].join("_");
+            assert!(stored.get(&forbidden_field).is_none());
+            let crypto = stored.get_document("crypto").expect("crypto document");
+            assert!(crypto.get("admin_pubkey").is_none());
+            assert!(crypto.get("nonce").is_none());
+            assert!(crypto.get("ciphertext").is_none());
+        }
+    }
+
+    #[tokio::test]
     async fn store_ciphertext_offline_returns_queue_full_when_cap_reached() {
-        let Some(db) = connect_test_database("pending_credential_queue_full").await else {
-            eprintln!("skipping pending credential test: no local MongoDB available");
-            return;
-        };
+        let db = test_db("pending_credential_queue_full").await;
 
         let actor_id = Uuid::new_v4().to_string();
         insert_users(&db, vec![test_user(&actor_id, UserType::Person)]).await;
@@ -1332,7 +1688,7 @@ mod tests {
                 &db,
                 &actor_id,
                 &node.id,
-                credential_input(&format!("service-{index}")),
+                remote_credential_input(&format!("service-{index}")),
             )
             .await
             .expect("push succeeds");
@@ -1360,10 +1716,14 @@ mod tests {
             ));
         }
 
-        let pending =
-            create_pending_credential(&db, &actor_id, &node.id, credential_input("service-full"))
-                .await
-                .expect("push succeeds");
+        let pending = create_pending_credential(
+            &db,
+            &actor_id,
+            &node.id,
+            remote_credential_input("service-full"),
+        )
+        .await
+        .expect("push succeeds");
         record_pending_credential_pubkey(&db, &node.id, &pending.id, "v1", "node-pubkey")
             .await
             .expect("record pubkey");
@@ -1387,11 +1747,7 @@ mod tests {
 
     #[tokio::test]
     async fn store_ciphertext_rejects_oversized_ciphertext() {
-        let Some(db) = connect_test_database("pending_credential_ciphertext_too_large").await
-        else {
-            eprintln!("skipping pending credential test: no local MongoDB available");
-            return;
-        };
+        let db = test_db("pending_credential_ciphertext_too_large").await;
 
         let err = store_pending_ciphertext_first_writer_wins(
             &db,
@@ -1414,19 +1770,20 @@ mod tests {
 
     #[tokio::test]
     async fn store_ciphertext_before_pubkey_returns_pubkey_awaiting() {
-        let Some(db) = connect_test_database("pending_credential_pubkey_awaiting").await else {
-            eprintln!("skipping pending credential test: no local MongoDB available");
-            return;
-        };
+        let db = test_db("pending_credential_pubkey_awaiting").await;
 
         let actor_id = Uuid::new_v4().to_string();
         insert_users(&db, vec![test_user(&actor_id, UserType::Person)]).await;
         let node = test_node(&actor_id, "personal-node");
         insert_node(&db, &node).await;
-        let pending =
-            create_pending_credential(&db, &actor_id, &node.id, credential_input("openclaw"))
-                .await
-                .expect("push succeeds");
+        let pending = create_pending_credential(
+            &db,
+            &actor_id,
+            &node.id,
+            remote_credential_input("openclaw"),
+        )
+        .await
+        .expect("push succeeds");
 
         let err = store_pending_ciphertext_first_writer_wins(
             &db,
@@ -1445,15 +1802,17 @@ mod tests {
             AppError::PendingCredentialPubkeyAwaiting(id) if id == pending.id
         ));
         let stored = load_pending(&db, &pending.id).await;
-        assert!(stored.crypto.is_none());
+        assert!(
+            stored
+                .crypto
+                .as_ref()
+                .is_some_and(|crypto| crypto.node_pubkey.is_empty())
+        );
     }
 
     #[tokio::test]
     async fn queue_cap_counts_only_active_unexpired_ciphertexts() {
-        let Some(db) = connect_test_database("pending_credential_queue_cap").await else {
-            eprintln!("skipping pending credential test: no local MongoDB available");
-            return;
-        };
+        let db = test_db("pending_credential_queue_cap").await;
 
         let actor_id = Uuid::new_v4().to_string();
         insert_users(&db, vec![test_user(&actor_id, UserType::Person)]).await;
@@ -1466,7 +1825,7 @@ mod tests {
                 &db,
                 &actor_id,
                 &node.id,
-                credential_input(&format!("service-{index}")),
+                remote_credential_input(&format!("service-{index}")),
             )
             .await
             .expect("push succeeds");
@@ -1520,10 +1879,14 @@ mod tests {
             .expect("count queued");
         assert_eq!(count, MAX_OFFLINE_CIPHERTEXT_QUEUE_PER_NODE - 2);
 
-        let pending =
-            create_pending_credential(&db, &actor_id, &node.id, credential_input("service-extra"))
-                .await
-                .expect("push succeeds");
+        let pending = create_pending_credential(
+            &db,
+            &actor_id,
+            &node.id,
+            remote_credential_input("service-extra"),
+        )
+        .await
+        .expect("push succeeds");
         record_pending_credential_pubkey(&db, &node.id, &pending.id, "v1", "node-pubkey")
             .await
             .expect("record pubkey");
@@ -1546,19 +1909,20 @@ mod tests {
 
     #[tokio::test]
     async fn expire_queued_ciphertexts_marks_expired_and_unsets_ciphertext() {
-        let Some(db) = connect_test_database("pending_credential_expire_queued").await else {
-            eprintln!("skipping pending credential test: no local MongoDB available");
-            return;
-        };
+        let db = test_db("pending_credential_expire_queued").await;
 
         let actor_id = Uuid::new_v4().to_string();
         insert_users(&db, vec![test_user(&actor_id, UserType::Person)]).await;
         let node = test_node(&actor_id, "personal-node");
         insert_node(&db, &node).await;
-        let pending =
-            create_pending_credential(&db, &actor_id, &node.id, credential_input("openclaw"))
-                .await
-                .expect("push succeeds");
+        let pending = create_pending_credential(
+            &db,
+            &actor_id,
+            &node.id,
+            remote_credential_input("openclaw"),
+        )
+        .await
+        .expect("push succeeds");
         record_pending_credential_pubkey(&db, &node.id, &pending.id, "v1", "node-pubkey")
             .await
             .expect("record pubkey");
@@ -1600,10 +1964,7 @@ mod tests {
 
     #[tokio::test]
     async fn transfer_deactivates_pending_credentials_for_node() {
-        let Some(db) = connect_test_database("pending_credential_transfer").await else {
-            eprintln!("skipping pending credential test: no local MongoDB available");
-            return;
-        };
+        let db = test_db("pending_credential_transfer").await;
 
         let actor_id = Uuid::new_v4().to_string();
         let org_id = Uuid::new_v4().to_string();

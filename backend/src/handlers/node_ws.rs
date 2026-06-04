@@ -5,6 +5,7 @@ use axum::{
     http::HeaderMap,
     response::{IntoResponse, Response},
 };
+use base64::Engine;
 use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
 use std::net::SocketAddr;
@@ -12,17 +13,19 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::AppState;
+use crate::errors::{AppError, AppResult};
 use crate::models::node::{NodeMetadata, NodeStatus};
+use crate::models::node_pending_credential::NodePendingCredential;
 use crate::services::{
-    audit_service, node_service,
+    audit_service, node_pending_credential_service, node_service,
     node_ws_manager::{
         NodeCapabilitiesMsg, NodeOutboundMessage, NodeProxyResponse, NodeSshExecResult,
-        NodeWsManager, WsFrameInjectedInbound, WsProxyBinaryInbound, WsProxyClosedInbound,
-        WsProxyErrorInbound, WsProxyOpenedInbound, WsProxyResponseChunkMsg, WsProxyResponseEndMsg,
-        WsProxyResponseStartMsg, WsProxyTextInbound, WsSshExecResultMsg, WsSshNodeExecCloseMsg,
-        WsSshNodeExecDataMsg, WsSshNodeExecErrorMsg, WsSshTunnelClosedMsg, WsSshTunnelDataMsg,
-        WsSshTunnelOpenedMsg, WsWebTerminalClosedMsg, WsWebTerminalDataMsg,
-        WsWebTerminalStartedMsg,
+        NodeWsManager, PendingCredentialCiphertextParams, WsFrameInjectedInbound,
+        WsProxyBinaryInbound, WsProxyClosedInbound, WsProxyErrorInbound, WsProxyOpenedInbound,
+        WsProxyResponseChunkMsg, WsProxyResponseEndMsg, WsProxyResponseStartMsg,
+        WsProxyTextInbound, WsSshExecResultMsg, WsSshNodeExecCloseMsg, WsSshNodeExecDataMsg,
+        WsSshNodeExecErrorMsg, WsSshTunnelClosedMsg, WsSshTunnelDataMsg, WsSshTunnelOpenedMsg,
+        WsWebTerminalClosedMsg, WsWebTerminalDataMsg, WsWebTerminalStartedMsg,
     },
 };
 use crate::telemetry::{
@@ -122,6 +125,19 @@ enum NodeMessage {
         #[serde(default)]
         error: Option<String>,
     },
+    #[serde(rename = "pending_credential_pubkey")]
+    PendingCredentialPubkey {
+        pending_id: String,
+        version: String,
+        node_pubkey: String,
+    },
+    #[serde(rename = "pending_credential_decrypt_result")]
+    PendingCredentialDecryptResult {
+        pending_id: String,
+        status: String,
+        #[serde(default)]
+        error_code: Option<serde_json::Value>,
+    },
     #[serde(rename = "ws_proxy_opened")]
     WsProxyOpened(WsProxyOpenedInbound),
     #[serde(rename = "ws_proxy_text")]
@@ -194,6 +210,105 @@ fn decode_binary_stream_frame(data: &[u8]) -> Result<(&str, &[u8]), &'static str
         .map_err(|_| "binary frame has invalid UTF-8 request_id prefix")?;
 
     Ok((request_id, &data[REQUEST_ID_LEN..]))
+}
+
+fn validate_base64url_no_pad_exact(
+    value: &str,
+    field: &str,
+    expected_len: usize,
+) -> Result<(), String> {
+    if value.contains('=') {
+        return Err(format!("{field} must be base64url without padding"));
+    }
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(value.as_bytes())
+        .map_err(|_| format!("{field} must be valid base64url"))?;
+    if decoded.len() != expected_len {
+        return Err(format!("{field} must decode to {expected_len} bytes"));
+    }
+    Ok(())
+}
+
+fn send_pending_ciphertext_to_node(
+    ws_manager: &NodeWsManager,
+    node_id: &str,
+    pending: &NodePendingCredential,
+) -> AppResult<()> {
+    let crypto = pending.crypto.as_ref().ok_or_else(|| {
+        AppError::Internal("pending credential ciphertext missing crypto bundle".to_string())
+    })?;
+    let admin_pubkey = crypto.admin_pubkey.as_deref().ok_or_else(|| {
+        AppError::Internal("pending credential ciphertext missing admin_pubkey".to_string())
+    })?;
+    let nonce = crypto.nonce.as_deref().ok_or_else(|| {
+        AppError::Internal("pending credential ciphertext missing nonce".to_string())
+    })?;
+    let ciphertext = crypto.ciphertext.as_ref().ok_or_else(|| {
+        AppError::Internal("pending credential ciphertext missing ciphertext".to_string())
+    })?;
+    let ciphertext_b64 =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(ciphertext.as_slice());
+    let params = PendingCredentialCiphertextParams {
+        pending_id: &pending.id,
+        version: &crypto.version,
+        admin_pubkey,
+        nonce,
+        ciphertext: &ciphertext_b64,
+    };
+    ws_manager.send_pending_credential_ciphertext(node_id, &params)
+}
+
+async fn drain_queued_pending_ciphertexts(state: &AppState, node_id: &str) {
+    const DRAIN_LIMIT: i64 = 50;
+    let now = chrono::Utc::now();
+    let pending =
+        match node_pending_credential_service::list_deliverable_queued_ciphertexts_for_node(
+            &state.db,
+            node_id,
+            DRAIN_LIMIT,
+            now,
+        )
+        .await
+        {
+            Ok(pending) => pending,
+            Err(err) => {
+                tracing::warn!(
+                    node_id = %node_id,
+                    error = %err,
+                    "Failed to list queued pending credential ciphertexts"
+                );
+                return;
+            }
+        };
+
+    for pending in pending {
+        if let Err(err) =
+            send_pending_ciphertext_to_node(state.node_ws_manager.as_ref(), node_id, &pending)
+        {
+            tracing::warn!(
+                node_id = %node_id,
+                pending_id = %pending.id,
+                error = %err,
+                "Stopping pending credential ciphertext drain after send failure"
+            );
+            break;
+        }
+        if let Err(err) = node_pending_credential_service::mark_queued_ciphertext_sent(
+            &state.db,
+            node_id,
+            &pending.id,
+            chrono::Utc::now(),
+        )
+        .await
+        {
+            tracing::warn!(
+                node_id = %node_id,
+                pending_id = %pending.id,
+                error = %err,
+                "Failed to mark queued pending credential ciphertext sent"
+            );
+        }
+    }
 }
 
 /// GET /api/v1/nodes/ws
@@ -687,6 +802,9 @@ async fn handle_node_connection(
                 // want to observe, and it's now final for this
                 // connection (twenty-ninth-round Codex P2).
                 ws_manager.mark_status_update_received(&node_id_reader);
+                if ws_manager.supports_remote_credential_crypto(&node_id_reader) {
+                    drain_queued_pending_ciphertexts(&state, &node_id_reader).await;
+                }
                 tracing::debug!(node_id = %node_id_reader, "Received status_update");
             }
             NodeMessage::SshTunnelOpened(opened) => {
@@ -857,6 +975,116 @@ async fn handle_node_connection(
                         )
                     };
                     ws_manager.deliver_credential_ack(&node_id_reader, &req_id, outcome);
+                }
+            }
+            NodeMessage::PendingCredentialPubkey {
+                pending_id,
+                version,
+                node_pubkey,
+            } => {
+                if version != "v1" {
+                    tracing::warn!(
+                        node_id = %node_id_reader,
+                        pending_id = %pending_id,
+                        version = %version,
+                        "Ignoring pending credential pubkey with unsupported version"
+                    );
+                    continue;
+                }
+                if let Err(message) =
+                    validate_base64url_no_pad_exact(&node_pubkey, "node_pubkey", 32)
+                {
+                    tracing::warn!(
+                        node_id = %node_id_reader,
+                        pending_id = %pending_id,
+                        error = %message,
+                        "Ignoring invalid pending credential pubkey"
+                    );
+                    continue;
+                }
+                if let Err(err) = node_pending_credential_service::record_pending_credential_pubkey(
+                    &db,
+                    &node_id_reader,
+                    &pending_id,
+                    &version,
+                    &node_pubkey,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        node_id = %node_id_reader,
+                        pending_id = %pending_id,
+                        error = %err,
+                        "Failed to record pending credential pubkey"
+                    );
+                }
+            }
+            NodeMessage::PendingCredentialDecryptResult {
+                pending_id,
+                status,
+                error_code,
+            } => {
+                let outcome = match status.as_str() {
+                    "ok" => node_pending_credential_service::PendingCredentialDecryptOutcome::Ok,
+                    "error" => {
+                        node_pending_credential_service::PendingCredentialDecryptOutcome::Error
+                    }
+                    other => {
+                        tracing::warn!(
+                            node_id = %node_id_reader,
+                            pending_id = %pending_id,
+                            status = %other,
+                            "Ignoring pending credential decrypt_result with unsupported status"
+                        );
+                        continue;
+                    }
+                };
+                match node_pending_credential_service::record_pending_credential_decrypt_result(
+                    &db,
+                    &node_id_reader,
+                    &pending_id,
+                    outcome,
+                    chrono::Utc::now(),
+                )
+                .await
+                {
+                    Ok(pending) => {
+                        if matches!(
+                            outcome,
+                            node_pending_credential_service::PendingCredentialDecryptOutcome::Error
+                        ) {
+                            let mut event_data = serde_json::json!({
+                                "node_id": &node_id_reader,
+                                "pending_credential_id": &pending.id,
+                                "service_slug": &pending.service_slug,
+                                "owner_user_id": &pending.owner_user_id,
+                            });
+                            if let Some(error_code) = error_code
+                                && let serde_json::Value::Object(ref mut object) = event_data
+                            {
+                                object.insert("error_code".to_string(), error_code);
+                            }
+                            audit_service::log_async(
+                                db.clone(),
+                                Some(pending.owner_user_id.clone()),
+                                "node_credential_remote_decrypt_failed".to_string(),
+                                Some(event_data),
+                                ip_address.clone(),
+                                user_agent.clone(),
+                                None,
+                                None,
+                            );
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            node_id = %node_id_reader,
+                            pending_id = %pending_id,
+                            status = %status,
+                            error = %err,
+                            "Failed to record pending credential decrypt_result"
+                        );
+                    }
                 }
             }
             NodeMessage::WsProxyOpened(msg) => {
@@ -1034,16 +1262,484 @@ pub async fn node_ws_manager_heartbeat_sweep(
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_base64_payload, decode_binary_stream_frame, handle_proxy_response_chunk};
+    use super::{
+        decode_base64_payload, decode_binary_stream_frame, drain_queued_pending_ciphertexts,
+        handle_proxy_response_chunk, validate_base64url_no_pad_exact,
+    };
     use base64::Engine;
+    use chrono::Utc;
+    use futures::{SinkExt, StreamExt};
+    use mongodb::bson::{self, doc};
     use serde_json::Value;
     use std::sync::Arc;
+    use std::time::Duration as StdDuration;
+    use tokio::net::TcpListener;
     use tokio::sync::mpsc;
+    use tokio::task::JoinHandle;
+    use tokio_tungstenite::{
+        MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message as WsMessage,
+    };
 
+    use crate::AppState;
+    use crate::crypto::token::hash_token;
+    use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};
+    use crate::models::node::{COLLECTION_NAME as NODES, Node, NodeMetrics, NodeStatus};
+    use crate::models::node_pending_credential::{
+        COLLECTION_NAME as NODE_PENDING_CREDENTIALS, InjectionMethod, NodePendingCredential,
+        RemoteCryptoState,
+    };
+    use crate::models::user::{COLLECTION_NAME as USERS, UserType};
+    use crate::services::node_pending_credential_service;
     use crate::services::node_ws_manager::{
         NodeOutboundMessage, NodeProxyRequest, NodeWsManager, ProxyResponseType, StreamChunk,
         WsProxyResponseChunkMsg,
     };
+    use crate::test_utils::{connect_test_database, test_app_state, test_user};
+
+    type TestWs = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
+
+    async fn test_db(prefix: &str) -> mongodb::Database {
+        connect_test_database(prefix)
+            .await
+            .expect("local MongoDB required for node WS behavior tests")
+    }
+
+    fn b64url(byte: u8, len: usize) -> String {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(vec![byte; len])
+    }
+
+    fn test_node(owner_id: &str, name: &str, raw_auth_token: &str) -> Node {
+        let now = Utc::now();
+        Node {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: owner_id.to_string(),
+            name: name.to_string(),
+            status: NodeStatus::Offline,
+            auth_token_hash: hash_token(raw_auth_token),
+            signing_secret_encrypted: None,
+            signing_secret_hash: "signing-hash".to_string(),
+            last_heartbeat_at: None,
+            connected_at: None,
+            metadata: None,
+            metrics: NodeMetrics::default(),
+            is_active: true,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    async fn insert_user_and_node(db: &mongodb::Database, owner_id: &str, node: &Node) {
+        db.collection(USERS)
+            .insert_one(test_user(owner_id, UserType::Person))
+            .await
+            .expect("insert user");
+        db.collection::<Node>(NODES)
+            .insert_one(node)
+            .await
+            .expect("insert node");
+    }
+
+    async fn create_remote_pending(
+        db: &mongodb::Database,
+        actor_id: &str,
+        node_id: &str,
+        service_slug: &str,
+    ) -> NodePendingCredential {
+        node_pending_credential_service::create_pending_credential(
+            db,
+            actor_id,
+            node_id,
+            node_pending_credential_service::CreatePendingCredentialInput {
+                service_slug: service_slug.to_string(),
+                injection_method: InjectionMethod::Header,
+                field_name: "X-API-Key".to_string(),
+                target_url: None,
+                label: Some("Production".to_string()),
+                ttl_secs: 86_400,
+                remote_crypto: true,
+            },
+        )
+        .await
+        .expect("create remote pending credential")
+    }
+
+    async fn create_remote_pending_with_pubkey(
+        db: &mongodb::Database,
+        actor_id: &str,
+        node_id: &str,
+        service_slug: &str,
+    ) -> NodePendingCredential {
+        let pending = create_remote_pending(db, actor_id, node_id, service_slug).await;
+        node_pending_credential_service::record_pending_credential_pubkey(
+            db,
+            node_id,
+            &pending.id,
+            "v1",
+            &b64url(5, 32),
+        )
+        .await
+        .expect("record node pubkey");
+        pending
+    }
+
+    async fn store_ciphertext(
+        db: &mongodb::Database,
+        actor_id: &str,
+        node_id: &str,
+        pending_id: &str,
+        node_connected: bool,
+    ) {
+        node_pending_credential_service::store_pending_ciphertext_first_writer_wins(
+            db,
+            actor_id,
+            node_id,
+            pending_id,
+            node_pending_credential_service::StorePendingCiphertextInput::new(
+                b64url(6, 32),
+                b64url(7, 24),
+                vec![1, 2, 3, 4],
+            ),
+            node_connected,
+            Utc::now(),
+        )
+        .await
+        .expect("store pending ciphertext");
+    }
+
+    async fn load_pending(db: &mongodb::Database, pending_id: &str) -> NodePendingCredential {
+        db.collection::<NodePendingCredential>(NODE_PENDING_CREDENTIALS)
+            .find_one(doc! { "_id": pending_id })
+            .await
+            .expect("query pending credential")
+            .expect("pending credential exists")
+    }
+
+    async fn wait_for_pending<F>(
+        db: &mongodb::Database,
+        pending_id: &str,
+        mut predicate: F,
+    ) -> NodePendingCredential
+    where
+        F: FnMut(&NodePendingCredential) -> bool,
+    {
+        for _ in 0..50 {
+            let pending = load_pending(db, pending_id).await;
+            if predicate(&pending) {
+                return pending;
+            }
+            tokio::time::sleep(StdDuration::from_millis(20)).await;
+        }
+        panic!("pending credential did not reach expected state");
+    }
+
+    async fn wait_for_audit(
+        db: &mongodb::Database,
+        event_type: &str,
+        pending_id: &str,
+    ) -> AuditLog {
+        for _ in 0..50 {
+            if let Some(entry) = db
+                .collection::<AuditLog>(AUDIT_LOG)
+                .find_one(doc! {
+                    "event_type": event_type,
+                    "event_data.pending_credential_id": pending_id,
+                })
+                .await
+                .expect("query audit log")
+            {
+                return entry;
+            }
+            tokio::time::sleep(StdDuration::from_millis(20)).await;
+        }
+        panic!("audit event was not written");
+    }
+
+    async fn spawn_ws_app(state: AppState) -> (String, JoinHandle<()>) {
+        let (_, private) = crate::routes::build_router(state.config.proxy_max_body_size);
+        let app = private.with_state(state);
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test ws server");
+        let addr = listener.local_addr().expect("test ws addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .expect("serve test ws app");
+        });
+        (format!("ws://{addr}/api/v1/nodes/ws"), handle)
+    }
+
+    async fn connect_node_ws(url: &str, node_id: &str, raw_auth_token: &str) -> TestWs {
+        let (mut ws, response) = connect_async(url).await.expect("connect node ws");
+        assert_eq!(response.status().as_u16(), 101);
+        ws.send(WsMessage::Text(
+            serde_json::json!({
+                "type": "auth",
+                "node_id": node_id,
+                "token": raw_auth_token,
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .expect("send auth");
+
+        let auth_msg = ws.next().await.expect("auth response").expect("auth frame");
+        let WsMessage::Text(text) = auth_msg else {
+            panic!("expected auth text frame");
+        };
+        let value: Value = serde_json::from_str(&text).expect("auth json");
+        assert_eq!(value["type"], "auth_ok");
+        assert_eq!(value["node_id"], node_id);
+        ws
+    }
+
+    async fn send_ws_json(ws: &mut TestWs, value: Value) {
+        ws.send(WsMessage::Text(value.to_string().into()))
+            .await
+            .expect("send ws json");
+    }
+
+    async fn next_ws_json(ws: &mut TestWs) -> Value {
+        let msg = tokio::time::timeout(StdDuration::from_secs(2), ws.next())
+            .await
+            .expect("next ws frame timeout")
+            .expect("next ws frame")
+            .expect("ws frame");
+        let WsMessage::Text(text) = msg else {
+            panic!("expected text ws frame");
+        };
+        serde_json::from_str(&text).expect("ws json")
+    }
+
+    #[tokio::test]
+    async fn ws_pending_credential_pubkey_records_valid_and_ignores_invalid() {
+        let db = test_db("ws_pending_pubkey_behavior").await;
+        let owner_id = uuid::Uuid::new_v4().to_string();
+        let raw_auth_token = "nyx_nauth_test_pubkey";
+        let node = test_node(&owner_id, "ws-pubkey-node", raw_auth_token);
+        insert_user_and_node(&db, &owner_id, &node).await;
+        let valid_pending = create_remote_pending(&db, &owner_id, &node.id, "valid-pubkey").await;
+        let invalid_pending =
+            create_remote_pending(&db, &owner_id, &node.id, "invalid-pubkey").await;
+        let state = test_app_state(db.clone());
+        let (url, server) = spawn_ws_app(state).await;
+        let mut ws = connect_node_ws(&url, &node.id, raw_auth_token).await;
+
+        send_ws_json(
+            &mut ws,
+            serde_json::json!({
+                "type": "pending_credential_pubkey",
+                "pending_id": invalid_pending.id,
+                "version": "v1",
+                "node_pubkey": b64url(9, 31),
+            }),
+        )
+        .await;
+        send_ws_json(
+            &mut ws,
+            serde_json::json!({
+                "type": "pending_credential_pubkey",
+                "pending_id": valid_pending.id,
+                "version": "v1",
+                "node_pubkey": b64url(8, 32),
+            }),
+        )
+        .await;
+
+        let valid = wait_for_pending(&db, &valid_pending.id, |pending| {
+            pending.remote_state == Some(RemoteCryptoState::PubkeyPosted)
+        })
+        .await;
+        assert_eq!(
+            valid
+                .crypto
+                .as_ref()
+                .map(|crypto| crypto.node_pubkey.as_str()),
+            Some(b64url(8, 32).as_str())
+        );
+
+        tokio::time::sleep(StdDuration::from_millis(100)).await;
+        let invalid = load_pending(&db, &invalid_pending.id).await;
+        assert!(
+            invalid
+                .crypto
+                .as_ref()
+                .is_some_and(|crypto| crypto.node_pubkey.is_empty())
+        );
+        assert!(invalid.remote_state.is_none());
+
+        ws.close(None).await.expect("close ws");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn ws_pending_credential_decrypt_result_records_ok_and_error_audit() {
+        let db = test_db("ws_pending_decrypt_result_behavior").await;
+        let owner_id = uuid::Uuid::new_v4().to_string();
+        let raw_auth_token = "nyx_nauth_test_decrypt";
+        let node = test_node(&owner_id, "ws-decrypt-node", raw_auth_token);
+        insert_user_and_node(&db, &owner_id, &node).await;
+        let ok_pending =
+            create_remote_pending_with_pubkey(&db, &owner_id, &node.id, "decrypt-ok").await;
+        let error_pending =
+            create_remote_pending_with_pubkey(&db, &owner_id, &node.id, "decrypt-error").await;
+        store_ciphertext(&db, &owner_id, &node.id, &ok_pending.id, true).await;
+        store_ciphertext(&db, &owner_id, &node.id, &error_pending.id, true).await;
+        let state = test_app_state(db.clone());
+        let (url, server) = spawn_ws_app(state).await;
+        let mut ws = connect_node_ws(&url, &node.id, raw_auth_token).await;
+
+        send_ws_json(
+            &mut ws,
+            serde_json::json!({
+                "type": "pending_credential_decrypt_result",
+                "pending_id": ok_pending.id,
+                "status": "ok",
+            }),
+        )
+        .await;
+        let ok = wait_for_pending(&db, &ok_pending.id, |pending| {
+            pending.remote_state == Some(RemoteCryptoState::Consumed)
+        })
+        .await;
+        assert!(!ok.is_active);
+        assert!(ok.consumed_at.is_some());
+
+        send_ws_json(
+            &mut ws,
+            serde_json::json!({
+                "type": "pending_credential_decrypt_result",
+                "pending_id": error_pending.id,
+                "status": "error",
+                "error_code": "node_decrypt_failed",
+            }),
+        )
+        .await;
+        let failed = wait_for_pending(&db, &error_pending.id, |pending| {
+            pending.remote_state == Some(RemoteCryptoState::DecryptFailed)
+        })
+        .await;
+        assert!(!failed.is_active);
+        assert!(failed.consumed_at.is_none());
+
+        let raw = db
+            .collection::<bson::Document>(NODE_PENDING_CREDENTIALS)
+            .find_one(doc! { "_id": &error_pending.id })
+            .await
+            .expect("query raw pending")
+            .expect("pending exists");
+        let forbidden_field = ["remote", "error", "code"].join("_");
+        assert!(raw.get(&forbidden_field).is_none());
+        let crypto = raw.get_document("crypto").expect("crypto document");
+        assert!(crypto.get("admin_pubkey").is_none());
+        assert!(crypto.get("nonce").is_none());
+        assert!(crypto.get("ciphertext").is_none());
+
+        let audit = wait_for_audit(
+            &db,
+            "node_credential_remote_decrypt_failed",
+            &error_pending.id,
+        )
+        .await;
+        let event_data = audit.event_data.expect("audit event data");
+        assert_eq!(event_data["node_id"], node.id);
+        assert_eq!(event_data["pending_credential_id"], error_pending.id);
+        assert_eq!(event_data["service_slug"], "decrypt-error");
+        assert_eq!(event_data["owner_user_id"], owner_id);
+        assert_eq!(event_data["error_code"], "node_decrypt_failed");
+        let audit_json = event_data.to_string();
+        assert!(!audit_json.contains("admin_pubkey"));
+        assert!(!audit_json.contains("nonce"));
+        assert!(!audit_json.contains("ciphertext"));
+
+        ws.close(None).await.expect("close ws");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn ws_status_update_drains_queued_ciphertext_and_marks_sent() {
+        let db = test_db("ws_pending_drain_sent").await;
+        let owner_id = uuid::Uuid::new_v4().to_string();
+        let raw_auth_token = "nyx_nauth_test_drain";
+        let node = test_node(&owner_id, "ws-drain-node", raw_auth_token);
+        insert_user_and_node(&db, &owner_id, &node).await;
+        let pending =
+            create_remote_pending_with_pubkey(&db, &owner_id, &node.id, "queued-drain").await;
+        store_ciphertext(&db, &owner_id, &node.id, &pending.id, false).await;
+        let queued = load_pending(&db, &pending.id).await;
+        assert_eq!(
+            queued.remote_state,
+            Some(RemoteCryptoState::CiphertextQueued)
+        );
+
+        let state = test_app_state(db.clone());
+        let (url, server) = spawn_ws_app(state).await;
+        let mut ws = connect_node_ws(&url, &node.id, raw_auth_token).await;
+        send_ws_json(
+            &mut ws,
+            serde_json::json!({
+                "type": "status_update",
+                "capabilities": {
+                    "remote_credential_crypto_v1": true
+                }
+            }),
+        )
+        .await;
+
+        let frame = next_ws_json(&mut ws).await;
+        assert_eq!(frame["type"], "pending_credential_ciphertext");
+        assert_eq!(frame["pending_id"], pending.id);
+        assert_eq!(frame["version"], "v1");
+        assert_eq!(frame["admin_pubkey"], b64url(6, 32));
+        assert_eq!(frame["nonce"], b64url(7, 24));
+        assert_eq!(
+            frame["ciphertext"],
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([1, 2, 3, 4])
+        );
+
+        let sent = wait_for_pending(&db, &pending.id, |pending| {
+            pending.remote_state == Some(RemoteCryptoState::CiphertextReceived)
+        })
+        .await;
+        assert!(sent.ciphertext_queued_at.is_none());
+        assert!(sent.ciphertext_expires_at.is_none());
+
+        ws.close(None).await.expect("close ws");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn drain_queued_pending_ciphertext_send_failure_leaves_row_queued() {
+        let db = test_db("ws_pending_drain_send_failure").await;
+        let owner_id = uuid::Uuid::new_v4().to_string();
+        let raw_auth_token = "nyx_nauth_test_drain_failure";
+        let node = test_node(&owner_id, "ws-drain-fail-node", raw_auth_token);
+        insert_user_and_node(&db, &owner_id, &node).await;
+        let pending =
+            create_remote_pending_with_pubkey(&db, &owner_id, &node.id, "queued-failure").await;
+        store_ciphertext(&db, &owner_id, &node.id, &pending.id, false).await;
+        let state = test_app_state(db.clone());
+        let (tx, _rx) = mpsc::channel(1);
+        state.node_ws_manager.register_connection(&node.id, tx);
+        state
+            .node_ws_manager
+            .send_pending_credentials_available(&node.id)
+            .expect("pre-fill writer queue");
+
+        drain_queued_pending_ciphertexts(&state, &node.id).await;
+
+        let stored = load_pending(&db, &pending.id).await;
+        assert_eq!(
+            stored.remote_state,
+            Some(RemoteCryptoState::CiphertextQueued)
+        );
+        assert!(stored.ciphertext_queued_at.is_some());
+        assert!(stored.ciphertext_expires_at.is_some());
+    }
 
     #[test]
     fn decode_base64_payload_decodes_valid_body() {
@@ -1252,6 +1948,29 @@ mod tests {
         assert!(payload.iter().all(|&b| b == 0xDE));
     }
 
+    #[test]
+    fn validate_base64url_no_pad_exact_accepts_expected_length() {
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7_u8; 32]);
+        validate_base64url_no_pad_exact(&encoded, "node_pubkey", 32).expect("valid pubkey");
+    }
+
+    #[test]
+    fn validate_base64url_no_pad_exact_rejects_padding_and_wrong_length() {
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7_u8; 32]);
+        assert!(
+            validate_base64url_no_pad_exact(&format!("{encoded}="), "node_pubkey", 32)
+                .expect_err("padding rejected")
+                .contains("without padding")
+        );
+
+        let short = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7_u8; 31]);
+        assert!(
+            validate_base64url_no_pad_exact(&short, "node_pubkey", 32)
+                .expect_err("wrong length rejected")
+                .contains("32 bytes")
+        );
+    }
+
     // -----------------------------------------------------------------------
     // ws_extract_ip tests
     // -----------------------------------------------------------------------
@@ -1404,6 +2123,28 @@ mod tests {
     }
 
     #[test]
+    fn node_message_deserialize_status_update_with_rci_capability() {
+        let json = r#"{
+            "type": "status_update",
+            "capabilities": {
+                "credential_ack_correlation": true,
+                "remote_credential_crypto_v1": true
+            }
+        }"#;
+        let msg: NodeMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            NodeMessage::StatusUpdate {
+                capabilities: Some(capabilities),
+                ..
+            } => {
+                assert!(capabilities.credential_ack_correlation);
+                assert!(capabilities.remote_credential_crypto_v1);
+            }
+            _ => panic!("expected StatusUpdate with capabilities"),
+        }
+    }
+
+    #[test]
     fn node_message_deserialize_credential_update_ack_minimal() {
         let json = r#"{"type": "credential_update_ack"}"#;
         let msg: NodeMessage = serde_json::from_str(json).unwrap();
@@ -1446,6 +2187,53 @@ mod tests {
                 assert!(error.is_none());
             }
             _ => panic!("expected CredentialUpdateAck"),
+        }
+    }
+
+    #[test]
+    fn node_message_deserialize_pending_credential_pubkey() {
+        let node_pubkey = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([1_u8; 32]);
+        let json = serde_json::json!({
+            "type": "pending_credential_pubkey",
+            "pending_id": "pending-1",
+            "version": "v1",
+            "node_pubkey": node_pubkey,
+        });
+        let msg: NodeMessage = serde_json::from_value(json).unwrap();
+        match msg {
+            NodeMessage::PendingCredentialPubkey {
+                pending_id,
+                version,
+                node_pubkey: parsed,
+            } => {
+                assert_eq!(pending_id, "pending-1");
+                assert_eq!(version, "v1");
+                assert_eq!(parsed, node_pubkey);
+            }
+            _ => panic!("expected PendingCredentialPubkey"),
+        }
+    }
+
+    #[test]
+    fn node_message_deserialize_pending_credential_decrypt_result() {
+        let json = r#"{
+            "type": "pending_credential_decrypt_result",
+            "pending_id": "pending-1",
+            "status": "error",
+            "error_code": "decrypt_failed"
+        }"#;
+        let msg: NodeMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            NodeMessage::PendingCredentialDecryptResult {
+                pending_id,
+                status,
+                error_code,
+            } => {
+                assert_eq!(pending_id, "pending-1");
+                assert_eq!(status, "error");
+                assert_eq!(error_code, Some(serde_json::json!("decrypt_failed")));
+            }
+            _ => panic!("expected PendingCredentialDecryptResult"),
         }
     }
 
