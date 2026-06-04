@@ -47,7 +47,6 @@ pub enum RemoteCryptoState {
     CiphertextReceived,
     CiphertextQueued,
     Consumed,
-    DecryptedPendingConfirmation,
     DecryptFailed,
     Expired,
 }

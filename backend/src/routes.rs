@@ -543,7 +543,12 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
         )
         .route(
             "/{node_id}/credentials/pending/{pending_id}",
-            delete(handlers::node_admin::cancel_pending_credential),
+            get(handlers::node_admin::get_pending_credential_pubkey)
+                .delete(handlers::node_admin::cancel_pending_credential),
+        )
+        .route(
+            "/{node_id}/credentials/pending/{pending_id}/ciphertext",
+            post(handlers::node_admin::post_pending_credential_ciphertext),
         )
         .route("/{node_id}/admins", get(handlers::node_admin::list_admins))
         .route(

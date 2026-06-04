@@ -4,8 +4,6 @@ use serde::Serialize;
 use utoipa::ToSchema;
 
 pub const PENDING_CREDENTIAL_NODE_OFFLINE_CODE: u32 = 8010;
-pub const PENDING_CREDENTIAL_NODE_OFFLINE_KEY: &str = "pending_credential_node_offline";
-pub const PENDING_CREDENTIAL_NODE_OFFLINE_STATUS: StatusCode = StatusCode::ACCEPTED;
 
 /// Structured JSON error response returned by all API error paths.
 #[derive(Debug, Serialize, ToSchema)]
@@ -1226,11 +1224,6 @@ mod tests {
             assert_eq!(err.error_key(), key, "{err}");
             assert_eq!(err.error_code(), code, "{err}");
         }
-        assert_eq!(PENDING_CREDENTIAL_NODE_OFFLINE_STATUS, StatusCode::ACCEPTED);
-        assert_eq!(
-            PENDING_CREDENTIAL_NODE_OFFLINE_KEY,
-            "pending_credential_node_offline"
-        );
         assert_eq!(PENDING_CREDENTIAL_NODE_OFFLINE_CODE, 8010);
     }
 

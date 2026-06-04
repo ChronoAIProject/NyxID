@@ -1,3 +1,4 @@
+use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -300,6 +301,7 @@ struct NodeConnection {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NodeCapabilitiesFlags {
     pub credential_ack_correlation: bool,
+    pub remote_credential_crypto_v1: bool,
 }
 
 /// In-memory WebSocket connection manager for credential nodes.
@@ -765,6 +767,17 @@ struct WsPendingCredentialsAvailable {
     msg_type: &'static str,
 }
 
+#[derive(Serialize)]
+struct WsPendingCredentialCiphertext<'a> {
+    #[serde(rename = "type")]
+    msg_type: &'static str,
+    pending_id: &'a str,
+    version: &'a str,
+    admin_pubkey: &'a str,
+    nonce: &'a str,
+    ciphertext: &'a str,
+}
+
 /// Outcome of a `credential_update` / `credential_remove` ack from a
 /// node agent. `Ok` means the node persisted the change; `Err` carries
 /// the node's error message.
@@ -790,6 +803,28 @@ pub struct NodeCapabilitiesMsg {
     /// fire-and-forget delivery.
     #[serde(default)]
     pub credential_ack_correlation: bool,
+    #[serde(default)]
+    pub remote_credential_crypto_v1: bool,
+}
+
+pub struct PendingCredentialCiphertextParams<'a> {
+    pub pending_id: &'a str,
+    pub version: &'a str,
+    pub admin_pubkey: &'a str,
+    pub nonce: &'a str,
+    pub ciphertext: &'a str,
+}
+
+impl fmt::Debug for PendingCredentialCiphertextParams<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PendingCredentialCiphertextParams")
+            .field("pending_id", &self.pending_id)
+            .field("version", &self.version)
+            .field("admin_pubkey", &"[REDACTED]")
+            .field("nonce", &"[REDACTED]")
+            .field("ciphertext", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// Parameters for pushing a credential update to a node.
@@ -1548,6 +1583,45 @@ impl NodeWsManager {
         Ok(())
     }
 
+    pub fn send_pending_credential_ciphertext(
+        &self,
+        node_id: &str,
+        params: &PendingCredentialCiphertextParams<'_>,
+    ) -> AppResult<()> {
+        let conn = self
+            .connections
+            .get(node_id)
+            .ok_or_else(|| AppError::NodeOffline(format!("Node {node_id} is not connected")))?;
+
+        let msg = WsPendingCredentialCiphertext {
+            msg_type: "pending_credential_ciphertext",
+            pending_id: params.pending_id,
+            version: params.version,
+            admin_pubkey: params.admin_pubkey,
+            nonce: params.nonce,
+            ciphertext: params.ciphertext,
+        };
+        let json = serde_json::to_string(&msg).map_err(|e| {
+            AppError::Internal(format!(
+                "Failed to serialize pending_credential_ciphertext: {e}"
+            ))
+        })?;
+
+        conn.tx
+            .try_send(NodeOutboundMessage::Text(json))
+            .map_err(|_| {
+                AppError::NodeOffline(format!("Node {node_id} connection closed or buffer full"))
+            })?;
+
+        tracing::info!(
+            node_id = %node_id,
+            pending_id = %params.pending_id,
+            "Sent pending_credential_ciphertext to node"
+        );
+
+        Ok(())
+    }
+
     /// Strict-wait variant of `send_credential_update`: generates a
     /// `request_id`, registers a pending oneshot waiter, sends the
     /// frame, then awaits the node's `credential_update_ack` with a
@@ -1707,6 +1781,7 @@ impl NodeWsManager {
             && let Ok(mut flags) = conn.capabilities.lock()
         {
             flags.credential_ack_correlation = caps.credential_ack_correlation;
+            flags.remote_credential_crypto_v1 = caps.remote_credential_crypto_v1;
         }
     }
 
@@ -1768,6 +1843,18 @@ impl NodeWsManager {
                     .lock()
                     .ok()
                     .map(|f| f.credential_ack_correlation)
+            })
+            .unwrap_or(false)
+    }
+
+    pub fn supports_remote_credential_crypto(&self, node_id: &str) -> bool {
+        self.connections
+            .get(node_id)
+            .and_then(|conn| {
+                conn.capabilities
+                    .lock()
+                    .ok()
+                    .map(|f| f.remote_credential_crypto_v1)
             })
             .unwrap_or(false)
     }
@@ -3821,11 +3908,138 @@ mod tests {
             "node-cap",
             &NodeCapabilitiesMsg {
                 credential_ack_correlation: true,
+                remote_credential_crypto_v1: true,
             },
         );
         assert!(mgr.supports_credential_ack_correlation("node-cap"));
+        assert!(mgr.supports_remote_credential_crypto("node-cap"));
 
         assert!(!mgr.supports_credential_ack_correlation("nonexistent"));
+        assert!(!mgr.supports_remote_credential_crypto("nonexistent"));
+    }
+
+    #[test]
+    fn remote_credential_crypto_capability_defaults_false() {
+        let msg: NodeCapabilitiesMsg = serde_json::from_str("{}").expect("empty caps");
+        assert!(!msg.remote_credential_crypto_v1);
+
+        let mgr = NodeWsManager::new(30, 100);
+        let (tx, _rx) = mpsc::channel(256);
+        mgr.register_connection("node-rci", tx);
+
+        assert!(!mgr.supports_remote_credential_crypto("node-rci"));
+        mgr.record_capabilities(
+            "node-rci",
+            &NodeCapabilitiesMsg {
+                remote_credential_crypto_v1: true,
+                ..NodeCapabilitiesMsg::default()
+            },
+        );
+        assert!(mgr.supports_remote_credential_crypto("node-rci"));
+    }
+
+    #[test]
+    fn pending_credential_ciphertext_params_debug_redacts_material() {
+        let params = PendingCredentialCiphertextParams {
+            pending_id: "pending-1",
+            version: "v1",
+            admin_pubkey: "admin-pubkey-secret",
+            nonce: "nonce-secret",
+            ciphertext: "ciphertext-secret",
+        };
+
+        let debug = format!("{params:?}");
+
+        assert!(debug.contains("pending-1"));
+        assert!(debug.contains("v1"));
+        assert!(!debug.contains("admin-pubkey-secret"));
+        assert!(!debug.contains("nonce-secret"));
+        assert!(!debug.contains("ciphertext-secret"));
+    }
+
+    #[test]
+    fn send_pending_credentials_available_uses_expected_frame_and_offline_outcomes() {
+        let mgr = NodeWsManager::new(30, 100);
+        let (tx, mut rx) = mpsc::channel(1);
+        mgr.register_connection("node-pending", tx);
+
+        mgr.send_pending_credentials_available("node-pending")
+            .expect("send pending credential nudge");
+
+        let NodeOutboundMessage::Text(json) = rx.try_recv().expect("outbound frame") else {
+            panic!("expected text frame");
+        };
+        let value: Value = serde_json::from_str(&json).expect("json");
+        assert_eq!(
+            value,
+            serde_json::json!({ "type": "pending_credentials_available" })
+        );
+
+        let err = mgr
+            .send_pending_credentials_available("unknown-node")
+            .expect_err("disconnected node maps to offline");
+        assert!(matches!(err, AppError::NodeOffline(_)));
+
+        let full_mgr = NodeWsManager::new(30, 100);
+        let (full_tx, _full_rx) = mpsc::channel(1);
+        full_mgr.register_connection("node-full", full_tx);
+        full_mgr
+            .send_pending_credentials_available("node-full")
+            .expect("first send fills buffer");
+        let err = full_mgr
+            .send_pending_credentials_available("node-full")
+            .expect_err("full buffer maps to offline");
+        assert!(matches!(err, AppError::NodeOffline(_)));
+    }
+
+    #[tokio::test]
+    async fn send_pending_credential_ciphertext_uses_bounded_writer_and_expected_json() {
+        let mgr = NodeWsManager::new(30, 100);
+        let (tx, mut rx) = mpsc::channel(1);
+        mgr.register_connection("node-rci", tx);
+        let params = PendingCredentialCiphertextParams {
+            pending_id: "pending-1",
+            version: "v1",
+            admin_pubkey: "admin-key",
+            nonce: "nonce-value",
+            ciphertext: "ciphertext-value",
+        };
+
+        mgr.send_pending_credential_ciphertext("node-rci", &params)
+            .expect("send ciphertext");
+
+        let NodeOutboundMessage::Text(json) = rx.recv().await.expect("outbound frame") else {
+            panic!("expected text frame");
+        };
+        let value: Value = serde_json::from_str(&json).expect("json");
+        assert_eq!(value["type"], "pending_credential_ciphertext");
+        assert_eq!(value["pending_id"], "pending-1");
+        assert_eq!(value["version"], "v1");
+        assert_eq!(value["admin_pubkey"], "admin-key");
+        assert_eq!(value["nonce"], "nonce-value");
+        assert_eq!(value["ciphertext"], "ciphertext-value");
+    }
+
+    #[test]
+    fn send_pending_credential_ciphertext_full_buffer_maps_offline() {
+        let mgr = NodeWsManager::new(30, 100);
+        let (tx, _rx) = mpsc::channel(1);
+        mgr.register_connection("node-rci", tx);
+        let params = PendingCredentialCiphertextParams {
+            pending_id: "pending-1",
+            version: "v1",
+            admin_pubkey: "admin-key",
+            nonce: "nonce-value",
+            ciphertext: "ciphertext-value",
+        };
+
+        mgr.send_pending_credential_ciphertext("node-rci", &params)
+            .expect("first send fills buffer");
+        let err = mgr
+            .send_pending_credential_ciphertext("node-rci", &params)
+            .expect_err("full buffer maps to offline");
+
+        assert!(matches!(err, AppError::NodeOffline(_)));
     }
 
     #[test]
