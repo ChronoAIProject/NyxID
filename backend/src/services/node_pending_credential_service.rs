@@ -914,6 +914,19 @@ mod tests {
             .expect("pending credential exists")
     }
 
+    fn assert_pubkey_only_pending(pending: &NodePendingCredential, expected_node_pubkey: &str) {
+        assert!(pending.is_active);
+        assert_eq!(pending.remote_state, Some(RemoteCryptoState::PubkeyPosted));
+        assert!(pending.ciphertext_queued_at.is_none());
+        assert!(pending.ciphertext_expires_at.is_none());
+        let crypto = pending.crypto.as_ref().expect("crypto metadata");
+        assert_eq!(crypto.version, "v1");
+        assert_eq!(crypto.node_pubkey, expected_node_pubkey);
+        assert!(crypto.admin_pubkey.is_none());
+        assert!(crypto.nonce.is_none());
+        assert!(crypto.ciphertext.is_none());
+    }
+
     fn assert_invalid_field_name(method: InjectionMethod, field_name: &str, expected: &str) {
         let err = validate_field_name(field_name, &method).expect_err("field name should fail");
         assert!(
@@ -1499,6 +1512,69 @@ mod tests {
         assert_eq!(crypto.admin_pubkey.as_deref(), Some("admin-pubkey-1"));
         assert_eq!(crypto.nonce.as_deref(), Some("nonce-1"));
         assert_eq!(crypto.ciphertext, Some(vec![1, 2, 3]));
+    }
+
+    #[tokio::test]
+    async fn store_ciphertext_rejects_non_writable_actor_without_state_change() {
+        let db = test_db("pending_credential_ciphertext_acl_denied").await;
+
+        let admin_id = Uuid::new_v4().to_string();
+        let member_id = Uuid::new_v4().to_string();
+        let stranger_id = Uuid::new_v4().to_string();
+        let org_id = Uuid::new_v4().to_string();
+        insert_users(
+            &db,
+            vec![
+                test_user(&admin_id, UserType::Person),
+                test_user(&member_id, UserType::Person),
+                test_user(&stranger_id, UserType::Person),
+                test_user(&org_id, UserType::Org),
+            ],
+        )
+        .await;
+        insert_membership(
+            &db,
+            test_membership(&org_id, &admin_id, OrgRole::Admin, None),
+        )
+        .await;
+        insert_membership(
+            &db,
+            test_membership(&org_id, &member_id, OrgRole::Member, None),
+        )
+        .await;
+        let node = test_node(&org_id, "org-node");
+        insert_node(&db, &node).await;
+        let pending = create_pending_credential(
+            &db,
+            &admin_id,
+            &node.id,
+            remote_credential_input("openclaw"),
+        )
+        .await
+        .expect("org admin can create pending credential");
+        record_pending_credential_pubkey(&db, &node.id, &pending.id, "v1", "node-pubkey")
+            .await
+            .expect("record pubkey");
+        let before = load_pending(&db, &pending.id).await;
+        assert_pubkey_only_pending(&before, "node-pubkey");
+
+        for denied_actor_id in [&member_id, &stranger_id] {
+            let err = store_pending_ciphertext_first_writer_wins(
+                &db,
+                denied_actor_id,
+                &node.id,
+                &pending.id,
+                ciphertext_input("admin-pubkey", "nonce", vec![1, 2, 3]),
+                false,
+                Utc::now(),
+            )
+            .await
+            .expect_err("actor without node write access cannot store ciphertext");
+
+            assert!(matches!(err, AppError::NodeNotFound(_)));
+            let stored = load_pending(&db, &pending.id).await;
+            assert_pubkey_only_pending(&stored, "node-pubkey");
+        }
     }
 
     #[tokio::test]

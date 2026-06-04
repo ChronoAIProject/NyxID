@@ -1217,6 +1217,19 @@ mod tests {
             .expect("pending credential exists")
     }
 
+    fn assert_pubkey_only_pending(pending: &NodePendingCredential, expected_node_pubkey: &str) {
+        assert!(pending.is_active);
+        assert_eq!(pending.remote_state, Some(RemoteCryptoState::PubkeyPosted));
+        assert!(pending.ciphertext_queued_at.is_none());
+        assert!(pending.ciphertext_expires_at.is_none());
+        let crypto = pending.crypto.as_ref().expect("crypto metadata");
+        assert_eq!(crypto.version, "v1");
+        assert_eq!(crypto.node_pubkey, expected_node_pubkey);
+        assert!(crypto.admin_pubkey.is_none());
+        assert!(crypto.nonce.is_none());
+        assert!(crypto.ciphertext.is_none());
+    }
+
     fn api_app(state: AppState) -> axum::Router {
         let (_, private) = crate::routes::build_router(state.config.proxy_max_body_size);
         private.with_state(state)
@@ -1579,6 +1592,65 @@ mod tests {
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(body["error_code"], 8011);
         assert_eq!(body["error"], "pending_credential_queue_full");
+    }
+
+    #[tokio::test]
+    async fn route_post_pending_ciphertext_rejects_non_writable_actor_without_state_change() {
+        let db = test_db("pending_route_post_acl_denied").await;
+
+        let admin_id = Uuid::new_v4().to_string();
+        let member_id = Uuid::new_v4().to_string();
+        let stranger_id = Uuid::new_v4().to_string();
+        let org_id = Uuid::new_v4().to_string();
+        insert_users(
+            &db,
+            vec![
+                test_user(&admin_id, UserType::Person),
+                test_user(&member_id, UserType::Person),
+                test_user(&stranger_id, UserType::Person),
+                test_user(&org_id, UserType::Org),
+            ],
+        )
+        .await;
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_many([
+                test_membership(&org_id, &admin_id, OrgRole::Admin, None),
+                test_membership(&org_id, &member_id, OrgRole::Member, None),
+            ])
+            .await
+            .expect("insert memberships");
+        let node = test_node(&org_id, "org-node");
+        insert_node(&db, &node).await;
+        let pending =
+            create_remote_pending_with_pubkey(&db, &admin_id, &node.id, "acl-denied").await;
+        let expected_node_pubkey = b64url(12, 32);
+        let before = load_pending(&db, &pending.id).await;
+        assert_pubkey_only_pending(&before, &expected_node_pubkey);
+
+        let state = test_app_state(db.clone());
+        let app = api_app(state.clone());
+        let uri = format!(
+            "/api/v1/nodes/{}/credentials/pending/{}/ciphertext",
+            node.id, pending.id
+        );
+
+        for denied_actor_id in [&member_id, &stranger_id] {
+            let token = access_token(&state, denied_actor_id);
+            let (status, body) = route_json(
+                app.clone(),
+                Method::POST,
+                uri.clone(),
+                &token,
+                Some(ciphertext_request(vec![1, 2, 3])),
+            )
+            .await;
+
+            assert_eq!(status, StatusCode::NOT_FOUND);
+            assert_eq!(body["error_code"], 8000);
+            assert_eq!(body["error"], "node_not_found");
+            let stored = load_pending(&db, &pending.id).await;
+            assert_pubkey_only_pending(&stored, &expected_node_pubkey);
+        }
     }
 
     #[tokio::test]
