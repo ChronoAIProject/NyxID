@@ -1908,6 +1908,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn route_cancel_pending_credential_writes_rci_canceled_audit_row() {
+        let (db, _state, app, token, node, pending) = pending_route_fixture(
+            "pending_route_cancel_rci_audit",
+            "cancel-rci-node",
+            "cancel-rci",
+            false,
+        )
+        .await;
+        let canceled_audit = audit_service::notify_on_audit_write(
+            "node_credential_rci_canceled",
+            Some(pending.id.clone()),
+        );
+
+        let (status, body) = route_json(
+            app,
+            Method::DELETE,
+            format!(
+                "/api/v1/nodes/{}/credentials/pending/{}",
+                node.id, pending.id
+            ),
+            &token,
+            None,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(body.is_null());
+        let stored = load_pending(&db, &pending.id).await;
+        assert!(!stored.is_active);
+        let audit = load_audit_entry(&db, canceled_audit).await;
+        assert_rci_audit_row(
+            &audit,
+            "node_credential_rci_canceled",
+            &stored,
+            Some("canceled"),
+            &[],
+        );
+    }
+
+    #[tokio::test]
     async fn route_post_pending_ciphertext_rejects_non_writable_actor_without_state_change() {
         let db = test_db("pending_route_post_acl_denied").await;
 

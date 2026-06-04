@@ -1688,6 +1688,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ws_pending_credential_pubkey_unsupported_version_writes_metadata_audit_row() {
+        let db = test_db("ws_pending_pubkey_bad_version_audit").await;
+        let owner_id = uuid::Uuid::new_v4().to_string();
+        let raw_auth_token = "nyx_nauth_test_pubkey_bad_version";
+        let node = test_node(&owner_id, "ws-pubkey-bad-version-node", raw_auth_token);
+        insert_user_and_node(&db, &owner_id, &node).await;
+        let pending = create_remote_pending(&db, &owner_id, &node.id, "pubkey-bad-version").await;
+        let before = load_pending(&db, &pending.id).await;
+        assert!(before.remote_state.is_none());
+        assert!(
+            before
+                .crypto
+                .as_ref()
+                .is_some_and(|crypto| crypto.node_pubkey.is_empty())
+        );
+        let audit_rx = audit_service::notify_on_audit_write(
+            "node_credential_rci_version_unsupported",
+            Some(pending.id.clone()),
+        );
+
+        handle_pending_credential_pubkey_message(
+            &db,
+            &node.id,
+            Some("203.0.113.21".to_string()),
+            Some("nyxid-node-test".to_string()),
+            pending.id.clone(),
+            "v2".to_string(),
+            b64url(8, 32),
+        )
+        .await;
+
+        let stored = load_pending(&db, &pending.id).await;
+        assert!(stored.remote_state.is_none());
+        assert!(
+            stored
+                .crypto
+                .as_ref()
+                .is_some_and(|crypto| crypto.node_pubkey.is_empty())
+        );
+        let audit = load_audit_entry(&db, audit_rx).await;
+        assert_eq!(audit.ip_address.as_deref(), Some("203.0.113.21"));
+        assert_eq!(audit.user_agent.as_deref(), Some("nyxid-node-test"));
+        assert_rci_audit_row(
+            &audit,
+            "node_credential_rci_version_unsupported",
+            &stored,
+            Some("decrypt_failed"),
+            &["error_code", "error_kind"],
+        );
+        let event_data = audit.event_data.as_ref().unwrap();
+        assert_eq!(event_data["error_code"], 8007);
+        assert_eq!(
+            event_data["error_kind"],
+            "pending_credential_version_unsupported"
+        );
+        assert!(!event_data.to_string().contains("v2"));
+    }
+
+    #[tokio::test]
     async fn ws_pending_credential_decrypt_result_records_ok_and_error_audit_metadata() {
         let db = test_db("ws_pending_decrypt_result_behavior").await;
         let owner_id = uuid::Uuid::new_v4().to_string();
