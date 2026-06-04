@@ -872,6 +872,43 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
             .build(),
     )
     .await?;
+    npc.create_index(
+        IndexModel::builder()
+            .keys(doc! {
+                "node_id": 1,
+                "remote_state": 1,
+                "ciphertext_expires_at": 1,
+            })
+            .options(
+                IndexOptions::builder()
+                    .name("node_pending_credentials_queue_cap".to_string())
+                    .partial_filter_expression(doc! {
+                        "is_active": true,
+                        "remote_state": "ciphertext_queued",
+                    })
+                    .build(),
+            )
+            .build(),
+    )
+    .await?;
+    npc.create_index(
+        IndexModel::builder()
+            .keys(doc! {
+                "remote_state": 1,
+                "ciphertext_expires_at": 1,
+            })
+            .options(
+                IndexOptions::builder()
+                    .name("node_pending_credentials_ciphertext_sweep".to_string())
+                    .partial_filter_expression(doc! {
+                        "is_active": true,
+                        "remote_state": "ciphertext_queued",
+                    })
+                    .build(),
+            )
+            .build(),
+    )
+    .await?;
 
     // ── cli_pairings (remote CLI pairing / Mode B wizard flow) ──
     let cli_pairings = db.collection::<mongodb::bson::Document>("cli_pairings");
