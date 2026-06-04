@@ -8,23 +8,26 @@ use axum::{
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use serde::Deserialize;
 use serde_json::json;
+use std::fmt;
 
 use crate::AppState;
 use crate::crypto::device_code::decode_device_code;
 use crate::errors::{AppError, AppResult};
 use crate::handlers::auth::{extract_ip, extract_user_agent};
 use crate::mw::auth::AuthUser;
+#[cfg(not(test))]
+use crate::services::audit_service;
 use crate::services::device_code_service::{
     DeviceCodeApprove, DeviceCodeApproveInput, DeviceCodeInitiate, DeviceCodeInitiateInput,
     DeviceCodeLockoutNotification, DeviceCodePoll, DeviceCodePollInput, DeviceOnboard,
     DeviceOnboardInput, approve, claim_lockout_notification, initiate, onboard, poll,
 };
+use crate::services::notification_service;
 use crate::services::notification_service::{
     DeviceNotificationContext, DeviceNotificationTemplate,
 };
-use crate::services::{audit_service, notification_service};
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct RequestDeviceCodeRequest {
     pub device_pubkey: String,
     pub hw_id: String,
@@ -32,14 +35,14 @@ pub struct RequestDeviceCodeRequest {
     pub suggested_label: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct PollDeviceCodeRequest {
     pub device_code: String,
     pub timestamp: i64,
     pub signature: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct ApproveDeviceCodeRequest {
     pub user_code: String,
     #[serde(default)]
@@ -50,7 +53,7 @@ pub struct ApproveDeviceCodeRequest {
     pub default_services: Option<Vec<String>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct OnboardDeviceRequest {
     #[serde(default)]
     pub org_id: Option<String>,
@@ -59,6 +62,58 @@ pub struct OnboardDeviceRequest {
     pub wifi_password: String,
     #[serde(default)]
     pub default_services: Option<Vec<String>>,
+}
+
+#[derive(Clone, Copy)]
+struct RedactedLen(usize);
+
+impl fmt::Debug for RedactedLen {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<redacted len={}>", self.0)
+    }
+}
+
+impl fmt::Debug for RequestDeviceCodeRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RequestDeviceCodeRequest")
+            .field("device_pubkey", &RedactedLen(self.device_pubkey.len()))
+            .field("hw_id", &self.hw_id)
+            .field("suggested_label", &self.suggested_label)
+            .finish()
+    }
+}
+
+impl fmt::Debug for PollDeviceCodeRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PollDeviceCodeRequest")
+            .field("device_code", &RedactedLen(self.device_code.len()))
+            .field("timestamp", &self.timestamp)
+            .field("signature", &RedactedLen(self.signature.len()))
+            .finish()
+    }
+}
+
+impl fmt::Debug for ApproveDeviceCodeRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ApproveDeviceCodeRequest")
+            .field("user_code", &RedactedLen(self.user_code.len()))
+            .field("org_id", &self.org_id)
+            .field("label", &self.label)
+            .field("default_services", &self.default_services)
+            .finish()
+    }
+}
+
+impl fmt::Debug for OnboardDeviceRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OnboardDeviceRequest")
+            .field("org_id", &self.org_id)
+            .field("label", &self.label)
+            .field("wifi_ssid", &self.wifi_ssid)
+            .field("wifi_password", &RedactedLen(self.wifi_password.len()))
+            .field("default_services", &self.default_services)
+            .finish()
+    }
 }
 
 pub async fn request_device_code(
@@ -149,6 +204,7 @@ pub async fn onboard_device(
 
     let response = onboard(
         &state.db,
+        &state.encryption_keys,
         &actor_user_id,
         DeviceOnboardInput {
             org_id: org_id.clone(),
@@ -161,7 +217,7 @@ pub async fn onboard_device(
     )
     .await?;
 
-    audit_service::log_for_user(
+    log_device_audit_for_user(
         state.db.clone(),
         &auth_user,
         "device_onboard_created",
@@ -229,7 +285,7 @@ where
         }
     };
 
-    audit_service::log_for_user(
+    log_device_audit_for_user(
         state.db.clone(),
         &auth_user,
         "device_code_approved",
@@ -261,7 +317,7 @@ fn audit_failed_approve_attempt(
     user_code_prefix: &str,
     error: &AppError,
 ) {
-    audit_service::log_for_user(
+    log_device_audit_for_user(
         state.db.clone(),
         auth_user,
         "device_code_approve_failed",
@@ -271,6 +327,83 @@ fn audit_failed_approve_attempt(
             "ip": auth_user.ip_address.clone(),
         })),
     );
+}
+
+#[cfg(not(test))]
+fn log_device_audit_for_user(
+    db: mongodb::Database,
+    auth_user: &AuthUser,
+    event_type: &'static str,
+    event_data: Option<serde_json::Value>,
+) {
+    audit_service::log_for_user(db, auth_user, event_type, event_data);
+}
+
+#[cfg(test)]
+fn log_device_audit_for_user(
+    db: mongodb::Database,
+    auth_user: &AuthUser,
+    event_type: &'static str,
+    event_data: Option<serde_json::Value>,
+) {
+    use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};
+    let entry = AuditLog {
+        id: uuid::Uuid::new_v4().to_string(),
+        user_id: Some(auth_user.user_id.to_string()),
+        event_type: event_type.to_string(),
+        event_data,
+        ip_address: auth_user.ip_address.clone(),
+        user_agent: auth_user.user_agent.clone(),
+        api_key_id: auth_user.api_key_id.clone(),
+        api_key_name: auth_user.api_key_name.clone(),
+        created_at: chrono::Utc::now(),
+    };
+
+    tokio::spawn(async move {
+        let event_type = entry.event_type.clone();
+        let user_id = entry.user_id.clone();
+        if let Err(error) = db
+            .collection::<AuditLog>(AUDIT_LOG)
+            .insert_one(&entry)
+            .await
+        {
+            tracing::error!(event_type = %event_type, error = %error, "Failed to write audit log");
+            return;
+        }
+        notify_device_audit_inserted(DeviceAuditInserted {
+            event_type,
+            user_id,
+        });
+    });
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DeviceAuditInserted {
+    event_type: String,
+    user_id: Option<String>,
+}
+
+#[cfg(test)]
+static DEVICE_AUDIT_INSERTED_TX: std::sync::OnceLock<
+    tokio::sync::broadcast::Sender<DeviceAuditInserted>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn subscribe_device_audit_inserted() -> tokio::sync::broadcast::Receiver<DeviceAuditInserted> {
+    DEVICE_AUDIT_INSERTED_TX
+        .get_or_init(|| {
+            let (tx, _rx) = tokio::sync::broadcast::channel(64);
+            tx
+        })
+        .subscribe()
+}
+
+#[cfg(test)]
+fn notify_device_audit_inserted(event: DeviceAuditInserted) {
+    if let Some(tx) = DEVICE_AUDIT_INSERTED_TX.get() {
+        let _ = tx.send(event);
+    }
 }
 
 fn audit_user_code_prefix(value: &str) -> String {
@@ -331,7 +464,7 @@ async fn send_lockout_notifications(
     };
 
     if lockout.recipients.is_empty() {
-        audit_service::log_async(
+        crate::services::audit_service::log_async(
             state.db.clone(),
             None,
             "device_code_locked_no_owner".to_string(),
@@ -572,7 +705,7 @@ mod tests {
     use crate::services::device_code_service::tests_support::setup_pending_row;
     use crate::test_utils::{connect_test_database, test_app_state, test_auth_user};
     use mongodb::bson::doc;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
     use tokio::sync::oneshot;
 
     #[test]
@@ -592,39 +725,43 @@ mod tests {
         let state = test_app_state(db);
         let actor_user_id = uuid::Uuid::new_v4().to_string();
         let auth_user = test_auth_user(&actor_user_id);
+        let (release_notification_tx, release_notification_rx) = oneshot::channel::<()>();
         let (notification_done_tx, mut notification_done_rx) = oneshot::channel::<()>();
 
-        let started = Instant::now();
-        let result = approve_device_code_with_notification_dispatcher(
-            state,
-            auth_user,
-            ApproveDeviceCodeRequest {
-                user_code: response.user_code,
-                org_id: None,
-                label: Some("Kitchen cam".to_string()),
-                default_services: None,
-            },
-            move |_state, _user_id, _context| {
-                tokio::spawn(async move {
-                    tokio::time::sleep(Duration::from_secs(2)).await;
-                    let _ = notification_done_tx.send(());
-                });
-            },
+        let result = tokio::time::timeout(
+            Duration::from_millis(200),
+            approve_device_code_with_notification_dispatcher(
+                state,
+                auth_user,
+                ApproveDeviceCodeRequest {
+                    user_code: response.user_code,
+                    org_id: None,
+                    label: Some("Kitchen cam".to_string()),
+                    default_services: None,
+                },
+                move |_state, _user_id, _context| {
+                    tokio::spawn(async move {
+                        let _ = release_notification_rx.await;
+                        let _ = notification_done_tx.send(());
+                    });
+                },
+            ),
         )
-        .await;
-        let elapsed = started.elapsed();
+        .await
+        .expect("approve should return without waiting for notification task");
 
         let _ = result.expect("approve succeeds");
         assert!(
-            elapsed < Duration::from_millis(200),
-            "approve took {elapsed:?}, expected notification dispatch not to block response"
+            notification_done_rx.try_recv().is_err(),
+            "notification task should still be pending after handler returns"
         );
-        assert!(
-            tokio::time::timeout(Duration::from_millis(200), &mut notification_done_rx)
-                .await
-                .is_err(),
-            "slow notification task should still be running after handler returns"
-        );
+        release_notification_tx
+            .send(())
+            .expect("release notification task");
+        tokio::time::timeout(Duration::from_millis(200), notification_done_rx)
+            .await
+            .expect("notification task should finish after release")
+            .expect("notification completion signal");
     }
 
     #[tokio::test]
@@ -637,6 +774,7 @@ mod tests {
         let actor_user_id = uuid::Uuid::new_v4().to_string();
         let mut auth_user = test_auth_user(&actor_user_id);
         auth_user.ip_address = Some("203.0.113.77".to_string());
+        let mut audit_rx = subscribe_device_audit_inserted();
 
         let error = approve_device_code_with_notification_dispatcher(
             state,
@@ -653,7 +791,7 @@ mod tests {
         .expect_err("approve should fail without matching code");
         assert!(matches!(error, AppError::DeviceUserCodeInvalid));
 
-        let audit = wait_for_approve_failed_audit(&db, &actor_user_id).await;
+        let audit = wait_for_approve_failed_audit(&db, &actor_user_id, &mut audit_rx).await;
         let event = audit
             .event_data
             .expect("device_code_approve_failed event data");
@@ -785,6 +923,7 @@ mod tests {
         let state = test_app_state(db.clone());
         let actor_user_id = uuid::Uuid::new_v4().to_string();
         let auth_user = test_auth_user(&actor_user_id);
+        let mut audit_rx = subscribe_device_audit_inserted();
 
         let Json(response) = onboard_device(
             State(state),
@@ -804,7 +943,7 @@ mod tests {
         assert!(response.qr_payload.contains("nyxid_ag_"));
         assert!(response.qr_payload.contains("psw=hunter22"));
 
-        let audit = wait_for_onboard_audit(&db, &actor_user_id).await;
+        let audit = wait_for_onboard_audit(&db, &actor_user_id, &mut audit_rx).await;
         let event = audit.event_data.expect("device_onboard_created event data");
         assert_eq!(event["node_id"], response.node_id);
         assert_eq!(event["api_key_id"], response.api_key_id);
@@ -845,39 +984,46 @@ mod tests {
         assert_eq!(event["locked_until"], locked_until.to_rfc3339());
     }
 
-    async fn wait_for_approve_failed_audit(db: &mongodb::Database, user_id: &str) -> AuditLog {
-        for _ in 0..100 {
-            if let Some(audit) = db
-                .collection::<AuditLog>(AUDIT_LOG)
-                .find_one(doc! {
-                    "user_id": user_id,
-                    "event_type": "device_code_approve_failed",
-                })
-                .await
-                .expect("query audit")
-            {
-                return audit;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-        panic!("device_code_approve_failed audit entry was not written");
+    async fn wait_for_approve_failed_audit(
+        db: &mongodb::Database,
+        user_id: &str,
+        audit_rx: &mut tokio::sync::broadcast::Receiver<DeviceAuditInserted>,
+    ) -> AuditLog {
+        wait_for_device_audit(db, user_id, "device_code_approve_failed", audit_rx).await
     }
 
-    async fn wait_for_onboard_audit(db: &mongodb::Database, user_id: &str) -> AuditLog {
-        for _ in 0..100 {
-            if let Some(audit) = db
-                .collection::<AuditLog>(AUDIT_LOG)
-                .find_one(doc! {
-                    "user_id": user_id,
-                    "event_type": "device_onboard_created",
-                })
-                .await
-                .expect("query audit")
-            {
-                return audit;
+    async fn wait_for_onboard_audit(
+        db: &mongodb::Database,
+        user_id: &str,
+        audit_rx: &mut tokio::sync::broadcast::Receiver<DeviceAuditInserted>,
+    ) -> AuditLog {
+        wait_for_device_audit(db, user_id, "device_onboard_created", audit_rx).await
+    }
+
+    async fn wait_for_device_audit(
+        db: &mongodb::Database,
+        user_id: &str,
+        event_type: &str,
+        audit_rx: &mut tokio::sync::broadcast::Receiver<DeviceAuditInserted>,
+    ) -> AuditLog {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let event = audit_rx.recv().await.expect("device audit insert event");
+                if event.event_type == event_type && event.user_id.as_deref() == Some(user_id) {
+                    break;
+                }
             }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-        panic!("device_onboard_created audit entry was not written");
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{event_type} audit entry was not written"));
+
+        db.collection::<AuditLog>(AUDIT_LOG)
+            .find_one(doc! {
+                "user_id": user_id,
+                "event_type": event_type,
+            })
+            .await
+            .expect("query audit")
+            .unwrap_or_else(|| panic!("{event_type} audit entry was not found"))
     }
 }

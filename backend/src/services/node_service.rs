@@ -239,12 +239,12 @@ pub async fn register_node(
 /// Create a Node row for an API-key-provisioned headless device.
 ///
 /// Device-code and QR-onboarded devices receive a scoped NyxID API key and
-/// authenticate through the proxy API, not the node WebSocket protocol. This
-/// creates a discriminator-bearing stub row with empty auth fields rather than
-/// fabricating auth-token/signing-secret hashes whose plaintext is not held by
-/// any device.
+/// authenticate through the proxy API, not the node WebSocket protocol. The row
+/// still carries valid random node auth material so it satisfies the Node model
+/// invariants and cannot collide on an empty auth hash.
 pub async fn create_for_device(
     db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
     input: DeviceNodeInput<'_>,
 ) -> AppResult<Node> {
     if input.hw_id.trim().is_empty() || input.hw_id.len() > 256 {
@@ -269,15 +269,25 @@ pub async fn create_for_device(
         let pubkey_digest = Sha256::digest(device_pubkey);
         hex::encode(&pubkey_digest[..8])
     });
+    let raw_auth_token = Zeroizing::new(format!(
+        "nyx_nauth_{}",
+        hex::encode(rand::random::<[u8; 32]>())
+    ));
+    let auth_token_hash = hash_token(raw_auth_token.as_str());
+    let raw_signing_secret = Zeroizing::new(hex::encode(rand::random::<[u8; 32]>()));
+    let signing_secret_encrypted = encryption_keys
+        .encrypt(raw_signing_secret.as_bytes())
+        .await?;
+    let signing_secret_hash = hash_token(raw_signing_secret.as_str());
 
     let node = Node {
         id: node_id.clone(),
         user_id: input.user_id.to_string(),
         name: device_node_name(input.label, &node_id),
         status: NodeStatus::Offline,
-        auth_token_hash: String::new(),
-        signing_secret_encrypted: None,
-        signing_secret_hash: String::new(),
+        auth_token_hash,
+        signing_secret_encrypted: Some(signing_secret_encrypted),
+        signing_secret_hash,
         last_heartbeat_at: None,
         connected_at: None,
         metadata: Some(NodeMetadata {
@@ -302,7 +312,7 @@ pub async fn create_for_device(
         hw_id = %input.hw_id,
         device_pubkey_fingerprint = pubkey_fingerprint.as_deref(),
         provisioning_source = %input.provisioning_source,
-        "Device node stub created"
+        "Device node record created"
     );
 
     Ok(node)
@@ -780,9 +790,9 @@ pub async fn update_binding_priority(
 
 /// Admin: list active operational nodes (no user filter).
 ///
-/// Device-code provisioning creates node-shaped stubs for ownership linkage,
-/// but those devices authenticate with API keys and cannot connect to the node
-/// WebSocket protocol, so the operational admin list excludes them.
+/// Device-code provisioning creates node-shaped ownership records, but those
+/// devices authenticate with API keys and are not operational node WebSocket
+/// agents, so the operational admin list excludes them.
 pub async fn list_all_nodes(
     db: &mongodb::Database,
     page: u64,
@@ -1367,7 +1377,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_for_device_creates_api_key_only_stub_without_node_auth_secrets() {
+    async fn create_for_device_creates_device_node_with_valid_auth_material() {
         let Some(db) = connect_test_database("node_device_code_stub").await else {
             return;
         };
@@ -1375,6 +1385,7 @@ mod tests {
 
         let node = create_for_device(
             &db,
+            &test_encryption_keys(),
             DeviceNodeInput {
                 user_id: &owner_id,
                 api_key_id: "api-key-1",
@@ -1387,9 +1398,11 @@ mod tests {
         .await
         .expect("create device stub");
 
-        assert_eq!(node.auth_token_hash, "");
-        assert_eq!(node.signing_secret_hash, "");
-        assert!(node.signing_secret_encrypted.is_none());
+        assert_eq!(node.auth_token_hash.len(), 64);
+        assert_ne!(node.auth_token_hash, hash_token(""));
+        assert_eq!(node.signing_secret_hash.len(), 64);
+        assert_ne!(node.signing_secret_hash, hash_token(""));
+        assert!(node.signing_secret_encrypted.is_some());
         assert_eq!(
             node.metadata
                 .as_ref()
@@ -1411,6 +1424,7 @@ mod tests {
             .expect("insert operational node");
         create_for_device(
             &db,
+            &test_encryption_keys(),
             DeviceNodeInput {
                 user_id: &owner_id,
                 api_key_id: "api-key-1",

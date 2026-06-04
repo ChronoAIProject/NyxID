@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 use super::bson_datetime;
 
@@ -15,14 +16,14 @@ pub enum DeviceCodeStatus {
     Delivered,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub struct UserCodeGen {
     pub code: String,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub generated_at: DateTime<Utc>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct DeviceCode {
     #[serde(rename = "_id")]
     pub id: String,
@@ -55,6 +56,80 @@ pub struct DeviceCode {
     pub last_poll_timestamp: Option<i64>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub last_rotated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Copy)]
+struct RedactedLen(usize);
+
+impl fmt::Debug for RedactedLen {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<redacted len={}>", self.0)
+    }
+}
+
+impl fmt::Debug for UserCodeGen {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UserCodeGen")
+            .field("code", &RedactedLen(self.code.len()))
+            .field("generated_at", &self.generated_at)
+            .finish()
+    }
+}
+
+impl fmt::Debug for DeviceCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DeviceCode")
+            .field("id", &self.id)
+            .field(
+                "device_code_hash",
+                &RedactedLen(self.device_code_hash.len()),
+            )
+            .field("device_pubkey", &RedactedLen(self.device_pubkey.len()))
+            .field("hw_id", &self.hw_id)
+            .field("suggested_label", &self.suggested_label)
+            .field("user_code_history", &self.user_code_history)
+            .field("status", &self.status)
+            .field("approved_by_user_id", &self.approved_by_user_id)
+            .field("approved_org_id", &self.approved_org_id)
+            .field(
+                "issued_api_key_id",
+                &self
+                    .issued_api_key_id
+                    .as_ref()
+                    .map(|id| RedactedLen(id.len())),
+            )
+            .field("issued_node_id", &self.issued_node_id)
+            .field(
+                "delivery_api_key_encrypted",
+                &self
+                    .delivery_api_key_encrypted
+                    .as_ref()
+                    .map(|bytes| RedactedLen(bytes.len())),
+            )
+            .field(
+                "delivery_refresh_token_encrypted",
+                &self
+                    .delivery_refresh_token_encrypted
+                    .as_ref()
+                    .map(|bytes| RedactedLen(bytes.len())),
+            )
+            .field(
+                "refresh_token_hash",
+                &self
+                    .refresh_token_hash
+                    .as_ref()
+                    .map(|hash| RedactedLen(hash.len())),
+            )
+            .field("failed_poll_count", &self.failed_poll_count)
+            .field("locked_until", &self.locked_until)
+            .field("lock_alert_sent_at", &self.lock_alert_sent_at)
+            .field("expires_at", &self.expires_at)
+            .field("created_at", &self.created_at)
+            .field("last_polled_at", &self.last_polled_at)
+            .field("last_poll_timestamp", &self.last_poll_timestamp)
+            .field("last_rotated_at", &self.last_rotated_at)
+            .finish()
+    }
 }
 
 #[cfg(test)]

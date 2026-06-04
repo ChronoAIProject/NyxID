@@ -1,6 +1,8 @@
 use chrono::Utc;
 use mongodb::{Database, bson::doc};
+use zeroize::Zeroizing;
 
+use crate::crypto::aes::EncryptionKeys;
 use crate::crypto::token::hash_token;
 use crate::errors::{AppError, AppResult};
 use crate::models::device_onboard_credential::{
@@ -24,6 +26,7 @@ const DEVICE_ONBOARD_HW_ID: &str = "qr-onboard";
 /// fields.
 pub async fn onboard(
     db: &Database,
+    encryption_keys: &EncryptionKeys,
     actor_user_id: &str,
     input: DeviceOnboardInput,
 ) -> AppResult<DeviceOnboard> {
@@ -62,6 +65,7 @@ pub async fn onboard(
 
     let node = match node_service::create_for_device(
         db,
+        encryption_keys,
         DeviceNodeInput {
             user_id: &owner_user_id,
             api_key_id: &created_key.id,
@@ -85,13 +89,13 @@ pub async fn onboard(
         return Err(error);
     }
 
-    let refresh_token = hex::encode(rand::random::<[u8; 32]>());
+    let refresh_token = Zeroizing::new(hex::encode(rand::random::<[u8; 32]>()));
     let credential = DeviceOnboardCredential {
         id: uuid::Uuid::new_v4().to_string(),
         owner_user_id: owner_user_id.clone(),
         api_key_id: created_key.id.clone(),
         node_id: node.id.clone(),
-        refresh_token_hash: hash_token(&refresh_token),
+        refresh_token_hash: hash_token(refresh_token.as_str()),
         created_at: Utc::now(),
     };
     if let Err(error) = db
@@ -108,7 +112,7 @@ pub async fn onboard(
         &input.wifi_password,
         &created_key.full_key,
         &node.id,
-        &refresh_token,
+        refresh_token.as_str(),
         &input.base_url,
     );
 
@@ -198,7 +202,7 @@ mod tests {
     use crate::models::node::{COLLECTION_NAME as NODES, Node};
     use crate::models::ssh_auth_mode::SshAuthMode;
     use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
-    use crate::test_utils::connect_test_database;
+    use crate::test_utils::{connect_test_database, test_encryption_keys};
     use uuid::Uuid;
 
     #[test]
@@ -249,6 +253,7 @@ mod tests {
 
         let response = onboard(
             &db,
+            &test_encryption_keys(),
             &actor_user_id,
             DeviceOnboardInput {
                 org_id: None,
@@ -304,6 +309,9 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+        assert_eq!(node.auth_token_hash.len(), 64);
+        assert_eq!(node.signing_secret_hash.len(), 64);
+        assert!(node.signing_secret_encrypted.is_some());
         assert_eq!(
             node.metadata
                 .as_ref()
@@ -333,6 +341,7 @@ mod tests {
 
         let response = onboard(
             &db,
+            &test_encryption_keys(),
             &actor_user_id,
             DeviceOnboardInput {
                 org_id: None,
@@ -370,6 +379,7 @@ mod tests {
 
         let error = onboard(
             &db,
+            &test_encryption_keys(),
             &actor_user_id,
             DeviceOnboardInput {
                 org_id: None,

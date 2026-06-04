@@ -123,7 +123,7 @@ Lockout triggers device failure notifications. Bind success triggers a notificat
 
 ### Credential storage
 
-The approval service creates an API key and a device-code node stub, stores only hashes for opaque refresh material, and returns raw secrets only once on the first successful approved poll. The stub carries `metadata.provisioning_source = "device-code"` and intentionally has empty node WebSocket auth fields; device-code devices authenticate with the delivered API key, not `/api/v1/nodes/ws`. After delivery, the row transitions to `delivered` and the delivery secrets are cleared.
+The approval service creates an API key and a device-code node row, stores only hashes for opaque refresh material, and returns raw secrets only once on the first successful approved poll. The node row carries `metadata.provisioning_source = "device-code"` and valid random node auth/signing material under the normal Node storage rules; device-code devices still authenticate with the delivered API key rather than `/api/v1/nodes/ws`. After delivery, the row transitions to `delivered` and the delivery secrets are cleared.
 
 Approvers can optionally pass `default_services` (web form: multi-select; CLI: `--service <SLUG>` repeatable) to grant the device proxy access to specific services in one step. Without it, the device's api_key is issued with no service access and must be granted scopes separately via the API Keys page.
 
@@ -220,7 +220,7 @@ nyxid device approve ABCDEFGHJKLM --org my-team --label "Lab camera" --service l
 
 ### Onboard with a QR payload
 
-Authenticated as a user. This server-side flow is for a device that has no WiFi yet but can scan a QR code from a browser or printed page. The backend creates the scoped API key and device node stub immediately, embeds the raw one-time credentials in the `nyxprov://` payload, and returns only the QR payload plus stable identifiers in the JSON response. The WiFi password is not stored.
+Authenticated as a user. This server-side flow is for a device that has no WiFi yet but can scan a QR code from a browser or printed page. The backend creates the scoped API key and device node row immediately, embeds the raw one-time credentials in the `nyxprov://` payload, and returns only the QR payload plus stable identifiers in the JSON response. The WiFi password is not stored.
 
 ```bash
 curl -sS -X POST "$NYXID_BASE_URL/api/v1/devices/onboard" \

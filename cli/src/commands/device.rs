@@ -1,3 +1,4 @@
+use std::fmt;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -6,6 +7,7 @@ use comfy_table::{Table, presets::UTF8_FULL_CONDENSED};
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 use crate::api::ApiClient;
 use crate::cli::{AuthArgs, DeviceCommands, OutputFormat};
@@ -34,7 +36,7 @@ pub struct OnboardDeviceArgs {
     pub auth: AuthArgs,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 struct ApproveDeviceRequest {
     user_code: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -45,7 +47,7 @@ struct ApproveDeviceRequest {
     default_services: Option<Vec<String>>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Deserialize, Serialize)]
 struct ApproveDeviceResponse {
     device_label: String,
     hw_id: String,
@@ -55,7 +57,7 @@ struct ApproveDeviceResponse {
     org_id: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 struct OnboardDeviceRequest {
     label: String,
     wifi_ssid: String,
@@ -66,7 +68,7 @@ struct OnboardDeviceRequest {
     default_services: Option<Vec<String>>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Deserialize, Serialize)]
 struct OnboardDeviceResponse {
     qr_payload: String,
     node_id: String,
@@ -74,10 +76,75 @@ struct OnboardDeviceResponse {
     label: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 struct FactoryKey {
     pubkey_hex: String,
     privkey_hex: String,
+}
+
+#[derive(Clone, Copy)]
+struct RedactedLen(usize);
+
+impl fmt::Debug for RedactedLen {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<redacted len={}>", self.0)
+    }
+}
+
+impl fmt::Debug for ApproveDeviceRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ApproveDeviceRequest")
+            .field("user_code", &RedactedLen(self.user_code.len()))
+            .field("org_id", &self.org_id)
+            .field("label", &self.label)
+            .field("default_services", &self.default_services)
+            .finish()
+    }
+}
+
+impl fmt::Debug for ApproveDeviceResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ApproveDeviceResponse")
+            .field("device_label", &self.device_label)
+            .field("hw_id", &self.hw_id)
+            .field("api_key_id", &RedactedLen(self.api_key_id.len()))
+            .field("node_id", &self.node_id)
+            .field("owner_user_id", &self.owner_user_id)
+            .field("org_id", &self.org_id)
+            .finish()
+    }
+}
+
+impl fmt::Debug for OnboardDeviceRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OnboardDeviceRequest")
+            .field("label", &self.label)
+            .field("wifi_ssid", &self.wifi_ssid)
+            .field("wifi_password", &RedactedLen(self.wifi_password.len()))
+            .field("org_id", &self.org_id)
+            .field("default_services", &self.default_services)
+            .finish()
+    }
+}
+
+impl fmt::Debug for OnboardDeviceResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OnboardDeviceResponse")
+            .field("qr_payload", &RedactedLen(self.qr_payload.len()))
+            .field("node_id", &self.node_id)
+            .field("api_key_id", &RedactedLen(self.api_key_id.len()))
+            .field("label", &self.label)
+            .finish()
+    }
+}
+
+impl fmt::Debug for FactoryKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FactoryKey")
+            .field("pubkey_hex", &RedactedLen(self.pubkey_hex.len()))
+            .field("privkey_hex", &RedactedLen(self.privkey_hex.len()))
+            .finish()
+    }
 }
 
 pub async fn run(command: DeviceCommands) -> Result<()> {
@@ -154,13 +221,15 @@ pub async fn onboard_cmd(args: OnboardDeviceArgs) -> Result<()> {
         Some(raw) => Some(resolve_org_id(&mut api, &raw).await?),
         None => None,
     };
-    let wifi_password = std::env::var(&args.password_env)
-        .with_context(|| format!("Environment variable {} is not set", args.password_env))?;
+    let wifi_password = Zeroizing::new(
+        std::env::var(&args.password_env)
+            .with_context(|| format!("Environment variable {} is not set", args.password_env))?,
+    );
 
     let request = OnboardDeviceRequest {
         label: normalize_onboard_label(&args.label)?,
         wifi_ssid: normalize_wifi_ssid(&args.ssid)?,
-        wifi_password: normalize_wifi_password(wifi_password)?,
+        wifi_password: normalize_wifi_password(wifi_password.as_str())?,
         org_id,
         default_services: normalize_default_services(args.service)?,
     };
@@ -300,11 +369,11 @@ fn normalize_wifi_ssid(value: &str) -> Result<String> {
     Ok(trimmed.to_string())
 }
 
-fn normalize_wifi_password(value: String) -> Result<String> {
+fn normalize_wifi_password(value: &str) -> Result<String> {
     if value.len() < 8 || value.len() > 63 {
         bail!("WiFi password must be between 8 and 63 characters");
     }
-    Ok(value)
+    Ok(value.to_string())
 }
 
 fn normalize_default_services(values: Vec<String>) -> Result<Option<Vec<String>>> {
@@ -447,16 +516,13 @@ mod tests {
     fn normalize_onboard_fields_enforce_secret_safe_bounds() {
         assert_eq!(normalize_onboard_label(" Kitchen ").unwrap(), "Kitchen");
         assert_eq!(normalize_wifi_ssid(" MyNetwork ").unwrap(), "MyNetwork");
-        assert_eq!(
-            normalize_wifi_password("hunter22".to_string()).unwrap(),
-            "hunter22"
-        );
+        assert_eq!(normalize_wifi_password("hunter22").unwrap(), "hunter22");
         assert!(normalize_onboard_label("").is_err());
         assert!(normalize_onboard_label(&"x".repeat(129)).is_err());
         assert!(normalize_wifi_ssid("").is_err());
         assert!(normalize_wifi_ssid(&"x".repeat(33)).is_err());
-        assert!(normalize_wifi_password("short".to_string()).is_err());
-        assert!(normalize_wifi_password("x".repeat(64)).is_err());
+        assert!(normalize_wifi_password("short").is_err());
+        assert!(normalize_wifi_password(&"x".repeat(64)).is_err());
     }
 
     #[test]

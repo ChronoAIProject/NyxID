@@ -4,6 +4,7 @@ use mongodb::{
     bson::{self, doc},
     options::ReturnDocument,
 };
+use zeroize::Zeroizing;
 
 use crate::crypto::aes::EncryptionKeys;
 use crate::crypto::device_code::{generate_user_code, verify_poll_signature};
@@ -129,8 +130,8 @@ async fn decrypt_delivery_secret(
     let encrypted = encrypted.ok_or_else(|| {
         AppError::Internal(format!("approved device code missing delivery {label}"))
     })?;
-    let plaintext = encryption_keys.decrypt(encrypted).await?;
-    String::from_utf8(plaintext).map_err(|_| {
+    let plaintext = Zeroizing::new(encryption_keys.decrypt(encrypted).await?);
+    String::from_utf8(plaintext.to_vec()).map_err(|_| {
         AppError::Internal(format!(
             "approved device code delivery {label} is not valid UTF-8"
         ))
@@ -180,7 +181,7 @@ where
         let current_user_code =
             rotate_user_code_if_needed_with_generator(row, now, &mut user_code_generator)?;
 
-        match persist_successful_poll(db, row, None).await {
+        match persist_successful_poll(db, row).await {
             Ok(()) => return Ok(current_user_code),
             Err(AppError::DatabaseError(error))
                 if is_duplicate_key_error(&error)
@@ -270,12 +271,8 @@ async fn claim_approved_delivery(
     Ok(claimed)
 }
 
-async fn persist_successful_poll(
-    db: &Database,
-    row: &DeviceCode,
-    status: Option<DeviceCodeStatus>,
-) -> AppResult<()> {
-    let mut set_doc = doc! {
+async fn persist_successful_poll(db: &Database, row: &DeviceCode) -> AppResult<()> {
+    let set_doc = doc! {
         "failed_poll_count": 0_i64,
         "lock_alert_sent_at": bson::Bson::Null,
         "last_polled_at": bson::DateTime::from_chrono(row.last_polled_at.expect("set before persist")),
@@ -284,28 +281,9 @@ async fn persist_successful_poll(
             .map_err(|e| AppError::Internal(format!("serialize user_code_history: {e}")))?,
         "last_rotated_at": bson::DateTime::from_chrono(row.last_rotated_at),
     };
-    if let Some(ref status) = status {
-        set_doc.insert(
-            "status",
-            bson::to_bson(&status)
-                .map_err(|e| AppError::Internal(format!("serialize status: {e}")))?,
-        );
-    }
-
-    let update = if matches!(status, Some(DeviceCodeStatus::Delivered)) {
-        doc! {
-            "$set": set_doc,
-            "$unset": {
-                "delivery_api_key_encrypted": "",
-                "delivery_refresh_token_encrypted": "",
-            },
-        }
-    } else {
-        doc! { "$set": set_doc }
-    };
 
     db.collection::<DeviceCode>(DEVICE_CODES)
-        .update_one(doc! { "_id": &row.id }, update)
+        .update_one(doc! { "_id": &row.id }, doc! { "$set": set_doc })
         .await?;
     Ok(())
 }

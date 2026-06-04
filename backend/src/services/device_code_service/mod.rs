@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::Serialize;
+use std::fmt;
 
 use crate::errors::{AppError, AppResult};
 use crate::models::device_code::DeviceCode;
@@ -36,7 +37,7 @@ pub(super) fn is_duplicate_key_error(error: &mongodb::error::Error) -> bool {
     )
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct DeviceCodeInitiateInput {
     pub device_pubkey: [u8; 32],
     pub hw_id: String,
@@ -44,7 +45,7 @@ pub struct DeviceCodeInitiateInput {
     pub frontend_url: String,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq)]
+#[derive(Clone, Serialize, PartialEq)]
 pub struct DeviceCodeInitiate {
     pub device_code: String,
     pub user_code: String,
@@ -54,14 +55,14 @@ pub struct DeviceCodeInitiate {
     pub poll_interval: u32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct DeviceCodePollInput {
     pub device_code: String,
     pub timestamp: i64,
     pub signature: [u8; 64],
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq)]
+#[derive(Clone, Serialize, PartialEq)]
 #[serde(tag = "status", rename_all = "lowercase")]
 pub enum DeviceCodePoll {
     Pending {
@@ -76,7 +77,7 @@ pub enum DeviceCodePoll {
     },
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct DeviceCodeApproveInput {
     pub user_code: String,
     pub org_id: Option<String>,
@@ -84,7 +85,7 @@ pub struct DeviceCodeApproveInput {
     pub default_services: Option<Vec<String>>,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq)]
+#[derive(Clone, Serialize, PartialEq)]
 pub struct DeviceCodeApprove {
     pub device_label: String,
     pub hw_id: String,
@@ -94,7 +95,7 @@ pub struct DeviceCodeApprove {
     pub org_id: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct DeviceOnboardInput {
     pub org_id: Option<String>,
     pub label: String,
@@ -104,7 +105,7 @@ pub struct DeviceOnboardInput {
     pub base_url: String,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq)]
+#[derive(Clone, Serialize, PartialEq)]
 pub struct DeviceOnboard {
     pub qr_payload: String,
     pub node_id: String,
@@ -112,7 +113,7 @@ pub struct DeviceOnboard {
     pub label: String,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct DeviceCodeLockoutNotification {
     pub recipients: Vec<String>,
     pub device_label: String,
@@ -127,6 +128,144 @@ pub struct DeviceCodeLockoutNotification {
 pub struct SignatureFailureLockout {
     pub failed_poll_count: u32,
     pub locked_until: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Copy)]
+struct RedactedLen(usize);
+
+impl fmt::Debug for RedactedLen {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<redacted len={}>", self.0)
+    }
+}
+
+impl fmt::Debug for DeviceCodeInitiateInput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DeviceCodeInitiateInput")
+            .field("device_pubkey", &RedactedLen(self.device_pubkey.len()))
+            .field("hw_id", &self.hw_id)
+            .field("suggested_label", &self.suggested_label)
+            .field("frontend_url", &self.frontend_url)
+            .finish()
+    }
+}
+
+impl fmt::Debug for DeviceCodeInitiate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DeviceCodeInitiate")
+            .field("device_code", &RedactedLen(self.device_code.len()))
+            .field("user_code", &RedactedLen(self.user_code.len()))
+            .field("verification_uri", &self.verification_uri)
+            .field(
+                "verification_uri_complete",
+                &RedactedLen(self.verification_uri_complete.len()),
+            )
+            .field("expires_in", &self.expires_in)
+            .field("poll_interval", &self.poll_interval)
+            .finish()
+    }
+}
+
+impl fmt::Debug for DeviceCodePollInput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DeviceCodePollInput")
+            .field("device_code", &RedactedLen(self.device_code.len()))
+            .field("timestamp", &self.timestamp)
+            .field("signature", &RedactedLen(self.signature.len()))
+            .finish()
+    }
+}
+
+impl fmt::Debug for DeviceCodePoll {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Pending {
+                current_user_code,
+                interval,
+            } => f
+                .debug_struct("DeviceCodePoll::Pending")
+                .field("current_user_code", &RedactedLen(current_user_code.len()))
+                .field("interval", interval)
+                .finish(),
+            Self::Approved {
+                api_key,
+                node_id,
+                refresh_token,
+                expires_in,
+            } => f
+                .debug_struct("DeviceCodePoll::Approved")
+                .field("api_key", &RedactedLen(api_key.len()))
+                .field("node_id", node_id)
+                .field("refresh_token", &RedactedLen(refresh_token.len()))
+                .field("expires_in", expires_in)
+                .finish(),
+        }
+    }
+}
+
+impl fmt::Debug for DeviceCodeApproveInput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DeviceCodeApproveInput")
+            .field("user_code", &RedactedLen(self.user_code.len()))
+            .field("org_id", &self.org_id)
+            .field("label", &self.label)
+            .field("default_services", &self.default_services)
+            .finish()
+    }
+}
+
+impl fmt::Debug for DeviceCodeApprove {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DeviceCodeApprove")
+            .field("device_label", &self.device_label)
+            .field("hw_id", &self.hw_id)
+            .field("api_key_id", &RedactedLen(self.api_key_id.len()))
+            .field("node_id", &self.node_id)
+            .field("owner_user_id", &self.owner_user_id)
+            .field("org_id", &self.org_id)
+            .finish()
+    }
+}
+
+impl fmt::Debug for DeviceOnboardInput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DeviceOnboardInput")
+            .field("org_id", &self.org_id)
+            .field("label", &self.label)
+            .field("wifi_ssid", &self.wifi_ssid)
+            .field("wifi_password", &RedactedLen(self.wifi_password.len()))
+            .field("default_services", &self.default_services)
+            .field("base_url", &self.base_url)
+            .finish()
+    }
+}
+
+impl fmt::Debug for DeviceOnboard {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DeviceOnboard")
+            .field("qr_payload", &RedactedLen(self.qr_payload.len()))
+            .field("node_id", &self.node_id)
+            .field("api_key_id", &RedactedLen(self.api_key_id.len()))
+            .field("label", &self.label)
+            .finish()
+    }
+}
+
+impl fmt::Debug for DeviceCodeLockoutNotification {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DeviceCodeLockoutNotification")
+            .field("recipients", &self.recipients)
+            .field("device_label", &self.device_label)
+            .field("hw_id", &self.hw_id)
+            .field("node_id", &self.node_id)
+            .field(
+                "device_pubkey_fingerprint",
+                &RedactedLen(self.device_pubkey_fingerprint.len()),
+            )
+            .field("failed_poll_count", &self.failed_poll_count)
+            .field("locked_until", &self.locked_until)
+            .finish()
+    }
 }
 
 pub(super) fn choose_device_label(

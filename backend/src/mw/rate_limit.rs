@@ -160,10 +160,13 @@ impl PerPubkeyRateLimiter {
         }
     }
 
+    pub fn check(&self, pubkey: &[u8; 32]) -> bool {
+        self.check_at(pubkey, Instant::now())
+    }
+
     /// Check if a request from the given device public key should be allowed.
     /// Returns true if allowed, false if rate limited.
-    pub fn check(&self, pubkey: &[u8; 32]) -> bool {
-        let now = Instant::now();
+    fn check_at(&self, pubkey: &[u8; 32], now: Instant) -> bool {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let entry = state.entry(*pubkey).or_insert(AgentBucket {
             tokens: self.burst as f64,
@@ -279,7 +282,10 @@ impl PerChannelEventLimiter {
     /// Check if an event for the given conversation should be allowed.
     /// Returns `true` if allowed, `false` if rate-limited.
     pub fn check(&self, conversation_id: &str) -> bool {
-        let now = Instant::now();
+        self.check_at(conversation_id, Instant::now())
+    }
+
+    fn check_at(&self, conversation_id: &str, now: Instant) -> bool {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let entry = state
             .entry(conversation_id.to_string())
@@ -371,15 +377,6 @@ pub fn create_per_ip_rate_limiter(max_requests: u32, window_secs: u64) -> Shared
 /// Create a per-pubkey limiter for device authorization endpoints.
 pub fn create_per_pubkey_rate_limiter() -> SharedPerPubkeyRateLimiter {
     Arc::new(PerPubkeyRateLimiter::new())
-}
-
-#[allow(dead_code)]
-pub fn device_code_rate_limit_layer(limiters: DeviceCodeRateLimiters) -> impl Clone + 'static {
-    axum::middleware::from_fn_with_state::<
-        _,
-        DeviceCodeRateLimiters,
-        (State<DeviceCodeRateLimiters>, Request<Body>),
-    >(limiters, device_code_rate_limit_middleware)
 }
 
 /// Resolve the client IP for per-IP rate-limit keying behind a
@@ -794,11 +791,11 @@ mod tests {
     fn per_pubkey_refills_over_time() {
         let limiter = PerPubkeyRateLimiter::new_with_rate(100.0, 1);
         let pubkey = [3u8; 32];
+        let start = Instant::now();
 
-        assert!(limiter.check(&pubkey));
-        assert!(!limiter.check(&pubkey));
-        std::thread::sleep(std::time::Duration::from_millis(30));
-        assert!(limiter.check(&pubkey));
+        assert!(limiter.check_at(&pubkey, start));
+        assert!(!limiter.check_at(&pubkey, start));
+        assert!(limiter.check_at(&pubkey, start + std::time::Duration::from_millis(30)));
     }
 
     #[test]
@@ -851,12 +848,12 @@ mod tests {
 
     #[test]
     fn per_channel_limiter_refills_over_time() {
-        // 100 req/s with burst 1 → roughly 10ms per token
         let limiter = PerChannelEventLimiter::new(100, 1);
-        assert!(limiter.check("conv"));
-        assert!(!limiter.check("conv"));
-        std::thread::sleep(std::time::Duration::from_millis(30));
-        assert!(limiter.check("conv"));
+        let start = Instant::now();
+
+        assert!(limiter.check_at("conv", start));
+        assert!(!limiter.check_at("conv", start));
+        assert!(limiter.check_at("conv", start + std::time::Duration::from_millis(30)));
     }
 
     #[test]

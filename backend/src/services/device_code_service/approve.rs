@@ -3,6 +3,7 @@ use mongodb::{
     Collection, Database,
     bson::{self, doc},
 };
+use zeroize::Zeroizing;
 
 use crate::crypto::aes::EncryptionKeys;
 use crate::crypto::token::hash_token;
@@ -79,6 +80,7 @@ pub async fn approve(
 
     let node = match node_service::create_for_device(
         db,
+        encryption_keys,
         DeviceNodeInput {
             user_id: &owner_user_id,
             api_key_id: &created_key.id,
@@ -102,8 +104,8 @@ pub async fn approve(
         return Err(error);
     }
 
-    let refresh_token = hex::encode(rand::random::<[u8; 32]>());
-    let refresh_token_hash = hash_token(&refresh_token);
+    let refresh_token = Zeroizing::new(hex::encode(rand::random::<[u8; 32]>()));
+    let refresh_token_hash = hash_token(refresh_token.as_str());
     let delivery_api_key_encrypted = match encryption_keys
         .encrypt(created_key.full_key.as_bytes())
         .await
@@ -358,6 +360,9 @@ mod tests {
         assert_eq!(node.user_id, approval.owner_user_id);
         assert_eq!(node.status, NodeStatus::Offline);
         assert!(node.is_active);
+        assert_eq!(node.auth_token_hash.len(), 64);
+        assert_eq!(node.signing_secret_hash.len(), 64);
+        assert!(node.signing_secret_encrypted.is_some());
 
         let row = db
             .collection::<DeviceCode>(DEVICE_CODES)
@@ -834,6 +839,7 @@ mod tests {
         let pubkey = [9u8; 32];
         let node = node_service::create_for_device(
             &db,
+            &test_encryption_keys(),
             DeviceNodeInput {
                 user_id: &owner_user_id,
                 api_key_id: &created_key.id,
