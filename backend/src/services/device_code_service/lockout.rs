@@ -224,10 +224,11 @@ mod tests {
 
     #[tokio::test]
     async fn claim_lockout_notification_claims_once_and_returns_recipients() {
-        let Some((db, response, _key)) = setup_pending_row("device_code_lockout_claim").await
+        let Some((db, response, key)) = setup_pending_row("device_code_lockout_claim").await
         else {
             return;
         };
+        let pubkey = key.verifying_key().to_bytes();
         let approved_by = Uuid::new_v4().to_string();
         let locked_until = Utc::now() + Duration::hours(1);
         db.collection::<DeviceCode>(DEVICE_CODES)
@@ -245,7 +246,7 @@ mod tests {
             .expect("lock row");
         seed_pubkey_lockout(
             &db,
-            &[77u8; 32],
+            &pubkey,
             DEVICE_CODE_SIGNATURE_FAILURE_LOCK_THRESHOLD,
             locked_until,
         )
@@ -261,7 +262,7 @@ mod tests {
         assert_eq!(claim.hw_id, "esp32-p4-cam-1");
         assert_eq!(
             claim.device_pubkey_fingerprint,
-            device_pubkey_fingerprint(&[77u8; 32])
+            device_pubkey_fingerprint(&pubkey)
         );
         assert_eq!(
             claim.failed_poll_count,
@@ -281,6 +282,7 @@ mod tests {
         else {
             return;
         };
+        let pubkey = key.verifying_key().to_bytes();
         let approved_by = Uuid::new_v4().to_string();
         let locked_until = Utc::now() + Duration::hours(1);
         db.collection::<DeviceCode>(DEVICE_CODES)
@@ -298,7 +300,7 @@ mod tests {
             .expect("lock row");
         seed_pubkey_lockout(
             &db,
-            &[77u8; 32],
+            &pubkey,
             DEVICE_CODE_SIGNATURE_FAILURE_LOCK_THRESHOLD,
             locked_until,
         )
@@ -349,7 +351,7 @@ mod tests {
         assert!(row.lock_alert_sent_at.is_none());
         let pubkey_lockout = db
             .collection::<DevicePubkeyLockout>(DEVICE_PUBKEY_LOCKOUTS)
-            .find_one(doc! { "_id": device_pubkey_hash(&[77u8; 32]) })
+            .find_one(doc! { "_id": device_pubkey_hash(&pubkey) })
             .await
             .expect("query pubkey lockout")
             .expect("pubkey lockout exists");
@@ -372,7 +374,7 @@ mod tests {
             .expect("lock row again");
         seed_pubkey_lockout(
             &db,
-            &[77u8; 32],
+            &pubkey,
             DEVICE_CODE_SIGNATURE_FAILURE_LOCK_THRESHOLD,
             locked_until,
         )
