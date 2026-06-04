@@ -11,6 +11,7 @@ import {
 import { useLogin, useRegister } from "@/hooks/use-auth";
 import { ApiError } from "@/lib/api-client";
 import { openExternal } from "@/lib/navigation";
+import { isTrustedAuthReturnTo } from "@/lib/return-url";
 import {
   Form,
   FormControl,
@@ -64,15 +65,6 @@ const SOCIAL_ERROR_MESSAGES: Record<string, string> = {
   invite_code_already_redeemed:
     "This invite code has already been redeemed with this account.",
 };
-
-/** Trusted origins for return_to redirect validation (open-redirect prevention). */
-const BACKEND_URL = (
-  (import.meta.env.VITE_BACKEND_URL as string | undefined) ??
-  (import.meta.env.VITE_API_URL as string | undefined) ??
-  ""
-).replace(/\/+$/, "");
-
-const FRONTEND_ORIGIN = window.location.origin;
 
 // Social provider buttons for the register methods panel (full-width list style)
 const REGISTER_PROVIDERS = [
@@ -241,11 +233,7 @@ export function AuthFlow({
     try {
       const result = await loginMutation.mutateAsync(data);
       if (!result.mfaRequired) {
-        if (
-          returnTo &&
-          (returnTo.startsWith(FRONTEND_ORIGIN + "/") ||
-            returnTo.startsWith(BACKEND_URL + "/"))
-        ) {
+        if (isTrustedAuthReturnTo(returnTo)) {
           window.location.assign(returnTo);
           return;
         }

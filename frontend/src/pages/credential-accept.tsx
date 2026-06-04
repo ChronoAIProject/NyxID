@@ -5,6 +5,7 @@ import { ShieldCheck, Terminal } from "lucide-react";
 import { useNode } from "@/hooks/use-nodes";
 import { ApiError, api } from "@/lib/api-client";
 import { buildRciContext, encrypt } from "@/lib/crypto";
+import { getSafeCredentialAcceptReturnTo } from "@/lib/return-url";
 import { acceptNodeCredentialSecretSchema } from "@/schemas/nodes";
 import { PageHeader } from "@/components/shared/page-header";
 import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
@@ -28,33 +29,6 @@ const PUBKEY_WAIT_MS = 30_000;
 const POLL_WAIT_MS = 60_000;
 const PUBKEY_DELAYS_MS = [500, 1_000, 2_000, 4_000, 8_000] as const;
 const POLL_DELAYS_MS = [1_000, 2_000, 3_000, 5_000] as const;
-
-/**
- * Open-redirect guard for the `return_to` deep-link param. The accept page only
- * ever returns to an in-app location, so accept a same-origin relative path and
- * reject protocol-relative (`//evil.example`), backslash-prefixed, or off-origin
- * absolute URLs. Returns the normalized same-origin path to assign, or null when
- * the value is unsafe.
- */
-function safeReturnPath(value: string | undefined): string | null {
-  if (
-    !value ||
-    !value.startsWith("/") ||
-    value.startsWith("//") ||
-    value.startsWith("/\\")
-  ) {
-    return null;
-  }
-  try {
-    const url = new URL(value, window.location.origin);
-    if (url.origin !== window.location.origin) {
-      return null;
-    }
-    return `${url.pathname}${url.search}${url.hash}`;
-  } catch {
-    return null;
-  }
-}
 
 type AcceptStatus =
   | "idle"
@@ -334,7 +308,7 @@ export function CredentialAcceptPage() {
           <Button
             variant="outline"
             onClick={() => {
-              const target = safeReturnPath(search.return_to);
+              const target = getSafeCredentialAcceptReturnTo(search.return_to);
               if (target) {
                 window.location.assign(target);
                 return;

@@ -9,6 +9,7 @@ import {
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/toast";
 import { ChunkErrorBoundary } from "@/components/chunk-error-boundary";
+import { getSafeCredentialAcceptReturnTo } from "@/lib/return-url";
 import { AuthLayout } from "@/components/layout/auth-layout";
 import { DashboardLayout } from "@/components/layout/dashboard-layout";
 import { useAuthStore } from "@/stores/auth-store";
@@ -510,15 +511,13 @@ const nodeDetailRoute = createRoute({
 const nodeCredentialAcceptRoute = createRoute({
   path: "/nodes/$nodeId/credentials/pending/$pendingId/accept",
   getParentRoute: () => dashboardLayout,
-  validateSearch: (
-    search: Record<string, unknown>,
-  ): { return_to?: string } => ({
-    ...(typeof search.return_to === "string" &&
-    search.return_to.length > 0 &&
-    search.return_to.length <= 2048
-      ? { return_to: search.return_to }
-      : {}),
-  }),
+  validateSearch: (search: Record<string, unknown>): { return_to?: string } => {
+    const returnTo =
+      typeof search.return_to === "string"
+        ? getSafeCredentialAcceptReturnTo(search.return_to)
+        : null;
+    return returnTo ? { return_to: returnTo } : {};
+  },
   component: CredentialAcceptPage,
 });
 
