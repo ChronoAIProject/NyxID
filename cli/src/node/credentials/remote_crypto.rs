@@ -2,7 +2,6 @@ use std::path::Path;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use tokio::sync::mpsc;
 use zeroize::Zeroizing;
 
 use super::crypto::{
@@ -14,32 +13,6 @@ use crate::node::config::NodeConfig;
 use crate::node::credential_store::{CredentialStore, SharedCredentialsSender};
 use crate::node::error::{Error, Result};
 use crate::node::secret_backend::SecretBackend;
-
-pub const REMOTE_CRYPTO_INBOX_CAPACITY: usize = 256;
-
-#[derive(Clone, Debug)]
-pub enum RemoteCredentialCryptoEvent {
-    Pending(PendingCredentialCryptoMetadata),
-    Ciphertext(PendingCredentialCiphertext),
-    Cleanup { pending_id: String },
-    Sweep { now: DateTime<Utc> },
-}
-
-#[derive(Clone)]
-pub struct RemoteCredentialCryptoInbox {
-    tx: mpsc::Sender<RemoteCredentialCryptoEvent>,
-}
-
-impl RemoteCredentialCryptoInbox {
-    pub fn channel() -> (Self, mpsc::Receiver<RemoteCredentialCryptoEvent>) {
-        let (tx, rx) = mpsc::channel(REMOTE_CRYPTO_INBOX_CAPACITY);
-        (Self { tx }, rx)
-    }
-
-    pub fn sender(&self) -> mpsc::Sender<RemoteCredentialCryptoEvent> {
-        self.tx.clone()
-    }
-}
 
 pub fn prepare_pubkey(
     config: &mut NodeConfig,

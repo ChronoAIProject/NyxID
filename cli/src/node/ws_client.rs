@@ -15,7 +15,7 @@ use zeroize::Zeroizing;
 use super::config::{NodeConfig, SshConfig};
 use super::credential_store::{CredentialStore, SharedCredentials, SharedCredentialsSender};
 use super::credentials::ssh_keys;
-use super::credentials::{crypto as rci_crypto, remote_inbox};
+use super::credentials::{crypto as rci_crypto, remote_crypto};
 use super::error::{Error, Result};
 use super::metrics::NodeMetrics;
 use super::proxy_executor;
@@ -518,7 +518,7 @@ async fn handle_pending_credentials_available(
     let mut config_changed = false;
     let mut outbound = Vec::new();
     for metadata in crypto_pending {
-        match remote_inbox::prepare_pubkey(&mut config, &backend, &metadata) {
+        match remote_crypto::prepare_pubkey(&mut config, &backend, &metadata) {
             Ok(message) => {
                 config_changed = true;
                 outbound.push(message);
@@ -564,6 +564,122 @@ fn pending_crypto_metadata_from_poll_item(
         expires_at: expires_at.clone(),
         version: crypto.version.clone(),
     })
+}
+
+async fn handle_pending_credential_ciphertext_frame(
+    parsed: &serde_json::Value,
+    tx: &mpsc::Sender<NodeWsMessage>,
+    credential_sender: &Arc<SharedCredentialsSender>,
+    config_path: &std::path::Path,
+    config_dir: &std::path::Path,
+    storage_backend: &str,
+) {
+    if let Some(outbound) = pending_credential_ciphertext_outbound(
+        parsed,
+        credential_sender,
+        config_path,
+        config_dir,
+        storage_backend,
+    ) {
+        let _ = send_ws_message(tx, outbound.to_ws_json().to_string()).await;
+    }
+}
+
+fn pending_credential_ciphertext_outbound(
+    parsed: &serde_json::Value,
+    credential_sender: &Arc<SharedCredentialsSender>,
+    config_path: &std::path::Path,
+    config_dir: &std::path::Path,
+    storage_backend: &str,
+) -> Option<rci_crypto::RemoteCredentialCryptoOutbound> {
+    match serde_json::from_value::<rci_crypto::PendingCredentialCiphertext>(parsed.clone()) {
+        Ok(message) => match (
+            NodeConfig::load(config_path),
+            SecretBackend::from_storage_backend_str(storage_backend, config_dir),
+        ) {
+            (Ok(mut cfg), Ok(be)) => Some(remote_crypto::decrypt_and_store_ciphertext(
+                &mut cfg,
+                config_path,
+                &be,
+                Some(credential_sender),
+                &message,
+            )),
+            (Err(error), _) | (_, Err(error)) => {
+                tracing::warn!(
+                    %error,
+                    "Failed to load node config for pending credential ciphertext"
+                );
+                Some(rci_crypto::RemoteCredentialCryptoOutbound::DecryptResult {
+                    pending_id: message.pending_id,
+                    status: "error".to_string(),
+                    error_code: Some(rci_crypto::PENDING_CREDENTIAL_DECRYPT_FAILED_CODE),
+                })
+            }
+        },
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "Invalid pending_credential_ciphertext frame"
+            );
+            None
+        }
+    }
+}
+
+fn handle_pending_credential_cleanup_frame(
+    parsed: &serde_json::Value,
+    config_path: &std::path::Path,
+    config_dir: &std::path::Path,
+    storage_backend: &str,
+) -> bool {
+    let Some(pending_id) = parsed["pending_id"].as_str() else {
+        return false;
+    };
+
+    let evicted = match (
+        NodeConfig::load(config_path),
+        SecretBackend::from_storage_backend_str(storage_backend, config_dir),
+    ) {
+        (Ok(mut cfg), Ok(be)) => {
+            match remote_crypto::evict_pending_key(&mut cfg, &be, pending_id) {
+                Ok(evicted) => {
+                    if evicted && let Err(error) = cfg.save(config_path) {
+                        tracing::warn!(
+                            %error,
+                            pending_credential_id = %pending_id,
+                            "Failed to save config after pending key cleanup"
+                        );
+                    }
+                    evicted
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        pending_credential_id = %pending_id,
+                        "Failed to clean up pending credential key"
+                    );
+                    false
+                }
+            }
+        }
+        (Err(error), _) | (_, Err(error)) => {
+            tracing::warn!(
+                %error,
+                pending_credential_id = %pending_id,
+                "Failed to load node config for pending key cleanup"
+            );
+            false
+        }
+    };
+
+    if evicted {
+        tracing::debug!(
+            pending_credential_id = %pending_id,
+            "Evicted pending credential private key"
+        );
+    }
+
+    evicted
 }
 
 fn node_agent_api_base_url_from_ws_url(ws_url: &str) -> String {
@@ -772,13 +888,16 @@ async fn connect_and_serve(
     // field; newer backends only enable the feature for nodes that
     // advertise the matching flag. Fire-and-forget — if the channel
     // is full we'll retry on the next status_update / reconnect.
+    let mut capabilities = serde_json::Map::new();
+    capabilities.insert("credential_ack_correlation".to_string(), true.into());
+    capabilities.insert(
+        rci_crypto::REMOTE_CREDENTIAL_CRYPTO_CAPABILITY.to_string(),
+        true.into(),
+    );
     let caps_msg = serde_json::json!({
         "type": "status_update",
         "agent_version": env!("CARGO_PKG_VERSION"),
-        "capabilities": {
-            "credential_ack_correlation": true,
-            "remote_credential_crypto_v1": true,
-        },
+        "capabilities": capabilities,
     });
     let _ = send_ws_message(&tx, caps_msg.to_string()).await;
 
@@ -1018,56 +1137,15 @@ async fn connect_and_serve(
                 .await;
             }
             Some("pending_credential_ciphertext") => {
-                let outbound = {
-                    match serde_json::from_value::<rci_crypto::PendingCredentialCiphertext>(
-                        parsed.clone(),
-                    ) {
-                        Ok(message) => {
-                            match (
-                                NodeConfig::load(config_path),
-                                SecretBackend::from_storage_backend_str(
-                                    storage_backend,
-                                    config_dir,
-                                ),
-                            ) {
-                                (Ok(mut cfg), Ok(be)) => {
-                                    Some(remote_inbox::decrypt_and_store_ciphertext(
-                                        &mut cfg,
-                                        config_path,
-                                        &be,
-                                        Some(credential_sender),
-                                        &message,
-                                    ))
-                                }
-                                (Err(error), _) | (_, Err(error)) => {
-                                    tracing::warn!(
-                                        %error,
-                                        "Failed to load node config for pending credential ciphertext"
-                                    );
-                                    Some(
-                                        rci_crypto::RemoteCredentialCryptoOutbound::DecryptResult {
-                                            pending_id: message.pending_id,
-                                            status: "error".to_string(),
-                                            error_code: Some(
-                                                rci_crypto::PENDING_CREDENTIAL_DECRYPT_FAILED_CODE,
-                                            ),
-                                        },
-                                    )
-                                }
-                            }
-                        }
-                        Err(error) => {
-                            tracing::warn!(
-                                %error,
-                                "Invalid pending_credential_ciphertext frame"
-                            );
-                            None
-                        }
-                    }
-                };
-                if let Some(outbound) = outbound {
-                    let _ = send_ws_message(&tx, outbound.to_ws_json().to_string()).await;
-                }
+                handle_pending_credential_ciphertext_frame(
+                    &parsed,
+                    &tx,
+                    credential_sender,
+                    config_path,
+                    config_dir,
+                    storage_backend,
+                )
+                .await;
             }
             Some(
                 "pending_credential_cleanup"
@@ -1076,51 +1154,12 @@ async fn connect_and_serve(
                 | "pending_credential_cancelled"
                 | "pending_credential_expired",
             ) => {
-                if let Some(pending_id) = parsed["pending_id"].as_str() {
-                    let evicted = {
-                        match (
-                            NodeConfig::load(config_path),
-                            SecretBackend::from_storage_backend_str(storage_backend, config_dir),
-                        ) {
-                            (Ok(mut cfg), Ok(be)) => {
-                                match remote_inbox::evict_pending_key(&mut cfg, &be, pending_id) {
-                                    Ok(evicted) => {
-                                        if evicted && let Err(error) = cfg.save(config_path) {
-                                            tracing::warn!(
-                                                %error,
-                                                pending_credential_id = %pending_id,
-                                                "Failed to save config after pending key cleanup"
-                                            );
-                                        }
-                                        evicted
-                                    }
-                                    Err(error) => {
-                                        tracing::warn!(
-                                            %error,
-                                            pending_credential_id = %pending_id,
-                                            "Failed to clean up pending credential key"
-                                        );
-                                        false
-                                    }
-                                }
-                            }
-                            (Err(error), _) | (_, Err(error)) => {
-                                tracing::warn!(
-                                    %error,
-                                    pending_credential_id = %pending_id,
-                                    "Failed to load node config for pending key cleanup"
-                                );
-                                false
-                            }
-                        }
-                    };
-                    if evicted {
-                        tracing::debug!(
-                            pending_credential_id = %pending_id,
-                            "Evicted pending credential private key"
-                        );
-                    }
-                }
+                handle_pending_credential_cleanup_frame(
+                    &parsed,
+                    config_path,
+                    config_dir,
+                    storage_backend,
+                );
             }
             Some("ws_proxy_open") => {
                 let tx_clone = tx.clone();
@@ -4337,10 +4376,14 @@ async fn drain_active_ws_proxies(active_ws_proxies: &ActiveWsProxyMap) {
 mod tests {
     use super::*;
     use crate::node::config::{SshConfig, SshTargetConfig};
+    use crate::node::credential_store::CredentialInjection;
+    use crate::node::encryption::LocalEncryption;
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
     use tokio::net::TcpListener;
     use tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Role};
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     /// Unwrap a NodeWsMessage::Text variant, panicking if it's Binary.
     fn unwrap_text(msg: NodeWsMessage) -> String {
@@ -4367,6 +4410,47 @@ mod tests {
 
     fn shared_signing_secret(secret: &str) -> SharedSigningSecret {
         Arc::new(Zeroizing::new(secret.to_string()))
+    }
+
+    fn rci_test_config(server_url: String) -> NodeConfig {
+        NodeConfig::new(server_url, "node-1".to_string(), "file".to_string())
+    }
+
+    fn rci_metadata(pending_id: &str) -> rci_crypto::PendingCredentialCryptoMetadata {
+        rci_crypto::PendingCredentialCryptoMetadata {
+            pending_id: pending_id.to_string(),
+            node_id: "node-1".to_string(),
+            service_slug: "openai".to_string(),
+            injection_method: "header".to_string(),
+            field_name: "Authorization".to_string(),
+            target_url: Some("https://api.openai.com/v1".to_string()),
+            expires_at: "2099-01-01T00:00:00Z".to_string(),
+            version: nyxid_crypto::VERSION_V1.to_string(),
+        }
+    }
+
+    fn rci_ciphertext_for(
+        meta: &rci_crypto::PendingCredentialCryptoMetadata,
+        node_pubkey: &str,
+        plaintext: &str,
+    ) -> rci_crypto::PendingCredentialCiphertext {
+        let pubkey = nyxid_crypto::decode_b64u_array::<32>("node_pubkey", node_pubkey).unwrap();
+        let envelope =
+            nyxid_crypto::encrypt(plaintext.as_bytes(), pubkey, &meta.context()).unwrap();
+        rci_crypto::PendingCredentialCiphertext {
+            pending_id: meta.pending_id.clone(),
+            version: envelope.version.clone(),
+            admin_pubkey: nyxid_crypto::encode_b64u(&envelope.admin_pubkey),
+            nonce: nyxid_crypto::encode_b64u(&envelope.nonce),
+            ciphertext: nyxid_crypto::encode_b64u(&envelope.ciphertext),
+        }
+    }
+
+    fn node_pubkey_from(outbound: rci_crypto::RemoteCredentialCryptoOutbound) -> String {
+        match outbound {
+            rci_crypto::RemoteCredentialCryptoOutbound::Pubkey { node_pubkey, .. } => node_pubkey,
+            other => panic!("expected pubkey, got {other:?}"),
+        }
     }
 
     fn signed_ssh_tunnel_open_request(
@@ -4619,6 +4703,135 @@ mod tests {
         assert_eq!(parsed.pending_credentials.len(), 1);
         assert_eq!(parsed.pending_credentials[0].id, "pending-1");
         assert_eq!(parsed.pending_credentials[0].service_slug, "openclaw");
+    }
+
+    #[tokio::test]
+    async fn pending_credentials_available_crypto_poll_sends_pubkey_and_persists_key() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/node-agent/pending-credentials"))
+            .and(header("authorization", "Bearer node-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "pending_credentials": [{
+                    "id": "pending-1",
+                    "service_slug": "openai",
+                    "injection_method": "header",
+                    "field_name": "Authorization",
+                    "target_url": "https://api.openai.com/v1",
+                    "expires_at": "2099-01-01T00:00:00Z",
+                    "crypto": { "version": "v1" }
+                }]
+            })))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let config = rci_test_config(format!("ws://{}/api/v1/nodes/ws", server.address()));
+        config.save(&config_path).unwrap();
+        let (tx, mut rx) = mpsc::channel(4);
+
+        handle_pending_credentials_available(
+            &tx,
+            &config.server.url,
+            "node-token",
+            &config_path,
+            dir.path(),
+            "file",
+        )
+        .await;
+
+        let payload: serde_json::Value =
+            serde_json::from_str(&unwrap_text(rx.recv().await.expect("pubkey frame")))
+                .expect("pubkey json");
+        assert_eq!(payload["type"], "pending_credential_pubkey");
+        assert_eq!(payload["pending_id"], "pending-1");
+        assert_eq!(payload["version"], "v1");
+        assert!(!payload["node_pubkey"].as_str().unwrap().is_empty());
+
+        let reloaded = NodeConfig::load(&config_path).unwrap();
+        let pending = reloaded.pending_crypto_keys.get("pending-1").unwrap();
+        assert_eq!(pending.version, nyxid_crypto::VERSION_V1);
+        assert_eq!(pending.service_slug, "openai");
+        assert_eq!(pending.public_key, payload["node_pubkey"].as_str().unwrap());
+    }
+
+    #[tokio::test]
+    async fn pending_credential_ciphertext_frame_sends_success_and_stores_credential() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let backend = SecretBackend::File(LocalEncryption::load_or_generate(dir.path()).unwrap());
+        let mut config = rci_test_config("ws://localhost:3001/api/v1/nodes/ws".to_string());
+        let meta = rci_metadata("pending-1");
+        let node_pubkey =
+            node_pubkey_from(remote_crypto::prepare_pubkey(&mut config, &backend, &meta).unwrap());
+        let message = rci_ciphertext_for(&meta, &node_pubkey, "Bearer sk-rci");
+        config.save(&config_path).unwrap();
+        let initial_store = CredentialStore::from_config_with_backend(&config, &backend).unwrap();
+        let (credential_sender, shared_credentials) = SharedCredentials::new(initial_store);
+        let credential_sender = Arc::new(credential_sender);
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut frame = serde_json::to_value(&message).unwrap();
+        frame["type"] = serde_json::Value::String("pending_credential_ciphertext".to_string());
+
+        handle_pending_credential_ciphertext_frame(
+            &frame,
+            &tx,
+            &credential_sender,
+            &config_path,
+            dir.path(),
+            "file",
+        )
+        .await;
+
+        let payload: serde_json::Value =
+            serde_json::from_str(&unwrap_text(rx.recv().await.expect("decrypt result frame")))
+                .expect("decrypt result json");
+        assert_eq!(
+            payload,
+            serde_json::json!({
+                "type": "pending_credential_decrypt_result",
+                "pending_id": "pending-1",
+                "status": "ok",
+            })
+        );
+        let reloaded = NodeConfig::load(&config_path).unwrap();
+        assert!(!reloaded.pending_crypto_keys.contains_key("pending-1"));
+        assert!(reloaded.credentials.contains_key("openai"));
+
+        let snapshot = shared_credentials.snapshot();
+        let credential = snapshot.get("openai").expect("credential refreshed");
+        match &credential.injection {
+            CredentialInjection::Header { name, value } => {
+                assert_eq!(name, "Authorization");
+                assert_eq!(value.as_str(), "Bearer sk-rci");
+            }
+            _ => panic!("expected header credential"),
+        }
+    }
+
+    #[test]
+    fn pending_credential_consumed_frame_evicts_pending_key_and_saves_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let backend = SecretBackend::File(LocalEncryption::load_or_generate(dir.path()).unwrap());
+        let mut config = rci_test_config("ws://localhost:3001/api/v1/nodes/ws".to_string());
+        let meta = rci_metadata("pending-1");
+        remote_crypto::prepare_pubkey(&mut config, &backend, &meta).unwrap();
+        config.save(&config_path).unwrap();
+
+        let evicted = handle_pending_credential_cleanup_frame(
+            &serde_json::json!({
+                "type": "pending_credential_consumed",
+                "pending_id": "pending-1",
+            }),
+            &config_path,
+            dir.path(),
+            "file",
+        );
+
+        assert!(evicted);
+        let reloaded = NodeConfig::load(&config_path).unwrap();
+        assert!(!reloaded.pending_crypto_keys.contains_key("pending-1"));
     }
 
     #[tokio::test]

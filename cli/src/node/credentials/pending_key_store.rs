@@ -214,11 +214,13 @@ mod tests {
         store.create_or_load(&meta).unwrap();
         assert!(store.load_private_key("pending-1").is_ok());
         assert!(store.delete("pending-1").unwrap());
-        assert!(backend
-            .load_pending_crypto_key("pending-1", None)
-            .unwrap_err()
-            .to_string()
-            .contains("pending-1"));
+        assert!(
+            backend
+                .load_pending_crypto_key("pending-1", None)
+                .unwrap_err()
+                .to_string()
+                .contains("pending-1")
+        );
     }
 
     #[test]

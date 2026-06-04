@@ -237,6 +237,65 @@ mod tests {
         assert!(decode_b64u_array::<32>("admin_pubkey", &short).is_err());
     }
 
+    #[test]
+    fn encoded_envelope_rejects_oversized_ciphertext() {
+        let oversized = vec![0_u8; MAX_CIPHERTEXT_SIZE + 1];
+        let error = envelope_from_encoded_parts(
+            VERSION_V1,
+            &encode_b64u(&[1; 32]),
+            &encode_b64u(&[2; 24]),
+            &encode_b64u(&oversized),
+        )
+        .expect_err("oversized encoded envelope should be rejected");
+
+        assert!(matches!(
+            error,
+            RciCryptoError::CiphertextTooLarge {
+                actual,
+                max: MAX_CIPHERTEXT_SIZE
+            } if actual == MAX_CIPHERTEXT_SIZE + 1
+        ));
+    }
+
+    #[test]
+    fn serde_envelope_rejects_oversized_ciphertext() {
+        let value = serde_json::json!({
+            "version": VERSION_V1,
+            "admin_pubkey": encode_b64u(&[1; 32]),
+            "nonce": encode_b64u(&[2; 24]),
+            "ciphertext": encode_b64u(&vec![0_u8; MAX_CIPHERTEXT_SIZE + 1]),
+        });
+
+        let error = serde_json::from_value::<CiphertextEnvelope>(value)
+            .expect_err("oversized serde envelope should be rejected")
+            .to_string();
+
+        assert!(error.contains("ciphertext exceeds maximum size"));
+        assert!(error.contains(&(MAX_CIPHERTEXT_SIZE + 1).to_string()));
+    }
+
+    #[cfg(feature = "decrypt")]
+    #[test]
+    fn decrypt_rejects_oversized_ciphertext_before_crypto() {
+        let envelope = CiphertextEnvelope::new(
+            VERSION_V1,
+            [1; 32],
+            [2; 24],
+            vec![0_u8; MAX_CIPHERTEXT_SIZE + 1],
+        );
+        let private_key = Zeroizing::new([3_u8; 32]);
+        let error =
+            decrypt(&envelope, &private_key, &context()).expect_err("oversized decrypt input");
+
+        assert!(matches!(
+            error,
+            RciCryptoError::CiphertextTooLarge {
+                actual,
+                max: MAX_CIPHERTEXT_SIZE
+            } if actual == MAX_CIPHERTEXT_SIZE + 1
+        ));
+    }
+
     #[derive(Deserialize)]
     struct Fixture {
         node_private_key: String,

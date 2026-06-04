@@ -131,3 +131,66 @@ impl fmt::Debug for RemoteCredentialCryptoOutbound {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn outbound_pubkey_ws_json_matches_protocol_contract() {
+        let outbound = RemoteCredentialCryptoOutbound::Pubkey {
+            pending_id: "pending-1".to_string(),
+            version: nyxid_crypto::VERSION_V1.to_string(),
+            node_pubkey: "node-pubkey".to_string(),
+        };
+
+        assert_eq!(
+            outbound.to_ws_json(),
+            serde_json::json!({
+                "type": "pending_credential_pubkey",
+                "pending_id": "pending-1",
+                "version": "v1",
+                "node_pubkey": "node-pubkey",
+            })
+        );
+    }
+
+    #[test]
+    fn outbound_success_ws_json_omits_error_code() {
+        let outbound = RemoteCredentialCryptoOutbound::DecryptResult {
+            pending_id: "pending-1".to_string(),
+            status: "ok".to_string(),
+            error_code: None,
+        };
+        let json = outbound.to_ws_json();
+
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "type": "pending_credential_decrypt_result",
+                "pending_id": "pending-1",
+                "status": "ok",
+            })
+        );
+        assert!(json.get("error_code").is_none());
+    }
+
+    #[test]
+    fn outbound_error_ws_json_includes_error_code() {
+        let outbound = RemoteCredentialCryptoOutbound::DecryptResult {
+            pending_id: "pending-1".to_string(),
+            status: "error".to_string(),
+            error_code: Some(PENDING_CREDENTIAL_DECRYPT_FAILED_CODE),
+        };
+
+        assert_eq!(
+            outbound.to_ws_json(),
+            serde_json::json!({
+                "type": "pending_credential_decrypt_result",
+                "pending_id": "pending-1",
+                "status": "error",
+                "error_code": 8006,
+            })
+        );
+    }
+}
