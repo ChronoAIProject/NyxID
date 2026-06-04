@@ -58,7 +58,6 @@ impl fmt::Debug for StorePendingCiphertextInput {
     }
 }
 
-// refactor helper, no behavior change
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PendingCredentialAuditSummary {
     pub node_id: String,

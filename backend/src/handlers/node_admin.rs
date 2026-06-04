@@ -80,7 +80,6 @@ pub struct PendingCredentialListQuery {
     pub include_history: Option<bool>,
 }
 
-// refactor helper, no behavior change
 #[derive(Debug, PartialEq, Eq)]
 enum PendingCiphertextValidation {
     Valid(Vec<u8>),
@@ -1235,6 +1234,7 @@ pub async fn list_my_bound_services(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};
     use crate::models::node::{COLLECTION_NAME as NODES, Node, NodeMetrics, NodeStatus};
     use crate::models::node_pending_credential::{
         COLLECTION_NAME as NODE_PENDING_CREDENTIALS, NodePendingCredential,
@@ -1251,7 +1251,7 @@ mod tests {
     use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
     use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
     use crate::services::{
-        node_pending_credential_service,
+        audit_service, node_pending_credential_service,
         node_ws_manager::{NodeCapabilitiesMsg, NodeOutboundMessage},
     };
     use crate::test_utils::{
@@ -1327,6 +1327,118 @@ mod tests {
             .await
             .expect("query pending credential")
             .expect("pending credential exists")
+    }
+
+    async fn load_audit_entry(
+        db: &mongodb::Database,
+        receiver: tokio::sync::oneshot::Receiver<String>,
+    ) -> AuditLog {
+        let audit_id = receiver.await.expect("audit write notification");
+        db.collection::<AuditLog>(AUDIT_LOG)
+            .find_one(doc! { "_id": audit_id })
+            .await
+            .expect("query audit log")
+            .expect("audit log exists")
+    }
+
+    fn sorted_strings(values: &[&str]) -> Vec<String> {
+        let mut values: Vec<String> = values.iter().map(|value| value.to_string()).collect();
+        values.sort();
+        values
+    }
+
+    fn assert_rci_audit_row(
+        entry: &AuditLog,
+        expected_event_type: &str,
+        pending: &NodePendingCredential,
+        expected_remote_state: Option<&str>,
+        extra_keys: &[&str],
+    ) {
+        assert_eq!(entry.event_type, expected_event_type);
+        assert_eq!(
+            entry.user_id.as_deref(),
+            Some(pending.owner_user_id.as_str())
+        );
+        let event_data = entry.event_data.as_ref().expect("audit event data");
+        let object = event_data.as_object().expect("audit event data object");
+        let mut expected_keys = vec![
+            "event_at",
+            "flow",
+            "node_id",
+            "owner_user_id",
+            "pending_created_at",
+            "pending_credential_id",
+            "pending_expires_at",
+            "routed_via",
+            "service_slug",
+        ];
+        if expected_remote_state.is_some() {
+            expected_keys.push("remote_state");
+        }
+        expected_keys.extend(extra_keys.iter().copied());
+        let mut actual_keys: Vec<String> = object.keys().cloned().collect();
+        actual_keys.sort();
+        assert_eq!(actual_keys, sorted_strings(&expected_keys));
+
+        assert_eq!(object["flow"], "remote_credential_injection");
+        assert_eq!(object["routed_via"], "node");
+        assert_eq!(object["node_id"], pending.node_id);
+        assert_eq!(object["pending_credential_id"], pending.id);
+        assert_eq!(object["service_slug"], pending.service_slug);
+        assert_eq!(object["owner_user_id"], pending.owner_user_id);
+        assert_eq!(
+            object["pending_created_at"],
+            pending.created_at.to_rfc3339()
+        );
+        assert_eq!(
+            object["pending_expires_at"],
+            pending.expires_at.to_rfc3339()
+        );
+        if let Some(remote_state) = expected_remote_state {
+            assert_eq!(object["remote_state"], remote_state);
+        } else {
+            assert!(object.get("remote_state").is_none());
+        }
+
+        for forbidden_key in [
+            "plaintext",
+            "secret",
+            "ciphertext",
+            "nonce",
+            "node_pubkey",
+            "admin_pubkey",
+            "hash",
+            "fingerprint",
+            "length",
+            "bytes",
+            "target_url",
+            "field_name",
+            "injection_method",
+            "raw_version",
+            "raw_status",
+            "raw_node_error",
+            "raw_decline_reason",
+            "queue_count",
+            "queued_pending_ids",
+        ] {
+            assert!(
+                !object.contains_key(forbidden_key),
+                "{expected_event_type}: {forbidden_key}"
+            );
+        }
+
+        let event_json = event_data.to_string();
+        for forbidden_value in [
+            b64url(10, 32),
+            b64url(11, 24),
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([1, 2, 3]),
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([42]),
+            "super-secret-plaintext-fixture".to_string(),
+            "raw-node-error-fixture".to_string(),
+            "raw-decline-reason-fixture".to_string(),
+        ] {
+            assert!(!event_json.contains(&forbidden_value), "{forbidden_value}");
+        }
     }
 
     fn assert_pubkey_only_pending(pending: &NodePendingCredential, expected_node_pubkey: &str) {
@@ -1586,6 +1698,14 @@ mod tests {
                 ..NodeCapabilitiesMsg::default()
             },
         );
+        let received_audit = audit_service::notify_on_audit_write(
+            "node_credential_rci_ciphertext_received",
+            Some(pending.id.clone()),
+        );
+        let forwarded_audit = audit_service::notify_on_audit_write(
+            "node_credential_rci_ciphertext_forwarded",
+            Some(pending.id.clone()),
+        );
 
         let (status, body) = route_json(
             app,
@@ -1624,6 +1744,27 @@ mod tests {
             Some(RemoteCryptoState::CiphertextReceived)
         );
         assert!(stored.ciphertext_queued_at.is_none());
+
+        let received = load_audit_entry(&db, received_audit).await;
+        assert_rci_audit_row(
+            &received,
+            "node_credential_rci_ciphertext_received",
+            &stored,
+            Some("ciphertext_received"),
+            &[],
+        );
+        let forwarded = load_audit_entry(&db, forwarded_audit).await;
+        assert_rci_audit_row(
+            &forwarded,
+            "node_credential_rci_ciphertext_forwarded",
+            &stored,
+            Some("ciphertext_received"),
+            &["delivery"],
+        );
+        assert_eq!(
+            forwarded.event_data.as_ref().unwrap()["delivery"],
+            "online_forward"
+        );
     }
 
     #[tokio::test]
@@ -1675,6 +1816,14 @@ mod tests {
                 }
                 _ => {}
             }
+            let received_audit = audit_service::notify_on_audit_write(
+                "node_credential_rci_ciphertext_received",
+                Some(pending_id.clone()),
+            );
+            let queued_audit = audit_service::notify_on_audit_write(
+                "node_credential_rci_ciphertext_queued",
+                Some(pending_id.clone()),
+            );
 
             let (status, body) = route_json(
                 app.clone(),
@@ -1701,7 +1850,86 @@ mod tests {
             );
             assert!(stored.ciphertext_queued_at.is_some(), "{case}");
             assert!(stored.ciphertext_expires_at.is_some(), "{case}");
+
+            let received = load_audit_entry(&db, received_audit).await;
+            assert_rci_audit_row(
+                &received,
+                "node_credential_rci_ciphertext_received",
+                &stored,
+                Some("ciphertext_received"),
+                &[],
+            );
+            let queued = load_audit_entry(&db, queued_audit).await;
+            assert_rci_audit_row(
+                &queued,
+                "node_credential_rci_ciphertext_queued",
+                &stored,
+                Some("ciphertext_queued"),
+                &[
+                    "ciphertext_expires_at",
+                    "ciphertext_queued_at",
+                    "delivery",
+                    "error_code",
+                    "error_kind",
+                ],
+            );
+            let queued_data = queued.event_data.as_ref().unwrap();
+            assert_eq!(queued_data["delivery"], "offline_queue", "{case}");
+            assert_eq!(
+                queued_data["error_code"], PENDING_CREDENTIAL_NODE_OFFLINE_CODE,
+                "{case}"
+            );
+            assert_eq!(
+                queued_data["error_kind"], "pending_credential_node_offline",
+                "{case}"
+            );
         }
+    }
+
+    #[tokio::test]
+    async fn route_post_pending_ciphertext_before_pubkey_audits_awaiting() {
+        let (db, _state, app, token, node, pending) = pending_route_fixture(
+            "pending_route_post_before_pubkey_audit",
+            "awaiting-node",
+            "openclaw",
+            false,
+        )
+        .await;
+        let awaiting_audit = audit_service::notify_on_audit_write(
+            "node_credential_rci_pubkey_awaiting",
+            Some(pending.id.clone()),
+        );
+
+        let (status, body) = route_json(
+            app,
+            Method::POST,
+            format!(
+                "/api/v1/nodes/{}/credentials/pending/{}/ciphertext",
+                node.id, pending.id
+            ),
+            &token,
+            Some(ciphertext_request(vec![1, 2, 3])),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error_code"], 8009);
+        assert_eq!(body["error"], "pending_credential_pubkey_awaiting");
+        let stored = load_pending(&db, &pending.id).await;
+        let audit = load_audit_entry(&db, awaiting_audit).await;
+        assert_rci_audit_row(
+            &audit,
+            "node_credential_rci_pubkey_awaiting",
+            &stored,
+            None,
+            &["error_code", "error_kind"],
+        );
+        let event_data = audit.event_data.as_ref().unwrap();
+        assert_eq!(event_data["error_code"], 8009);
+        assert_eq!(
+            event_data["error_kind"],
+            "pending_credential_pubkey_awaiting"
+        );
     }
 
     #[tokio::test]

@@ -1,4 +1,6 @@
 use chrono::Utc;
+#[cfg(test)]
+use std::sync::{Mutex, OnceLock};
 use uuid::Uuid;
 
 use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};
@@ -92,7 +94,67 @@ async fn write_audit_entry(
     if let Err(e) = &result {
         tracing::error!(event_type = %event_type, error = %e, "Failed to write audit log");
     }
+    #[cfg(test)]
+    if result.is_ok() {
+        notify_test_audit_write(&entry);
+    }
     result.map(|_| ())
+}
+
+#[cfg(test)]
+struct AuditWriteWatcher {
+    event_type: String,
+    pending_credential_id: Option<String>,
+    sender: tokio::sync::oneshot::Sender<String>,
+}
+
+#[cfg(test)]
+static AUDIT_WRITE_WATCHERS: OnceLock<Mutex<Vec<AuditWriteWatcher>>> = OnceLock::new();
+
+#[cfg(test)]
+fn audit_write_watchers() -> &'static Mutex<Vec<AuditWriteWatcher>> {
+    AUDIT_WRITE_WATCHERS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+#[cfg(test)]
+pub(crate) fn notify_on_audit_write(
+    event_type: impl Into<String>,
+    pending_credential_id: Option<String>,
+) -> tokio::sync::oneshot::Receiver<String> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    audit_write_watchers()
+        .lock()
+        .expect("audit watcher mutex")
+        .push(AuditWriteWatcher {
+            event_type: event_type.into(),
+            pending_credential_id,
+            sender,
+        });
+    receiver
+}
+
+#[cfg(test)]
+fn notify_test_audit_write(entry: &AuditLog) {
+    let pending_credential_id = entry
+        .event_data
+        .as_ref()
+        .and_then(|event_data| event_data.get("pending_credential_id"))
+        .and_then(serde_json::Value::as_str);
+    let mut watchers = audit_write_watchers().lock().expect("audit watcher mutex");
+    let mut index = 0;
+    while index < watchers.len() {
+        let watcher = &watchers[index];
+        let pending_matches = match watcher.pending_credential_id.as_deref() {
+            Some(expected) => pending_credential_id == Some(expected),
+            None => true,
+        };
+        if watcher.event_type == entry.event_type && pending_matches {
+            let watcher = watchers.swap_remove(index);
+            let _ = watcher.sender.send(entry.id.clone());
+        } else {
+            index += 1;
+        }
+    }
 }
 
 #[cfg(test)]
