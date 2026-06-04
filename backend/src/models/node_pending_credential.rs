@@ -1,9 +1,33 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::models::bson_datetime;
+use crate::models::{bson_bytes, bson_datetime};
 
 pub const COLLECTION_NAME: &str = "node_pending_credentials";
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CryptoBundle {
+    pub version: String,
+    pub node_pubkey: String,
+    #[serde(default)]
+    pub admin_pubkey: Option<String>,
+    #[serde(default)]
+    pub nonce: Option<String>,
+    #[serde(default, with = "bson_bytes::optional")]
+    pub ciphertext: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteCryptoState {
+    PubkeyPosted,
+    CiphertextReceived,
+    CiphertextQueued,
+    Consumed,
+    DecryptedPendingConfirmation,
+    DecryptFailed,
+    Expired,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -43,6 +67,14 @@ pub struct NodePendingCredential {
     pub consumed_at: Option<DateTime<Utc>>,
     #[serde(default, with = "bson_datetime::optional")]
     pub declined_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub crypto: Option<CryptoBundle>,
+    #[serde(default)]
+    pub remote_state: Option<RemoteCryptoState>,
+    #[serde(default, with = "bson_datetime::optional")]
+    pub ciphertext_queued_at: Option<DateTime<Utc>>,
+    #[serde(default, with = "bson_datetime::optional")]
+    pub ciphertext_expires_at: Option<DateTime<Utc>>,
     pub is_active: bool,
 }
 
@@ -71,6 +103,111 @@ mod tests {
     }
 
     #[test]
+    fn crypto_bundle_serde_roundtrip() {
+        let bundle = CryptoBundle {
+            version: "v1".to_string(),
+            node_pubkey: "node-pubkey".to_string(),
+            admin_pubkey: Some("admin-pubkey".to_string()),
+            nonce: Some("nonce".to_string()),
+            ciphertext: Some(vec![1, 2, 3, 255]),
+        };
+
+        let doc = bson::to_document(&bundle).expect("serialize");
+        let restored: CryptoBundle = bson::from_document(doc.clone()).expect("deserialize");
+
+        assert_eq!(restored, bundle);
+        assert!(matches!(doc.get("ciphertext"), Some(bson::Bson::Binary(_))));
+    }
+
+    #[test]
+    fn remote_state_enum_serde_roundtrip() {
+        let json = serde_json::to_string(&RemoteCryptoState::CiphertextQueued).unwrap();
+        assert_eq!(json, "\"ciphertext_queued\"");
+        let restored: RemoteCryptoState = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, RemoteCryptoState::CiphertextQueued);
+    }
+
+    #[test]
+    fn legacy_pending_without_crypto_roundtrip() {
+        let now = Utc::now();
+        let legacy_doc = bson::doc! {
+            "_id": "legacy",
+            "node_id": "node-1",
+            "service_slug": "openai",
+            "injection_method": "header",
+            "field_name": "Authorization",
+            "target_url": bson::Bson::Null,
+            "label": bson::Bson::Null,
+            "created_by_user_id": "user-1",
+            "owner_user_id": "user-1",
+            "created_at": bson::DateTime::from_chrono(now),
+            "expires_at": bson::DateTime::from_chrono(now + chrono::Duration::hours(1)),
+            "consumed_at": bson::Bson::Null,
+            "declined_at": bson::Bson::Null,
+            "is_active": true,
+        };
+
+        let restored: NodePendingCredential =
+            bson::from_document(legacy_doc).expect("deserialize legacy");
+
+        assert!(restored.crypto.is_none());
+        assert!(restored.remote_state.is_none());
+        assert!(restored.ciphertext_queued_at.is_none());
+        assert!(restored.ciphertext_expires_at.is_none());
+    }
+
+    #[test]
+    fn queue_lifecycle_fields_bson_roundtrip() {
+        let now = Utc::now();
+        let cred = NodePendingCredential {
+            id: "queued".to_string(),
+            node_id: "node-1".to_string(),
+            service_slug: "openai".to_string(),
+            injection_method: InjectionMethod::Header,
+            field_name: "Authorization".to_string(),
+            target_url: None,
+            label: Some("OpenAI key".to_string()),
+            created_by_user_id: "user-1".to_string(),
+            owner_user_id: "user-1".to_string(),
+            created_at: now,
+            expires_at: now + chrono::Duration::hours(1),
+            consumed_at: None,
+            declined_at: None,
+            crypto: Some(CryptoBundle {
+                version: "v1".to_string(),
+                node_pubkey: "node-pubkey".to_string(),
+                admin_pubkey: Some("admin-pubkey".to_string()),
+                nonce: Some("nonce".to_string()),
+                ciphertext: Some(vec![4, 5, 6]),
+            }),
+            remote_state: Some(RemoteCryptoState::CiphertextQueued),
+            ciphertext_queued_at: Some(now),
+            ciphertext_expires_at: Some(now + chrono::Duration::minutes(15)),
+            is_active: true,
+        };
+
+        let doc = bson::to_document(&cred).expect("serialize");
+        let restored: NodePendingCredential = bson::from_document(doc).expect("deserialize");
+
+        assert_eq!(
+            restored.remote_state,
+            Some(RemoteCryptoState::CiphertextQueued)
+        );
+        assert_eq!(
+            restored.crypto.and_then(|crypto| crypto.ciphertext),
+            Some(vec![4, 5, 6])
+        );
+        assert_eq!(
+            restored
+                .ciphertext_queued_at
+                .expect("queued timestamp")
+                .timestamp_millis(),
+            now.timestamp_millis()
+        );
+        assert!(restored.ciphertext_expires_at.is_some());
+    }
+
+    #[test]
     fn bson_roundtrip() {
         let cred = NodePendingCredential {
             id: uuid::Uuid::new_v4().to_string(),
@@ -86,6 +223,10 @@ mod tests {
             expires_at: Utc::now() + chrono::Duration::hours(1),
             consumed_at: None,
             declined_at: None,
+            crypto: None,
+            remote_state: None,
+            ciphertext_queued_at: None,
+            ciphertext_expires_at: None,
             is_active: true,
         };
         let doc = bson::to_document(&cred).expect("serialize");
@@ -112,6 +253,10 @@ mod tests {
             expires_at: Utc::now(),
             consumed_at: Some(Utc::now()),
             declined_at: Some(Utc::now()),
+            crypto: None,
+            remote_state: None,
+            ciphertext_queued_at: None,
+            ciphertext_expires_at: None,
             is_active: false,
         };
         let doc = bson::to_document(&cred).expect("serialize");

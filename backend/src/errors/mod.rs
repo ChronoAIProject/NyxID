@@ -3,6 +3,10 @@ use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 use utoipa::ToSchema;
 
+pub const PENDING_CREDENTIAL_NODE_OFFLINE_CODE: u32 = 8010;
+pub const PENDING_CREDENTIAL_NODE_OFFLINE_KEY: &str = "pending_credential_node_offline";
+pub const PENDING_CREDENTIAL_NODE_OFFLINE_STATUS: StatusCode = StatusCode::ACCEPTED;
+
 /// Structured JSON error response returned by all API error paths.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ErrorResponse {
@@ -178,6 +182,21 @@ pub enum AppError {
     #[error("WebSocket proxy downstream error: {0}")]
     WsProxyDownstream(String),
 
+    #[error("Pending credential decrypt failed: {0}")]
+    PendingCredentialDecryptFailed(String),
+
+    #[error("Pending credential version unsupported: {0}")]
+    PendingCredentialVersionUnsupported(String),
+
+    #[error("Pending credential ciphertext too large: {0} bytes")]
+    PendingCredentialCiphertextTooLarge(usize),
+
+    #[error("Pending credential pubkey awaiting: {0}")]
+    PendingCredentialPubkeyAwaiting(String),
+
+    #[error("Pending credential queue full: {0}")]
+    PendingCredentialQueueFull(String),
+
     #[error("API key scope forbidden: {0}")]
     ApiKeyScopeForbidden(String),
 
@@ -299,6 +318,11 @@ impl AppError {
             Self::NodeRegistrationFailed(_) => StatusCode::BAD_REQUEST,
             Self::NodeCredentialMissing(_) => StatusCode::BAD_GATEWAY,
             Self::WsProxyDownstream(_) => StatusCode::BAD_GATEWAY,
+            Self::PendingCredentialDecryptFailed(_) => StatusCode::BAD_REQUEST,
+            Self::PendingCredentialVersionUnsupported(_) => StatusCode::BAD_REQUEST,
+            Self::PendingCredentialCiphertextTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
+            Self::PendingCredentialPubkeyAwaiting(_) => StatusCode::NOT_FOUND,
+            Self::PendingCredentialQueueFull(_) => StatusCode::TOO_MANY_REQUESTS,
             Self::ApiKeyScopeForbidden(_) => StatusCode::FORBIDDEN,
             Self::ApiKeyScopeInactive => StatusCode::FORBIDDEN,
             Self::ApiKeyScopeNotFound(_) => StatusCode::NOT_FOUND,
@@ -377,6 +401,11 @@ impl AppError {
             Self::NodeRegistrationFailed(_) => 8003,
             Self::NodeCredentialMissing(_) => 8004,
             Self::WsProxyDownstream(_) => 8005,
+            Self::PendingCredentialDecryptFailed(_) => 8006,
+            Self::PendingCredentialVersionUnsupported(_) => 8007,
+            Self::PendingCredentialCiphertextTooLarge(_) => 8008,
+            Self::PendingCredentialPubkeyAwaiting(_) => 8009,
+            Self::PendingCredentialQueueFull(_) => 8011,
             Self::ApiKeyScopeForbidden(_) => 9000,
             Self::ApiKeyScopeInactive => 9001,
             Self::ApiKeyScopeNotFound(_) => 9002,
@@ -487,6 +516,15 @@ impl AppError {
             Self::NodeRegistrationFailed(_) => "node_registration_failed",
             Self::NodeCredentialMissing(_) => "node_credential_missing",
             Self::WsProxyDownstream(_) => "ws_proxy_downstream",
+            Self::PendingCredentialDecryptFailed(_) => "pending_credential_decrypt_failed",
+            Self::PendingCredentialVersionUnsupported(_) => {
+                "pending_credential_version_unsupported"
+            }
+            Self::PendingCredentialCiphertextTooLarge(_) => {
+                "pending_credential_ciphertext_too_large"
+            }
+            Self::PendingCredentialPubkeyAwaiting(_) => "pending_credential_pubkey_awaiting",
+            Self::PendingCredentialQueueFull(_) => "pending_credential_queue_full",
             Self::ApiKeyScopeForbidden(_) => "api_key_scope_forbidden",
             Self::ApiKeyScopeInactive => "api_key_scope_inactive",
             Self::ApiKeyScopeNotFound(_) => "api_key_scope_not_found",
@@ -871,6 +909,11 @@ mod tests {
             AppError::NodeRegistrationFailed("".into()).error_code(),
             AppError::NodeCredentialMissing("".into()).error_code(),
             AppError::WsProxyDownstream("".into()).error_code(),
+            AppError::PendingCredentialDecryptFailed("".into()).error_code(),
+            AppError::PendingCredentialVersionUnsupported("".into()).error_code(),
+            AppError::PendingCredentialCiphertextTooLarge(0).error_code(),
+            AppError::PendingCredentialPubkeyAwaiting("".into()).error_code(),
+            AppError::PendingCredentialQueueFull("".into()).error_code(),
             AppError::ApiKeyScopeForbidden("".into()).error_code(),
             AppError::ApiKeyScopeInactive.error_code(),
             AppError::ApiKeyScopeNotFound("".into()).error_code(),
@@ -1141,6 +1184,54 @@ mod tests {
             json["message"],
             "WebSocket proxy downstream error: downstream rejected handshake"
         );
+    }
+
+    #[test]
+    fn pending_credential_error_codes_and_statuses() {
+        let cases = [
+            (
+                AppError::PendingCredentialDecryptFailed("node failed".to_string()),
+                StatusCode::BAD_REQUEST,
+                "pending_credential_decrypt_failed",
+                8006,
+            ),
+            (
+                AppError::PendingCredentialVersionUnsupported("v0".to_string()),
+                StatusCode::BAD_REQUEST,
+                "pending_credential_version_unsupported",
+                8007,
+            ),
+            (
+                AppError::PendingCredentialCiphertextTooLarge(16 * 1024 + 1),
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "pending_credential_ciphertext_too_large",
+                8008,
+            ),
+            (
+                AppError::PendingCredentialPubkeyAwaiting("pending-id".to_string()),
+                StatusCode::NOT_FOUND,
+                "pending_credential_pubkey_awaiting",
+                8009,
+            ),
+            (
+                AppError::PendingCredentialQueueFull("node-id".to_string()),
+                StatusCode::TOO_MANY_REQUESTS,
+                "pending_credential_queue_full",
+                8011,
+            ),
+        ];
+
+        for (err, status, key, code) in cases {
+            assert_eq!(err.status_code(), status, "{err}");
+            assert_eq!(err.error_key(), key, "{err}");
+            assert_eq!(err.error_code(), code, "{err}");
+        }
+        assert_eq!(PENDING_CREDENTIAL_NODE_OFFLINE_STATUS, StatusCode::ACCEPTED);
+        assert_eq!(
+            PENDING_CREDENTIAL_NODE_OFFLINE_KEY,
+            "pending_credential_node_offline"
+        );
+        assert_eq!(PENDING_CREDENTIAL_NODE_OFFLINE_CODE, 8010);
     }
 
     #[test]

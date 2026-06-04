@@ -2364,6 +2364,10 @@ mod tests {
             expires_at: expires,
             consumed_at: None,
             declined_at: Some(now),
+            crypto: None,
+            remote_state: None,
+            ciphertext_queued_at: None,
+            ciphertext_expires_at: None,
             is_active: false,
         };
         let info = pending_credential_info(model.clone());

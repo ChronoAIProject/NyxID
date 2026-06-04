@@ -82,7 +82,20 @@ Add new entries here when introducing additional vendored URN types.
 - Streaming proxy uses `proxy_response_start` / chunk frames / `proxy_response_end`; preferred chunk transport is a WebSocket binary frame with a 36-byte request_id prefix, with legacy `proxy_response_chunk` JSON fallback for older servers
 - Node metrics (`node_metrics_service`) are recorded asynchronously (fire-and-forget) after each proxy request; stored as embedded `NodeMetrics` document on the Node model
 - Node-routed audit events include `"routed_via": "node"` and `"node_id"` in event data
-- Error codes 8000-8003 are reserved for node errors (`NodeNotFound`, `NodeOffline`, `NodeProxyTimeout`, `NodeRegistrationFailed`)
+- Error codes 8000-8005 are occupied by node/proxy-node errors:
+  - 8000 `NodeNotFound`
+  - 8001 `NodeOffline`
+  - 8002 `NodeProxyTimeout`
+  - 8003 `NodeRegistrationFailed`
+  - 8004 `NodeCredentialMissing`
+  - 8005 `WsProxyDownstream`
+- Error codes 8006-8011 are reserved for remote credential injection pending-credential protocol outcomes:
+  - 8006 `PendingCredentialDecryptFailed`
+  - 8007 `PendingCredentialVersionUnsupported`
+  - 8008 `PendingCredentialCiphertextTooLarge`
+  - 8009 `PendingCredentialPubkeyAwaiting`
+  - 8010 `PendingCredentialNodeOffline`
+  - 8011 `PendingCredentialQueueFull`
 - Error codes 1011-1019 are reserved for SSH-specific node-key/auth-mode errors:
   - 1011 `SshNodeKeyMissing`
   - 1012 `SshHostKeyMismatch`
