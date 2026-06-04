@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt;
 
 use chrono::{DateTime, Duration, Utc};
 use futures::TryStreamExt;
@@ -23,6 +24,7 @@ use crate::models::node_service_binding::{
 use crate::models::org_membership::OrgRole;
 use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
+use crate::redaction::RedactedLen;
 use crate::services::org_service::{self, OwnerAccess};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,7 +72,7 @@ pub struct TransferNodeResult {
     pub deactivated_pending_credentials_count: u64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct DeviceNodeInput<'a> {
     pub user_id: &'a str,
     pub api_key_id: &'a str,
@@ -78,6 +80,22 @@ pub struct DeviceNodeInput<'a> {
     pub label: &'a str,
     pub device_pubkey: Option<&'a [u8; 32]>,
     pub provisioning_source: &'a str,
+}
+
+impl fmt::Debug for DeviceNodeInput<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DeviceNodeInput")
+            .field("user_id", &self.user_id)
+            .field("api_key_id", &RedactedLen(self.api_key_id.len()))
+            .field("hw_id", &self.hw_id)
+            .field("label", &self.label)
+            .field(
+                "device_pubkey",
+                &self.device_pubkey.map(|pubkey| RedactedLen(pubkey.len())),
+            )
+            .field("provisioning_source", &self.provisioning_source)
+            .finish()
+    }
 }
 
 pub const DEVICE_CODE_PROVISIONING_SOURCE: &str = "device-code";

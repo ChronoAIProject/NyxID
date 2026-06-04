@@ -1,9 +1,12 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::fmt;
+
+use crate::redaction::RedactedLen;
 
 pub const COLLECTION_NAME: &str = "device_onboard_credentials";
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceOnboardCredential {
     #[serde(rename = "_id")]
     pub id: String,
@@ -13,6 +16,22 @@ pub struct DeviceOnboardCredential {
     pub refresh_token_hash: String,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
+}
+
+impl fmt::Debug for DeviceOnboardCredential {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DeviceOnboardCredential")
+            .field("id", &RedactedLen(self.id.len()))
+            .field("owner_user_id", &RedactedLen(self.owner_user_id.len()))
+            .field("api_key_id", &RedactedLen(self.api_key_id.len()))
+            .field("node_id", &RedactedLen(self.node_id.len()))
+            .field(
+                "refresh_token_hash",
+                &RedactedLen(self.refresh_token_hash.len()),
+            )
+            .field("created_at", &self.created_at)
+            .finish()
+    }
 }
 
 #[cfg(test)]

@@ -1270,6 +1270,25 @@ mod tests {
     }
 
     #[test]
+    fn render_repeated_fail_includes_failure_count_and_data() {
+        let rendered =
+            render_device_notification(DeviceNotificationTemplate::RepeatedFail, &context());
+
+        assert_eq!(rendered.title, "Repeated device poll failures");
+        assert!(rendered.body.contains("Kitchen <Cam>"));
+        assert!(rendered.body.contains("esp32-p4"));
+        assert!(rendered.body.contains("3 failed signed polls"));
+        assert_eq!(
+            rendered.data.get("type").map(String::as_str),
+            Some("device_repeated_fail")
+        );
+        assert_eq!(
+            rendered.data.get("failed_poll_count").map(String::as_str),
+            Some("3")
+        );
+    }
+
+    #[test]
     fn render_lock_alert_includes_lockout_metadata() {
         let rendered =
             render_device_notification(DeviceNotificationTemplate::LockAlert, &context());

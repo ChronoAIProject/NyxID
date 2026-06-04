@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use super::bson_datetime;
+use crate::redaction::RedactedLen;
 
 pub const COLLECTION_NAME: &str = "device_codes";
 
@@ -56,15 +57,6 @@ pub struct DeviceCode {
     pub last_poll_timestamp: Option<i64>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub last_rotated_at: DateTime<Utc>,
-}
-
-#[derive(Clone, Copy)]
-struct RedactedLen(usize);
-
-impl fmt::Debug for RedactedLen {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "<redacted len={}>", self.0)
-    }
 }
 
 impl fmt::Debug for UserCodeGen {

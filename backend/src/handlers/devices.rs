@@ -15,6 +15,7 @@ use crate::crypto::device_code::decode_device_code;
 use crate::errors::{AppError, AppResult};
 use crate::handlers::auth::{extract_ip, extract_user_agent};
 use crate::mw::auth::AuthUser;
+use crate::redaction::RedactedLen;
 #[cfg(not(test))]
 use crate::services::audit_service;
 use crate::services::device_code_service::{
@@ -62,15 +63,6 @@ pub struct OnboardDeviceRequest {
     pub wifi_password: String,
     #[serde(default)]
     pub default_services: Option<Vec<String>>,
-}
-
-#[derive(Clone, Copy)]
-struct RedactedLen(usize);
-
-impl fmt::Debug for RedactedLen {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "<redacted len={}>", self.0)
-    }
 }
 
 impl fmt::Debug for RequestDeviceCodeRequest {

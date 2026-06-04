@@ -12,6 +12,7 @@ use crate::models::agent_service_binding::{
 use crate::models::api_key::{ApiKey, COLLECTION_NAME as API_KEYS};
 use crate::models::node::{COLLECTION_NAME as NODES, Node};
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
+use crate::redaction::RedactedLen;
 
 /// Result returned when a new API key is created.
 /// The `full_key` is shown once and never stored.
@@ -30,15 +31,6 @@ pub struct CreatedApiKey {
     pub rate_limit_per_second: Option<u32>,
     pub rate_limit_burst: Option<u32>,
     pub platform: Option<String>,
-}
-
-#[derive(Clone, Copy)]
-struct RedactedLen(usize);
-
-impl fmt::Debug for RedactedLen {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "<redacted len={}>", self.0)
-    }
 }
 
 impl fmt::Debug for CreatedApiKey {

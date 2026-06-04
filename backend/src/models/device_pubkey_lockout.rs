@@ -1,11 +1,13 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 use super::bson_datetime;
+use crate::redaction::RedactedLen;
 
 pub const COLLECTION_NAME: &str = "device_pubkey_lockouts";
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub struct DevicePubkeyLockout {
     #[serde(rename = "_id")]
     pub id: String,
@@ -16,6 +18,18 @@ pub struct DevicePubkeyLockout {
     pub last_failure_at: DateTime<Utc>,
     #[serde(default, with = "bson_datetime::optional")]
     pub last_lockout_audited_at: Option<DateTime<Utc>>,
+}
+
+impl fmt::Debug for DevicePubkeyLockout {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DevicePubkeyLockout")
+            .field("id", &RedactedLen(self.id.len()))
+            .field("failed_poll_count", &self.failed_poll_count)
+            .field("locked_until", &self.locked_until)
+            .field("last_failure_at", &self.last_failure_at)
+            .field("last_lockout_audited_at", &self.last_lockout_audited_at)
+            .finish()
+    }
 }
 
 #[cfg(test)]

@@ -16,6 +16,7 @@ mod handlers;
 mod login_cli;
 mod models;
 mod mw;
+mod redaction;
 mod routes;
 mod services;
 mod ssh_cli;

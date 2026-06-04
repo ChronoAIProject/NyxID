@@ -4,6 +4,7 @@ use std::fmt;
 
 use crate::errors::{AppError, AppResult};
 use crate::models::device_code::DeviceCode;
+use crate::redaction::RedactedLen;
 
 mod approve;
 mod initiate;
@@ -128,15 +129,6 @@ pub struct DeviceCodeLockoutNotification {
 pub struct SignatureFailureLockout {
     pub failed_poll_count: u32,
     pub locked_until: Option<DateTime<Utc>>,
-}
-
-#[derive(Clone, Copy)]
-struct RedactedLen(usize);
-
-impl fmt::Debug for RedactedLen {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "<redacted len={}>", self.0)
-    }
 }
 
 impl fmt::Debug for DeviceCodeInitiateInput {
