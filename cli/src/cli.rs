@@ -2623,6 +2623,25 @@ pub enum ApprovalCommands {
         /// Approval mode: "per_request" (every call needs approval) or "grant" (approval creates a time-based grant)
         #[arg(long)]
         approval_mode: Option<String>,
+        /// Effect for operations that match no rule: "auto_allow" (allow
+        /// silently), "require_approval", or "deny". Defaults to auto_allow
+        /// when rules are present, so add explicit rules plus a stricter
+        /// default to turn a service into an allow-list.
+        #[arg(long, value_name = "EFFECT")]
+        default_effect: Option<String>,
+        /// Granular approval rule (repeatable; first match wins). Format is
+        /// 'key=value;key=value' with keys effect, methods, path, verbs, mode.
+        /// Only effect is commonly needed; methods/path default to any/'*'.
+        /// effect=auto_allow|require_approval|deny, verbs=read|write|destructive
+        /// (comma-separated), methods=GET,POST,... (comma-separated; also EXEC
+        /// or TUNNEL for SSH), path=<glob>, mode=per_request|grant.
+        /// Example: --rule 'effect=deny;methods=DELETE' --rule 'verbs=write;mode=grant'
+        #[arg(long = "rule", value_name = "SPEC")]
+        rules: Vec<String>,
+        /// Remove all granular rules from this service, reverting to the plain
+        /// require-approval/mode policy. Cannot be combined with --rule.
+        #[arg(long, conflicts_with = "rules")]
+        clear_rules: bool,
         /// Set the policy on the given org's behalf instead of your personal
         /// scope. You must be an admin of that org. The org's policy is
         /// authoritative for org-shared services -- it overrides any
