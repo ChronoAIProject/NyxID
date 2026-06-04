@@ -4,6 +4,7 @@ use super::config::NodeConfig;
 use super::encryption::LocalEncryption;
 use super::error::{Error, Result};
 use super::keychain::{KeychainBackend, KeychainVault};
+use zeroize::Zeroizing;
 
 /// Unified secret storage -- either file-based AES-GCM or OS keychain vault.
 pub enum SecretBackend {
@@ -158,6 +159,51 @@ impl SecretBackend {
         match self {
             Self::File(_) => Ok(()),
             Self::Keychain(vault) => vault.delete_credential(service_slug),
+        }
+    }
+
+    // -- Pending RCI private keys --
+
+    /// Store a pending private key. Returns `Some(encrypted)` for file backend,
+    /// `None` for keychain (value stored in vault).
+    pub fn store_pending_crypto_key(
+        &self,
+        pending_id: &str,
+        private_key_b64u: &Zeroizing<String>,
+    ) -> Result<Option<String>> {
+        match self {
+            Self::File(enc) => Ok(Some(enc.encrypt(private_key_b64u)?)),
+            Self::Keychain(vault) => {
+                vault.set_pending_crypto_key(pending_id, private_key_b64u)?;
+                Ok(None)
+            }
+        }
+    }
+
+    /// Load a pending private key from the appropriate backend.
+    pub fn load_pending_crypto_key(
+        &self,
+        pending_id: &str,
+        encrypted: Option<&str>,
+    ) -> Result<Zeroizing<String>> {
+        match self {
+            Self::File(enc) => {
+                let encrypted = encrypted.ok_or_else(|| {
+                    Error::Config(format!(
+                        "Missing encrypted private key for pending credential '{pending_id}'"
+                    ))
+                })?;
+                enc.decrypt(encrypted).map(Zeroizing::new)
+            }
+            Self::Keychain(vault) => vault.get_pending_crypto_key(pending_id),
+        }
+    }
+
+    /// Delete a pending private key (no-op for file backend after config save).
+    pub fn delete_pending_crypto_key(&self, pending_id: &str) -> Result<()> {
+        match self {
+            Self::File(_) => Ok(()),
+            Self::Keychain(vault) => vault.delete_pending_crypto_key(pending_id),
         }
     }
 

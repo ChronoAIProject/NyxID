@@ -3152,6 +3152,34 @@ mod tests {
     }
 
     #[test]
+    fn legacy_crypto_none_accept_flow_unchanged() {
+        let response: PendingCredentialListResponse = serde_json::from_value(json!({
+            "pending_credentials": [{
+                "id": "p-legacy",
+                "service_slug": "svc",
+                "injection_method": "header",
+                "field_name": "Authorization",
+                "target_url": null,
+                "label": null,
+                "created_at": "2026-01-01T00:00:00Z",
+                "expires_at": "2026-01-02T00:00:00Z"
+            }]
+        }))
+        .unwrap();
+        let pending = response.pending_credentials.first().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let backend = SecretBackend::File(LocalEncryption::load_or_generate(dir.path()).unwrap());
+        let mut config =
+            NodeConfig::new("ws://x/api/v1/nodes/ws".into(), "n1".into(), "file".into());
+
+        store_pending_credential_locally(&mut config, &backend, pending, "Bearer sk-test").unwrap();
+
+        let stored = config.credentials.get("svc").unwrap();
+        assert_eq!(stored.injection_method, "header");
+        assert!(config.pending_crypto_keys.is_empty());
+    }
+
+    #[test]
     fn find_existing_service_returns_none_when_no_keys() {
         let resp = json!({"keys": []});
         assert!(find_existing_service(&resp, "test", "node-a").is_none());

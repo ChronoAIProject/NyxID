@@ -15,6 +15,7 @@ use zeroize::Zeroizing;
 use super::config::{NodeConfig, SshConfig};
 use super::credential_store::{CredentialStore, SharedCredentials, SharedCredentialsSender};
 use super::credentials::ssh_keys;
+use super::credentials::{crypto as rci_crypto, remote_inbox};
 use super::error::{Error, Result};
 use super::metrics::NodeMetrics;
 use super::proxy_executor;
@@ -113,6 +114,21 @@ struct PendingCredentialPollResponse {
 struct PendingCredentialPollItem {
     id: String,
     service_slug: String,
+    #[serde(default)]
+    injection_method: Option<String>,
+    #[serde(default)]
+    field_name: Option<String>,
+    #[serde(default)]
+    target_url: Option<String>,
+    #[serde(default)]
+    expires_at: Option<String>,
+    #[serde(default)]
+    crypto: Option<PendingCredentialPollCrypto>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct PendingCredentialPollCrypto {
+    version: String,
 }
 
 /// Compute the WebSocket read-idle timeout from the server-advertised
@@ -456,6 +472,100 @@ async fn poll_pending_credentials(
         .map_err(|error| error.to_string())
 }
 
+async fn handle_pending_credentials_available(
+    tx: &mpsc::Sender<NodeWsMessage>,
+    server_ws_url: &str,
+    auth_token: &str,
+    config_path: &std::path::Path,
+    config_dir: &std::path::Path,
+    storage_backend: &str,
+) {
+    let api_base_url = node_agent_api_base_url_from_ws_url(server_ws_url);
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(Duration::from_secs(PENDING_CREDENTIAL_POLL_TIMEOUT_SECS))
+        .build()
+    else {
+        tracing::debug!("Failed to create pending credential nudge HTTP client");
+        return;
+    };
+    let pending = match poll_pending_credentials(&client, &api_base_url, auth_token).await {
+        Ok(pending) => pending,
+        Err(error) => {
+            tracing::debug!(%error, "Pending credential nudge poll failed");
+            return;
+        }
+    };
+
+    let crypto_pending = pending
+        .iter()
+        .filter_map(|item| pending_crypto_metadata_from_poll_item(config_path, item))
+        .collect::<Vec<_>>();
+    if crypto_pending.is_empty() {
+        return;
+    }
+
+    let (mut config, backend) = match (
+        NodeConfig::load(config_path),
+        SecretBackend::from_storage_backend_str(storage_backend, config_dir),
+    ) {
+        (Ok(config), Ok(backend)) => (config, backend),
+        (Err(error), _) | (_, Err(error)) => {
+            tracing::warn!(%error, "Failed to load node config for pending credential pubkey");
+            return;
+        }
+    };
+
+    let mut config_changed = false;
+    let mut outbound = Vec::new();
+    for metadata in crypto_pending {
+        match remote_inbox::prepare_pubkey(&mut config, &backend, &metadata) {
+            Ok(message) => {
+                config_changed = true;
+                outbound.push(message);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    pending_credential_id = %metadata.pending_id,
+                    %error,
+                    "Failed to prepare pending credential pubkey"
+                );
+            }
+        }
+    }
+
+    if config_changed && let Err(error) = config.save(config_path) {
+        tracing::warn!(%error, "Failed to save pending credential pubkey metadata");
+        return;
+    }
+
+    for message in outbound {
+        if !send_ws_message(tx, message.to_ws_json().to_string()).await {
+            break;
+        }
+    }
+}
+
+fn pending_crypto_metadata_from_poll_item(
+    config_path: &std::path::Path,
+    item: &PendingCredentialPollItem,
+) -> Option<rci_crypto::PendingCredentialCryptoMetadata> {
+    let crypto = item.crypto.as_ref()?;
+    let injection_method = item.injection_method.as_ref()?;
+    let field_name = item.field_name.as_ref()?;
+    let expires_at = item.expires_at.as_ref()?;
+    let node_id = NodeConfig::load(config_path).ok()?.node.id;
+    Some(rci_crypto::PendingCredentialCryptoMetadata {
+        pending_id: item.id.clone(),
+        node_id,
+        service_slug: item.service_slug.clone(),
+        injection_method: injection_method.clone(),
+        field_name: field_name.clone(),
+        target_url: item.target_url.clone(),
+        expires_at: expires_at.clone(),
+        version: crypto.version.clone(),
+    })
+}
+
 fn node_agent_api_base_url_from_ws_url(ws_url: &str) -> String {
     let http_url = if let Some(rest) = ws_url.strip_prefix("ws://") {
         format!("http://{rest}")
@@ -667,6 +777,7 @@ async fn connect_and_serve(
         "agent_version": env!("CARGO_PKG_VERSION"),
         "capabilities": {
             "credential_ack_correlation": true,
+            "remote_credential_crypto_v1": true,
         },
     });
     let _ = send_ws_message(&tx, caps_msg.to_string()).await;
@@ -893,6 +1004,122 @@ async fn connect_and_serve(
                 };
                 if let Some(ack) = ack_msg {
                     let _ = send_ws_message(&tx, ack).await;
+                }
+            }
+            Some("pending_credentials_available") => {
+                handle_pending_credentials_available(
+                    &tx,
+                    &config.server.url,
+                    auth_token,
+                    config_path,
+                    config_dir,
+                    storage_backend,
+                )
+                .await;
+            }
+            Some("pending_credential_ciphertext") => {
+                let outbound = {
+                    match serde_json::from_value::<rci_crypto::PendingCredentialCiphertext>(
+                        parsed.clone(),
+                    ) {
+                        Ok(message) => {
+                            match (
+                                NodeConfig::load(config_path),
+                                SecretBackend::from_storage_backend_str(
+                                    storage_backend,
+                                    config_dir,
+                                ),
+                            ) {
+                                (Ok(mut cfg), Ok(be)) => {
+                                    Some(remote_inbox::decrypt_and_store_ciphertext(
+                                        &mut cfg,
+                                        config_path,
+                                        &be,
+                                        Some(credential_sender),
+                                        &message,
+                                    ))
+                                }
+                                (Err(error), _) | (_, Err(error)) => {
+                                    tracing::warn!(
+                                        %error,
+                                        "Failed to load node config for pending credential ciphertext"
+                                    );
+                                    Some(
+                                        rci_crypto::RemoteCredentialCryptoOutbound::DecryptResult {
+                                            pending_id: message.pending_id,
+                                            status: "error".to_string(),
+                                            error_code: Some(
+                                                rci_crypto::PENDING_CREDENTIAL_DECRYPT_FAILED_CODE,
+                                            ),
+                                        },
+                                    )
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                %error,
+                                "Invalid pending_credential_ciphertext frame"
+                            );
+                            None
+                        }
+                    }
+                };
+                if let Some(outbound) = outbound {
+                    let _ = send_ws_message(&tx, outbound.to_ws_json().to_string()).await;
+                }
+            }
+            Some(
+                "pending_credential_cleanup"
+                | "pending_credential_consumed"
+                | "pending_credential_declined"
+                | "pending_credential_cancelled"
+                | "pending_credential_expired",
+            ) => {
+                if let Some(pending_id) = parsed["pending_id"].as_str() {
+                    let evicted = {
+                        match (
+                            NodeConfig::load(config_path),
+                            SecretBackend::from_storage_backend_str(storage_backend, config_dir),
+                        ) {
+                            (Ok(mut cfg), Ok(be)) => {
+                                match remote_inbox::evict_pending_key(&mut cfg, &be, pending_id) {
+                                    Ok(evicted) => {
+                                        if evicted && let Err(error) = cfg.save(config_path) {
+                                            tracing::warn!(
+                                                %error,
+                                                pending_credential_id = %pending_id,
+                                                "Failed to save config after pending key cleanup"
+                                            );
+                                        }
+                                        evicted
+                                    }
+                                    Err(error) => {
+                                        tracing::warn!(
+                                            %error,
+                                            pending_credential_id = %pending_id,
+                                            "Failed to clean up pending credential key"
+                                        );
+                                        false
+                                    }
+                                }
+                            }
+                            (Err(error), _) | (_, Err(error)) => {
+                                tracing::warn!(
+                                    %error,
+                                    pending_credential_id = %pending_id,
+                                    "Failed to load node config for pending key cleanup"
+                                );
+                                false
+                            }
+                        }
+                    };
+                    if evicted {
+                        tracing::debug!(
+                            pending_credential_id = %pending_id,
+                            "Evicted pending credential private key"
+                        );
+                    }
                 }
             }
             Some("ws_proxy_open") => {

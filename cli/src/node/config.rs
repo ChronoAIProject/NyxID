@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -25,6 +26,9 @@ pub struct NodeConfig {
     /// Per-principal SSH private keys for node-key SSH auth.
     #[serde(default)]
     pub ssh_keys: Vec<SshKeyConfig>,
+    /// Node-side pending RCI keypairs awaiting encrypted credential delivery.
+    #[serde(default)]
+    pub pending_crypto_keys: BTreeMap<String, PendingCryptoKeyConfig>,
 }
 
 fn default_storage_backend() -> String {
@@ -159,6 +163,38 @@ pub struct SshKeyConfig {
     pub algorithms: Option<SshAlgorithmPreferences>,
     #[serde(default = "default_created_at")]
     pub created_at: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct PendingCryptoKeyConfig {
+    pub version: String,
+    pub service_slug: String,
+    pub injection_method: String,
+    pub field_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_url: Option<String>,
+    pub expires_at: String,
+    pub public_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private_key_encrypted: Option<String>,
+}
+
+impl fmt::Debug for PendingCryptoKeyConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PendingCryptoKeyConfig")
+            .field("version", &self.version)
+            .field("service_slug", &self.service_slug)
+            .field("injection_method", &self.injection_method)
+            .field("field_name", &self.field_name)
+            .field("target_url", &self.target_url)
+            .field("expires_at", &self.expires_at)
+            .field("public_key", &"[REDACTED]")
+            .field(
+                "private_key_encrypted",
+                &self.private_key_encrypted.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -334,6 +370,7 @@ impl NodeConfig {
             storage_backend,
             credentials: BTreeMap::new(),
             ssh_keys: Vec::new(),
+            pending_crypto_keys: BTreeMap::new(),
         }
     }
 

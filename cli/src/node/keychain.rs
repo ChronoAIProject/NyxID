@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 #[cfg(test)]
 use std::collections::HashMap;
 #[cfg(test)]
@@ -6,6 +7,7 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 use super::config::NodeConfig;
 use super::error::{Error, Result};
@@ -189,14 +191,74 @@ pub fn credential_key(service_slug: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// All secrets stored in one keychain entry to avoid per-item password prompts.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct VaultData {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_token: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signing_secret: Option<String>,
     #[serde(default)]
-    pub credentials: std::collections::BTreeMap<String, String>,
+    pub credentials: BTreeMap<String, String>,
+    #[serde(default)]
+    #[serde(with = "zeroizing_string_btreemap")]
+    pub pending_crypto_keys: BTreeMap<String, Zeroizing<String>>,
+}
+
+mod zeroizing_string_btreemap {
+    use std::collections::BTreeMap;
+
+    use serde::ser::SerializeMap;
+    use serde::{Deserialize, Deserializer, Serializer};
+    use zeroize::Zeroizing;
+
+    pub fn serialize<S>(
+        map: &BTreeMap<String, Zeroizing<String>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut output = serializer.serialize_map(Some(map.len()))?;
+        for (key, value) in map {
+            output.serialize_entry(key, value.as_str())?;
+        }
+        output.end()
+    }
+
+    pub fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> Result<BTreeMap<String, Zeroizing<String>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(BTreeMap::<String, String>::deserialize(deserializer)?
+            .into_iter()
+            .map(|(key, value)| (key, Zeroizing::new(value)))
+            .collect())
+    }
+}
+
+impl std::fmt::Debug for VaultData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VaultData")
+            .field(
+                "auth_token",
+                &self.auth_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "signing_secret",
+                &self.signing_secret.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "credentials",
+                &format!("[REDACTED; {} entries]", self.credentials.len()),
+            )
+            .field(
+                "pending_crypto_keys",
+                &format!("[REDACTED; {} entries]", self.pending_crypto_keys.len()),
+            )
+            .finish()
+    }
 }
 
 /// A single-entry keychain vault that caches all secrets in memory.
@@ -274,7 +336,7 @@ impl KeychainVault {
             None
         };
 
-        let mut credentials = std::collections::BTreeMap::new();
+        let mut credentials = BTreeMap::new();
         for slug in config.credentials.keys() {
             let key = credential_key(slug);
             let value = backend.get_optional(&key)?.ok_or_else(|| {
@@ -289,6 +351,7 @@ impl KeychainVault {
             auth_token,
             signing_secret,
             credentials,
+            pending_crypto_keys: BTreeMap::new(),
         })
     }
 
@@ -372,6 +435,40 @@ impl KeychainVault {
         self.flush()
     }
 
+    pub fn set_pending_crypto_key(
+        &self,
+        pending_id: &str,
+        private_key: &Zeroizing<String>,
+    ) -> Result<()> {
+        self.vault
+            .lock()
+            .unwrap()
+            .pending_crypto_keys
+            .insert(pending_id.to_string(), private_key.clone());
+        self.flush()
+    }
+
+    pub fn get_pending_crypto_key(&self, pending_id: &str) -> Result<Zeroizing<String>> {
+        self.vault
+            .lock()
+            .unwrap()
+            .pending_crypto_keys
+            .get(pending_id)
+            .cloned()
+            .ok_or_else(|| {
+                Error::Keychain(format!("No pending crypto key for '{pending_id}' in vault"))
+            })
+    }
+
+    pub fn delete_pending_crypto_key(&self, pending_id: &str) -> Result<()> {
+        self.vault
+            .lock()
+            .unwrap()
+            .pending_crypto_keys
+            .remove(pending_id);
+        self.flush()
+    }
+
     pub fn delete_auth_token(&self) -> Result<()> {
         self.vault.lock().unwrap().auth_token = None;
         self.flush()
@@ -415,6 +512,32 @@ mod tests {
 
     fn header_credential() -> CredentialConfig {
         CredentialConfig::new_header("Authorization".to_string(), None, None)
+    }
+
+    fn assert_pending_key_map_is_zeroizing(_: &BTreeMap<String, Zeroizing<String>>) {}
+
+    #[test]
+    fn pending_crypto_keys_are_zeroizing_and_serde_as_strings() {
+        let mut vault = VaultData::default();
+        assert_pending_key_map_is_zeroizing(&vault.pending_crypto_keys);
+
+        vault.pending_crypto_keys.insert(
+            "pending-1".to_string(),
+            Zeroizing::new("private-key-b64u".to_string()),
+        );
+
+        let json = serde_json::to_string(&vault).unwrap();
+        assert!(json.contains(r#""pending-1":"private-key-b64u""#));
+
+        let parsed: VaultData = serde_json::from_str(&json).unwrap();
+        assert_pending_key_map_is_zeroizing(&parsed.pending_crypto_keys);
+        assert_eq!(
+            parsed
+                .pending_crypto_keys
+                .get("pending-1")
+                .map(|value| value.as_str()),
+            Some("private-key-b64u")
+        );
     }
 
     #[test]

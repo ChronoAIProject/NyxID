@@ -78,6 +78,8 @@ jobs:
             backend:
               - 'backend/**'
               - 'cloud-auth/**'
+              - 'nyxid-crypto/**'
+              - 'scripts/check-rci-backend-boundary.sh'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
@@ -86,6 +88,7 @@ jobs:
             cli:
               - 'cli/**'
               - 'cloud-auth/**'
+              - 'nyxid-crypto/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
@@ -100,7 +103,9 @@ jobs:
               - 'backend/**'
               - 'cli/**'
               - 'cloud-auth/**'
+              - 'nyxid-crypto/**'
               - 'mcp-demo/**'
+              - 'scripts/check-rci-backend-boundary.sh'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
@@ -200,6 +205,9 @@ jobs:
         with:
           key: backend
       - uses: taiki-e/install-action@nextest
+
+      - name: Check RCI backend boundary
+        run: bash scripts/check-rci-backend-boundary.sh
 
       - name: Build backend
         run: cargo build -p nyxid
