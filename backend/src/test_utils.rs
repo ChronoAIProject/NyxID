@@ -1,6 +1,7 @@
 use std::sync::{Arc, OnceLock, atomic::AtomicUsize};
 use std::time::Duration;
 
+use base64::Engine;
 use mongodb::bson::doc;
 use uuid::Uuid;
 
@@ -9,7 +10,9 @@ use crate::config::AppConfig;
 use crate::crypto::aes::EncryptionKeys;
 use crate::crypto::jwks::JwksCache;
 use crate::crypto::jwt::JwtKeys;
+use crate::models::audit_log::AuditLog;
 use crate::models::mcp_session::McpSessionStore;
+use crate::models::node_pending_credential::NodePendingCredential;
 use crate::models::org_membership::{MemberScopeSource, OrgMembership, OrgRole};
 use crate::models::user::{User, UserType};
 use crate::models::user_endpoint::UserEndpoint;
@@ -422,6 +425,152 @@ pub(crate) fn test_auth_user(user_id: &str) -> AuthUser {
         rate_limit_burst: None,
         ip_address: None,
         user_agent: None,
+    }
+}
+
+fn sorted_strings(values: &[&str]) -> Vec<String> {
+    let mut values: Vec<String> = values.iter().map(|value| value.to_string()).collect();
+    values.sort();
+    values
+}
+
+fn b64url_fixture(byte: u8, len: usize) -> String {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(vec![byte; len])
+}
+
+/// Assert an RCI audit row is metadata-only and has exactly the expected keys.
+pub(crate) fn assert_rci_audit_row(
+    entry: &AuditLog,
+    expected_event_type: &str,
+    pending: &NodePendingCredential,
+    expected_remote_state: Option<&str>,
+    extra_keys: &[&str],
+) {
+    assert_eq!(entry.event_type, expected_event_type);
+    assert_eq!(
+        entry.user_id.as_deref(),
+        Some(pending.owner_user_id.as_str())
+    );
+
+    let event_data = entry.event_data.as_ref().expect("audit event data");
+    let object = event_data.as_object().expect("audit event data object");
+    let mut expected_keys = vec![
+        "event_at",
+        "flow",
+        "node_id",
+        "owner_user_id",
+        "pending_created_at",
+        "pending_credential_id",
+        "pending_expires_at",
+        "routed_via",
+        "service_slug",
+    ];
+    if expected_remote_state.is_some() {
+        expected_keys.push("remote_state");
+    }
+    expected_keys.extend(extra_keys.iter().copied());
+
+    let mut actual_keys: Vec<String> = object.keys().cloned().collect();
+    actual_keys.sort();
+    assert_eq!(actual_keys, sorted_strings(&expected_keys));
+
+    assert_eq!(object["flow"], "remote_credential_injection");
+    assert_eq!(object["routed_via"], "node");
+    assert_eq!(object["node_id"], pending.node_id);
+    assert_eq!(object["pending_credential_id"], pending.id);
+    assert_eq!(object["service_slug"], pending.service_slug);
+    assert_eq!(object["owner_user_id"], pending.owner_user_id);
+    assert_eq!(
+        object["pending_created_at"],
+        pending.created_at.to_rfc3339()
+    );
+    assert_eq!(
+        object["pending_expires_at"],
+        pending.expires_at.to_rfc3339()
+    );
+    assert!(
+        chrono::DateTime::parse_from_rfc3339(object["event_at"].as_str().expect("event_at string"))
+            .is_ok()
+    );
+
+    if let Some(remote_state) = expected_remote_state {
+        assert_eq!(object["remote_state"], remote_state);
+    } else {
+        assert!(object.get("remote_state").is_none());
+    }
+
+    if let Some(queued_at) = object.get("ciphertext_queued_at") {
+        assert_eq!(
+            queued_at.as_str().expect("ciphertext_queued_at string"),
+            pending
+                .ciphertext_queued_at
+                .expect("pending has queued timestamp")
+                .to_rfc3339()
+        );
+    }
+    if let Some(expires_at) = object.get("ciphertext_expires_at") {
+        assert_eq!(
+            expires_at.as_str().expect("ciphertext_expires_at string"),
+            pending
+                .ciphertext_expires_at
+                .expect("pending has ciphertext expiry")
+                .to_rfc3339()
+        );
+    }
+
+    for forbidden_key in [
+        "plaintext",
+        "secret",
+        "ciphertext",
+        "nonce",
+        "node_pubkey",
+        "admin_pubkey",
+        "sealed_privkey",
+        "private_key",
+        "hash",
+        "fingerprint",
+        "length",
+        "bytes",
+        "target_url",
+        "field_name",
+        "injection_method",
+        "raw_version",
+        "raw_status",
+        "raw_node_error",
+        "raw_decrypt_error",
+        "raw_decline_reason",
+        "decrypt_error",
+        "queue_count",
+        "queued_pending_ids",
+    ] {
+        assert!(
+            !object.contains_key(forbidden_key),
+            "{expected_event_type}: {forbidden_key}"
+        );
+    }
+
+    let event_json = event_data.to_string();
+    let forbidden_values = [
+        b64url_fixture(5, 32),
+        b64url_fixture(6, 32),
+        b64url_fixture(7, 24),
+        b64url_fixture(8, 32),
+        b64url_fixture(9, 31),
+        b64url_fixture(10, 32),
+        b64url_fixture(11, 24),
+        b64url_fixture(12, 32),
+        b64url_fixture(13, 32),
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([1, 2, 3]),
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([1, 2, 3, 4]),
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([42]),
+        "super-secret-plaintext-fixture".to_string(),
+        "secret-value-fixture".to_string(),
+        "raw-node-error-fixture".to_string(),
+        "decline-reason-fixture".to_string(),
+        "raw-decline-reason-fixture".to_string(),
+    ];
+    for forbidden_value in forbidden_values {
+        assert!(!event_json.contains(&forbidden_value), "{forbidden_value}");
     }
 }
 

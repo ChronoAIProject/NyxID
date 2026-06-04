@@ -22,7 +22,9 @@ use crate::models::node_pending_credential::{
 };
 use crate::mw::auth::AuthUser;
 use crate::services::{
-    audit_service, node_pending_credential_service, node_routing_service, node_service, org_service,
+    audit_service, node_pending_credential_service, node_routing_service, node_service,
+    org_service,
+    rci_audit_service::{self, RciAuditDelivery, RciAuditEventKind, RciAuditSubject},
 };
 use crate::telemetry::{
     context::{TelemetryContext, emit_event},
@@ -76,6 +78,12 @@ pub struct PendingCredentialCiphertextRequest {
 #[derive(Debug, Deserialize, Default)]
 pub struct PendingCredentialListQuery {
     pub include_history: Option<bool>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum PendingCiphertextValidation {
+    Valid(Vec<u8>),
+    TooLarge,
 }
 
 // --- Response types ---
@@ -365,7 +373,7 @@ fn decode_base64url_no_pad_exact(
 
 fn validate_pending_ciphertext_request(
     body: &PendingCredentialCiphertextRequest,
-) -> AppResult<Vec<u8>> {
+) -> AppResult<PendingCiphertextValidation> {
     if body.version != "v1" {
         return Err(AppError::PendingCredentialVersionUnsupported(
             body.version.clone(),
@@ -375,11 +383,9 @@ fn validate_pending_ciphertext_request(
     let _ = decode_base64url_no_pad_exact(&body.nonce, "nonce", 24)?;
     let ciphertext = decode_base64url_no_pad(&body.ciphertext, "ciphertext")?;
     if ciphertext.len() > node_pending_credential_service::MAX_CIPHERTEXT_SIZE {
-        return Err(AppError::PendingCredentialCiphertextTooLarge(
-            ciphertext.len(),
-        ));
+        return Ok(PendingCiphertextValidation::TooLarge);
     }
-    Ok(ciphertext)
+    Ok(PendingCiphertextValidation::Valid(ciphertext))
 }
 
 fn send_pending_ciphertext_to_node(
@@ -446,6 +452,26 @@ fn pending_ciphertext_queued_response(
             error_code: Some(PENDING_CREDENTIAL_NODE_OFFLINE_CODE),
         }),
     )
+}
+
+fn log_rci_for_pending_user(
+    state: &AppState,
+    auth_user: &AuthUser,
+    pending: &NodePendingCredential,
+    kind: RciAuditEventKind,
+) {
+    let subject = RciAuditSubject::from_pending(pending);
+    rci_audit_service::log_rci_for_user(state.db.clone(), auth_user, &subject, kind);
+}
+
+fn log_rci_for_summary_user(
+    state: &AppState,
+    auth_user: &AuthUser,
+    summary: &node_pending_credential_service::PendingCredentialAuditSummary,
+    kind: RciAuditEventKind,
+) {
+    let subject = RciAuditSubject::from_summary(summary);
+    rci_audit_service::log_rci_for_user(state.db.clone(), auth_user, &subject, kind);
 }
 
 // --- Handlers ---
@@ -850,8 +876,30 @@ pub async fn post_pending_credential_ciphertext(
     Path((node_id, pending_id)): Path<(String, String)>,
     Json(body): Json<PendingCredentialCiphertextRequest>,
 ) -> AppResult<(StatusCode, Json<PendingCredentialCiphertextResponse>)> {
-    let ciphertext = validate_pending_ciphertext_request(&body)?;
+    let validation = validate_pending_ciphertext_request(&body)?;
     let user_id_str = auth_user.user_id.to_string();
+    let subject_summary =
+        node_pending_credential_service::get_pending_credential_audit_summary_for_admin(
+            &state.db,
+            &user_id_str,
+            &node_id,
+            &pending_id,
+        )
+        .await?;
+    let ciphertext = match validation {
+        PendingCiphertextValidation::Valid(ciphertext) => ciphertext,
+        PendingCiphertextValidation::TooLarge => {
+            log_rci_for_summary_user(
+                &state,
+                &auth_user,
+                &subject_summary,
+                RciAuditEventKind::CiphertextTooLarge,
+            );
+            return Err(AppError::PendingCredentialCiphertextTooLarge(
+                node_pending_credential_service::MAX_CIPHERTEXT_SIZE + 1,
+            ));
+        }
+    };
     let node_can_receive_now = state.node_ws_manager.is_connected(&node_id)
         && state
             .node_ws_manager
@@ -871,27 +919,71 @@ pub async fn post_pending_credential_ciphertext(
         node_can_receive_now,
         now,
     )
-    .await?;
+    .await
+    .map_err(|err| {
+        if matches!(err, AppError::PendingCredentialPubkeyAwaiting(_)) {
+            log_rci_for_summary_user(
+                &state,
+                &auth_user,
+                &subject_summary,
+                RciAuditEventKind::PubkeyAwaiting,
+            );
+        }
+        err
+    })?;
 
     match outcome {
-        node_pending_credential_service::StorePendingCiphertextOutcome::QueueFull => {
+        node_pending_credential_service::StorePendingCiphertextOutcome::QueueFull(summary) => {
+            log_rci_for_summary_user(&state, &auth_user, &summary, RciAuditEventKind::QueueFull);
             Err(AppError::PendingCredentialQueueFull(node_id))
         }
         node_pending_credential_service::StorePendingCiphertextOutcome::QueuedOffline(pending) => {
+            log_rci_for_pending_user(
+                &state,
+                &auth_user,
+                &pending,
+                RciAuditEventKind::CiphertextReceived,
+            );
+            log_rci_for_pending_user(
+                &state,
+                &auth_user,
+                &pending,
+                RciAuditEventKind::CiphertextQueued {
+                    delivery: RciAuditDelivery::OfflineQueue,
+                    node_offline: true,
+                },
+            );
             Ok(pending_ciphertext_queued_response(&pending))
         }
         node_pending_credential_service::StorePendingCiphertextOutcome::StoredForOnlineNode(
             pending,
-        ) => match send_pending_ciphertext_to_node(&state, &node_id, &pending) {
-            Ok(()) => Ok(pending_ciphertext_sent_response(&pending)),
-            Err(err) => {
-                tracing::warn!(
-                    node_id = %node_id,
-                    pending_id = %pending.id,
-                    error = %err,
-                    "Failed to send pending credential ciphertext; queueing for retry"
-                );
-                let queued =
+        ) => {
+            log_rci_for_pending_user(
+                &state,
+                &auth_user,
+                &pending,
+                RciAuditEventKind::CiphertextReceived,
+            );
+            match send_pending_ciphertext_to_node(&state, &node_id, &pending) {
+                Ok(()) => {
+                    log_rci_for_pending_user(
+                        &state,
+                        &auth_user,
+                        &pending,
+                        RciAuditEventKind::CiphertextForwarded {
+                            delivery: RciAuditDelivery::OnlineForward,
+                        },
+                    );
+                    Ok(pending_ciphertext_sent_response(&pending))
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        node_id = %node_id,
+                        pending_id = %pending.id,
+                        error = %err,
+                        "Failed to send pending credential ciphertext; queueing for retry"
+                    );
+                    let queued =
                     node_pending_credential_service::mark_pending_ciphertext_queued_after_send_failure(
                         &state.db,
                         &node_id,
@@ -899,9 +991,19 @@ pub async fn post_pending_credential_ciphertext(
                         chrono::Utc::now(),
                     )
                     .await?;
-                Ok(pending_ciphertext_queued_response(&queued))
+                    log_rci_for_pending_user(
+                        &state,
+                        &auth_user,
+                        &queued,
+                        RciAuditEventKind::CiphertextQueued {
+                            delivery: RciAuditDelivery::OfflineQueue,
+                            node_offline: true,
+                        },
+                    );
+                    Ok(pending_ciphertext_queued_response(&queued))
+                }
             }
-        },
+        }
     }
 }
 
@@ -920,17 +1022,21 @@ pub async fn cancel_pending_credential(
     )
     .await?;
 
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "node_credential_push_canceled",
-        Some(serde_json::json!({
-            "node_id": &pending.node_id,
-            "pending_credential_id": &pending.id,
-            "service_slug": &pending.service_slug,
-            "owner_user_id": &pending.owner_user_id,
-        })),
-    );
+    if RciAuditSubject::pending_is_rci(&pending) {
+        log_rci_for_pending_user(&state, &auth_user, &pending, RciAuditEventKind::Canceled);
+    } else {
+        audit_service::log_for_user(
+            state.db.clone(),
+            &auth_user,
+            "node_credential_push_canceled",
+            Some(serde_json::json!({
+                "node_id": &pending.node_id,
+                "pending_credential_id": &pending.id,
+                "service_slug": &pending.service_slug,
+                "owner_user_id": &pending.owner_user_id,
+            })),
+        );
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1128,6 +1234,10 @@ pub async fn list_my_bound_services(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::errors::{
+        PENDING_CREDENTIAL_CIPHERTEXT_TOO_LARGE_CODE, PENDING_CREDENTIAL_QUEUE_FULL_CODE,
+    };
+    use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};
     use crate::models::node::{COLLECTION_NAME as NODES, Node, NodeMetrics, NodeStatus};
     use crate::models::node_pending_credential::{
         COLLECTION_NAME as NODE_PENDING_CREDENTIALS, NodePendingCredential,
@@ -1144,12 +1254,12 @@ mod tests {
     use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
     use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
     use crate::services::{
-        node_pending_credential_service,
+        audit_service, node_pending_credential_service,
         node_ws_manager::{NodeCapabilitiesMsg, NodeOutboundMessage},
     };
     use crate::test_utils::{
-        connect_test_database, test_app_state, test_auth_user, test_membership, test_user,
-        test_user_service,
+        assert_rci_audit_row, connect_test_database, test_app_state, test_auth_user,
+        test_membership, test_user, test_user_service,
     };
     use axum::body::{Body, to_bytes};
     use axum::http::{Method, Request, StatusCode};
@@ -1220,6 +1330,18 @@ mod tests {
             .await
             .expect("query pending credential")
             .expect("pending credential exists")
+    }
+
+    async fn load_audit_entry(
+        db: &mongodb::Database,
+        receiver: tokio::sync::oneshot::Receiver<String>,
+    ) -> AuditLog {
+        let audit_id = receiver.await.expect("audit write notification");
+        db.collection::<AuditLog>(AUDIT_LOG)
+            .find_one(doc! { "_id": audit_id })
+            .await
+            .expect("query audit log")
+            .expect("audit log exists")
     }
 
     fn assert_pubkey_only_pending(pending: &NodePendingCredential, expected_node_pubkey: &str) {
@@ -1479,6 +1601,14 @@ mod tests {
                 ..NodeCapabilitiesMsg::default()
             },
         );
+        let received_audit = audit_service::notify_on_audit_write(
+            "node_credential_rci_ciphertext_received",
+            Some(pending.id.clone()),
+        );
+        let forwarded_audit = audit_service::notify_on_audit_write(
+            "node_credential_rci_ciphertext_forwarded",
+            Some(pending.id.clone()),
+        );
 
         let (status, body) = route_json(
             app,
@@ -1517,6 +1647,27 @@ mod tests {
             Some(RemoteCryptoState::CiphertextReceived)
         );
         assert!(stored.ciphertext_queued_at.is_none());
+
+        let received = load_audit_entry(&db, received_audit).await;
+        assert_rci_audit_row(
+            &received,
+            "node_credential_rci_ciphertext_received",
+            &stored,
+            Some("ciphertext_received"),
+            &[],
+        );
+        let forwarded = load_audit_entry(&db, forwarded_audit).await;
+        assert_rci_audit_row(
+            &forwarded,
+            "node_credential_rci_ciphertext_forwarded",
+            &stored,
+            Some("ciphertext_received"),
+            &["delivery"],
+        );
+        assert_eq!(
+            forwarded.event_data.as_ref().unwrap()["delivery"],
+            "online_forward"
+        );
     }
 
     #[tokio::test]
@@ -1568,6 +1719,14 @@ mod tests {
                 }
                 _ => {}
             }
+            let received_audit = audit_service::notify_on_audit_write(
+                "node_credential_rci_ciphertext_received",
+                Some(pending_id.clone()),
+            );
+            let queued_audit = audit_service::notify_on_audit_write(
+                "node_credential_rci_ciphertext_queued",
+                Some(pending_id.clone()),
+            );
 
             let (status, body) = route_json(
                 app.clone(),
@@ -1594,7 +1753,86 @@ mod tests {
             );
             assert!(stored.ciphertext_queued_at.is_some(), "{case}");
             assert!(stored.ciphertext_expires_at.is_some(), "{case}");
+
+            let received = load_audit_entry(&db, received_audit).await;
+            assert_rci_audit_row(
+                &received,
+                "node_credential_rci_ciphertext_received",
+                &stored,
+                Some("ciphertext_received"),
+                &[],
+            );
+            let queued = load_audit_entry(&db, queued_audit).await;
+            assert_rci_audit_row(
+                &queued,
+                "node_credential_rci_ciphertext_queued",
+                &stored,
+                Some("ciphertext_queued"),
+                &[
+                    "ciphertext_expires_at",
+                    "ciphertext_queued_at",
+                    "delivery",
+                    "error_code",
+                    "error_kind",
+                ],
+            );
+            let queued_data = queued.event_data.as_ref().unwrap();
+            assert_eq!(queued_data["delivery"], "offline_queue", "{case}");
+            assert_eq!(
+                queued_data["error_code"], PENDING_CREDENTIAL_NODE_OFFLINE_CODE,
+                "{case}"
+            );
+            assert_eq!(
+                queued_data["error_kind"], "pending_credential_node_offline",
+                "{case}"
+            );
         }
+    }
+
+    #[tokio::test]
+    async fn route_post_pending_ciphertext_before_pubkey_audits_awaiting() {
+        let (db, _state, app, token, node, pending) = pending_route_fixture(
+            "pending_route_post_before_pubkey_audit",
+            "awaiting-node",
+            "openclaw",
+            false,
+        )
+        .await;
+        let awaiting_audit = audit_service::notify_on_audit_write(
+            "node_credential_rci_pubkey_awaiting",
+            Some(pending.id.clone()),
+        );
+
+        let (status, body) = route_json(
+            app,
+            Method::POST,
+            format!(
+                "/api/v1/nodes/{}/credentials/pending/{}/ciphertext",
+                node.id, pending.id
+            ),
+            &token,
+            Some(ciphertext_request(vec![1, 2, 3])),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error_code"], 8009);
+        assert_eq!(body["error"], "pending_credential_pubkey_awaiting");
+        let stored = load_pending(&db, &pending.id).await;
+        let audit = load_audit_entry(&db, awaiting_audit).await;
+        assert_rci_audit_row(
+            &audit,
+            "node_credential_rci_pubkey_awaiting",
+            &stored,
+            None,
+            &["error_code", "error_kind"],
+        );
+        let event_data = audit.event_data.as_ref().unwrap();
+        assert_eq!(event_data["error_code"], 8009);
+        assert_eq!(
+            event_data["error_kind"],
+            "pending_credential_pubkey_awaiting"
+        );
     }
 
     #[tokio::test]
@@ -1634,6 +1872,10 @@ mod tests {
         let pending =
             create_remote_pending_with_pubkey(&db, &node.user_id, &node.id, "queue-full-final")
                 .await;
+        let queue_full_audit = audit_service::notify_on_audit_write(
+            "node_credential_rci_queue_full",
+            Some(pending.id.clone()),
+        );
 
         let (status, body) = route_json(
             app,
@@ -1648,8 +1890,61 @@ mod tests {
         .await;
 
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(body["error_code"], 8011);
+        assert_eq!(body["error_code"], PENDING_CREDENTIAL_QUEUE_FULL_CODE);
         assert_eq!(body["error"], "pending_credential_queue_full");
+
+        let stored = load_pending(&db, &pending.id).await;
+        let audit = load_audit_entry(&db, queue_full_audit).await;
+        assert_rci_audit_row(
+            &audit,
+            "node_credential_rci_queue_full",
+            &stored,
+            Some("pubkey_posted"),
+            &["error_code", "error_kind"],
+        );
+        let event_data = audit.event_data.as_ref().unwrap();
+        assert_eq!(event_data["error_code"], PENDING_CREDENTIAL_QUEUE_FULL_CODE);
+        assert_eq!(event_data["error_kind"], "pending_credential_queue_full");
+    }
+
+    #[tokio::test]
+    async fn route_cancel_pending_credential_writes_rci_canceled_audit_row() {
+        let (db, _state, app, token, node, pending) = pending_route_fixture(
+            "pending_route_cancel_rci_audit",
+            "cancel-rci-node",
+            "cancel-rci",
+            false,
+        )
+        .await;
+        let canceled_audit = audit_service::notify_on_audit_write(
+            "node_credential_rci_canceled",
+            Some(pending.id.clone()),
+        );
+
+        let (status, body) = route_json(
+            app,
+            Method::DELETE,
+            format!(
+                "/api/v1/nodes/{}/credentials/pending/{}",
+                node.id, pending.id
+            ),
+            &token,
+            None,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(body.is_null());
+        let stored = load_pending(&db, &pending.id).await;
+        assert!(!stored.is_active);
+        let audit = load_audit_entry(&db, canceled_audit).await;
+        assert_rci_audit_row(
+            &audit,
+            "node_credential_rci_canceled",
+            &stored,
+            Some("canceled"),
+            &[],
+        );
     }
 
     #[tokio::test]
@@ -1796,13 +2091,17 @@ mod tests {
 
     #[tokio::test]
     async fn route_post_pending_ciphertext_rejects_oversized_ciphertext() {
-        let (_db, _state, app, token, node, pending) = pending_route_fixture(
+        let (db, _state, app, token, node, pending) = pending_route_fixture(
             "pending_route_post_oversized",
             "oversized-node",
             "openclaw",
             true,
         )
         .await;
+        let too_large_audit = audit_service::notify_on_audit_write(
+            "node_credential_rci_ciphertext_too_large",
+            Some(pending.id.clone()),
+        );
 
         let (status, body) = route_json(
             app,
@@ -1821,8 +2120,30 @@ mod tests {
         .await;
 
         assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
-        assert_eq!(body["error_code"], 8008);
+        assert_eq!(
+            body["error_code"],
+            PENDING_CREDENTIAL_CIPHERTEXT_TOO_LARGE_CODE
+        );
         assert_eq!(body["error"], "pending_credential_ciphertext_too_large");
+
+        let stored = load_pending(&db, &pending.id).await;
+        let audit = load_audit_entry(&db, too_large_audit).await;
+        assert_rci_audit_row(
+            &audit,
+            "node_credential_rci_ciphertext_too_large",
+            &stored,
+            Some("pubkey_posted"),
+            &["error_code", "error_kind"],
+        );
+        let event_data = audit.event_data.as_ref().unwrap();
+        assert_eq!(
+            event_data["error_code"],
+            PENDING_CREDENTIAL_CIPHERTEXT_TOO_LARGE_CODE
+        );
+        assert_eq!(
+            event_data["error_kind"],
+            "pending_credential_ciphertext_too_large"
+        );
     }
 
     #[tokio::test]
@@ -3209,7 +3530,7 @@ mod tests {
         };
 
         let decoded = validate_pending_ciphertext_request(&request).expect("valid request");
-        assert_eq!(decoded, vec![3_u8; 48]);
+        assert_eq!(decoded, PendingCiphertextValidation::Valid(vec![3_u8; 48]));
     }
 
     #[test]
@@ -3263,8 +3584,7 @@ mod tests {
         };
         assert!(matches!(
             validate_pending_ciphertext_request(&oversized),
-            Err(AppError::PendingCredentialCiphertextTooLarge(size))
-                if size == node_pending_credential_service::MAX_CIPHERTEXT_SIZE + 1
+            Ok(PendingCiphertextValidation::TooLarge)
         ));
     }
 

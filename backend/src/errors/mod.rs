@@ -3,7 +3,12 @@ use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 use utoipa::ToSchema;
 
+pub const PENDING_CREDENTIAL_DECRYPT_FAILED_CODE: u32 = 8006;
+pub const PENDING_CREDENTIAL_VERSION_UNSUPPORTED_CODE: u32 = 8007;
+pub const PENDING_CREDENTIAL_CIPHERTEXT_TOO_LARGE_CODE: u32 = 8008;
+pub const PENDING_CREDENTIAL_PUBKEY_AWAITING_CODE: u32 = 8009;
 pub const PENDING_CREDENTIAL_NODE_OFFLINE_CODE: u32 = 8010;
+pub const PENDING_CREDENTIAL_QUEUE_FULL_CODE: u32 = 8011;
 
 /// Structured JSON error response returned by all API error paths.
 #[derive(Debug, Serialize, ToSchema)]
@@ -399,11 +404,15 @@ impl AppError {
             Self::NodeRegistrationFailed(_) => 8003,
             Self::NodeCredentialMissing(_) => 8004,
             Self::WsProxyDownstream(_) => 8005,
-            Self::PendingCredentialDecryptFailed(_) => 8006,
-            Self::PendingCredentialVersionUnsupported(_) => 8007,
-            Self::PendingCredentialCiphertextTooLarge(_) => 8008,
-            Self::PendingCredentialPubkeyAwaiting(_) => 8009,
-            Self::PendingCredentialQueueFull(_) => 8011,
+            Self::PendingCredentialDecryptFailed(_) => PENDING_CREDENTIAL_DECRYPT_FAILED_CODE,
+            Self::PendingCredentialVersionUnsupported(_) => {
+                PENDING_CREDENTIAL_VERSION_UNSUPPORTED_CODE
+            }
+            Self::PendingCredentialCiphertextTooLarge(_) => {
+                PENDING_CREDENTIAL_CIPHERTEXT_TOO_LARGE_CODE
+            }
+            Self::PendingCredentialPubkeyAwaiting(_) => PENDING_CREDENTIAL_PUBKEY_AWAITING_CODE,
+            Self::PendingCredentialQueueFull(_) => PENDING_CREDENTIAL_QUEUE_FULL_CODE,
             Self::ApiKeyScopeForbidden(_) => 9000,
             Self::ApiKeyScopeInactive => 9001,
             Self::ApiKeyScopeNotFound(_) => 9002,

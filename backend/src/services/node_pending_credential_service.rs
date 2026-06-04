@@ -58,11 +58,40 @@ impl fmt::Debug for StorePendingCiphertextInput {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingCredentialAuditSummary {
+    pub node_id: String,
+    pub pending_credential_id: String,
+    pub service_slug: String,
+    pub owner_user_id: String,
+    pub remote_state: Option<RemoteCryptoState>,
+    pub pending_created_at: DateTime<Utc>,
+    pub pending_expires_at: DateTime<Utc>,
+    pub ciphertext_queued_at: Option<DateTime<Utc>>,
+    pub ciphertext_expires_at: Option<DateTime<Utc>>,
+}
+
+impl PendingCredentialAuditSummary {
+    fn from_pending(pending: &NodePendingCredential) -> Self {
+        Self {
+            node_id: pending.node_id.clone(),
+            pending_credential_id: pending.id.clone(),
+            service_slug: pending.service_slug.clone(),
+            owner_user_id: pending.owner_user_id.clone(),
+            remote_state: pending.remote_state.clone(),
+            pending_created_at: pending.created_at,
+            pending_expires_at: pending.expires_at,
+            ciphertext_queued_at: pending.ciphertext_queued_at,
+            ciphertext_expires_at: pending.ciphertext_expires_at,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub enum StorePendingCiphertextOutcome {
     StoredForOnlineNode(NodePendingCredential),
     QueuedOffline(NodePendingCredential),
-    QueueFull,
+    QueueFull(PendingCredentialAuditSummary),
 }
 
 impl fmt::Debug for StorePendingCiphertextOutcome {
@@ -78,7 +107,11 @@ impl fmt::Debug for StorePendingCiphertextOutcome {
                 .field("pending_id", &pending.id)
                 .field("remote_state", &pending.remote_state)
                 .finish(),
-            Self::QueueFull => f.write_str("QueueFull"),
+            Self::QueueFull(summary) => f
+                .debug_struct("QueueFull")
+                .field("pending_id", &summary.pending_credential_id)
+                .field("remote_state", &summary.remote_state)
+                .finish(),
         }
     }
 }
@@ -267,6 +300,28 @@ pub async fn get_pending_credential_for_admin(
     load_active_unexpired_pending_credential(db, node_id, pending_id, Utc::now()).await
 }
 
+pub async fn get_pending_credential_audit_summary_for_admin(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+    node_id: &str,
+    pending_id: &str,
+) -> AppResult<PendingCredentialAuditSummary> {
+    node_service::ensure_node_writable_by_actor(db, actor_user_id, node_id).await?;
+    let pending =
+        load_active_unexpired_pending_credential(db, node_id, pending_id, Utc::now()).await?;
+    Ok(PendingCredentialAuditSummary::from_pending(&pending))
+}
+
+pub async fn get_pending_credential_audit_summary_for_node(
+    db: &mongodb::Database,
+    node_id: &str,
+    pending_id: &str,
+) -> AppResult<PendingCredentialAuditSummary> {
+    let pending =
+        load_active_unexpired_pending_credential(db, node_id, pending_id, Utc::now()).await?;
+    Ok(PendingCredentialAuditSummary::from_pending(&pending))
+}
+
 pub async fn store_pending_ciphertext_first_writer_wins(
     db: &mongodb::Database,
     actor_user_id: &str,
@@ -299,7 +354,9 @@ pub async fn store_pending_ciphertext_first_writer_wins(
         if active_unexpired_queued_ciphertext_count(db, node_id, now).await?
             >= MAX_OFFLINE_CIPHERTEXT_QUEUE_PER_NODE
         {
-            return Ok(StorePendingCiphertextOutcome::QueueFull);
+            return Ok(StorePendingCiphertextOutcome::QueueFull(
+                PendingCredentialAuditSummary::from_pending(&pending),
+            ));
         }
         RemoteCryptoState::CiphertextQueued
     };
@@ -373,19 +430,32 @@ pub async fn store_pending_ciphertext_first_writer_wins(
     }
 }
 
-#[cfg(test)]
-pub async fn expire_queued_ciphertexts(
+pub async fn expire_queued_ciphertexts_with_summaries(
     db: &mongodb::Database,
     now: DateTime<Utc>,
-) -> AppResult<u64> {
+) -> AppResult<Vec<PendingCredentialAuditSummary>> {
+    let filter = doc! {
+        "is_active": true,
+        "remote_state": "ciphertext_queued",
+        "ciphertext_expires_at": { "$lte": bson::DateTime::from_chrono(now) },
+    };
+    let summaries: Vec<PendingCredentialAuditSummary> = db
+        .collection::<NodePendingCredential>(NODE_PENDING_CREDENTIALS)
+        .find(filter.clone())
+        .await?
+        .try_collect::<Vec<_>>()
+        .await?
+        .iter()
+        .map(PendingCredentialAuditSummary::from_pending)
+        .collect();
+    if summaries.is_empty() {
+        return Ok(Vec::new());
+    }
+
     let result = db
         .collection::<NodePendingCredential>(NODE_PENDING_CREDENTIALS)
         .update_many(
-            doc! {
-                "is_active": true,
-                "remote_state": "ciphertext_queued",
-                "ciphertext_expires_at": { "$lte": bson::DateTime::from_chrono(now) },
-            },
+            filter,
             doc! {
                 "$set": {
                     "remote_state": "expired",
@@ -402,7 +472,8 @@ pub async fn expire_queued_ciphertexts(
         )
         .await?;
 
-    Ok(result.modified_count)
+    let modified_count = result.modified_count as usize;
+    Ok(summaries.into_iter().take(modified_count).collect())
 }
 
 pub async fn mark_pending_ciphertext_queued_after_send_failure(
@@ -1815,7 +1886,15 @@ mod tests {
         .await
         .expect("full offline queue returns a business outcome");
 
-        assert!(matches!(outcome, StorePendingCiphertextOutcome::QueueFull));
+        match outcome {
+            StorePendingCiphertextOutcome::QueueFull(summary) => {
+                assert_eq!(summary.pending_credential_id, pending.id);
+                assert_eq!(summary.node_id, node.id);
+                assert_eq!(summary.service_slug, "service-full");
+                assert_eq!(summary.owner_user_id, actor_id);
+            }
+            other => panic!("expected queue full, got {other:?}"),
+        }
         let stored = load_pending(&db, &pending.id).await;
         assert_eq!(stored.remote_state, Some(RemoteCryptoState::PubkeyPosted));
         assert!(stored.crypto.and_then(|crypto| crypto.ciphertext).is_none());
@@ -1984,7 +2063,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn expire_queued_ciphertexts_marks_expired_and_unsets_ciphertext() {
+    async fn expire_queued_ciphertexts_returns_metadata_only_summaries() {
         let db = test_db("pending_credential_expire_queued").await;
 
         let actor_id = Uuid::new_v4().to_string();
@@ -2015,13 +2094,29 @@ mod tests {
         .await
         .expect("queue ciphertext offline");
 
-        let modified = expire_queued_ciphertexts(
+        let summaries = expire_queued_ciphertexts_with_summaries(
             &db,
             now + Duration::seconds(OFFLINE_CIPHERTEXT_QUEUE_TTL_SECS + 1),
         )
         .await
         .expect("expire queued ciphertexts");
-        assert_eq!(modified, 1);
+        assert_eq!(summaries.len(), 1);
+        let summary = &summaries[0];
+        assert_eq!(summary.pending_credential_id, pending.id);
+        assert_eq!(summary.node_id, node.id);
+        assert_eq!(summary.service_slug, "openclaw");
+        assert_eq!(summary.owner_user_id, actor_id);
+        assert_eq!(
+            summary.remote_state,
+            Some(RemoteCryptoState::CiphertextQueued)
+        );
+        assert!(summary.ciphertext_queued_at.is_some());
+        assert!(summary.ciphertext_expires_at.is_some());
+        let summary_debug = format!("{summary:?}");
+        assert!(!summary_debug.contains("admin-pubkey"));
+        assert!(!summary_debug.contains("nonce"));
+        assert!(!summary_debug.contains("[7, 8, 9]"));
+        assert!(!summary_debug.contains("node-pubkey"));
 
         let stored = load_pending(&db, &pending.id).await;
         assert!(!stored.is_active);
