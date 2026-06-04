@@ -256,6 +256,25 @@ fn audit_event_data_with_owner(
     event_data
 }
 
+fn transfer_audit_event_data(
+    actor_user_id: &str,
+    result: &node_service::TransferNodeResult,
+) -> serde_json::Value {
+    audit_event_data_with_owner(
+        actor_user_id,
+        &result.new_owner_user_id,
+        serde_json::json!({
+            "actor_user_id": actor_user_id,
+            "node_id": &result.node_id,
+            "previous_owner_user_id": &result.previous_owner_user_id,
+            "new_owner_user_id": &result.new_owner_user_id,
+            "deactivated_bindings_count": result.deactivated_bindings_count,
+            "cleared_user_service_count": result.cleared_user_service_count,
+            "deactivated_pending_credentials_count": result.deactivated_pending_credentials_count,
+        }),
+    )
+}
+
 fn pending_credential_info(pending: NodePendingCredential) -> PendingCredentialInfo {
     PendingCredentialInfo {
         id: pending.id,
@@ -392,6 +411,41 @@ fn send_pending_ciphertext_to_node(
     state
         .node_ws_manager
         .send_pending_credential_ciphertext(node_id, &params)
+}
+
+fn pending_ciphertext_state(pending: &NodePendingCredential, fallback: &'static str) -> String {
+    pending
+        .remote_state
+        .as_ref()
+        .map(remote_state_name)
+        .unwrap_or(fallback)
+        .to_string()
+}
+
+fn pending_ciphertext_sent_response(
+    pending: &NodePendingCredential,
+) -> (StatusCode, Json<PendingCredentialCiphertextResponse>) {
+    (
+        StatusCode::ACCEPTED,
+        Json(PendingCredentialCiphertextResponse {
+            delivery_status: "sent".to_string(),
+            remote_state: pending_ciphertext_state(pending, "ciphertext_received"),
+            error_code: None,
+        }),
+    )
+}
+
+fn pending_ciphertext_queued_response(
+    pending: &NodePendingCredential,
+) -> (StatusCode, Json<PendingCredentialCiphertextResponse>) {
+    (
+        StatusCode::ACCEPTED,
+        Json(PendingCredentialCiphertextResponse {
+            delivery_status: "queued".to_string(),
+            remote_state: pending_ciphertext_state(pending, "ciphertext_queued"),
+            error_code: Some(PENDING_CREDENTIAL_NODE_OFFLINE_CODE),
+        }),
+    )
 }
 
 // --- Handlers ---
@@ -687,19 +741,7 @@ pub async fn transfer_node(
         state.db.clone(),
         &auth_user,
         "node_transferred",
-        Some(audit_event_data_with_owner(
-            &user_id_str,
-            &result.new_owner_user_id,
-            serde_json::json!({
-                "actor_user_id": &user_id_str,
-                "node_id": &result.node_id,
-                "previous_owner_user_id": &result.previous_owner_user_id,
-                "new_owner_user_id": &result.new_owner_user_id,
-                "deactivated_bindings_count": result.deactivated_bindings_count,
-                "cleared_user_service_count": result.cleared_user_service_count,
-                "deactivated_pending_credentials_count": result.deactivated_pending_credentials_count,
-            }),
-        )),
+        Some(transfer_audit_event_data(&user_id_str, &result)),
     );
 
     Ok(Json(TransferNodeResponse {
@@ -836,37 +878,12 @@ pub async fn post_pending_credential_ciphertext(
             Err(AppError::PendingCredentialQueueFull(node_id))
         }
         node_pending_credential_service::StorePendingCiphertextOutcome::QueuedOffline(pending) => {
-            let remote_state = pending
-                .remote_state
-                .as_ref()
-                .map(remote_state_name)
-                .unwrap_or("ciphertext_queued")
-                .to_string();
-            Ok((
-                StatusCode::ACCEPTED,
-                Json(PendingCredentialCiphertextResponse {
-                    delivery_status: "queued".to_string(),
-                    remote_state,
-                    error_code: Some(PENDING_CREDENTIAL_NODE_OFFLINE_CODE),
-                }),
-            ))
+            Ok(pending_ciphertext_queued_response(&pending))
         }
         node_pending_credential_service::StorePendingCiphertextOutcome::StoredForOnlineNode(
             pending,
         ) => match send_pending_ciphertext_to_node(&state, &node_id, &pending) {
-            Ok(()) => Ok((
-                StatusCode::ACCEPTED,
-                Json(PendingCredentialCiphertextResponse {
-                    delivery_status: "sent".to_string(),
-                    remote_state: pending
-                        .remote_state
-                        .as_ref()
-                        .map(remote_state_name)
-                        .unwrap_or("ciphertext_received")
-                        .to_string(),
-                    error_code: None,
-                }),
-            )),
+            Ok(()) => Ok(pending_ciphertext_sent_response(&pending)),
             Err(err) => {
                 tracing::warn!(
                     node_id = %node_id,
@@ -882,19 +899,7 @@ pub async fn post_pending_credential_ciphertext(
                         chrono::Utc::now(),
                     )
                     .await?;
-                Ok((
-                    StatusCode::ACCEPTED,
-                    Json(PendingCredentialCiphertextResponse {
-                        delivery_status: "queued".to_string(),
-                        remote_state: queued
-                            .remote_state
-                            .as_ref()
-                            .map(remote_state_name)
-                            .unwrap_or("ciphertext_queued")
-                            .to_string(),
-                        error_code: Some(PENDING_CREDENTIAL_NODE_OFFLINE_CODE),
-                    }),
-                ))
+                Ok(pending_ciphertext_queued_response(&queued))
             }
         },
     }
@@ -2093,6 +2098,42 @@ mod tests {
         assert_eq!(response.deactivated_bindings_count, 1);
         assert_eq!(response.cleared_user_service_count, 1);
 
+        let audit_payload = transfer_audit_event_data(
+            &admin_id,
+            &node_service::TransferNodeResult {
+                node_id: node.id.clone(),
+                previous_owner_user_id: admin_id.clone(),
+                new_owner_user_id: org_id.clone(),
+                deactivated_bindings_count: response.deactivated_bindings_count,
+                cleared_user_service_count: response.cleared_user_service_count,
+                deactivated_pending_credentials_count: 0,
+            },
+        );
+        assert_eq!(
+            audit_payload
+                .get("previous_owner_user_id")
+                .and_then(|value| value.as_str()),
+            Some(admin_id.as_str())
+        );
+        assert_eq!(
+            audit_payload
+                .get("new_owner_user_id")
+                .and_then(|value| value.as_str()),
+            Some(org_id.as_str())
+        );
+        assert_eq!(
+            audit_payload
+                .get("deactivated_bindings_count")
+                .and_then(|value| value.as_u64()),
+            Some(1)
+        );
+        assert_eq!(
+            audit_payload
+                .get("cleared_user_service_count")
+                .and_then(|value| value.as_u64()),
+            Some(1)
+        );
+
         let transferred = db
             .collection::<Node>(NODES)
             .find_one(doc! { "_id": &node.id })
@@ -2482,7 +2523,7 @@ mod tests {
             .expect("insert user services");
 
         let state = test_app_state(db.clone());
-        let _ = transfer_node(
+        let Json(response) = transfer_node(
             State(state),
             test_auth_user(&actor_id),
             Path(node.id.clone()),
@@ -2492,6 +2533,37 @@ mod tests {
         )
         .await
         .expect("transfer succeeds");
+
+        assert_eq!(response.deactivated_bindings_count, 1);
+        let audit_payload = transfer_audit_event_data(
+            &actor_id,
+            &node_service::TransferNodeResult {
+                node_id: node.id.clone(),
+                previous_owner_user_id: actor_id.clone(),
+                new_owner_user_id: org_id.clone(),
+                deactivated_bindings_count: response.deactivated_bindings_count,
+                cleared_user_service_count: response.cleared_user_service_count,
+                deactivated_pending_credentials_count: 0,
+            },
+        );
+        assert_eq!(
+            audit_payload
+                .get("actor_user_id")
+                .and_then(|value| value.as_str()),
+            Some(actor_id.as_str())
+        );
+        assert_eq!(
+            audit_payload
+                .get("owner_user_id")
+                .and_then(|value| value.as_str()),
+            Some(org_id.as_str())
+        );
+        assert_eq!(
+            audit_payload
+                .get("deactivated_bindings_count")
+                .and_then(|value| value.as_u64()),
+            Some(1)
+        );
 
         let cross_owner_routes = db
             .collection::<UserService>(USER_SERVICES)
