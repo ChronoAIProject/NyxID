@@ -458,4 +458,34 @@ describe("CredentialAcceptPage", () => {
     await waitFor(() => expect(screen.getByText(label)).toBeInTheDocument());
     expect(api.post).toHaveBeenCalledTimes(1);
   });
+
+  it("returns to a safe same-origin return_to from the Back button", () => {
+    routerState.search = { return_to: `/nodes/${NODE_ID}` };
+    const assignSpy = vi
+      .spyOn(window.location, "assign")
+      .mockImplementation(() => {});
+    renderPage();
+
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+
+    expect(assignSpy).toHaveBeenCalledWith(`/nodes/${NODE_ID}`);
+    expect(navigateMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects a protocol-relative return_to (open-redirect guard) and navigates in-app", () => {
+    // `//evil.example` passes a naive startsWith("/") check but is off-origin.
+    routerState.search = { return_to: "//evil.example/phish" };
+    const assignSpy = vi
+      .spyOn(window.location, "assign")
+      .mockImplementation(() => {});
+    renderPage();
+
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+
+    expect(assignSpy).not.toHaveBeenCalled();
+    expect(navigateMock).toHaveBeenCalledWith({
+      to: "/nodes/$nodeId",
+      params: { nodeId: NODE_ID },
+    });
+  });
 });
