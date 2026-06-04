@@ -112,6 +112,12 @@ function renderPage() {
   return render(<CredentialAcceptPage />);
 }
 
+async function flushAsyncWork() {
+  for (let index = 0; index < 8; index += 1) {
+    await Promise.resolve();
+  }
+}
+
 function submitSecret(): HTMLInputElement {
   const input = screen.getByLabelText("Credential value") as HTMLInputElement;
   fireEvent.change(input, { target: { value: SECRET } });
@@ -215,6 +221,142 @@ describe("CredentialAcceptPage", () => {
     expect(String(envelope.ciphertext)).not.toContain("=");
     expect(toastSuccess).toHaveBeenCalledWith("Credential accepted");
     expectSecretNotLeaked(input);
+  });
+
+  it("polls queued ciphertext delivery until the credential is stored", async () => {
+    vi.useFakeTimers();
+    let listCalls = 0;
+    api.get.mockImplementation(async (endpoint: string) => {
+      if (endpoint === PUBKEY_ENDPOINT) return pubkeyResponse();
+      if (endpoint === LIST_ENDPOINT) {
+        listCalls += 1;
+        return {
+          pending_credentials: [
+            listCalls < 3
+              ? pendingCredential({ remote_state: "ciphertext_queued" })
+              : pendingCredential({
+                  consumed_at: "2026-01-01T00:00:01Z",
+                  remote_state: "consumed",
+                }),
+          ],
+        };
+      }
+      throw new Error(`Unexpected GET ${endpoint}`);
+    });
+    api.post.mockResolvedValue({
+      delivery_status: "queued",
+      remote_state: "ciphertext_queued",
+    });
+
+    renderPage();
+    let input: HTMLInputElement;
+    await act(async () => {
+      input = submitSecret();
+      await flushAsyncWork();
+    });
+
+    expect(screen.getByText("Waiting for node")).toBeInTheDocument();
+    expect(screen.getByText("queued")).toBeInTheDocument();
+    expect(
+      api.get.mock.calls.filter(([endpoint]) => endpoint === LIST_ENDPOINT),
+    ).toHaveLength(2);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+      await flushAsyncWork();
+    });
+
+    expect(screen.getByText("Stored")).toBeInTheDocument();
+    expect(toastSuccess).toHaveBeenCalledWith("Credential accepted");
+    expect(
+      api.get.mock.calls.filter(([endpoint]) => endpoint === LIST_ENDPOINT),
+    ).toHaveLength(3);
+    expect(
+      api.get.mock.calls
+        .filter(([endpoint]) =>
+          String(endpoint).startsWith(`/nodes/${NODE_ID}`),
+        )
+        .every(
+          ([endpoint]) =>
+            endpoint === PUBKEY_ENDPOINT || endpoint === LIST_ENDPOINT,
+        ),
+    ).toBe(true);
+    expect(api.post).toHaveBeenCalledWith(
+      `/nodes/${NODE_ID}/credentials/pending/${PENDING_ID}/ciphertext`,
+      expect.objectContaining({ version: "v1" }),
+    );
+    expectSecretNotLeaked(input!);
+  });
+
+  it("times out after polling non-terminal pending credential state without leaking the secret", async () => {
+    vi.useFakeTimers();
+    window.history.replaceState(
+      null,
+      "",
+      `/nodes/${NODE_ID}/credentials/pending/${PENDING_ID}/accept?return_to=/nodes/${NODE_ID}`,
+    );
+    routerState.search = { return_to: `/nodes/${NODE_ID}` };
+    let listCalls = 0;
+    api.get.mockImplementation(async (endpoint: string) => {
+      if (endpoint === PUBKEY_ENDPOINT) return pubkeyResponse();
+      if (endpoint === LIST_ENDPOINT) {
+        listCalls += 1;
+        return {
+          pending_credentials: [
+            pendingCredential({ remote_state: "ciphertext_queued" }),
+          ],
+        };
+      }
+      throw new Error(`Unexpected GET ${endpoint}`);
+    });
+    api.post.mockResolvedValue({
+      delivery_status: "queued",
+      remote_state: "ciphertext_queued",
+    });
+
+    renderPage();
+    let input: HTMLInputElement;
+    await act(async () => {
+      input = submitSecret();
+      await flushAsyncWork();
+    });
+
+    expect(screen.getByText("Waiting for node")).toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+      await flushAsyncWork();
+    });
+
+    expect(screen.getByText("Timed out")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "The node did not report completion before the browser stopped waiting.",
+      ),
+    ).toBeInTheDocument();
+    expect(listCalls).toBe(15);
+    expect(
+      api.get.mock.calls.filter(([endpoint]) => endpoint === LIST_ENDPOINT),
+    ).toHaveLength(15);
+    expect(window.location.href).not.toContain(SECRET);
+    expect(window.location.search).not.toContain(SECRET);
+    expect(JSON.stringify(routerState.search)).not.toContain(SECRET);
+    expect(localStorageDump()).not.toContain(SECRET);
+    expect(document.body.textContent ?? "").not.toContain(SECRET);
+    expect(
+      JSON.stringify([
+        ...api.get.mock.calls.map(([endpoint]) => ({ endpoint })),
+        ...api.post.mock.calls.map(([endpoint, body]) => ({ endpoint, body })),
+      ]),
+    ).not.toContain(SECRET);
+    expect(
+      JSON.stringify([
+        ...vi.mocked(console.log).mock.calls,
+        ...vi.mocked(console.warn).mock.calls,
+        ...vi.mocked(console.error).mock.calls,
+      ]),
+    ).not.toContain(SECRET);
+    expectSecretNotLeaked(input!);
   });
 
   it("backs off on 404 and 8009 before posting ciphertext", async () => {
