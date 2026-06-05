@@ -2,6 +2,7 @@ mod codec;
 mod context;
 mod envelope;
 mod error;
+mod fingerprint;
 
 use std::fmt;
 
@@ -17,6 +18,7 @@ pub use codec::{decode_b64u, decode_b64u_array, decode_b64u_capped, encode_b64u}
 pub use context::RciContext;
 pub use envelope::{CiphertextEnvelope, envelope_from_encoded_parts};
 pub use error::{RciCryptoError, Result};
+pub use fingerprint::{rci_pubkey_fingerprint, rci_pubkey_fingerprint_b64u};
 
 pub const VERSION_V1: &str = "v1";
 pub const MAX_CIPHERTEXT_SIZE: usize = 16 * 1024;

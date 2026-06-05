@@ -571,6 +571,10 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
                 .delete(handlers::node_admin::cancel_pending_credential),
         )
         .route(
+            "/{node_id}/credentials/pending/{pending_id}/remote-crypto",
+            post(handlers::node_admin::init_pending_credential_remote_crypto),
+        )
+        .route(
             "/{node_id}/credentials/pending/{pending_id}/ciphertext",
             post(handlers::node_admin::post_pending_credential_ciphertext),
         )

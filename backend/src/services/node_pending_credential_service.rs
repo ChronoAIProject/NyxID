@@ -954,6 +954,77 @@ pub async fn get_pending_credential_for_admin(
     load_active_unexpired_pending_credential(db, node_id, pending_id, Utc::now()).await
 }
 
+pub async fn init_pending_remote_crypto_for_admin(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+    node_id: &str,
+    pending_id: &str,
+) -> AppResult<NodePendingCredential> {
+    node_service::ensure_node_writable_by_actor(db, actor_user_id, node_id).await?;
+    let now = Utc::now();
+    let pending = load_active_unexpired_pending_credential(db, node_id, pending_id, now).await?;
+    if !pending.fan_out_nodes.is_empty() {
+        return Err(AppError::ValidationError(
+            "fan-out pending credential injection is not supported by this command".to_string(),
+        ));
+    }
+    if pending.crypto.is_some() {
+        return Ok(pending);
+    }
+
+    let crypto = bson::to_bson(&CryptoBundle {
+        version: "v1".to_string(),
+        node_pubkey: String::new(),
+        admin_pubkey: None,
+        nonce: None,
+        ciphertext: None,
+    })
+    .map_err(|err| AppError::Internal(format!("crypto metadata serialization failed: {err}")))?;
+
+    let updated = db
+        .collection::<NodePendingCredential>(NODE_PENDING_CREDENTIALS)
+        .find_one_and_update(
+            doc! {
+                "_id": pending_id,
+                "node_id": node_id,
+                "fan_out_nodes.0": { "$exists": false },
+                "is_active": true,
+                "expires_at": { "$gt": bson::DateTime::from_chrono(now) },
+                "$or": [
+                    { "crypto": { "$exists": false } },
+                    { "crypto": Bson::Null },
+                ],
+            },
+            doc! {
+                "$set": {
+                    "crypto": crypto,
+                    "remote_state": remote_state_bson(RemoteCryptoState::PubkeyAwaiting)?,
+                },
+                "$unset": {
+                    "ciphertext_queued_at": "",
+                    "ciphertext_expires_at": "",
+                },
+            },
+        )
+        .return_document(ReturnDocument::After)
+        .await?;
+
+    match updated {
+        Some(updated) => Ok(updated),
+        None => {
+            let current =
+                load_active_unexpired_pending_credential(db, node_id, pending_id, now).await?;
+            if current.crypto.is_some() {
+                Ok(current)
+            } else {
+                Err(AppError::Conflict(
+                    "pending credential could not be initialized for remote crypto".to_string(),
+                ))
+            }
+        }
+    }
+}
+
 pub async fn get_pending_credential_audit_summary_for_admin(
     db: &mongodb::Database,
     actor_user_id: &str,
@@ -2887,6 +2958,44 @@ mod tests {
 
         assert!(pending.crypto.is_none());
         assert!(pending.remote_state.is_none());
+    }
+
+    #[tokio::test]
+    async fn init_pending_remote_crypto_upgrades_legacy_metadata_only() {
+        let db = test_db("pending_credential_init_legacy_remote").await;
+
+        let actor_id = Uuid::new_v4().to_string();
+        insert_users(&db, vec![test_user(&actor_id, UserType::Person)]).await;
+        let node = test_node(&actor_id, "personal-node");
+        insert_node(&db, &node).await;
+
+        let pending =
+            create_pending_credential(&db, &actor_id, &node.id, credential_input("openclaw"))
+                .await
+                .expect("legacy push succeeds");
+        assert!(pending.crypto.is_none());
+        assert!(pending.remote_state.is_none());
+
+        let upgraded = init_pending_remote_crypto_for_admin(&db, &actor_id, &node.id, &pending.id)
+            .await
+            .expect("metadata-only init succeeds");
+
+        let crypto = upgraded.crypto.expect("crypto metadata initialized");
+        assert_eq!(crypto.version, "v1");
+        assert!(crypto.node_pubkey.is_empty());
+        assert!(crypto.admin_pubkey.is_none());
+        assert!(crypto.nonce.is_none());
+        assert!(crypto.ciphertext.is_none());
+        assert_eq!(
+            upgraded.remote_state,
+            Some(RemoteCryptoState::PubkeyAwaiting)
+        );
+
+        let stored = get_pending_credential_for_admin(&db, &actor_id, &node.id, &pending.id)
+            .await
+            .expect("stored pending remains readable");
+        assert!(stored.crypto.is_some());
+        assert_eq!(stored.remote_state, Some(RemoteCryptoState::PubkeyAwaiting));
     }
 
     #[tokio::test]

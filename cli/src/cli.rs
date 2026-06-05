@@ -1524,6 +1524,46 @@ pub enum NodeCredentialAdminCommands {
         #[command(flatten)]
         auth: AuthArgs,
     },
+    /// Inject a pending credential through remote credential encryption
+    Inject {
+        /// Node ID or name
+        node: String,
+        /// Existing pending credential ID to complete
+        #[arg(long)]
+        pending: Option<String>,
+        /// Service slug
+        #[arg(long, required_unless_present = "pending")]
+        slug: Option<String>,
+        /// Injection method
+        #[arg(long, value_enum, required_unless_present = "pending")]
+        injection_method: Option<PendingCredentialInjectionMethod>,
+        /// Header name, query parameter name, or path prefix value
+        #[arg(long, required_unless_present = "pending")]
+        field_name: Option<String>,
+        /// Target URL associated with this credential
+        #[arg(long)]
+        target_url: Option<String>,
+        /// Human-readable label
+        #[arg(long)]
+        label: Option<String>,
+        /// Organization to act on (UUID, slug, or display name)
+        #[arg(long, value_name = "ID|SLUG|NAME")]
+        org: Option<String>,
+        /// Read the secret from this environment variable
+        #[arg(long, conflicts_with = "browser")]
+        secret_env: Option<String>,
+        /// Open the browser accept page; the CLI process never reads the secret
+        #[arg(long)]
+        browser: bool,
+        /// Expected node pubkey fingerprint (bare 32-char lowercase hex)
+        #[arg(long, conflicts_with = "yes")]
+        verify_fingerprint: Option<String>,
+        /// Skip out-of-band pubkey fingerprint confirmation
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
     /// List pending credential pushes for a node
     List {
         /// Node ID or name
@@ -1890,6 +1930,93 @@ mod tests {
             }
             _ => panic!("unexpected parse result"),
         }
+    }
+
+    #[test]
+    fn node_credential_inject_accepts_modes_and_flags() {
+        let cli = Cli::try_parse_from([
+            "nyxid",
+            "node-credential",
+            "inject",
+            "edge-node",
+            "--slug",
+            "openclaw",
+            "--injection-method",
+            "header",
+            "--field-name",
+            "Authorization",
+            "--target-url",
+            "https://gateway.example.com/v1",
+            "--label",
+            "prod",
+            "--org",
+            "chrono-ai",
+            "--secret-env",
+            "OPENCLAW_KEY",
+            "--verify-fingerprint",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ])
+        .expect("node-credential inject should parse");
+
+        match cli.command {
+            Commands::NodeCredential {
+                command:
+                    NodeCredentialAdminCommands::Inject {
+                        node,
+                        pending,
+                        slug,
+                        injection_method,
+                        field_name,
+                        target_url,
+                        label,
+                        org,
+                        secret_env,
+                        browser,
+                        verify_fingerprint,
+                        yes,
+                        ..
+                    },
+            } => {
+                assert_eq!(node, "edge-node");
+                assert!(pending.is_none());
+                assert_eq!(slug.as_deref(), Some("openclaw"));
+                assert_eq!(
+                    injection_method,
+                    Some(PendingCredentialInjectionMethod::Header)
+                );
+                assert_eq!(field_name.as_deref(), Some("Authorization"));
+                assert_eq!(
+                    target_url.as_deref(),
+                    Some("https://gateway.example.com/v1")
+                );
+                assert_eq!(label.as_deref(), Some("prod"));
+                assert_eq!(org.as_deref(), Some("chrono-ai"));
+                assert_eq!(secret_env.as_deref(), Some("OPENCLAW_KEY"));
+                assert!(!browser);
+                assert_eq!(
+                    verify_fingerprint.as_deref(),
+                    Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                );
+                assert!(!yes);
+            }
+            _ => panic!("unexpected parse result"),
+        }
+    }
+
+    #[test]
+    fn inject_requires_node_with_pending() {
+        let err = match Cli::try_parse_from([
+            "nyxid",
+            "node-credential",
+            "inject",
+            "--pending",
+            "pending-1",
+        ]) {
+            Ok(_) => panic!("--pending should still require the node positional"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
     }
 
     #[test]

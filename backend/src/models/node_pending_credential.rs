@@ -43,6 +43,7 @@ impl fmt::Debug for CryptoBundle {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RemoteCryptoState {
+    PubkeyAwaiting,
     PubkeyPosted,
     CiphertextReceived,
     CiphertextQueued,
@@ -233,6 +234,13 @@ mod tests {
         assert_eq!(json, "\"ciphertext_queued\"");
         let restored: RemoteCryptoState = serde_json::from_str(&json).unwrap();
         assert_eq!(restored, RemoteCryptoState::CiphertextQueued);
+
+        let awaiting = serde_json::to_string(&RemoteCryptoState::PubkeyAwaiting).unwrap();
+        assert_eq!(awaiting, "\"pubkey_awaiting\"");
+        assert_eq!(
+            serde_json::from_str::<RemoteCryptoState>(&awaiting).unwrap(),
+            RemoteCryptoState::PubkeyAwaiting
+        );
     }
 
     #[test]

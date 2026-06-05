@@ -569,6 +569,7 @@ pub(crate) fn rci_fan_out_event_data(
 
 fn remote_state_name(state: &RemoteCryptoState) -> &'static str {
     match state {
+        RemoteCryptoState::PubkeyAwaiting => "pubkey_awaiting",
         RemoteCryptoState::PubkeyPosted => "pubkey_posted",
         RemoteCryptoState::CiphertextReceived => "ciphertext_received",
         RemoteCryptoState::CiphertextQueued => "ciphertext_queued",

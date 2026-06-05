@@ -131,6 +131,13 @@ struct PendingCredentialPollCrypto {
     version: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingPubkeyLogMetadata {
+    pending_id: String,
+    service_slug: String,
+    rci_pubkey_fingerprint: String,
+}
+
 /// Compute the WebSocket read-idle timeout from the server-advertised
 /// heartbeat interval. Returns `None` when the server did not advertise an
 /// interval (older backend); in that case the idle watchdog is disabled so
@@ -520,6 +527,14 @@ async fn handle_pending_credentials_available(
     for metadata in crypto_pending {
         match remote_crypto::prepare_pubkey(&mut config, &backend, &metadata) {
             Ok(message) => {
+                if let Some(log) = pending_pubkey_log_metadata(&metadata, &message) {
+                    tracing::info!(
+                        pending_credential_id = %log.pending_id,
+                        service_slug = %log.service_slug,
+                        rci_pubkey_fingerprint = %log.rci_pubkey_fingerprint,
+                        "Prepared pending credential RCI pubkey"
+                    );
+                }
                 config_changed = true;
                 outbound.push(message);
             }
@@ -563,6 +578,26 @@ fn pending_crypto_metadata_from_poll_item(
         target_url: item.target_url.clone(),
         expires_at: expires_at.clone(),
         version: crypto.version.clone(),
+    })
+}
+
+fn pending_pubkey_log_metadata(
+    metadata: &rci_crypto::PendingCredentialCryptoMetadata,
+    message: &rci_crypto::RemoteCredentialCryptoOutbound,
+) -> Option<PendingPubkeyLogMetadata> {
+    let rci_crypto::RemoteCredentialCryptoOutbound::Pubkey {
+        pending_id,
+        node_pubkey,
+        ..
+    } = message
+    else {
+        return None;
+    };
+    let rci_pubkey_fingerprint = nyxid_crypto::rci_pubkey_fingerprint_b64u(node_pubkey).ok()?;
+    Some(PendingPubkeyLogMetadata {
+        pending_id: pending_id.clone(),
+        service_slug: metadata.service_slug.clone(),
+        rci_pubkey_fingerprint,
     })
 }
 
@@ -4451,6 +4486,27 @@ mod tests {
             rci_crypto::RemoteCredentialCryptoOutbound::Pubkey { node_pubkey, .. } => node_pubkey,
             other => panic!("expected pubkey, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn node_agent_logs_same_fingerprint_without_raw_pubkey() {
+        let raw_pubkey = [9_u8; 32];
+        let encoded_pubkey = nyxid_crypto::encode_b64u(&raw_pubkey);
+        let message = rci_crypto::RemoteCredentialCryptoOutbound::Pubkey {
+            pending_id: "pending-1".to_string(),
+            version: nyxid_crypto::VERSION_V1.to_string(),
+            node_pubkey: encoded_pubkey.clone(),
+        };
+
+        let log = pending_pubkey_log_metadata(&rci_metadata("pending-1"), &message)
+            .expect("pubkey log metadata");
+
+        assert_eq!(
+            log.rci_pubkey_fingerprint,
+            nyxid_crypto::rci_pubkey_fingerprint(&raw_pubkey)
+        );
+        assert_eq!(log.rci_pubkey_fingerprint.len(), 32);
+        assert!(!format!("{log:?}").contains(&encoded_pubkey));
     }
 
     fn signed_ssh_tunnel_open_request(
