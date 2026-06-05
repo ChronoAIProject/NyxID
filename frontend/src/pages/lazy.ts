@@ -165,11 +165,6 @@ export const NodeDetailPage = lazy(() =>
     default: m.NodeDetailPage,
   })),
 );
-export const CredentialAcceptPage = lazy(() =>
-  import("@/pages/credential-accept").then((m) => ({
-    default: m.CredentialAcceptPage,
-  })),
-);
 export const AdminNodesPage = lazy(() =>
   import("@/pages/admin-nodes").then((m) => ({
     default: m.AdminNodesPage,

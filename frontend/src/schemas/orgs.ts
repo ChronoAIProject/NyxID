@@ -73,6 +73,7 @@ export const orgResponseSchema = z.object({
    */
   contact_email: z.string().nullable(),
   created_at: z.string(),
+  remote_credential_integrity_verification_opt_out: z.boolean(),
   your_role: orgRoleSchema,
   member_count: z.number().int().nonnegative(),
 });
@@ -180,6 +181,7 @@ export const updateOrgRequestSchema = z.object({
     .email("Contact email must be a valid email")
     .optional()
     .or(z.literal("")),
+  remote_credential_integrity_verification_opt_out: z.boolean().optional(),
 });
 export type UpdateOrgRequest = z.infer<typeof updateOrgRequestSchema>;
 

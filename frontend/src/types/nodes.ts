@@ -121,6 +121,7 @@ export interface NodePendingCredentialPubkeyResponse {
   readonly version: "v1";
   readonly node_pubkey: string;
   readonly remote_state?: NodePendingCredentialRemoteState | null;
+  readonly integrity_verification_opt_out: boolean;
 }
 
 export interface NodePendingCredentialCiphertextResponse {
@@ -164,6 +165,7 @@ export interface FanOutPendingCredentialPubkeysResponse {
   readonly fanout_id: string;
   readonly fan_out_revision: number;
   readonly target_count: number;
+  readonly integrity_verification_opt_out: boolean;
   readonly targets: readonly FanOutPendingCredentialPubkeyTarget[];
 }
 

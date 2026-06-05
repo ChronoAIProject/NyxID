@@ -9,7 +9,6 @@ import {
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/toast";
 import { ChunkErrorBoundary } from "@/components/chunk-error-boundary";
-import { getSafeCredentialAcceptReturnTo } from "@/lib/return-url";
 import { AuthLayout } from "@/components/layout/auth-layout";
 import { DashboardLayout } from "@/components/layout/dashboard-layout";
 import { useAuthStore } from "@/stores/auth-store";
@@ -54,7 +53,6 @@ import {
   ApprovalGrantsPage,
   NodesPage,
   NodeDetailPage,
-  CredentialAcceptPage,
   AdminNodesPage,
   AdminAuditLogPage,
   AdminInviteCodesPage,
@@ -508,32 +506,6 @@ const nodeDetailRoute = createRoute({
   component: NodeDetailPage,
 });
 
-const nodeCredentialAcceptRoute = createRoute({
-  path: "/nodes/$nodeId/credentials/pending/$pendingId/accept",
-  getParentRoute: () => dashboardLayout,
-  validateSearch: (search: Record<string, unknown>): { return_to?: string } => {
-    const returnTo =
-      typeof search.return_to === "string"
-        ? getSafeCredentialAcceptReturnTo(search.return_to)
-        : null;
-    return returnTo ? { return_to: returnTo } : {};
-  },
-  component: CredentialAcceptPage,
-});
-
-const nodeCredentialFanOutAcceptRoute = createRoute({
-  path: "/nodes/credentials/pending/$pendingId/fan-out/accept",
-  getParentRoute: () => dashboardLayout,
-  validateSearch: (search: Record<string, unknown>): { return_to?: string } => {
-    const returnTo =
-      typeof search.return_to === "string"
-        ? getSafeCredentialAcceptReturnTo(search.return_to)
-        : null;
-    return returnTo ? { return_to: returnTo } : {};
-  },
-  component: CredentialAcceptPage,
-});
-
 const keysRoute = createRoute({
   path: "/keys",
   getParentRoute: () => dashboardLayout,
@@ -755,8 +727,6 @@ const routeTree = rootRoute.addChildren([
     apiKeyDetailRoute,
     nodesRoute,
     nodeDetailRoute,
-    nodeCredentialAcceptRoute,
-    nodeCredentialFanOutAcceptRoute,
     channelBotsRoute,
     channelBotDetailRoute,
     channelConversationDetailRoute,

@@ -217,14 +217,74 @@ jobs:
           path: |
             ${{ steps.cargo-dist.outputs.paths }}
             ${{ env.BUILD_MANIFEST_NAME }}
+
+  release-integrity-manifest:
+    name: Release Integrity Manifest
+    needs:
+      - plan
+    runs-on: "ubuntu-24.04"
+    env:
+      RELEASE_INTEGRITY_SIGNING_ENABLED: ${{ vars.RELEASE_INTEGRITY_SIGNING_ENABLED || 'false' }}
+      RELEASE_INTEGRITY_SIGN_CMD: ${{ secrets.RELEASE_INTEGRITY_SIGN_CMD || vars.RELEASE_INTEGRITY_SIGN_CMD }}
+      RELEASE_INTEGRITY_PUBLISH_CMD: ${{ secrets.RELEASE_INTEGRITY_PUBLISH_CMD || vars.RELEASE_INTEGRITY_PUBLISH_CMD }}
+      RELEASE_INTEGRITY_MANIFEST_URL: ${{ vars.RELEASE_INTEGRITY_MANIFEST_URL }}
+      RELEASE_INTEGRITY_SIGNING_KEY: ${{ secrets.RELEASE_INTEGRITY_SIGNING_KEY }}
+      RELEASE_INTEGRITY_PUBLISH_TOKEN: ${{ secrets.RELEASE_INTEGRITY_PUBLISH_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          submodules: recursive
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Build standalone credential accept bundle
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build:credential-accept
+      - name: Upload release integrity manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-integrity-manifest
+          path: frontend/dist/release-integrity/releases.json
+          if-no-files-found: error
+      - name: Sign and publish release integrity manifest
+        shell: bash
+        run: |
+          if [ "${{ needs.plan.outputs.publishing }}" != "true" ]; then
+            echo "::warning::Release integrity signing skipped because this is not a publishing run."
+            exit 0
+          fi
+          if [ "${RELEASE_INTEGRITY_SIGNING_ENABLED:-false}" != "true" ]; then
+            echo "::warning::Release integrity signing disabled; set RELEASE_INTEGRITY_SIGNING_ENABLED=true and provide command env vars to publish a signed manifest."
+            exit 0
+          fi
+
+          missing=()
+          [ -n "${RELEASE_INTEGRITY_SIGN_CMD:-}" ] || missing+=("RELEASE_INTEGRITY_SIGN_CMD")
+          [ -n "${RELEASE_INTEGRITY_PUBLISH_CMD:-}" ] || missing+=("RELEASE_INTEGRITY_PUBLISH_CMD")
+          [ -n "${RELEASE_INTEGRITY_MANIFEST_URL:-}" ] || missing+=("RELEASE_INTEGRITY_MANIFEST_URL")
+          if [ "${#missing[@]}" -gt 0 ]; then
+            printf '::error::Release integrity signing enabled but missing required env: %s\n' "${missing[*]}"
+            exit 1
+          fi
+
+          export RELEASE_INTEGRITY_MANIFEST_PATH="$PWD/frontend/dist/release-integrity/releases.json"
+          bash -c "$RELEASE_INTEGRITY_SIGN_CMD"
+          bash -c "$RELEASE_INTEGRITY_PUBLISH_CMD"
   # Determines if we should publish/announce
   host:
     needs:
       - plan
       - build-local-artifacts
       - build-global-artifacts
+      - release-integrity-manifest
     # Only run if we're "publishing", and only if local and global didn't fail (skipped is fine)
-    if: ${{ always() && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
+    if: ${{ always() && needs.plan.outputs.publishing == 'true' && needs.release-integrity-manifest.result == 'success' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     runs-on: "ubuntu-24.04"

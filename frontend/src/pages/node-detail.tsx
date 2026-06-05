@@ -21,6 +21,7 @@ import {
   type PushNodeCredentialFormInput,
 } from "@/schemas/nodes";
 import { formatDate, formatRelativeTime } from "@/lib/utils";
+import { buildStandaloneCredentialAcceptUrl } from "@/lib/credential-accept-url";
 import { PageHeader } from "@/components/shared/page-header";
 import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
 import { CopyableField } from "@/components/shared/copyable-field";
@@ -202,10 +203,13 @@ export function NodeDetailPage() {
       const created = await pushCredentialMutation.mutateAsync(data);
       toast.success("Credential push created");
       credentialPushForm.reset(NODE_CREDENTIAL_PUSH_DEFAULT_VALUES);
-      void navigate({
-        to: "/nodes/$nodeId/credentials/pending/$pendingId/accept",
-        params: { nodeId, pendingId: created.id },
-      });
+      window.location.assign(
+        await buildStandaloneCredentialAcceptUrl(
+          nodeId,
+          created.id,
+          `/nodes/${nodeId}`,
+        ),
+      );
     } catch (err) {
       toast.error(
         err instanceof ApiError ? err.message : "Failed to push credential",
@@ -665,15 +669,13 @@ export function NodeDetailPage() {
                             <Button
                               variant="ghost"
                               className="text-muted-foreground hover:text-foreground"
-                              onClick={() =>
-                                void navigate({
-                                  to: "/nodes/$nodeId/credentials/pending/$pendingId/accept",
-                                  params: {
-                                    nodeId,
-                                    pendingId: credential.id,
-                                  },
-                                })
-                              }
+                              onClick={() => {
+                                void buildStandaloneCredentialAcceptUrl(
+                                  nodeId,
+                                  credential.id,
+                                  `/nodes/${nodeId}`,
+                                ).then((url) => window.location.assign(url));
+                              }}
                             >
                               Accept
                             </Button>
