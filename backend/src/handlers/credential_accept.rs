@@ -55,9 +55,7 @@ fn script_tag_for_src<'a>(html: &'a str, src: &str) -> Option<&'a str> {
     let mut offset = 0;
     while let Some(start_rel) = html[offset..].find("<script") {
         let start = offset + start_rel;
-        let Some(end_rel) = html[start..].find("</script>") else {
-            return None;
-        };
+        let end_rel = html[start..].find("</script>")?;
         let end = start + end_rel + "</script>".len();
         let tag = &html[start..end];
         if tag.contains(&src_attr) {

@@ -4497,7 +4497,8 @@ mod tests {
         }
 
         let fan_out =
-            insert_fan_out_pending(&db, &owner_id, &[node_id.clone()], "fanout-queued").await;
+            insert_fan_out_pending(&db, &owner_id, std::slice::from_ref(&node_id), "fanout-queued")
+                .await;
         record_fan_out_pubkey(&db, &node_id, &fan_out.id, "v1", "node-pubkey")
             .await
             .expect("record fan-out pubkey");
@@ -4518,7 +4519,8 @@ mod tests {
         );
 
         let blocked =
-            insert_fan_out_pending(&db, &owner_id, &[node_id.clone()], "fanout-blocked").await;
+            insert_fan_out_pending(&db, &owner_id, std::slice::from_ref(&node_id), "fanout-blocked")
+                .await;
         record_fan_out_pubkey(&db, &node_id, &blocked.id, "v1", "node-pubkey")
             .await
             .expect("record blocked pubkey");
@@ -4540,8 +4542,13 @@ mod tests {
         let owner_id = Uuid::new_v4().to_string();
         let node_id = Uuid::new_v4().to_string();
         let pending =
-            insert_fan_out_pending(&db, &owner_id, &[node_id.clone()], "fanout-nested-expiry")
-                .await;
+            insert_fan_out_pending(
+                &db,
+                &owner_id,
+                std::slice::from_ref(&node_id),
+                "fanout-nested-expiry",
+            )
+            .await;
         record_fan_out_pubkey(&db, &node_id, &pending.id, "v1", "node-pubkey")
             .await
             .expect("record pubkey");

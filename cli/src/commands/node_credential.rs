@@ -577,10 +577,9 @@ impl<'a> RciInjectSession<'a> {
                 .pending_credentials
                 .into_iter()
                 .find(|item| item.id == pending_id)
+                .filter(|pending| terminal_state(pending).is_some())
             {
-                if terminal_state(&pending).is_some() {
-                    return Ok(pending);
-                }
+                return Ok(pending);
             }
 
             if start.elapsed() >= self.terminal_timeout {
@@ -1503,6 +1502,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::await_holding_lock)] // env_lock serializes env mutation across single-thread test; held across await by design
     async fn inject_secret_env_reads_from_env() {
         let _guard = crate::test_support::env_lock().lock().unwrap();
         // SAFETY: env mutation is serialized by env_lock and this test runs on one thread.
@@ -1581,6 +1581,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::await_holding_lock)] // env_lock serializes env mutation across single-thread test; held across await by design
     async fn inject_org_flag_resolves_correctly() {
         let _guard = crate::test_support::env_lock().lock().unwrap();
         // SAFETY: env mutation is serialized by env_lock and this test runs on one thread.
@@ -1663,6 +1664,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::await_holding_lock)] // env_lock serializes env mutation across single-thread test; held across await by design
     async fn inject_browser_wizard_opens_url_and_polls() {
         let _guard = crate::test_support::env_lock().lock().unwrap();
         // SAFETY: env mutation is serialized by env_lock and this test runs on one thread.
@@ -1719,6 +1721,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::await_holding_lock)] // env_lock serializes env mutation across single-thread test; held across await by design
     async fn inject_browser_wizard_secret_not_in_terminal() {
         let _guard = crate::test_support::env_lock().lock().unwrap();
         // SAFETY: env mutation is serialized by env_lock and this test runs on one thread.
