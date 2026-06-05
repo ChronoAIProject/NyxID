@@ -2997,6 +2997,9 @@ pub enum ExternalKeyCommands {
         /// `google-bigquery`. Repeatable.
         #[arg(long = "service", value_name = "SLUG")]
         services: Vec<String>,
+        /// Create this credential under the given org (you must be an admin).
+        #[arg(long, value_name = "ID|SLUG|NAME")]
+        org: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
     },

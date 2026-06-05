@@ -5750,6 +5750,7 @@ mod proxy_resolution_integration_tests {
         ApprovalMode, COLLECTION_NAME as SERVICE_APPROVAL_CONFIGS, ServiceApprovalConfig,
     };
     use crate::models::user::{COLLECTION_NAME as USERS, UserType};
+    use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
     use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
     use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
     use crate::mw::auth::{AuthMethod, AuthUser};
@@ -5760,7 +5761,7 @@ mod proxy_resolution_integration_tests {
     };
     use axum::{
         Router,
-        body::Body,
+        body::{Body, to_bytes},
         extract::{Path, State},
         http::{Method, Request, StatusCode, Uri},
         response::{IntoResponse, Response},
@@ -5776,6 +5777,14 @@ mod proxy_resolution_integration_tests {
         (StatusCode::OK, format!("ok:{}", uri.path()))
     }
 
+    async fn downstream_auth_header(headers: axum::http::HeaderMap) -> (StatusCode, String) {
+        let auth = headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("");
+        (StatusCode::OK, format!("auth:{auth}"))
+    }
+
     async fn start_downstream() -> (String, tokio::task::JoinHandle<()>) {
         let app = Router::new().route("/{*path}", get(downstream_ok));
         let listener = TcpListener::bind("127.0.0.1:0")
@@ -5786,6 +5795,20 @@ mod proxy_resolution_integration_tests {
             axum::serve(listener, app)
                 .await
                 .expect("serve downstream test app");
+        });
+        (format!("http://{addr}"), server)
+    }
+
+    async fn start_auth_downstream() -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new().route("/{*path}", get(downstream_auth_header));
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind downstream auth test listener");
+        let addr = listener.local_addr().expect("downstream listener addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve downstream auth test app");
         });
         (format!("http://{addr}"), server)
     }
@@ -6014,6 +6037,32 @@ mod proxy_resolution_integration_tests {
         wait_for_node_audit_event(db, node_id, "proxy_request").await
     }
 
+    async fn find_org_routing_audit(
+        db: &mongodb::Database,
+        org_id: &str,
+        member_id: &str,
+        user_service_id: &str,
+    ) -> Option<AuditLog> {
+        for _ in 0..100 {
+            let found = db
+                .collection::<AuditLog>(AUDIT_LOG)
+                .find_one(doc! {
+                    "event_type": "proxy_routed_via_org",
+                    "event_data.routed_via": "org",
+                    "event_data.org_user_id": org_id,
+                    "event_data.member_user_id": member_id,
+                    "event_data.user_service_id": user_service_id,
+                })
+                .await
+                .expect("query org routing audit");
+            if found.is_some() {
+                return found;
+            }
+            tokio::task::yield_now().await;
+        }
+        None
+    }
+
     fn spawn_ws_open_responder(
         state: &AppState,
         node_id: &str,
@@ -6195,6 +6244,112 @@ mod proxy_resolution_integration_tests {
             data.get("owner_user_id").and_then(|v| v.as_str()),
             Some(org_id.as_str())
         );
+    }
+
+    #[tokio::test]
+    async fn org_member_proxy_uses_bound_org_gcp_service_account_credential() {
+        let Some(db) = connect_test_database("proxy_org_member_gcp_sa").await else {
+            eprintln!("skipping proxy integration test: no local MongoDB available");
+            return;
+        };
+
+        let (base_url, server) = start_auth_downstream().await;
+        let org_id = Uuid::new_v4().to_string();
+        let member_id = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_many([
+                test_user(&org_id, UserType::Org),
+                test_user(&member_id, UserType::Person),
+            ])
+            .await
+            .unwrap();
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(&org_id, &member_id, OrgRole::Member, None))
+            .await
+            .unwrap();
+
+        let state = test_app_state(db.clone());
+        let credential_key = state
+            .encryption_keys
+            .encrypt(br#"{"type":"service_account","private_key":"redacted"}"#)
+            .await
+            .expect("encrypt service-account JSON");
+        let access_token = state
+            .encryption_keys
+            .encrypt(b"ya29.bound-org-sa")
+            .await
+            .expect("encrypt cached GCP access token");
+        let api_key_id = Uuid::new_v4().to_string();
+        let now = Utc::now();
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .insert_one(UserApiKey {
+                id: api_key_id.clone(),
+                user_id: org_id.clone(),
+                label: "Org GCP SA".to_string(),
+                credential_type: "gcp_service_account".to_string(),
+                credential_encrypted: Some(credential_key),
+                access_token_encrypted: Some(access_token),
+                refresh_token_encrypted: None,
+                token_scopes: Some("https://www.googleapis.com/auth/cloud-platform".to_string()),
+                expires_at: Some(now + chrono::Duration::hours(1)),
+                provider_config_id: None,
+                connection_id: None,
+                user_oauth_client_id_encrypted: None,
+                user_oauth_client_secret_encrypted: None,
+                status: "active".to_string(),
+                last_used_at: None,
+                error_message: None,
+                source: Some("user_created".to_string()),
+                source_id: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .expect("insert org GCP SA key");
+
+        let mut service =
+            insert_user_service(&db, &org_id, "org-gcp-billing", &base_url, None).await;
+        service.api_key_id = Some(api_key_id);
+        service.auth_method = "bearer".to_string();
+        db.collection::<UserService>(USER_SERVICES)
+            .replace_one(doc! { "_id": &service.id }, service.clone())
+            .await
+            .expect("bind org service to GCP SA key");
+
+        let mut resolved_slug = String::new();
+        let response = proxy_request_by_slug_inner(
+            &state,
+            &access_token_auth(&member_id),
+            &service.slug,
+            "v1/billingAccounts",
+            proxy_request("/proxy/s/org-gcp-billing/v1/billingAccounts"),
+            &mut resolved_slug,
+        )
+        .await
+        .expect("org member should proxy through bound org GCP SA credential");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(resolved_slug, service.slug);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(
+            std::str::from_utf8(&body).unwrap(),
+            "auth:Bearer ya29.bound-org-sa"
+        );
+
+        let audit = find_org_routing_audit(&db, &org_id, &member_id, &service.id)
+            .await
+            .expect("org routing audit should be written");
+        let data = audit.event_data.expect("event data");
+        assert_eq!(data.get("routed_via").and_then(|v| v.as_str()), Some("org"));
+        assert_eq!(
+            data.get("org_user_id").and_then(|v| v.as_str()),
+            Some(org_id.as_str())
+        );
+        assert_eq!(
+            data.get("member_user_id").and_then(|v| v.as_str()),
+            Some(member_id.as_str())
+        );
+        server.abort();
     }
 
     #[tokio::test]

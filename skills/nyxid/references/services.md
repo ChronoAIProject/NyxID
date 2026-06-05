@@ -334,6 +334,12 @@ nyxid external-key add-gcp-service-account \
   --service google-bigquery \
   --service google-cloud-billing
 
+# Org-owned Cloud APIs: admin creates/binds the service-account credential
+# under the org owner, and members proxy through the resulting org service.
+nyxid external-key add-gcp-service-account --org acme-corp \
+  --key-file ~/Downloads/nyxid-cost-reader.json \
+  --service google-bigquery
+
 # Optional: narrow the minted scope (default cloud-platform). IAM roles on
 # the service account are the real authorization boundary -- the scope only
 # has to be broad enough to reach the API.
@@ -349,6 +355,9 @@ time. The key's `token_uri` is pinned to Google's endpoint server-side
 (SSRF guard). The `--service` slugs must already exist (add them with the
 `--oauth` commands below, or any add that creates the UserService); the
 flag re-points them onto the service account and sets `auth_method=bearer`.
+With `--org <ID|SLUG|NAME>`, the caller must be an org admin, the credential
+is stored with `user_id = <org_user_id>`, and `--service` resolves active
+service slugs under that same org owner. Omit `--org` for the personal path.
 
 The user-OAuth flow below still applies to **non-Cloud** Google APIs, or
 to operators who accept the ~16h re-login cadence.

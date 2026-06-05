@@ -87,9 +87,20 @@ nyxid node credentials setup --service llm-openai
 nyxid service add-ssh --label prod-bastion --host bastion.acme.internal \
   --via-node acme-shared-node --cert-auth --principals ubuntu \
   --org acme-corp
+
+# Shared Google Cloud service-account credential for unattended Cloud APIs.
+# First create the org-owned api-google-cloud services/slugs, then bind the
+# service-account key to those org-owned service slugs.
+nyxid service add api-google-cloud --org acme-corp \
+  --endpoint-url https://bigquery.googleapis.com --slug google-bigquery
+nyxid external-key add-gcp-service-account --org acme-corp \
+  --key-file ~/Downloads/acme-cost-reader.json \
+  --service google-bigquery
 ```
 
 The backend enforces that the caller is an admin of the target org before writing the row (returns `8103 org_role_insufficient` otherwise). Creating or updating an org-owned service respects the admin's **effective** scope (per-member override if set, otherwise the role's default) just like the proxy path — a scoped admin cannot reach a service outside their effective allow-list.
+
+Org-owned GCP service-account credentials follow the same owner-create rule as `nyxid service add --org`: the encrypted `UserApiKey` is written with `user_id = <org_user_id>`, and any `--service` rebind looks up active service slugs under that org owner. `--org` requires org admin access; members and viewers receive `8103 org_role_insufficient`. Scoped admins may create an unbound org credential or bind any active org-owned slug during this create flow, matching `/keys target_org_id` create semantics.
 
 Org-owned SSH services inherit the org's approval policy via `authorize_ssh_access`, so SSH access requests pass through the same per-org approval gate as HTTP proxy calls.
 
