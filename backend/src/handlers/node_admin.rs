@@ -239,6 +239,8 @@ pub struct PendingCredentialInfo {
     pub consumed_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub declined_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_state: Option<String>,
     pub is_active: bool,
 }
 
@@ -386,6 +388,7 @@ fn transfer_audit_event_data(
 }
 
 fn pending_credential_info(pending: NodePendingCredential) -> PendingCredentialInfo {
+    let remote_state = pending_remote_state(&pending);
     PendingCredentialInfo {
         id: pending.id,
         node_id: pending.node_id,
@@ -400,12 +403,14 @@ fn pending_credential_info(pending: NodePendingCredential) -> PendingCredentialI
         expires_at: pending.expires_at.to_rfc3339(),
         consumed_at: pending.consumed_at.map(|dt| dt.to_rfc3339()),
         declined_at: pending.declined_at.map(|dt| dt.to_rfc3339()),
+        remote_state,
         is_active: pending.is_active,
     }
 }
 
 fn remote_state_name(state: &RemoteCryptoState) -> &'static str {
     match state {
+        RemoteCryptoState::PubkeyAwaiting => "pubkey_awaiting",
         RemoteCryptoState::PubkeyPosted => "pubkey_posted",
         RemoteCryptoState::CiphertextReceived => "ciphertext_received",
         RemoteCryptoState::CiphertextQueued => "ciphertext_queued",
@@ -1487,6 +1492,37 @@ pub async fn get_pending_credential_pubkey(
     .await?;
 
     Ok(Json(pending_pubkey_response(pending, opt_out)?))
+}
+
+/// POST /api/v1/nodes/{node_id}/credentials/pending/{pending_id}/remote-crypto
+pub async fn init_pending_credential_remote_crypto(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path((node_id, pending_id)): Path<(String, String)>,
+) -> AppResult<Json<PendingCredentialInfo>> {
+    let user_id_str = auth_user.user_id.to_string();
+    let pending = node_pending_credential_service::init_pending_remote_crypto_for_admin(
+        &state.db,
+        &user_id_str,
+        &node_id,
+        &pending_id,
+    )
+    .await?;
+
+    if state.node_ws_manager.is_connected(&node_id)
+        && let Err(err) = state
+            .node_ws_manager
+            .send_pending_credentials_available(&node_id)
+    {
+        tracing::warn!(
+            node_id = %node_id,
+            pending_id = %pending_id,
+            error = %err,
+            "Failed to nudge node about pending remote crypto initialization"
+        );
+    }
+
+    Ok(Json(pending_credential_info(pending)))
 }
 
 /// POST /api/v1/nodes/{node_id}/credentials/pending/{pending_id}/ciphertext
@@ -2635,6 +2671,78 @@ mod tests {
         assert!(body.get("admin_pubkey").is_none());
         assert!(body.get("nonce").is_none());
         assert!(body.get("ciphertext").is_none());
+    }
+
+    #[tokio::test]
+    async fn route_post_pending_remote_crypto_initializes_metadata_and_nudges_connected_node() {
+        let db = test_db("pending_route_init_remote_crypto").await;
+        let actor_id = Uuid::new_v4().to_string();
+        insert_users(&db, vec![test_user(&actor_id, UserType::Person)]).await;
+        let node = test_node(&actor_id, "init-remote-node");
+        insert_node(&db, &node).await;
+        let pending = node_pending_credential_service::create_pending_credential(
+            &db,
+            &actor_id,
+            &node.id,
+            node_pending_credential_service::CreatePendingCredentialInput {
+                service_slug: "openclaw".to_string(),
+                injection_method: crate::models::node_pending_credential::InjectionMethod::Header,
+                field_name: "X-API-Key".to_string(),
+                target_url: None,
+                label: Some("Production".to_string()),
+                ttl_secs: 86_400,
+                remote_crypto: false,
+            },
+        )
+        .await
+        .expect("create legacy pending credential");
+        assert!(pending.crypto.is_none());
+        assert!(pending.remote_state.is_none());
+
+        let state = test_app_state(db.clone());
+        let (tx, mut rx) = mpsc::channel(1);
+        state.node_ws_manager.register_connection(&node.id, tx);
+        let token = access_token(&state, &actor_id);
+        let app = api_app(state);
+
+        let (status, body) = route_json(
+            app,
+            Method::POST,
+            format!(
+                "/api/v1/nodes/{}/credentials/pending/{}/remote-crypto",
+                node.id, pending.id
+            ),
+            &token,
+            None,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["id"], pending.id);
+        assert_eq!(body["node_id"], node.id);
+        assert_eq!(body["service_slug"], "openclaw");
+        assert_eq!(body["remote_state"], "pubkey_awaiting");
+        assert_eq!(body["is_active"], true);
+
+        let stored = load_pending(&db, &pending.id).await;
+        assert_eq!(stored.remote_state, Some(RemoteCryptoState::PubkeyAwaiting));
+        assert!(stored.ciphertext_queued_at.is_none());
+        assert!(stored.ciphertext_expires_at.is_none());
+        let crypto = stored.crypto.as_ref().expect("crypto metadata");
+        assert_eq!(crypto.version, "v1");
+        assert!(crypto.node_pubkey.is_empty());
+        assert!(crypto.admin_pubkey.is_none());
+        assert!(crypto.nonce.is_none());
+        assert!(crypto.ciphertext.is_none());
+
+        let NodeOutboundMessage::Text(frame) = rx.try_recv().expect("nudge frame") else {
+            panic!("expected text outbound frame");
+        };
+        let frame: Value = serde_json::from_str(&frame).expect("frame json");
+        assert_eq!(
+            frame,
+            serde_json::json!({ "type": "pending_credentials_available" })
+        );
     }
 
     #[tokio::test]
@@ -5607,6 +5715,7 @@ mod tests {
             expires_at: "2025-01-01T01:00:00+00:00".to_string(),
             consumed_at: None,
             declined_at: None,
+            remote_state: None,
             is_active: true,
         };
         let json = serde_json::to_value(&info).unwrap();
@@ -5638,6 +5747,7 @@ mod tests {
             expires_at: "2025-01-01T01:00:00+00:00".to_string(),
             consumed_at: Some("2025-01-01T00:30:00+00:00".to_string()),
             declined_at: None,
+            remote_state: Some("consumed".to_string()),
             is_active: false,
         };
         let json = serde_json::to_value(&info).unwrap();
@@ -5645,6 +5755,7 @@ mod tests {
         assert_eq!(json["target_url"], "https://api.anthropic.com");
         assert_eq!(json["label"], "Production");
         assert_eq!(json["consumed_at"], "2025-01-01T00:30:00+00:00");
+        assert_eq!(json["remote_state"], "consumed");
         assert_eq!(json["is_active"], false);
         assert!(json.get("declined_at").is_none());
     }
@@ -5693,6 +5804,47 @@ mod tests {
         assert!(info.consumed_at.is_none());
         assert!(info.declined_at.is_some());
         assert!(!info.is_active);
+    }
+
+    #[test]
+    fn pending_credential_info_includes_remote_state_metadata_only() {
+        let now = Utc::now();
+        let model = crate::models::node_pending_credential::NodePendingCredential {
+            id: "pc-map-state".to_string(),
+            node_id: "node-map-state".to_string(),
+            service_slug: "openclaw".to_string(),
+            injection_method: crate::models::node_pending_credential::InjectionMethod::Header,
+            field_name: "X-API-Key".to_string(),
+            target_url: None,
+            label: None,
+            created_by_user_id: "creator-1".to_string(),
+            owner_user_id: "owner-1".to_string(),
+            created_at: now,
+            expires_at: now + chrono::Duration::hours(1),
+            consumed_at: None,
+            declined_at: None,
+            crypto: Some(crate::models::node_pending_credential::CryptoBundle {
+                version: "v1".to_string(),
+                node_pubkey: "raw-node-pubkey".to_string(),
+                admin_pubkey: Some("raw-admin-pubkey".to_string()),
+                nonce: Some("raw-nonce".to_string()),
+                ciphertext: Some(vec![1, 2, 3]),
+            }),
+            remote_state: Some(RemoteCryptoState::PubkeyAwaiting),
+            ciphertext_queued_at: None,
+            ciphertext_expires_at: None,
+            is_active: true,
+            fan_out_nodes: Vec::new(),
+            fan_out_revision: 0,
+        };
+
+        let json = serde_json::to_value(pending_credential_info(model)).unwrap();
+
+        assert_eq!(json["remote_state"], "pubkey_awaiting");
+        let body = json.to_string();
+        assert!(!body.contains("raw-node-pubkey"));
+        assert!(!body.contains("raw-admin-pubkey"));
+        assert!(!body.contains("raw-nonce"));
     }
 
     // --- Serialization tests: MyBoundServicesResponse ---
