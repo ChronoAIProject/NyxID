@@ -54,14 +54,23 @@ pub async fn run(command: NodeCredentialAdminCommands) -> Result<()> {
                     eprintln!("  field name: {field}");
                     eprintln!();
                     eprintln!(
-                        "The VM operator must SSH to the node-agent machine and run `nyxid node credentials pending`, then `nyxid node credentials accept {slug}`."
+                        "Remote injection can complete this pending credential without sending the secret value to NyxID."
+                    );
+                    eprintln!(
+                        "Legacy node-side path: SSH to the node-agent machine and run `nyxid node credentials pending`, then `nyxid node credentials accept {slug}`."
                     );
                     eprintln!(
                         "`nyxid node credentials` is node-side only; it is not available on the user-side CLI."
                     );
-                    eprintln!("Do not send the secret value; it is entered on the VM.");
+                    eprintln!(
+                        "push sends only credential metadata; the secret is not sent to NyxID."
+                    );
                     eprintln!();
-                    for line in push_continuation_lines(api.base_url_root(), &node_id, pending_id) {
+                    for line in RciCliHintLines::push_continuation_lines(
+                        api.base_url_root(),
+                        &node_id,
+                        pending_id,
+                    ) {
                         eprintln!("{line}");
                     }
                 }
@@ -457,6 +466,12 @@ impl<'a> RciInjectSession<'a> {
         let url = pending_accept_url(self.api.base_url_root(), &self.node_id, &pending.id);
         eprintln!("Open this credential injection page:");
         eprintln!("  {url}");
+        eprintln!(
+            "Security: standalone accept-page release-integrity is detection-only and does not prevent T1 node pubkey substitution."
+        );
+        eprintln!(
+            "Security: org policy remote_credential_integrity_verification_opt_out skips or relaxes that integrity verification."
+        );
         if std::env::var_os("NYXID_WIZARD_NO_OPEN").is_none() {
             if let Err(error) = crate::browser::open_browser(&url) {
                 eprintln!("Could not open browser automatically: {error}");
@@ -497,7 +512,7 @@ impl<'a> RciInjectSession<'a> {
 
         if is_terminal_remote_state(&response.remote_state) {
             if let Some(code) = response.error_code {
-                eprintln!("Backend delivery error code: {code}");
+                print_delivery_error_code(code);
             }
             return Ok(RciInjectOutcome {
                 pending_id: pending.id,
@@ -509,7 +524,7 @@ impl<'a> RciInjectSession<'a> {
 
         let completed = self.poll_terminal_state(&pending.id).await?;
         if let Some(code) = response.error_code {
-            eprintln!("Backend delivery error code: {code}");
+            print_delivery_error_code(code);
         }
         Ok(RciInjectOutcome {
             pending_id: pending.id,
@@ -588,15 +603,17 @@ impl<'a> RciInjectSession<'a> {
                         "Node pubkey fingerprint mismatch: expected {expected}, got {fingerprint}"
                     );
                 }
+                eprintln!("Node pubkey fingerprint matched --verify-fingerprint.");
             }
             RciFingerprintPolicy::SkipWithYes => {
                 eprintln!("Node pubkey fingerprint: {fingerprint}");
                 eprintln!(
-                    "Skipping out-of-band fingerprint confirmation because --yes was passed."
+                    "Skipping out-of-band fingerprint confirmation because --yes was passed; T1 data-substitution is not checked."
                 );
             }
             RciFingerprintPolicy::ConfirmPrompt => {
                 eprintln!("Node pubkey fingerprint: {fingerprint}");
+                eprintln!("Compare this with the node-agent console fingerprint out-of-band.");
                 eprint!("Confirm this fingerprint matches the node console? [y/N] ");
                 std::io::stderr().flush()?;
                 let mut answer = String::new();
@@ -761,18 +778,75 @@ fn pending_accept_url(base_url_root: &str, node_id: &str, pending_id: &str) -> S
     )
 }
 
-fn push_continuation_lines(base_url_root: &str, node_id: &str, pending_id: &str) -> Vec<String> {
-    vec![
-        "Continuation options:".to_string(),
-        format!(
-            "  Browser: {}",
-            pending_accept_url(base_url_root, node_id, pending_id)
-        ),
-        format!("  CLI: nyxid node-credential inject {node_id} --pending {pending_id}"),
-        format!(
-            "  CLI browser: nyxid node-credential inject {node_id} --pending {pending_id} --browser"
-        ),
-    ]
+pub(crate) struct RciCliHintLines;
+
+impl RciCliHintLines {
+    pub(crate) fn rci_service_hint_lines(node_id: Option<&str>, slug: &str) -> Vec<String> {
+        let node_arg = node_id
+            .filter(|value| !value.is_empty())
+            .unwrap_or("<node-id>");
+        vec![
+            "Remote credential injection (secret is not sent to NyxID):".to_string(),
+            format!(
+                "Create metadata: nyxid node-credential push {node_arg} --slug {slug} --injection-method <header|query-param|path-prefix> --field-name <name> [--target-url <url>] [--label <label>]"
+            ),
+            format!(
+                "Complete pending: nyxid node-credential inject {node_arg} --pending <pending-id> [--browser | --secret-env VAR] [--verify-fingerprint <32 lowercase hex> | --yes] [--org <ID|SLUG|NAME>]"
+            ),
+            format!(
+                "One-step create+inject: nyxid node-credential inject {node_arg} --slug {slug} --injection-method <header|query-param|path-prefix> --field-name <name> [--target-url <url>] [--label <label>] [--browser | --secret-env VAR] [--verify-fingerprint <32 lowercase hex> | --yes] [--org <ID|SLUG|NAME>]"
+            ),
+            "Security: CLI injection avoids browser-JS code substitution, but NyxID still relays the node pubkey.".to_string(),
+            "Security: compare the node-agent console fingerprint out-of-band with --verify-fingerprint <32 lowercase hex>; --yes skips that check.".to_string(),
+            "Security: standalone accept-page release-integrity is detection-only and does not prevent T1 pubkey substitution.".to_string(),
+            "Security: org policy remote_credential_integrity_verification_opt_out skips or relaxes that integrity verification.".to_string(),
+        ]
+    }
+
+    pub(crate) fn push_continuation_lines(
+        base_url_root: &str,
+        node_id: &str,
+        pending_id: &str,
+    ) -> Vec<String> {
+        vec![
+            "Continuation options:".to_string(),
+            format!(
+                "  Standalone accept page: {}",
+                pending_accept_url(base_url_root, node_id, pending_id)
+            ),
+            format!(
+                "  CLI: nyxid node-credential inject {node_id} --pending {pending_id} [--browser | --secret-env VAR] [--verify-fingerprint <32 lowercase hex> | --yes] [--org <ID|SLUG|NAME>]"
+            ),
+            format!(
+                "  CLI browser: nyxid node-credential inject {node_id} --pending {pending_id} --browser [--verify-fingerprint <32 lowercase hex> | --yes] [--org <ID|SLUG|NAME>]"
+            ),
+            "  push sends only credential metadata; the secret is not sent to NyxID.".to_string(),
+            "  CLI injection avoids browser-JS code substitution, but NyxID still relays the node pubkey.".to_string(),
+            "  Compare the node-agent console fingerprint out-of-band with --verify-fingerprint <32 lowercase hex>; --yes skips that check.".to_string(),
+            "  Standalone accept-page release-integrity is detection-only and does not prevent T1 pubkey substitution.".to_string(),
+            "  Org policy remote_credential_integrity_verification_opt_out skips or relaxes that integrity verification.".to_string(),
+        ]
+    }
+
+    pub(crate) fn rci_delivery_error_hint(code: u32) -> Option<&'static str> {
+        match code {
+            8006 => Some("decrypt failed/AAD verify failed"),
+            8007 => Some("version unsupported (protocol drift)"),
+            8008 => Some("ciphertext too large"),
+            8009 => Some("pubkey awaiting"),
+            8010 => Some("node offline; ciphertext queued"),
+            8011 => Some("queue full"),
+            _ => None,
+        }
+    }
+}
+
+fn print_delivery_error_code(code: u32) {
+    if let Some(hint) = RciCliHintLines::rci_delivery_error_hint(code) {
+        eprintln!("Backend delivery error code: {code} ({hint})");
+    } else {
+        eprintln!("Backend delivery error code: {code}");
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -850,9 +924,9 @@ fn format_age(created_at: &str) -> String {
 mod tests {
     use super::{
         InjectMetadata, PendingCredentialInfoCli, PendingCredentialPubkeyResponseCli,
-        RciFingerprintPolicy, RciInjectMode, RciInjectSession, RciSecretSource,
+        RciCliHintLines, RciFingerprintPolicy, RciInjectMode, RciInjectSession, RciSecretSource,
         encrypt_pending_secret_for_node, format_age, normalize_fingerprint_input,
-        pending_accept_url, push_continuation_lines, validate_pubkey_response_matches_pending,
+        pending_accept_url, validate_pubkey_response_matches_pending,
     };
     use crate::api::ApiClient;
     use crate::cli::{NodeCredentialAdminCommands, OutputFormat, PendingCredentialInjectionMethod};
@@ -1207,7 +1281,11 @@ mod tests {
 
     #[test]
     fn push_fallback_prints_all_three_paths() {
-        let lines = push_continuation_lines("https://nyxid.example", "node-1", "pending-1");
+        let lines = RciCliHintLines::push_continuation_lines(
+            "https://nyxid.example",
+            "node-1",
+            "pending-1",
+        );
         let rendered = lines.join("\n");
 
         assert!(rendered.contains("Continuation options:"));
@@ -1220,6 +1298,36 @@ mod tests {
         assert!(
             rendered.contains("nyxid node-credential inject node-1 --pending pending-1 --browser")
         );
+        assert!(rendered.contains("--secret-env VAR"));
+        assert!(rendered.contains("--verify-fingerprint <32 lowercase hex>"));
+        assert!(rendered.contains("push sends only credential metadata"));
+        assert!(rendered.contains("the secret is not sent to NyxID"));
+    }
+
+    #[test]
+    fn rci_delivery_error_hints_cover_reserved_codes() {
+        let cases = [
+            (8006, ["decrypt", "AAD verify failed"]),
+            (8007, ["version unsupported", "protocol drift"]),
+            (8008, ["ciphertext too large", "ciphertext too large"]),
+            (8009, ["pubkey awaiting", "pubkey awaiting"]),
+            (8010, ["node offline", "ciphertext queued"]),
+            (8011, ["queue full", "queue full"]),
+        ];
+
+        let mut rendered = String::new();
+        for (code, expected) in cases {
+            let hint =
+                RciCliHintLines::rci_delivery_error_hint(code).expect("reserved code has hint");
+            assert!(hint.contains(expected[0]), "hint {code}: {hint}");
+            assert!(hint.contains(expected[1]), "hint {code}: {hint}");
+            rendered.push_str(hint);
+            rendered.push('\n');
+        }
+
+        assert!(RciCliHintLines::rci_delivery_error_hint(8005).is_none());
+        assert!(RciCliHintLines::rci_delivery_error_hint(8012).is_none());
+        assert!(!rendered.contains("pending_credential_integrity_failed"));
     }
 
     #[test]
