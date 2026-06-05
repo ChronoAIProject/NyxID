@@ -125,7 +125,7 @@ const ciphertextEnvelopeSchema = z
     }
   });
 
-const integrityVerificationSchema = z.discriminatedUnion("mode", [
+export const integrityVerificationSchema = z.discriminatedUnion("mode", [
   z.object({
     mode: z.literal("admin_verified"),
     fingerprint_sha384_hex: z.string().regex(/^[0-9a-f]{96}$/),

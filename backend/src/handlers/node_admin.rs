@@ -20,8 +20,10 @@ use crate::models::node::NodeMetadata;
 use crate::models::node_pending_credential::{
     FanOutNodeState, InjectionMethod, NodePendingCredential, RemoteCryptoState,
 };
-use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::AuthUser;
+use crate::services::node_pending_credential_service::{
+    IntegrityVerificationAudit, PendingCredentialIntegrityVerificationRequest,
+};
 use crate::services::{
     audit_service, node_pending_credential_service, node_routing_service, node_service,
     org_service,
@@ -106,29 +108,6 @@ pub struct PendingCredentialFanOutCiphertextRequest {
     pub items: Vec<PendingCredentialFanOutCiphertextItemRequest>,
     #[serde(default)]
     pub integrity_verification: Option<PendingCredentialIntegrityVerificationRequest>,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-#[serde(tag = "mode", rename_all = "snake_case")]
-pub enum PendingCredentialIntegrityVerificationRequest {
-    AdminVerified {
-        fingerprint_sha384_hex: Option<String>,
-        verified_at: Option<String>,
-        manifest_url_configured: bool,
-    },
-    OrgPolicyOptOut {
-        fingerprint_sha384_hex: Option<String>,
-        verified_at: Option<String>,
-        manifest_url_configured: bool,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct IntegrityVerificationAudit {
-    mode: &'static str,
-    fingerprint_sha384_prefix: Option<String>,
-    verified_at: Option<String>,
-    manifest_url_configured: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -658,124 +637,6 @@ fn validate_fan_out_ciphertext_request(
             online_node_ids: HashSet::new(),
         },
     )
-}
-
-async fn owner_integrity_verification_opt_out(
-    db: &mongodb::Database,
-    owner_user_id: &str,
-) -> AppResult<bool> {
-    let user = db
-        .collection::<User>(USERS)
-        .find_one(doc! { "_id": owner_user_id })
-        .await?;
-    Ok(user
-        .as_ref()
-        .map(org_service::remote_credential_integrity_verification_opt_out)
-        .unwrap_or(false))
-}
-
-fn validate_integrity_verification(
-    config: &crate::config::AppConfig,
-    effective_org_opt_out: bool,
-    request: Option<&PendingCredentialIntegrityVerificationRequest>,
-    now: chrono::DateTime<chrono::Utc>,
-) -> AppResult<IntegrityVerificationAudit> {
-    let manifest_configured = config
-        .release_integrity_manifest_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .is_some();
-
-    let Some(request) = request else {
-        if effective_org_opt_out {
-            return Ok(IntegrityVerificationAudit {
-                mode: "org_policy_opt_out",
-                fingerprint_sha384_prefix: None,
-                verified_at: None,
-                manifest_url_configured: manifest_configured,
-            });
-        }
-        return Err(AppError::ValidationError(
-            "integrity_verification is required for remote credential ciphertext submission"
-                .to_string(),
-        ));
-    };
-
-    match request {
-        PendingCredentialIntegrityVerificationRequest::AdminVerified {
-            fingerprint_sha384_hex,
-            verified_at,
-            manifest_url_configured,
-        } => {
-            if !manifest_configured || !manifest_url_configured {
-                return Err(AppError::ValidationError(
-                    "release integrity manifest URL is not configured".to_string(),
-                ));
-            }
-            let fingerprint = fingerprint_sha384_hex.as_deref().ok_or_else(|| {
-                AppError::ValidationError("fingerprint_sha384_hex is required".to_string())
-            })?;
-            if !is_sha384_hex(fingerprint) {
-                return Err(AppError::ValidationError(
-                    "fingerprint_sha384_hex must be 96 lowercase hex characters".to_string(),
-                ));
-            }
-            let verified_at_raw = verified_at
-                .as_deref()
-                .ok_or_else(|| AppError::ValidationError("verified_at is required".to_string()))?;
-            let verified_at = chrono::DateTime::parse_from_rfc3339(verified_at_raw)
-                .map_err(|_| AppError::ValidationError("verified_at must be RFC3339".to_string()))?
-                .with_timezone(&chrono::Utc);
-            if verified_at > now {
-                return Err(AppError::ValidationError(
-                    "verified_at must not be in the future".to_string(),
-                ));
-            }
-            if now.signed_duration_since(verified_at).num_seconds()
-                > config.jwt_relay_reply_ttl_secs
-            {
-                return Err(AppError::ValidationError(
-                    "integrity verification has expired".to_string(),
-                ));
-            }
-            Ok(IntegrityVerificationAudit {
-                mode: "admin_verified",
-                fingerprint_sha384_prefix: Some(fingerprint[..12].to_string()),
-                verified_at: Some(verified_at.to_rfc3339()),
-                manifest_url_configured: true,
-            })
-        }
-        PendingCredentialIntegrityVerificationRequest::OrgPolicyOptOut {
-            fingerprint_sha384_hex,
-            verified_at,
-            manifest_url_configured,
-        } => {
-            if !effective_org_opt_out {
-                return Err(AppError::ValidationError(
-                    "org policy has not opted out of release integrity verification".to_string(),
-                ));
-            }
-            if fingerprint_sha384_hex.is_some() || verified_at.is_some() {
-                return Err(AppError::ValidationError(
-                    "org_policy_opt_out integrity verification must not include fingerprint or verified_at".to_string(),
-                ));
-            }
-            Ok(IntegrityVerificationAudit {
-                mode: "org_policy_opt_out",
-                fingerprint_sha384_prefix: None,
-                verified_at: None,
-                manifest_url_configured: *manifest_url_configured,
-            })
-        }
-    }
-}
-
-fn is_sha384_hex(value: &str) -> bool {
-    value.len() == 96
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn send_pending_ciphertext_to_node(
@@ -1427,7 +1288,11 @@ pub async fn get_fan_out_pending_credential_pubkeys(
         &fanout_id,
     )
     .await?;
-    let opt_out = owner_integrity_verification_opt_out(&state.db, &pending.owner_user_id).await?;
+    let opt_out = node_pending_credential_service::owner_integrity_verification_opt_out(
+        &state.db,
+        &pending.owner_user_id,
+    )
+    .await?;
 
     Ok(Json(fan_out_pubkeys_response(pending, opt_out)))
 }
@@ -1449,11 +1314,17 @@ pub async fn post_fan_out_pending_credential_ciphertexts(
             &fanout_id,
         )
         .await?;
-    let opt_out =
-        owner_integrity_verification_opt_out(&state.db, &pending_for_policy.owner_user_id).await?;
     let now = chrono::Utc::now();
     let integrity_audit =
-        validate_integrity_verification(&state.config, opt_out, integrity_request.as_ref(), now)?;
+        node_pending_credential_service::validate_integrity_verification_for_owner(
+            &state.db,
+            &pending_for_policy.owner_user_id,
+            state.config.release_integrity_manifest_url.as_deref(),
+            state.config.jwt_relay_reply_ttl_secs,
+            integrity_request.as_ref(),
+            now,
+        )
+        .await?;
     input.online_node_ids = input
         .items
         .iter()
@@ -1609,7 +1480,11 @@ pub async fn get_pending_credential_pubkey(
         &pending_id,
     )
     .await?;
-    let opt_out = owner_integrity_verification_opt_out(&state.db, &pending.owner_user_id).await?;
+    let opt_out = node_pending_credential_service::owner_integrity_verification_opt_out(
+        &state.db,
+        &pending.owner_user_id,
+    )
+    .await?;
 
     Ok(Json(pending_pubkey_response(pending, opt_out)?))
 }
@@ -1645,15 +1520,17 @@ pub async fn post_pending_credential_ciphertext(
             ));
         }
     };
-    let opt_out =
-        owner_integrity_verification_opt_out(&state.db, &subject_summary.owner_user_id).await?;
     let now = chrono::Utc::now();
-    let integrity_audit = validate_integrity_verification(
-        &state.config,
-        opt_out,
-        body.integrity_verification.as_ref(),
-        now,
-    )?;
+    let integrity_audit =
+        node_pending_credential_service::validate_integrity_verification_for_owner(
+            &state.db,
+            &subject_summary.owner_user_id,
+            state.config.release_integrity_manifest_url.as_deref(),
+            state.config.jwt_relay_reply_ttl_secs,
+            body.integrity_verification.as_ref(),
+            now,
+        )
+        .await?;
     let node_can_receive_now = state.node_ws_manager.is_connected(&node_id)
         && state
             .node_ws_manager

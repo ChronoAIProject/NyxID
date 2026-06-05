@@ -4,12 +4,21 @@ import {
   type RuntimeConfig,
 } from "@/schemas/runtime-config";
 
-function safeRelativeReturnTo(returnTo: string): string {
-  const url = new URL(returnTo, window.location.origin);
-  if (url.origin !== window.location.origin) {
-    return "/nodes";
+const DEFAULT_RETURN_TO = "/nodes";
+
+export function safeRelativeReturnTo(returnTo: string): string {
+  if (!returnTo || returnTo.length > 2048 || returnTo.includes("\\")) {
+    return DEFAULT_RETURN_TO;
   }
-  return `${url.pathname}${url.search}${url.hash}`;
+  try {
+    const url = new URL(returnTo, window.location.origin);
+    if (url.origin !== window.location.origin) {
+      return DEFAULT_RETURN_TO;
+    }
+    return `${url.pathname}${url.search}${url.hash}`;
+  } catch {
+    return DEFAULT_RETURN_TO;
+  }
 }
 
 async function fetchRuntimeConfig(): Promise<RuntimeConfig> {

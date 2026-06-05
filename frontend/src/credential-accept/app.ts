@@ -5,6 +5,10 @@ import {
   pathFromSameOriginScriptUrl,
   type CredentialAcceptScriptBytes,
 } from "@/lib/release-integrity/manifest";
+import {
+  runtimeConfigSchema,
+  type RuntimeConfig,
+} from "@/schemas/runtime-config";
 import type { CiphertextEnvelope } from "@/lib/crypto";
 import type {
   FanOutPendingCredentialCiphertextResponse,
@@ -37,15 +41,6 @@ type AcceptStatus =
   | "timeout"
   | "legacy_fallback"
   | "error";
-
-interface RuntimeConfig {
-  readonly api_base_url: string;
-  readonly release_integrity: {
-    readonly enabled: boolean;
-    readonly manifest_url: string | null;
-    readonly verification_ttl_secs: number;
-  };
-}
 
 interface PendingCredentialListResponse {
   readonly pending_credentials: readonly PendingCredentialWithState[];
@@ -112,6 +107,13 @@ interface PageState {
     | null;
   ciphertextResponse: NodePendingCredentialCiphertextResponse | null;
   retryPlaintext: Uint8Array | null;
+}
+
+interface FanOutCiphertextFlowInput {
+  readonly route: RouteInfo;
+  readonly pending: () => Promise<FanOutPendingCredentialResponse> | FanOutPendingCredentialResponse;
+  readonly targetNodeIds: ReadonlySet<string> | null;
+  readonly integrityVerification: IntegrityVerification;
 }
 
 class ApiError extends Error {
@@ -207,6 +209,12 @@ function clearRetryPlaintext(state: PageState): void {
 function retainRetryPlaintext(state: PageState, plaintext: Uint8Array): void {
   clearRetryPlaintext(state);
   state.retryPlaintext = plaintext.slice();
+}
+
+function retainFanOutPlaintextForRetry(state: PageState, plaintext: Uint8Array): void {
+  if (state.retryPlaintext !== plaintext) {
+    retainRetryPlaintext(state, plaintext);
+  }
 }
 
 function failedFanOutTargetIds(
@@ -410,7 +418,7 @@ function createIntegrityVerification(state: PageState, deps: CredentialAcceptDep
 }
 
 async function fetchRuntimeConfig(deps: CredentialAcceptDeps): Promise<RuntimeConfig> {
-  return apiFetch<RuntimeConfig>(deps, "/runtime-config");
+  return runtimeConfigSchema.parse(await apiFetch<unknown>(deps, "/runtime-config"));
 }
 
 async function fetchPubkeyWithBackoff(
@@ -588,6 +596,79 @@ async function pollFanOutTerminalState(
     attempt += 1;
   }
   return null;
+}
+
+async function waitForFanOutPubkeys(
+  deps: CredentialAcceptDeps,
+  route: RouteInfo,
+  targetNodeIds: ReadonlySet<string> | null,
+): Promise<FanOutPendingCredentialPubkeysResponse | null> {
+  return targetNodeIds
+    ? fetchFanOutPubkeysForTargetsWithBackoff(deps, route, targetNodeIds)
+    : fetchFanOutPubkeysWithBackoff(deps, route);
+}
+
+async function runFanOutCiphertextFlow(
+  root: HTMLElement,
+  state: PageState,
+  deps: CredentialAcceptDeps,
+  plaintext: Uint8Array,
+  input: FanOutCiphertextFlowInput,
+): Promise<void> {
+  state.status = "waiting_pubkey";
+  render(root, state, deps);
+  const [pending, pubkeys] = await Promise.all([
+    input.pending(),
+    waitForFanOutPubkeys(deps, input.route, input.targetNodeIds),
+  ]);
+  if (!pubkeys) {
+    state.status = "legacy_fallback";
+    return;
+  }
+
+  state.status = "encrypting";
+  render(root, state, deps);
+  const items = encryptedFanOutItems(
+    plaintext,
+    pending,
+    pubkeys,
+    input.targetNodeIds,
+  );
+
+  state.status = "posting";
+  render(root, state, deps);
+  const postResult = await postJson<FanOutPendingCredentialCiphertextResponse>(
+    deps,
+    `/nodes/credentials/pending/${encodeURIComponent(input.route.pendingId)}/fan-out/ciphertexts`,
+    {
+      fan_out_revision: pubkeys.fan_out_revision,
+      integrity_verification: input.integrityVerification,
+      items,
+    },
+  );
+  state.fanOutResponse = postResult;
+  const directTerminal = statusFromRemoteState(postResult.remote_state);
+  if (directTerminal) {
+    state.status = directTerminal;
+    if (directTerminal === "partial_decrypted") {
+      retainFanOutPlaintextForRetry(state, plaintext);
+    }
+    return;
+  }
+
+  state.status = "polling";
+  render(root, state, deps);
+  const terminalPending = await pollFanOutTerminalState(deps, input.route);
+  if (!terminalPending) {
+    state.status = "timeout";
+    return;
+  }
+  state.fanOutResponse = terminalPending;
+  state.status =
+    statusFromRemoteState(terminalPending.remote_state ?? "ciphertext_received") ?? "timeout";
+  if (state.status === "partial_decrypted") {
+    retainFanOutPlaintextForRetry(state, plaintext);
+  }
 }
 
 function render(root: HTMLElement, state: PageState, deps: CredentialAcceptDeps): void {
@@ -815,59 +896,19 @@ async function submitCredential(
   state.busy = true;
   try {
     const integrity_verification = createIntegrityVerification(state, deps);
-    state.status = "waiting_pubkey";
-    render(root, state, deps);
 
     if (state.route.fanOut) {
-      const [pending, pubkeys] = await Promise.all([
-        fetchFanOutStatus(deps, state.route),
-        fetchFanOutPubkeysWithBackoff(deps, state.route),
-      ]);
-      if (!pubkeys) {
-        state.status = "legacy_fallback";
-        return;
-      }
-
-      state.status = "encrypting";
-      render(root, state, deps);
-      const items = encryptedFanOutItems(plaintext, pending, pubkeys, null);
-
-      state.status = "posting";
-      render(root, state, deps);
-      const postResult = await postJson<FanOutPendingCredentialCiphertextResponse>(
-        deps,
-        `/nodes/credentials/pending/${encodeURIComponent(state.route.pendingId)}/fan-out/ciphertexts`,
-        {
-          fan_out_revision: pubkeys.fan_out_revision,
-          integrity_verification,
-          items,
-        },
-      );
-      state.fanOutResponse = postResult;
-      const directTerminal = statusFromRemoteState(postResult.remote_state);
-      if (directTerminal) {
-        state.status = directTerminal;
-        if (directTerminal === "partial_decrypted") {
-          retainRetryPlaintext(state, plaintext);
-        }
-        return;
-      }
-      state.status = "polling";
-      render(root, state, deps);
-      const terminalPending = await pollFanOutTerminalState(deps, state.route);
-      if (!terminalPending) {
-        state.status = "timeout";
-        return;
-      }
-      state.fanOutResponse = terminalPending;
-      state.status =
-        statusFromRemoteState(terminalPending.remote_state ?? "ciphertext_received") ?? "timeout";
-      if (state.status === "partial_decrypted") {
-        retainRetryPlaintext(state, plaintext);
-      }
+      await runFanOutCiphertextFlow(root, state, deps, plaintext, {
+        route: state.route,
+        pending: () => fetchFanOutStatus(deps, state.route),
+        targetNodeIds: null,
+        integrityVerification: integrity_verification,
+      });
       return;
     }
 
+    state.status = "waiting_pubkey";
+    render(root, state, deps);
     const pubkey = await fetchPubkeyWithBackoff(deps, state.route);
     if (!pubkey) {
       state.status = "legacy_fallback";
@@ -972,51 +1013,12 @@ async function retryFailedFanOutNodes(
     );
     state.fanOutResponse = retry;
 
-    state.status = "waiting_pubkey";
-    render(root, state, deps);
-    const pubkeys = await fetchFanOutPubkeysForTargetsWithBackoff(
-      deps,
-      retryRoute,
-      retryTargetIds,
-    );
-    if (!pubkeys) {
-      state.status = "legacy_fallback";
-      clearRetryPlaintext(state);
-      return;
-    }
-
-    state.status = "encrypting";
-    render(root, state, deps);
-    const items = encryptedFanOutItems(plaintext, retry, pubkeys, retryTargetIds);
-
-    state.status = "posting";
-    render(root, state, deps);
-    const postResult = await postJson<FanOutPendingCredentialCiphertextResponse>(
-      deps,
-      `/nodes/credentials/pending/${encodeURIComponent(fanOutResponse.fanout_id)}/fan-out/ciphertexts`,
-      {
-        fan_out_revision: pubkeys.fan_out_revision,
-        integrity_verification,
-        items,
-      },
-    );
-    state.fanOutResponse = postResult;
-    const directTerminal = statusFromRemoteState(postResult.remote_state);
-    if (directTerminal) {
-      state.status = directTerminal;
-      return;
-    }
-
-    state.status = "polling";
-    render(root, state, deps);
-    const terminalPending = await pollFanOutTerminalState(deps, retryRoute);
-    if (!terminalPending) {
-      state.status = "timeout";
-      return;
-    }
-    state.fanOutResponse = terminalPending;
-    state.status =
-      statusFromRemoteState(terminalPending.remote_state ?? "ciphertext_received") ?? "timeout";
+    await runFanOutCiphertextFlow(root, state, deps, plaintext, {
+      route: retryRoute,
+      pending: () => retry,
+      targetNodeIds: retryTargetIds,
+      integrityVerification: integrity_verification,
+    });
   } catch (err) {
     state.status = "error";
     state.errorMessage =

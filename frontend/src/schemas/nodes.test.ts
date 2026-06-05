@@ -6,12 +6,18 @@ import {
   nodePendingCredentialInjectionMethodSchema,
   pushNodeCredentialSchema,
   pushNodeCredentialFanOutSchema,
+  integrityVerificationSchema,
+  pendingCredentialCiphertextRequestSchema,
   fanOutCiphertextsSchema,
   MAX_FAN_OUT_CIPHERTEXT_TOTAL_SIZE,
   acceptNodeCredentialSecretSchema,
   MAX_REMOTE_CREDENTIAL_PLAINTEXT_SIZE,
 } from "./nodes";
 import { encodeBase64UrlNoPad, MAX_CIPHERTEXT_SIZE } from "@/lib/crypto";
+
+function b64(len: number): string {
+  return encodeBase64UrlNoPad(new Uint8Array(len));
+}
 
 describe("createRegistrationTokenSchema", () => {
   it("accepts a valid lowercase-hyphen name with no owner", () => {
@@ -154,11 +160,121 @@ describe("acceptNodeCredentialSecretSchema", () => {
   });
 });
 
-describe("fanOutCiphertextsSchema", () => {
-  function b64(len: number): string {
-    return encodeBase64UrlNoPad(new Uint8Array(len));
-  }
+describe("integrityVerificationSchema", () => {
+  const adminVerified = {
+    mode: "admin_verified" as const,
+    fingerprint_sha384_hex: "a".repeat(96),
+    verified_at: "2026-06-05T00:00:00.000Z",
+    manifest_url_configured: true,
+  };
 
+  const orgPolicyOptOut = {
+    mode: "org_policy_opt_out" as const,
+    fingerprint_sha384_hex: null,
+    verified_at: null,
+    manifest_url_configured: false,
+  };
+
+  it("accepts admin verification metadata", () => {
+    expect(integrityVerificationSchema.safeParse(adminVerified).success).toBe(
+      true,
+    );
+  });
+
+  it("accepts org policy opt-out metadata", () => {
+    expect(integrityVerificationSchema.safeParse(orgPolicyOptOut).success).toBe(
+      true,
+    );
+  });
+
+  it("rejects bad modes and missing required fields", () => {
+    expect(
+      integrityVerificationSchema.safeParse({
+        ...adminVerified,
+        mode: "manual",
+      }).success,
+    ).toBe(false);
+    expect(
+      integrityVerificationSchema.safeParse({
+        ...adminVerified,
+        fingerprint_sha384_hex: undefined,
+      }).success,
+    ).toBe(false);
+    expect(
+      integrityVerificationSchema.safeParse({
+        ...adminVerified,
+        verified_at: undefined,
+      }).success,
+    ).toBe(false);
+    expect(
+      integrityVerificationSchema.safeParse({
+        ...adminVerified,
+        manifest_url_configured: false,
+      }).success,
+    ).toBe(false);
+  });
+
+  it("rejects oversized or invalid fingerprints", () => {
+    expect(
+      integrityVerificationSchema.safeParse({
+        ...adminVerified,
+        fingerprint_sha384_hex: "a".repeat(97),
+      }).success,
+    ).toBe(false);
+    expect(
+      integrityVerificationSchema.safeParse({
+        ...adminVerified,
+        fingerprint_sha384_hex: "A".repeat(96),
+      }).success,
+    ).toBe(false);
+  });
+
+  it("rejects org opt-out metadata with admin verification fields", () => {
+    expect(
+      integrityVerificationSchema.safeParse({
+        ...orgPolicyOptOut,
+        fingerprint_sha384_hex: "a".repeat(96),
+      }).success,
+    ).toBe(false);
+    expect(
+      integrityVerificationSchema.safeParse({
+        ...orgPolicyOptOut,
+        verified_at: "2026-06-05T00:00:00.000Z",
+      }).success,
+    ).toBe(false);
+  });
+});
+
+describe("pendingCredentialCiphertextRequestSchema", () => {
+  const envelope = {
+    version: "v1" as const,
+    admin_pubkey: b64(32),
+    nonce: b64(24),
+    ciphertext: b64(32),
+  };
+
+  it("accepts ciphertext requests without integrity verification", () => {
+    expect(
+      pendingCredentialCiphertextRequestSchema.safeParse(envelope).success,
+    ).toBe(true);
+  });
+
+  it("accepts ciphertext requests with integrity verification", () => {
+    expect(
+      pendingCredentialCiphertextRequestSchema.safeParse({
+        ...envelope,
+        integrity_verification: {
+          mode: "admin_verified",
+          fingerprint_sha384_hex: "a".repeat(96),
+          verified_at: "2026-06-05T00:00:00.000Z",
+          manifest_url_configured: true,
+        },
+      }).success,
+    ).toBe(true);
+  });
+});
+
+describe("fanOutCiphertextsSchema", () => {
   const item = {
     node_id: "node-1",
     generation: 0,
@@ -173,6 +289,21 @@ describe("fanOutCiphertextsSchema", () => {
       fanOutCiphertextsSchema.safeParse({
         fan_out_revision: 1,
         items: [item],
+      }).success,
+    ).toBe(true);
+  });
+
+  it("accepts fan-out integrity verification metadata", () => {
+    expect(
+      fanOutCiphertextsSchema.safeParse({
+        fan_out_revision: 1,
+        items: [item],
+        integrity_verification: {
+          mode: "org_policy_opt_out",
+          fingerprint_sha384_hex: null,
+          verified_at: null,
+          manifest_url_configured: false,
+        },
       }).success,
     ).toBe(true);
   });

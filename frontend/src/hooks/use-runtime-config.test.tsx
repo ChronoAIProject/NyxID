@@ -54,6 +54,11 @@ describe("useRuntimeConfig", () => {
     expect(mockGet).toHaveBeenCalledWith("/runtime-config");
     expect(result.current.data).toEqual({
       api_base_url: "https://nyx-api.chrono-ai.fun",
+      release_integrity: {
+        enabled: true,
+        manifest_url: "https://release.example.test/releases.json",
+        verification_ttl_secs: 1800,
+      },
     });
   });
 });
