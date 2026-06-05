@@ -1,9 +1,12 @@
 import { useNavigate, useParams } from "@tanstack/react-router";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { useForm } from "react-hook-form";
 import {
   useService,
   useDeleteService,
   useTestSshConnection,
 } from "@/hooks/use-services";
+import { usePushNodeCredential } from "@/hooks/use-nodes";
 import {
   isOidcService,
   isConnectable,
@@ -34,6 +37,7 @@ import { useDeveloperApps } from "@/hooks/use-developer-apps";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button, ButtonIcon } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { ApiError } from "@/lib/api-client";
@@ -43,6 +47,7 @@ import {
   Terminal,
   Router,
   ExternalLink,
+  Send,
 } from "lucide-react";
 import {
   Card,
@@ -51,6 +56,27 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  pushNodeCredentialSchema,
+  type PushNodeCredentialFormData,
+  type PushNodeCredentialFormInput,
+} from "@/schemas/nodes";
+import {
+  Form,
+  FormControl,
+  FormField,
+  FormItem,
+  FormLabel,
+  FormMessage,
+} from "@/components/ui/form";
+import type { NodePendingCredentialInjectionMethod } from "@/types/nodes";
 import { toast } from "sonner";
 
 const PROPAGATION_MODE_LABELS: Readonly<Record<string, string>> = {
@@ -113,7 +139,11 @@ export function ServiceDetailPage() {
       <div className="space-y-8">
         <PageHeader title="Service Not Found" />
         <ErrorBanner
-          message={error instanceof ApiError ? error.message : "The service you are looking for does not exist or has been deleted."}
+          message={
+            error instanceof ApiError
+              ? error.message
+              : "The service you are looking for does not exist or has been deleted."
+          }
           onRetry={refetch}
         />
       </div>
@@ -153,7 +183,9 @@ export function ServiceDetailPage() {
                   })
                 }
               >
-                <ButtonIcon><Terminal className="h-3 w-3" /></ButtonIcon>
+                <ButtonIcon>
+                  <Terminal className="h-3 w-3" />
+                </ButtonIcon>
                 Terminal
               </Button>
             )}
@@ -167,7 +199,9 @@ export function ServiceDetailPage() {
                 })
               }
             >
-              <ButtonIcon><Pencil className="h-3 w-3" /></ButtonIcon>
+              <ButtonIcon>
+                <Pencil className="h-3 w-3" />
+              </ButtonIcon>
               Edit
             </Button>
             <Button
@@ -175,7 +209,9 @@ export function ServiceDetailPage() {
               onClick={() => void handleDelete()}
               isLoading={deleteMutation.isPending}
             >
-              <ButtonIcon variant="destructive"><Trash2 className="h-3 w-3 text-destructive" /></ButtonIcon>
+              <ButtonIcon variant="destructive">
+                <Trash2 className="h-3 w-3 text-destructive" />
+              </ButtonIcon>
               Delete
             </Button>
           </>
@@ -211,28 +247,27 @@ export function ServiceDetailPage() {
             service.visibility === "private" ? "secondary" : "secondary"
           }
         />
-        {service.developer_app_ids &&
-          service.developer_app_ids.length > 0 && (
-            <div className="space-y-1 py-2">
-              <p className="text-[12px] text-muted-foreground">
-                Developer App Scoping
-              </p>
-              <div className="flex flex-wrap gap-1.5">
-                {service.developer_app_ids.map((appId) => {
-                  const app = appsData?.clients?.find((c) => c.id === appId);
-                  return (
-                    <Badge key={appId} variant="secondary">
-                      {app?.client_name ?? appId}
-                    </Badge>
-                  );
-                })}
-              </div>
-              <p className="text-xs text-muted-foreground">
-                Users who consent to these apps will have this service
-                auto-provisioned.
-              </p>
+        {service.developer_app_ids && service.developer_app_ids.length > 0 && (
+          <div className="space-y-1 py-2">
+            <p className="text-[12px] text-muted-foreground">
+              Developer App Scoping
+            </p>
+            <div className="flex flex-wrap gap-1.5">
+              {service.developer_app_ids.map((appId) => {
+                const app = appsData?.clients?.find((c) => c.id === appId);
+                return (
+                  <Badge key={appId} variant="secondary">
+                    {app?.client_name ?? appId}
+                  </Badge>
+                );
+              })}
             </div>
-          )}
+            <p className="text-xs text-muted-foreground">
+              Users who consent to these apps will have this service
+              auto-provisioned.
+            </p>
+          </div>
+        )}
         {!isSshService && (
           <>
             <DetailRow label="Base URL" value={service.base_url} copyable />
@@ -269,6 +304,13 @@ export function ServiceDetailPage() {
           })
         }
       />
+
+      {!isSshService && service.your_binding_count === 1 && service.node_id && (
+        <>
+          <Separator />
+          <ServiceCredentialPushSection service={service} />
+        </>
+      )}
 
       {isSshService ? (
         <>
@@ -476,8 +518,10 @@ export function ServiceDetailPage() {
             service.examples_url ||
             service.auth_notes ||
             service.known_limitations ||
-            (service.required_permissions && service.required_permissions.length > 0) ||
-            (service.recommended_skills && service.recommended_skills.length > 0) ||
+            (service.required_permissions &&
+              service.required_permissions.length > 0) ||
+            (service.recommended_skills &&
+              service.recommended_skills.length > 0) ||
             service.capabilities) && (
             <>
               <Separator />
@@ -600,6 +644,193 @@ export function ServiceDetailPage() {
   );
 }
 
+function injectionMethodForService(
+  service: Pick<
+    import("@/types/api").DownstreamService,
+    "auth_method" | "auth_type"
+  >,
+): NodePendingCredentialInjectionMethod {
+  if (service.auth_method === "query" || service.auth_type === "query") {
+    return "query-param";
+  }
+  if (
+    service.auth_method === "path" ||
+    service.auth_method === "path-prefix" ||
+    service.auth_type === "path"
+  ) {
+    return "path-prefix";
+  }
+  return "header";
+}
+
+function defaultFieldName(
+  method: NodePendingCredentialInjectionMethod,
+  authKeyName: string | null | undefined,
+): string {
+  if (authKeyName?.trim()) return authKeyName;
+  if (method === "query-param") return "api_key";
+  if (method === "path-prefix") return "api";
+  return "Authorization";
+}
+
+function ServiceCredentialPushSection({
+  service,
+}: {
+  readonly service: import("@/types/api").DownstreamService;
+}) {
+  const navigate = useNavigate();
+  const nodeId = service.node_id ?? "";
+  const pushCredentialMutation = usePushNodeCredential(nodeId);
+  const initialMethod = injectionMethodForService(service);
+  const form = useForm<
+    PushNodeCredentialFormInput,
+    unknown,
+    PushNodeCredentialFormData
+  >({
+    resolver: zodResolver(pushNodeCredentialSchema),
+    defaultValues: {
+      service_slug: service.slug,
+      injection_method: initialMethod,
+      field_name: defaultFieldName(initialMethod, service.auth_key_name),
+      target_url: service.base_url ?? "",
+      label: `${service.name} credential`,
+      remote_crypto: true,
+    },
+  });
+  const watchedFieldName = form.watch("field_name");
+
+  async function handlePushCredential(data: PushNodeCredentialFormData) {
+    if (!nodeId) return;
+    try {
+      const created = await pushCredentialMutation.mutateAsync(data);
+      toast.success("Credential push created");
+      void navigate({
+        to: "/nodes/$nodeId/credentials/pending/$pendingId/accept",
+        params: { nodeId, pendingId: created.id },
+      });
+    } catch (err) {
+      toast.error(
+        err instanceof ApiError ? err.message : "Failed to push credential",
+      );
+    }
+  }
+
+  return (
+    <DetailSection title="Push credential">
+      <Form {...form}>
+        <form
+          className="space-y-4 p-5"
+          onSubmit={(event) =>
+            void form.handleSubmit(handlePushCredential)(event)
+          }
+        >
+        <p className="text-[12px] text-muted-foreground">
+          Create pending metadata for the node, then encrypt the secret in the
+          browser on the accept page.
+        </p>
+        <div className="grid gap-4 md:grid-cols-2">
+          <FormField
+            control={form.control}
+            name="injection_method"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>Injection method</FormLabel>
+                <Select
+                  value={field.value}
+                  onValueChange={(value) => {
+                    const method = value as NodePendingCredentialInjectionMethod;
+                    const previousDefault = defaultFieldName(
+                      field.value,
+                      service.auth_key_name,
+                    );
+                    const currentFieldName = form.getValues("field_name");
+                    field.onChange(method);
+                    if (
+                      currentFieldName.trim() === "" ||
+                      currentFieldName === previousDefault
+                    ) {
+                      form.setValue(
+                        "field_name",
+                        defaultFieldName(method, service.auth_key_name),
+                        { shouldDirty: true, shouldValidate: true },
+                      );
+                    }
+                  }}
+                >
+                  <FormControl>
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                  </FormControl>
+                  <SelectContent>
+                    <SelectItem value="header">Header</SelectItem>
+                    <SelectItem value="query-param">Query param</SelectItem>
+                    <SelectItem value="path-prefix">Path prefix</SelectItem>
+                  </SelectContent>
+                </Select>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+          <FormField
+            control={form.control}
+            name="field_name"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>Field name</FormLabel>
+                <FormControl>
+                  <Input {...field} />
+                </FormControl>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+          <FormField
+            control={form.control}
+            name="target_url"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>Target URL</FormLabel>
+                <FormControl>
+                  <Input {...field} value={field.value ?? ""} />
+                </FormControl>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+          <FormField
+            control={form.control}
+            name="label"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>Label</FormLabel>
+                <FormControl>
+                  <Input {...field} value={field.value ?? ""} />
+                </FormControl>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+        </div>
+        <div className="flex justify-end">
+          <Button
+            variant="primary"
+            type="submit"
+            disabled={!watchedFieldName.trim() || !service.slug || !nodeId}
+            isLoading={pushCredentialMutation.isPending}
+          >
+            <ButtonIcon variant="primary">
+              <Send className="h-3 w-3" />
+            </ButtonIcon>
+            Push
+          </Button>
+        </div>
+        </form>
+      </Form>
+    </DetailSection>
+  );
+}
+
 /**
  * Issue #416: viewer-scoped routing for an admin-catalog row.
  *
@@ -648,9 +879,15 @@ function YourRoutingSection({
             <Router className="h-4 w-4 text-primary" />
             <CardTitle className="text-[15px]">Your Routing</CardTitle>
           </div>
-          <Button variant="outline" className="text-text-tertiary hover:text-muted-foreground" onClick={onBindClick}>
+          <Button
+            variant="outline"
+            className="text-text-tertiary hover:text-muted-foreground"
+            onClick={onBindClick}
+          >
             {count === 0 ? "Bind in AI Services" : "Manage in AI Services"}
-            <ButtonIcon><ExternalLink className="h-3 w-3" /></ButtonIcon>
+            <ButtonIcon>
+              <ExternalLink className="h-3 w-3" />
+            </ButtonIcon>
           </Button>
         </div>
         <CardDescription>
@@ -660,13 +897,13 @@ function YourRoutingSection({
       <CardContent className="space-y-3">
         {count === 0 ? (
           <p className="text-xs text-muted-foreground">
-            You haven't bound this service to your account yet, so there's
-            no routing to configure here.
+            You haven't bound this service to your account yet, so there's no
+            routing to configure here.
           </p>
         ) : (
           <p className="text-xs text-muted-foreground">
-            You have {String(count)} personal bindings for this service.
-            Manage each one's routing in AI Services.
+            You have {String(count)} personal bindings for this service. Manage
+            each one's routing in AI Services.
           </p>
         )}
       </CardContent>

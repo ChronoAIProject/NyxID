@@ -1,7 +1,14 @@
 import { z } from "zod";
+import { MAX_CIPHERTEXT_SIZE } from "@/lib/crypto";
 
-const blankToUndefined = (value: unknown) =>
-  typeof value === "string" && value.trim() === "" ? undefined : value;
+export const MAX_REMOTE_CREDENTIAL_PLAINTEXT_SIZE =
+  MAX_CIPHERTEXT_SIZE - 16;
+
+const optionalTrimmedString = z
+  .string()
+  .trim()
+  .optional()
+  .transform((value) => (value === "" ? undefined : value));
 
 export const createRegistrationTokenSchema = z.object({
   name: z
@@ -53,15 +60,26 @@ export const pushNodeCredentialSchema = z.object({
         }),
       "Field name cannot contain control characters",
     ),
-  target_url: z.preprocess(
-    blankToUndefined,
-    z.string().trim().url("Target URL must be valid").optional(),
+  target_url: optionalTrimmedString.pipe(
+    z.string().url("Target URL must be valid").optional(),
   ),
-  label: z.preprocess(
-    blankToUndefined,
-    z.string().trim().min(1).max(128, "Label must be 128 characters or less").optional(),
+  label: optionalTrimmedString.pipe(
+    z
+      .string()
+      .min(1)
+      .max(128, "Label must be 128 characters or less")
+      .optional(),
   ),
+  remote_crypto: z.literal(true).default(true),
 });
+
+export const acceptNodeCredentialSecretSchema = z
+  .instanceof(Uint8Array)
+  .refine((value) => value.length > 0, "Credential value is required.")
+  .refine(
+    (value) => value.length <= MAX_REMOTE_CREDENTIAL_PLAINTEXT_SIZE,
+    `Credential value must be ${String(MAX_REMOTE_CREDENTIAL_PLAINTEXT_SIZE)} bytes or less.`,
+  );
 
 export type CreateRegistrationTokenFormData = z.infer<
   typeof createRegistrationTokenSchema
@@ -70,4 +88,10 @@ export type CreateBindingFormData = z.infer<typeof createBindingSchema>;
 export type TransferNodeFormData = z.infer<typeof transferNodeSchema>;
 export type PushNodeCredentialFormData = z.infer<
   typeof pushNodeCredentialSchema
+>;
+export type PushNodeCredentialFormInput = z.input<
+  typeof pushNodeCredentialSchema
+>;
+export type AcceptNodeCredentialSecretData = z.infer<
+  typeof acceptNodeCredentialSecretSchema
 >;

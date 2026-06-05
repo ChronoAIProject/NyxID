@@ -251,7 +251,7 @@ export default defineConfig({
     globals: true,
     environment: "happy-dom",
     setupFiles: ["./src/test-setup.ts"],
-    include: ["src/**/*.test.{ts,tsx}"],
+    include: ["src/**/*.test.{ts,tsx}", "test/**/*.test.{ts,tsx}"],
     coverage: {
       // CI coverage gate (issue #785). `npm run test:coverage` (vitest run
       // --coverage) enforces the line threshold below and fails the run if FE

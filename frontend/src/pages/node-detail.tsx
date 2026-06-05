@@ -1,5 +1,7 @@
 import { useState } from "react";
 import { useParams, useNavigate } from "@tanstack/react-router";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { useForm } from "react-hook-form";
 import {
   useNode,
   useNodeAdmins,
@@ -13,7 +15,11 @@ import {
 import { useKeys } from "@/hooks/use-keys";
 import { useAuthStore } from "@/stores/auth-store";
 import { ApiError } from "@/lib/api-client";
-import { pushNodeCredentialSchema } from "@/schemas/nodes";
+import {
+  pushNodeCredentialSchema,
+  type PushNodeCredentialFormData,
+  type PushNodeCredentialFormInput,
+} from "@/schemas/nodes";
 import { formatDate, formatRelativeTime } from "@/lib/utils";
 import { PageHeader } from "@/components/shared/page-header";
 import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
@@ -26,7 +32,6 @@ import { Badge } from "@/components/ui/badge";
 import { Button, ButtonIcon } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import {
   Dialog,
   DialogContent,
@@ -50,6 +55,14 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  Form,
+  FormControl,
+  FormField,
+  FormItem,
+  FormLabel,
+  FormMessage,
+} from "@/components/ui/form";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import {
   Activity,
@@ -71,6 +84,15 @@ import {
   keyOwnerId,
   nodeOwnerLabel,
 } from "./node-detail.helpers";
+
+const NODE_CREDENTIAL_PUSH_DEFAULT_VALUES = {
+  service_slug: "",
+  injection_method: "header",
+  field_name: "X-API-Key",
+  target_url: "",
+  label: "",
+  remote_crypto: true,
+} satisfies PushNodeCredentialFormInput;
 
 export function NodeDetailPage() {
   const { nodeId } = useParams({ strict: false }) as { nodeId: string };
@@ -97,12 +119,16 @@ export function NodeDetailPage() {
     readonly auth_token: string;
     readonly signing_secret: string;
   } | null>(null);
-  const [credentialSlug, setCredentialSlug] = useState("");
-  const [credentialInjectionMethod, setCredentialInjectionMethod] =
-    useState<NodePendingCredentialInjectionMethod>("header");
-  const [credentialFieldName, setCredentialFieldName] = useState("X-API-Key");
-  const [credentialTargetUrl, setCredentialTargetUrl] = useState("");
-  const [credentialLabel, setCredentialLabel] = useState("");
+  const credentialPushForm = useForm<
+    PushNodeCredentialFormInput,
+    unknown,
+    PushNodeCredentialFormData
+  >({
+    resolver: zodResolver(pushNodeCredentialSchema),
+    defaultValues: NODE_CREDENTIAL_PUSH_DEFAULT_VALUES,
+  });
+  const watchedCredentialSlug = credentialPushForm.watch("service_slug");
+  const watchedCredentialFieldName = credentialPushForm.watch("field_name");
 
   useBreadcrumbLabel(node?.name);
   const canManage = canManageNode(node, currentUserId, admins);
@@ -171,28 +197,15 @@ export function NodeDetailPage() {
     }
   }
 
-  async function handlePushCredential() {
-    const parsed = pushNodeCredentialSchema.safeParse({
-      service_slug: credentialSlug,
-      injection_method: credentialInjectionMethod,
-      field_name: credentialFieldName,
-      target_url: credentialTargetUrl,
-      label: credentialLabel,
-    });
-
-    if (!parsed.success) {
-      toast.error(parsed.error.issues[0]?.message ?? "Invalid credential push");
-      return;
-    }
-
+  async function handlePushCredential(data: PushNodeCredentialFormData) {
     try {
-      await pushCredentialMutation.mutateAsync(parsed.data);
+      const created = await pushCredentialMutation.mutateAsync(data);
       toast.success("Credential push created");
-      setCredentialSlug("");
-      setCredentialInjectionMethod("header");
-      setCredentialFieldName("X-API-Key");
-      setCredentialTargetUrl("");
-      setCredentialLabel("");
+      credentialPushForm.reset(NODE_CREDENTIAL_PUSH_DEFAULT_VALUES);
+      void navigate({
+        to: "/nodes/$nodeId/credentials/pending/$pendingId/accept",
+        params: { nodeId, pendingId: created.id },
+      });
     } catch (err) {
       toast.error(
         err instanceof ApiError ? err.message : "Failed to push credential",
@@ -227,7 +240,11 @@ export function NodeDetailPage() {
       <div className="space-y-8">
         <PageHeader title="Node Not Found" />
         <ErrorBanner
-          message={error instanceof ApiError ? error.message : "Node not found or failed to load."}
+          message={
+            error instanceof ApiError
+              ? error.message
+              : "Node not found or failed to load."
+          }
           onRetry={refetch}
         />
       </div>
@@ -255,7 +272,9 @@ export function NodeDetailPage() {
                   setShowTransferDialog(true);
                 }}
               >
-                <ButtonIcon><ArrowRightLeft className="h-3 w-3" /></ButtonIcon>
+                <ButtonIcon>
+                  <ArrowRightLeft className="h-3 w-3" />
+                </ButtonIcon>
                 Transfer
               </Button>
               <Button
@@ -263,14 +282,18 @@ export function NodeDetailPage() {
                 className="text-text-tertiary hover:text-muted-foreground"
                 onClick={() => setShowRotateDialog(true)}
               >
-                <ButtonIcon><KeyRound className="h-3 w-3" /></ButtonIcon>
+                <ButtonIcon>
+                  <KeyRound className="h-3 w-3" />
+                </ButtonIcon>
                 Rotate Credentials
               </Button>
               <Button
                 variant="destructive"
                 onClick={() => setShowDeleteDialog(true)}
               >
-                <ButtonIcon variant="destructive"><Trash2 className="h-3 w-3 text-destructive" /></ButtonIcon>
+                <ButtonIcon variant="destructive">
+                  <Trash2 className="h-3 w-3 text-destructive" />
+                </ButtonIcon>
                 Delete
               </Button>
             </div>
@@ -358,25 +381,43 @@ export function NodeDetailPage() {
           <>
             <div className="grid grid-cols-2 gap-3 p-4 sm:grid-cols-4">
               <div className="rounded-xl border border-border/50 bg-white/[0.02] p-4 text-center">
-                <p className="text-[22px] font-bold text-foreground" style={{ letterSpacing: "-0.02em" }}>
+                <p
+                  className="text-[22px] font-bold text-foreground"
+                  style={{ letterSpacing: "-0.02em" }}
+                >
                   {String(node.metrics.total_requests)}
                 </p>
-                <p className="text-[11px] text-muted-foreground mt-1">Total Requests</p>
+                <p className="text-[11px] text-muted-foreground mt-1">
+                  Total Requests
+                </p>
               </div>
               <div className="rounded-xl border border-border/50 bg-white/[0.02] p-4 text-center">
-                <p className="text-[22px] font-bold text-foreground" style={{ letterSpacing: "-0.02em" }}>
+                <p
+                  className="text-[22px] font-bold text-foreground"
+                  style={{ letterSpacing: "-0.02em" }}
+                >
                   {(node.metrics.success_rate * 100).toFixed(1)}%
                 </p>
-                <p className="text-[11px] text-muted-foreground mt-1">Success Rate</p>
+                <p className="text-[11px] text-muted-foreground mt-1">
+                  Success Rate
+                </p>
               </div>
               <div className="rounded-xl border border-border/50 bg-white/[0.02] p-4 text-center">
-                <p className="text-[22px] font-bold text-foreground" style={{ letterSpacing: "-0.02em" }}>
+                <p
+                  className="text-[22px] font-bold text-foreground"
+                  style={{ letterSpacing: "-0.02em" }}
+                >
                   {node.metrics.avg_latency_ms.toFixed(0)}ms
                 </p>
-                <p className="text-[11px] text-muted-foreground mt-1">Avg Latency</p>
+                <p className="text-[11px] text-muted-foreground mt-1">
+                  Avg Latency
+                </p>
               </div>
               <div className="rounded-xl border border-border/50 bg-white/[0.02] p-4 text-center">
-                <p className="text-[22px] font-bold text-foreground" style={{ letterSpacing: "-0.02em" }}>
+                <p
+                  className="text-[22px] font-bold text-foreground"
+                  style={{ letterSpacing: "-0.02em" }}
+                >
                   {String(node.metrics.error_count)}
                 </p>
                 <p className="text-[11px] text-muted-foreground mt-1">Errors</p>
@@ -411,7 +452,8 @@ export function NodeDetailPage() {
           <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
             <SolarPanelIcon className="h-48 w-48 text-muted-foreground/30" />
             <p className="text-[12px] text-muted-foreground/30">
-              No metrics recorded yet. Metrics will appear after the first proxy request.
+              No metrics recorded yet. Metrics will appear after the first proxy
+              request.
             </p>
           </div>
         )}
@@ -420,95 +462,147 @@ export function NodeDetailPage() {
       {canManage && (
         <div className="space-y-6">
           <DetailSection title="Push Credential to Node">
-            <div className="p-5 space-y-4">
+            <Form {...credentialPushForm}>
+              <form
+                className="p-5 space-y-4"
+                onSubmit={(event) =>
+                  void credentialPushForm.handleSubmit(handlePushCredential)(
+                    event,
+                  )
+                }
+              >
               <p className="text-[12px] text-muted-foreground">
-                The VM operator will be prompted for the secret value when they
-                accept this on the VM. The secret never leaves the VM.
+                Create pending credential metadata, then enter the secret on the
+                accept page for browser-side encryption.
               </p>
               <div className="grid gap-4 md:grid-cols-2">
-                <div className="space-y-2">
-                  <Label htmlFor="credential-service-slug">Service slug</Label>
-                  <Input
-                    id="credential-service-slug"
-                    value={credentialSlug}
-                    onChange={(event) => setCredentialSlug(event.target.value)}
-                    placeholder="openclaw"
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="credential-field-name">Field name</Label>
-                  <Input
-                    id="credential-field-name"
-                    value={credentialFieldName}
-                    onChange={(event) =>
-                      setCredentialFieldName(event.target.value)
-                    }
-                    placeholder="X-API-Key"
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label>Injection method</Label>
-                  <Select
-                    value={credentialInjectionMethod}
-                    onValueChange={(value) => {
-                      const method = value as NodePendingCredentialInjectionMethod;
-                      const previousDefault = defaultFieldNameForMethod(
-                        credentialInjectionMethod,
-                      );
-                      setCredentialInjectionMethod(method);
-                      if (
-                        credentialFieldName.trim() === "" ||
-                        credentialFieldName === previousDefault
-                      ) {
-                        setCredentialFieldName(
-                          defaultFieldNameForMethod(method),
-                        );
-                      }
-                    }}
-                  >
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="header">Header</SelectItem>
-                      <SelectItem value="query-param">Query param</SelectItem>
-                      <SelectItem value="path-prefix">Path prefix</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="credential-target-url">Target URL</Label>
-                  <Input
-                    id="credential-target-url"
-                    value={credentialTargetUrl}
-                    onChange={(event) =>
-                      setCredentialTargetUrl(event.target.value)
-                    }
-                    placeholder="https://gateway.example.com/v1"
-                  />
-                </div>
-                <div className="space-y-2 md:col-span-2">
-                  <Label htmlFor="credential-label">Label</Label>
-                  <Input
-                    id="credential-label"
-                    value={credentialLabel}
-                    onChange={(event) => setCredentialLabel(event.target.value)}
-                    placeholder="Production gateway"
-                  />
-                </div>
+                <FormField
+                  control={credentialPushForm.control}
+                  name="service_slug"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Service slug</FormLabel>
+                      <FormControl>
+                        <Input {...field} placeholder="openclaw" />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <FormField
+                  control={credentialPushForm.control}
+                  name="field_name"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Field name</FormLabel>
+                      <FormControl>
+                        <Input {...field} placeholder="X-API-Key" />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <FormField
+                  control={credentialPushForm.control}
+                  name="injection_method"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Injection method</FormLabel>
+                      <Select
+                        value={field.value}
+                        onValueChange={(value) => {
+                          const method =
+                            value as NodePendingCredentialInjectionMethod;
+                          const previousDefault = defaultFieldNameForMethod(
+                            field.value,
+                          );
+                          const currentFieldName =
+                            credentialPushForm.getValues("field_name");
+                          field.onChange(method);
+                          if (
+                            currentFieldName.trim() === "" ||
+                            currentFieldName === previousDefault
+                          ) {
+                            credentialPushForm.setValue(
+                              "field_name",
+                              defaultFieldNameForMethod(method),
+                              { shouldDirty: true, shouldValidate: true },
+                            );
+                          }
+                        }}
+                      >
+                        <FormControl>
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                        </FormControl>
+                        <SelectContent>
+                          <SelectItem value="header">Header</SelectItem>
+                          <SelectItem value="query-param">
+                            Query param
+                          </SelectItem>
+                          <SelectItem value="path-prefix">
+                            Path prefix
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <FormField
+                  control={credentialPushForm.control}
+                  name="target_url"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Target URL</FormLabel>
+                      <FormControl>
+                        <Input
+                          {...field}
+                          value={field.value ?? ""}
+                          placeholder="https://gateway.example.com/v1"
+                        />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <FormField
+                  control={credentialPushForm.control}
+                  name="label"
+                  render={({ field }) => (
+                    <FormItem className="md:col-span-2">
+                      <FormLabel>Label</FormLabel>
+                      <FormControl>
+                        <Input
+                          {...field}
+                          value={field.value ?? ""}
+                          placeholder="Production gateway"
+                        />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
               </div>
               <div className="flex justify-end">
                 <Button
                   variant="primary"
-                  onClick={() => void handlePushCredential()}
-                  disabled={!credentialSlug.trim() || !credentialFieldName.trim()}
+                  type="submit"
+                  disabled={
+                    !watchedCredentialSlug.trim() ||
+                    !watchedCredentialFieldName.trim()
+                  }
                   isLoading={pushCredentialMutation.isPending}
                 >
-                  <ButtonIcon variant="primary"><Send className="h-3 w-3" /></ButtonIcon>
+                  <ButtonIcon variant="primary">
+                    <Send className="h-3 w-3" />
+                  </ButtonIcon>
                   Push
                 </Button>
               </div>
-            </div>
+              </form>
+            </Form>
           </DetailSection>
 
           <DetailSection title="Pending Credentials">
@@ -567,16 +661,37 @@ export function NodeDetailPage() {
                           {credential.target_url ?? "-"}
                         </TableCell>
                         <TableCell>
-                          <Button
-                            variant="ghost"
-                            className="text-muted-foreground hover:text-destructive"
-                            onClick={() =>
-                              void handleCancelPendingCredential(credential.id)
-                            }
-                            isLoading={cancelPendingCredentialMutation.isPending}
-                          >
-                            Cancel
-                          </Button>
+                          <div className="flex items-center gap-1">
+                            <Button
+                              variant="ghost"
+                              className="text-muted-foreground hover:text-foreground"
+                              onClick={() =>
+                                void navigate({
+                                  to: "/nodes/$nodeId/credentials/pending/$pendingId/accept",
+                                  params: {
+                                    nodeId,
+                                    pendingId: credential.id,
+                                  },
+                                })
+                              }
+                            >
+                              Accept
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              className="text-muted-foreground hover:text-destructive"
+                              onClick={() =>
+                                void handleCancelPendingCredential(
+                                  credential.id,
+                                )
+                              }
+                              isLoading={
+                                cancelPendingCredentialMutation.isPending
+                              }
+                            >
+                              Cancel
+                            </Button>
+                          </div>
                         </TableCell>
                       </TableRow>
                     ))}
