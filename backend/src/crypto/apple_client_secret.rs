@@ -166,6 +166,8 @@ ci0O2dgc19c2/sLtanU7P2KAzhEo8O0tIc0Dwe/nMqKfue82eGVL3DqM\n\
             telegram_webhook_url: None,
             telegram_bot_username: None,
             approval_expiry_interval_secs: 5,
+            oauth_refresh_sweep_interval_secs: 600,
+            oauth_refresh_sweep_window_secs: 900,
             fcm_service_account_path: None,
             fcm_project_id: None,
             apns_key_path: None,
@@ -256,5 +258,32 @@ ci0O2dgc19c2/sLtanU7P2KAzhEo8O0tIc0Dwe/nMqKfue82eGVL3DqM\n\
         let config = make_test_config(None);
         let err = generate_apple_client_secret(&config).expect_err("missing key path should fail");
         assert!(matches!(err, AppError::ExternalProviderNotConfigured(_)));
+    }
+
+    #[test]
+    fn generate_client_secret_fails_when_required_apple_config_is_missing() {
+        let mut config = make_test_config(Some("/unused/key.p8".to_string()));
+        config.apple_team_id = None;
+        let err =
+            generate_apple_client_secret(&config).expect_err("missing team id should fail first");
+        assert!(
+            matches!(err, AppError::ExternalProviderNotConfigured(message) if message.contains("APPLE_TEAM_ID"))
+        );
+
+        let mut config = make_test_config(Some("/unused/key.p8".to_string()));
+        config.apple_client_id = None;
+        let err = generate_apple_client_secret(&config)
+            .expect_err("missing client id should fail before key read");
+        assert!(
+            matches!(err, AppError::ExternalProviderNotConfigured(message) if message.contains("APPLE_CLIENT_ID"))
+        );
+
+        let mut config = make_test_config(Some("/unused/key.p8".to_string()));
+        config.apple_key_id = None;
+        let err = generate_apple_client_secret(&config)
+            .expect_err("missing key id should fail before key read");
+        assert!(
+            matches!(err, AppError::ExternalProviderNotConfigured(message) if message.contains("APPLE_KEY_ID"))
+        );
     }
 }

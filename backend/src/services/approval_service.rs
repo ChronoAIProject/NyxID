@@ -13,10 +13,13 @@ use crate::models::approval_grant::{ApprovalGrant, COLLECTION_NAME as GRANTS};
 use crate::models::approval_request::{ApprovalRequest, COLLECTION_NAME as REQUESTS};
 use crate::models::notification_channel::{COLLECTION_NAME as CHANNELS, NotificationChannel};
 use crate::models::service_approval_config::{
-    ApprovalMode, COLLECTION_NAME as SERVICE_APPROVAL_CONFIGS, ServiceApprovalConfig,
+    ApprovalEffect, ApprovalMode, ApprovalRule, COLLECTION_NAME as SERVICE_APPROVAL_CONFIGS,
+    ServiceApprovalConfig,
 };
 use crate::models::user::{COLLECTION_NAME as USERS, User};
+use crate::services::approval_policy;
 use crate::services::notification_service;
+use crate::services::operation_descriptor::OperationDescriptor;
 use crate::services::push_service::{ApnsAuth, FcmAuth};
 use crate::telemetry::{TelemetryClient, TelemetryContext, TelemetryEvent, emit_event};
 
@@ -67,6 +70,8 @@ pub async fn user_requires_approval(db: &Database, user_id: &str) -> AppResult<b
 pub struct ApprovalResolution {
     pub required: bool,
     pub mode: ApprovalMode,
+    pub effect: ApprovalEffect,
+    pub grant_scope: Option<String>,
     /// User the request is created under. For org-policy requests this
     /// is the org user_id; for actor-policy requests this is the actor.
     pub primary_owner_user_id: String,
@@ -74,6 +79,21 @@ pub struct ApprovalResolution {
     /// than the actor's settings. The proxy handler uses this to populate
     /// `notify_user_ids` with the org's admin list instead of `[actor]`.
     pub from_org_policy: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingApproval {
+    pub resolution: ApprovalResolution,
+    pub primary_owner_user_id: String,
+    pub requester_type: String,
+    pub requester_id: String,
+}
+
+#[derive(Debug, Clone)]
+pub enum ApprovalOutcome {
+    Allowed { required: bool },
+    Denied,
+    NeedsApproval(PendingApproval),
 }
 
 /// Resolve the effective approval policy for a proxy call, accounting for
@@ -87,6 +107,7 @@ pub async fn resolve_org_aware_approval(
     actor_user_id: &str,
     service_owner_user_id: &str,
     service_id: &str,
+    descriptor: &OperationDescriptor,
 ) -> AppResult<ApprovalResolution> {
     // Step 1: if the resolved service is org-owned and the org has a
     // policy, use it. We detect "org-owned" by looking up the owner's
@@ -109,9 +130,12 @@ pub async fn resolve_org_aware_approval(
             })
             .await?
     {
+        let decision = approval_policy::evaluate(&org_config, descriptor);
         return Ok(ApprovalResolution {
-            required: org_config.approval_required,
-            mode: org_config.approval_mode,
+            required: decision.effect == ApprovalEffect::RequireApproval,
+            mode: decision.mode,
+            effect: decision.effect,
+            grant_scope: decision.grant_scope,
             primary_owner_user_id: service_owner_user_id.to_string(),
             from_org_policy: true,
         });
@@ -123,19 +147,137 @@ pub async fn resolve_org_aware_approval(
         .find_one(doc! { "user_id": actor_user_id, "service_id": service_id })
         .await?;
 
-    let (required, mode) = if let Some(cfg) = actor_config {
-        (cfg.approval_required, cfg.approval_mode)
+    let (required, mode, effect, grant_scope) = if let Some(cfg) = actor_config {
+        let decision = approval_policy::evaluate(&cfg, descriptor);
+        (
+            decision.effect == ApprovalEffect::RequireApproval,
+            decision.mode,
+            decision.effect,
+            decision.grant_scope,
+        )
     } else {
-        let global = user_requires_approval(db, actor_user_id).await?;
-        (global, ApprovalMode::default())
+        let required = user_requires_approval(db, actor_user_id).await?;
+        (
+            required,
+            ApprovalMode::default(),
+            if required {
+                ApprovalEffect::RequireApproval
+            } else {
+                ApprovalEffect::AutoAllow
+            },
+            None,
+        )
     };
 
     Ok(ApprovalResolution {
         required,
         mode,
+        effect,
+        grant_scope,
         primary_owner_user_id: actor_user_id.to_string(),
         from_org_policy: false,
     })
+}
+
+pub async fn evaluate_deny_only(
+    db: &Database,
+    actor_user_id: &str,
+    service_owner_user_id: &str,
+    service_id: &str,
+    descriptor: &OperationDescriptor,
+) -> AppResult<bool> {
+    let resolution = resolve_org_aware_approval(
+        db,
+        actor_user_id,
+        service_owner_user_id,
+        service_id,
+        descriptor,
+    )
+    .await?;
+    Ok(resolution.effect == ApprovalEffect::Deny)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn evaluate_and_check(
+    db: &Database,
+    actor_user_id: &str,
+    service_owner_user_id: &str,
+    service_id: &str,
+    descriptor: &OperationDescriptor,
+    requester_type: Option<&str>,
+    requester_id: &str,
+    bypass_approval_flow: bool,
+) -> AppResult<ApprovalOutcome> {
+    let resolution = resolve_org_aware_approval(
+        db,
+        actor_user_id,
+        service_owner_user_id,
+        service_id,
+        descriptor,
+    )
+    .await?;
+
+    if resolution.effect == ApprovalEffect::Deny {
+        return Ok(ApprovalOutcome::Denied);
+    }
+
+    if !resolution.required || bypass_approval_flow {
+        return Ok(ApprovalOutcome::Allowed {
+            required: resolution.required,
+        });
+    }
+
+    let requester_type = requester_type
+        .ok_or_else(|| AppError::Forbidden("Session auth does not require approval".to_string()))?;
+    let primary_owner_user_id = resolution.primary_owner_user_id.clone();
+    let has_grant = if resolution.mode == ApprovalMode::Grant {
+        check_approval(
+            db,
+            &primary_owner_user_id,
+            service_id,
+            requester_type,
+            requester_id,
+            resolution.from_org_policy,
+            descriptor,
+        )
+        .await?
+    } else {
+        false
+    };
+
+    if has_grant {
+        return Ok(ApprovalOutcome::Allowed {
+            required: resolution.required,
+        });
+    }
+
+    Ok(ApprovalOutcome::NeedsApproval(PendingApproval {
+        resolution,
+        primary_owner_user_id,
+        requester_type: requester_type.to_string(),
+        requester_id: requester_id.to_string(),
+    }))
+}
+
+pub async fn approval_notification_recipients(
+    db: &Database,
+    approval_owner_user_id: &str,
+    pending: &PendingApproval,
+) -> AppResult<Vec<String>> {
+    if !pending.resolution.from_org_policy {
+        return Ok(vec![approval_owner_user_id.to_string()]);
+    }
+
+    let primary_owner = &pending.primary_owner_user_id;
+    let mut admins = crate::services::org_service::list_admin_user_ids(db, primary_owner).await?;
+    admins.sort();
+    admins.dedup();
+    if admins.is_empty() {
+        return Err(AppError::OrgApprovalNoAdmin(format!(
+            "Org {primary_owner} has an approval policy on this service but no active admins to decide. Add an admin to the org and retry."
+        )));
+    }
+    Ok(admins)
 }
 
 async fn user_global_approval_setting(db: &Database, user_id: &str) -> AppResult<Option<bool>> {
@@ -176,6 +318,7 @@ pub async fn check_approval(
     requester_type: &str,
     requester_id: &str,
     org_scoped: bool,
+    descriptor: &OperationDescriptor,
 ) -> AppResult<bool> {
     let now = bson::DateTime::from_chrono(Utc::now());
 
@@ -210,12 +353,16 @@ pub async fn check_approval(
         }
     };
 
-    let grant = db
+    let grants: Vec<ApprovalGrant> = db
         .collection::<ApprovalGrant>(GRANTS)
-        .find_one(filter)
+        .find(filter)
+        .await?
+        .try_collect()
         .await?;
 
-    Ok(grant.is_some())
+    Ok(grants
+        .iter()
+        .any(|grant| approval_policy::grant_scope_covers(grant.scope.as_deref(), descriptor)))
 }
 
 /// Create an approval request.
@@ -242,6 +389,29 @@ pub async fn check_approval(
 ///
 /// `from_org_policy` is persisted on the request so `process_decision` can
 /// mint an org-scoped grant on approval (see ChronoAIProject/NyxID#364).
+#[derive(Clone, Debug)]
+pub struct ApprovalRequestOperation {
+    pub operation_summary: String,
+    pub action_description: Option<String>,
+    pub http_method: Option<String>,
+    pub resource: Option<String>,
+    pub verb: Option<String>,
+    pub grant_scope: Option<String>,
+}
+
+impl ApprovalRequestOperation {
+    pub fn from_descriptor(descriptor: &OperationDescriptor, grant_scope: Option<String>) -> Self {
+        Self {
+            operation_summary: descriptor.operation_summary(),
+            action_description: Some(descriptor.summary.clone()),
+            http_method: descriptor.method.clone(),
+            resource: descriptor.resource.clone(),
+            verb: Some(descriptor.verb.as_str().to_string()),
+            grant_scope,
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn create_approval_request(
     db: &Database,
@@ -256,8 +426,7 @@ pub async fn create_approval_request(
     requester_type: &str,
     requester_id: &str,
     requester_label: Option<&str>,
-    operation_summary: &str,
-    action_description: Option<&str>,
+    operation: ApprovalRequestOperation,
     approval_mode: ApprovalMode,
     timeout_secs: u32,
     notify_user_ids: Vec<String>,
@@ -304,8 +473,12 @@ pub async fn create_approval_request(
             requester_type: requester_type.to_string(),
             requester_id: requester_id.to_string(),
             requester_label: requester_label.map(String::from),
-            operation_summary: operation_summary.to_string(),
-            action_description: action_description.map(String::from),
+            operation_summary: operation.operation_summary.clone(),
+            action_description: operation.action_description.clone(),
+            http_method: operation.http_method.clone(),
+            resource: operation.resource.clone(),
+            verb: operation.verb.clone(),
+            grant_scope: operation.grant_scope.clone(),
             tool_name: None,
             tool_call_id: None,
             tool_arguments: None,
@@ -500,6 +673,10 @@ pub async fn create_tool_approval_request(
         requester_label: requester_label.map(String::from),
         operation_summary,
         action_description,
+        http_method: None,
+        resource: None,
+        verb: None,
+        grant_scope: None,
         tool_name: Some(tool_name.to_string()),
         tool_call_id: tool_call_id.map(String::from),
         tool_arguments: tool_arguments.map(String::from),
@@ -641,7 +818,7 @@ pub async fn process_decision(
     // mode-switch time (#153), but this catches any that slip through a
     // TOCTOU race. We roll back the decision so the request stays "pending"
     // (and will be picked up by the next expiry sweep).
-    if approved && updated.approval_mode == ApprovalMode::Grant {
+    if approved && requires_legacy_grant_mode_recheck(&updated) {
         let current_mode = resolve_approval_mode(db, &updated.user_id, &updated.service_id).await?;
         if current_mode != ApprovalMode::Grant {
             // Roll back the decision atomically. The filter guards against a
@@ -702,6 +879,7 @@ pub async fn process_decision(
             requester_id: updated.requester_id.clone(),
             requester_label: updated.requester_label.clone(),
             approval_request_id: updated.id.clone(),
+            scope: updated.grant_scope.clone(),
             granted_at: now,
             expires_at: grant_expiry,
             revoked: false,
@@ -734,6 +912,10 @@ pub async fn process_decision(
     });
 
     Ok(updated)
+}
+
+fn requires_legacy_grant_mode_recheck(request: &ApprovalRequest) -> bool {
+    request.approval_mode == ApprovalMode::Grant && request.grant_scope.is_none()
 }
 
 fn is_idempotent_replay(
@@ -1392,6 +1574,7 @@ pub async fn list_service_approval_configs(
 /// If a config already exists for (user, service), it is updated.
 /// Otherwise, a new config is created. Uses `findOneAndUpdate` with
 /// `upsert: true` to avoid race conditions from concurrent requests.
+#[allow(clippy::too_many_arguments)]
 pub async fn set_service_approval_config(
     db: &Database,
     user_id: &str,
@@ -1399,15 +1582,27 @@ pub async fn set_service_approval_config(
     service_name: &str,
     approval_required: Option<bool>,
     approval_mode: Option<&ApprovalMode>,
+    rules: Option<&[ApprovalRule]>,
+    default_effect: Option<&ApprovalEffect>,
 ) -> AppResult<ServiceApprovalConfig> {
     let now = bson::DateTime::from_chrono(Utc::now());
     let collection = db.collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS);
     let filter = doc! { "user_id": user_id, "service_id": service_id };
     let existing = collection.find_one(filter.clone()).await?;
-    let (approval_required, approval_mode) =
-        resolve_service_config_update(existing.as_ref(), approval_required, approval_mode)?;
+    let (approval_required, approval_mode, rules, default_effect) = resolve_service_config_update(
+        existing.as_ref(),
+        approval_required,
+        approval_mode,
+        rules,
+        default_effect,
+    )?;
 
     for _attempt in 0..2 {
+        let rules_bson = bson::to_bson(&rules)
+            .map_err(|e| AppError::Internal(format!("Failed to serialize approval rules: {e}")))?;
+        let default_effect_bson = bson::to_bson(&default_effect).map_err(|e| {
+            AppError::Internal(format!("Failed to serialize approval default effect: {e}"))
+        })?;
         let config = collection
             .find_one_and_update(
                 filter.clone(),
@@ -1415,6 +1610,8 @@ pub async fn set_service_approval_config(
                     "$set": {
                         "approval_required": approval_required,
                         "approval_mode": approval_mode.as_str(),
+                        "rules": rules_bson,
+                        "default_effect": default_effect_bson,
                         "service_name": service_name,
                         "updated_at": now,
                     },
@@ -1558,22 +1755,48 @@ fn resolve_service_config_update(
     existing: Option<&ServiceApprovalConfig>,
     approval_required: Option<bool>,
     approval_mode: Option<&ApprovalMode>,
-) -> AppResult<(bool, ApprovalMode)> {
-    let resolved_required = approval_required
-        .or_else(|| existing.map(|config| config.approval_required))
-        .ok_or_else(|| {
-            AppError::ValidationError(
-                "approval_required is required when creating a new per-service approval config"
-                    .to_string(),
-            )
-        })?;
+    rules: Option<&[ApprovalRule]>,
+    default_effect: Option<&ApprovalEffect>,
+) -> AppResult<(
+    bool,
+    ApprovalMode,
+    Vec<ApprovalRule>,
+    Option<ApprovalEffect>,
+)> {
+    let granular_field_supplied = rules.is_some() || default_effect.is_some();
+    let resolved_required =
+        match approval_required.or_else(|| existing.map(|c| c.approval_required)) {
+            Some(required) => required,
+            None if granular_field_supplied => false,
+            None => {
+                return Err(AppError::ValidationError(
+                    "approval_required is required when creating a new per-service approval config"
+                        .to_string(),
+                ));
+            }
+        };
 
     let resolved_mode = approval_mode
         .cloned()
         .or_else(|| existing.map(|config| config.approval_mode.clone()))
         .unwrap_or_default();
 
-    Ok((resolved_required, resolved_mode))
+    let resolved_rules = rules
+        .map(<[ApprovalRule]>::to_vec)
+        .or_else(|| existing.map(|config| config.rules.clone()))
+        .unwrap_or_default();
+    approval_policy::validate_rules(&resolved_rules).map_err(AppError::ValidationError)?;
+
+    let resolved_default_effect = default_effect
+        .cloned()
+        .or_else(|| existing.and_then(|config| config.default_effect.clone()));
+
+    Ok((
+        resolved_required,
+        resolved_mode,
+        resolved_rules,
+        resolved_default_effect,
+    ))
 }
 
 /// Cancel all pending grant-mode approval requests for a (user, service) pair.
@@ -1637,6 +1860,10 @@ fn is_duplicate_key_error(e: &mongodb::error::Error) -> bool {
 mod tests {
     use super::*;
 
+    fn test_operation() -> OperationDescriptor {
+        crate::services::operation_descriptor::build_http_descriptor("GET", "/v1/models", None)
+    }
+
     fn make_request(id: &str, status: &str) -> ApprovalRequest {
         let now = Utc::now();
         ApprovalRequest {
@@ -1649,6 +1876,11 @@ mod tests {
             requester_id: "requester-1".to_string(),
             requester_label: Some("CI Pipeline".to_string()),
             operation_summary: "proxy:POST /v1/chat/completions".to_string(),
+            action_description: None,
+            http_method: Some("POST".to_string()),
+            resource: Some("/v1/chat/completions".to_string()),
+            verb: Some("write".to_string()),
+            grant_scope: None,
             status: status.to_string(),
             idempotency_key: format!("idem-{id}"),
             notification_channel: Some("telegram".to_string()),
@@ -1658,7 +1890,6 @@ mod tests {
             decided_at: None,
             decision_channel: None,
             decision_idempotency_key: None,
-            action_description: None,
             tool_name: None,
             tool_call_id: None,
             tool_arguments: None,
@@ -1668,6 +1899,21 @@ mod tests {
             from_org_policy: false,
             created_at: now,
         }
+    }
+
+    #[test]
+    fn grant_mode_recheck_only_applies_to_legacy_unscoped_grants() {
+        let mut request = make_request("req-1", "pending");
+        request.approval_mode = ApprovalMode::Grant;
+        request.grant_scope = None;
+        assert!(requires_legacy_grant_mode_recheck(&request));
+
+        request.grant_scope = Some("v1:http:post:write:/v1/chat/**".to_string());
+        assert!(!requires_legacy_grant_mode_recheck(&request));
+
+        request.approval_mode = ApprovalMode::PerRequest;
+        request.grant_scope = None;
+        assert!(!requires_legacy_grant_mode_recheck(&request));
     }
 
     #[test]
@@ -1961,20 +2207,26 @@ mod tests {
             service_name: "OpenAI".to_string(),
             approval_required: true,
             approval_mode: ApprovalMode::Grant,
+            rules: vec![],
+            default_effect: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
 
-        let (approval_required, approval_mode) =
-            resolve_service_config_update(Some(&existing), Some(false), None).expect("ok");
+        let (approval_required, approval_mode, rules, default_effect) =
+            resolve_service_config_update(Some(&existing), Some(false), None, None, None)
+                .expect("ok");
 
         assert!(!approval_required);
         assert_eq!(approval_mode, ApprovalMode::Grant);
+        assert!(rules.is_empty());
+        assert_eq!(default_effect, None);
     }
 
     #[test]
     fn resolve_service_config_update_requires_approval_required_for_new_config() {
-        let result = resolve_service_config_update(None, None, Some(&ApprovalMode::Grant));
+        let result =
+            resolve_service_config_update(None, None, Some(&ApprovalMode::Grant), None, None);
         assert!(matches!(result, Err(AppError::ValidationError(_))));
     }
 
@@ -2234,6 +2486,8 @@ mod tests {
             service_name: "Test Service".to_string(),
             approval_required,
             approval_mode: mode,
+            rules: vec![],
+            default_effect: None,
             created_at: now,
             updated_at: now,
         }
@@ -2257,6 +2511,7 @@ mod tests {
             requester_id: requester_id.to_string(),
             requester_label: None,
             approval_request_id: uuid::Uuid::new_v4().to_string(),
+            scope: None,
             granted_at: now,
             expires_at: now + chrono::Duration::days(expires_in_days),
             revoked,
@@ -2281,6 +2536,10 @@ mod tests {
             requester_label: None,
             operation_summary: "proxy:POST /test".to_string(),
             action_description: None,
+            http_method: Some("POST".to_string()),
+            resource: Some("/test".to_string()),
+            verb: Some("write".to_string()),
+            grant_scope: None,
             tool_name: None,
             tool_call_id: None,
             tool_arguments: None,
@@ -2374,9 +2633,17 @@ mod tests {
         };
         let user_id = uuid::Uuid::new_v4().to_string();
 
-        let result = check_approval(&db, &user_id, "svc-1", "sa", "req-1", false)
-            .await
-            .unwrap();
+        let result = check_approval(
+            &db,
+            &user_id,
+            "svc-1",
+            "sa",
+            "req-1",
+            false,
+            &test_operation(),
+        )
+        .await
+        .unwrap();
         assert!(!result);
     }
 
@@ -2392,9 +2659,17 @@ mod tests {
         let grant = make_grant(&user_id, &service_id, "sa", "req-1", false, 30);
         insert_grant(&db, &grant).await;
 
-        let result = check_approval(&db, &user_id, &service_id, "sa", "req-1", false)
-            .await
-            .unwrap();
+        let result = check_approval(
+            &db,
+            &user_id,
+            &service_id,
+            "sa",
+            "req-1",
+            false,
+            &test_operation(),
+        )
+        .await
+        .unwrap();
         assert!(result);
     }
 
@@ -2410,9 +2685,17 @@ mod tests {
         let grant = make_grant(&user_id, &service_id, "sa", "req-1", true, 30);
         insert_grant(&db, &grant).await;
 
-        let result = check_approval(&db, &user_id, &service_id, "sa", "req-1", false)
-            .await
-            .unwrap();
+        let result = check_approval(
+            &db,
+            &user_id,
+            &service_id,
+            "sa",
+            "req-1",
+            false,
+            &test_operation(),
+        )
+        .await
+        .unwrap();
         assert!(!result);
     }
 
@@ -2429,9 +2712,17 @@ mod tests {
         let grant = make_grant(&user_id, &service_id, "sa", "req-1", false, -1);
         insert_grant(&db, &grant).await;
 
-        let result = check_approval(&db, &user_id, &service_id, "sa", "req-1", false)
-            .await
-            .unwrap();
+        let result = check_approval(
+            &db,
+            &user_id,
+            &service_id,
+            "sa",
+            "req-1",
+            false,
+            &test_operation(),
+        )
+        .await
+        .unwrap();
         assert!(!result);
     }
 
@@ -2448,9 +2739,17 @@ mod tests {
         insert_grant(&db, &grant).await;
 
         // Different requester_id
-        let result = check_approval(&db, &user_id, &service_id, "sa", "req-DIFFERENT", false)
-            .await
-            .unwrap();
+        let result = check_approval(
+            &db,
+            &user_id,
+            &service_id,
+            "sa",
+            "req-DIFFERENT",
+            false,
+            &test_operation(),
+        )
+        .await
+        .unwrap();
         assert!(!result);
     }
 
@@ -2468,9 +2767,17 @@ mod tests {
         insert_grant(&db, &grant).await;
 
         // Different requester, but org_scoped=true check matches
-        let result = check_approval(&db, &user_id, &service_id, "sa", "req-DIFFERENT", true)
-            .await
-            .unwrap();
+        let result = check_approval(
+            &db,
+            &user_id,
+            &service_id,
+            "sa",
+            "req-DIFFERENT",
+            true,
+            &test_operation(),
+        )
+        .await
+        .unwrap();
         assert!(result);
     }
 
@@ -2689,9 +2996,17 @@ mod tests {
         assert_eq!(count, 2);
 
         // Verify both grants are revoked
-        let result = check_approval(&db, &user_id, &service_id, "sa", "req-1", false)
-            .await
-            .unwrap();
+        let result = check_approval(
+            &db,
+            &user_id,
+            &service_id,
+            "sa",
+            "req-1",
+            false,
+            &test_operation(),
+        )
+        .await
+        .unwrap();
         assert!(!result);
     }
 
@@ -2736,6 +3051,8 @@ mod tests {
             "Test Service",
             Some(true),
             Some(&ApprovalMode::Grant),
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -2763,6 +3080,8 @@ mod tests {
             "Test Service",
             Some(true),
             Some(&ApprovalMode::Grant),
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -2775,6 +3094,8 @@ mod tests {
             "Test Service",
             Some(false),
             Some(&ApprovalMode::PerRequest),
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -2804,13 +3125,23 @@ mod tests {
             "Test Service",
             Some(true),
             Some(&ApprovalMode::PerRequest),
+            None,
+            None,
         )
         .await
         .unwrap();
 
-        let still_valid = check_approval(&db, &user_id, &service_id, "sa", "req-1", false)
-            .await
-            .unwrap();
+        let still_valid = check_approval(
+            &db,
+            &user_id,
+            &service_id,
+            "sa",
+            "req-1",
+            false,
+            &test_operation(),
+        )
+        .await
+        .unwrap();
         assert!(!still_valid);
     }
 
@@ -2867,9 +3198,17 @@ mod tests {
             .await
             .unwrap();
 
-        let still_valid = check_approval(&db, &user_id, &service_id, "sa", "req-1", false)
-            .await
-            .unwrap();
+        let still_valid = check_approval(
+            &db,
+            &user_id,
+            &service_id,
+            "sa",
+            "req-1",
+            false,
+            &test_operation(),
+        )
+        .await
+        .unwrap();
         assert!(!still_valid);
     }
 
@@ -2896,9 +3235,11 @@ mod tests {
         let actor_config = make_service_config(&actor_id, &service_id, true, ApprovalMode::Grant);
         insert_config(&db, &actor_config).await;
 
-        let resolution = resolve_org_aware_approval(&db, &actor_id, &org_user_id, &service_id)
-            .await
-            .unwrap();
+        let operation = test_operation();
+        let resolution =
+            resolve_org_aware_approval(&db, &actor_id, &org_user_id, &service_id, &operation)
+                .await
+                .unwrap();
         assert!(resolution.required);
         assert_eq!(resolution.mode, ApprovalMode::Grant);
         assert_eq!(resolution.primary_owner_user_id, actor_id);
@@ -2926,9 +3267,11 @@ mod tests {
         let org_config = make_service_config(&org_user_id, &service_id, true, ApprovalMode::Grant);
         insert_config(&db, &org_config).await;
 
-        let resolution = resolve_org_aware_approval(&db, &actor_id, &org_user_id, &service_id)
-            .await
-            .unwrap();
+        let operation = test_operation();
+        let resolution =
+            resolve_org_aware_approval(&db, &actor_id, &org_user_id, &service_id, &operation)
+                .await
+                .unwrap();
         assert!(resolution.required);
         assert_eq!(resolution.mode, ApprovalMode::Grant);
         assert_eq!(resolution.primary_owner_user_id, org_user_id);
@@ -2955,9 +3298,11 @@ mod tests {
         let channel = make_channel(&actor_id, true);
         insert_channel(&db, &channel).await;
 
-        let resolution = resolve_org_aware_approval(&db, &actor_id, &actor_id, &service_id)
-            .await
-            .unwrap();
+        let operation = test_operation();
+        let resolution =
+            resolve_org_aware_approval(&db, &actor_id, &actor_id, &service_id, &operation)
+                .await
+                .unwrap();
         assert!(resolution.required);
         assert_eq!(resolution.mode, ApprovalMode::default());
         assert_eq!(resolution.primary_owner_user_id, actor_id);

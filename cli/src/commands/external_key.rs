@@ -109,6 +109,61 @@ pub async fn run(command: ExternalKeyCommands) -> Result<()> {
             }
             Ok(())
         }
+
+        ExternalKeyCommands::AddGcpServiceAccount {
+            key_file,
+            label,
+            scopes,
+            services,
+            auth,
+        } => {
+            let key_json = std::fs::read_to_string(&key_file)
+                .with_context(|| format!("Failed to read {}", key_file.display()))?;
+
+            // Local sanity check before sending: confirm it's a service
+            // account key file, not (say) an OAuth client secret.
+            let parsed: Value = serde_json::from_str(&key_json)
+                .context("Service account file is not valid JSON")?;
+            let is_sa = parsed.get("type").and_then(|v| v.as_str()) == Some("service_account")
+                || parsed
+                    .get("private_key")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| !s.is_empty());
+            if !is_sa {
+                bail!(
+                    "{} does not look like a Google service account key (no private_key). \
+                     Create one in the GCP console under IAM & Admin → Service Accounts → Keys.",
+                    key_file.display()
+                );
+            }
+
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let body = serde_json::json!({
+                "label": label,
+                "key_json": key_json,
+                "scopes": scopes,
+                "service_slugs": services,
+            });
+            let result: Value = api
+                .post("/api-keys/external/gcp-service-account", &body)
+                .await?;
+
+            match auth.output {
+                OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&result)?),
+                OutputFormat::Table => {
+                    let id = result["id"].as_str().unwrap_or("-");
+                    let lbl = result["label"].as_str().unwrap_or("-");
+                    eprintln!("Created GCP service account credential {id} ({lbl}).");
+                    if !services.is_empty() {
+                        eprintln!("Bound to service(s): {}", services.join(", "));
+                    }
+                    eprintln!(
+                        "Tokens now mint automatically from the service account — no more re-auth."
+                    );
+                }
+            }
+            Ok(())
+        }
     }
 }
 

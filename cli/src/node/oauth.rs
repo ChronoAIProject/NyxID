@@ -656,7 +656,13 @@ fn callback_error_html() -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{CallbackResult, oauth_config_from_catalog_value, parse_callback_request};
+    use super::{
+        CallbackResult, DeviceCodeResponse, OAuthConfig, exchange_authorization_code,
+        fetch_catalog_oauth_config, is_reserved_oauth_param, oauth_config_from_catalog_value,
+        parse_callback_request, pkce_code_challenge, refresh_token,
+    };
+    use wiremock::matchers::{body_string, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn parses_catalog_oauth_config_with_provider_specific_fields() {
@@ -796,5 +802,291 @@ mod tests {
         let body = serde_json::json!({ "token_url": "https://example.com/token" });
         let config = oauth_config_from_catalog_value(&body).expect("config");
         assert_eq!(config.client_id_param_name(), "client_id");
+    }
+
+    #[test]
+    fn device_code_response_prefers_verification_uri_over_legacy_url() {
+        let response: DeviceCodeResponse = serde_json::from_value(serde_json::json!({
+            "device_code": "dev-1",
+            "user_code": "ABCD-EFGH",
+            "verification_uri": "https://provider.example/device",
+            "verification_url": "https://legacy.example/device",
+            "expires_in": 900,
+            "interval": 7
+        }))
+        .expect("device response");
+
+        assert_eq!(
+            response.verification_uri(),
+            "https://provider.example/device"
+        );
+        assert_eq!(response.interval, 7);
+    }
+
+    #[test]
+    fn device_code_response_falls_back_to_verification_url_and_default_text() {
+        let legacy: DeviceCodeResponse = serde_json::from_value(serde_json::json!({
+            "device_code": "dev-1",
+            "user_code": "ABCD-EFGH",
+            "verification_url": "https://legacy.example/device",
+            "expires_in": 900,
+            "interval": "11"
+        }))
+        .expect("legacy device response");
+        assert_eq!(legacy.verification_uri(), "https://legacy.example/device");
+        assert_eq!(legacy.interval, 11);
+
+        let missing: DeviceCodeResponse = serde_json::from_value(serde_json::json!({
+            "device_code": "dev-1",
+            "user_code": "ABCD-EFGH",
+            "expires_in": 900,
+            "interval": 5
+        }))
+        .expect("missing verification URL response");
+        assert_eq!(missing.verification_uri(), "(no verification URL provided)");
+    }
+
+    #[test]
+    fn device_code_response_rejects_non_numeric_interval_string() {
+        let err = serde_json::from_value::<DeviceCodeResponse>(serde_json::json!({
+            "device_code": "dev-1",
+            "user_code": "ABCD-EFGH",
+            "verification_uri": "https://provider.example/device",
+            "expires_in": 900,
+            "interval": "slow"
+        }))
+        .expect_err("invalid interval should fail");
+
+        assert!(err.to_string().contains("interval must be a number"));
+    }
+
+    #[test]
+    fn catalog_config_ignores_non_string_scopes_and_extra_params() {
+        let body = serde_json::json!({
+            "token_url": "https://example.com/token",
+            "default_scopes": ["profile", 42, "email"],
+            "extra_auth_params": {
+                "prompt": "consent",
+                "ignored": true
+            }
+        });
+        let config = oauth_config_from_catalog_value(&body).expect("config");
+
+        assert_eq!(config.default_scopes, vec!["profile", "email"]);
+        assert_eq!(
+            config
+                .extra_auth_params
+                .as_ref()
+                .and_then(|params| params.get("prompt"))
+                .map(String::as_str),
+            Some("consent")
+        );
+        assert!(
+            !config
+                .extra_auth_params
+                .as_ref()
+                .expect("params")
+                .contains_key("ignored")
+        );
+    }
+
+    #[test]
+    fn reserved_oauth_param_filter_covers_builtin_authorization_fields() {
+        for key in [
+            "client_id",
+            "client_secret",
+            "redirect_uri",
+            "response_type",
+            "state",
+            "code",
+            "code_challenge",
+            "code_challenge_method",
+            "scope",
+        ] {
+            assert!(is_reserved_oauth_param(key), "{key} should be reserved");
+        }
+        assert!(!is_reserved_oauth_param("access_type"));
+        assert!(!is_reserved_oauth_param("prompt"));
+    }
+
+    #[test]
+    fn pkce_challenge_matches_rfc7636_example() {
+        let challenge =
+            pkce_code_challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk").expect("challenge");
+        assert_eq!(challenge, "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");
+    }
+
+    #[test]
+    fn callback_decodes_url_encoded_code_and_description() {
+        let request =
+            "GET /callback?code=auth%2Fcode%2B1&state=state%201 HTTP/1.1\r\nHost: 127.0.0.1\r\n";
+        match parse_callback_request(request, "state 1") {
+            CallbackResult::Success(code) => assert_eq!(code, "auth/code+1"),
+            other => panic!("expected success, got {}", callback_result_name(&other)),
+        }
+
+        let denied = "GET /callback?error=access_denied&error_description=needs%20approval&state=s HTTP/1.1\r\n";
+        match parse_callback_request(denied, "s") {
+            CallbackResult::Error(message) => {
+                assert!(message.contains("needs approval"), "{message}");
+            }
+            other => panic!("expected error, got {}", callback_result_name(&other)),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_catalog_oauth_config_sends_bearer_and_parses_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/catalog/openai"))
+            .and(header("authorization", "Bearer access-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "authorization_url": "https://provider.example/oauth/authorize",
+                "token_url": "https://provider.example/oauth/token",
+                "supports_pkce": true
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let config = fetch_catalog_oauth_config(&server.uri(), Some("access-1"), "openai")
+            .await
+            .expect("catalog config");
+
+        assert_eq!(
+            config.authorization_url.as_deref(),
+            Some("https://provider.example/oauth/authorize")
+        );
+        assert_eq!(config.token_url, "https://provider.example/oauth/token");
+        assert!(config.supports_pkce);
+    }
+
+    #[tokio::test]
+    async fn fetch_catalog_oauth_config_surfaces_non_success_status() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/catalog/missing"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let err = match fetch_catalog_oauth_config(&server.uri(), None, "missing").await {
+            Ok(_) => panic!("missing catalog should fail"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("Catalog returned 404"));
+    }
+
+    #[tokio::test]
+    async fn refresh_token_uses_custom_client_id_param_for_post_auth() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .and(body_string(
+                "grant_type=refresh_token&refresh_token=ref-1&client_key=client-1&client_secret=secret-1",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "access-2",
+                "refresh_token": "ref-2",
+                "expires_in": 3600,
+                "token_type": "Bearer",
+                "scope": "read write"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let token = refresh_token(
+            &format!("{}/token", server.uri()),
+            "client-1",
+            Some("secret-1"),
+            "ref-1",
+            "client_secret_post",
+            Some("client_key"),
+        )
+        .await
+        .expect("refresh token");
+
+        assert_eq!(token.access_token, "access-2");
+        assert_eq!(token.refresh_token.as_deref(), Some("ref-2"));
+        assert_eq!(token.expires_in, Some(3600));
+        assert_eq!(token.token_type.as_deref(), Some("Bearer"));
+        assert_eq!(token.scope.as_deref(), Some("read write"));
+    }
+
+    #[tokio::test]
+    async fn refresh_token_uses_basic_auth_without_client_secret_in_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .and(header("authorization", "Basic Y2xpZW50LTE6c2VjcmV0LTE="))
+            .and(body_string("grant_type=refresh_token&refresh_token=ref-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "access-2"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let token = refresh_token(
+            &format!("{}/token", server.uri()),
+            "client-1",
+            Some("secret-1"),
+            "ref-1",
+            "client_secret_basic",
+            None,
+        )
+        .await
+        .expect("refresh token");
+
+        assert_eq!(token.access_token, "access-2");
+        assert!(token.refresh_token.is_none());
+    }
+
+    #[tokio::test]
+    async fn exchange_authorization_code_posts_code_verifier_and_custom_client_id() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .and(body_string(
+                "grant_type=authorization_code&code=code-1&redirect_uri=http%3A%2F%2F127.0.0.1%3A9000%2Fcallback&client_key=client-1&client_secret=secret-1&code_verifier=verifier-1",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "access-3",
+                "refresh_token": "ref-3"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let config = OAuthConfig {
+            authorization_url: Some("https://provider.example/authorize".to_string()),
+            token_url: format!("{}/token", server.uri()),
+            device_code_url: None,
+            device_verification_url: None,
+            device_token_url: None,
+            default_scopes: vec![],
+            supports_pkce: true,
+            device_code_format: "rfc8628".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            oauth_client_id: None,
+            client_id_param_name: Some("client_key".to_string()),
+        };
+
+        let token = exchange_authorization_code(
+            &config,
+            "client-1",
+            Some("secret-1"),
+            "code-1",
+            "http://127.0.0.1:9000/callback",
+            Some("verifier-1"),
+        )
+        .await
+        .expect("token exchange");
+
+        assert_eq!(token.access_token, "access-3");
+        assert_eq!(token.refresh_token.as_deref(), Some("ref-3"));
     }
 }

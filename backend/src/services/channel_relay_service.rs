@@ -8,12 +8,13 @@
 use chrono::Utc;
 use futures::TryStreamExt;
 use hmac::{Hmac, Mac};
-use mongodb::bson::doc;
+use mongodb::bson::{Bson, doc};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::config::AppConfig;
 use crate::errors::{AppError, AppResult};
+use crate::models::channel_conversation::COLLECTION_NAME as CONVERSATIONS;
 use crate::models::channel_message::{COLLECTION_NAME, ChannelMessage};
 use crate::services::channel_platform::InboundMessage;
 
@@ -441,6 +442,64 @@ pub async fn get_outbound_message_by_platform_id(
         })
 }
 
+/// Resolve a single outbound message editable by an assigned agent API key.
+pub async fn get_outbound_message_for_api_key(
+    db: &mongodb::Database,
+    api_key_id: &str,
+    platform_message_id: &str,
+) -> AppResult<ChannelMessage> {
+    let platforms = db
+        .collection::<mongodb::bson::Document>(CONVERSATIONS)
+        .distinct("platform", doc! { "agent_api_key_id": api_key_id })
+        .await?;
+
+    let mut found: Option<ChannelMessage> = None;
+
+    for platform in platforms {
+        let Bson::String(platform) = platform else {
+            continue;
+        };
+
+        match get_outbound_message_by_platform_id(db, &platform, platform_message_id).await {
+            Ok(message) => {
+                if found.is_some() {
+                    return Err(AppError::Conflict(format!(
+                        "Multiple outbound messages found for platform message ID: {platform_message_id}"
+                    )));
+                }
+                found = Some(message);
+            }
+            Err(AppError::NotFound(_)) => {}
+            Err(err) => return Err(err),
+        }
+    }
+
+    if let Some(message) = found {
+        return Ok(message);
+    }
+
+    let matches: Vec<ChannelMessage> = db
+        .collection::<ChannelMessage>(COLLECTION_NAME)
+        .find(doc! {
+            "direction": "outbound",
+            "agent_api_key_id": api_key_id,
+            "platform_message_id": platform_message_id,
+        })
+        .await?
+        .try_collect()
+        .await?;
+
+    match matches.as_slice() {
+        [message] => Ok(message.clone()),
+        [] => Err(AppError::NotFound(format!(
+            "Outbound message not found: {platform_message_id}"
+        ))),
+        _ => Err(AppError::Conflict(format!(
+            "Multiple outbound messages found for platform message ID: {platform_message_id}"
+        ))),
+    }
+}
+
 /// Update the outbound row's `updated_at` timestamp after a successful edit.
 pub async fn update_outbound_message_timestamp(
     db: &mongodb::Database,
@@ -593,6 +652,152 @@ mod tests {
         let sig_a = compute_hmac_signature(key, b"body_a").unwrap();
         let sig_b = compute_hmac_signature(key, b"body_b").unwrap();
         assert_ne!(sig_a, sig_b);
+    }
+
+    #[tokio::test]
+    async fn outbound_message_for_api_key_fallback_returns_single_matching_outbound_message() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("channel_relay_outbound_api_key_single").await
+        else {
+            eprintln!("skipping channel_relay service test: no local MongoDB available");
+            return;
+        };
+
+        let now = Utc::now();
+        let agent_api_key_id = uuid::Uuid::new_v4().to_string();
+        let platform_message_id = "platform-single-message";
+        let conversation = crate::models::channel_conversation::ChannelConversation {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: uuid::Uuid::new_v4().to_string(),
+            channel_bot_id: Some(uuid::Uuid::new_v4().to_string()),
+            platform: "telegram".to_string(),
+            platform_conversation_id: "chat-123".to_string(),
+            platform_conversation_type: "private".to_string(),
+            platform_sender_id: None,
+            agent_api_key_id: agent_api_key_id.clone(),
+            default_agent: false,
+            is_active: true,
+            last_message_at: None,
+            created_at: now,
+            updated_at: now,
+        };
+        db.collection::<crate::models::channel_conversation::ChannelConversation>(CONVERSATIONS)
+            .insert_one(&conversation)
+            .await
+            .expect("insert conversation");
+
+        let inserted = store_outbound_message(
+            &db,
+            conversation
+                .channel_bot_id
+                .as_deref()
+                .expect("test conversation bot id"),
+            &conversation.id,
+            &conversation.user_id,
+            "lark",
+            &agent_api_key_id,
+            None,
+            Some(platform_message_id),
+        )
+        .await
+        .expect("insert outbound message");
+
+        let resolved =
+            get_outbound_message_for_api_key(&db, &agent_api_key_id, platform_message_id)
+                .await
+                .expect("single fallback match should resolve");
+        assert_eq!(resolved.id, inserted.id);
+        assert_eq!(resolved.platform, "lark");
+        assert_eq!(
+            resolved.platform_message_id.as_deref(),
+            Some(platform_message_id)
+        );
+        assert_eq!(
+            resolved.agent_api_key_id.as_deref(),
+            Some(agent_api_key_id.as_str())
+        );
+
+        db.drop().await.expect("drop test database");
+    }
+
+    #[tokio::test]
+    async fn outbound_message_for_api_key_fallback_conflicts_on_duplicate_matches() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("channel_relay_outbound_api_key").await
+        else {
+            eprintln!("skipping channel_relay service test: no local MongoDB available");
+            return;
+        };
+
+        let now = Utc::now();
+        let agent_api_key_id = uuid::Uuid::new_v4().to_string();
+        let other_agent_api_key_id = uuid::Uuid::new_v4().to_string();
+        let platform_message_id = "platform-duplicate-message";
+        let conversation = crate::models::channel_conversation::ChannelConversation {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: uuid::Uuid::new_v4().to_string(),
+            channel_bot_id: Some(uuid::Uuid::new_v4().to_string()),
+            platform: "telegram".to_string(),
+            platform_conversation_id: "chat-123".to_string(),
+            platform_conversation_type: "private".to_string(),
+            platform_sender_id: None,
+            agent_api_key_id: agent_api_key_id.clone(),
+            default_agent: false,
+            is_active: true,
+            last_message_at: None,
+            created_at: now,
+            updated_at: now,
+        };
+        db.collection::<crate::models::channel_conversation::ChannelConversation>(CONVERSATIONS)
+            .insert_one(&conversation)
+            .await
+            .expect("insert conversation");
+
+        store_outbound_message(
+            &db,
+            conversation
+                .channel_bot_id
+                .as_deref()
+                .expect("test conversation bot id"),
+            &conversation.id,
+            &conversation.user_id,
+            "lark",
+            &agent_api_key_id,
+            None,
+            Some(platform_message_id),
+        )
+        .await
+        .expect("insert first outbound message");
+        store_outbound_message(
+            &db,
+            conversation
+                .channel_bot_id
+                .as_deref()
+                .expect("test conversation bot id"),
+            &conversation.id,
+            &conversation.user_id,
+            "lark",
+            &agent_api_key_id,
+            None,
+            Some(platform_message_id),
+        )
+        .await
+        .expect("insert duplicate outbound message");
+
+        let err = get_outbound_message_for_api_key(&db, &agent_api_key_id, platform_message_id)
+            .await
+            .expect_err("duplicate fallback matches should conflict");
+        assert!(
+            matches!(err, AppError::Conflict(msg) if msg.contains("Multiple outbound messages found"))
+        );
+
+        let err =
+            get_outbound_message_for_api_key(&db, &other_agent_api_key_id, platform_message_id)
+                .await
+                .expect_err("fallback lookup should stay scoped to the requesting agent");
+        assert!(matches!(err, AppError::NotFound(_)));
+
+        db.drop().await.expect("drop test database");
     }
 
     #[test]
@@ -792,6 +997,8 @@ mod tests {
             telegram_webhook_url: None,
             telegram_bot_username: None,
             approval_expiry_interval_secs: 5,
+            oauth_refresh_sweep_interval_secs: 600,
+            oauth_refresh_sweep_window_secs: 900,
             fcm_service_account_path: None,
             fcm_project_id: None,
             apns_key_path: None,

@@ -740,7 +740,7 @@ mod tests {
         assert_eq!(response.slug, "catalog-api");
         assert_eq!(response.openapi_spec_url.as_deref(), Some(CATALOG_SPEC_URL));
         assert_eq!(response.endpoints.len(), 1);
-        assert_eq!(response.endpoints[0].name, "listWidgets");
+        assert_eq!(response.endpoints[0].name, "listwidgets");
     }
 
     #[tokio::test]

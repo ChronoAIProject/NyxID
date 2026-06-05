@@ -453,7 +453,7 @@ mod tests {
             auth,
             Path(created.id),
             Json(CompletePairingRequest {
-                ack: serde_json::json!({"api_key_id": "abc-123"}),
+                ack: serde_json::json!({"acknowledged": true, "api_key_id": "abc-123"}),
             }),
         )
         .await

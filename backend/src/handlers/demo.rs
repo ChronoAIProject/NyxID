@@ -38,3 +38,31 @@ pub async fn get_demo(auth_user: AuthUser) -> Json<DemoResponse> {
         request_id: Uuid::new_v4().to_string(),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::get_demo;
+    use crate::test_utils::test_auth_user;
+
+    #[tokio::test]
+    async fn get_demo_returns_authenticated_demo_payload() {
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let axum::Json(response) = get_demo(test_auth_user(&user_id)).await;
+
+        assert!(response.ok);
+        assert_eq!(
+            response.message,
+            "Hello from NyxID. Your auth and routing are wired correctly. Connect a real AI Service to start proxying downstream APIs."
+        );
+        assert_eq!(response.user_id, user_id);
+        assert!(chrono::DateTime::parse_from_rfc3339(&response.timestamp).is_ok());
+        assert!(uuid::Uuid::parse_str(&response.request_id).is_ok());
+
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["ok"], true);
+        assert_eq!(json["user_id"], user_id);
+        assert!(json["timestamp"].as_str().is_some());
+        assert!(json["request_id"].as_str().is_some());
+    }
+}

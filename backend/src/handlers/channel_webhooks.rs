@@ -694,6 +694,8 @@ mod tests {
             telegram_webhook_url: None,
             telegram_bot_username: None,
             approval_expiry_interval_secs: 5,
+            oauth_refresh_sweep_interval_secs: 600,
+            oauth_refresh_sweep_window_secs: 900,
             fcm_service_account_path: None,
             fcm_project_id: None,
             apns_key_path: None,
@@ -740,28 +742,6 @@ mod tests {
             telemetry_host: None,
             share_analytics: false,
         }
-    }
-
-    async fn connect_test_database() -> Option<mongodb::Database> {
-        let db_name = format!("nyxid_test_channel_webhooks_{}", uuid::Uuid::new_v4());
-        let candidates = [
-            format!(
-                "mongodb://nyxid:nyxid_dev_password@127.0.0.1:27018/{db_name}?authSource=admin"
-            ),
-            format!("mongodb://127.0.0.1:27017/{db_name}"),
-        ];
-
-        for uri in candidates {
-            let Ok(client) = mongodb::Client::with_uri_str(&uri).await else {
-                continue;
-            };
-            let db = client.database(&db_name);
-            if db.run_command(doc! { "ping": 1 }).await.is_ok() {
-                return Some(db);
-            }
-        }
-
-        None
     }
 
     fn lark_event_body(token: &str) -> Vec<u8> {
@@ -833,7 +813,7 @@ mod tests {
 
     #[tokio::test]
     async fn valid_lark_event_promotes_pending_webhook_bot_and_stores_message() {
-        let Some(db) = connect_test_database().await else {
+        let Some(db) = crate::test_utils::connect_test_database("channel_webhooks").await else {
             eprintln!("skipping channel_webhooks integration test: no local MongoDB available");
             return;
         };

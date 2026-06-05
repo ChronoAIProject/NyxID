@@ -11,12 +11,13 @@ use crate::errors::{AppError, AppResult};
 use crate::models::ssh_auth_mode::SshAuthMode;
 use crate::mw::auth::AuthUser;
 use crate::services::{
-    audit_service, node_metrics_service, node_routing_service, node_service, ssh_service,
+    audit_service, node_metrics_service, node_routing_service, node_service, operation_descriptor,
+    ssh_service,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 use super::services_helpers::fetch_service;
-use super::ssh_tunnel::authorize_ssh_access;
+use super::ssh_tunnel::authorize_ssh_access_for_operation;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -97,7 +98,11 @@ pub async fn ssh_exec(
     Json(body): Json<SshExecRequest>,
 ) -> AppResult<Json<SshExecResponse>> {
     // -- Auth --
-    authorize_ssh_access(&state, &auth_user, &service_id).await?;
+    let operation = operation_descriptor::build_ssh_descriptor(
+        operation_descriptor::SshOperationKind::Exec,
+        Some(&body.command),
+    );
+    authorize_ssh_access_for_operation(&state, &auth_user, &service_id, &operation).await?;
 
     let ssh_svc = ssh_service::get_ssh_service(&state.db, &service_id).await?;
     // Resolve the catalog slug for telemetry -- best-effort so exec
@@ -302,7 +307,7 @@ pub async fn ssh_exec(
                     Some(serde_json::json!({
                         "service_id": service_id,
                         "principal": principal,
-                        "command": truncate_for_audit(&command),
+                        "command": redact_command_for_audit(&command),
                         "exit_code": response.exit_code,
                         "duration_ms": response.duration_ms,
                         "timed_out": response.timed_out,
@@ -461,6 +466,12 @@ pub(crate) fn truncate_for_audit(command: &str) -> &str {
     }
 }
 
+/// Redact command secrets before audit logging, then apply the audit length cap.
+pub(crate) fn redact_command_for_audit(command: &str) -> String {
+    let redacted = operation_descriptor::redact_ssh_command_secrets(command);
+    truncate_for_audit(&redacted).to_string()
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -526,6 +537,31 @@ mod tests {
 
         let big: String = "x".repeat(2000);
         assert_eq!(truncate_for_audit(&big).len(), 1024);
+    }
+
+    #[test]
+    fn redact_command_for_audit_redacts_secrets_before_truncating() {
+        let command = concat!(
+            "ssh -p 22 host ",
+            "mysql -pSECRET ",
+            "curl -H \"Authorization: Bearer TOKEN\" ",
+            "--password=swordfish token=abc api_key=xyz"
+        );
+
+        let redacted = redact_command_for_audit(command);
+
+        assert!(redacted.contains("ssh -p 22 host"));
+        assert!(redacted.contains("mysql -p***"));
+        assert!(redacted.contains("Authorization: Bearer ***"));
+        assert!(redacted.contains("--password=***"));
+        assert!(redacted.contains("token=***"));
+        assert!(redacted.contains("api_key=***"));
+        assert!(!redacted.contains("SECRET"));
+        assert!(!redacted.contains("TOKEN"));
+        assert!(!redacted.contains("swordfish"));
+        assert!(!redacted.contains("token=abc"));
+        assert!(!redacted.contains("api_key=xyz"));
+        assert!(redacted.len() <= 1024);
     }
 
     #[test]

@@ -635,6 +635,54 @@ mod tests {
     }
 
     #[test]
+    fn parse_jwk_accepts_signing_key_when_use_is_omitted() {
+        let jwk = JwkKey {
+            kty: "RSA".to_string(),
+            kid: Some("no-use-kid".to_string()),
+            alg: Some("RS256".to_string()),
+            n: Some("0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAtVT86zwu1RK7aPFFxuhDR1L6tSoc_BJECPebWKRXjBZCiFV4n3oknjhMstn64tZ_2W-5JsGY4Hc5n9yBXArwl93lqt7_RN5w6Cf0h4QyQ5v-65YGjQR0_FDW2QvzqY368QQMicAtaSqzs8KJZgnYb9c7d0zgdAZHzu6qMQvRL5hajrn1n91CbOpbISD08qNLyrdkt-bFTWhAI4vMQFh6WeZu0fM4lFd2NcRwr3XPksINHaQ-G_xBniIqbw0Ls1jF44-csFCur-kEgU8awapJzKnqDKgw".to_string()),
+            e: Some("AQAB".to_string()),
+            x: None,
+            y: None,
+            crv: None,
+            key_use: None,
+        };
+
+        let key = parse_jwk(&jwk).expect("omitted use should be treated as signing-capable");
+        assert_eq!(key.kid.as_deref(), Some("no-use-kid"));
+        assert_eq!(key.algorithm, Algorithm::RS256);
+    }
+
+    #[test]
+    fn parse_jwk_rejects_rsa_keys_missing_public_components() {
+        let missing_modulus = JwkKey {
+            kty: "RSA".to_string(),
+            kid: Some("missing-n".to_string()),
+            alg: Some("RS256".to_string()),
+            n: None,
+            e: Some("AQAB".to_string()),
+            x: None,
+            y: None,
+            crv: None,
+            key_use: Some("sig".to_string()),
+        };
+        let missing_exponent = JwkKey {
+            kty: "RSA".to_string(),
+            kid: Some("missing-e".to_string()),
+            alg: Some("RS256".to_string()),
+            n: Some("AQAB".to_string()),
+            e: None,
+            x: None,
+            y: None,
+            crv: None,
+            key_use: Some("sig".to_string()),
+        };
+
+        assert!(parse_jwk(&missing_modulus).is_none());
+        assert!(parse_jwk(&missing_exponent).is_none());
+    }
+
+    #[test]
     fn apple_id_token_algorithm_is_rs256() {
         assert_eq!(APPLE_ID_TOKEN_ALGORITHM, Algorithm::RS256);
     }

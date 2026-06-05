@@ -115,6 +115,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
 
     #[test]
     fn default_surface_is_backend() {
@@ -198,5 +200,36 @@ mod tests {
                 mfa_required: false,
             },
         );
+    }
+
+    #[tokio::test]
+    async fn extractor_returns_context_from_request_extensions() {
+        let expected = TelemetryContext {
+            surface: "mobile",
+            client_version: Some("2.0.1".to_string()),
+        };
+        let mut req = Request::builder().body(Body::empty()).unwrap();
+        req.extensions_mut().insert(expected.clone());
+        let (mut parts, _) = req.into_parts();
+
+        let ctx = TelemetryContext::from_request_parts(&mut parts, &())
+            .await
+            .expect("extractor is infallible");
+
+        assert_eq!(ctx.surface, expected.surface);
+        assert_eq!(ctx.client_version, expected.client_version);
+    }
+
+    #[tokio::test]
+    async fn extractor_defaults_when_middleware_extension_is_absent() {
+        let req = Request::builder().body(Body::empty()).unwrap();
+        let (mut parts, _) = req.into_parts();
+
+        let ctx = TelemetryContext::from_request_parts(&mut parts, &())
+            .await
+            .expect("extractor is infallible");
+
+        assert_eq!(ctx.surface, "backend");
+        assert!(ctx.client_version.is_none());
     }
 }

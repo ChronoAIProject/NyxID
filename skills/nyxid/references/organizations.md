@@ -252,7 +252,20 @@ nyxid approval grants --org <ID|SLUG|NAME> --output json
 nyxid approval revoke-grant <GRANT_ID> --org <ID|SLUG|NAME> --yes
 ```
 
-Frontend: the Org detail page has an **Approvals** tab for admins to manage these policies via a UI.
+Granular rules work at org level too: pass `--rule` / `--default-effect` (see
+[notifications.md](notifications.md) "Granular approval rules") together with
+`--org` to gate org-owned services by method/path/verb. When an org policy is
+set, its rules **fully replace** each member's personal rules for that service —
+they are not merged — preserving the org-wins cascade.
+
+```bash
+# Org allow-list: members may only POST /v1/chat/completions; everything else denied.
+nyxid approval set-config <SERVICE_ID> --org <ID|SLUG|NAME> \
+  --default-effect deny \
+  --rule 'effect=auto_allow;methods=POST;path=/v1/chat/completions'
+```
+
+Frontend: the Org detail page has an **Approvals** tab for admins to manage these policies via a UI (Simple verb toggles + an Advanced rule editor).
 
 **Cascade semantics** (`approval_service::resolve_org_aware_approval`):
 

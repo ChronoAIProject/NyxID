@@ -256,6 +256,30 @@ mod tests {
     use crate::services::openclaw_channel_service::{self, MAPPINGS_COLLECTION};
     use crate::test_utils::*;
     use axum::extract::State;
+    use axum::http::HeaderValue;
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    type HmacSha256 = Hmac<Sha256>;
+
+    fn signature(secret: &str, body: &[u8]) -> String {
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(body);
+        hex::encode(mac.finalize().into_bytes())
+    }
+
+    fn webhook_headers(secret: &str, signature: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-openclaw-webhook-secret",
+            HeaderValue::from_str(secret).unwrap(),
+        );
+        headers.insert(
+            "x-openclaw-signature",
+            HeaderValue::from_str(signature).unwrap(),
+        );
+        headers
+    }
 
     #[tokio::test]
     async fn test_create_mapping_success() {
@@ -376,5 +400,149 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_create_mapping_rejects_length_limits_with_exact_errors() {
+        let state = test_app_state_no_db().await;
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let long_channel = create_mapping(
+            State(state.clone()),
+            test_auth_user(&user_id),
+            TelemetryContext::default(),
+            Json(CreateMappingRequest {
+                channel: "c".repeat(101),
+                channel_user_id: "user-123".to_string(),
+            }),
+        )
+        .await
+        .expect_err("channel length should be validated before DB access");
+        assert!(matches!(
+            long_channel,
+            AppError::ValidationError(message) if message == "channel exceeds maximum length"
+        ));
+
+        let long_channel_user_id = create_mapping(
+            State(state),
+            test_auth_user(&user_id),
+            TelemetryContext::default(),
+            Json(CreateMappingRequest {
+                channel: "telegram".to_string(),
+                channel_user_id: "u".repeat(501),
+            }),
+        )
+        .await
+        .expect_err("channel_user_id length should be validated before DB access");
+        assert!(matches!(
+            long_channel_user_id,
+            AppError::ValidationError(message)
+                if message == "channel_user_id exceeds maximum length"
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_handle_channel_message_missing_signature_returns_401() {
+        let state = test_app_state_no_db().await;
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-openclaw-webhook-secret",
+            HeaderValue::from_static("secret"),
+        );
+
+        let err = handle_channel_message(State(state), headers, Bytes::from_static(b"{}"))
+            .await
+            .expect_err("missing signature header should be unauthorized");
+
+        assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            err.1.0,
+            serde_json::json!({ "error": "Missing X-OpenClaw-Signature header" })
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_channel_message_rejects_wrong_secret() {
+        let Some(db) = connect_test_database("h_openclaw_wrong_secret").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let state = test_app_state(db);
+
+        let Json(resp) = create_mapping(
+            State(state.clone()),
+            test_auth_user(&user_id),
+            TelemetryContext::default(),
+            Json(CreateMappingRequest {
+                channel: "telegram".to_string(),
+                channel_user_id: "tg-user-1".to_string(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(resp.webhook_secret.is_some());
+
+        let body = serde_json::json!({
+            "channel": "telegram",
+            "channel_user_id": "tg-user-1",
+            "message": "hello",
+            "direction": "inbound"
+        })
+        .to_string();
+        let wrong_secret = "wrong-secret";
+        let headers = webhook_headers(wrong_secret, &signature(wrong_secret, body.as_bytes()));
+
+        let err = handle_channel_message(State(state), headers, Bytes::from(body))
+            .await
+            .expect_err("wrong webhook secret should fail verification");
+
+        assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            err.1.0,
+            serde_json::json!({ "error": "Webhook verification failed" })
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_channel_message_accepts_valid_signature() {
+        let Some(db) = connect_test_database("h_openclaw_valid_signature").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let state = test_app_state(db);
+
+        let Json(mapping) = create_mapping(
+            State(state.clone()),
+            test_auth_user(&user_id),
+            TelemetryContext::default(),
+            Json(CreateMappingRequest {
+                channel: "whatsapp".to_string(),
+                channel_user_id: "wa-user-7".to_string(),
+            }),
+        )
+        .await
+        .unwrap();
+        let secret = mapping.webhook_secret.unwrap();
+        let body = serde_json::json!({
+            "channel": "whatsapp",
+            "channel_user_id": "wa-user-7",
+            "agent_id": "agent-1",
+            "session_key": "session-1",
+            "message": "hello",
+            "direction": "inbound",
+            "metadata": { "thread": "thread-1" }
+        })
+        .to_string();
+        let headers = webhook_headers(&secret, &signature(&secret, body.as_bytes()));
+
+        let Json(response) = handle_channel_message(State(state), headers, Bytes::from(body))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status, "resolved");
+        assert_eq!(response.nyxid_user_id.as_deref(), Some(user_id.as_str()));
+        assert!(response.nyxid_user_email.is_none());
+        assert!(response.available_providers.is_empty());
+        assert!(!response.openclaw_connected);
     }
 }

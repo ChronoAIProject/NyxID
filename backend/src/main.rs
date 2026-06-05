@@ -630,6 +630,43 @@ async fn main() {
         }
     });
 
+    // Spawn proactive OAuth token-refresh sweep. Keeps multi-connection
+    // OAuth access tokens warm (Google / Lark / GitHub BYO etc.) so a
+    // token stays valid even for services that aren't proxied often, and
+    // a dead refresh token surfaces as status="failed" promptly instead
+    // of on the user's next proxy attempt. Lazy proxy-time refresh still
+    // covers everything this misses. Disabled when the interval is 0.
+    if config.oauth_refresh_sweep_interval_secs > 0 {
+        let refresh_db = state.db.clone();
+        let refresh_keys = state.encryption_keys.clone();
+        let refresh_interval = config.oauth_refresh_sweep_interval_secs;
+        let refresh_window =
+            chrono::Duration::seconds(config.oauth_refresh_sweep_window_secs.max(0));
+        tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_secs(refresh_interval));
+            // Delay catch-up bursts under DB backpressure: a stacked sweep
+            // would re-query the same expiring rows and double the refresh
+            // calls. One sweep per interval is plenty.
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // Skip the immediate first tick so startup isn't competing with
+            // index creation / seeding for the connection pool.
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                if let Err(e) = services::user_token_service::refresh_expiring_oauth_keys(
+                    &refresh_db,
+                    &refresh_keys,
+                    refresh_window,
+                )
+                .await
+                {
+                    tracing::warn!("OAuth refresh sweep error: {e}");
+                }
+            }
+        });
+    }
+
     // Telegram integration: webhook mode (production) or polling mode (development)
     if let (Some(bot_token), Some(webhook_url), Some(webhook_secret)) = (
         &config.telegram_bot_token,

@@ -15,6 +15,8 @@ import type {
   PushDevicesResponse,
   RemoveDeviceResponse,
   ApprovalMode,
+  ApprovalEffect,
+  ApprovalRule,
 } from "@/types/approvals";
 
 // --- Notification Settings ---
@@ -240,11 +242,15 @@ export function useSetServiceApprovalConfig() {
       serviceId,
       approvalRequired,
       approvalMode,
+      rules,
+      defaultEffect,
       orgId,
     }: {
       readonly serviceId: string;
       readonly approvalRequired?: boolean;
       readonly approvalMode?: ApprovalMode;
+      readonly rules?: readonly ApprovalRule[];
+      readonly defaultEffect?: ApprovalEffect;
       /** When set, the policy is set on the given org's behalf. Caller
        *  must be an admin of that org. The org's policy is dominant for
        *  org-shared services. */
@@ -258,6 +264,10 @@ export function useSetServiceApprovalConfig() {
           ? { approval_required: approvalRequired }
           : {}),
         ...(approvalMode !== undefined ? { approval_mode: approvalMode } : {}),
+        ...(rules !== undefined ? { rules } : {}),
+        ...(defaultEffect !== undefined
+          ? { default_effect: defaultEffect }
+          : {}),
       });
     },
     onSuccess: (_, variables) => {

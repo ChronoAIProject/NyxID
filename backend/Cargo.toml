@@ -1,6 +1,6 @@
 [package]
 name = "nyxid"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 rust-version.workspace = true
 license.workspace = true
@@ -63,6 +63,7 @@ urlencoding = "2.1"
 zeroize = "1"
 async-trait = "0.1"
 regex = "1.12.3"
+globset = "0.4.18"
 serde_bytes = "0.11"
 tokio-stream = "0.1"
 dashmap = "6"

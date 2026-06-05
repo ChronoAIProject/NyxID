@@ -54,8 +54,8 @@ nyxid approval approve <ID>                            # approve a request
 nyxid approval deny <ID>                               # deny a request
 nyxid approval enable                                  # enable global approval protection
 nyxid approval disable                                 # disable global approval protection
-nyxid approval grants --output json                    # list active grants (grant mode only)
-nyxid approval service-configs --output json           # list per-service approval configs (includes approval_mode)
+nyxid approval grants --output json                    # list active grants (grant mode only; shows scope)
+nyxid approval service-configs --output json           # list per-service approval configs (approval_mode, default_effect, rules)
 nyxid approval set-config <SERVICE_ID> --require-approval true                    # per-request (default)
 nyxid approval set-config <SERVICE_ID> --require-approval true --approval-mode grant  # grant mode
 
@@ -78,3 +78,56 @@ nyxid notification update --approval-telegram true     # enable telegram notific
 nyxid notification update --approval-push true         # enable push notifications
 nyxid notification telegram-link                       # link telegram account
 ```
+
+## Granular approval rules
+
+`--require-approval` is a single on/off switch for the whole service. For finer
+control, attach **rules** that match a request's HTTP method, path, and verb and
+decide per-operation. Rules work across every proxy protocol — HTTP, the LLM
+gateway, MCP `tools/call`, and SSH `exec` (which matches on the command string).
+SSH tunnels and terminals stay coarse (one decision per session).
+
+A rule has these fields, given as a `key=value;key=value` string to `--rule`:
+
+- `effect` — `auto_allow` (allow silently), `require_approval`, or `deny`
+  (reject before any credential is used). Defaults to `require_approval`.
+- `methods` — comma-separated, e.g. `GET,POST` (also `EXEC` / `TUNNEL` for SSH).
+  Omitted means any method.
+- `path` — glob over the request path (HTTP/LLM/MCP) or the command (SSH exec),
+  e.g. `/v1/chat/*` or `rm *`. Defaults to `*`.
+- `verbs` — comma-separated `read` / `write` / `destructive` (derived from the
+  method). Omitted means any verb.
+- `mode` — `per_request` or `grant`; only meaningful when `effect=require_approval`.
+
+`--default-effect` decides operations that match no rule. It defaults to
+`auto_allow`, so adding a few rules never silently blocks an unlisted endpoint of
+a dynamic API. Set `--default-effect deny` (or `require_approval`) to turn the
+service into an allow-list. Rules are evaluated in the order given; first match
+wins. Limits: 50 rules, 16 methods per rule, 256-char patterns.
+
+```bash
+# Require approval for any write, auto-allow everything else (reads pass through).
+nyxid approval set-config <SERVICE_ID> --rule 'verbs=write'
+
+# Deny deletes outright, ask for writes (issuing a reusable grant), allow reads.
+nyxid approval set-config <SERVICE_ID> \
+  --rule 'effect=deny;methods=DELETE' \
+  --rule 'verbs=write;mode=grant'
+
+# Allow-list: only POST /v1/chat/completions is auto-allowed; everything else denied.
+nyxid approval set-config <SERVICE_ID> \
+  --default-effect deny \
+  --rule 'effect=auto_allow;methods=POST;path=/v1/chat/completions'
+
+# SSH: require approval before any `rm` command; allow other exec.
+nyxid approval set-config <SSH_SERVICE_ID> --rule 'methods=EXEC;path=rm *'
+
+nyxid approval set-config <SERVICE_ID> --clear-rules   # drop all rules, back to require/mode policy
+```
+
+With no rules configured, behavior is unchanged: the binary
+`--require-approval` / `--approval-mode` gate applies. Approving an operation
+issues a **scoped grant** (visible in `nyxid approval grants`): a grant for
+`POST /v1/chat/completions` covers later calls to that same endpoint (across HTTP,
+LLM, and MCP transports) but not, say, `DELETE /v1/files/*`. SSH grants stay
+isolated to SSH.

@@ -1522,11 +1522,20 @@ mod tests {
 
         let location = redirect_location(redirect);
         assert!(location.contains("/providers/callback"));
-        assert!(location.contains("status=error"));
-        assert!(location.contains("message=access_denied"));
+        assert_eq!(
+            redirect_query_param(&location, "status").as_deref(),
+            Some("error")
+        );
+        assert_eq!(
+            redirect_query_param(&location, "message").as_deref(),
+            Some(safe_provider_error_message("access_denied", None).as_str())
+        );
         let api_key = get_api_key(&db, &key_id).await;
         assert_eq!(api_key.status, "failed");
-        assert_eq!(api_key.error_message.as_deref(), Some("access_denied"));
+        assert_eq!(
+            api_key.error_message.as_deref(),
+            Some(safe_provider_error_message("access_denied", None).as_str())
+        );
     }
 
     #[tokio::test]
@@ -1987,8 +1996,14 @@ mod tests {
         .await;
 
         let location = redirect_location(redirect);
-        assert!(location.contains("status=error"));
-        assert!(location.contains("message=access_denied"));
+        assert_eq!(
+            redirect_query_param(&location, "status").as_deref(),
+            Some("error")
+        );
+        assert_eq!(
+            redirect_query_param(&location, "message").as_deref(),
+            Some(safe_provider_error_message("access_denied", None).as_str())
+        );
         assert_eq!(get_api_key(&db, &key_id).await.status, "pending_auth");
     }
 
@@ -2023,8 +2038,14 @@ mod tests {
         .await;
 
         let location = redirect_location(redirect);
-        assert!(location.contains("status=error"));
-        assert!(location.contains("message=access_denied"));
+        assert_eq!(
+            redirect_query_param(&location, "status").as_deref(),
+            Some("error")
+        );
+        assert_eq!(
+            redirect_query_param(&location, "message").as_deref(),
+            Some(safe_provider_error_message("access_denied", None).as_str())
+        );
         assert_eq!(get_api_key(&db, &key_id).await.status, "pending_auth");
     }
 }

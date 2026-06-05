@@ -42,6 +42,22 @@ pub struct ApprovalRequest {
     #[serde(default)]
     pub action_description: Option<String>,
 
+    /// Structured operation identity captured from OperationDescriptor.
+    #[serde(default)]
+    pub http_method: Option<String>,
+
+    /// Normalized resource path/tool/command for display and grant scoping.
+    #[serde(default)]
+    pub resource: Option<String>,
+
+    /// Semantic operation verb: "read", "write", or "destructive".
+    #[serde(default)]
+    pub verb: Option<String>,
+
+    /// Internal grant scope minted if a grant-mode request is approved.
+    #[serde(default)]
+    pub grant_scope: Option<String>,
+
     /// Tool approval fields (set when created via POST /api/v1/approvals/requests).
     /// All optional -- `None` for proxy-initiated approval requests.
 
@@ -156,6 +172,10 @@ mod tests {
             action_description: Some(
                 "POST /v1/chat/completions (model: gpt-4, 3 messages)".to_string(),
             ),
+            http_method: Some("POST".to_string()),
+            resource: Some("/v1/chat/completions".to_string()),
+            verb: Some("write".to_string()),
+            grant_scope: Some("v1:http:post:write:/v1/chat/completions".to_string()),
             tool_name: None,
             tool_call_id: None,
             tool_arguments: None,
@@ -216,6 +236,21 @@ mod tests {
             restored.action_description.as_deref(),
             Some("POST /v1/chat/completions (model: gpt-4, 3 messages)")
         );
+    }
+
+    #[test]
+    fn missing_operation_identity_defaults_to_none() {
+        let req = make_approval_request();
+        let mut doc = bson::to_document(&req).expect("serialize");
+        doc.remove("http_method");
+        doc.remove("resource");
+        doc.remove("verb");
+        doc.remove("grant_scope");
+        let restored: ApprovalRequest = bson::from_document(doc).expect("deserialize");
+        assert!(restored.http_method.is_none());
+        assert!(restored.resource.is_none());
+        assert!(restored.verb.is_none());
+        assert!(restored.grant_scope.is_none());
     }
 
     #[test]

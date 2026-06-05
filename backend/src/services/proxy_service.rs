@@ -17,6 +17,7 @@ use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoi
 use crate::models::user_provider_token::{
     COLLECTION_NAME as USER_PROVIDER_TOKENS, UserProviderToken,
 };
+use crate::models::user_service::UserService;
 use crate::models::user_service_connection::{
     COLLECTION_NAME as USER_SERVICE_CONNECTIONS, UserServiceConnection,
 };
@@ -26,7 +27,8 @@ use crate::services::delegation_service::DelegatedCredential;
 use crate::services::node_ws_manager::NodeWsManager;
 use crate::services::provider_token_exchange_service::{self, TokenExchangeCache};
 use crate::services::{
-    agent_binding_service, user_api_key_service, user_service_service, user_token_service,
+    agent_binding_service, gcp_sa_service, user_api_key_service, user_service_service,
+    user_token_service,
 };
 use nyxid_cloud_auth::aws_sigv4::{self, AwsCredentials};
 
@@ -676,6 +678,12 @@ pub struct UserServiceResolution {
     pub org_routing: Option<OrgRouting>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalResolutionHint {
+    pub service_id: String,
+    pub service_owner_id: String,
+}
+
 /// Audit metadata for proxy calls that resolved through an org membership
 /// instead of the actor's own credentials.
 #[derive(Debug, Clone)]
@@ -1237,6 +1245,144 @@ pub async fn find_effective_service_owner(
     Ok(None)
 }
 
+/// Metadata-only mirror of `resolve_proxy_target_from_user_service` for
+/// approval deny preflight. It does not decrypt credentials or load endpoints.
+pub async fn find_approval_resolution_hint(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+    slug: Option<&str>,
+    catalog_service_id: Option<&str>,
+) -> AppResult<Option<ApprovalResolutionHint>> {
+    if let Some(svc) = lookup_user_service(db, actor_user_id, slug, catalog_service_id).await? {
+        return Ok(Some(approval_hint_from_user_service(&svc)));
+    }
+
+    if user_has_legacy_personal_connection(db, actor_user_id, slug, catalog_service_id).await? {
+        return legacy_approval_hint(db, actor_user_id, slug, catalog_service_id).await;
+    }
+
+    let memberships =
+        match crate::services::org_service::find_active_memberships_with_timeout(db, actor_user_id)
+            .await
+        {
+            Ok(rows) => rows,
+            Err(crate::errors::AppError::OrgQueryTimeout) => return Ok(None),
+            Err(crate::errors::AppError::NotFound(_)) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+
+    for membership in memberships {
+        let Some(org_us) =
+            lookup_user_service(db, &membership.org_user_id, slug, catalog_service_id).await?
+        else {
+            continue;
+        };
+        if !membership.role.can_proxy() {
+            continue;
+        }
+        let effective_scope =
+            crate::services::org_role_scope_service::effective_scope_for_membership(
+                db,
+                &membership,
+            )
+            .await?;
+        if crate::services::org_role_scope_service::scope_allows(&effective_scope, &org_us.id) {
+            return Ok(Some(approval_hint_from_user_service(&org_us)));
+        }
+    }
+
+    Ok(None)
+}
+
+/// Metadata-only mirror of `resolve_proxy_target_by_user_service_id` for
+/// approval deny preflight. It validates the same route identity and owner
+/// access constraints without decrypting credentials.
+pub async fn find_approval_resolution_hint_by_user_service_id(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+    user_service_id: &str,
+    expected_slug: Option<&str>,
+    expected_catalog_service_id: Option<&str>,
+) -> AppResult<Option<ApprovalResolutionHint>> {
+    let svc = match user_service_service::find_user_service_by_id(db, user_service_id).await? {
+        Some(svc) => svc,
+        None => return Ok(None),
+    };
+
+    if let Some(slug) = expected_slug
+        && svc.slug != slug
+    {
+        return Err(AppError::BadRequest(format!(
+            "_nyxid_via UserService '{user_service_id}' has slug '{}', \
+             but the route requested '{slug}'",
+            svc.slug
+        )));
+    }
+    if let Some(catalog_id) = expected_catalog_service_id {
+        let svc_catalog = svc.catalog_service_id.as_deref().unwrap_or("");
+        if svc_catalog != catalog_id {
+            return Err(AppError::BadRequest(format!(
+                "_nyxid_via UserService '{user_service_id}' belongs to catalog \
+                 service '{svc_catalog}', but the route requested '{catalog_id}'"
+            )));
+        }
+    }
+
+    let access =
+        crate::services::org_service::resolve_owner_access(db, actor_user_id, &svc.user_id).await?;
+    let allowed = match &access {
+        crate::services::org_service::OwnerAccess::Direct => true,
+        crate::services::org_service::OwnerAccess::AsOrgAdmin { .. } => {
+            access.allows_resource(&svc.id)
+        }
+        crate::services::org_service::OwnerAccess::AsOrgMember { role, .. } => {
+            role.can_proxy() && access.allows_resource(&svc.id)
+        }
+        crate::services::org_service::OwnerAccess::Forbidden => false,
+    };
+    if !allowed {
+        return Err(AppError::OrgRoleInsufficient(
+            "you do not have proxy access to this service".to_string(),
+        ));
+    }
+
+    Ok(Some(approval_hint_from_user_service(&svc)))
+}
+
+async fn legacy_approval_hint(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+    slug: Option<&str>,
+    catalog_service_id: Option<&str>,
+) -> AppResult<Option<ApprovalResolutionHint>> {
+    if let Some(service_id) = catalog_service_id {
+        return Ok(Some(ApprovalResolutionHint {
+            service_id: service_id.to_string(),
+            service_owner_id: actor_user_id.to_string(),
+        }));
+    }
+
+    if let Some(slug) = slug {
+        let service = resolve_service_by_slug(db, slug).await?;
+        return Ok(Some(ApprovalResolutionHint {
+            service_id: service.id,
+            service_owner_id: actor_user_id.to_string(),
+        }));
+    }
+
+    Ok(None)
+}
+
+fn approval_hint_from_user_service(user_service: &UserService) -> ApprovalResolutionHint {
+    ApprovalResolutionHint {
+        service_id: user_service
+            .catalog_service_id
+            .clone()
+            .unwrap_or_else(|| user_service.id.clone()),
+        service_owner_id: user_service.user_id.clone(),
+    }
+}
+
 /// Look up a `UserService` for the given owner by either slug or catalog
 /// service id. Pure data access, no decryption or side effects.
 async fn lookup_user_service(
@@ -1666,6 +1812,37 @@ async fn maybe_refresh_provider_backed_api_key(
     user_id: &str,
     api_key: UserApiKey,
 ) -> AppResult<UserApiKey> {
+    // GCP service account: mint a fresh Google access token from the
+    // stored SA key when the cached token is missing or within the
+    // 5-minute buffer. Unlike user OAuth, this never hits `invalid_rapt`
+    // — service-account tokens carry no session/reauth policy and renew
+    // indefinitely with no human in the loop, so this is the durable
+    // alternative to the (impossible) unattended user-OAuth refresh for
+    // BigQuery / Cloud Billing.
+    if api_key.credential_type == "gcp_service_account" {
+        if api_key.status != "active" {
+            // A terminally-failed key short-circuits: the status check
+            // downstream surfaces it without a wasted mint attempt.
+            return Ok(api_key);
+        }
+        let needs_mint = api_key.access_token_encrypted.is_none()
+            || api_key
+                .expires_at
+                .is_some_and(|exp| exp <= chrono::Utc::now() + chrono::Duration::minutes(5));
+        if !needs_mint {
+            return Ok(api_key);
+        }
+        return match gcp_sa_service::mint_and_store(db, encryption_keys, &api_key).await {
+            Ok(refreshed) => Ok(refreshed),
+            // Transient mint failures (5xx / 429 / network) leave the row
+            // active so the proxy can fall back on any still-valid cached
+            // token and a later request retries; terminal failures are
+            // already persisted as `status: "failed"` by `mint_and_store`.
+            Err(AppError::Internal(_)) => Ok(api_key),
+            Err(error) => Err(error),
+        };
+    }
+
     let needs_refresh = api_key.credential_type == "oauth2"
         && (api_key.access_token_encrypted.is_none()
             || api_key
@@ -1746,7 +1923,9 @@ async fn resolve_user_api_key_credential(
     encryption_keys: &EncryptionKeys,
 ) -> AppResult<Option<String>> {
     let encrypted = match api_key.credential_type.as_str() {
-        "oauth2" => api_key.access_token_encrypted.as_ref(),
+        // Both inject a minted/refreshed access token (kept in
+        // `access_token_encrypted`), not the durable seed credential.
+        "oauth2" | "gcp_service_account" => api_key.access_token_encrypted.as_ref(),
         "node_managed" | "ssh_certificate" => None,
         _ => api_key.credential_encrypted.as_ref(),
     };
@@ -3958,6 +4137,28 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
+    }
+
+    #[test]
+    fn approval_hint_uses_catalog_id_when_user_service_has_one() {
+        let user_service = make_user_service_token_exchange();
+
+        let hint = approval_hint_from_user_service(&user_service);
+
+        assert_eq!(hint.service_id, "cat-1");
+        assert_eq!(hint.service_owner_id, "user-1");
+    }
+
+    #[test]
+    fn approval_hint_uses_user_service_id_for_custom_services() {
+        let mut user_service = make_user_service_token_exchange();
+        user_service.catalog_service_id = None;
+        user_service.user_id = "org-1".to_string();
+
+        let hint = approval_hint_from_user_service(&user_service);
+
+        assert_eq!(hint.service_id, "us-1");
+        assert_eq!(hint.service_owner_id, "org-1");
     }
 
     #[test]

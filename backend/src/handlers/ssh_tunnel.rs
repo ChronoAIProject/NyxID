@@ -22,7 +22,7 @@ use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::{AuthMethod, AuthUser};
 use crate::services::{
     approval_service, audit_service, node_routing_service, node_service, notification_service,
-    ssh_service, user_service_service,
+    operation_descriptor, ssh_service, user_service_service,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
@@ -912,6 +912,19 @@ pub(crate) async fn authorize_ssh_access(
     auth_user: &AuthUser,
     service_id: &str,
 ) -> AppResult<()> {
+    let operation = operation_descriptor::build_ssh_descriptor(
+        operation_descriptor::SshOperationKind::Tunnel,
+        None,
+    );
+    authorize_ssh_access_for_operation(state, auth_user, service_id, &operation).await
+}
+
+pub(crate) async fn authorize_ssh_access_for_operation(
+    state: &AppState,
+    auth_user: &AuthUser,
+    service_id: &str,
+    operation: &operation_descriptor::OperationDescriptor,
+) -> AppResult<()> {
     let approval_owner_user_id = auth_user.effective_approval_owner_user_id();
     let service = fetch_service(state, service_id).await?;
     if !service.is_active {
@@ -919,8 +932,17 @@ pub(crate) async fn authorize_ssh_access(
     }
     ssh_service::ensure_ssh_service(&service)?;
 
-    // SSH services may be org-owned. Look up the effective owner so the
-    // approval cascade applies the org policy when set.
+    // SSH services may be org-owned. Resolve the effective owner through the
+    // same membership-aware path the HTTP proxy uses, so SSH access stays
+    // consistent with proxy access. `find_effective_service_owner` applies the
+    // same role (`can_proxy`) and per-service scope filters, returning the
+    // effective owner for the resource owner or an in-scope, proxy-capable org
+    // member, and `None` otherwise. For a private (org- or personally-owned)
+    // service a `None` result means the caller has no claim on it, so we return
+    // NotFound rather than falling back to treating the caller as the owner.
+    // The service creator and public catalog services (visibility != "private")
+    // keep their existing access. NotFound (rather than Forbidden) avoids
+    // leaking the existence of a private service the caller cannot see.
     let effective_owner = crate::services::proxy_service::find_effective_service_owner(
         &state.db,
         &approval_owner_user_id,
@@ -928,108 +950,93 @@ pub(crate) async fn authorize_ssh_access(
         Some(service_id),
     )
     .await?;
-    let owner_for_resolution = effective_owner
-        .as_deref()
-        .unwrap_or(&approval_owner_user_id);
-    let approval_resolution = approval_service::resolve_org_aware_approval(
+    let owner_for_resolution = match effective_owner.as_deref() {
+        Some(owner) => owner,
+        None => {
+            // No personal service and no authorized org membership grants
+            // access. Reject for a private (owned) service unless the caller
+            // is its creator -- a Direct owner who never provisioned a
+            // UserService also resolves to `None` here and must not be locked
+            // out of their own service. Public catalog services keep their
+            // open behaviour.
+            if service.visibility == "private" && service.created_by != approval_owner_user_id {
+                return Err(AppError::NotFound("SSH service not found".to_string()));
+            }
+            &approval_owner_user_id
+        }
+    };
+    let approval_outcome = approval_service::evaluate_and_check(
         &state.db,
         &approval_owner_user_id,
         owner_for_resolution,
         service_id,
+        operation,
+        auth_user.approval_requester_type(),
+        &auth_user.approval_requester_id(),
+        auth_user.auth_method == AuthMethod::Session,
     )
     .await?;
 
-    if approval_resolution.required && auth_user.auth_method != AuthMethod::Session {
-        let requester_type = auth_user.approval_requester_type().ok_or_else(|| {
-            AppError::Forbidden("Session auth does not require approval".to_string())
-        })?;
-
-        let primary_owner = &approval_resolution.primary_owner_user_id;
-
-        // In grant mode, check for existing grant first.
-        // In per_request mode, skip grant check -- every request needs fresh approval.
-        let has_grant = if approval_resolution.mode
-            == crate::models::service_approval_config::ApprovalMode::Grant
-        {
-            // Org-policy grants are org-scoped (see ChronoAIProject/NyxID#364)
-            // -- pass the flag through so a grant minted by one member's call
-            // is reused when any other member of the same org opens a tunnel.
-            approval_service::check_approval(
-                &state.db,
-                primary_owner,
-                service_id,
-                requester_type,
-                &auth_user.approval_requester_id(),
-                approval_resolution.from_org_policy,
-            )
-            .await?
-        } else {
-            false
-        };
-
-        if !has_grant {
-            // Org policy with no admins MUST fail closed -- otherwise the
-            // requesting member would end up in `notify_user_ids` and could
-            // self-approve their own org-gated request.
-            let notify_user_ids: Vec<String> = if approval_resolution.from_org_policy {
-                let mut admins =
-                    crate::services::org_service::list_admin_user_ids(&state.db, primary_owner)
-                        .await?;
-                admins.sort();
-                admins.dedup();
-                if admins.is_empty() {
-                    return Err(AppError::OrgApprovalNoAdmin(format!(
-                        "Org {primary_owner} has an approval policy on this service but no active admins to decide. Add an admin to the org and retry."
-                    )));
-                }
-                admins
-            } else {
-                vec![approval_owner_user_id.clone()]
-            };
-
-            let timeout_recipient = notify_user_ids.first().cloned().ok_or_else(|| {
-                AppError::Internal("approval recipient list unexpectedly empty".to_string())
-            })?;
-            let channel =
-                notification_service::get_or_create_channel(&state.db, &timeout_recipient).await?;
-            let timeout_secs = channel.approval_timeout_secs;
-            let approval_service_slug =
-                resolve_ssh_approval_service_slug(&state.db, owner_for_resolution, &service)
-                    .await?;
-            let approval_request = approval_service::create_approval_request(
-                &state.db,
-                &state.config,
-                &state.http_client,
-                state.fcm_auth.as_deref(),
-                state.apns_auth.as_deref(),
-                primary_owner,
-                service_id,
-                &service.name,
-                &approval_service_slug,
-                requester_type,
-                &auth_user.approval_requester_id(),
-                None,
-                "ssh:tunnel",
-                None,
-                approval_resolution.mode.clone(),
-                timeout_secs,
-                notify_user_ids,
-                approval_resolution.from_org_policy,
-            )
-            .await?;
-
-            let req_id = approval_request.id.clone();
-            approval_service::wait_for_decision(&state.db, &approval_request.id, timeout_secs)
-                .await
-                .map_err(|error| {
-                    approval_service::map_wait_for_decision_error(
-                        error,
-                        &req_id,
-                        &state.config.frontend_url,
-                    )
-                })?;
+    let pending = match approval_outcome {
+        approval_service::ApprovalOutcome::Allowed { .. } => return Ok(()),
+        approval_service::ApprovalOutcome::Denied => {
+            return Err(AppError::Forbidden(
+                "Operation denied by approval policy".to_string(),
+            ));
         }
-    }
+        approval_service::ApprovalOutcome::NeedsApproval(pending) => pending,
+    };
+
+    let notify_user_ids = approval_service::approval_notification_recipients(
+        &state.db,
+        &approval_owner_user_id,
+        &pending,
+    )
+    .await?;
+
+    let timeout_recipient = notify_user_ids.first().cloned().ok_or_else(|| {
+        AppError::Internal("approval recipient list unexpectedly empty".to_string())
+    })?;
+    let channel =
+        notification_service::get_or_create_channel(&state.db, &timeout_recipient).await?;
+    let timeout_secs = channel.approval_timeout_secs;
+    let approval_service_slug =
+        resolve_ssh_approval_service_slug(&state.db, owner_for_resolution, &service).await?;
+    let request_operation = approval_service::ApprovalRequestOperation::from_descriptor(
+        operation,
+        pending.resolution.grant_scope.clone(),
+    );
+    let approval_request = approval_service::create_approval_request(
+        &state.db,
+        &state.config,
+        &state.http_client,
+        state.fcm_auth.as_deref(),
+        state.apns_auth.as_deref(),
+        &pending.primary_owner_user_id,
+        service_id,
+        &service.name,
+        &approval_service_slug,
+        &pending.requester_type,
+        &pending.requester_id,
+        None,
+        request_operation,
+        pending.resolution.mode.clone(),
+        timeout_secs,
+        notify_user_ids,
+        pending.resolution.from_org_policy,
+    )
+    .await?;
+
+    let req_id = approval_request.id.clone();
+    approval_service::wait_for_decision(&state.db, &approval_request.id, timeout_secs)
+        .await
+        .map_err(|error| {
+            approval_service::map_wait_for_decision_error(
+                error,
+                &req_id,
+                &state.config.frontend_url,
+            )
+        })?;
 
     Ok(())
 }
@@ -1195,7 +1202,7 @@ mod tests {
         MAX_SSH_BANNER_BYTES, ssh_approval_display_slug, ssh_banner_validated,
         validate_runtime_ssh_target,
     };
-    use crate::models::downstream_service::SshServiceConfig;
+    use crate::models::downstream_service::{DownstreamService, SshServiceConfig};
     use crate::models::ssh_auth_mode::SshAuthMode;
 
     #[test]
@@ -1283,6 +1290,140 @@ mod tests {
         .expect_err("metadata endpoint should be blocked");
 
         assert!(error.to_string().contains("cloud metadata endpoint"));
+    }
+
+    // ── authorize_ssh_access: owner / membership access ──────────────────
+    // All four SSH endpoints route through authorize_ssh_access. For a private
+    // service it should grant access to the service creator and authorized
+    // members of the owning org, and deny everyone else -- matching the
+    // ownership resolution the HTTP proxy already applies. These two tests
+    // cover the deny (non-member) and allow (creator) directions.
+
+    fn ssh_service_row(id: &str, created_by: &str, visibility: &str) -> DownstreamService {
+        DownstreamService {
+            id: id.to_string(),
+            name: "Bastion".to_string(),
+            slug: format!("ssh-{id}"),
+            description: None,
+            base_url: "ssh://10.0.0.5:22".to_string(),
+            service_type: "ssh".to_string(),
+            visibility: visibility.to_string(),
+            auth_method: "none".to_string(),
+            auth_key_name: String::new(),
+            credential_encrypted: vec![],
+            auth_type: None,
+            openapi_spec_url: None,
+            asyncapi_spec_url: None,
+            streaming_supported: false,
+            ssh_config: Some(SshServiceConfig {
+                host: "10.0.0.5".to_string(),
+                port: 22,
+                ssh_auth_mode: SshAuthMode::Cert,
+                certificate_auth_enabled: true,
+                certificate_ttl_minutes: 30,
+                allowed_principals: vec!["ubuntu".to_string()],
+                ca_private_key_encrypted: None,
+                ca_public_key: None,
+            }),
+            oauth_client_id: None,
+            service_category: "connection".to_string(),
+            requires_user_credential: false,
+            is_active: true,
+            created_by: created_by.to_string(),
+            identity_propagation_mode: "none".to_string(),
+            identity_include_user_id: false,
+            identity_include_email: false,
+            identity_include_name: false,
+            identity_jwt_audience: None,
+            forward_access_token: false,
+            inject_delegation_token: false,
+            delegation_token_scope: String::new(),
+            provider_config_id: None,
+            homepage_url: None,
+            repository_url: None,
+            issues_url: None,
+            capabilities: None,
+            auth_notes: None,
+            known_limitations: None,
+            required_permissions: None,
+            examples_url: None,
+            recommended_skills: None,
+            custom_user_agent: None,
+            default_request_headers: None,
+            ws_frame_injections: vec![],
+            developer_app_ids: None,
+            token_exchange_config: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn authorize_ssh_access_denies_non_member_of_private_org_service() {
+        use crate::errors::AppError;
+        use crate::models::downstream_service::COLLECTION_NAME as DOWNSTREAM_SERVICES;
+        use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+        use crate::test_utils::{connect_test_database, test_app_state, test_auth_user, test_user};
+
+        let Some(db) = connect_test_database("ssh_authz_nonmember").await else {
+            eprintln!("Skipping MongoDB-backed test; no test database available");
+            return;
+        };
+
+        let org_id = uuid::Uuid::new_v4().to_string();
+        let outsider_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&org_id, UserType::Org))
+            .await
+            .expect("insert org");
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&outsider_id, UserType::Person))
+            .await
+            .expect("insert outsider");
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(ssh_service_row(&service_id, &org_id, "private"))
+            .await
+            .expect("insert org-owned private ssh service");
+
+        let state = test_app_state(db);
+        let err = super::authorize_ssh_access(&state, &test_auth_user(&outsider_id), &service_id)
+            .await
+            .expect_err("a non-member must be denied a private org SSH service");
+        assert!(
+            matches!(err, AppError::NotFound(_)),
+            "expected NotFound (no existence leak), got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn authorize_ssh_access_allows_service_creator() {
+        use crate::models::downstream_service::COLLECTION_NAME as DOWNSTREAM_SERVICES;
+        use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+        use crate::test_utils::{connect_test_database, test_app_state, test_auth_user, test_user};
+
+        let Some(db) = connect_test_database("ssh_authz_creator").await else {
+            eprintln!("Skipping MongoDB-backed test; no test database available");
+            return;
+        };
+
+        let creator_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&creator_id, UserType::Person))
+            .await
+            .expect("insert creator");
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(ssh_service_row(&service_id, &creator_id, "private"))
+            .await
+            .expect("insert creator-owned private ssh service");
+
+        let state = test_app_state(db);
+        super::authorize_ssh_access(&state, &test_auth_user(&creator_id), &service_id)
+            .await
+            .expect("the service creator must retain access to their own private SSH service");
     }
 
     // ── ssh_banner_validated: additional edge cases ──────────────────────

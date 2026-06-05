@@ -13,8 +13,8 @@ use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::mw::auth::AuthUser;
 use crate::services::{
-    action_description, approval_service, audit_service, chatgpt_translator, delegation_service,
-    llm_gateway_service, llm_usage_service, notification_service, proxy_service, sse_parser,
+    approval_service, audit_service, chatgpt_translator, delegation_service, llm_gateway_service,
+    llm_usage_service, notification_service, operation_descriptor, proxy_service, sse_parser,
 };
 
 /// Maximum size for upstream response bodies (50 MB).
@@ -80,6 +80,30 @@ pub async fn llm_proxy_request(
 
     let service_id = service.id.clone();
 
+    // Read request parts and body before credential resolution so Deny
+    // policies can short-circuit without decrypting downstream credentials.
+    let request_method_str = request.method().as_str().to_string();
+    let method = request.method().clone();
+    let query = request.uri().query().map(String::from);
+    let headers = request.headers().clone();
+    let body_bytes = axum::body::to_bytes(request.into_body(), 10 * 1024 * 1024)
+        .await
+        .map_err(|e| AppError::BadRequest(format!("Failed to read request body: {e}")))?;
+
+    preflight_llm_deny_before_resolution(
+        &state,
+        &auth_user,
+        &service_id,
+        &path,
+        &request_method_str,
+        if body_bytes.is_empty() {
+            None
+        } else {
+            Some(&body_bytes)
+        },
+    )
+    .await?;
+
     // Two-tier credential resolution:
     //   1. Prefer the new UserService / UserApiKey model (created via
     //      `nyxid service add` / POST /api/v1/keys). Its target has the
@@ -131,17 +155,6 @@ pub async fn llm_proxy_request(
                 (legacy, false)
             }
         };
-
-    // Read request parts before approval check so we can build action descriptions
-    let request_method_str = request.method().as_str().to_string();
-    let method = request.method().clone();
-    let query = request.uri().query().map(String::from);
-    let headers = request.headers().clone();
-
-    // Read the request body (10MB limit)
-    let body_bytes = axum::body::to_bytes(request.into_body(), 10 * 1024 * 1024)
-        .await
-        .map_err(|e| AppError::BadRequest(format!("Failed to read request body: {e}")))?;
 
     // Check approval if user has it enabled. The two-tier resolver above
     // doesn't surface its `org_routing` back to this scope, so we look up
@@ -375,6 +388,20 @@ pub async fn gateway_request(
 
     // Get the translator
     let translator = llm_gateway_service::get_translator(&provider_slug);
+
+    preflight_llm_deny_before_resolution(
+        &state,
+        &auth_user,
+        &service_id,
+        &path,
+        "POST",
+        if body_bytes.is_empty() {
+            None
+        } else {
+            Some(&body_bytes)
+        },
+    )
+    .await?;
 
     // Two-tier proxy target resolution (mirrors `llm_proxy_request`):
     //   1. Prefer the new UserService / UserApiKey model, which bakes the
@@ -1095,6 +1122,46 @@ fn parse_next_sse_event(buffer: &mut String) -> Option<sse_parser::SseEvent> {
 /// `UserService` (the actor for personal credentials, an org for
 /// org-shared credentials). When `None`, the caller couldn't determine
 /// the owner -- the function falls back to the actor's policy only.
+async fn preflight_llm_deny_before_resolution(
+    state: &AppState,
+    auth_user: &AuthUser,
+    service_id: &str,
+    path: &str,
+    method_str: &str,
+    body: Option<&[u8]>,
+) -> AppResult<()> {
+    let approval_owner_user_id = auth_user.effective_approval_owner_user_id();
+    let hint = proxy_service::find_approval_resolution_hint(
+        &state.db,
+        &approval_owner_user_id,
+        None,
+        Some(service_id),
+    )
+    .await?
+    .unwrap_or_else(|| proxy_service::ApprovalResolutionHint {
+        service_id: service_id.to_string(),
+        service_owner_id: approval_owner_user_id.clone(),
+    });
+
+    let operation = operation_descriptor::build_llm_descriptor(method_str, path, body);
+    let denied = approval_service::evaluate_deny_only(
+        &state.db,
+        &approval_owner_user_id,
+        &hint.service_owner_id,
+        &hint.service_id,
+        &operation,
+    )
+    .await?;
+
+    if denied {
+        return Err(AppError::Forbidden(
+            "Operation denied by approval policy".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn check_llm_approval(
     state: &AppState,
@@ -1108,96 +1175,64 @@ async fn check_llm_approval(
 ) -> AppResult<()> {
     let approval_owner_user_id = auth_user.effective_approval_owner_user_id();
     let owner_for_resolution = service_owner_user_id.unwrap_or(&approval_owner_user_id);
-    let approval_resolution = approval_service::resolve_org_aware_approval(
+    let operation = operation_descriptor::build_llm_descriptor(method_str, path, body);
+    let approval_outcome = approval_service::evaluate_and_check(
         &state.db,
         &approval_owner_user_id,
         owner_for_resolution,
         service_id,
+        &operation,
+        auth_user.approval_requester_type(),
+        &auth_user.approval_requester_id(),
+        auth_user.auth_method == crate::mw::auth::AuthMethod::Session,
     )
     .await?;
 
-    if should_bypass_approval_flow(approval_resolution.required, &auth_user.auth_method) {
-        return Ok(());
-    }
-
-    let requester_type = auth_user
-        .approval_requester_type()
-        .ok_or_else(|| AppError::Forbidden("Session auth does not require approval".to_string()))?;
-    let requester_id = auth_user.approval_requester_id();
-
-    let primary_owner = &approval_resolution.primary_owner_user_id;
-
-    // In grant mode, check for existing grant first.
-    // In per_request mode, skip grant check -- every request needs fresh approval.
-    let has_grant = if approval_resolution.mode
-        == crate::models::service_approval_config::ApprovalMode::Grant
-    {
-        // Org-policy grants are org-scoped (see ChronoAIProject/NyxID#364) --
-        // pass the flag through so members of the same org reuse the grant.
-        approval_service::check_approval(
-            &state.db,
-            primary_owner,
-            service_id,
-            requester_type,
-            &requester_id,
-            approval_resolution.from_org_policy,
-        )
-        .await?
-    } else {
-        false
-    };
-
-    if has_grant {
-        return Ok(());
-    }
-
-    // Compute notification recipients (see proxy.rs for the same pattern).
-    // Org policy with no admins MUST fail closed -- otherwise the
-    // requesting member would end up in `notify_user_ids` and could
-    // self-approve their own org-gated request.
-    let notify_user_ids: Vec<String> = if approval_resolution.from_org_policy {
-        let mut admins =
-            crate::services::org_service::list_admin_user_ids(&state.db, primary_owner).await?;
-        admins.sort();
-        admins.dedup();
-        if admins.is_empty() {
-            return Err(AppError::OrgApprovalNoAdmin(format!(
-                "Org {primary_owner} has an approval policy on this service but no active admins to decide. Add an admin to the org and retry."
-            )));
+    let pending = match approval_outcome {
+        approval_service::ApprovalOutcome::Allowed { .. } => return Ok(()),
+        approval_service::ApprovalOutcome::Denied => {
+            return Err(AppError::Forbidden(
+                "Operation denied by approval policy".to_string(),
+            ));
         }
-        admins
-    } else {
-        vec![approval_owner_user_id.clone()]
+        approval_service::ApprovalOutcome::NeedsApproval(pending) => pending,
     };
 
+    let notify_user_ids = approval_service::approval_notification_recipients(
+        &state.db,
+        &approval_owner_user_id,
+        &pending,
+    )
+    .await?;
     let timeout_recipient = notify_user_ids.first().cloned().ok_or_else(|| {
         AppError::Internal("approval recipient list unexpectedly empty".to_string())
     })?;
     let channel =
         notification_service::get_or_create_channel(&state.db, &timeout_recipient).await?;
 
-    let action_desc = action_description::build_action_description(method_str, path, body);
-
     let timeout_secs = channel.approval_timeout_secs;
+    let request_operation = approval_service::ApprovalRequestOperation::from_descriptor(
+        &operation,
+        pending.resolution.grant_scope.clone(),
+    );
     let approval_request = approval_service::create_approval_request(
         &state.db,
         &state.config,
         &state.http_client,
         state.fcm_auth.as_deref(),
         state.apns_auth.as_deref(),
-        primary_owner,
+        &pending.primary_owner_user_id,
         service_id,
         &service.name,
         &service.slug,
-        requester_type,
-        &requester_id,
+        &pending.requester_type,
+        &pending.requester_id,
         None,
-        &format!("llm:{} {}", method_str, path),
-        Some(&action_desc),
-        approval_resolution.mode.clone(),
+        request_operation,
+        pending.resolution.mode.clone(),
         timeout_secs,
         notify_user_ids,
-        approval_resolution.from_org_policy,
+        pending.resolution.from_org_policy,
     )
     .await?;
 
@@ -1214,6 +1249,7 @@ async fn check_llm_approval(
         })
 }
 
+#[cfg(test)]
 fn should_bypass_approval_flow(
     requires_approval: bool,
     auth_method: &crate::mw::auth::AuthMethod,

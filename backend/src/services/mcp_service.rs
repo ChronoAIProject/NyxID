@@ -20,7 +20,8 @@ use crate::services::content_type::{
 };
 use crate::services::node_ws_manager::NodeWsManager;
 use crate::services::{
-    api_docs_service, connection_service, node_routing_service, openapi_parser, proxy_service,
+    api_docs_service, connection_service, node_routing_service, openapi_parser,
+    operation_descriptor, proxy_service,
 };
 
 // ---------------------------------------------------------------------------
@@ -1738,21 +1739,35 @@ pub fn build_proxy_args(
         return Err(error);
     }
 
-    let method = match endpoint.method.to_uppercase().as_str() {
-        "GET" => reqwest::Method::GET,
-        "POST" => reqwest::Method::POST,
-        "PUT" => reqwest::Method::PUT,
-        "DELETE" => reqwest::Method::DELETE,
-        "PATCH" => reqwest::Method::PATCH,
-        "HEAD" => reqwest::Method::HEAD,
-        "OPTIONS" => reqwest::Method::OPTIONS,
-        _ => reqwest::Method::GET,
-    };
+    let method = parse_proxy_method(&endpoint.method).map_err(|_| {
+        AppError::BadRequest(format!(
+            "Unsupported HTTP method for MCP endpoint '{}': {}",
+            endpoint.name, endpoint.method
+        ))
+    })?;
 
     let parameter_headers = build_parameter_headers(endpoint, header_params, cookie_params)?;
     let body = build_request_body(endpoint, body_fields)?;
 
     Ok((method, path, query, parameter_headers, body))
+}
+
+pub fn build_mcp_operation_descriptor(
+    service: &McpToolService,
+    endpoint: &McpToolEndpoint,
+    args: &serde_json::Value,
+) -> AppResult<operation_descriptor::OperationDescriptor> {
+    let (method, path, _query, _parameter_headers, body) = if service.is_generic_proxy {
+        build_generic_proxy_args(args)?
+    } else {
+        build_proxy_args(endpoint, args)?
+    };
+
+    Ok(operation_descriptor::build_mcp_descriptor(
+        method.as_str(),
+        &path,
+        body.as_ref().map(|bytes| bytes.as_ref()),
+    ))
 }
 
 fn build_request_body(
@@ -2524,19 +2539,7 @@ fn build_generic_proxy_args(args: &serde_json::Value) -> AppResult<ProxyArgs> {
         }
     };
 
-    let method = match args
-        .get("method")
-        .and_then(|v| v.as_str())
-        .unwrap_or("GET")
-        .to_uppercase()
-        .as_str()
-    {
-        "POST" => reqwest::Method::POST,
-        "PUT" => reqwest::Method::PUT,
-        "DELETE" => reqwest::Method::DELETE,
-        "PATCH" => reqwest::Method::PATCH,
-        _ => reqwest::Method::GET,
-    };
+    let method = parse_proxy_method(args.get("method").and_then(|v| v.as_str()).unwrap_or("GET"))?;
 
     let body = args.get("body").and_then(|b| {
         if b.is_null() {
@@ -2551,6 +2554,21 @@ fn build_generic_proxy_args(args: &serde_json::Value) -> AppResult<ProxyArgs> {
     });
 
     Ok((method, path, None, Vec::new(), body))
+}
+
+fn parse_proxy_method(method: &str) -> AppResult<reqwest::Method> {
+    match method.trim().to_ascii_uppercase().as_str() {
+        "GET" => Ok(reqwest::Method::GET),
+        "POST" => Ok(reqwest::Method::POST),
+        "PUT" => Ok(reqwest::Method::PUT),
+        "DELETE" => Ok(reqwest::Method::DELETE),
+        "PATCH" => Ok(reqwest::Method::PATCH),
+        "HEAD" => Ok(reqwest::Method::HEAD),
+        "OPTIONS" => Ok(reqwest::Method::OPTIONS),
+        other => Err(AppError::BadRequest(format!(
+            "Unsupported HTTP method: {other}"
+        ))),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2784,6 +2802,86 @@ mod tests {
             },
             is_generic_proxy: false,
         }
+    }
+
+    #[test]
+    fn mcp_operation_descriptor_reuses_endpoint_method_and_path() {
+        let mut endpoint = make_endpoint("delete_repo_file", "Delete file");
+        endpoint.method = "DELETE".to_string();
+        endpoint.path = "/repos/acme/project/contents/README.md".to_string();
+        let service = make_service("svc-1", "GitHub", "github", vec![endpoint]);
+
+        let descriptor =
+            build_mcp_operation_descriptor(&service, &service.endpoints[0], &serde_json::json!({}))
+                .unwrap();
+
+        assert_eq!(descriptor.protocol, operation_descriptor::Protocol::Mcp);
+        assert_eq!(
+            descriptor.verb,
+            crate::models::service_approval_config::ApprovalVerb::Destructive
+        );
+        assert_eq!(descriptor.method.as_deref(), Some("DELETE"));
+        assert_eq!(
+            descriptor.resource.as_deref(),
+            Some("/repos/acme/project/contents/README.md")
+        );
+    }
+
+    #[test]
+    fn mcp_operation_descriptor_extracts_generic_proxy_method_and_path() {
+        let endpoint = build_generic_proxy_endpoint("custom");
+        let mut service = make_service("svc-1", "Custom", "custom", vec![endpoint]);
+        service.is_generic_proxy = true;
+        let args = serde_json::json!({
+            "method": "PATCH",
+            "path": "v1/resources/123",
+            "body": {
+                "name": "updated",
+                "api_key": "secret-value"
+            }
+        });
+
+        let descriptor =
+            build_mcp_operation_descriptor(&service, &service.endpoints[0], &args).unwrap();
+
+        assert_eq!(
+            descriptor.verb,
+            crate::models::service_approval_config::ApprovalVerb::Write
+        );
+        assert_eq!(descriptor.method.as_deref(), Some("PATCH"));
+        assert_eq!(descriptor.resource.as_deref(), Some("/v1/resources/123"));
+        assert!(!descriptor.summary.contains("secret-value"));
+    }
+
+    #[test]
+    fn generic_proxy_descriptor_rejects_unknown_method() {
+        let endpoint = build_generic_proxy_endpoint("custom");
+        let mut service = make_service("svc-1", "Custom", "custom", vec![endpoint]);
+        service.is_generic_proxy = true;
+        let args = serde_json::json!({
+            "method": "DESTROY",
+            "path": "v1/resources/123"
+        });
+
+        let error = build_mcp_operation_descriptor(&service, &service.endpoints[0], &args)
+            .expect_err("unknown method must be rejected");
+
+        assert!(
+            matches!(error, AppError::BadRequest(msg) if msg.contains("Unsupported HTTP method: DESTROY"))
+        );
+    }
+
+    #[test]
+    fn endpoint_proxy_args_reject_unknown_method() {
+        let mut endpoint = make_endpoint("bad", "Bad");
+        endpoint.method = "DESTROY".to_string();
+
+        let error = build_proxy_args(&endpoint, &serde_json::json!({}))
+            .expect_err("unknown endpoint method must be rejected");
+
+        assert!(
+            matches!(error, AppError::BadRequest(msg) if msg.contains("Unsupported HTTP method for MCP endpoint"))
+        );
     }
 
     // -- search_all_tools tests --

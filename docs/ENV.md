@@ -155,6 +155,20 @@ The approval system works without Telegram -- users can always approve/reject vi
 
 **Telegram delivery modes:** When `TELEGRAM_WEBHOOK_URL` (and `TELEGRAM_WEBHOOK_SECRET`) are set, the backend registers a webhook with Telegram at startup. When only `TELEGRAM_BOT_TOKEN` is set (no webhook URL), the backend automatically falls back to `getUpdates` long polling -- ideal for local development without ngrok or tunnels.
 
+## OAuth Token Refresh (Optional)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OAUTH_REFRESH_SWEEP_INTERVAL_SECS` | `600` (10 min) | Interval between proactive OAuth refresh sweeps. `0` disables the sweep (lazy proxy-time refresh still applies). |
+| `OAUTH_REFRESH_SWEEP_WINDOW_SECS` | `900` (15 min) | How far ahead the sweep looks for expiring access tokens. Keep larger than the proxy-time 5-minute refresh buffer so the sweep wins for idle services. |
+
+The backend refreshes OAuth access tokens two ways: **lazily** at proxy time (whenever a request arrives within 5 minutes of expiry) and **proactively** via this background sweep. The sweep keeps multi-connection OAuth access tokens (Google / Lark / GitHub BYO etc.) warm even for services that aren't proxied often, and surfaces a dead refresh token as `status: "failed"` promptly instead of on the user's next proxy attempt.
+
+The sweep only refreshes the short-lived **access** token. It does **not** extend **refresh**-token lifetime, so it cannot prevent these re-auth causes:
+
+- A Google OAuth app left in **"Testing"** publishing status expires its refresh tokens after 7 days regardless. Publish the app (Google Cloud Console → OAuth consent screen → Publish) to fix.
+- A connection authorized before refresh tokens were issued (no `access_type=offline` consent) has no refresh token to use. Re-add the connection once to obtain one.
+
 ## Mobile Push Notifications (Optional)
 
 | Variable | Default | Description |

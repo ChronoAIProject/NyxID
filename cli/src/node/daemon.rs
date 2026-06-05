@@ -928,9 +928,37 @@ fn read_pid_if_running(pid_file: &Path) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
     use std::io::Write;
     use std::path::{Path, PathBuf};
     use tempfile::NamedTempFile;
+
+    struct HomeGuard {
+        previous: Option<OsString>,
+    }
+
+    impl HomeGuard {
+        fn set(path: &Path) -> Self {
+            let previous = std::env::var_os("HOME");
+            // SAFETY: tests that mutate HOME hold the process-global env lock.
+            unsafe {
+                std::env::set_var("HOME", path);
+            }
+            Self { previous }
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            // SAFETY: tests that mutate HOME hold the process-global env lock.
+            unsafe {
+                match &self.previous {
+                    Some(previous) => std::env::set_var("HOME", previous),
+                    None => std::env::remove_var("HOME"),
+                }
+            }
+        }
+    }
 
     #[test]
     fn launchd_label_default() {
@@ -950,6 +978,19 @@ mod tests {
     fn launchd_label_rejects_unsafe_name() {
         assert!(launchd_label(Some("../../etc")).is_err());
         assert!(launchd_label(Some("; rm -rf /")).is_err());
+    }
+
+    #[test]
+    fn safe_label_accepts_alphanumeric_hyphen_and_underscore() {
+        assert_safe_label("agent_01-prod").expect("safe profile");
+    }
+
+    #[test]
+    fn safe_label_rejects_empty_whitespace_and_path_separators() {
+        for value in ["", "agent prod", "agent/prod", "agent.prod"] {
+            let err = assert_safe_label(value).expect_err("unsafe label should fail");
+            assert!(err.to_string().contains("not safe"), "{err}");
+        }
     }
 
     #[test]
@@ -1056,5 +1097,93 @@ mod tests {
             command,
             "\"/tmp/Nyx ID/bin/nyxid\" \"node\" \"start\" \"--config\" \"/tmp/Nyx ID/config dir\" \"--log-level\" \"debug\""
         );
+    }
+
+    #[test]
+    fn systemd_quote_arg_escapes_quotes_and_backslashes() {
+        assert_eq!(
+            systemd_quote_arg(r#"/tmp/Nyx\ID/"bin""#),
+            r#""/tmp/Nyx\\ID/\"bin\"""#
+        );
+    }
+
+    #[test]
+    fn systemd_exec_start_omits_log_level_when_absent() {
+        let command = build_systemd_exec_start(
+            Path::new("/usr/local/bin/nyxid"),
+            Path::new("/var/lib/nyxid-node"),
+            None,
+        );
+        assert_eq!(
+            command,
+            "\"/usr/local/bin/nyxid\" \"node\" \"start\" \"--config\" \"/var/lib/nyxid-node\""
+        );
+    }
+
+    #[test]
+    #[allow(clippy::await_holding_lock)]
+    fn daemon_config_metadata_round_trips_profile_config_dir() {
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let home = tempfile::tempdir().expect("home");
+        let _home_guard = HomeGuard::set(home.path());
+        let config_dir = home.path().join("actual config");
+        fs::create_dir_all(&config_dir).expect("config dir");
+
+        save_daemon_config_dir(&config_dir, Some("agent_1")).expect("save daemon metadata");
+
+        let loaded = load_daemon_config_dir(Some("agent_1"))
+            .expect("load metadata")
+            .expect("saved config dir");
+        assert_eq!(loaded, config_dir);
+        assert_eq!(
+            resolve_daemon_config_dir(None, Some("agent_1")).expect("resolved"),
+            config_dir
+        );
+    }
+
+    #[test]
+    fn daemon_config_metadata_ignores_malformed_or_stale_entries() {
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let home = tempfile::tempdir().expect("home");
+        let _home_guard = HomeGuard::set(home.path());
+        let default_dir =
+            config::resolve_config_dir_with_profile(None, None).expect("default config dir");
+        fs::create_dir_all(&default_dir).expect("default dir");
+        let meta_file = default_dir.join(DAEMON_META_FILE);
+
+        fs::write(&meta_file, "not valid =").expect("malformed metadata");
+        assert!(
+            load_daemon_config_dir(None)
+                .expect("malformed metadata read")
+                .is_none()
+        );
+
+        fs::write(&meta_file, "config_dir = \"/path/that/does/not/exist\"\n")
+            .expect("stale metadata");
+        assert!(
+            load_daemon_config_dir(None)
+                .expect("stale metadata read")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn resolve_daemon_config_dir_prefers_explicit_config_path() {
+        assert_eq!(
+            resolve_daemon_config_dir(Some("/tmp/custom-node-config"), Some("agent_1"))
+                .expect("explicit config"),
+            PathBuf::from("/tmp/custom-node-config")
+        );
+    }
+
+    #[test]
+    fn launchd_target_combines_domain_and_profile_label() {
+        let target = launchd_target_for(Some("prod")).expect("launchd target");
+        assert!(target.starts_with("gui/"), "{target}");
+        assert!(target.ends_with("/dev.nyxid.node.prod"), "{target}");
     }
 }

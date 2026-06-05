@@ -3941,7 +3941,7 @@ dependencies = [
 
 [[package]]
 name = "nyxid"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -3964,6 +3964,7 @@ dependencies = [
  "dotenvy",
  "ed25519-dalek",
  "futures",
+ "globset",
  "google-cloud-kms",
  "governor",
  "hex",
@@ -4012,7 +4013,7 @@ dependencies = [
 
 [[package]]
 name = "nyxid-cli"
-version = "0.5.6"
+version = "0.6.0"
 dependencies = [
  "aes-gcm",
  "anyhow",

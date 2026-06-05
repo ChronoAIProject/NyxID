@@ -936,4 +936,93 @@ mod tests {
         // user-2's session should be unaffected
         assert!(store.validate(&s3, "user-2"));
     }
+
+    #[tokio::test]
+    async fn load_from_db_without_database_returns_zero() {
+        let store = McpSessionStore::new();
+
+        let loaded = store
+            .load_from_db()
+            .await
+            .expect("no-db load is infallible");
+
+        assert_eq!(loaded, 0);
+    }
+
+    #[tokio::test]
+    async fn load_from_db_recovers_only_non_expired_sessions_with_active_auth_session() {
+        let Some(db) = crate::test_utils::connect_test_database("mcp_load_recover").await else {
+            return;
+        };
+        let now = Utc::now();
+        let active_user = uuid::Uuid::new_v4().to_string();
+        let orphan_user = uuid::Uuid::new_v4().to_string();
+
+        db.collection::<mongodb::bson::Document>("sessions")
+            .insert_one(doc! {
+                "_id": uuid::Uuid::new_v4().to_string(),
+                "user_id": &active_user,
+                "revoked": false,
+                "expires_at": bson::DateTime::from_chrono(now + chrono::Duration::hours(1)),
+            })
+            .await
+            .expect("insert active auth session");
+
+        let recoverable = McpSessionRecord {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: active_user.clone(),
+            client_info: Some("claude-desktop".to_string()),
+            activated_service_ids: vec!["svc-1".to_string(), "svc-2".to_string()],
+            proxy_authorized: true,
+            created_at: now - chrono::Duration::minutes(5),
+            last_active_at: now - chrono::Duration::minutes(1),
+            expires_at: now + chrono::Duration::hours(1),
+        };
+        let expired = McpSessionRecord {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: active_user.clone(),
+            client_info: None,
+            activated_service_ids: vec!["expired-svc".to_string()],
+            proxy_authorized: false,
+            created_at: now - chrono::Duration::hours(2),
+            last_active_at: now - chrono::Duration::hours(2),
+            expires_at: now - chrono::Duration::minutes(1),
+        };
+        let orphaned = McpSessionRecord {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: orphan_user.clone(),
+            client_info: None,
+            activated_service_ids: vec!["orphan-svc".to_string()],
+            proxy_authorized: true,
+            created_at: now,
+            last_active_at: now,
+            expires_at: now + chrono::Duration::hours(1),
+        };
+
+        db.collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
+            .insert_many(vec![recoverable.clone(), expired.clone(), orphaned.clone()])
+            .await
+            .expect("insert mcp session records");
+
+        let store = McpSessionStore::with_db(db);
+        let loaded = store.load_from_db().await.expect("load from db");
+
+        assert_eq!(loaded, 1);
+        assert!(store.validate(&recoverable.id, &active_user));
+        assert!(!store.validate(&expired.id, &active_user));
+        assert!(!store.validate(&orphaned.id, &orphan_user));
+        assert!(store.allows_proxy_access(&recoverable.id));
+
+        let activated = store.get_activated_service_ids(&recoverable.id);
+        assert_eq!(activated.len(), 2);
+        assert!(activated.contains("svc-1"));
+        assert!(activated.contains("svc-2"));
+
+        let mut rx = store
+            .take_notification_rx(&recoverable.id)
+            .expect("loaded sessions get pending notification receivers");
+        assert!(store.send_notification(&recoverable.id, serde_json::json!({"method": "loaded"})));
+        let notification = rx.recv().await.expect("notification should arrive");
+        assert_eq!(notification["method"], "loaded");
+    }
 }

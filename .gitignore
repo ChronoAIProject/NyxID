@@ -57,3 +57,8 @@ docs/STREAMLINE_SERVICES_PROPOSAL.md
 .gstack/
 .context/
 .antigravitycli/
+
+# consensus-rnd codex-refactor-loop runtime (machine-specific, do not commit)
+/.refactor-loop/
+/.worktrees/
+/.config/consensus-rnd/host.env

@@ -3147,8 +3147,8 @@ mod tests {
         let user_id = uuid::Uuid::new_v4().to_string();
         insert_user(&db, &user_id, UserType::Person).await;
 
-        // No service_slug and no slug means unified_key_service cannot
-        // determine the slug; this should be rejected.
+        // Current custom-key creation derives the slug from the label when
+        // service_slug and slug are both omitted.
         let body = make_create_key_request(
             "Missing Slug",
             None,
@@ -3157,21 +3157,17 @@ mod tests {
             Some("bearer"),
         );
 
-        let err = super::create_key(
+        let Json(response) = super::create_key(
             State(state),
             test_auth_user(&user_id),
             TelemetryContext::default(),
             Json(body),
         )
         .await
-        .expect_err("should reject missing slug when no service_slug");
+        .expect("custom key should derive slug from label");
 
-        // The error should be a validation or bad-request error.
-        assert!(
-            matches!(err, AppError::ValidationError(_) | AppError::BadRequest(_)),
-            "expected ValidationError or BadRequest, got {:?}",
-            err
-        );
+        assert_eq!(response.slug, "missing-slug");
+        assert_eq!(response.label, "Missing Slug");
     }
 
     #[tokio::test]

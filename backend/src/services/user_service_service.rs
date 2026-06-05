@@ -1350,6 +1350,54 @@ pub async fn link_api_key(
     Ok(())
 }
 
+/// Re-point an existing `UserService` (looked up by `slug`) at a
+/// different API key, scoped to the owner. Unlike `link_api_key` (which
+/// only binds when `api_key_id` is currently null), this deliberately
+/// *replaces* an existing binding — the use case is switching a Google
+/// Cloud service off a (failed) user-OAuth credential and onto a
+/// service-account credential. It also forces `auth_method: "bearer"`,
+/// since the minted GCP access token is injected as `Authorization:
+/// Bearer`.
+///
+/// The new key is validated to belong to `user_id` so a rebind can't
+/// point a service at someone else's credential.
+pub async fn rebind_user_service_api_key(
+    db: &mongodb::Database,
+    user_id: &str,
+    slug: &str,
+    api_key_id: &str,
+) -> AppResult<()> {
+    let ak_count = db
+        .collection::<mongodb::bson::Document>(USER_API_KEYS)
+        .count_documents(doc! { "_id": api_key_id, "user_id": user_id })
+        .await?;
+    if ak_count == 0 {
+        return Err(AppError::NotFound(
+            "API key not found or does not belong to user".to_string(),
+        ));
+    }
+
+    let result = db
+        .collection::<UserService>(COLLECTION_NAME)
+        .update_one(
+            doc! { "user_id": user_id, "slug": slug },
+            doc! { "$set": {
+                "api_key_id": api_key_id,
+                "auth_method": "bearer",
+                "updated_at": bson::DateTime::from_chrono(Utc::now()),
+            }},
+        )
+        .await?;
+
+    if result.matched_count == 0 {
+        return Err(AppError::NotFound(format!(
+            "Service '{slug}' not found for this user"
+        )));
+    }
+
+    Ok(())
+}
+
 pub(crate) fn ssh_node_keys_stale_after_transition(
     current_stale: bool,
     from: SshAuthMode,
@@ -2638,5 +2686,64 @@ mod tests {
             SshAuthMode::Cert,
             SshAuthMode::ProxyOnly
         ));
+    }
+
+    #[tokio::test]
+    async fn rebind_user_service_api_key_repoints_and_forces_bearer() {
+        let Some(db) = connect_test_database("rebind_user_service_api_key").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let key_id = uuid::Uuid::new_v4().to_string();
+
+        // A service currently bound to nothing (auth_method "none").
+        let svc = test_user_service(
+            &uuid::Uuid::new_v4().to_string(),
+            &user_id,
+            "google-bigquery",
+            &uuid::Uuid::new_v4().to_string(),
+            None,
+            None,
+        );
+        db.collection::<UserService>(COLLECTION_NAME)
+            .insert_one(&svc)
+            .await
+            .unwrap();
+        // The destination key (ownership is verified by the rebind).
+        db.collection::<mongodb::bson::Document>(USER_API_KEYS)
+            .insert_one(doc! { "_id": &key_id, "user_id": &user_id })
+            .await
+            .unwrap();
+
+        rebind_user_service_api_key(&db, &user_id, "google-bigquery", &key_id)
+            .await
+            .unwrap();
+
+        let rebound = db
+            .collection::<UserService>(COLLECTION_NAME)
+            .find_one(doc! { "slug": "google-bigquery", "user_id": &user_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(rebound.api_key_id.as_deref(), Some(key_id.as_str()));
+        assert_eq!(rebound.auth_method, "bearer");
+
+        // Unknown slug is rejected.
+        let err = rebind_user_service_api_key(&db, &user_id, "no-such-slug", &key_id)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::NotFound(_)), "got {err:?}");
+
+        // A key that doesn't belong to the user is rejected (no rebind to
+        // someone else's credential).
+        let foreign = rebind_user_service_api_key(
+            &db,
+            &user_id,
+            "google-bigquery",
+            &uuid::Uuid::new_v4().to_string(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(foreign, AppError::NotFound(_)), "got {foreign:?}");
     }
 }

@@ -95,6 +95,9 @@ type BackendApprovalRequestItem = {
   requester_label?: string | null;
   operation_summary: string;
   action_description?: string | null;
+  http_method?: string | null;
+  resource?: string | null;
+  verb?: string | null;
   approval_mode: ApprovalMode;
   status: string;
   created_at: string;
@@ -315,6 +318,8 @@ function deriveChallengeExpiry(createdAt: string): string {
 function mapBackendRequestToChallenge(item: BackendApprovalRequestItem): ChallengeDetail {
   const summary = item.action_description ?? item.operation_summary;
   const parsed = parseOperationSummary(summary);
+  const action = sanitizeDisplayValue(item.http_method ?? item.verb, parsed.action);
+  const resource = sanitizeDisplayValue(item.resource, parsed.resource);
 
   // Only surface org fields when the backend flags the request as
   // created under an org policy. Falsy / missing `from_org_policy`
@@ -326,10 +331,10 @@ function mapBackendRequestToChallenge(item: BackendApprovalRequestItem): Challen
   return {
     id: item.id,
     title: sanitizeDisplayValue(item.service_name, "Unknown Service"),
-    action: parsed.action,
-    resource: parsed.resource,
+    action,
+    resource,
     approval_mode: item.approval_mode,
-    risk_level: deriveRiskLevel(parsed.action),
+    risk_level: deriveRiskLevel(action),
     status: mapChallengeStatus(item.status),
     created_at: item.created_at,
     expires_at: deriveChallengeExpiry(item.created_at),

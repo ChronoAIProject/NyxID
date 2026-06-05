@@ -162,9 +162,177 @@ fn format_age(created_at: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::format_age;
+    use crate::cli::{NodeCredentialAdminCommands, OutputFormat, PendingCredentialInjectionMethod};
+    use crate::test_support::{mock_auth, mock_auth_with_output};
+    use serde_json::json;
+    use wiremock::matchers::{body_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn format_age_handles_invalid_timestamp() {
         assert_eq!(format_age("not-a-date"), "-");
+    }
+
+    #[test]
+    fn format_age_reports_seconds_minutes_hours_and_days() {
+        let now = chrono::Utc::now();
+        assert_eq!(
+            format_age(&(now - chrono::Duration::seconds(42)).to_rfc3339()),
+            "42s"
+        );
+        assert_eq!(
+            format_age(&(now - chrono::Duration::minutes(17)).to_rfc3339()),
+            "17m"
+        );
+        assert_eq!(
+            format_age(&(now - chrono::Duration::hours(5)).to_rfc3339()),
+            "5h"
+        );
+        assert_eq!(
+            format_age(&(now - chrono::Duration::days(3)).to_rfc3339()),
+            "3d"
+        );
+    }
+
+    #[test]
+    fn format_age_clamps_future_timestamps_to_zero_seconds() {
+        let future = chrono::Utc::now() + chrono::Duration::minutes(5);
+        assert_eq!(format_age(&future.to_rfc3339()), "0s");
+    }
+
+    #[tokio::test]
+    async fn push_resolves_node_name_and_posts_pending_credential_metadata() {
+        let server = MockServer::start().await;
+        let node_id = "dbf51e02-633d-4293-a896-ec0fb383f30b";
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/nodes"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "nodes": [
+                    {"id": node_id, "name": "edge-node"}
+                ]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path(format!("/api/v1/nodes/{node_id}/credentials/push")))
+            .and(body_json(json!({
+                "service_slug": "openai",
+                "injection_method": "header",
+                "field_name": "Authorization",
+                "target_url": "https://api.openai.com/v1",
+                "label": "OpenAI production"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "pending-1",
+                "service_slug": "openai",
+                "injection_method": "header",
+                "field_name": "Authorization"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        super::run(NodeCredentialAdminCommands::Push {
+            node: "edge-node".to_string(),
+            slug: "openai".to_string(),
+            injection_method: PendingCredentialInjectionMethod::Header,
+            field_name: "Authorization".to_string(),
+            target_url: Some("https://api.openai.com/v1".to_string()),
+            label: Some("OpenAI production".to_string()),
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("push should succeed");
+    }
+
+    #[tokio::test]
+    async fn list_fetches_pending_credentials_for_resolved_node() {
+        let server = MockServer::start().await;
+        let node_id = "dbf51e02-633d-4293-a896-ec0fb383f30b";
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/nodes"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "nodes": [
+                    {"id": node_id, "name": "edge-node"}
+                ]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/nodes/{node_id}/credentials/pending")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "pending_credentials": [
+                    {
+                        "id": "pending-1",
+                        "service_slug": "openai",
+                        "injection_method": "header",
+                        "field_name": "Authorization",
+                        "created_at": "2026-01-01T00:00:00Z",
+                        "expires_at": "2026-01-01T01:00:00Z"
+                    }
+                ]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        super::run(NodeCredentialAdminCommands::List {
+            node: "edge-node".to_string(),
+            auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
+        })
+        .await
+        .expect("list should succeed");
+    }
+
+    #[tokio::test]
+    async fn list_handles_empty_pending_credentials_response() {
+        let server = MockServer::start().await;
+        let node_id = "dbf51e02-633d-4293-a896-ec0fb383f30b";
+
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/nodes/{node_id}/credentials/pending")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "pending_credentials": []
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        super::run(NodeCredentialAdminCommands::List {
+            node: node_id.to_string(),
+            auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
+        })
+        .await
+        .expect("empty list should succeed");
+    }
+
+    #[tokio::test]
+    async fn cancel_with_yes_deletes_pending_credential_without_prompt() {
+        let server = MockServer::start().await;
+        let node_id = "dbf51e02-633d-4293-a896-ec0fb383f30b";
+
+        Mock::given(method("DELETE"))
+            .and(path(format!(
+                "/api/v1/nodes/{node_id}/credentials/pending/pending-1"
+            )))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        super::run(NodeCredentialAdminCommands::Cancel {
+            node: node_id.to_string(),
+            pending_id: "pending-1".to_string(),
+            yes: true,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("cancel should succeed");
     }
 }

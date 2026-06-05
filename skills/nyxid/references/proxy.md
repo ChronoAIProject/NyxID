@@ -146,6 +146,10 @@ nyxid proxy request aws-cost-explorer / -m POST \
 # Google Cloud APIs use the generic api-google-cloud catalog entry.
 # Add one UserService per Google API host; the default OAuth scope is
 # https://www.googleapis.com/auth/cloud-platform.read-only.
+# NOTE: for BigQuery / Cloud Billing, user OAuth refresh dies every ~16h
+# with invalid_rapt (Google session reauth on Cloud scopes). For unattended
+# access register a service account instead -- see services.md
+# "Cloud-billing services" (nyxid external-key add-gcp-service-account).
 nyxid service add api-google-cloud --oauth \
   --endpoint-url https://cloudbilling.googleapis.com \
   --slug google-cloud-billing

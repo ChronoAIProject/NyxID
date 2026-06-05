@@ -663,9 +663,10 @@ mod tests {
 
         assert_eq!(resp["message"], "OAuth client deactivated");
 
-        let err = get_my_oauth_client(State(state), auth, Path(created.id)).await;
-
-        assert!(err.is_err());
+        let Json(fetched) = get_my_oauth_client(State(state), auth, Path(created.id))
+            .await
+            .unwrap();
+        assert!(!fetched.is_active);
     }
 
     #[tokio::test]

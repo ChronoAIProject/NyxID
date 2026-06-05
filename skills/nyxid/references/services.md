@@ -297,7 +297,7 @@ Two catalog entries cover the cloud cost and Google API paths used for
 | Slug | What it proxies | Credential shape |
 |------|-----------------|------------------|
 | `aws-cost-explorer` | AWS Cost Explorer JSON-RPC API (`ce.us-east-1.amazonaws.com`). Use `X-Amz-Target` to pick the operation (e.g. `AWSInsightsServiceV20210101.GetCostAndUsage`). | JSON: `{"access_key_id","secret_access_key","region","service"}` |
-| `api-google-cloud` | Generic Google Cloud OAuth user-account proxy. Pick the concrete Google API host at add time with `--endpoint-url`: common hosts include `https://cloudbilling.googleapis.com`, `https://bigquery.googleapis.com`, and `https://compute.googleapis.com`. | OAuth browser sign-in. Default scope: `https://www.googleapis.com/auth/cloud-platform.read-only`; add write/admin scopes with `--scope` when needed. |
+| `api-google-cloud` | Generic Google Cloud proxy. Pick the concrete Google API host at add time with `--endpoint-url`: common hosts include `https://cloudbilling.googleapis.com`, `https://bigquery.googleapis.com`, and `https://compute.googleapis.com`. | **Service account (recommended for Cloud APIs):** JSON key via `nyxid external-key add-gcp-service-account` — unattended, never re-auths. **User OAuth:** browser sign-in, default scope `https://www.googleapis.com/auth/cloud-platform.read-only` — but breaks every ~16h for Cloud scopes (`invalid_rapt`). |
 
 AWS SigV4 takes its credential as a JSON blob on the existing
 `credential` field -- pass it in via `--credential-file`:
@@ -311,11 +311,47 @@ nyxid service add aws-cost-explorer --credential-file /tmp/aws-cred.json
 rm /tmp/aws-cred.json
 ```
 
-Google Cloud uses the normal OAuth provider flow. There is no
-service-account JSON paste path for `api-google-cloud`; the user signs in
-with a Google account and NyxID stores the delegated OAuth token. The
-catalog base URL is only a placeholder, so every useful add should supply
-the concrete Google API host.
+Google Cloud has **two** credential paths. The catalog base URL is only a
+placeholder, so every useful add must supply the concrete Google API host.
+
+> **Use a service account for BigQuery / Cloud Billing.** User OAuth
+> (`--oauth`) **cannot run unattended for Google Cloud Platform scopes**:
+> Google enforces a ~16-hour session-length reauthentication on Cloud
+> scopes and rejects the refresh with `invalid_grant` /
+> `error_subtype=invalid_rapt` once it lapses — the service flips to
+> `failed` and only an interactive human re-login (which NyxID can't do)
+> revives it. This is scope-specific, not account-wide: non-Cloud Google
+> APIs (YouTube, Drive, Gmail) refresh fine via OAuth. For BigQuery, Cloud
+> Billing, Compute, etc., register a **service account** instead — its
+> tokens mint from a key with no reauth, forever:
+
+```bash
+# Create a service account in the GCP project holding the data, grant it
+# least-privilege roles (see "Required IAM" below), download a JSON key,
+# then register it and re-point the services onto it in one step:
+nyxid external-key add-gcp-service-account \
+  --key-file ~/Downloads/nyxid-cost-reader.json \
+  --service google-bigquery \
+  --service google-cloud-billing
+
+# Optional: narrow the minted scope (default cloud-platform). IAM roles on
+# the service account are the real authorization boundary -- the scope only
+# has to be broad enough to reach the API.
+nyxid external-key add-gcp-service-account \
+  --key-file ~/Downloads/nyxid-cost-reader.json \
+  --scopes https://www.googleapis.com/auth/bigquery.readonly \
+  --service google-bigquery
+```
+
+NyxID validates the key by minting a token once at registration, stores
+the key encrypted, and re-mints the hourly access token lazily at proxy
+time. The key's `token_uri` is pinned to Google's endpoint server-side
+(SSRF guard). The `--service` slugs must already exist (add them with the
+`--oauth` commands below, or any add that creates the UserService); the
+flag re-points them onto the service account and sets `auth_method=bearer`.
+
+The user-OAuth flow below still applies to **non-Cloud** Google APIs, or
+to operators who accept the ~16h re-login cadence.
 
 **Operator setup (must be done once before users can `--oauth`):**
 
@@ -397,12 +433,14 @@ nyxid service add api-google-cloud --oauth \
 - AWS: the IAM user / role must be in the AWS **Organization management
   (payer) account** — linked-account credentials return `AccessDenied`.
   Minimum policy: `ce:GetCostAndUsage`, `ce:GetCostAndUsageWithResources`.
-- Google Cloud: the signed-in user still needs IAM for the target
-  project / billing account. Typical read-only billing setup is
-  `roles/billing.viewer` (org or billing-account scope) plus, for
-  BigQuery billing export queries, `roles/bigquery.dataViewer` on the
-  export dataset and `roles/bigquery.jobUser` on the host project.
-  OAuth scopes and IAM both have to allow the operation.
+- Google Cloud: the principal (the signed-in user for OAuth, or the
+  **service account** for the SA path) needs IAM for the target project /
+  billing account. Typical read-only billing setup is `roles/billing.viewer`
+  (org or billing-account scope) plus, for BigQuery billing export queries,
+  `roles/bigquery.dataViewer` on the export dataset and `roles/bigquery.jobUser`
+  on the host project. For the service-account path these roles are granted
+  to the SA's email; the minted scope and IAM both have to allow the
+  operation.
 
 **Operational requirements before this works end-to-end:**
 

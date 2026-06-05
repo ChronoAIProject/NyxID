@@ -447,7 +447,7 @@ mod tests {
             .await
             .expect_err("missing SA should fail");
 
-        assert!(matches!(err, AppError::NotFound(_)));
+        assert!(matches!(err, AppError::ServiceAccountNotFound(_)));
     }
 
     #[tokio::test]

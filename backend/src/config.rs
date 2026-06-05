@@ -136,6 +136,20 @@ pub struct AppConfig {
     /// Interval in seconds between approval expiry sweeps (default: 5).
     pub approval_expiry_interval_secs: u64,
 
+    /// Interval in seconds between proactive OAuth token-refresh sweeps
+    /// (default: 600 = 10 min). Set to 0 to disable the sweep entirely
+    /// (lazy proxy-time refresh still applies). The sweep refreshes
+    /// multi-connection OAuth access tokens that expire within
+    /// `oauth_refresh_sweep_window_secs` so a token stays warm even for
+    /// services that aren't proxied frequently.
+    pub oauth_refresh_sweep_interval_secs: u64,
+
+    /// How far ahead (seconds) the proactive refresh sweep looks for
+    /// expiring OAuth access tokens (default: 900 = 15 min). Must be
+    /// larger than the proxy-time 5-min buffer so the sweep wins the
+    /// race for idle services.
+    pub oauth_refresh_sweep_window_secs: i64,
+
     // -- FCM (Firebase Cloud Messaging) --
     /// Path to FCM service account JSON file.
     pub fcm_service_account_path: Option<String>,
@@ -342,6 +356,14 @@ impl std::fmt::Debug for AppConfig {
             .field(
                 "approval_expiry_interval_secs",
                 &self.approval_expiry_interval_secs,
+            )
+            .field(
+                "oauth_refresh_sweep_interval_secs",
+                &self.oauth_refresh_sweep_interval_secs,
+            )
+            .field(
+                "oauth_refresh_sweep_window_secs",
+                &self.oauth_refresh_sweep_window_secs,
             )
             .field("fcm_service_account_path", &self.fcm_service_account_path)
             .field("fcm_project_id", &self.fcm_project_id)
@@ -645,6 +667,16 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(5),
+
+            oauth_refresh_sweep_interval_secs: env::var("OAUTH_REFRESH_SWEEP_INTERVAL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(600),
+
+            oauth_refresh_sweep_window_secs: env::var("OAUTH_REFRESH_SWEEP_WINDOW_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(900),
 
             fcm_service_account_path: env::var("FCM_SERVICE_ACCOUNT_PATH")
                 .ok()
@@ -1063,6 +1095,8 @@ mod tests {
             telegram_webhook_url: None,
             telegram_bot_username: None,
             approval_expiry_interval_secs: 5,
+            oauth_refresh_sweep_interval_secs: 600,
+            oauth_refresh_sweep_window_secs: 900,
             fcm_service_account_path: None,
             fcm_project_id: None,
             apns_key_path: None,

@@ -25,9 +25,10 @@ use crate::models::user_service_connection::{
 use crate::mw::auth::AuthUser;
 use crate::services::node_ws_manager::{NodeProxyRequest, ProxyResponseType, StreamChunk};
 use crate::services::{
-    action_description, approval_service, audit_service, chatgpt_translator, delegation_service,
-    identity_service, llm_usage_service, node_metrics_service, node_routing_service, node_service,
-    notification_service, proxy_service, sse_parser, user_service_service, ws_frame_injector,
+    approval_service, audit_service, chatgpt_translator, delegation_service, identity_service,
+    llm_usage_service, node_metrics_service, node_routing_service, node_service,
+    notification_service, operation_descriptor, proxy_service, sse_parser, user_service_service,
+    ws_frame_injector,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
@@ -486,6 +487,16 @@ async fn proxy_request_inner(
 
     let user_id_str = auth_user.proxy_resolution_user_id();
     let via_service = extract_via_service(&request);
+    preflight_proxy_deny_before_resolution(
+        state,
+        auth_user,
+        via_service.as_deref(),
+        None,
+        Some(service_id),
+        path,
+        request.method().as_str(),
+    )
+    .await?;
 
     // Direct resolution by UserService ID if ?_nyxid_via= is present.
     // Constrained to the catalog service_id in the route path so the
@@ -683,6 +694,16 @@ async fn proxy_request_by_slug_inner(
 
     let user_id_str = auth_user.proxy_resolution_user_id();
     let via_service = extract_via_service(&request);
+    preflight_proxy_deny_before_resolution(
+        state,
+        auth_user,
+        via_service.as_deref(),
+        Some(slug),
+        None,
+        path,
+        request.method().as_str(),
+    )
+    .await?;
 
     // Direct resolution by UserService ID if ?_nyxid_via= is present.
     // Constrained to the slug in the route path so the override cannot
@@ -1042,6 +1063,75 @@ fn compose_pre_resolved_node_ids(
     }
 }
 
+async fn preflight_proxy_deny_before_resolution(
+    state: &AppState,
+    auth_user: &AuthUser,
+    via_service: Option<&str>,
+    slug: Option<&str>,
+    catalog_service_id: Option<&str>,
+    path: &str,
+    method: &str,
+) -> AppResult<()> {
+    let approval_owner_user_id = auth_user.effective_approval_owner_user_id();
+    let hint = if let Some(user_service_id) = via_service {
+        proxy_service::find_approval_resolution_hint_by_user_service_id(
+            &state.db,
+            &approval_owner_user_id,
+            user_service_id,
+            slug,
+            catalog_service_id,
+        )
+        .await?
+    } else {
+        proxy_service::find_approval_resolution_hint(
+            &state.db,
+            &approval_owner_user_id,
+            slug,
+            catalog_service_id,
+        )
+        .await?
+    };
+
+    let hint = if let Some(hint) = hint {
+        Some(hint)
+    } else if let Some(service_id) = catalog_service_id {
+        Some(proxy_service::ApprovalResolutionHint {
+            service_id: service_id.to_string(),
+            service_owner_id: approval_owner_user_id.clone(),
+        })
+    } else if let Some(slug) = slug {
+        let service = proxy_service::resolve_service_by_slug(&state.db, slug).await?;
+        Some(proxy_service::ApprovalResolutionHint {
+            service_id: service.id,
+            service_owner_id: approval_owner_user_id.clone(),
+        })
+    } else {
+        None
+    };
+
+    let Some(hint) = hint else {
+        return Ok(());
+    };
+
+    let operation = operation_descriptor::build_http_descriptor(method, path, None);
+    let denied = approval_service::evaluate_deny_only(
+        &state.db,
+        &approval_owner_user_id,
+        &hint.service_owner_id,
+        &hint.service_id,
+        &operation,
+    )
+    .await?;
+
+    if denied {
+        return Err(AppError::Forbidden(
+            "Operation denied by approval policy".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 /// Inner proxy execution with optional pre-resolved target from UserService path.
 ///
 /// When `pre_resolved` is `Some`, the target and node routing are already known
@@ -1310,24 +1400,6 @@ async fn execute_proxy_inner(
     );
 
     // === Request body handling ===
-    // Resolve approval policy with org-cascade. The "service owner" (the
-    // user_id that owns the resolved UserService) determines whether an
-    // org policy applies. For the legacy DownstreamService fallback path
-    // where no PreResolved was supplied, the service owner is the actor
-    // (no org context available).
-    let service_owner_for_approval = effective_owner_for_approval
-        .as_deref()
-        .unwrap_or(&approval_owner_user_id);
-    let approval_resolution = approval_service::resolve_org_aware_approval(
-        &state.db,
-        &approval_owner_user_id,
-        service_owner_for_approval,
-        service_id,
-    )
-    .await?;
-    let enforce_approval =
-        should_enforce_runtime_approval(approval_resolution.required, &auth_user.auth_method);
-
     // For WebSocket upgrades, skip body buffering -- WS handshakes have no
     // meaningful body, and consuming it would prevent the protocol upgrade.
     // The request is kept intact for WebSocketUpgrade extraction later.
@@ -1342,107 +1414,87 @@ async fn execute_proxy_inner(
         (bytes, None)
     };
 
-    // Approval enforcement.
-    if enforce_approval {
-        let requester_type = auth_user.approval_requester_type().ok_or_else(|| {
-            AppError::Forbidden("Session auth does not require approval".to_string())
-        })?;
-        let requester_id = auth_user.approval_requester_id();
-
-        // The "primary owner" of the request is whoever the policy came
-        // from -- the org for org-policy, the actor otherwise. Grants are
-        // scoped under this owner so the next call from the same actor
-        // (under the same policy) reuses the existing grant.
-        let primary_owner = &approval_resolution.primary_owner_user_id;
-
-        // In grant mode, check for existing grant first.
-        // In per_request mode, skip grant check -- every request needs fresh approval.
-        let has_grant = if approval_resolution.mode
-            == crate::models::service_approval_config::ApprovalMode::Grant
-        {
-            // For org-policy requests the grant is minted as org-scoped and
-            // must be reused across every member of the owning org (see
-            // ChronoAIProject/NyxID#364); pass the resolution flag through so
-            // check_approval widens the lookup to ignore requester identity.
-            approval_service::check_approval(
-                &state.db,
-                primary_owner,
-                service_id,
-                requester_type,
-                &requester_id,
-                approval_resolution.from_org_policy,
-            )
-            .await?
+    let operation = operation_descriptor::build_http_descriptor(
+        &method_str,
+        path,
+        if body_bytes.is_empty() {
+            None
         } else {
-            false
-        };
+            Some(body_bytes.as_ref())
+        },
+    );
 
-        if !has_grant {
-            // Compute the notification recipients. For an actor-policy
-            // request the actor is the only recipient. For an org-policy
-            // request the recipients are every active admin of the
-            // owning org. If the org has no admins we MUST fail closed:
-            // falling back to the actor would let a normal member
-            // self-approve their own org-gated request (and in grant mode
-            // mint an org-wide grant) since `decide_request` authorizes
-            // anyone in `notify_user_ids`.
-            let notify_user_ids: Vec<String> = if approval_resolution.from_org_policy {
-                let mut admins =
-                    crate::services::org_service::list_admin_user_ids(&state.db, primary_owner)
-                        .await?;
-                admins.sort();
-                admins.dedup();
-                if admins.is_empty() {
-                    return Err(AppError::OrgApprovalNoAdmin(format!(
-                        "Org {primary_owner} has an approval policy on this service but no active admins to decide. Add an admin to the org and retry."
-                    )));
-                }
-                admins
-            } else {
-                vec![approval_owner_user_id.clone()]
-            };
+    // Resolve approval policy with org-cascade. The "service owner" (the
+    // user_id that owns the resolved UserService) determines whether an
+    // org policy applies. For the legacy DownstreamService fallback path
+    // where no PreResolved was supplied, the service owner is the actor
+    // (no org context available).
+    let service_owner_for_approval = effective_owner_for_approval
+        .as_deref()
+        .unwrap_or(&approval_owner_user_id);
+    let approval_outcome = approval_service::evaluate_and_check(
+        &state.db,
+        &approval_owner_user_id,
+        service_owner_for_approval,
+        service_id,
+        &operation,
+        auth_user.approval_requester_type(),
+        &auth_user.approval_requester_id(),
+        auth_user.auth_method == crate::mw::auth::AuthMethod::Session,
+    )
+    .await?;
 
-            // Use the FIRST recipient's notification channel for the
-            // primary timeout (subsequent recipients still get notified
-            // independently in fan-out). The recipient list is guaranteed
-            // non-empty: the org branch errors out above if there are no
-            // admins, and the actor branch always pushes the actor.
+    let enforce_approval = match &approval_outcome {
+        approval_service::ApprovalOutcome::Allowed { required } => {
+            *required && auth_user.auth_method != crate::mw::auth::AuthMethod::Session
+        }
+        approval_service::ApprovalOutcome::Denied => false,
+        approval_service::ApprovalOutcome::NeedsApproval(_) => true,
+    };
+
+    match approval_outcome {
+        approval_service::ApprovalOutcome::Allowed { .. } => {}
+        approval_service::ApprovalOutcome::Denied => {
+            return Err(AppError::Forbidden(
+                "Operation denied by approval policy".to_string(),
+            ));
+        }
+        approval_service::ApprovalOutcome::NeedsApproval(pending) => {
+            let notify_user_ids = approval_service::approval_notification_recipients(
+                &state.db,
+                &approval_owner_user_id,
+                &pending,
+            )
+            .await?;
             let timeout_recipient = notify_user_ids.first().cloned().ok_or_else(|| {
                 AppError::Internal("approval recipient list unexpectedly empty".to_string())
             })?;
             let channel =
                 notification_service::get_or_create_channel(&state.db, &timeout_recipient).await?;
 
-            let action_desc = action_description::build_action_description(
-                &method_str,
-                path,
-                if body_bytes.is_empty() {
-                    None
-                } else {
-                    Some(body_bytes.as_ref())
-                },
-            );
-
             let timeout_secs = channel.approval_timeout_secs;
+            let request_operation = approval_service::ApprovalRequestOperation::from_descriptor(
+                &operation,
+                pending.resolution.grant_scope.clone(),
+            );
             let approval_request = approval_service::create_approval_request(
                 &state.db,
                 &state.config,
                 &state.http_client,
                 state.fcm_auth.as_deref(),
                 state.apns_auth.as_deref(),
-                primary_owner,
+                &pending.primary_owner_user_id,
                 service_id,
                 &target.service.name,
                 &target.service.slug,
-                requester_type,
-                &requester_id,
+                &pending.requester_type,
+                &pending.requester_id,
                 None,
-                &format!("proxy:{} {}", method_str, path),
-                Some(&action_desc),
-                approval_resolution.mode.clone(),
+                request_operation,
+                pending.resolution.mode.clone(),
                 timeout_secs,
                 notify_user_ids,
-                approval_resolution.from_org_policy,
+                pending.resolution.from_org_policy,
             )
             .await?;
 
@@ -2484,6 +2536,7 @@ fn is_chat_completions_proxy_path(path: &str) -> bool {
     normalized == "chat/completions" || normalized.ends_with("/chat/completions")
 }
 
+#[cfg(test)]
 fn should_enforce_runtime_approval(
     requires_approval: bool,
     auth_method: &crate::mw::auth::AuthMethod,
@@ -5708,7 +5761,9 @@ mod proxy_resolution_integration_tests {
     use axum::{
         Router,
         body::Body,
+        extract::{Path, State},
         http::{Method, Request, StatusCode, Uri},
+        response::{IntoResponse, Response},
         routing::get,
     };
     use chrono::Utc;
@@ -5743,16 +5798,42 @@ mod proxy_resolution_integration_tests {
             .expect("build proxy request")
     }
 
-    fn ws_proxy_request(uri: &str) -> Request<Body> {
-        Request::builder()
-            .method(Method::GET)
-            .uri(uri)
-            .header("connection", "Upgrade")
-            .header("upgrade", "websocket")
-            .header("sec-websocket-version", "13")
-            .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
-            .body(Body::empty())
-            .expect("build websocket proxy request")
+    async fn ws_proxy_test_route(
+        State((state, auth)): State<(AppState, AuthUser)>,
+        Path((slug, path)): Path<(String, String)>,
+        request: Request<Body>,
+    ) -> Response {
+        let mut resolved_slug = String::new();
+        match proxy_request_by_slug_inner(&state, &auth, &slug, &path, request, &mut resolved_slug)
+            .await
+        {
+            Ok(response) if resolved_slug == slug => response,
+            Ok(_) => AppError::Internal("proxy resolved unexpected service slug".to_string())
+                .into_response(),
+            Err(error) => error.into_response(),
+        }
+    }
+
+    async fn assert_ws_proxy_upgrade(state: AppState, auth: AuthUser, path: &str) {
+        let app = Router::new()
+            .route("/proxy/s/{slug}/{*path}", get(ws_proxy_test_route))
+            .with_state((state, auth));
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ws proxy test listener");
+        let addr = listener.local_addr().expect("ws proxy listener addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve ws proxy test app");
+        });
+
+        let url = format!("ws://{addr}{path}");
+        let (_socket, response) = tokio_tungstenite::connect_async(&url)
+            .await
+            .expect("websocket proxy should upgrade");
+        assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
+        server.abort();
     }
 
     fn service_account_auth(service_account_id: &str, owner_user_id: &str) -> AuthUser {
@@ -5826,6 +5907,8 @@ mod proxy_resolution_integration_tests {
             service_name: "Org Proxy Target".to_string(),
             approval_required: true,
             approval_mode: ApprovalMode::PerRequest,
+            rules: vec![],
+            default_effect: None,
             created_at: now,
             updated_at: now,
         }
@@ -6157,20 +6240,12 @@ mod proxy_resolution_integration_tests {
         state.node_ws_manager.register_connection(&node.id, tx);
         let responder = spawn_ws_open_responder(&state, &node.id, rx, service.slug.clone());
 
-        let mut resolved_slug = String::new();
-        let response = proxy_request_by_slug_inner(
-            &state,
-            &access_token_auth(&member_id),
-            &service.slug,
-            "socket",
-            ws_proxy_request("/proxy/s/org-node-ws-target/socket"),
-            &mut resolved_slug,
+        assert_ws_proxy_upgrade(
+            state.clone(),
+            access_token_auth(&member_id),
+            "/proxy/s/org-node-ws-target/socket",
         )
-        .await
-        .expect("org member should open ws through org node");
-
-        assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
-        assert_eq!(resolved_slug, service.slug);
+        .await;
         responder.await.expect("node ws responder task");
 
         let audit = wait_for_node_audit_event(&db, &node.id, "proxy_ws_upgrade")
@@ -6222,20 +6297,12 @@ mod proxy_resolution_integration_tests {
         state.node_ws_manager.register_connection(&node.id, tx);
         let responder = spawn_ws_open_responder(&state, &node.id, rx, service.slug.clone());
 
-        let mut resolved_slug = String::new();
-        let response = proxy_request_by_slug_inner(
-            &state,
-            &access_token_auth(&owner_id),
-            &service.slug,
-            "socket",
-            ws_proxy_request("/proxy/s/personal-node-ws-target/socket"),
-            &mut resolved_slug,
+        assert_ws_proxy_upgrade(
+            state.clone(),
+            access_token_auth(&owner_id),
+            "/proxy/s/personal-node-ws-target/socket",
         )
-        .await
-        .expect("owner should open ws through personal node");
-
-        assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
-        assert_eq!(resolved_slug, service.slug);
+        .await;
         responder.await.expect("node ws responder task");
 
         let audit = wait_for_node_audit_event(&db, &node.id, "proxy_ws_upgrade")

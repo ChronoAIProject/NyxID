@@ -68,6 +68,15 @@ function isToolApproval(request: ApprovalRequestItem): boolean {
   return request.tool_name != null;
 }
 
+function operationIdentityLabel(request: ApprovalRequestItem): string | null {
+  const method = request.http_method?.trim();
+  const resource = request.resource?.trim();
+  if (method && resource) return `${method} ${resource}`;
+  if (resource) return resource;
+  if (method) return method;
+  return request.verb ?? null;
+}
+
 export function ApprovalHistoryPage() {
   const [page, setPage] = useState(1);
   const [statusFilter, setStatusFilter] = useState("all");
@@ -186,6 +195,11 @@ export function ApprovalHistoryPage() {
                     ? request.tool_arguments ?? "Tool execution approval"
                     : request.action_description ?? request.operation_summary}
                 </p>
+                {operationIdentityLabel(request) && (
+                  <p className="mt-1 text-[11px] text-muted-foreground">
+                    {operationIdentityLabel(request)}
+                  </p>
+                )}
                 {request.is_destructive && (
                   <Badge variant="destructive" className="mt-1.5">Destructive</Badge>
                 )}
@@ -308,6 +322,11 @@ export function ApprovalHistoryPage() {
                             {request.action_description && (
                               <span className="text-[11px] text-muted-foreground">
                                 {request.operation_summary}
+                              </span>
+                            )}
+                            {operationIdentityLabel(request) && (
+                              <span className="text-[11px] text-muted-foreground">
+                                {operationIdentityLabel(request)}
                               </span>
                             )}
                           </>

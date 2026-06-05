@@ -244,6 +244,40 @@ describe("per-service approval configs", () => {
     });
   });
 
+  it("useSetServiceApprovalConfig forwards granular rules and default effect", async () => {
+    mockPut.mockResolvedValue({});
+    const { result } = renderHook(() => useSetServiceApprovalConfig(), {
+      wrapper: wrapperFactory(),
+    });
+    await result.current.mutateAsync({
+      serviceId: "svc-1",
+      approvalMode: "per_request",
+      rules: [
+        {
+          methods: [],
+          resource_pattern: "*",
+          verbs: ["write"],
+          effect: "require_approval",
+          mode: "per_request",
+        },
+      ],
+      defaultEffect: "auto_allow",
+    });
+    expect(mockPut).toHaveBeenCalledWith("/approvals/service-configs/svc-1", {
+      approval_mode: "per_request",
+      rules: [
+        {
+          methods: [],
+          resource_pattern: "*",
+          verbs: ["write"],
+          effect: "require_approval",
+          mode: "per_request",
+        },
+      ],
+      default_effect: "auto_allow",
+    });
+  });
+
   it("useSetServiceApprovalConfig omits unset fields and routes through the org path", async () => {
     mockPut.mockResolvedValue({});
     const { result } = renderHook(() => useSetServiceApprovalConfig(), {

@@ -23,30 +23,87 @@ use crate::services::node_ws_manager::NodeWsManager;
 use crate::services::provider_token_exchange_service::TokenExchangeCache;
 use crate::services::ssh_service::SshSessionManager;
 
-/// Connect to a fresh per-test MongoDB database. Tries a plain local mongod
-/// docker-compose override on 27018 first, then a plain local mongod
-/// (standard port, no auth — matches CI's service container). Returns `None`
-/// if neither is reachable
-/// so integration tests can skip cleanly in environments without a running
-/// MongoDB.
+const TEST_DB_NAME_PREFIX: &str = "nyxid_test_";
+const TEST_DB_UUID_LEN: usize = 36;
+const MAX_TEST_DB_PREFIX_LEN: usize = 63 - TEST_DB_NAME_PREFIX.len() - 1 - TEST_DB_UUID_LEN;
+
+/// Connect to a fresh per-test MongoDB database.
 ///
-/// The probe uses short server-selection / connect timeouts so a missing
-/// MongoDB fails the test quickly instead of the driver's
-/// 30s default per URI (which previously made absence-of-mongo look like
-/// a ~60s-per-test hang in CI before the tests eventually skipped).
+/// Probes the dev docker-compose mongod on `127.0.0.1:27018` first (published by
+/// `docker-compose.override.yml`), then the CI-style mongod on `127.0.0.1:27017`
+/// (the GitHub Actions service container). Each candidate is gated by a fast TCP
+/// reachability check, so a port with no listener — e.g. 27018 in CI, or both
+/// ports when no mongod is running locally — is skipped in milliseconds instead
+/// of stalling on the driver's server-selection timeout. Without that pre-check
+/// the dead 27018 probe cost ~10s of server selection on *every* DB-backed test
+/// in CI (where only 27017 exists), which dominated the suite's wall-clock.
+/// Returns `None` when neither is reachable so integration tests skip cleanly.
+///
+/// Deliberately NOT cached: a per-test client is required for correct llvm-cov
+/// coverage measurement — a shared client broke under the runtime-per-test
+/// harness (see #864). The TCP pre-check keeps per-test connects cheap.
 pub(crate) async fn connect_test_database(prefix: &str) -> Option<mongodb::Database> {
-    let db_name = format!("nyxid_test_{prefix}_{}", uuid::Uuid::new_v4());
+    let client = probe_test_mongo_client().await?;
+    let db_name = format!(
+        "{TEST_DB_NAME_PREFIX}{}_{}",
+        sanitize_test_db_prefix(prefix),
+        uuid::Uuid::new_v4()
+    );
+
+    Some(client.database(&db_name))
+}
+
+/// Returns `true` when a TCP connection to `addr` succeeds quickly. A closed
+/// local port returns `ECONNREFUSED` almost immediately, so this rejects a dead
+/// probe candidate in ~milliseconds rather than paying the mongo server-selection
+/// timeout. The timeout is only an upper bound for the pathological case of a
+/// port that neither accepts nor refuses (not expected on loopback).
+async fn test_mongo_port_reachable(addr: &str) -> bool {
+    matches!(
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            tokio::net::TcpStream::connect(addr),
+        )
+        .await,
+        Ok(Ok(_))
+    )
+}
+
+async fn probe_test_mongo_client() -> Option<mongodb::Client> {
+    let db_name = format!("nyxid_test_probe_{}", uuid::Uuid::new_v4());
+    // (tcp address, client URI). 27018 is the dev docker-compose port; 27017 is
+    // the CI service-container port. Probe order is no longer load-bearing — the
+    // TCP pre-check below skips whichever candidate has no listener.
     let candidates = [
-        format!("mongodb://nyxid:nyxid_dev_password@127.0.0.1:27018/{db_name}?authSource=admin"),
-        format!("mongodb://127.0.0.1:27017/{db_name}"),
+        (
+            "127.0.0.1:27018",
+            format!(
+                "mongodb://nyxid:nyxid_dev_password@127.0.0.1:27018/{db_name}?authSource=admin&directConnection=true"
+            ),
+        ),
+        (
+            "127.0.0.1:27017",
+            format!("mongodb://127.0.0.1:27017/{db_name}?directConnection=true"),
+        ),
     ];
 
-    for uri in candidates {
+    for (addr, uri) in candidates {
+        // Fast-fail a port with no listener instead of blocking on server
+        // selection before falling over to the next candidate.
+        if !test_mongo_port_reachable(addr).await {
+            continue;
+        }
+
         let Ok(mut options) = mongodb::options::ClientOptions::parse(&uri).await else {
             continue;
         };
-        options.server_selection_timeout = Some(Duration::from_secs(5));
+        // The TCP pre-check already confirmed a listener, so a healthy mongod is
+        // selected well within these bounds; they only cap the rare case where a
+        // port accepts TCP but never answers (down from 10s/5s, which the dead
+        // 27018 probe used to pay in full on every CI test).
+        options.server_selection_timeout = Some(Duration::from_secs(2));
         options.connect_timeout = Some(Duration::from_secs(2));
+        options.max_pool_size = Some(1);
         let Ok(client) = mongodb::Client::with_options(options) else {
             continue;
         };
@@ -67,11 +124,31 @@ pub(crate) async fn connect_test_database(prefix: &str) -> Option<mongodb::Datab
                 probe.delete_one(doc! { "_id": "probe" }),
             )
             .await;
-            return Some(db);
+            return Some(client);
         }
     }
 
     None
+}
+
+fn sanitize_test_db_prefix(prefix: &str) -> String {
+    let sanitized: String = prefix
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .take(MAX_TEST_DB_PREFIX_LEN)
+        .collect();
+
+    if sanitized.is_empty() {
+        "db".to_string()
+    } else {
+        sanitized
+    }
 }
 
 /// Build an `AppConfig` suitable for unit tests that need access to the
@@ -120,6 +197,8 @@ pub(crate) fn test_app_config() -> AppConfig {
         telegram_webhook_url: None,
         telegram_bot_username: None,
         approval_expiry_interval_secs: 5,
+        oauth_refresh_sweep_interval_secs: 600,
+        oauth_refresh_sweep_window_secs: 900,
         fcm_service_account_path: None,
         fcm_project_id: None,
         apns_key_path: None,
@@ -172,6 +251,48 @@ pub(crate) fn test_encryption_keys() -> EncryptionKeys {
     EncryptionKeys::from_config(&test_app_config())
 }
 
+/// A throwaway 2048-bit RSA private key (PKCS#8 PEM) for GCP service-account
+/// mint tests. A mock token server never verifies the signature, so this
+/// only needs to be a parseable, signable key.
+pub(crate) const TEST_GCP_SA_PRIVATE_KEY: &str = "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQCxOfGio6jS5FhN\nxWOq8diF22dhiHhJ+IHxHM7NP40+ljQri6sRnfFzbEZoS2JcXgX7vuWBwjopYgR0\nawMK+fjhOzuy1bEltJ940ZyFgtVIMxgAVosI9fz38faLd1hqc1X/S2KADLYFdt2I\nTucnPg3W5eLlwXrggCBR5TuGBkSGO2uX4H48pZ54vEVrT4APz3GF6kn378lM/04G\nXKfuR3VBCQtQ1N1t+uSDHVEZCOXqnOm1KDgBuBvGCwn+nDAo8X7vSUZ53CvzIsgX\nmHCf7u2cHdYw9LRYlZdMeNuuIRX/2pH5chuIGoVKgywG3svb3/STJG6jT2oUpM7c\nCYu0p7SVAgMBAAECggEAFcPQdZFUy+WIJLDvnxBJb5L03MkGQMtYpfRMP2+lGIEY\n0ho6fZTgkLTE5s0PPNm9MWANzoQ8YVWsx2FXA9OUKZD9MWbF9SP8C7nuV4UsTUwd\nD/mQ5J5VHVwlU5ZqENSuRIaNB73H4t7osPNDtxGLYI9l8KJ0xTpm/bfBuiFt6/AO\nvJoCT12m5gZzF7cLHk3Gb8a9YSlj86rM3eJJF+L0UZ0gpob//RDqnX58SaqeW3sM\nIRXPL9ZHUsKZ9i2Ke68DMox9ACi3gFmnsyaiB0yhBjOiBvTpIjgAT7ucmdFKP15D\ndPgphTxM6cnxGLRE37PiSqW6GDzA7itly8zPRi2OpwKBgQDls4wyeaMNQtgSvXWM\nvSImzgyk7/KagmWtniSYw8Kh8pAL0vHUz38XL8PpVDBTCp8N7pSHnu8brxXOwwYU\n/a9kJzgmncYHogkrcsDXskx4czUx6BO7p8qMBSYh2dCI9iHIJejl3Be+tWmWdEPk\nXn7WCOzq3mzJVfubdMuAqGTpEwKBgQDFhGAJHSMIsEInEHMDCmHy7cX5pDOJoX9K\nB2SjQTpHXmTS6LjrpAFSodyuM3lr/M/coVk8FAwwGfNAlViaEotQBlbkU/HkekkM\n+iNvlMKm8YL2fMpCHQNDI/S9sjiI0Yi7unPFnlbmpCY7NDCWGJsm0x5IsDs4sKfF\nQ8ISheGItwKBgQDgOu3ZODSbdW1InfpqcRctmmdte27wtepcGczP9AnD3e4QHNRG\nUmhWUiKFW9HwvqWWDBiia9wuwjQfqvH8+8iDlGWUDOCMAvnAmDz4Uu2jh5OeLFdX\nEO0A0uXulZqkmOFRaPB5sujbGm0Amm7MOBLJDd15SbgYsv7zOoiOB9S6UQKBgCDZ\nx288nVsQlbARmE9lJq1Uxpyipr+5UIZrfF16t8qu9G3vrvHiMSYhLab7gLJpNdko\nLMNFQlGtvzt6m2Xkt67znvgSziSGAihaYhJo14cUnAeK8cjVMnm0PTxfq+91ihxP\nAnpXv3RU0Nb/8yTDqupmKp9EUFU5bG3uuxSBl+U5AoGBAL+NOw9adup24YiPJ/Gc\nMC3YWJLHTMmWthhQl2zoST3B2qyF59herT0OapF9uvSA/3R7l2/hjY7Y62qHdvlp\nyvwM98ObxwlT/Cip3pDK1E/cek9QwqxyAsRDdy/Tr1PnISowhaNRtv/6yjpjDMRq\n36i//64vyzDNvwtlnvGWhsCs\n-----END PRIVATE KEY-----\n";
+
+/// Build a Google service-account key JSON whose `token_uri` points at a
+/// (test) token endpoint. Used by GCP service-account mint/handler tests.
+pub(crate) fn test_gcp_sa_json(token_uri: &str) -> String {
+    serde_json::json!({
+        "type": "service_account",
+        "project_id": "test-project",
+        "private_key_id": "abc123",
+        "private_key": TEST_GCP_SA_PRIVATE_KEY,
+        "client_email": "svc@test-project.iam.gserviceaccount.com",
+        "client_id": "1234567890",
+        "token_uri": token_uri,
+    })
+    .to_string()
+}
+
+/// Spawn a one-route mock OAuth token endpoint on localhost. Returns the
+/// `/token` URL (usable as a service-account `token_uri` under `cfg(test)`)
+/// and the server task handle.
+pub(crate) async fn spawn_mock_token_server(
+    response: serde_json::Value,
+    status: axum::http::StatusCode,
+) -> (String, tokio::task::JoinHandle<()>) {
+    let app = axum::Router::new().route(
+        "/token",
+        axum::routing::post(move || {
+            let resp = response.clone();
+            async move { (status, axum::Json(resp)) }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (format!("http://{addr}/token"), handle)
+}
+
 /// Returns a process-wide RSA `JwtKeys` for tests, generated lazily once.
 ///
 /// Generating an RSA keypair via the pure-Rust `rsa` crate is the dominant
@@ -217,6 +338,11 @@ fn generate_test_jwt_keys() -> JwtKeys {
 /// Build a minimal `AppState` for handler tests.
 pub(crate) fn test_app_state(db: mongodb::Database) -> AppState {
     let config = test_app_config();
+    test_app_state_with_config(db, config)
+}
+
+/// Build an `AppState` with a caller-provided config for pure handler tests.
+pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfig) -> AppState {
     let http_client = reqwest::Client::new();
     let jwt_keys = cached_test_jwt_keys();
 
@@ -269,6 +395,14 @@ pub(crate) fn test_app_state(db: mongodb::Database) -> AppState {
         ),
         telemetry: None,
     }
+}
+
+/// Build an `AppState` for tests that never perform MongoDB operations.
+pub(crate) async fn test_app_state_no_db() -> AppState {
+    let client = mongodb::Client::with_uri_str("mongodb://localhost:27017")
+        .await
+        .expect("build inert test MongoDB client");
+    test_app_state(client.database("nyxid_unit_unused"))
 }
 
 /// Build a permissive session-auth `AuthUser` for handler tests.
@@ -413,5 +547,35 @@ pub(crate) fn test_user_service(
         source_app_id: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    /// Guards the per-test mongo probe against the CI slowdown regression: a
+    /// candidate port with no listener must fail over in ~milliseconds, not stall
+    /// on the driver's server-selection timeout. (In CI only 27017 is published,
+    /// so the 27018 candidate is dead — without the TCP pre-check every DB test
+    /// paid ~10s here.) Uses a freshly-closed ephemeral port so the assertion is
+    /// deterministic and needs no running mongod.
+    #[tokio::test]
+    async fn closed_port_probe_fails_fast() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let addr = listener.local_addr().expect("local addr").to_string();
+        drop(listener); // port now has no listener -> connect refused immediately
+
+        let start = Instant::now();
+        let reachable = test_mongo_port_reachable(&addr).await;
+        let elapsed = start.elapsed();
+
+        assert!(!reachable, "a closed port must be reported unreachable");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "closed-port probe must fail fast (got {elapsed:?}); a dead candidate \
+             must not block on the mongo server-selection timeout"
+        );
     }
 }

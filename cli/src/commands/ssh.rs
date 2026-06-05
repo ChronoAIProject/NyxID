@@ -648,7 +648,10 @@ fn shell_escape(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_issue_cert_url, build_ws_url, public_key_file_for_identity, shell_escape};
+    use super::{
+        bearer_header, build_issue_cert_url, build_terminal_ws_url, build_ws_url,
+        public_key_file_for_identity, resolve_exec_principal, shell_escape,
+    };
     use std::path::PathBuf;
 
     #[test]
@@ -656,6 +659,23 @@ mod tests {
         assert_eq!(
             build_ws_url("https://nyxid.example.com/base", "svc-1").expect("ws url"),
             "wss://nyxid.example.com/api/v1/ssh/svc-1"
+        );
+    }
+
+    #[test]
+    fn builds_ws_url_from_http_or_existing_ws_base_and_rejects_other_schemes() {
+        assert_eq!(
+            build_ws_url("http://localhost:3001", "svc-1").expect("ws url"),
+            "ws://localhost:3001/api/v1/ssh/svc-1"
+        );
+        assert_eq!(
+            build_ws_url("wss://nyxid.example.com/old/path?x=1", "svc-1").expect("ws url"),
+            "wss://nyxid.example.com/api/v1/ssh/svc-1"
+        );
+        let err = build_ws_url("ftp://nyxid.example.com", "svc-1").expect_err("bad scheme");
+        assert!(
+            err.to_string()
+                .contains("Unsupported NyxID base URL scheme")
         );
     }
 
@@ -668,6 +688,35 @@ mod tests {
     }
 
     #[test]
+    fn builds_issue_cert_url_replaces_path_and_query() {
+        assert_eq!(
+            build_issue_cert_url("https://nyxid.example.com/base?debug=true", "svc-2")
+                .expect("cert url"),
+            "https://nyxid.example.com/api/v1/ssh/svc-2/certificate"
+        );
+    }
+
+    #[test]
+    fn builds_terminal_ws_url_with_optional_principal() {
+        assert_eq!(
+            build_terminal_ws_url("https://nyxid.example.com", "svc-1", Some("alice"))
+                .expect("terminal ws url"),
+            "wss://nyxid.example.com/api/v1/ssh/svc-1/terminal?principal=alice"
+        );
+        assert_eq!(
+            build_terminal_ws_url("http://localhost:3001/base", "svc-1", None)
+                .expect("terminal ws url"),
+            "ws://localhost:3001/api/v1/ssh/svc-1/terminal"
+        );
+        let err =
+            build_terminal_ws_url("file:///tmp/nyxid", "svc-1", None).expect_err("bad scheme");
+        assert!(
+            err.to_string()
+                .contains("Unsupported NyxID base URL scheme")
+        );
+    }
+
+    #[test]
     fn derives_public_key_file_path() {
         assert_eq!(
             public_key_file_for_identity(&PathBuf::from("/tmp/id_ed25519")).expect("pub key"),
@@ -676,7 +725,49 @@ mod tests {
     }
 
     #[test]
+    fn public_key_file_requires_utf8_file_name() {
+        #[cfg(unix)]
+        {
+            use std::ffi::OsString;
+            use std::os::unix::ffi::OsStringExt;
+
+            let invalid = PathBuf::from(OsString::from_vec(vec![0xff]));
+            let err = public_key_file_for_identity(&invalid).expect_err("invalid utf8");
+            assert!(err.to_string().contains("valid UTF-8"));
+        }
+    }
+
+    #[test]
     fn shell_escape_handles_single_quotes() {
         assert_eq!(shell_escape("a'b"), "'a'\"'\"'b'");
+    }
+
+    #[test]
+    fn shell_escape_handles_empty_and_plain_values() {
+        assert_eq!(shell_escape(""), "''");
+        assert_eq!(shell_escape("simple"), "'simple'");
+        assert_eq!(shell_escape("two words"), "'two words'");
+    }
+
+    #[test]
+    fn bearer_header_prefixes_token_and_rejects_invalid_header_value() {
+        assert_eq!(
+            bearer_header("token-1")
+                .expect("header")
+                .to_str()
+                .expect("valid string"),
+            "Bearer token-1"
+        );
+        assert!(bearer_header("bad\nvalue").is_err());
+    }
+
+    #[test]
+    fn explicit_exec_principal_is_trimmed_and_empty_value_is_rejected() {
+        assert_eq!(
+            resolve_exec_principal(None, "openai", Some("  alice  ")).expect("principal"),
+            "alice"
+        );
+        let err = resolve_exec_principal(None, "openai", Some("   ")).expect_err("empty principal");
+        assert!(err.to_string().contains("--principal must not be empty"));
     }
 }

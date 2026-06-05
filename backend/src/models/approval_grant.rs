@@ -28,6 +28,11 @@ pub struct ApprovalGrant {
     /// The approval_request._id that created this grant
     pub approval_request_id: String,
 
+    /// Optional granular operation scope. Missing/None means legacy
+    /// service-wide grant.
+    #[serde(default)]
+    pub scope: Option<String>,
+
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub granted_at: DateTime<Utc>,
 
@@ -71,6 +76,7 @@ mod tests {
             requester_id: uuid::Uuid::new_v4().to_string(),
             requester_label: Some("CI Pipeline".to_string()),
             approval_request_id: uuid::Uuid::new_v4().to_string(),
+            scope: Some("v1:http:post:write:/v1/chat/completions".to_string()),
             granted_at: Utc::now(),
             expires_at: Utc::now() + chrono::Duration::days(30),
             revoked: false,
@@ -103,6 +109,7 @@ mod tests {
         assert!(keys.contains(&"requester_id"));
         assert!(keys.contains(&"requester_label"));
         assert!(keys.contains(&"approval_request_id"));
+        assert!(keys.contains(&"scope"));
         assert!(keys.contains(&"granted_at"));
         assert!(keys.contains(&"expires_at"));
         assert!(keys.contains(&"revoked"));
@@ -117,8 +124,10 @@ mod tests {
         let grant = make_approval_grant();
         let mut doc = bson::to_document(&grant).expect("serialize");
         doc.remove("org_scoped");
+        doc.remove("scope");
         let restored: ApprovalGrant = bson::from_document(doc).expect("deserialize");
         assert!(!restored.org_scoped);
+        assert!(restored.scope.is_none());
     }
 
     #[test]
