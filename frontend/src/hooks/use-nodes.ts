@@ -12,12 +12,17 @@ import type {
   NodePendingCredentialsResponse,
   NodePendingCredentialPubkeyResponse,
   NodePendingCredentialCiphertextResponse,
+  FanOutPendingCredentialResponse,
+  FanOutPendingCredentialPubkeysResponse,
+  FanOutPendingCredentialCiphertextResponse,
 } from "@/types/nodes";
 import type { CiphertextEnvelope } from "@/lib/crypto";
 import type {
   CreateRegistrationTokenFormData,
   TransferNodeFormData,
   PushNodeCredentialFormData,
+  PushNodeCredentialFanOutFormData,
+  FanOutCiphertextsData,
 } from "@/schemas/nodes";
 
 // --- Query hooks ---
@@ -104,6 +109,36 @@ export function useNodePendingCredentialPubkey(
       );
     },
     enabled: enabled && Boolean(nodeId) && Boolean(pendingCredentialId),
+  });
+}
+
+export function useFanOutPendingCredential(
+  fanoutId: string,
+  enabled = true,
+) {
+  return useQuery({
+    queryKey: ["nodes", "fan-out", fanoutId],
+    queryFn: async (): Promise<FanOutPendingCredentialResponse> => {
+      return api.get<FanOutPendingCredentialResponse>(
+        `/nodes/credentials/pending/${fanoutId}/fan-out`,
+      );
+    },
+    enabled: enabled && Boolean(fanoutId),
+  });
+}
+
+export function useFanOutPendingCredentialPubkeys(
+  fanoutId: string,
+  enabled = true,
+) {
+  return useQuery({
+    queryKey: ["nodes", "fan-out", fanoutId, "pubkeys"],
+    queryFn: async (): Promise<FanOutPendingCredentialPubkeysResponse> => {
+      return api.get<FanOutPendingCredentialPubkeysResponse>(
+        `/nodes/credentials/pending/${fanoutId}/fan-out/pubkeys`,
+      );
+    },
+    enabled: enabled && Boolean(fanoutId),
   });
 }
 
@@ -202,6 +237,26 @@ export function usePushNodeCredential(nodeId: string) {
   });
 }
 
+export function usePushNodeCredentialFanOut() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (
+      data: PushNodeCredentialFanOutFormData,
+    ): Promise<FanOutPendingCredentialResponse> => {
+      return api.post<FanOutPendingCredentialResponse>(
+        "/nodes/credentials/push/fan-out",
+        data,
+      );
+    },
+    onSuccess: (data) => {
+      void queryClient.invalidateQueries({
+        queryKey: ["nodes", "fan-out", data.fanout_id],
+      });
+    },
+  });
+}
+
 export function usePostNodePendingCredentialCiphertext(
   nodeId: string,
   pendingCredentialId: string,
@@ -220,6 +275,52 @@ export function usePostNodePendingCredentialCiphertext(
     onSuccess: () => {
       void queryClient.invalidateQueries({
         queryKey: ["nodes", nodeId, "pending-credentials"],
+      });
+    },
+  });
+}
+
+export function usePostFanOutCiphertexts(fanoutId: string) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (
+      data: FanOutCiphertextsData,
+    ): Promise<FanOutPendingCredentialCiphertextResponse> => {
+      return api.post<FanOutPendingCredentialCiphertextResponse>(
+        `/nodes/credentials/pending/${fanoutId}/fan-out/ciphertexts`,
+        data,
+      );
+    },
+    onSuccess: (data) => {
+      void queryClient.invalidateQueries({
+        queryKey: ["nodes", "fan-out", data.fanout_id],
+      });
+      void queryClient.invalidateQueries({
+        queryKey: ["nodes", "fan-out", data.fanout_id, "pubkeys"],
+      });
+    },
+  });
+}
+
+export function useRetryFailedFanOutNodes(fanoutId: string) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (data: {
+      readonly fan_out_revision: number;
+    }): Promise<FanOutPendingCredentialResponse> => {
+      return api.post<FanOutPendingCredentialResponse>(
+        `/nodes/credentials/pending/${fanoutId}/fan-out/retry-failed`,
+        data,
+      );
+    },
+    onSuccess: (data) => {
+      void queryClient.invalidateQueries({
+        queryKey: ["nodes", "fan-out", data.fanout_id],
+      });
+      void queryClient.invalidateQueries({
+        queryKey: ["nodes", "fan-out", data.fanout_id, "pubkeys"],
       });
     },
   });

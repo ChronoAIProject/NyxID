@@ -909,6 +909,53 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
             .build(),
     )
     .await?;
+    npc.create_index(
+        IndexModel::builder()
+            .keys(doc! {
+                "fan_out_nodes.node_id": 1,
+                "is_active": 1,
+            })
+            .options(
+                IndexOptions::builder()
+                    .name("node_pending_credentials_fan_out_node_active".to_string())
+                    .build(),
+            )
+            .build(),
+    )
+    .await?;
+    npc.create_index(
+        IndexModel::builder()
+            .keys(doc! {
+                "fan_out_nodes.node_id": 1,
+                "fan_out_nodes.remote_state": 1,
+                "fan_out_nodes.ciphertext_expires_at": 1,
+            })
+            .options(
+                IndexOptions::builder()
+                    .name("node_pending_credentials_fan_out_ciphertext_sweep".to_string())
+                    .partial_filter_expression(doc! {
+                        "is_active": true,
+                        "fan_out_nodes.remote_state": "ciphertext_queued",
+                    })
+                    .build(),
+            )
+            .build(),
+    )
+    .await?;
+    npc.create_index(
+        IndexModel::builder()
+            .keys(doc! {
+                "created_by_user_id": 1,
+                "fan_out_revision": 1,
+            })
+            .options(
+                IndexOptions::builder()
+                    .name("node_pending_credentials_creator_fan_out_revision".to_string())
+                    .build(),
+            )
+            .build(),
+    )
+    .await?;
 
     // ── cli_pairings (remote CLI pairing / Mode B wizard flow) ──
     let cli_pairings = db.collection::<mongodb::bson::Document>("cli_pairings");

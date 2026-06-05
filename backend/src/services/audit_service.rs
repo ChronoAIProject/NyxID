@@ -105,6 +105,7 @@ async fn write_audit_entry(
 struct AuditWriteWatcher {
     event_type: String,
     pending_credential_id: Option<String>,
+    user_id: Option<String>,
     sender: tokio::sync::oneshot::Sender<String>,
 }
 
@@ -128,6 +129,25 @@ pub(crate) fn notify_on_audit_write(
         .push(AuditWriteWatcher {
             event_type: event_type.into(),
             pending_credential_id,
+            user_id: None,
+            sender,
+        });
+    receiver
+}
+
+#[cfg(test)]
+pub(crate) fn notify_on_audit_write_for_user(
+    event_type: impl Into<String>,
+    user_id: impl Into<String>,
+) -> tokio::sync::oneshot::Receiver<String> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    audit_write_watchers()
+        .lock()
+        .expect("audit watcher mutex")
+        .push(AuditWriteWatcher {
+            event_type: event_type.into(),
+            pending_credential_id: None,
+            user_id: Some(user_id.into()),
             sender,
         });
     receiver
@@ -139,6 +159,12 @@ fn notify_test_audit_write(entry: &AuditLog) {
         .event_data
         .as_ref()
         .and_then(|event_data| event_data.get("pending_credential_id"))
+        .or_else(|| {
+            entry
+                .event_data
+                .as_ref()
+                .and_then(|event_data| event_data.get("fanout_id"))
+        })
         .and_then(serde_json::Value::as_str);
     let mut watchers = audit_write_watchers().lock().expect("audit watcher mutex");
     let mut index = 0;
@@ -148,7 +174,11 @@ fn notify_test_audit_write(entry: &AuditLog) {
             Some(expected) => pending_credential_id == Some(expected),
             None => true,
         };
-        if watcher.event_type == entry.event_type && pending_matches {
+        let user_matches = match watcher.user_id.as_deref() {
+            Some(expected) => entry.user_id.as_deref() == Some(expected),
+            None => true,
+        };
+        if watcher.event_type == entry.event_type && pending_matches && user_matches {
             let watcher = watchers.swap_remove(index);
             let _ = watcher.sender.send(entry.id.clone());
         } else {
@@ -294,6 +324,8 @@ mod tests {
             service_slug: "openclaw".to_string(),
             owner_user_id: "owner-audit".to_string(),
             remote_state: Some(RemoteCryptoState::PubkeyPosted),
+            fan_out: false,
+            generation: None,
             pending_created_at: now - Duration::minutes(5),
             pending_expires_at: now + Duration::minutes(55),
             ciphertext_queued_at: Some(now - Duration::minutes(1)),

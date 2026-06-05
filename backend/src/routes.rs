@@ -538,6 +538,30 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
             post(handlers::node_admin::push_pending_credential),
         )
         .route(
+            "/credentials/push/fan-out",
+            post(handlers::node_admin::push_pending_credential_fan_out),
+        )
+        .route(
+            "/credentials/pending/{fanout_id}/fan-out",
+            get(handlers::node_admin::get_fan_out_pending_credential),
+        )
+        .route(
+            "/credentials/pending/{fanout_id}/fan-out/pubkeys",
+            get(handlers::node_admin::get_fan_out_pending_credential_pubkeys),
+        )
+        .route(
+            "/credentials/pending/{fanout_id}/fan-out/ciphertexts",
+            post(handlers::node_admin::post_fan_out_pending_credential_ciphertexts).layer(
+                DefaultBodyLimit::max(
+                    crate::services::node_pending_credential_service::MAX_FAN_OUT_HTTP_BODY_BYTES,
+                ),
+            ),
+        )
+        .route(
+            "/credentials/pending/{fanout_id}/fan-out/retry-failed",
+            post(handlers::node_admin::retry_failed_fan_out_pending_credential),
+        )
+        .route(
             "/{node_id}/credentials/pending",
             get(handlers::node_admin::list_pending_credentials),
         )

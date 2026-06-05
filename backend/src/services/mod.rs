@@ -35,6 +35,7 @@ pub mod llm_gateway_service;
 pub mod llm_usage_service;
 pub mod mcp_service;
 pub mod mfa_service;
+pub mod node_fanout_resolver;
 pub mod node_metrics_service;
 pub mod node_pending_credential_service;
 pub mod node_routing_service;

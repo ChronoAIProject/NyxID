@@ -5,9 +5,13 @@ import {
   transferNodeSchema,
   nodePendingCredentialInjectionMethodSchema,
   pushNodeCredentialSchema,
+  pushNodeCredentialFanOutSchema,
+  fanOutCiphertextsSchema,
+  MAX_FAN_OUT_CIPHERTEXT_TOTAL_SIZE,
   acceptNodeCredentialSecretSchema,
   MAX_REMOTE_CREDENTIAL_PLAINTEXT_SIZE,
 } from "./nodes";
+import { encodeBase64UrlNoPad, MAX_CIPHERTEXT_SIZE } from "@/lib/crypto";
 
 describe("createRegistrationTokenSchema", () => {
   it("accepts a valid lowercase-hyphen name with no owner", () => {
@@ -147,5 +151,64 @@ describe("acceptNodeCredentialSecretSchema", () => {
         new Uint8Array(MAX_REMOTE_CREDENTIAL_PLAINTEXT_SIZE + 1),
       ).success,
     ).toBe(false);
+  });
+});
+
+describe("fanOutCiphertextsSchema", () => {
+  function b64(len: number): string {
+    return encodeBase64UrlNoPad(new Uint8Array(len));
+  }
+
+  const item = {
+    node_id: "node-1",
+    generation: 0,
+    version: "v1" as const,
+    admin_pubkey: b64(32),
+    nonce: b64(24),
+    ciphertext: b64(32),
+  };
+
+  it("accepts fan-out envelope array shape", () => {
+    expect(
+      fanOutCiphertextsSchema.safeParse({
+        fan_out_revision: 1,
+        items: [item],
+      }).success,
+    ).toBe(true);
+  });
+
+  it("rejects per-element ciphertexts over the cap", () => {
+    expect(
+      fanOutCiphertextsSchema.safeParse({
+        fan_out_revision: 1,
+        items: [{ ...item, ciphertext: b64(MAX_CIPHERTEXT_SIZE + 1) }],
+      }).success,
+    ).toBe(false);
+  });
+
+  it("rejects aggregate ciphertext bytes over the cap", () => {
+    const full = Array.from({ length: 10 }, (_, index) => ({
+      ...item,
+      node_id: `node-${String(index)}`,
+      ciphertext: b64(MAX_CIPHERTEXT_SIZE),
+    }));
+    expect(MAX_FAN_OUT_CIPHERTEXT_TOTAL_SIZE).toBe(
+      10 * MAX_CIPHERTEXT_SIZE,
+    );
+    expect(
+      fanOutCiphertextsSchema.safeParse({
+        fan_out_revision: 1,
+        items: [...full, { ...item, node_id: "overflow", ciphertext: b64(1) }],
+      }).success,
+    ).toBe(false);
+  });
+
+  it("push and ciphertext schemas have no plaintext-like fields", () => {
+    const pushShape = pushNodeCredentialFanOutSchema.shape;
+    const ciphertextShape = fanOutCiphertextsSchema.shape;
+    for (const field of ["secret", "credential", "token", "value", "plaintext"]) {
+      expect(pushShape).not.toHaveProperty(field);
+      expect(ciphertextShape).not.toHaveProperty(field);
+    }
   });
 });

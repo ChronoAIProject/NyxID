@@ -521,6 +521,19 @@ const nodeCredentialAcceptRoute = createRoute({
   component: CredentialAcceptPage,
 });
 
+const nodeCredentialFanOutAcceptRoute = createRoute({
+  path: "/nodes/credentials/pending/$pendingId/fan-out/accept",
+  getParentRoute: () => dashboardLayout,
+  validateSearch: (search: Record<string, unknown>): { return_to?: string } => {
+    const returnTo =
+      typeof search.return_to === "string"
+        ? getSafeCredentialAcceptReturnTo(search.return_to)
+        : null;
+    return returnTo ? { return_to: returnTo } : {};
+  },
+  component: CredentialAcceptPage,
+});
+
 const keysRoute = createRoute({
   path: "/keys",
   getParentRoute: () => dashboardLayout,
@@ -743,6 +756,7 @@ const routeTree = rootRoute.addChildren([
     nodesRoute,
     nodeDetailRoute,
     nodeCredentialAcceptRoute,
+    nodeCredentialFanOutAcceptRoute,
     channelBotsRoute,
     channelBotDetailRoute,
     channelConversationDetailRoute,

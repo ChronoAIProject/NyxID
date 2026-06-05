@@ -35,6 +35,8 @@ pub struct NodeAgentPendingCredentialInfo {
     pub created_at: String,
     pub expires_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub fan_out_generation: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub crypto: Option<NodeAgentPendingCredentialCryptoInfo>,
 }
 
@@ -60,16 +62,19 @@ async fn authenticate_node(state: &AppState, headers: &HeaderMap) -> AppResult<N
 
 fn pending_info(
     pending: NodePendingCredential,
+    node_id: &str,
     include_remote_crypto: bool,
 ) -> NodeAgentPendingCredentialInfo {
+    let fan_out_target = node_pending_credential_service::fan_out_target(&pending, node_id);
+    let fan_out_generation = fan_out_target.map(|target| target.generation);
+    let crypto_version = pending
+        .crypto
+        .as_ref()
+        .or_else(|| fan_out_target.map(|target| &target.crypto))
+        .filter(|crypto| crypto.version == "v1")
+        .map(|crypto| crypto.version.clone());
     let crypto = if include_remote_crypto {
-        pending
-            .crypto
-            .as_ref()
-            .filter(|crypto| crypto.version == "v1")
-            .map(|crypto| NodeAgentPendingCredentialCryptoInfo {
-                version: crypto.version.clone(),
-            })
+        crypto_version.map(|version| NodeAgentPendingCredentialCryptoInfo { version })
     } else {
         None
     };
@@ -83,6 +88,7 @@ fn pending_info(
         label: pending.label,
         created_at: pending.created_at.to_rfc3339(),
         expires_at: pending.expires_at.to_rfc3339(),
+        fan_out_generation,
         crypto,
     }
 }
@@ -103,13 +109,16 @@ fn log_pending_completion_audit(
     state: &AppState,
     headers: &HeaderMap,
     pending: &NodePendingCredential,
+    node_id: &str,
     legacy_event_type: &'static str,
     rci_kind: RciAuditEventKind,
 ) {
     if pending_completion_audit_event_type(pending, legacy_event_type, rci_kind)
         == rci_kind.event_type()
     {
-        let subject = RciAuditSubject::from_pending(pending);
+        let subject = node_pending_credential_service::fan_out_target(pending, node_id)
+            .map(|target| RciAuditSubject::from_fan_out_target(pending, target))
+            .unwrap_or_else(|| RciAuditSubject::from_pending(pending));
         rci_audit_service::log_rci_for_node(
             state.db.clone(),
             &pending.owner_user_id,
@@ -124,7 +133,7 @@ fn log_pending_completion_audit(
             Some(pending.owner_user_id.clone()),
             legacy_event_type.to_string(),
             Some(serde_json::json!({
-                "node_id": &pending.node_id,
+                "node_id": node_id,
                 "pending_credential_id": &pending.id,
                 "service_slug": &pending.service_slug,
                 "owner_user_id": &pending.owner_user_id,
@@ -153,7 +162,7 @@ pub async fn list_pending_credentials(
     Ok(Json(NodeAgentPendingCredentialListResponse {
         pending_credentials: pending
             .into_iter()
-            .map(|pending| pending_info(pending, include_remote_crypto))
+            .map(|pending| pending_info(pending, &node.id, include_remote_crypto))
             .collect(),
     }))
 }
@@ -176,6 +185,7 @@ pub async fn consume_pending_credential(
         &state,
         &headers,
         &pending,
+        &node.id,
         "node_credential_push_consumed",
         RciAuditEventKind::Consumed,
     );
@@ -207,6 +217,7 @@ pub async fn decline_pending_credential(
             &state,
             &headers,
             &pending,
+            &node.id,
             "node_credential_push_declined",
             RciAuditEventKind::Declined { reason_present },
         );
@@ -242,8 +253,8 @@ mod tests {
     use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};
     use crate::models::node::{COLLECTION_NAME as NODES, Node, NodeMetrics, NodeStatus};
     use crate::models::node_pending_credential::{
-        COLLECTION_NAME as NODE_PENDING_CREDENTIALS, CryptoBundle, InjectionMethod,
-        NodePendingCredential, RemoteCryptoState,
+        COLLECTION_NAME as NODE_PENDING_CREDENTIALS, CryptoBundle, FanOutDecryptOutcome,
+        FanOutNodeState, InjectionMethod, NodePendingCredential, RemoteCryptoState,
     };
     use crate::models::user::{COLLECTION_NAME as USERS, UserType};
     use crate::services::{
@@ -290,6 +301,8 @@ mod tests {
             ciphertext_queued_at: None,
             ciphertext_expires_at: None,
             is_active: true,
+            fan_out_nodes: Vec::new(),
+            fan_out_revision: 0,
         }
     }
 
@@ -362,6 +375,107 @@ mod tests {
             .expect("pending credential exists")
     }
 
+    fn fan_out_target_state(
+        node_id: &str,
+        remote_state: RemoteCryptoState,
+        now: chrono::DateTime<Utc>,
+        ciphertext_byte: u8,
+    ) -> FanOutNodeState {
+        let consumed = matches!(remote_state, RemoteCryptoState::Consumed);
+        let declined = matches!(remote_state, RemoteCryptoState::Declined);
+        let decrypt_failed = matches!(remote_state, RemoteCryptoState::DecryptFailed);
+        let completed = matches!(
+            remote_state,
+            RemoteCryptoState::Consumed
+                | RemoteCryptoState::Declined
+                | RemoteCryptoState::DecryptFailed
+                | RemoteCryptoState::Expired
+        );
+        let decrypt_outcome = if consumed {
+            Some(FanOutDecryptOutcome::Ok)
+        } else if declined || decrypt_failed {
+            Some(FanOutDecryptOutcome::Error)
+        } else {
+            None
+        };
+        FanOutNodeState {
+            node_id: node_id.to_string(),
+            generation: 0,
+            crypto: CryptoBundle {
+                version: "v1".to_string(),
+                node_pubkey: format!("node-pubkey-{ciphertext_byte}"),
+                admin_pubkey: (!completed).then(|| format!("admin-pubkey-{ciphertext_byte}")),
+                nonce: (!completed).then(|| format!("nonce-{ciphertext_byte}")),
+                ciphertext: (!completed).then(|| vec![ciphertext_byte; 4]),
+            },
+            remote_state: Some(remote_state),
+            decrypt_outcome,
+            error_code: None,
+            error_kind: None,
+            pubkey_posted_at: Some(now),
+            ciphertext_queued_at: None,
+            ciphertext_expires_at: None,
+            consumed_at: consumed.then_some(now),
+            declined_at: declined.then_some(now),
+            updated_at: now,
+        }
+    }
+
+    async fn insert_primary_fan_out_pending(
+        db: &mongodb::Database,
+        owner_id: &str,
+        primary_node_id: &str,
+        other_node_id: &str,
+        service_slug: &str,
+        other_state: RemoteCryptoState,
+        top_state: RemoteCryptoState,
+    ) -> NodePendingCredential {
+        let now = Utc::now();
+        let pending = NodePendingCredential {
+            id: Uuid::new_v4().to_string(),
+            node_id: primary_node_id.to_string(),
+            service_slug: service_slug.to_string(),
+            injection_method: InjectionMethod::Header,
+            field_name: "X-API-Key".to_string(),
+            target_url: None,
+            label: Some("Production".to_string()),
+            created_by_user_id: owner_id.to_string(),
+            owner_user_id: owner_id.to_string(),
+            created_at: now,
+            expires_at: now + Duration::hours(1),
+            consumed_at: None,
+            declined_at: None,
+            crypto: None,
+            remote_state: Some(top_state),
+            ciphertext_queued_at: None,
+            ciphertext_expires_at: None,
+            is_active: true,
+            fan_out_nodes: vec![
+                fan_out_target_state(
+                    primary_node_id,
+                    RemoteCryptoState::CiphertextReceived,
+                    now,
+                    1,
+                ),
+                fan_out_target_state(other_node_id, other_state, now, 2),
+            ],
+            fan_out_revision: 1,
+        };
+        db.collection::<NodePendingCredential>(NODE_PENDING_CREDENTIALS)
+            .insert_one(&pending)
+            .await
+            .expect("insert fan-out pending credential");
+        pending
+    }
+
+    fn fan_out_target<'a>(
+        pending: &'a NodePendingCredential,
+        node_id: &str,
+    ) -> &'a FanOutNodeState {
+        node_pending_credential_service::fan_out_target(pending, node_id)
+            .expect("fan-out target exists")
+    }
+
     async fn load_audit_entry(
         db: &mongodb::Database,
         receiver: tokio::sync::oneshot::Receiver<String>,
@@ -384,6 +498,7 @@ mod tests {
                 nonce: None,
                 ciphertext: None,
             })),
+            "node-1",
             false,
         );
 
@@ -401,6 +516,7 @@ mod tests {
                 nonce: None,
                 ciphertext: None,
             })),
+            "node-1",
             true,
         );
 
@@ -483,6 +599,138 @@ mod tests {
         assert_eq!(
             decline_entry.event_data.as_ref().unwrap()["reason_present"],
             true
+        );
+    }
+
+    #[tokio::test]
+    async fn node_agent_primary_fan_out_consume_and_decline_use_embedded_state_machine() {
+        let db = test_db("node_agent_primary_fanout_completion").await;
+        let owner_id = Uuid::new_v4().to_string();
+        let raw_auth_token = "nyx_nauth_node_agent_primary_fanout";
+        let node = test_node(&owner_id, raw_auth_token);
+        db.collection(USERS)
+            .insert_one(test_user(&owner_id, UserType::Person))
+            .await
+            .expect("insert user");
+        db.collection::<Node>(NODES)
+            .insert_one(&node)
+            .await
+            .expect("insert node");
+        let state = test_app_state(db.clone());
+
+        let consume_other_node_id = Uuid::new_v4().to_string();
+        let consume_pending = insert_primary_fan_out_pending(
+            &db,
+            &owner_id,
+            &node.id,
+            &consume_other_node_id,
+            "fanout-primary-consume",
+            RemoteCryptoState::CiphertextReceived,
+            RemoteCryptoState::CiphertextReceived,
+        )
+        .await;
+        let consume_before = load_pending(&db, &consume_pending.id).await;
+        assert_eq!(consume_before.node_id, node.id);
+        assert_eq!(consume_before.fan_out_nodes[0].node_id, node.id);
+        let consume_other_before = fan_out_target(&consume_before, &consume_other_node_id).clone();
+
+        let consume_response = consume_pending_credential(
+            State(state.clone()),
+            node_headers(raw_auth_token),
+            Path(consume_pending.id.clone()),
+        )
+        .await
+        .expect("consume primary fan-out pending credential")
+        .into_response();
+        assert_eq!(consume_response.status(), StatusCode::NO_CONTENT);
+
+        let consumed = load_pending(&db, &consume_pending.id).await;
+        assert_eq!(
+            consumed.fan_out_revision,
+            consume_before.fan_out_revision + 1
+        );
+        assert_eq!(
+            consumed.remote_state,
+            Some(RemoteCryptoState::PartialDecrypted)
+        );
+        assert!(consumed.is_active);
+        assert!(consumed.consumed_at.is_none());
+        assert!(consumed.crypto.is_none());
+        let consumed_primary = fan_out_target(&consumed, &node.id);
+        assert_eq!(
+            consumed_primary.remote_state,
+            Some(RemoteCryptoState::Consumed)
+        );
+        assert_eq!(
+            consumed_primary.decrypt_outcome.as_ref(),
+            Some(&FanOutDecryptOutcome::Ok)
+        );
+        assert!(consumed_primary.consumed_at.is_some());
+        assert!(consumed_primary.crypto.admin_pubkey.is_none());
+        assert!(consumed_primary.crypto.nonce.is_none());
+        assert!(consumed_primary.crypto.ciphertext.is_none());
+        assert_eq!(
+            fan_out_target(&consumed, &consume_other_node_id),
+            &consume_other_before
+        );
+
+        let decline_other_node_id = Uuid::new_v4().to_string();
+        let decline_pending = insert_primary_fan_out_pending(
+            &db,
+            &owner_id,
+            &node.id,
+            &decline_other_node_id,
+            "fanout-primary-decline",
+            RemoteCryptoState::Consumed,
+            RemoteCryptoState::PartialDecrypted,
+        )
+        .await;
+        let decline_before = load_pending(&db, &decline_pending.id).await;
+        assert_eq!(decline_before.node_id, node.id);
+        assert_eq!(decline_before.fan_out_nodes[0].node_id, node.id);
+        let decline_other_before = fan_out_target(&decline_before, &decline_other_node_id).clone();
+
+        let decline_response = decline_pending_credential(
+            State(state),
+            node_headers(raw_auth_token),
+            Path(decline_pending.id.clone()),
+            Json(Some(DeclinePendingCredentialRequest {
+                reason: Some("primary fan-out decline".to_string()),
+            })),
+        )
+        .await
+        .expect("decline primary fan-out pending credential")
+        .into_response();
+        assert_eq!(decline_response.status(), StatusCode::NO_CONTENT);
+
+        let declined = load_pending(&db, &decline_pending.id).await;
+        assert_eq!(
+            declined.fan_out_revision,
+            decline_before.fan_out_revision + 1
+        );
+        assert_eq!(
+            declined.remote_state,
+            Some(RemoteCryptoState::PartialDecrypted)
+        );
+        assert!(declined.is_active);
+        assert!(declined.declined_at.is_none());
+        assert!(declined.crypto.is_none());
+        let declined_primary = fan_out_target(&declined, &node.id);
+        assert_eq!(
+            declined_primary.remote_state,
+            Some(RemoteCryptoState::Declined)
+        );
+        assert_eq!(
+            declined_primary.decrypt_outcome.as_ref(),
+            Some(&FanOutDecryptOutcome::Error)
+        );
+        assert!(declined_primary.declined_at.is_some());
+        assert!(declined_primary.crypto.admin_pubkey.is_none());
+        assert!(declined_primary.crypto.nonce.is_none());
+        assert!(declined_primary.crypto.ciphertext.is_none());
+        assert_eq!(
+            fan_out_target(&declined, &decline_other_node_id),
+            &decline_other_before
         );
     }
 
