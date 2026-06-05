@@ -1,6 +1,7 @@
 use chrono::Utc;
 use futures::TryStreamExt;
 use mongodb::bson::{self, doc};
+use std::fmt;
 use uuid::Uuid;
 
 use crate::crypto::token::{generate_api_key, hash_token};
@@ -11,10 +12,10 @@ use crate::models::agent_service_binding::{
 use crate::models::api_key::{ApiKey, COLLECTION_NAME as API_KEYS};
 use crate::models::node::{COLLECTION_NAME as NODES, Node};
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
+use crate::redaction::RedactedLen;
 
 /// Result returned when a new API key is created.
 /// The `full_key` is shown once and never stored.
-#[derive(Debug)]
 pub struct CreatedApiKey {
     pub id: String,
     pub name: String,
@@ -32,6 +33,27 @@ pub struct CreatedApiKey {
     pub platform: Option<String>,
 }
 
+impl fmt::Debug for CreatedApiKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CreatedApiKey")
+            .field("id", &RedactedLen(self.id.len()))
+            .field("name", &self.name)
+            .field("key_prefix", &RedactedLen(self.key_prefix.len()))
+            .field("full_key", &RedactedLen(self.full_key.len()))
+            .field("scopes", &self.scopes)
+            .field("created_at", &self.created_at)
+            .field("description", &self.description)
+            .field("allowed_service_ids", &self.allowed_service_ids)
+            .field("allowed_node_ids", &self.allowed_node_ids)
+            .field("allow_all_services", &self.allow_all_services)
+            .field("allow_all_nodes", &self.allow_all_nodes)
+            .field("rate_limit_per_second", &self.rate_limit_per_second)
+            .field("rate_limit_burst", &self.rate_limit_burst)
+            .field("platform", &self.platform)
+            .finish()
+    }
+}
+
 /// Valid scopes that can be assigned to API keys.
 const VALID_API_KEY_SCOPES: &[&str] = &[
     "read",
@@ -46,7 +68,15 @@ const VALID_API_KEY_SCOPES: &[&str] = &[
 ];
 
 /// Valid platform identifiers for API keys.
-const VALID_PLATFORMS: &[&str] = &["claude-code", "cursor", "codex", "openclaw", "generic"];
+const VALID_PLATFORMS: &[&str] = &[
+    "claude-code",
+    "cursor",
+    "codex",
+    "openclaw",
+    "generic",
+    "device-code",
+    "device-onboard",
+];
 
 /// Validate the platform field if provided.
 fn validate_platform(platform: Option<&str>) -> AppResult<()> {

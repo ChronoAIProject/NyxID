@@ -32,6 +32,7 @@ rpassword = "7.5.1"
 urlencoding = "2.1"
 rand = "0.8"
 hex = "0.4"
+ed25519-dalek = { version = "2", features = ["alloc", "rand_core"] }
 comfy-table = "7"
 url = "2"
 

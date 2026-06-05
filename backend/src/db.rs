@@ -8,6 +8,8 @@ use mongodb::options::{ClientOptions, IndexOptions};
 use mongodb::{Client, Database, IndexModel};
 
 use crate::config::AppConfig;
+use crate::models::device_code::COLLECTION_NAME as DEVICE_CODES;
+use crate::models::device_onboard_credential::COLLECTION_NAME as DEVICE_ONBOARD_CREDENTIALS;
 use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
 };
@@ -833,6 +835,77 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
             .build(),
     )
     .await?;
+
+    // ── device_codes ──
+    let device_codes = db.collection::<mongodb::bson::Document>(DEVICE_CODES);
+    device_codes
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "device_code_hash": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    device_codes
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "user_code_history.code": 1 })
+                .build(),
+        )
+        .await?;
+    device_codes
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "user_code_history.0.code": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .unique(true)
+                        .partial_filter_expression(doc! { "status": "pending" })
+                        .name("device_code_pending_current_user_code_unique".to_string())
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    device_codes
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "expires_at": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(Duration::from_secs(0))
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+
+    // ── device_onboard_credentials ──
+    let device_onboard_credentials =
+        db.collection::<mongodb::bson::Document>(DEVICE_ONBOARD_CREDENTIALS);
+    device_onboard_credentials
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "node_id": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    device_onboard_credentials
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "api_key_id": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    device_onboard_credentials
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "owner_user_id": 1, "created_at": -1 })
+                .build(),
+        )
+        .await?;
 
     // ── node_pending_credentials ──
     let npc = db.collection::<mongodb::bson::Document>("node_pending_credentials");

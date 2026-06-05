@@ -1304,7 +1304,7 @@ mod tests {
         db: &mongodb::Database,
         browser_user_id: &str,
     ) -> Option<AuditLog> {
-        for _ in 0..20 {
+        for _ in 0..100 {
             let found = db
                 .collection::<AuditLog>(AUDIT_LOG)
                 .find_one(doc! {

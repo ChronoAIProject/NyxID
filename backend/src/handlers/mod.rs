@@ -25,6 +25,7 @@ pub mod delegation;
 pub mod demo;
 pub mod developer_apps;
 pub mod device_tokens;
+pub mod devices;
 pub mod docs;
 pub mod endpoints;
 pub mod health;

@@ -23,6 +23,7 @@ This document is a reference for AI agents (Claude, Codex, ChatGPT, Gemini, etc.
 8. [Set Up MCP Proxy for AI Clients](#8-set-up-mcp-proxy-for-ai-clients)
 9. [Use the Credential Proxy](#9-use-the-credential-proxy)
 10. [Set Up a Provider (OAuth / API Key / Device Code)](#10-set-up-a-provider-oauth--api-key--device-code)
+10b. [Device-Code Grant (headless device provisioning)](#10b-device-code-grant-headless-device-provisioning)
 11. [Deploy a Node Agent (On-Premise Credentials)](#11-deploy-a-node-agent-on-premise-credentials)
 12. [Add Login to a React App (OAuth Client)](#12-add-login-to-a-react-app-oauth-client)
 13. [Add Login to Any Web App (Raw OAuth / OIDC)](#13-add-login-to-any-web-app-raw-oauth--oidc)
@@ -1087,6 +1088,90 @@ POST /api/v1/providers/{provider_id}/connect/device-code/poll
 
 Admin provider management: http://localhost:3000/providers/manage (admin section).
 Users add services and manage credentials from the AI Services page: http://localhost:3000/keys.
+
+---
+
+## 10b. Device-Code Grant (headless device provisioning)
+
+**Goal:** Provision a fresh headless device, such as an ESP32 camera, with NyxID credentials after a human approves the code shown by the device.
+
+This is not the provider device-code OAuth flow above. Provider device-code connects a user's downstream OAuth provider credential. Device-code grant gives the device its own NyxID API key, node id, and one-time refresh token.
+
+Signed device flow:
+
+1. Device calls `POST /api/v1/devices/code/request` with `device_pubkey`, `hw_id`, and optional `suggested_label`.
+2. NyxID returns `device_code`, rotating `user_code` (`XXXX-XXXX-XXXX`), `verification_uri_complete`, `expires_in`, and `poll_interval`.
+3. Human approves with the web bind page or `nyxid device approve <CODE>`.
+4. Device polls `POST /api/v1/devices/code/poll`, signing `device_code` and timestamp with its Ed25519 factory key.
+5. The first approved poll returns `{ "status": "approved", "api_key": "...", "node_id": "...", "refresh_token": "...", "expires_in": 86400 }` and NyxID marks the row delivered.
+
+CLI approval:
+
+```bash
+nyxid device approve ABCD-EFGH-JKLM --label "Hall camera"
+nyxid device approve ABCDEFGHJKLM --org my-team --service llm-openai --service api-weather
+```
+
+`--service` is repeatable and grants proxy access to specific user services at approval time. Without it, the device API key has no service allowlist. `--org` accepts UUID, slug, or display name in the CLI; the API accepts an `org_id` UUID.
+
+Public request:
+
+```bash
+curl -X POST http://localhost:3001/api/v1/devices/code/request \
+  -H "Content-Type: application/json" \
+  -d '{
+    "device_pubkey": "'"$DEVICE_PUBKEY_BASE64"'",
+    "hw_id": "esp32-p4-aabbcc",
+    "suggested_label": "Hall camera"
+  }'
+```
+
+Signed public poll:
+
+```bash
+curl -X POST http://localhost:3001/api/v1/devices/code/poll \
+  -H "Content-Type: application/json" \
+  -d '{
+    "device_code": "'"$DEVICE_CODE"'",
+    "timestamp": '"$TIMESTAMP"',
+    "signature": "'"$SIGNATURE_BASE64"'"
+  }'
+```
+
+Authenticated approval:
+
+```bash
+curl -X POST http://localhost:3001/api/v1/devices/code/approve \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_code": "ABCD-EFGH-JKLM",
+    "label": "Hall camera",
+    "default_services": ["llm-openai"]
+  }'
+```
+
+Factory keys:
+
+```bash
+nyxid device factory-key
+nyxid device factory-key --count 100 --ndjson --out factory-keys.ndjson
+```
+
+The public key is sent to `/devices/code/request` as base64. The private key is burned into the device or stored in secure provisioning storage and is never sent to NyxID.
+
+No-WiFi QR onboarding:
+
+```bash
+export WIFI_PASSWORD='hunter22'
+nyxid device onboard \
+  --label "Kitchen Camera" \
+  --ssid "MyHomeNetwork" \
+  --password-env WIFI_PASSWORD \
+  --service llm-openai
+```
+
+`POST /api/v1/devices/onboard` creates the scoped API key and node immediately, stores only a hash of the refresh token, and returns a `nyxprov://full?...` QR payload containing WiFi credentials, API key, node id, refresh token, and backend URL. The WiFi password is not persisted. The device-side consumer for redeeming `nyxprov://` and consuming the onboard refresh token is deferred to follow-up work after #747; do not assume a backend QR redeem endpoint exists.
 
 ---
 
@@ -2208,6 +2293,15 @@ Base URL: `http://localhost:3001`
 | GET | `/api/v1/providers/{id}/credentials` | Get user's own OAuth credentials |
 | PUT | `/api/v1/providers/{id}/credentials` | Set user's own OAuth credentials |
 | DELETE | `/api/v1/providers/{id}/credentials` | Delete user's own credentials |
+
+### Device-Code Grant
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/v1/devices/code/request` | Start headless device provisioning and return device/user codes |
+| POST | `/api/v1/devices/code/poll` | Signed device poll for pending status or one-time delivered credentials |
+| POST | `/api/v1/devices/code/approve` | Human approval for a displayed device user code |
+| POST | `/api/v1/devices/onboard` | Create a no-WiFi device credential bundle and return a `nyxprov://` QR payload |
 
 ### Nodes
 

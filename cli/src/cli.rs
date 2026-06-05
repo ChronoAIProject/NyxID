@@ -78,6 +78,11 @@ pub enum Commands {
         #[command(subcommand)]
         command: NodeCommands,
     },
+    /// Approve device-code provisioning requests
+    Device {
+        #[command(subcommand)]
+        command: DeviceCommands,
+    },
     /// Push credential setup metadata to node operators
     #[command(name = "node-credential")]
     NodeCredential {
@@ -1602,6 +1607,72 @@ impl PendingCredentialInjectionMethod {
     }
 }
 
+// ---- Device-code commands ----
+
+#[derive(Subcommand)]
+pub enum DeviceCommands {
+    /// Approve a device binding code and provision device credentials
+    Approve {
+        /// User code shown by the device. Dashes and spaces are optional.
+        user_code: String,
+        /// Approve the device under this org (admin required)
+        #[arg(
+            long,
+            value_name = "ID|SLUG|NAME",
+            help = "Organization to act on (UUID, slug, or display name)"
+        )]
+        org: Option<String>,
+        /// Device label to store on the provisioned API key and node
+        #[arg(long)]
+        label: Option<String>,
+        /// Service(s) to grant the device proxy access to at approve time. Repeatable. Accepts slugs or service IDs. Without this, the device gets an api_key with no service access; you'll need to grant scopes separately later.
+        #[arg(long = "service", value_name = "SLUG_OR_UUID")]
+        service: Vec<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Provision a no-WiFi headless device and print a nyxprov QR payload
+    Onboard {
+        /// Device label to store on the provisioned API key and node
+        #[arg(long)]
+        label: String,
+        /// WiFi SSID to embed in the QR payload
+        #[arg(long)]
+        ssid: String,
+        /// Environment variable containing the WiFi password
+        #[arg(
+            long = "password-env",
+            value_name = "ENV_VAR",
+            help = "Environment variable containing the WiFi password. A bare --password flag is intentionally unsupported so secrets do not land in shell history or process listings."
+        )]
+        password_env: String,
+        /// Approve the device under this org (admin required)
+        #[arg(
+            long,
+            value_name = "ID|SLUG|NAME",
+            help = "Organization to act on (UUID, slug, or display name)"
+        )]
+        org: Option<String>,
+        /// Service(s) to grant the device proxy access to at onboard time. Repeatable. Accepts slugs or service IDs.
+        #[arg(long = "service", value_name = "SLUG_OR_UUID")]
+        service: Vec<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Generate Ed25519 factory provisioning keys
+    FactoryKey {
+        /// Number of keypairs to generate
+        #[arg(long, default_value_t = 1)]
+        count: usize,
+        /// Write output to this file instead of stdout
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Emit newline-delimited JSON instead of a JSON array
+        #[arg(long)]
+        ndjson: bool,
+    },
+}
+
 // ---- Node Docker subcommands ----
 
 #[derive(Args, Clone)]
@@ -1729,6 +1800,191 @@ mod tests {
                             },
                     },
             } => assert_eq!(config.as_deref(), Some("/tmp")),
+            _ => panic!("unexpected parse result"),
+        }
+    }
+
+    #[test]
+    fn device_approve_accepts_code_org_and_label() {
+        let cli = Cli::try_parse_from([
+            "nyxid",
+            "device",
+            "approve",
+            "ABCD-EFGH-JKLM",
+            "--org",
+            "team-ai",
+            "--label",
+            "Hallway camera",
+        ])
+        .expect("device approve should parse");
+
+        match cli.command {
+            Commands::Device {
+                command:
+                    DeviceCommands::Approve {
+                        user_code,
+                        org,
+                        label,
+                        service,
+                        ..
+                    },
+            } => {
+                assert_eq!(user_code, "ABCD-EFGH-JKLM");
+                assert_eq!(org.as_deref(), Some("team-ai"));
+                assert_eq!(label.as_deref(), Some("Hallway camera"));
+                assert!(service.is_empty());
+            }
+            _ => panic!("unexpected parse result"),
+        }
+    }
+
+    #[test]
+    fn device_approve_accepts_repeatable_service_flags() {
+        let single = Cli::try_parse_from([
+            "nyxid",
+            "device",
+            "approve",
+            "ABCD-EFGH-JKLM",
+            "--service",
+            "llm-openai",
+        ])
+        .expect("device approve should parse one service");
+
+        match single.command {
+            Commands::Device {
+                command: DeviceCommands::Approve { service, .. },
+            } => assert_eq!(service, vec!["llm-openai".to_string()]),
+            _ => panic!("unexpected parse result"),
+        }
+
+        let cli = Cli::try_parse_from([
+            "nyxid",
+            "device",
+            "approve",
+            "ABCD-EFGH-JKLM",
+            "--service",
+            "llm-openai",
+            "--service",
+            "550e8400-e29b-41d4-a716-446655440000",
+        ])
+        .expect("device approve should parse repeatable services");
+
+        match cli.command {
+            Commands::Device {
+                command: DeviceCommands::Approve { service, .. },
+            } => assert_eq!(
+                service,
+                vec![
+                    "llm-openai".to_string(),
+                    "550e8400-e29b-41d4-a716-446655440000".to_string()
+                ]
+            ),
+            _ => panic!("unexpected parse result"),
+        }
+    }
+
+    #[test]
+    fn device_onboard_requires_password_env_and_accepts_services() {
+        let cli = Cli::try_parse_from([
+            "nyxid",
+            "device",
+            "onboard",
+            "--label",
+            "Kitchen Camera",
+            "--ssid",
+            "MyNetwork",
+            "--password-env",
+            "WIFI_PASSWORD",
+            "--org",
+            "team-ai",
+            "--service",
+            "llm-openai",
+            "--service",
+            "550e8400-e29b-41d4-a716-446655440000",
+        ])
+        .expect("device onboard should parse");
+
+        match cli.command {
+            Commands::Device {
+                command:
+                    DeviceCommands::Onboard {
+                        label,
+                        ssid,
+                        password_env,
+                        org,
+                        service,
+                        ..
+                    },
+            } => {
+                assert_eq!(label, "Kitchen Camera");
+                assert_eq!(ssid, "MyNetwork");
+                assert_eq!(password_env, "WIFI_PASSWORD");
+                assert_eq!(org.as_deref(), Some("team-ai"));
+                assert_eq!(
+                    service,
+                    vec![
+                        "llm-openai".to_string(),
+                        "550e8400-e29b-41d4-a716-446655440000".to_string()
+                    ]
+                );
+            }
+            _ => panic!("unexpected parse result"),
+        }
+
+        assert!(
+            Cli::try_parse_from([
+                "nyxid",
+                "device",
+                "onboard",
+                "--label",
+                "Kitchen Camera",
+                "--ssid",
+                "MyNetwork",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn device_onboard_does_not_accept_bare_password_flag() {
+        assert!(
+            Cli::try_parse_from([
+                "nyxid",
+                "device",
+                "onboard",
+                "--label",
+                "Kitchen Camera",
+                "--ssid",
+                "MyNetwork",
+                "--password",
+                "hunter22",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn device_factory_key_accepts_count_out_and_ndjson() {
+        let cli = Cli::try_parse_from([
+            "nyxid",
+            "device",
+            "factory-key",
+            "--count",
+            "2",
+            "--out",
+            "keys.ndjson",
+            "--ndjson",
+        ])
+        .expect("device factory-key should parse");
+
+        match cli.command {
+            Commands::Device {
+                command: DeviceCommands::FactoryKey { count, out, ndjson },
+            } => {
+                assert_eq!(count, 2);
+                assert_eq!(out.as_deref(), Some(std::path::Path::new("keys.ndjson")));
+                assert!(ndjson);
+            }
             _ => panic!("unexpected parse result"),
         }
     }
@@ -2868,6 +3124,9 @@ pub enum ExternalKeyCommands {
         /// `google-bigquery`. Repeatable.
         #[arg(long = "service", value_name = "SLUG")]
         services: Vec<String>,
+        /// Create this credential under the given org (you must be an admin).
+        #[arg(long, value_name = "ID|SLUG|NAME")]
+        org: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
     },

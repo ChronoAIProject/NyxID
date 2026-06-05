@@ -351,6 +351,58 @@ pub async fn find_by_slug(
         .await?)
 }
 
+/// Resolve a user-service identifier by UUID or slug for a specific owner.
+///
+/// UUIDs are looked up first without an ownership filter so callers get a
+/// clear forbidden error when the service exists but belongs to another owner.
+/// Slugs are first resolved within the requested owner and then checked
+/// globally to distinguish unknown slugs from cross-owner attempts.
+pub async fn resolve_service_id(
+    db: &mongodb::Database,
+    owner_user_id: &str,
+    slug_or_uuid: &str,
+) -> AppResult<String> {
+    let value = slug_or_uuid.trim();
+    if value.is_empty() {
+        return Err(AppError::ValidationError(
+            "Service identifier must not be empty".to_string(),
+        ));
+    }
+
+    let collection = db.collection::<UserService>(COLLECTION_NAME);
+    if Uuid::parse_str(value).is_ok() {
+        let service = collection
+            .find_one(doc! { "_id": value, "is_active": true })
+            .await?;
+        return match service {
+            Some(service) if service.user_id == owner_user_id => Ok(service.id),
+            Some(_) => Err(AppError::Forbidden(format!(
+                "service {value} not owned by approver"
+            ))),
+            None => Err(AppError::NotFound(format!("service {value} not found"))),
+        };
+    }
+
+    if let Some(service) = collection
+        .find_one(doc! { "user_id": owner_user_id, "slug": value, "is_active": true })
+        .await?
+    {
+        return Ok(service.id);
+    }
+
+    if collection
+        .find_one(doc! { "slug": value, "is_active": true })
+        .await?
+        .is_some()
+    {
+        return Err(AppError::Forbidden(format!(
+            "service {value} not owned by approver"
+        )));
+    }
+
+    Err(AppError::NotFound(format!("service {value} not found")))
+}
+
 /// Find a user service by catalog_service_id for a given user.
 pub async fn find_by_catalog_service_id(
     db: &mongodb::Database,
@@ -1317,18 +1369,18 @@ pub async fn rebind_user_service_api_key(
 ) -> AppResult<()> {
     let ak_count = db
         .collection::<mongodb::bson::Document>(USER_API_KEYS)
-        .count_documents(doc! { "_id": api_key_id, "user_id": user_id })
+        .count_documents(doc! { "_id": api_key_id, "user_id": user_id, "status": "active" })
         .await?;
     if ak_count == 0 {
         return Err(AppError::NotFound(
-            "API key not found or does not belong to user".to_string(),
+            "API key not found, inactive, or does not belong to user".to_string(),
         ));
     }
 
     let result = db
         .collection::<UserService>(COLLECTION_NAME)
         .update_one(
-            doc! { "user_id": user_id, "slug": slug },
+            doc! { "user_id": user_id, "slug": slug, "is_active": true },
             doc! { "$set": {
                 "api_key_id": api_key_id,
                 "auth_method": "bearer",
@@ -2659,7 +2711,42 @@ mod tests {
             .unwrap();
         // The destination key (ownership is verified by the rebind).
         db.collection::<mongodb::bson::Document>(USER_API_KEYS)
-            .insert_one(doc! { "_id": &key_id, "user_id": &user_id })
+            .insert_one(doc! { "_id": &key_id, "user_id": &user_id, "status": "active" })
+            .await
+            .unwrap();
+        let failed_key_id = uuid::Uuid::new_v4().to_string();
+        let revoked_key_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<mongodb::bson::Document>(USER_API_KEYS)
+            .insert_many([
+                doc! { "_id": &failed_key_id, "user_id": &user_id, "status": "failed" },
+                doc! { "_id": &revoked_key_id, "user_id": &user_id, "status": "revoked" },
+            ])
+            .await
+            .unwrap();
+        let mut inactive_same_slug = test_user_service(
+            &uuid::Uuid::new_v4().to_string(),
+            &user_id,
+            "google-bigquery",
+            &uuid::Uuid::new_v4().to_string(),
+            None,
+            None,
+        );
+        inactive_same_slug.is_active = false;
+        db.collection::<UserService>(COLLECTION_NAME)
+            .insert_one(&inactive_same_slug)
+            .await
+            .unwrap();
+        let mut inactive_only = test_user_service(
+            &uuid::Uuid::new_v4().to_string(),
+            &user_id,
+            "inactive-only",
+            &uuid::Uuid::new_v4().to_string(),
+            None,
+            None,
+        );
+        inactive_only.is_active = false;
+        db.collection::<UserService>(COLLECTION_NAME)
+            .insert_one(&inactive_only)
             .await
             .unwrap();
 
@@ -2675,6 +2762,22 @@ mod tests {
             .unwrap();
         assert_eq!(rebound.api_key_id.as_deref(), Some(key_id.as_str()));
         assert_eq!(rebound.auth_method, "bearer");
+        let inactive_duplicate = db
+            .collection::<UserService>(COLLECTION_NAME)
+            .find_one(doc! { "_id": &inactive_same_slug.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(inactive_duplicate.api_key_id.is_none());
+        assert_eq!(inactive_duplicate.auth_method, "none");
+
+        let inactive = rebind_user_service_api_key(&db, &user_id, "inactive-only", &key_id)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(inactive, AppError::NotFound(_)),
+            "got {inactive:?}"
+        );
 
         // Unknown slug is rejected.
         let err = rebind_user_service_api_key(&db, &user_id, "no-such-slug", &key_id)
@@ -2693,5 +2796,16 @@ mod tests {
         .await
         .unwrap_err();
         assert!(matches!(foreign, AppError::NotFound(_)), "got {foreign:?}");
+
+        let failed = rebind_user_service_api_key(&db, &user_id, "google-bigquery", &failed_key_id)
+            .await
+            .unwrap_err();
+        assert!(matches!(failed, AppError::NotFound(_)), "got {failed:?}");
+
+        let revoked =
+            rebind_user_service_api_key(&db, &user_id, "google-bigquery", &revoked_key_id)
+                .await
+                .unwrap_err();
+        assert!(matches!(revoked, AppError::NotFound(_)), "got {revoked:?}");
     }
 }

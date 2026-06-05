@@ -23,6 +23,7 @@ pub mod consent_service;
 pub mod content_type;
 pub mod credential_push_service;
 pub mod delegation_service;
+pub mod device_code_service;
 pub mod dpop_jti_cache;
 pub mod event_dedup_cache;
 pub mod gcp_sa_service;

@@ -1,9 +1,11 @@
 use std::collections::HashMap;
+use std::fmt;
 
 use chrono::{DateTime, Duration, Utc};
 use futures::TryStreamExt;
 use mongodb::bson::{self, doc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use crate::crypto::aes::EncryptionKeys;
@@ -22,6 +24,7 @@ use crate::models::node_service_binding::{
 use crate::models::org_membership::OrgRole;
 use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
+use crate::redaction::RedactedLen;
 use crate::services::org_service::{self, OwnerAccess};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,6 +71,39 @@ pub struct TransferNodeResult {
     pub cleared_user_service_count: u64,
     pub deactivated_pending_credentials_count: u64,
 }
+
+#[derive(Clone)]
+pub struct DeviceNodeInput<'a> {
+    pub user_id: &'a str,
+    pub api_key_id: &'a str,
+    pub hw_id: &'a str,
+    pub label: &'a str,
+    pub device_pubkey: Option<&'a [u8; 32]>,
+    pub provisioning_source: &'a str,
+}
+
+impl fmt::Debug for DeviceNodeInput<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DeviceNodeInput")
+            .field("user_id", &self.user_id)
+            .field("api_key_id", &RedactedLen(self.api_key_id.len()))
+            .field("hw_id", &self.hw_id)
+            .field("label", &self.label)
+            .field(
+                "device_pubkey",
+                &self.device_pubkey.map(|pubkey| RedactedLen(pubkey.len())),
+            )
+            .field("provisioning_source", &self.provisioning_source)
+            .finish()
+    }
+}
+
+pub const DEVICE_CODE_PROVISIONING_SOURCE: &str = "device-code";
+pub const DEVICE_ONBOARD_PROVISIONING_SOURCE: &str = "device-onboard";
+const DEVICE_PROVISIONING_SOURCES: &[&str] = &[
+    DEVICE_CODE_PROVISIONING_SOURCE,
+    DEVICE_ONBOARD_PROVISIONING_SOURCE,
+];
 
 /// Create a one-time registration token for a new node.
 /// Returns (token_id, raw_token, expires_at). The raw token is shown once and never stored.
@@ -216,6 +252,88 @@ pub async fn register_node(
     );
 
     Ok((node, raw_auth_token, raw_signing_secret))
+}
+
+/// Create a Node row for an API-key-provisioned headless device.
+///
+/// Device-code and QR-onboarded devices receive a scoped NyxID API key and
+/// authenticate through the proxy API, not the node WebSocket protocol. The row
+/// still carries valid random node auth material so it satisfies the Node model
+/// invariants and cannot collide on an empty auth hash.
+pub async fn create_for_device(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    input: DeviceNodeInput<'_>,
+) -> AppResult<Node> {
+    if input.hw_id.trim().is_empty() || input.hw_id.len() > 256 {
+        return Err(AppError::ValidationError(
+            "hw_id must be between 1 and 256 characters".to_string(),
+        ));
+    }
+    if input.label.trim().is_empty() || input.label.len() > 200 {
+        return Err(AppError::ValidationError(
+            "Device label must be between 1 and 200 characters".to_string(),
+        ));
+    }
+    if input.provisioning_source.trim().is_empty() || input.provisioning_source.len() > 64 {
+        return Err(AppError::ValidationError(
+            "Device provisioning source must be between 1 and 64 characters".to_string(),
+        ));
+    }
+
+    let now = Utc::now();
+    let node_id = uuid::Uuid::new_v4().to_string();
+    let pubkey_fingerprint = input.device_pubkey.map(|device_pubkey| {
+        let pubkey_digest = Sha256::digest(device_pubkey);
+        hex::encode(&pubkey_digest[..8])
+    });
+    let raw_auth_token = Zeroizing::new(format!(
+        "nyx_nauth_{}",
+        hex::encode(rand::random::<[u8; 32]>())
+    ));
+    let auth_token_hash = hash_token(raw_auth_token.as_str());
+    let raw_signing_secret = Zeroizing::new(hex::encode(rand::random::<[u8; 32]>()));
+    let signing_secret_encrypted = encryption_keys
+        .encrypt(raw_signing_secret.as_bytes())
+        .await?;
+    let signing_secret_hash = hash_token(raw_signing_secret.as_str());
+
+    let node = Node {
+        id: node_id.clone(),
+        user_id: input.user_id.to_string(),
+        name: device_node_name(input.label, &node_id),
+        status: NodeStatus::Offline,
+        auth_token_hash,
+        signing_secret_encrypted: Some(signing_secret_encrypted),
+        signing_secret_hash,
+        last_heartbeat_at: None,
+        connected_at: None,
+        metadata: Some(NodeMetadata {
+            agent_version: None,
+            os: None,
+            arch: None,
+            ip_address: None,
+            provisioning_source: Some(input.provisioning_source.to_string()),
+        }),
+        metrics: crate::models::node::NodeMetrics::default(),
+        is_active: true,
+        created_at: now,
+        updated_at: now,
+    };
+
+    db.collection::<Node>(NODES).insert_one(&node).await?;
+
+    tracing::info!(
+        node_id = %node.id,
+        user_id = %node.user_id,
+        api_key_id = %input.api_key_id,
+        hw_id = %input.hw_id,
+        device_pubkey_fingerprint = pubkey_fingerprint.as_deref(),
+        provisioning_source = %input.provisioning_source,
+        "Device node record created"
+    );
+
+    Ok(node)
 }
 
 /// Get a single node by ID without ownership check.
@@ -528,6 +646,33 @@ fn validate_node_metadata(meta: &NodeMetadata) -> AppResult<()> {
     Ok(())
 }
 
+fn device_node_name(label: &str, node_id: &str) -> String {
+    let suffix: String = node_id.chars().take(8).collect();
+    let max_base_len = 64_usize.saturating_sub(suffix.len() + 1);
+    let mut base = String::with_capacity(max_base_len);
+    let mut last_dash = false;
+
+    for c in label.chars() {
+        if c.is_ascii_alphanumeric() {
+            if base.len() == max_base_len {
+                break;
+            }
+            base.push(c.to_ascii_lowercase());
+            last_dash = false;
+        } else if !last_dash && !base.is_empty() {
+            if base.len() == max_base_len {
+                break;
+            }
+            base.push('-');
+            last_dash = true;
+        }
+    }
+
+    let base = base.trim_matches('-');
+    let base = if base.is_empty() { "device" } else { base };
+    format!("{base}-{suffix}")
+}
+
 /// Update last_heartbeat_at and optionally metadata.
 pub async fn update_heartbeat(
     db: &mongodb::Database,
@@ -661,7 +806,11 @@ pub async fn update_binding_priority(
     Ok(())
 }
 
-/// Admin: list all active nodes (no user filter). Supports pagination and optional filters.
+/// Admin: list active operational nodes (no user filter).
+///
+/// Device-code provisioning creates node-shaped ownership records, but those
+/// devices authenticate with API keys and are not operational node WebSocket
+/// agents, so the operational admin list excludes them.
 pub async fn list_all_nodes(
     db: &mongodb::Database,
     page: u64,
@@ -669,7 +818,10 @@ pub async fn list_all_nodes(
     status_filter: Option<&str>,
     user_id_filter: Option<&str>,
 ) -> AppResult<(Vec<Node>, u64)> {
-    let mut filter = doc! { "is_active": true };
+    let mut filter = doc! {
+        "is_active": true,
+        "metadata.provisioning_source": { "$nin": DEVICE_PROVISIONING_SOURCES },
+    };
     if let Some(status) = status_filter {
         filter.insert("status", status);
     }
@@ -1230,6 +1382,88 @@ mod tests {
         }
     }
 
+    #[test]
+    fn device_node_name_sanitizes_and_keeps_uuid_suffix() {
+        let node_id = "12345678-aaaa-bbbb-cccc-123456789012";
+
+        assert_eq!(
+            device_node_name("Kitchen Camera 01", node_id),
+            "kitchen-camera-01-12345678"
+        );
+        assert_eq!(device_node_name("!!!", node_id), "device-12345678");
+        assert!(device_node_name(&"A".repeat(200), node_id).len() <= 64);
+    }
+
+    #[tokio::test]
+    async fn create_for_device_creates_device_node_with_valid_auth_material() {
+        let Some(db) = connect_test_database("node_device_code_stub").await else {
+            return;
+        };
+        let owner_id = Uuid::new_v4().to_string();
+
+        let node = create_for_device(
+            &db,
+            &test_encryption_keys(),
+            DeviceNodeInput {
+                user_id: &owner_id,
+                api_key_id: "api-key-1",
+                hw_id: "esp32-p4-cam",
+                label: "Kitchen Camera",
+                device_pubkey: Some(&[7u8; 32]),
+                provisioning_source: DEVICE_CODE_PROVISIONING_SOURCE,
+            },
+        )
+        .await
+        .expect("create device stub");
+
+        assert_eq!(node.auth_token_hash.len(), 64);
+        assert_ne!(node.auth_token_hash, hash_token(""));
+        assert_eq!(node.signing_secret_hash.len(), 64);
+        assert_ne!(node.signing_secret_hash, hash_token(""));
+        assert!(node.signing_secret_encrypted.is_some());
+        assert_eq!(
+            node.metadata
+                .as_ref()
+                .and_then(|metadata| metadata.provisioning_source.as_deref()),
+            Some(DEVICE_CODE_PROVISIONING_SOURCE)
+        );
+    }
+
+    #[tokio::test]
+    async fn list_all_nodes_excludes_device_code_stubs_from_operational_view() {
+        let Some(db) = connect_test_database("node_device_code_stub_admin_list").await else {
+            return;
+        };
+        let owner_id = Uuid::new_v4().to_string();
+        let operational_node = make_node(&owner_id, "operational-node");
+        db.collection::<Node>(NODES)
+            .insert_one(&operational_node)
+            .await
+            .expect("insert operational node");
+        create_for_device(
+            &db,
+            &test_encryption_keys(),
+            DeviceNodeInput {
+                user_id: &owner_id,
+                api_key_id: "api-key-1",
+                hw_id: "esp32-p4-cam",
+                label: "Kitchen Camera",
+                device_pubkey: Some(&[7u8; 32]),
+                provisioning_source: DEVICE_CODE_PROVISIONING_SOURCE,
+            },
+        )
+        .await
+        .expect("create device stub");
+
+        let (nodes, total) = list_all_nodes(&db, 1, 50, None, None)
+            .await
+            .expect("list nodes");
+
+        assert_eq!(total, 1);
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].id, operational_node.id);
+    }
+
     struct NodeAclFixture {
         actor_id: String,
         owner_id: String,
@@ -1638,6 +1872,7 @@ mod tests {
             os: None,
             arch: None,
             ip_address: None,
+            provisioning_source: None,
         };
         validate_node_metadata(&meta).expect("all-None metadata should be valid");
     }
@@ -1649,6 +1884,7 @@ mod tests {
             os: Some("linux".to_string()),
             arch: Some("x86_64".to_string()),
             ip_address: Some("192.168.1.1".to_string()),
+            provisioning_source: None,
         };
         validate_node_metadata(&meta).expect("valid metadata should pass");
     }
@@ -1660,6 +1896,7 @@ mod tests {
             os: None,
             arch: None,
             ip_address: Some("::1".to_string()),
+            provisioning_source: None,
         };
         validate_node_metadata(&meta).expect("IPv6 loopback should be valid");
     }
@@ -1671,6 +1908,7 @@ mod tests {
             os: None,
             arch: None,
             ip_address: Some("2001:0db8:85a3:0000:0000:8a2e:0370:7334".to_string()),
+            provisioning_source: None,
         };
         validate_node_metadata(&meta).expect("full IPv6 should be valid");
     }
@@ -1682,6 +1920,7 @@ mod tests {
             os: None,
             arch: None,
             ip_address: None,
+            provisioning_source: None,
         };
         let err = validate_node_metadata(&meta).expect_err("agent_version too long");
         assert!(matches!(err, AppError::ValidationError(msg) if msg.contains("agent_version")));
@@ -1694,6 +1933,7 @@ mod tests {
             os: None,
             arch: None,
             ip_address: None,
+            provisioning_source: None,
         };
         validate_node_metadata(&meta).expect("64-char agent_version should pass");
     }
@@ -1705,6 +1945,7 @@ mod tests {
             os: Some("x".repeat(65)),
             arch: None,
             ip_address: None,
+            provisioning_source: None,
         };
         let err = validate_node_metadata(&meta).expect_err("os too long");
         assert!(matches!(err, AppError::ValidationError(msg) if msg.contains("os")));
@@ -1717,6 +1958,7 @@ mod tests {
             os: None,
             arch: Some("a".repeat(65)),
             ip_address: None,
+            provisioning_source: None,
         };
         let err = validate_node_metadata(&meta).expect_err("arch too long");
         assert!(matches!(err, AppError::ValidationError(msg) if msg.contains("arch")));
@@ -1729,6 +1971,7 @@ mod tests {
             os: None,
             arch: None,
             ip_address: Some("not-an-ip".to_string()),
+            provisioning_source: None,
         };
         let err = validate_node_metadata(&meta).expect_err("invalid IP");
         assert!(matches!(err, AppError::ValidationError(msg) if msg.contains("Invalid IP")));
@@ -1741,6 +1984,7 @@ mod tests {
             os: None,
             arch: None,
             ip_address: Some(String::new()),
+            provisioning_source: None,
         };
         let err = validate_node_metadata(&meta).expect_err("empty IP");
         assert!(matches!(err, AppError::ValidationError(msg) if msg.contains("Invalid IP")));

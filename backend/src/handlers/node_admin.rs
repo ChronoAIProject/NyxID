@@ -5429,6 +5429,7 @@ mod tests {
                 os: Some("linux".to_string()),
                 arch: Some("x86_64".to_string()),
                 ip_address: Some("10.0.0.1".to_string()),
+                provisioning_source: None,
             }),
             metrics: Some(NodeMetricsInfo {
                 total_requests: 100,

@@ -823,10 +823,16 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
     let llm_routes = llm_routes.layer(RequestBodyLimitLayer::new(10 * 1024 * 1024));
 
     // Public API routes that expose non-sensitive runtime metadata.
-    let api_v1_public = Router::new().route(
-        "/runtime-config",
-        get(handlers::runtime_config::get_runtime_config),
-    );
+    let device_code_public_routes = Router::new()
+        .route("/request", post(handlers::devices::request_device_code))
+        .route("/poll", post(handlers::devices::poll_device_code));
+
+    let api_v1_public = Router::new()
+        .route(
+            "/runtime-config",
+            get(handlers::runtime_config::get_runtime_config),
+        )
+        .nest("/devices/code", device_code_public_routes);
 
     // Routes that ALLOW delegated tokens (proxy, LLM gateway, delegation refresh)
     // Also accessible by service accounts.
@@ -864,6 +870,11 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
     // Routes that BLOCK service account tokens (human-only endpoints)
     let api_v1_human_only = Router::new()
         .nest("/auth", auth_routes)
+        .route(
+            "/devices/code/approve",
+            post(handlers::devices::approve_device_code),
+        )
+        .route("/devices/onboard", post(handlers::devices::onboard_device))
         .nest("/users", user_routes)
         .nest("/api-keys", api_key_routes)
         .nest("/services", service_routes)

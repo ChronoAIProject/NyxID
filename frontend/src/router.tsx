@@ -26,6 +26,8 @@ import {
   ServiceDetailPage,
   ServiceEditPage,
   SettingsPage,
+  DevicesBindPage,
+  DevicesOnboardPage,
   ProvidersLayout,
   ProvidersPage,
   ProvidersCallbackPage,
@@ -407,6 +409,27 @@ const settingsRoute = createRoute({
   }),
 });
 
+const devicesBindRoute = createRoute({
+  path: "/settings/devices/bind",
+  getParentRoute: () => dashboardLayout,
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { user_code?: string } => ({
+    ...(typeof search.user_code === "string" &&
+    search.user_code.length > 0 &&
+    search.user_code.length <= 32
+      ? { user_code: search.user_code }
+      : {}),
+  }),
+  component: DevicesBindPage,
+});
+
+const devicesOnboardRoute = createRoute({
+  path: "/settings/devices/onboard",
+  getParentRoute: () => dashboardLayout,
+  component: DevicesOnboardPage,
+});
+
 const guideRoute = createRoute({
   path: "/guide",
   getParentRoute: () => dashboardLayout,
@@ -712,6 +735,8 @@ const routeTree = rootRoute.addChildren([
       providerEditRoute,
     ]),
     settingsRoute,
+    devicesBindRoute,
+    devicesOnboardRoute,
     consentsRoute,
     authorizationsRedirectRoute,
     guideRoute,

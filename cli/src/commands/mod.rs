@@ -7,6 +7,7 @@ pub mod catalog;
 pub mod channel_bot;
 pub mod channel_event;
 pub mod developer_app;
+pub mod device;
 pub mod doctor;
 pub mod endpoint;
 pub mod external_key;

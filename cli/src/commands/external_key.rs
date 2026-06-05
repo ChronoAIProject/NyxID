@@ -6,6 +6,7 @@ use serde_json::Value;
 
 use crate::api::ApiClient;
 use crate::cli::{ExternalKeyCommands, OutputFormat};
+use crate::org_resolver::resolve_org_id;
 
 pub async fn run(command: ExternalKeyCommands) -> Result<()> {
     match command {
@@ -115,6 +116,7 @@ pub async fn run(command: ExternalKeyCommands) -> Result<()> {
             label,
             scopes,
             services,
+            org,
             auth,
         } => {
             let key_json = std::fs::read_to_string(&key_file)
@@ -138,12 +140,19 @@ pub async fn run(command: ExternalKeyCommands) -> Result<()> {
             }
 
             let mut api = ApiClient::from_auth_checked(&auth).await?;
-            let body = serde_json::json!({
+            let target_org_id = match org {
+                Some(raw) => Some(resolve_org_id(&mut api, &raw).await?),
+                None => None,
+            };
+            let mut body = serde_json::json!({
                 "label": label,
                 "key_json": key_json,
                 "scopes": scopes,
                 "service_slugs": services,
             });
+            if let Some(org_id) = target_org_id {
+                body["target_org_id"] = Value::String(org_id);
+            }
             let result: Value = api
                 .post("/api-keys/external/gcp-service-account", &body)
                 .await?;
@@ -173,6 +182,15 @@ mod tests {
     use crate::test_support::mock_auth;
     use wiremock::matchers::{body_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const ORG_UUID: &str = "11111111-1111-4111-8111-111111111111";
+    const GCP_SA_JSON: &str = r#"{"type":"service_account","private_key":"fake-private-key"}"#;
+
+    fn write_temp_gcp_sa_key(name: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("nyxid-{name}-{}.json", uuid::Uuid::new_v4()));
+        std::fs::write(&path, GCP_SA_JSON).expect("write temp service-account key");
+        path
+    }
 
     #[tokio::test]
     async fn list_fetches_external_keys_ok() {
@@ -317,5 +335,77 @@ mod tests {
         })
         .await
         .expect("delete should succeed");
+    }
+
+    #[tokio::test]
+    async fn add_gcp_service_account_posts_target_org_id() {
+        let server = MockServer::start().await;
+        let key_file = write_temp_gcp_sa_key("gcp-sa-org");
+        Mock::given(method("POST"))
+            .and(path("/api/v1/api-keys/external/gcp-service-account"))
+            .and(body_json(serde_json::json!({
+                "label": "Org GCP Reader",
+                "key_json": GCP_SA_JSON,
+                "scopes": "https://www.googleapis.com/auth/bigquery.readonly",
+                "service_slugs": ["google-bigquery", "google-cloud-billing"],
+                "target_org_id": ORG_UUID
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": "key-org-1",
+                "label": "Org GCP Reader"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ExternalKeyCommands::AddGcpServiceAccount {
+            key_file: key_file.clone(),
+            label: Some("Org GCP Reader".to_string()),
+            scopes: Some("https://www.googleapis.com/auth/bigquery.readonly".to_string()),
+            services: vec![
+                "google-bigquery".to_string(),
+                "google-cloud-billing".to_string(),
+            ],
+            org: Some(ORG_UUID.to_string()),
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("org GCP SA create should succeed");
+
+        let _ = std::fs::remove_file(key_file);
+    }
+
+    #[tokio::test]
+    async fn add_gcp_service_account_without_org_omits_target_org_id() {
+        let server = MockServer::start().await;
+        let key_file = write_temp_gcp_sa_key("gcp-sa-personal");
+        Mock::given(method("POST"))
+            .and(path("/api/v1/api-keys/external/gcp-service-account"))
+            .and(body_json(serde_json::json!({
+                "label": null,
+                "key_json": GCP_SA_JSON,
+                "scopes": null,
+                "service_slugs": ["google-bigquery"]
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": "key-personal-1",
+                "label": "svc@test-project.iam.gserviceaccount.com"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ExternalKeyCommands::AddGcpServiceAccount {
+            key_file: key_file.clone(),
+            label: None,
+            scopes: None,
+            services: vec!["google-bigquery".to_string()],
+            org: None,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("personal GCP SA create should succeed");
+
+        let _ = std::fs::remove_file(key_file);
     }
 }

@@ -120,6 +120,18 @@ Set `NYXID_ACCESS_TOKEN` in your agent's environment to authenticate:
 export NYXID_ACCESS_TOKEN="nyxid_ag_..."
 ```
 
+External Google Cloud service-account credentials can also be owned by an org:
+
+```bash
+# Admin required. The encrypted UserApiKey is written under the org user_id,
+# and --service rebinds active service slugs owned by that org.
+nyxid external-key add-gcp-service-account --org <ID|SLUG|NAME> \
+  --key-file ~/Downloads/nyxid-cost-reader.json \
+  --service google-bigquery
+```
+
+Omit `--org` for a personal credential. Members and viewers cannot create org-owned external credentials (`8103 org_role_insufficient`).
+
 ### Scope requirements for management writes
 
 Agent keys need `write` or `admin` scope to call management endpoints via REST (create/update/delete/rotate API keys, services, endpoints, bindings, etc.). `proxy read` is sufficient for proxy traffic only -- paths under `/proxy`, `/llm`, `/ssh`, `/channel-events`, `/channel-relay`, and `/delegation` do not require write scope. The `nyxid` CLI uses session auth (not API keys) and is unaffected.

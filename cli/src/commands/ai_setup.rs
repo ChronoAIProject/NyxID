@@ -22,6 +22,7 @@ const REFERENCE_FILES: &[&str] = &[
     "managing",
     "organizations",
     "nodes",
+    "devices",
     "notifications",
     "channels",
     "openclaw",

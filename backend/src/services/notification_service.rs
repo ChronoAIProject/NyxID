@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use mongodb::Database;
 use mongodb::bson::{self, doc};
 use reqwest::Client;
@@ -20,10 +20,162 @@ pub struct NotificationResult {
     pub telegram_message_id: Option<i64>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeviceNotificationTemplate {
+    BindSuccess,
+    RepeatedFail,
+    LockAlert,
+}
+
+impl DeviceNotificationTemplate {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::BindSuccess => "device_bind_success",
+            Self::RepeatedFail => "device_repeated_fail",
+            Self::LockAlert => "device_lock_alert",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeviceNotificationContext {
+    pub device_label: String,
+    pub hw_id: String,
+    pub node_id: Option<String>,
+    pub failed_poll_count: Option<u32>,
+    pub locked_until: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RenderedDeviceNotification {
+    title: String,
+    body: String,
+    data: HashMap<String, String>,
+}
+
 /// Result of sending push to a single device.
 enum PushResult {
     Success,
     TokenInvalid,
+}
+
+/// Send a device-code lifecycle notification through the user's enabled
+/// Telegram and push channels.
+#[allow(clippy::too_many_arguments)]
+pub async fn send_device_notification(
+    db: &Database,
+    config: &AppConfig,
+    http_client: &Client,
+    fcm_auth: Option<&FcmAuth>,
+    apns_auth: Option<&ApnsAuth>,
+    user_id: &str,
+    template: DeviceNotificationTemplate,
+    context: &DeviceNotificationContext,
+) -> AppResult<NotificationResult> {
+    let channel = get_or_create_channel(db, user_id).await?;
+    let rendered = render_device_notification(template, context);
+    let mut channels_used: Vec<String> = Vec::new();
+    let mut telegram_chat_id = None;
+    let mut telegram_message_id = None;
+    let mut tokens_to_remove: Vec<String> = Vec::new();
+
+    if channel.telegram_enabled
+        && let Some(chat_id) = channel.telegram_chat_id
+        && let Some(bot_token) = config.telegram_bot_token.as_deref()
+    {
+        let telegram_text = format!(
+            "<b>{}</b>\n\n{}",
+            html_escape(&rendered.title),
+            html_escape(&rendered.body)
+        );
+        match telegram_service::send_text_message(http_client, bot_token, chat_id, &telegram_text)
+            .await
+        {
+            Ok(()) => {
+                channels_used.push("telegram".to_string());
+                telegram_chat_id = Some(chat_id);
+                telegram_message_id = None;
+            }
+            Err(error) => tracing::warn!(
+                user_id = %user_id,
+                template = %template.as_str(),
+                error = %error,
+                "Telegram device notification failed"
+            ),
+        }
+    }
+
+    if channel.push_enabled && !channel.push_devices.is_empty() {
+        let unique_devices = unique_devices_by_token(&channel.push_devices);
+        let push_futures: Vec<_> = unique_devices
+            .iter()
+            .map(|device| {
+                send_push_to_device(
+                    http_client,
+                    fcm_auth,
+                    apns_auth,
+                    config,
+                    device,
+                    &rendered.title,
+                    &rendered.body,
+                    &rendered.data,
+                )
+            })
+            .collect();
+
+        let results = futures::future::join_all(push_futures).await;
+
+        let mut successful_device_ids: Vec<String> = Vec::new();
+        for (i, result) in results.into_iter().enumerate() {
+            match result {
+                Ok(PushResult::Success) => {
+                    let platform = &unique_devices[i].platform;
+                    if !channels_used.contains(platform) {
+                        channels_used.push(platform.clone());
+                    }
+                    successful_device_ids.push(unique_devices[i].device_id.clone());
+                }
+                Ok(PushResult::TokenInvalid) => {
+                    tokens_to_remove.push(unique_devices[i].device_id.clone());
+                }
+                Err(error) => tracing::warn!(
+                    user_id = %user_id,
+                    device_id = %unique_devices[i].device_id,
+                    template = %template.as_str(),
+                    error = %error,
+                    "Push device notification failed"
+                ),
+            }
+        }
+
+        if !successful_device_ids.is_empty() {
+            let db_clone = db.clone();
+            let channel_id = channel.id.clone();
+            tokio::spawn(async move {
+                update_device_last_used(&db_clone, &channel_id, &successful_device_ids).await;
+            });
+        }
+    }
+
+    if !tokens_to_remove.is_empty() {
+        let db = db.clone();
+        let channel_id = channel.id.clone();
+        tokio::spawn(async move {
+            remove_stale_device_tokens(&db, &channel_id, &tokens_to_remove).await;
+        });
+    }
+
+    if channels_used.is_empty() {
+        return Err(AppError::BadRequest(
+            "No notification channel is configured and enabled".to_string(),
+        ));
+    }
+
+    Ok(NotificationResult {
+        channels: channels_used,
+        telegram_chat_id,
+        telegram_message_id,
+    })
 }
 
 /// Send an approval notification to the user via all enabled channels.
@@ -364,6 +516,64 @@ pub async fn get_or_create_channel(db: &Database, user_id: &str) -> AppResult<No
 // Internal helpers
 // ---------------------------------------------------------------------------
 
+fn render_device_notification(
+    template: DeviceNotificationTemplate,
+    context: &DeviceNotificationContext,
+) -> RenderedDeviceNotification {
+    let title = match template {
+        DeviceNotificationTemplate::BindSuccess => "Device bound".to_string(),
+        DeviceNotificationTemplate::RepeatedFail => "Repeated device poll failures".to_string(),
+        DeviceNotificationTemplate::LockAlert => "Device code locked".to_string(),
+    };
+
+    let body = match template {
+        DeviceNotificationTemplate::BindSuccess => format!(
+            "{} ({}) was approved and can pick up credentials on its next poll.",
+            context.device_label, context.hw_id
+        ),
+        DeviceNotificationTemplate::RepeatedFail => format!(
+            "{} ({}) reached {} failed signed polls.",
+            context.device_label,
+            context.hw_id,
+            context.failed_poll_count.unwrap_or_default()
+        ),
+        DeviceNotificationTemplate::LockAlert => {
+            let until = context
+                .locked_until
+                .map(|value| value.to_rfc3339())
+                .unwrap_or_else(|| "the lockout expires".to_string());
+            format!(
+                "{} ({}) is locked until {} after repeated invalid poll signatures.",
+                context.device_label, context.hw_id, until
+            )
+        }
+    };
+
+    let mut data = HashMap::new();
+    data.insert("type".to_string(), template.as_str().to_string());
+    data.insert("template".to_string(), template.as_str().to_string());
+    data.insert("hw_id".to_string(), context.hw_id.clone());
+    data.insert("device_label".to_string(), context.device_label.clone());
+    if let Some(node_id) = &context.node_id {
+        data.insert("node_id".to_string(), node_id.clone());
+    }
+    if let Some(count) = context.failed_poll_count {
+        data.insert("failed_poll_count".to_string(), count.to_string());
+    }
+    if let Some(locked_until) = context.locked_until {
+        data.insert("locked_until".to_string(), locked_until.to_rfc3339());
+    }
+
+    RenderedDeviceNotification { title, body, data }
+}
+
+fn html_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
 /// Send a push notification to a single device via the appropriate platform.
 #[allow(clippy::too_many_arguments)]
 async fn send_push_to_device(
@@ -592,6 +802,7 @@ fn unique_devices_by_token(devices: &[DeviceToken]) -> Vec<&DeviceToken> {
 mod tests {
     use super::*;
     use crate::test_utils::connect_test_database;
+    use chrono::TimeZone;
 
     fn make_device(device_id: &str, platform: &str, token: &str) -> DeviceToken {
         DeviceToken {
@@ -602,6 +813,16 @@ mod tests {
             app_id: None,
             registered_at: Utc::now(),
             last_used_at: None,
+        }
+    }
+
+    fn context() -> DeviceNotificationContext {
+        DeviceNotificationContext {
+            device_label: "Kitchen <Cam>".to_string(),
+            hw_id: "esp32-p4".to_string(),
+            node_id: Some("node-1".to_string()),
+            failed_poll_count: Some(3),
+            locked_until: Some(Utc.with_ymd_and_hms(2026, 5, 14, 12, 0, 0).unwrap()),
         }
     }
 
@@ -1021,5 +1242,83 @@ mod tests {
 
         let updated = get_or_create_channel(&db, &user_id).await.unwrap();
         assert!(updated.push_devices[0].last_used_at.is_some());
+    }
+
+    #[test]
+    fn device_notification_template_keys_are_stable() {
+        assert_eq!(
+            DeviceNotificationTemplate::BindSuccess.as_str(),
+            "device_bind_success"
+        );
+        assert_eq!(
+            DeviceNotificationTemplate::RepeatedFail.as_str(),
+            "device_repeated_fail"
+        );
+        assert_eq!(
+            DeviceNotificationTemplate::LockAlert.as_str(),
+            "device_lock_alert"
+        );
+    }
+
+    #[test]
+    fn render_bind_success_includes_device_identity_and_data() {
+        let rendered =
+            render_device_notification(DeviceNotificationTemplate::BindSuccess, &context());
+
+        assert_eq!(rendered.title, "Device bound");
+        assert!(rendered.body.contains("Kitchen <Cam>"));
+        assert!(rendered.body.contains("esp32-p4"));
+        assert_eq!(
+            rendered.data.get("type").map(String::as_str),
+            Some("device_bind_success")
+        );
+        assert_eq!(
+            rendered.data.get("node_id").map(String::as_str),
+            Some("node-1")
+        );
+    }
+
+    #[test]
+    fn render_repeated_fail_includes_failure_count_and_data() {
+        let rendered =
+            render_device_notification(DeviceNotificationTemplate::RepeatedFail, &context());
+
+        assert_eq!(rendered.title, "Repeated device poll failures");
+        assert!(rendered.body.contains("Kitchen <Cam>"));
+        assert!(rendered.body.contains("esp32-p4"));
+        assert!(rendered.body.contains("3 failed signed polls"));
+        assert_eq!(
+            rendered.data.get("type").map(String::as_str),
+            Some("device_repeated_fail")
+        );
+        assert_eq!(
+            rendered.data.get("failed_poll_count").map(String::as_str),
+            Some("3")
+        );
+    }
+
+    #[test]
+    fn render_lock_alert_includes_lockout_metadata() {
+        let rendered =
+            render_device_notification(DeviceNotificationTemplate::LockAlert, &context());
+
+        assert_eq!(rendered.title, "Device code locked");
+        assert!(rendered.body.contains("2026-05-14T12:00:00+00:00"));
+        assert_eq!(
+            rendered.data.get("failed_poll_count").map(String::as_str),
+            Some("3")
+        );
+        assert_eq!(
+            rendered.data.get("locked_until").map(String::as_str),
+            Some("2026-05-14T12:00:00+00:00")
+        );
+    }
+
+    #[test]
+    fn html_escape_escapes_telegram_html_special_chars() {
+        assert_eq!(
+            html_escape("Kitchen <Cam> & Lab"),
+            "Kitchen &lt;Cam&gt; &amp; Lab"
+        );
     }
 }
