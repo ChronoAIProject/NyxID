@@ -21,6 +21,9 @@ use crate::models::node_pending_credential::{
     FanOutNodeState, InjectionMethod, NodePendingCredential, RemoteCryptoState,
 };
 use crate::mw::auth::AuthUser;
+use crate::services::node_pending_credential_service::{
+    IntegrityVerificationAudit, PendingCredentialIntegrityVerificationRequest,
+};
 use crate::services::{
     audit_service, node_pending_credential_service, node_routing_service, node_service,
     org_service,
@@ -85,6 +88,8 @@ pub struct PendingCredentialCiphertextRequest {
     pub admin_pubkey: String,
     pub nonce: String,
     pub ciphertext: String,
+    #[serde(default)]
+    pub integrity_verification: Option<PendingCredentialIntegrityVerificationRequest>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -101,6 +106,8 @@ pub struct PendingCredentialFanOutCiphertextItemRequest {
 pub struct PendingCredentialFanOutCiphertextRequest {
     pub fan_out_revision: i64,
     pub items: Vec<PendingCredentialFanOutCiphertextItemRequest>,
+    #[serde(default)]
+    pub integrity_verification: Option<PendingCredentialIntegrityVerificationRequest>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -249,6 +256,7 @@ pub struct PendingCredentialPubkeyResponse {
     pub node_pubkey: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote_state: Option<String>,
+    pub integrity_verification_opt_out: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -308,6 +316,7 @@ pub struct FanOutPendingCredentialPubkeysResponse {
     pub fanout_id: String,
     pub fan_out_revision: i64,
     pub target_count: usize,
+    pub integrity_verification_opt_out: bool,
     pub targets: Vec<FanOutPendingCredentialPubkeyTarget>,
 }
 
@@ -418,6 +427,7 @@ fn pending_remote_state(pending: &NodePendingCredential) -> Option<String> {
 
 fn pending_pubkey_response(
     pending: NodePendingCredential,
+    integrity_verification_opt_out: bool,
 ) -> AppResult<PendingCredentialPubkeyResponse> {
     let (version, node_pubkey) = {
         let crypto = pending
@@ -438,6 +448,7 @@ fn pending_pubkey_response(
         version,
         node_pubkey,
         remote_state,
+        integrity_verification_opt_out,
     })
 }
 
@@ -508,11 +519,13 @@ fn fan_out_status_response(pending: NodePendingCredential) -> FanOutPendingCrede
 
 fn fan_out_pubkeys_response(
     pending: NodePendingCredential,
+    integrity_verification_opt_out: bool,
 ) -> FanOutPendingCredentialPubkeysResponse {
     FanOutPendingCredentialPubkeysResponse {
         fanout_id: pending.id,
         fan_out_revision: pending.fan_out_revision,
         target_count: pending.fan_out_nodes.len(),
+        integrity_verification_opt_out,
         targets: pending
             .fan_out_nodes
             .iter()
@@ -754,6 +767,55 @@ fn log_rci_for_summary_user(
 ) {
     let subject = RciAuditSubject::from_summary(summary);
     rci_audit_service::log_rci_for_user(state.db.clone(), auth_user, &subject, kind);
+}
+
+fn integrity_audit_value(integrity: &IntegrityVerificationAudit) -> serde_json::Value {
+    serde_json::json!({
+        "mode": integrity.mode,
+        "fingerprint_sha384_prefix": integrity.fingerprint_sha384_prefix,
+        "verified_at": integrity.verified_at,
+        "manifest_url_configured": integrity.manifest_url_configured,
+    })
+}
+
+fn log_integrity_ciphertext_submitted_for_pending(
+    state: &AppState,
+    auth_user: &AuthUser,
+    pending: &NodePendingCredential,
+    integrity: &IntegrityVerificationAudit,
+) {
+    audit_service::log_for_user(
+        state.db.clone(),
+        auth_user,
+        "node_credential_ciphertext_submitted",
+        Some(serde_json::json!({
+            "node_id": &pending.node_id,
+            "pending_credential_id": &pending.id,
+            "service_slug": &pending.service_slug,
+            "owner_user_id": &pending.owner_user_id,
+            "integrity_verification": integrity_audit_value(integrity),
+        })),
+    );
+}
+
+fn log_integrity_ciphertext_submitted_for_fan_out(
+    state: &AppState,
+    auth_user: &AuthUser,
+    pending: &NodePendingCredential,
+    integrity: &IntegrityVerificationAudit,
+) {
+    audit_service::log_for_user(
+        state.db.clone(),
+        auth_user,
+        "node_credential_ciphertext_submitted",
+        Some(serde_json::json!({
+            "fan_out": true,
+            "fanout_id": &pending.id,
+            "service_slug": &pending.service_slug,
+            "owner_user_id": &pending.owner_user_id,
+            "integrity_verification": integrity_audit_value(integrity),
+        })),
+    );
 }
 
 fn log_fan_out_ciphertext_audit(
@@ -1226,8 +1288,13 @@ pub async fn get_fan_out_pending_credential_pubkeys(
         &fanout_id,
     )
     .await?;
+    let opt_out = node_pending_credential_service::owner_integrity_verification_opt_out(
+        &state.db,
+        &pending.owner_user_id,
+    )
+    .await?;
 
-    Ok(Json(fan_out_pubkeys_response(pending)))
+    Ok(Json(fan_out_pubkeys_response(pending, opt_out)))
 }
 
 /// POST /api/v1/nodes/credentials/pending/{fanout_id}/fan-out/ciphertexts
@@ -1237,7 +1304,27 @@ pub async fn post_fan_out_pending_credential_ciphertexts(
     Path(fanout_id): Path<String>,
     Json(body): Json<PendingCredentialFanOutCiphertextRequest>,
 ) -> AppResult<(StatusCode, Json<FanOutPendingCredentialCiphertextResponse>)> {
+    let integrity_request = body.integrity_verification.clone();
     let mut input = validate_fan_out_ciphertext_request(body)?;
+    let user_id_str = auth_user.user_id.to_string();
+    let pending_for_policy =
+        node_pending_credential_service::get_fan_out_pending_credential_for_admin(
+            &state.db,
+            &user_id_str,
+            &fanout_id,
+        )
+        .await?;
+    let now = chrono::Utc::now();
+    let integrity_audit =
+        node_pending_credential_service::validate_integrity_verification_for_owner(
+            &state.db,
+            &pending_for_policy.owner_user_id,
+            state.config.release_integrity_manifest_url.as_deref(),
+            state.config.jwt_relay_reply_ttl_secs,
+            integrity_request.as_ref(),
+            now,
+        )
+        .await?;
     input.online_node_ids = input
         .items
         .iter()
@@ -1250,8 +1337,6 @@ pub async fn post_fan_out_pending_credential_ciphertexts(
         .map(|item| item.node_id.clone())
         .collect::<HashSet<_>>();
 
-    let user_id_str = auth_user.user_id.to_string();
-    let now = chrono::Utc::now();
     let outcome = node_pending_credential_service::store_fan_out_ciphertexts_revision_guard(
         &state.db,
         &user_id_str,
@@ -1261,6 +1346,12 @@ pub async fn post_fan_out_pending_credential_ciphertexts(
     )
     .await?;
 
+    log_integrity_ciphertext_submitted_for_fan_out(
+        &state,
+        &auth_user,
+        &outcome.pending,
+        &integrity_audit,
+    );
     log_fan_out_ciphertext_audit(&state, &auth_user, &outcome.pending, &outcome.targets);
 
     let mut latest_pending = outcome.pending.clone();
@@ -1389,8 +1480,13 @@ pub async fn get_pending_credential_pubkey(
         &pending_id,
     )
     .await?;
+    let opt_out = node_pending_credential_service::owner_integrity_verification_opt_out(
+        &state.db,
+        &pending.owner_user_id,
+    )
+    .await?;
 
-    Ok(Json(pending_pubkey_response(pending)?))
+    Ok(Json(pending_pubkey_response(pending, opt_out)?))
 }
 
 /// POST /api/v1/nodes/{node_id}/credentials/pending/{pending_id}/ciphertext
@@ -1424,11 +1520,21 @@ pub async fn post_pending_credential_ciphertext(
             ));
         }
     };
+    let now = chrono::Utc::now();
+    let integrity_audit =
+        node_pending_credential_service::validate_integrity_verification_for_owner(
+            &state.db,
+            &subject_summary.owner_user_id,
+            state.config.release_integrity_manifest_url.as_deref(),
+            state.config.jwt_relay_reply_ttl_secs,
+            body.integrity_verification.as_ref(),
+            now,
+        )
+        .await?;
     let node_can_receive_now = state.node_ws_manager.is_connected(&node_id)
         && state
             .node_ws_manager
             .supports_remote_credential_crypto(&node_id);
-    let now = chrono::Utc::now();
 
     let outcome = node_pending_credential_service::store_pending_ciphertext_first_writer_wins(
         &state.db,
@@ -1462,6 +1568,12 @@ pub async fn post_pending_credential_ciphertext(
             Err(AppError::PendingCredentialQueueFull(node_id))
         }
         node_pending_credential_service::StorePendingCiphertextOutcome::QueuedOffline(pending) => {
+            log_integrity_ciphertext_submitted_for_pending(
+                &state,
+                &auth_user,
+                &pending,
+                &integrity_audit,
+            );
             log_rci_for_pending_user(
                 &state,
                 &auth_user,
@@ -1482,6 +1594,12 @@ pub async fn post_pending_credential_ciphertext(
         node_pending_credential_service::StorePendingCiphertextOutcome::StoredForOnlineNode(
             pending,
         ) => {
+            log_integrity_ciphertext_submitted_for_pending(
+                &state,
+                &auth_user,
+                &pending,
+                &integrity_audit,
+            );
             log_rci_for_pending_user(
                 &state,
                 &auth_user,
@@ -1775,7 +1893,9 @@ mod tests {
     use crate::models::org_membership::{
         COLLECTION_NAME as ORG_MEMBERSHIPS, OrgMembership, OrgRole,
     };
-    use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+    use crate::models::user::{
+        COLLECTION_NAME as USERS, ReleaseIntegrityProfileConfig, User, UserProfileConfig, UserType,
+    };
     use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
     use crate::services::{
         audit_service, node_pending_credential_service,
@@ -1881,7 +2001,15 @@ mod tests {
         assert!(crypto.ciphertext.is_none());
     }
 
-    fn api_app(state: AppState) -> axum::Router {
+    fn api_app(mut state: AppState) -> axum::Router {
+        if state.config.release_integrity_manifest_url.is_none() {
+            state.config.release_integrity_manifest_url =
+                Some("https://release.example.test/releases.json".to_string());
+        }
+        api_app_preserving_config(state)
+    }
+
+    fn api_app_preserving_config(state: AppState) -> axum::Router {
         let (_, private) = crate::routes::build_router(state.config.proxy_max_body_size);
         private.with_state(state)
     }
@@ -1971,7 +2099,28 @@ mod tests {
             "admin_pubkey": b64url(10, 32),
             "nonce": b64url(11, 24),
             "ciphertext": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(ciphertext),
+            "integrity_verification": valid_integrity_verification(),
         })
+    }
+
+    fn valid_integrity_verification() -> Value {
+        serde_json::json!({
+            "mode": "admin_verified",
+            "fingerprint_sha384_hex": "a".repeat(96),
+            "verified_at": Utc::now().to_rfc3339(),
+            "manifest_url_configured": true,
+        })
+    }
+
+    fn test_org_with_integrity_opt_out(org_id: &str) -> User {
+        let mut org = test_user(org_id, UserType::Org);
+        org.profile_config = UserProfileConfig {
+            release_integrity: ReleaseIntegrityProfileConfig {
+                remote_credential_integrity_verification_opt_out: true,
+            },
+            ..UserProfileConfig::default()
+        };
+        org
     }
 
     fn fan_out_ciphertext_request(ciphertext: Vec<u8>) -> Value {
@@ -1987,6 +2136,7 @@ mod tests {
                     "ciphertext": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(ciphertext),
                 }
             ],
+            "integrity_verification": valid_integrity_verification(),
         })
     }
 
@@ -2015,6 +2165,7 @@ mod tests {
                     "ciphertext": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([1, 2, 3, 4]),
                 }
             ],
+            "integrity_verification": valid_integrity_verification(),
         })
     }
 
@@ -2480,9 +2631,51 @@ mod tests {
         assert_eq!(body["version"], "v1");
         assert_eq!(body["node_pubkey"], node_pubkey);
         assert_eq!(body["remote_state"], "pubkey_posted");
+        assert_eq!(body["integrity_verification_opt_out"], false);
         assert!(body.get("admin_pubkey").is_none());
         assert!(body.get("nonce").is_none());
         assert!(body.get("ciphertext").is_none());
+    }
+
+    #[tokio::test]
+    async fn route_get_pending_credential_pubkey_exposes_org_integrity_opt_out() {
+        let db = test_db("pending_route_get_pubkey_optout").await;
+        let admin_id = Uuid::new_v4().to_string();
+        let org_id = Uuid::new_v4().to_string();
+        insert_users(
+            &db,
+            vec![
+                test_user(&admin_id, UserType::Person),
+                test_org_with_integrity_opt_out(&org_id),
+            ],
+        )
+        .await;
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(&org_id, &admin_id, OrgRole::Admin, None))
+            .await
+            .expect("insert membership");
+        let node = test_node(&org_id, "optout-pubkey-node");
+        insert_node(&db, &node).await;
+        let pending = create_remote_pending_with_pubkey(&db, &admin_id, &node.id, "openclaw").await;
+        let state = test_app_state(db.clone());
+        let token = access_token(&state, &admin_id);
+        let app = api_app(state);
+
+        let (status, body) = route_json(
+            app,
+            Method::GET,
+            format!(
+                "/api/v1/nodes/{}/credentials/pending/{}",
+                node.id, pending.id
+            ),
+            &token,
+            None,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["pending_id"], pending.id);
+        assert_eq!(body["integrity_verification_opt_out"], true);
     }
 
     #[tokio::test]
@@ -2609,6 +2802,7 @@ mod tests {
         assert_eq!(body["fanout_id"], fanout_id);
         assert_eq!(body["fan_out_revision"], 1);
         assert_eq!(body["target_count"], 2);
+        assert_eq!(body["integrity_verification_opt_out"], false);
         let first_pubkey = response_target(&body, &first.id);
         let second_pubkey = response_target(&body, &second.id);
         assert_eq!(first_pubkey["version"], "v1");
@@ -3092,6 +3286,10 @@ mod tests {
             "node_credential_rci_ciphertext_forwarded",
             Some(pending.id.clone()),
         );
+        let integrity_audit = audit_service::notify_on_audit_write(
+            "node_credential_ciphertext_submitted",
+            Some(pending.id.clone()),
+        );
 
         let (status, body) = route_json(
             app,
@@ -3150,6 +3348,171 @@ mod tests {
         assert_eq!(
             forwarded.event_data.as_ref().unwrap()["delivery"],
             "online_forward"
+        );
+        let integrity = load_audit_entry(&db, integrity_audit).await;
+        let integrity_data = integrity.event_data.as_ref().expect("integrity audit data");
+        assert_eq!(integrity_data["node_id"], node.id);
+        assert_eq!(integrity_data["pending_credential_id"], pending.id);
+        assert_eq!(
+            integrity_data["integrity_verification"]["mode"],
+            "admin_verified"
+        );
+        assert_eq!(
+            integrity_data["integrity_verification"]["fingerprint_sha384_prefix"],
+            "aaaaaaaaaaaa"
+        );
+        let integrity_json = integrity_data.to_string();
+        assert!(!integrity_json.contains(&"a".repeat(96)));
+        assert!(!integrity_json.contains(&b64url(10, 32)));
+        assert!(!integrity_json.contains(&b64url(11, 24)));
+        assert!(
+            !integrity_json
+                .contains(&base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([1, 2, 3]))
+        );
+    }
+
+    #[tokio::test]
+    async fn route_post_pending_ciphertext_fails_closed_without_manifest_for_non_opt_out_owner() {
+        let (db, mut state, _app, token, node, pending) = pending_route_fixture(
+            "pending_route_integrity_manifest_missing",
+            "manifest-missing-node",
+            "openclaw",
+            true,
+        )
+        .await;
+        state.config.release_integrity_manifest_url = None;
+        let app = api_app_preserving_config(state);
+
+        let (status, body) = route_json(
+            app,
+            Method::POST,
+            format!(
+                "/api/v1/nodes/{}/credentials/pending/{}/ciphertext",
+                node.id, pending.id
+            ),
+            &token,
+            Some(ciphertext_request(vec![1, 2, 3])),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error_code"], 1008);
+        assert_eq!(body["error"], "validation_error");
+        assert!(
+            body["message"]
+                .as_str()
+                .expect("message")
+                .contains("release integrity manifest URL is not configured")
+        );
+        let stored = load_pending(&db, &pending.id).await;
+        assert_pubkey_only_pending(&stored, &b64url(12, 32));
+    }
+
+    #[tokio::test]
+    async fn route_post_pending_ciphertext_rejects_expired_integrity_metadata() {
+        let (db, state, app, token, node, pending) = pending_route_fixture(
+            "pending_route_integrity_expired",
+            "expired-integrity-node",
+            "openclaw",
+            true,
+        )
+        .await;
+        let mut body = ciphertext_request(vec![1, 2, 3]);
+        body["integrity_verification"]["verified_at"] = Value::String(
+            (Utc::now() - chrono::Duration::seconds(state.config.jwt_relay_reply_ttl_secs + 60))
+                .to_rfc3339(),
+        );
+
+        let (status, body) = route_json(
+            app,
+            Method::POST,
+            format!(
+                "/api/v1/nodes/{}/credentials/pending/{}/ciphertext",
+                node.id, pending.id
+            ),
+            &token,
+            Some(body),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error_code"], 1008);
+        assert!(
+            body["message"]
+                .as_str()
+                .expect("message")
+                .contains("integrity verification has expired")
+        );
+        let stored = load_pending(&db, &pending.id).await;
+        assert_pubkey_only_pending(&stored, &b64url(12, 32));
+    }
+
+    #[tokio::test]
+    async fn route_post_pending_ciphertext_accepts_org_policy_opt_out_without_manifest() {
+        let db = test_db("pending_route_integrity_org_optout").await;
+        let admin_id = Uuid::new_v4().to_string();
+        let org_id = Uuid::new_v4().to_string();
+        insert_users(
+            &db,
+            vec![
+                test_user(&admin_id, UserType::Person),
+                test_org_with_integrity_opt_out(&org_id),
+            ],
+        )
+        .await;
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(&org_id, &admin_id, OrgRole::Admin, None))
+            .await
+            .expect("insert membership");
+        let node = test_node(&org_id, "org-optout-node");
+        insert_node(&db, &node).await;
+        let pending = create_remote_pending_with_pubkey(&db, &admin_id, &node.id, "openclaw").await;
+        let mut state = test_app_state(db.clone());
+        state.config.release_integrity_manifest_url = None;
+        let token = access_token(&state, &admin_id);
+        let app = api_app_preserving_config(state);
+        let integrity_audit = audit_service::notify_on_audit_write(
+            "node_credential_ciphertext_submitted",
+            Some(pending.id.clone()),
+        );
+        let mut body = ciphertext_request(vec![4, 5, 6]);
+        body["integrity_verification"] = serde_json::json!({
+            "mode": "org_policy_opt_out",
+            "fingerprint_sha384_hex": null,
+            "verified_at": null,
+            "manifest_url_configured": false,
+        });
+
+        let (status, response) = route_json(
+            app,
+            Method::POST,
+            format!(
+                "/api/v1/nodes/{}/credentials/pending/{}/ciphertext",
+                node.id, pending.id
+            ),
+            &token,
+            Some(body),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(response["delivery_status"], "queued");
+        let audit = load_audit_entry(&db, integrity_audit).await;
+        let data = audit.event_data.as_ref().expect("audit data");
+        assert_eq!(data["owner_user_id"], org_id);
+        assert_eq!(data["integrity_verification"]["mode"], "org_policy_opt_out");
+        assert!(data["integrity_verification"]["fingerprint_sha384_prefix"].is_null());
+        assert!(data["integrity_verification"]["verified_at"].is_null());
+        assert_eq!(
+            data["integrity_verification"]["manifest_url_configured"],
+            false
+        );
+        let audit_json = data.to_string();
+        assert!(!audit_json.contains(&b64url(10, 32)));
+        assert!(!audit_json.contains(&b64url(11, 24)));
+        assert!(
+            !audit_json
+                .contains(&base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([4, 5, 6]))
         );
     }
 
@@ -5079,6 +5442,7 @@ mod tests {
             admin_pubkey: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([1_u8; 32]),
             nonce: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([2_u8; 24]),
             ciphertext: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([3_u8; 48]),
+            integrity_verification: None,
         };
 
         let decoded = validate_pending_ciphertext_request(&request).expect("valid request");
@@ -5096,6 +5460,7 @@ mod tests {
             admin_pubkey: valid_admin.clone(),
             nonce: valid_nonce.clone(),
             ciphertext: valid_ciphertext.clone(),
+            integrity_verification: None,
         };
         assert!(matches!(
             validate_pending_ciphertext_request(&bad_version),
@@ -5107,6 +5472,7 @@ mod tests {
             admin_pubkey: format!("{valid_admin}="),
             nonce: valid_nonce.clone(),
             ciphertext: valid_ciphertext.clone(),
+            integrity_verification: None,
         };
         assert!(matches!(
             validate_pending_ciphertext_request(&padded_admin),
@@ -5118,6 +5484,7 @@ mod tests {
             admin_pubkey: valid_admin,
             nonce: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([2_u8; 23]),
             ciphertext: valid_ciphertext,
+            integrity_verification: None,
         };
         assert!(matches!(
             validate_pending_ciphertext_request(&short_nonce),
@@ -5133,6 +5500,7 @@ mod tests {
                 node_pending_credential_service::MAX_CIPHERTEXT_SIZE
                     + 1
             ]),
+            integrity_verification: None,
         };
         assert!(matches!(
             validate_pending_ciphertext_request(&oversized),
@@ -5172,7 +5540,7 @@ mod tests {
             fan_out_revision: 0,
         };
 
-        let response = pending_pubkey_response(pending).expect("pubkey response");
+        let response = pending_pubkey_response(pending, false).expect("pubkey response");
         let json = serde_json::to_value(&response).expect("serialize");
 
         assert_eq!(json["pending_id"], "pending-1");
@@ -5216,7 +5584,7 @@ mod tests {
         };
 
         assert!(matches!(
-            pending_pubkey_response(pending),
+            pending_pubkey_response(pending, false),
             Err(AppError::PendingCredentialPubkeyAwaiting(id)) if id == "pending-awaiting"
         ));
     }

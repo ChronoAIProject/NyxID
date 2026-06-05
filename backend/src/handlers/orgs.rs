@@ -62,6 +62,8 @@ pub struct UpdateOrgRequest {
     /// creation time. Accepts any RFC-compliant email otherwise.
     #[serde(default)]
     pub contact_email: Option<String>,
+    #[serde(default)]
+    pub remote_credential_integrity_verification_opt_out: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -137,6 +139,7 @@ pub struct OrgResponse {
     /// from user-facing surfaces).
     pub contact_email: Option<String>,
     pub created_at: String,
+    pub remote_credential_integrity_verification_opt_out: bool,
     /// Caller's role in this org. Always present in single-org responses.
     pub your_role: OrgRoleWire,
     pub member_count: u64,
@@ -524,6 +527,7 @@ pub async fn create_org(
 
     let contact_email = org_service::contact_email_for_display(&org);
     let slug = slug_for_response(&org);
+    let opt_out = org_service::remote_credential_integrity_verification_opt_out(&org);
     Ok((
         StatusCode::CREATED,
         Json(OrgResponse {
@@ -533,6 +537,7 @@ pub async fn create_org(
             avatar_url: org.avatar_url,
             contact_email,
             created_at: org.created_at.to_rfc3339(),
+            remote_credential_integrity_verification_opt_out: opt_out,
             your_role: membership.role.into(),
             member_count: 1,
         }),
@@ -583,6 +588,7 @@ pub async fn get_org(
     let members = org_service::list_members_for_org(&state.db, &org_id, false).await?;
     let contact_email = org_service::contact_email_for_display(&org);
     let slug = slug_for_response(&org);
+    let opt_out = org_service::remote_credential_integrity_verification_opt_out(&org);
 
     Ok(Json(OrgResponse {
         id: org.id,
@@ -591,6 +597,7 @@ pub async fn get_org(
         avatar_url: org.avatar_url,
         contact_email,
         created_at: org.created_at.to_rfc3339(),
+        remote_credential_integrity_verification_opt_out: opt_out,
         your_role: membership.role.into(),
         member_count: members.len() as u64,
     }))
@@ -641,6 +648,7 @@ pub async fn update_org(
         body.slug.as_deref(),
         body.avatar_url.as_deref(),
         body.contact_email.as_deref(),
+        body.remote_credential_integrity_verification_opt_out,
     )
     .await?;
 
@@ -648,6 +656,7 @@ pub async fn update_org(
     let members = org_service::list_members_for_org(&state.db, &org_id, false).await?;
     let contact_email = org_service::contact_email_for_display(&org);
     let slug = slug_for_response(&org);
+    let opt_out = org_service::remote_credential_integrity_verification_opt_out(&org);
 
     let contact_email_changed = body.contact_email.is_some();
     audit_service::log_for_user(
@@ -657,6 +666,7 @@ pub async fn update_org(
         Some(serde_json::json!({
             "org_user_id": org_id,
             "contact_email_changed": contact_email_changed,
+            "remote_credential_integrity_verification_opt_out_changed": body.remote_credential_integrity_verification_opt_out.is_some(),
         })),
     );
 
@@ -667,6 +677,7 @@ pub async fn update_org(
         avatar_url: org.avatar_url,
         contact_email,
         created_at: org.created_at.to_rfc3339(),
+        remote_credential_integrity_verification_opt_out: opt_out,
         your_role: membership.role.into(),
         member_count: members.len() as u64,
     }))
@@ -1341,6 +1352,7 @@ mod tests {
                 slug: Some("acme-labs".to_string()),
                 avatar_url: None,
                 contact_email: None,
+                remote_credential_integrity_verification_opt_out: None,
             }),
         )
         .await;
@@ -1350,6 +1362,80 @@ mod tests {
             Err(other) => panic!("unexpected error: {other}"),
             Ok(_) => panic!("duplicate slug patch should fail"),
         }
+    }
+
+    #[tokio::test]
+    async fn update_org_remote_credential_integrity_opt_out_requires_admin_and_persists() {
+        let Some(db) = connect_test_database("org_integrity_opt_out_patch").await else {
+            eprintln!("Skipping MongoDB-backed test; no test database available");
+            return;
+        };
+
+        let admin_id = Uuid::new_v4().to_string();
+        let member_id = Uuid::new_v4().to_string();
+        let org_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_many([
+                test_user(&admin_id, UserType::Person),
+                test_user(&member_id, UserType::Person),
+                test_user(&org_id, UserType::Org),
+            ])
+            .await
+            .expect("insert users");
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_many([
+                test_membership(&org_id, &admin_id, OrgRole::Admin, None),
+                test_membership(&org_id, &member_id, OrgRole::Member, None),
+            ])
+            .await
+            .expect("insert memberships");
+
+        let state = test_app_state(db.clone());
+        let request = UpdateOrgRequest {
+            display_name: None,
+            slug: None,
+            avatar_url: None,
+            contact_email: None,
+            remote_credential_integrity_verification_opt_out: Some(true),
+        };
+
+        let denied = update_org(
+            State(state.clone()),
+            test_auth_user(&member_id),
+            Path(org_id.clone()),
+            Json(request),
+        )
+        .await;
+        assert!(matches!(denied, Err(AppError::OrgRoleInsufficient(_))));
+
+        let Json(response) = update_org(
+            State(state),
+            test_auth_user(&admin_id),
+            Path(org_id.clone()),
+            Json(UpdateOrgRequest {
+                display_name: None,
+                slug: None,
+                avatar_url: None,
+                contact_email: None,
+                remote_credential_integrity_verification_opt_out: Some(true),
+            }),
+        )
+        .await
+        .expect("admin can patch opt-out");
+        assert!(response.remote_credential_integrity_verification_opt_out);
+
+        let stored = db
+            .collection::<User>(USERS)
+            .find_one(doc! { "_id": &org_id })
+            .await
+            .expect("query org")
+            .expect("org exists");
+        assert!(
+            stored
+                .profile_config
+                .release_integrity
+                .remote_credential_integrity_verification_opt_out
+        );
     }
 
     // ── invite_to_response: pure mapping tests ──────────────────────────
@@ -1752,6 +1838,7 @@ mod tests {
             slug: None,
             avatar_url: None,
             contact_email: None,
+            remote_credential_integrity_verification_opt_out: None,
         };
         assert!(req.validate().is_err());
     }
@@ -1763,6 +1850,7 @@ mod tests {
             slug: None,
             avatar_url: None,
             contact_email: None,
+            remote_credential_integrity_verification_opt_out: None,
         };
         assert!(req.validate().is_err());
     }
@@ -1774,6 +1862,7 @@ mod tests {
             slug: None,
             avatar_url: None,
             contact_email: None,
+            remote_credential_integrity_verification_opt_out: None,
         };
         assert!(req.validate().is_ok());
     }
@@ -1785,6 +1874,7 @@ mod tests {
             slug: None,
             avatar_url: None,
             contact_email: None,
+            remote_credential_integrity_verification_opt_out: None,
         };
         assert!(req.validate().is_ok());
     }
@@ -1864,6 +1954,7 @@ mod tests {
             avatar_url: None,
             contact_email: Some("admin@acme.com".to_string()),
             created_at: "2024-01-01T00:00:00Z".to_string(),
+            remote_credential_integrity_verification_opt_out: false,
             your_role: OrgRoleWire::Admin,
             member_count: 5,
         };

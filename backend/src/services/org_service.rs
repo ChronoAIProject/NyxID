@@ -175,6 +175,7 @@ pub async fn update_org_user(
     slug: Option<&str>,
     avatar_url: Option<&str>,
     contact_email: Option<&str>,
+    remote_credential_integrity_verification_opt_out: Option<bool>,
 ) -> AppResult<User> {
     // Verify it's an org first.
     let existing = get_org_user(db, org_user_id).await?;
@@ -217,6 +218,12 @@ pub async fn update_org_user(
             update.insert("email", trimmed.to_lowercase());
         }
     }
+    if let Some(opt_out) = remote_credential_integrity_verification_opt_out {
+        update.insert(
+            "profile_config.release_integrity.remote_credential_integrity_verification_opt_out",
+            opt_out,
+        );
+    }
     update.insert("updated_at", bson::DateTime::from_chrono(Utc::now()));
 
     db.collection::<User>(USERS)
@@ -224,6 +231,14 @@ pub async fn update_org_user(
         .await?;
 
     get_org_user(db, org_user_id).await
+}
+
+pub fn remote_credential_integrity_verification_opt_out(user: &User) -> bool {
+    user.user_type.is_org()
+        && user
+            .profile_config
+            .release_integrity
+            .remote_credential_integrity_verification_opt_out
 }
 
 /// Delete an org user.

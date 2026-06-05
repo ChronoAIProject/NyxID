@@ -667,6 +667,8 @@ mod tests {
             jwt_relay_reply_ttl_secs: 1800,
             jwt_relay_callback_ttl_secs: 300,
             jwt_refresh_ttl_secs: 604800,
+            release_integrity_manifest_url: None,
+            credential_accept_dist_dir: "frontend/dist/credential-accept".to_string(),
             google_client_id: None,
             google_client_secret: None,
             github_client_id: None,

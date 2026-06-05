@@ -125,6 +125,26 @@ const ciphertextEnvelopeSchema = z
     }
   });
 
+export const integrityVerificationSchema = z.discriminatedUnion("mode", [
+  z.object({
+    mode: z.literal("admin_verified"),
+    fingerprint_sha384_hex: z.string().regex(/^[0-9a-f]{96}$/),
+    verified_at: z.string().datetime({ offset: true }),
+    manifest_url_configured: z.literal(true),
+  }),
+  z.object({
+    mode: z.literal("org_policy_opt_out"),
+    fingerprint_sha384_hex: z.null(),
+    verified_at: z.null(),
+    manifest_url_configured: z.boolean(),
+  }),
+]);
+
+export const pendingCredentialCiphertextRequestSchema =
+  ciphertextEnvelopeSchema.extend({
+    integrity_verification: integrityVerificationSchema.optional(),
+  });
+
 export const fanOutCiphertextItemSchema = ciphertextEnvelopeSchema.extend({
   node_id: z.string().min(1),
   generation: z.number().int().nonnegative(),
@@ -137,6 +157,7 @@ export const fanOutCiphertextsSchema = z
       .array(fanOutCiphertextItemSchema)
       .min(1)
       .max(MAX_FAN_OUT_TARGETS),
+    integrity_verification: integrityVerificationSchema.optional(),
   })
   .superRefine((value, ctx) => {
     let total = 0;

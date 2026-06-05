@@ -675,6 +675,9 @@ export function OrgDetailPage() {
               initialSlug={org.slug}
               initialAvatarUrl={org.avatar_url ?? ""}
               initialContactEmail={org.contact_email ?? ""}
+              initialRemoteCredentialIntegrityVerificationOptOut={
+                org.remote_credential_integrity_verification_opt_out
+              }
               onDelete={() => setDeleteOpen(true)}
             />
           ) : (
@@ -1025,6 +1028,7 @@ interface SettingsPanelProps {
   readonly initialSlug: string;
   readonly initialAvatarUrl: string;
   readonly initialContactEmail: string;
+  readonly initialRemoteCredentialIntegrityVerificationOptOut: boolean;
   readonly onDelete: () => void;
 }
 
@@ -1034,6 +1038,7 @@ function SettingsPanel({
   initialSlug,
   initialAvatarUrl,
   initialContactEmail,
+  initialRemoteCredentialIntegrityVerificationOptOut,
   onDelete,
 }: SettingsPanelProps) {
   const updateMutation = useUpdateOrg();
@@ -1045,6 +1050,8 @@ function SettingsPanel({
       slug: initialSlug,
       avatar_url: initialAvatarUrl,
       contact_email: initialContactEmail,
+      remote_credential_integrity_verification_opt_out:
+        initialRemoteCredentialIntegrityVerificationOptOut,
     },
   });
 
@@ -1055,6 +1062,12 @@ function SettingsPanel({
     const body: UpdateOrgRequest = { ...data };
     if ((body.contact_email ?? "") === initialContactEmail) {
       delete body.contact_email;
+    }
+    if (
+      body.remote_credential_integrity_verification_opt_out ===
+      initialRemoteCredentialIntegrityVerificationOptOut
+    ) {
+      delete body.remote_credential_integrity_verification_opt_out;
     }
     try {
       await updateMutation.mutateAsync({ orgId, body });
@@ -1141,6 +1154,33 @@ function SettingsPanel({
                       Shown in admin surfaces and used as the org user's
                       identity. Leave blank to clear.
                     </p>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+
+              <FormField
+                control={form.control}
+                name="remote_credential_integrity_verification_opt_out"
+                render={({ field }) => (
+                  <FormItem>
+                    <label className="flex items-start gap-3 rounded-md border border-border p-3">
+                      <Checkbox
+                        checked={Boolean(field.value)}
+                        onCheckedChange={(checked) =>
+                          field.onChange(Boolean(checked))
+                        }
+                      />
+                      <span className="space-y-1">
+                        <span className="block text-[13px] font-medium text-foreground">
+                          Opt out of credential accept fingerprint verification
+                        </span>
+                        <span className="block text-xs text-muted-foreground">
+                          This only skips the admin UX gate for this org. It
+                          does not change the encrypted credential flow.
+                        </span>
+                      </span>
+                    </label>
                     <FormMessage />
                   </FormItem>
                 )}

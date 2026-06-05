@@ -8,7 +8,8 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "tsc -b && vite build && vite build --config vite.credential-accept.config.ts",
+    "build:credential-accept": "vite build --config vite.credential-accept.config.ts",
     "build:wizard": "tsc -b && vite build --config vite.wizard.config.ts && node scripts/install-wizard-bundle.mjs",
     "lint": "eslint .",
     "preview": "vite preview",

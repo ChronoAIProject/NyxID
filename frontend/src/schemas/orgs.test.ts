@@ -74,6 +74,7 @@ describe("orgResponseSchema", () => {
       contact_email: null,
       created_at: "2026-01-01T00:00:00Z",
       your_role: "member" as const,
+      remote_credential_integrity_verification_opt_out: false,
     };
     expect(
       orgResponseSchema.safeParse({ ...base, member_count: 3 }).success,
@@ -93,6 +94,7 @@ describe("orgResponseSchema", () => {
       created_at: "2026-01-01T00:00:00Z",
       your_role: "admin",
       member_count: 1,
+      remote_credential_integrity_verification_opt_out: true,
     });
     expect(result.success).toBe(true);
   });

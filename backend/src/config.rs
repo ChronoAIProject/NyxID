@@ -42,6 +42,13 @@ pub struct AppConfig {
     /// Refresh token TTL in seconds (default: 604800 = 7 days)
     pub jwt_refresh_ttl_secs: i64,
 
+    /// Host-configured URL for the independently published release-integrity
+    /// manifest. Unset/empty disables admin verification and browser
+    /// credential accept fails closed unless the owning org opts out.
+    pub release_integrity_manifest_url: Option<String>,
+    /// Local packaged standalone credential-accept build directory.
+    pub credential_accept_dist_dir: String,
+
     // Social login providers
     pub google_client_id: Option<String>,
     pub google_client_secret: Option<String>,
@@ -306,6 +313,14 @@ impl std::fmt::Debug for AppConfig {
                 &self.jwt_relay_callback_ttl_secs,
             )
             .field("jwt_refresh_ttl_secs", &self.jwt_refresh_ttl_secs)
+            .field(
+                "release_integrity_manifest_url",
+                &self.release_integrity_manifest_url,
+            )
+            .field(
+                "credential_accept_dist_dir",
+                &self.credential_accept_dist_dir,
+            )
             .field("google_client_id", &self.google_client_id)
             .field("google_client_secret", &"[REDACTED]")
             .field("github_client_id", &self.github_client_id)
@@ -593,6 +608,15 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(604800),
+            release_integrity_manifest_url: env::var("RELEASE_INTEGRITY_MANIFEST_URL")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+            credential_accept_dist_dir: env::var("CREDENTIAL_ACCEPT_DIST_DIR")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "frontend/dist/credential-accept".to_string()),
 
             google_client_id: env::var("GOOGLE_CLIENT_ID").ok(),
             google_client_secret: env::var("GOOGLE_CLIENT_SECRET").ok(),
@@ -1065,6 +1089,8 @@ mod tests {
             jwt_relay_reply_ttl_secs: 1800,
             jwt_relay_callback_ttl_secs: 300,
             jwt_refresh_ttl_secs: 604800,
+            release_integrity_manifest_url: None,
+            credential_accept_dist_dir: "frontend/dist/credential-accept".to_string(),
             google_client_id: None,
             google_client_secret: None,
             github_client_id: None,

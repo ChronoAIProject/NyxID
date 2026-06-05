@@ -12,6 +12,7 @@ const {
   mockNavigate,
   mockToastError,
   mockToastSuccess,
+  mockUpdateOrg,
   routerState,
 } = vi.hoisted(() => {
   const listeners = new Set<() => void>();
@@ -43,11 +44,13 @@ const {
     org: {
       id: "org-1",
       display_name: "Testing Org",
+      slug: "testing-org",
       avatar_url: null,
       contact_email: null,
       created_at: "2026-04-20T00:00:00Z",
       your_role: "admin" as const,
       member_count: 1,
+      remote_credential_integrity_verification_opt_out: false,
     },
     members: [] as MemberResponse[],
     invites: [
@@ -102,6 +105,7 @@ const {
   ),
   mockToastSuccess: vi.fn(),
   mockToastError: vi.fn(),
+  mockUpdateOrg: vi.fn(),
   routerState,
   };
 });
@@ -141,7 +145,7 @@ vi.mock("@/hooks/use-orgs", () => ({
     error: null,
   }),
   useUpdateOrg: () => ({
-    mutateAsync: vi.fn(),
+    mutateAsync: mockUpdateOrg,
     isPending: false,
   }),
   useDeleteOrg: () => ({
@@ -280,6 +284,7 @@ describe("OrgDetailPage", () => {
     fixtures.orgRole = "admin";
     fixtures.members = [];
     mockCopyToClipboard.mockResolvedValue(undefined);
+    mockUpdateOrg.mockResolvedValue({});
     routerState.reset();
   });
 
@@ -305,6 +310,44 @@ describe("OrgDetailPage", () => {
     expect(
       screen.queryByRole("tab", { name: "Developer Apps" }),
     ).not.toBeInTheDocument();
+  });
+
+  it("sends the remote credential integrity opt-out setting only when changed", async () => {
+    const user = userEvent.setup();
+
+    renderOrgDetailPage();
+
+    await user.click(screen.getByRole("tab", { name: "Settings" }));
+    await user.clear(screen.getByLabelText("Display name"));
+    await user.type(screen.getByLabelText("Display name"), "Testing Org Updated");
+    await user.click(screen.getByRole("button", { name: "Save Changes" }));
+
+    await waitFor(() => {
+      expect(mockUpdateOrg).toHaveBeenCalledTimes(1);
+    });
+    expect(mockUpdateOrg.mock.calls[0]?.[0]).toMatchObject({
+      orgId: fixtures.org.id,
+      body: {
+        display_name: "Testing Org Updated",
+      },
+    });
+    expect(mockUpdateOrg.mock.calls[0]?.[0].body).not.toHaveProperty(
+      "remote_credential_integrity_verification_opt_out",
+    );
+
+    await user.click(
+      screen.getByRole("checkbox", {
+        name: /opt out of credential accept fingerprint verification/i,
+      }),
+    );
+    await user.click(screen.getByRole("button", { name: "Save Changes" }));
+
+    await waitFor(() => {
+      expect(mockUpdateOrg).toHaveBeenCalledTimes(2);
+    });
+    expect(mockUpdateOrg.mock.calls[1]?.[0].body).toMatchObject({
+      remote_credential_integrity_verification_opt_out: true,
+    });
   });
 
   it("copies the full invite join URL for pending invites", async () => {

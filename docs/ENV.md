@@ -53,6 +53,14 @@ See [KMS_MIGRATION_GUIDE.md](KMS_MIGRATION_GUIDE.md) and [KMS_OPERATIONS_GUIDE.m
 | `FRONTEND_URL` | `http://localhost:3000` | Frontend origin for CORS |
 | `ENVIRONMENT` | `development` | `development`, `staging`, `production` |
 
+The standalone remote credential accept routes are backend-served. In split
+frontend/backend deployments, reverse proxies must route
+`/nodes/{node_id}/credentials/pending/{pending_id}/accept`,
+`/nodes/credentials/pending/{pending_id}/fan-out/accept`, and
+`/credential-accept/assets/*` to the backend. Frontend callers build the
+absolute accept URL from `runtime-config.api_base_url`; see
+[RELEASE_INTEGRITY.md](RELEASE_INTEGRITY.md#standalone-accept-page).
+
 ## Database
 
 | Variable | Default | Description |

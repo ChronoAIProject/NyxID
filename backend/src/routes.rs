@@ -947,6 +947,18 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
         .route("/health", get(handlers::health::health_check))
         .route("/llms.txt", get(handlers::llms_txt::llms_txt))
         .route("/llms-full.txt", get(handlers::llms_txt::llms_full_txt))
+        .route(
+            "/nodes/{node_id}/credentials/pending/{pending_id}/accept",
+            get(handlers::credential_accept::accept_page),
+        )
+        .route(
+            "/nodes/credentials/pending/{pending_id}/fan-out/accept",
+            get(handlers::credential_accept::fan_out_accept_page),
+        )
+        .route(
+            "/credential-accept/assets/{*file}",
+            get(handlers::credential_accept::asset),
+        )
         .nest("/api/v1/webhooks", webhook_routes)
         // Channel bot webhook routes -- unauthenticated (per-bot signature verified)
         .route(

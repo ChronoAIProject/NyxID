@@ -20,6 +20,7 @@ import {
   inferSshAuthMode,
 } from "@/lib/ssh-auth-mode";
 import { formatDate } from "@/lib/utils";
+import { buildStandaloneCredentialAcceptUrl } from "@/lib/credential-accept-url";
 import { PageHeader } from "@/components/shared/page-header";
 import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
 import { DetailSection } from "@/components/shared/detail-section";
@@ -678,7 +679,6 @@ function ServiceCredentialPushSection({
 }: {
   readonly service: import("@/types/api").DownstreamService;
 }) {
-  const navigate = useNavigate();
   const nodeId = service.node_id ?? "";
   const pushCredentialMutation = usePushNodeCredential(nodeId);
   const initialMethod = injectionMethodForService(service);
@@ -704,10 +704,13 @@ function ServiceCredentialPushSection({
     try {
       const created = await pushCredentialMutation.mutateAsync(data);
       toast.success("Credential push created");
-      void navigate({
-        to: "/nodes/$nodeId/credentials/pending/$pendingId/accept",
-        params: { nodeId, pendingId: created.id },
-      });
+      window.location.assign(
+        await buildStandaloneCredentialAcceptUrl(
+          nodeId,
+          created.id,
+          `/services/${service.id}`,
+        ),
+      );
     } catch (err) {
       toast.error(
         err instanceof ApiError ? err.message : "Failed to push credential",

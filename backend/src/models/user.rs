@@ -79,6 +79,14 @@ impl PlatformRole {
 pub struct UserProfileConfig {
     #[serde(default)]
     pub onboarding: OnboardingState,
+    #[serde(default)]
+    pub release_integrity: ReleaseIntegrityProfileConfig,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReleaseIntegrityProfileConfig {
+    #[serde(default)]
+    pub remote_credential_integrity_verification_opt_out: bool,
 }
 
 /// Tracks which first-run onboarding flows the user has completed (or
@@ -228,6 +236,7 @@ mod tests {
         assert!(keys.contains(&"user_type"));
         assert!(keys.contains(&"created_at"));
         assert!(keys.contains(&"updated_at"));
+        assert!(keys.contains(&"profile_config"));
     }
 
     #[test]
@@ -270,6 +279,12 @@ mod tests {
         assert!(restored.user_type.is_person());
         assert_eq!(restored.primary_org_id, None);
         assert_eq!(restored.slug, None);
+        assert!(
+            !restored
+                .profile_config
+                .release_integrity
+                .remote_credential_integrity_verification_opt_out
+        );
     }
 
     #[test]
@@ -279,6 +294,46 @@ mod tests {
         doc.remove("is_operator");
         let restored: User = bson::from_document(doc).expect("deserialize legacy");
         assert!(!restored.is_operator);
+    }
+
+    #[test]
+    fn release_integrity_profile_defaults_to_no_opt_out() {
+        let mut doc = bson::to_document(&make_user()).expect("serialize");
+        doc.remove("profile_config");
+        let restored: User = bson::from_document(doc).expect("deserialize missing profile");
+        assert!(
+            !restored
+                .profile_config
+                .release_integrity
+                .remote_credential_integrity_verification_opt_out
+        );
+
+        let mut doc = bson::to_document(&make_user()).expect("serialize");
+        doc.insert("profile_config", bson::doc! { "onboarding": {} });
+        let restored: User = bson::from_document(doc).expect("deserialize missing release group");
+        assert!(
+            !restored
+                .profile_config
+                .release_integrity
+                .remote_credential_integrity_verification_opt_out
+        );
+    }
+
+    #[test]
+    fn release_integrity_profile_roundtrips_opt_out_flag() {
+        let mut user = make_user();
+        user.user_type = UserType::Org;
+        user.profile_config
+            .release_integrity
+            .remote_credential_integrity_verification_opt_out = true;
+        let doc = bson::to_document(&user).expect("serialize");
+        let restored: User = bson::from_document(doc).expect("deserialize");
+        assert!(
+            restored
+                .profile_config
+                .release_integrity
+                .remote_credential_integrity_verification_opt_out
+        );
     }
 
     #[test]
