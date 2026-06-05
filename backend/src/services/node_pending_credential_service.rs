@@ -4496,9 +4496,13 @@ mod tests {
                 .expect("insert queued single pending");
         }
 
-        let fan_out =
-            insert_fan_out_pending(&db, &owner_id, std::slice::from_ref(&node_id), "fanout-queued")
-                .await;
+        let fan_out = insert_fan_out_pending(
+            &db,
+            &owner_id,
+            std::slice::from_ref(&node_id),
+            "fanout-queued",
+        )
+        .await;
         record_fan_out_pubkey(&db, &node_id, &fan_out.id, "v1", "node-pubkey")
             .await
             .expect("record fan-out pubkey");
@@ -4518,9 +4522,13 @@ mod tests {
             MAX_OFFLINE_CIPHERTEXT_QUEUE_PER_NODE
         );
 
-        let blocked =
-            insert_fan_out_pending(&db, &owner_id, std::slice::from_ref(&node_id), "fanout-blocked")
-                .await;
+        let blocked = insert_fan_out_pending(
+            &db,
+            &owner_id,
+            std::slice::from_ref(&node_id),
+            "fanout-blocked",
+        )
+        .await;
         record_fan_out_pubkey(&db, &node_id, &blocked.id, "v1", "node-pubkey")
             .await
             .expect("record blocked pubkey");
@@ -4541,14 +4549,13 @@ mod tests {
         let db = test_db("fanout_nested_expiry").await;
         let owner_id = Uuid::new_v4().to_string();
         let node_id = Uuid::new_v4().to_string();
-        let pending =
-            insert_fan_out_pending(
-                &db,
-                &owner_id,
-                std::slice::from_ref(&node_id),
-                "fanout-nested-expiry",
-            )
-            .await;
+        let pending = insert_fan_out_pending(
+            &db,
+            &owner_id,
+            std::slice::from_ref(&node_id),
+            "fanout-nested-expiry",
+        )
+        .await;
         record_fan_out_pubkey(&db, &node_id, &pending.id, "v1", "node-pubkey")
             .await
             .expect("record pubkey");
