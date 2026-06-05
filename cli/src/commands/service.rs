@@ -7,6 +7,7 @@ use serde_json::Value;
 use crate::api::ApiClient;
 use crate::cli::{OutputFormat, ServiceCommands};
 use crate::commands::lark_permission::print_permission_block;
+use crate::commands::node_credential::RciCliHintLines;
 use crate::org_resolver::resolve_org_id;
 
 /// Parse one or more `--default-header NAME=VALUE[:overridable]` flag values
@@ -704,9 +705,11 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                     .or(result["service_slug"].as_str())
                     .unwrap_or("-");
                 eprintln!();
-                eprintln!(
-                    "Next step: SSH to the machine running node {node_id} and configure the credential:"
-                );
+                for line in RciCliHintLines::rci_service_hint_lines(Some(node_id), result_slug) {
+                    eprintln!("{line}");
+                }
+                eprintln!();
+                eprintln!("Legacy node-side path (SSH to the node-agent machine):");
                 if custom {
                     eprintln!("  nyxid node credentials add ... --service {result_slug}");
                 } else {
@@ -932,6 +935,9 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                             table.add_row([id, slug, label, endpoint, status, node]);
                         }
                         eprintln!("{table}");
+                        for line in format_node_managed_list_hint_lines(items) {
+                            eprintln!("{line}");
+                        }
                     }
                 }
             }
@@ -1418,7 +1424,11 @@ async fn run_oauth_add(
         // extra scopes (see `cli/src/node/agent.rs::cmd_credentials_setup`).
         print_add_result(api, &key_result, auth.output)?;
         eprintln!();
-        eprintln!("Next step: SSH to the node-agent machine, then run:");
+        for line in RciCliHintLines::rci_service_hint_lines(options.via_node, &slug) {
+            eprintln!("{line}");
+        }
+        eprintln!();
+        eprintln!("Legacy node-side OAuth setup (SSH to the node-agent machine):");
         let scope_suffix = format_scope_suffix(options.additional_scopes);
         eprintln!("  nyxid node credentials setup --service {slug}{scope_suffix}");
         eprintln!(
@@ -1585,7 +1595,11 @@ async fn run_device_code_add(
     if options.via_node.is_some() {
         print_add_result(api, &key_result, auth.output)?;
         eprintln!();
-        eprintln!("Next step: SSH to the node-agent machine, then run:");
+        for line in RciCliHintLines::rci_service_hint_lines(options.via_node, &slug) {
+            eprintln!("{line}");
+        }
+        eprintln!();
+        eprintln!("Legacy node-side device-code setup (SSH to the node-agent machine):");
         let scope_suffix = format_scope_suffix(options.additional_scopes);
         eprintln!("  nyxid node credentials setup --service {slug}{scope_suffix}");
         eprintln!(
@@ -2267,16 +2281,46 @@ fn format_credential_lines(
 ) -> Vec<String> {
     if credential_type == "node_managed" {
         let node_id_val = node_id.filter(|s| !s.is_empty()).unwrap_or("—");
-        vec![
-            format!("Credential: node_managed (lives on node {node_id_val})"),
-            format!(
-                "            To update: nyxid node-credential push <node-id> --slug {slug} ..."
-            ),
-            "            Then have the node operator accept the pending credential.".to_string(),
-        ]
+        let mut lines = vec![format!(
+            "Credential: node_managed (lives on node {node_id_val})"
+        )];
+        lines.extend(
+            RciCliHintLines::rci_service_hint_lines(node_id, slug)
+                .into_iter()
+                .map(|line| format!("            {line}")),
+        );
+        lines.push(format!(
+            "            Legacy node-side path: nyxid node credentials setup --service {slug}"
+        ));
+        lines
     } else {
         vec![format!("Credential: {credential_type}")]
     }
+}
+
+fn format_node_managed_list_hint_lines(items: &[Value]) -> Vec<String> {
+    if !items
+        .iter()
+        .any(|svc| svc["credential_type"].as_str() == Some("node_managed"))
+    {
+        return Vec::new();
+    }
+
+    let service_lines = RciCliHintLines::rci_service_hint_lines(None, "<slug>");
+    let push = service_lines
+        .iter()
+        .find(|line| line.starts_with("Create metadata:"))
+        .expect("RCI service hint includes push command");
+    let inject = service_lines
+        .iter()
+        .find(|line| line.starts_with("Complete pending:"))
+        .expect("RCI service hint includes pending inject command");
+
+    vec![
+        "Node-managed credential hint: remote injection is available.".to_string(),
+        format!("  {push}"),
+        format!("  {inject}"),
+    ]
 }
 
 #[cfg(test)]
@@ -2286,23 +2330,31 @@ mod tests {
     #[test]
     fn test_format_credential_lines() {
         let lines1 = format_credential_lines("node_managed", Some("abc-123"), "home-assistant");
-        assert_eq!(lines1.len(), 3);
         assert_eq!(
             lines1[0],
             "Credential: node_managed (lives on node abc-123)"
         );
-        assert_eq!(
-            lines1[1],
-            "            To update: nyxid node-credential push <node-id> --slug home-assistant ..."
+        let rendered1 = lines1.join("\n");
+        assert!(
+            rendered1.contains(
+                "nyxid node-credential push abc-123 --slug home-assistant --injection-method <header|query-param|path-prefix> --field-name <name> [--target-url <url>] [--label <label>]"
+            ),
+            "{rendered1}"
         );
-        assert_eq!(
-            lines1[2],
-            "            Then have the node operator accept the pending credential."
+        assert!(
+            rendered1.contains(
+                "nyxid node-credential inject abc-123 --pending <pending-id> [--browser | --secret-env VAR] [--verify-fingerprint <32 lowercase hex> | --yes] [--org <ID|SLUG|NAME>]"
+            ),
+            "{rendered1}"
         );
+        assert!(!rendered1.contains("nyxid node-credential inject --pending"));
+        assert!(!rendered1.contains("--fingerprint"));
+        assert!(!rendered1.contains("body"));
 
         let lines2 = format_credential_lines("node_managed", None, "home-assistant");
-        assert_eq!(lines2.len(), 3);
         assert_eq!(lines2[0], "Credential: node_managed (lives on node —)");
+        let rendered2 = lines2.join("\n");
+        assert!(rendered2.contains("nyxid node-credential push <node-id> --slug home-assistant"));
 
         let lines3 = format_credential_lines("direct", Some("abc"), "x");
         assert_eq!(lines3.len(), 1);
@@ -2311,6 +2363,36 @@ mod tests {
         let lines4 = format_credential_lines("oauth", None, "x");
         assert_eq!(lines4.len(), 1);
         assert_eq!(lines4[0], "Credential: oauth");
+    }
+
+    #[test]
+    fn node_managed_list_hint_prints_once_only_when_needed() {
+        let direct_or_oauth = vec![
+            serde_json::json!({"credential_type": "direct"}),
+            serde_json::json!({"credential_type": "oauth"}),
+        ];
+        assert!(format_node_managed_list_hint_lines(&direct_or_oauth).is_empty());
+
+        let mixed = vec![
+            serde_json::json!({"credential_type": "direct"}),
+            serde_json::json!({"credential_type": "node_managed"}),
+            serde_json::json!({"credential_type": "node_managed"}),
+        ];
+        let lines = format_node_managed_list_hint_lines(&mixed);
+        let rendered = lines.join("\n");
+        assert_eq!(rendered.matches("remote injection is available").count(), 1);
+        assert!(
+            rendered.contains(
+                "nyxid node-credential push <node-id> --slug <slug> --injection-method <header|query-param|path-prefix> --field-name <name>"
+            ),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "nyxid node-credential inject <node-id> --pending <pending-id> [--browser | --secret-env VAR] [--verify-fingerprint <32 lowercase hex> | --yes]"
+            ),
+            "{rendered}"
+        );
     }
 
     #[test]
