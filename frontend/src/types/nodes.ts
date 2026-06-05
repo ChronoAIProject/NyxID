@@ -87,8 +87,10 @@ export type NodePendingCredentialRemoteState =
   | "ciphertext_received"
   | "ciphertext_queued"
   | "consumed"
+  | "partial_decrypted"
   | "decrypt_failed"
-  | "expired";
+  | "expired"
+  | "declined";
 
 export interface NodePendingCredentialInfo {
   readonly id: string;
@@ -125,6 +127,51 @@ export interface NodePendingCredentialCiphertextResponse {
   readonly delivery_status: "sent" | "queued";
   readonly remote_state: NodePendingCredentialRemoteState;
   readonly error_code?: number;
+}
+
+export interface FanOutTargetInfo {
+  readonly node_id: string;
+  readonly generation: number;
+  readonly remote_state?: NodePendingCredentialRemoteState | null;
+  readonly delivery_status?: "sent" | "queued" | null;
+  readonly error_code?: number | null;
+  readonly error_kind?: string | null;
+}
+
+export interface FanOutPendingCredentialResponse {
+  readonly fanout_id: string;
+  readonly fan_out_revision: number;
+  readonly target_count: number;
+  readonly service_slug: string;
+  readonly injection_method: NodePendingCredentialInjectionMethod;
+  readonly field_name: string;
+  readonly target_url?: string | null;
+  readonly label?: string | null;
+  readonly remote_state?: NodePendingCredentialRemoteState | null;
+  readonly targets: readonly FanOutTargetInfo[];
+}
+
+export interface FanOutPendingCredentialPubkeyTarget {
+  readonly node_id: string;
+  readonly generation: number;
+  readonly version: "v1";
+  readonly node_pubkey?: string | null;
+  readonly remote_state?: NodePendingCredentialRemoteState | null;
+  readonly error_code?: number | null;
+}
+
+export interface FanOutPendingCredentialPubkeysResponse {
+  readonly fanout_id: string;
+  readonly fan_out_revision: number;
+  readonly target_count: number;
+  readonly targets: readonly FanOutPendingCredentialPubkeyTarget[];
+}
+
+export interface FanOutPendingCredentialCiphertextResponse {
+  readonly fanout_id: string;
+  readonly fan_out_revision: number;
+  readonly remote_state: NodePendingCredentialRemoteState;
+  readonly targets: readonly FanOutTargetInfo[];
 }
 
 export interface AdminNodeInfo {

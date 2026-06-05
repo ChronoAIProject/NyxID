@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use axum::{
     Json,
@@ -18,7 +18,7 @@ use crate::models::downstream_service::{
 };
 use crate::models::node::NodeMetadata;
 use crate::models::node_pending_credential::{
-    InjectionMethod, NodePendingCredential, RemoteCryptoState,
+    FanOutNodeState, InjectionMethod, NodePendingCredential, RemoteCryptoState,
 };
 use crate::mw::auth::AuthUser;
 use crate::services::{
@@ -68,11 +68,44 @@ pub struct PushPendingCredentialRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct PushPendingCredentialFanOutRequest {
+    pub owner_user_id: String,
+    pub service_id: String,
+    pub service_slug: String,
+    pub injection_method: InjectionMethod,
+    pub field_name: String,
+    pub target_url: Option<String>,
+    pub label: Option<String>,
+    pub remote_crypto: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct PendingCredentialCiphertextRequest {
     pub version: String,
     pub admin_pubkey: String,
     pub nonce: String,
     pub ciphertext: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PendingCredentialFanOutCiphertextItemRequest {
+    pub node_id: String,
+    pub generation: i64,
+    pub version: String,
+    pub admin_pubkey: String,
+    pub nonce: String,
+    pub ciphertext: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PendingCredentialFanOutCiphertextRequest {
+    pub fan_out_revision: i64,
+    pub items: Vec<PendingCredentialFanOutCiphertextItemRequest>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RetryFanOutPendingCredentialRequest {
+    pub fan_out_revision: i64,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -226,6 +259,66 @@ pub struct PendingCredentialCiphertextResponse {
     pub error_code: Option<u32>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct FanOutTargetInfo {
+    pub node_id: String,
+    pub generation: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FanOutPendingCredentialResponse {
+    pub fanout_id: String,
+    pub fan_out_revision: i64,
+    pub target_count: usize,
+    pub service_slug: String,
+    pub injection_method: String,
+    pub field_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_state: Option<String>,
+    pub targets: Vec<FanOutTargetInfo>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FanOutPendingCredentialPubkeyTarget {
+    pub node_id: String,
+    pub generation: i64,
+    pub version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_pubkey: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FanOutPendingCredentialPubkeysResponse {
+    pub fanout_id: String,
+    pub fan_out_revision: i64,
+    pub target_count: usize,
+    pub targets: Vec<FanOutPendingCredentialPubkeyTarget>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FanOutPendingCredentialCiphertextResponse {
+    pub fanout_id: String,
+    pub fan_out_revision: i64,
+    pub remote_state: String,
+    pub targets: Vec<FanOutTargetInfo>,
+}
+
 // --- Helpers ---
 
 /// Build NodeMetricsInfo from the embedded metrics on a Node model.
@@ -308,8 +401,10 @@ fn remote_state_name(state: &RemoteCryptoState) -> &'static str {
         RemoteCryptoState::CiphertextReceived => "ciphertext_received",
         RemoteCryptoState::CiphertextQueued => "ciphertext_queued",
         RemoteCryptoState::Consumed => "consumed",
+        RemoteCryptoState::PartialDecrypted => "partial_decrypted",
         RemoteCryptoState::DecryptFailed => "decrypt_failed",
         RemoteCryptoState::Expired => "expired",
+        RemoteCryptoState::Declined => "declined",
     }
 }
 
@@ -344,6 +439,102 @@ fn pending_pubkey_response(
         node_pubkey,
         remote_state,
     })
+}
+
+fn fan_out_target_info(
+    target: &node_pending_credential_service::FanOutTargetStatus,
+) -> FanOutTargetInfo {
+    FanOutTargetInfo {
+        node_id: target.node_id.clone(),
+        generation: target.generation,
+        remote_state: target
+            .remote_state
+            .as_ref()
+            .map(remote_state_name)
+            .map(str::to_string),
+        delivery_status: target
+            .delivery_status
+            .map(|status| status.as_str().to_string()),
+        error_code: target.error_code,
+        error_kind: target.error_kind.clone(),
+    }
+}
+
+fn fan_out_pending_response(
+    result: node_pending_credential_service::FanOutPendingCredentialResult,
+) -> FanOutPendingCredentialResponse {
+    let remote_state = pending_remote_state(&result.pending);
+    FanOutPendingCredentialResponse {
+        fanout_id: result.pending.id,
+        fan_out_revision: result.pending.fan_out_revision,
+        target_count: result.targets.len(),
+        service_slug: result.pending.service_slug,
+        injection_method: result.pending.injection_method.as_str().to_string(),
+        field_name: result.pending.field_name,
+        target_url: result.pending.target_url,
+        label: result.pending.label,
+        remote_state,
+        targets: result.targets.iter().map(fan_out_target_info).collect(),
+    }
+}
+
+fn fan_out_status_response(pending: NodePendingCredential) -> FanOutPendingCredentialResponse {
+    let targets = pending
+        .fan_out_nodes
+        .iter()
+        .map(
+            |target| node_pending_credential_service::FanOutTargetStatus {
+                node_id: target.node_id.clone(),
+                generation: target.generation,
+                remote_state: target.remote_state.clone(),
+                error_code: target.error_code,
+                error_kind: target.error_kind.clone(),
+                delivery_status: match target.remote_state {
+                    Some(RemoteCryptoState::CiphertextReceived) => {
+                        Some(node_pending_credential_service::FanOutDeliveryStatus::Sent)
+                    }
+                    Some(RemoteCryptoState::CiphertextQueued) => {
+                        Some(node_pending_credential_service::FanOutDeliveryStatus::Queued)
+                    }
+                    _ => None,
+                },
+            },
+        )
+        .collect::<Vec<_>>();
+    fan_out_pending_response(
+        node_pending_credential_service::FanOutPendingCredentialResult { pending, targets },
+    )
+}
+
+fn fan_out_pubkeys_response(
+    pending: NodePendingCredential,
+) -> FanOutPendingCredentialPubkeysResponse {
+    FanOutPendingCredentialPubkeysResponse {
+        fanout_id: pending.id,
+        fan_out_revision: pending.fan_out_revision,
+        target_count: pending.fan_out_nodes.len(),
+        targets: pending
+            .fan_out_nodes
+            .iter()
+            .map(|target| FanOutPendingCredentialPubkeyTarget {
+                node_id: target.node_id.clone(),
+                generation: target.generation,
+                version: target.crypto.version.clone(),
+                node_pubkey: (!target.crypto.node_pubkey.is_empty())
+                    .then(|| target.crypto.node_pubkey.clone()),
+                remote_state: target
+                    .remote_state
+                    .as_ref()
+                    .map(remote_state_name)
+                    .map(str::to_string),
+                error_code: if target.crypto.node_pubkey.is_empty() {
+                    Some(crate::errors::PENDING_CREDENTIAL_PUBKEY_AWAITING_CODE)
+                } else {
+                    target.error_code
+                },
+            })
+            .collect(),
+    }
 }
 
 fn decode_base64url_no_pad(value: &str, field: &str) -> AppResult<Vec<u8>> {
@@ -388,6 +579,53 @@ fn validate_pending_ciphertext_request(
     Ok(PendingCiphertextValidation::Valid(ciphertext))
 }
 
+fn validate_fan_out_ciphertext_request(
+    body: PendingCredentialFanOutCiphertextRequest,
+) -> AppResult<node_pending_credential_service::StoreFanOutCiphertextsInput> {
+    if body.items.len() > node_pending_credential_service::MAX_FAN_OUT_TARGETS {
+        return Err(AppError::ValidationError(format!(
+            "items must contain {} or fewer fan-out ciphertexts",
+            node_pending_credential_service::MAX_FAN_OUT_TARGETS
+        )));
+    }
+    let mut total = 0usize;
+    let mut items = Vec::with_capacity(body.items.len());
+    for item in body.items {
+        if item.version != "v1" {
+            return Err(AppError::PendingCredentialVersionUnsupported(item.version));
+        }
+        let _ = decode_base64url_no_pad_exact(&item.admin_pubkey, "admin_pubkey", 32)?;
+        let _ = decode_base64url_no_pad_exact(&item.nonce, "nonce", 24)?;
+        let ciphertext = decode_base64url_no_pad(&item.ciphertext, "ciphertext")?;
+        if ciphertext.len() > node_pending_credential_service::MAX_CIPHERTEXT_SIZE {
+            return Err(AppError::PendingCredentialCiphertextTooLarge(
+                ciphertext.len(),
+            ));
+        }
+        total = total.saturating_add(ciphertext.len());
+        if total > node_pending_credential_service::MAX_FAN_OUT_CIPHERTEXT_TOTAL_SIZE {
+            return Err(AppError::PendingCredentialCiphertextTooLarge(total));
+        }
+        items.push(
+            node_pending_credential_service::StoreFanOutCiphertextItemInput::new(
+                item.node_id,
+                item.generation,
+                item.version,
+                item.admin_pubkey,
+                item.nonce,
+                ciphertext,
+            ),
+        );
+    }
+    Ok(
+        node_pending_credential_service::StoreFanOutCiphertextsInput {
+            fan_out_revision: body.fan_out_revision,
+            items,
+            online_node_ids: HashSet::new(),
+        },
+    )
+}
+
 fn send_pending_ciphertext_to_node(
     state: &AppState,
     node_id: &str,
@@ -417,6 +655,39 @@ fn send_pending_ciphertext_to_node(
     state
         .node_ws_manager
         .send_pending_credential_ciphertext(node_id, &params)
+}
+
+fn send_fan_out_ciphertext_to_node(
+    state: &AppState,
+    pending: &NodePendingCredential,
+    target: &FanOutNodeState,
+) -> AppResult<()> {
+    let admin_pubkey = target.crypto.admin_pubkey.as_deref().ok_or_else(|| {
+        AppError::Internal("fan-out pending credential missing admin_pubkey".to_string())
+    })?;
+    let nonce = target.crypto.nonce.as_deref().ok_or_else(|| {
+        AppError::Internal("fan-out pending credential missing nonce".to_string())
+    })?;
+    let ciphertext = target.crypto.ciphertext.as_ref().ok_or_else(|| {
+        AppError::Internal("fan-out pending credential missing ciphertext".to_string())
+    })?;
+    if ciphertext.len() > node_pending_credential_service::MAX_CIPHERTEXT_SIZE {
+        return Err(AppError::PendingCredentialCiphertextTooLarge(
+            ciphertext.len(),
+        ));
+    }
+    let ciphertext_b64 =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(ciphertext.as_slice());
+    let params = crate::services::node_ws_manager::PendingCredentialCiphertextParams {
+        pending_id: &pending.id,
+        version: &target.crypto.version,
+        admin_pubkey,
+        nonce,
+        ciphertext: &ciphertext_b64,
+    };
+    state
+        .node_ws_manager
+        .send_pending_credential_ciphertext(&target.node_id, &params)
 }
 
 fn pending_ciphertext_state(pending: &NodePendingCredential, fallback: &'static str) -> String {
@@ -464,6 +735,17 @@ fn log_rci_for_pending_user(
     rci_audit_service::log_rci_for_user(state.db.clone(), auth_user, &subject, kind);
 }
 
+fn log_rci_for_pending_fan_out_target(
+    state: &AppState,
+    auth_user: &AuthUser,
+    pending: &NodePendingCredential,
+    target: &FanOutNodeState,
+    kind: RciAuditEventKind,
+) {
+    let subject = RciAuditSubject::from_fan_out_target(pending, target);
+    rci_audit_service::log_rci_for_user(state.db.clone(), auth_user, &subject, kind);
+}
+
 fn log_rci_for_summary_user(
     state: &AppState,
     auth_user: &AuthUser,
@@ -472,6 +754,42 @@ fn log_rci_for_summary_user(
 ) {
     let subject = RciAuditSubject::from_summary(summary);
     rci_audit_service::log_rci_for_user(state.db.clone(), auth_user, &subject, kind);
+}
+
+fn log_fan_out_ciphertext_audit(
+    state: &AppState,
+    auth_user: &AuthUser,
+    pending: &NodePendingCredential,
+    targets: &[node_pending_credential_service::FanOutTargetStatus],
+) {
+    for target_status in targets {
+        if let Some(target) =
+            node_pending_credential_service::fan_out_target(pending, &target_status.node_id)
+        {
+            log_rci_for_pending_fan_out_target(
+                state,
+                auth_user,
+                pending,
+                target,
+                RciAuditEventKind::CiphertextReceived,
+            );
+            if matches!(
+                target_status.delivery_status,
+                Some(node_pending_credential_service::FanOutDeliveryStatus::Queued)
+            ) {
+                log_rci_for_pending_fan_out_target(
+                    state,
+                    auth_user,
+                    pending,
+                    target,
+                    RciAuditEventKind::CiphertextQueued {
+                        delivery: RciAuditDelivery::OfflineQueue,
+                        node_offline: true,
+                    },
+                );
+            }
+        }
+    }
 }
 
 // --- Handlers ---
@@ -828,6 +1146,212 @@ pub async fn push_pending_credential(
     }
 
     Ok(Json(pending_credential_info(pending)))
+}
+
+/// POST /api/v1/nodes/credentials/push/fan-out
+pub async fn push_pending_credential_fan_out(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Json(body): Json<PushPendingCredentialFanOutRequest>,
+) -> AppResult<Json<FanOutPendingCredentialResponse>> {
+    let user_id_str = auth_user.user_id.to_string();
+    let result = node_pending_credential_service::create_fan_out_pending_credential(
+        &state.db,
+        &user_id_str,
+        node_pending_credential_service::CreateFanOutPendingCredentialInput {
+            owner_user_id: body.owner_user_id,
+            service_id: body.service_id,
+            service_slug: body.service_slug,
+            injection_method: body.injection_method,
+            field_name: body.field_name,
+            target_url: body.target_url,
+            label: body.label,
+            ttl_secs: state.config.node_pending_credential_ttl_secs,
+            remote_crypto: body.remote_crypto.unwrap_or(true),
+        },
+    )
+    .await?;
+
+    rci_audit_service::log_rci_fan_out_for_user(
+        state.db.clone(),
+        &auth_user,
+        &rci_audit_service::RciFanOutAuditSubject::from_pending(&result.pending),
+        rci_audit_service::RciFanOutAuditEventKind::Created,
+    );
+
+    for target in &result.targets {
+        if state.node_ws_manager.is_connected(&target.node_id)
+            && let Err(err) = state
+                .node_ws_manager
+                .send_pending_credentials_available(&target.node_id)
+        {
+            tracing::warn!(
+                node_id = %target.node_id,
+                error = %err,
+                "Failed to nudge node about fan-out pending credential"
+            );
+        }
+    }
+
+    Ok(Json(fan_out_pending_response(result)))
+}
+
+/// GET /api/v1/nodes/credentials/pending/{fanout_id}/fan-out
+pub async fn get_fan_out_pending_credential(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(fanout_id): Path<String>,
+) -> AppResult<Json<FanOutPendingCredentialResponse>> {
+    let user_id_str = auth_user.user_id.to_string();
+    let pending = node_pending_credential_service::get_fan_out_pending_credential_for_admin(
+        &state.db,
+        &user_id_str,
+        &fanout_id,
+    )
+    .await?;
+
+    Ok(Json(fan_out_status_response(pending)))
+}
+
+/// GET /api/v1/nodes/credentials/pending/{fanout_id}/fan-out/pubkeys
+pub async fn get_fan_out_pending_credential_pubkeys(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(fanout_id): Path<String>,
+) -> AppResult<Json<FanOutPendingCredentialPubkeysResponse>> {
+    let user_id_str = auth_user.user_id.to_string();
+    let pending = node_pending_credential_service::get_fan_out_pending_credential_for_admin(
+        &state.db,
+        &user_id_str,
+        &fanout_id,
+    )
+    .await?;
+
+    Ok(Json(fan_out_pubkeys_response(pending)))
+}
+
+/// POST /api/v1/nodes/credentials/pending/{fanout_id}/fan-out/ciphertexts
+pub async fn post_fan_out_pending_credential_ciphertexts(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(fanout_id): Path<String>,
+    Json(body): Json<PendingCredentialFanOutCiphertextRequest>,
+) -> AppResult<(StatusCode, Json<FanOutPendingCredentialCiphertextResponse>)> {
+    let mut input = validate_fan_out_ciphertext_request(body)?;
+    input.online_node_ids = input
+        .items
+        .iter()
+        .filter(|item| {
+            state.node_ws_manager.is_connected(&item.node_id)
+                && state
+                    .node_ws_manager
+                    .supports_remote_credential_crypto(&item.node_id)
+        })
+        .map(|item| item.node_id.clone())
+        .collect::<HashSet<_>>();
+
+    let user_id_str = auth_user.user_id.to_string();
+    let now = chrono::Utc::now();
+    let outcome = node_pending_credential_service::store_fan_out_ciphertexts_revision_guard(
+        &state.db,
+        &user_id_str,
+        &fanout_id,
+        input,
+        now,
+    )
+    .await?;
+
+    log_fan_out_ciphertext_audit(&state, &auth_user, &outcome.pending, &outcome.targets);
+
+    let mut latest_pending = outcome.pending.clone();
+    for target in outcome.pending.fan_out_nodes.iter().filter(|target| {
+        matches!(
+            target.remote_state,
+            Some(RemoteCryptoState::CiphertextReceived)
+        )
+    }) {
+        match send_fan_out_ciphertext_to_node(&state, &outcome.pending, target) {
+            Ok(()) => {
+                log_rci_for_pending_fan_out_target(
+                    &state,
+                    &auth_user,
+                    &outcome.pending,
+                    target,
+                    RciAuditEventKind::CiphertextForwarded {
+                        delivery: RciAuditDelivery::OnlineForward,
+                    },
+                );
+            }
+            Err(err) => {
+                tracing::warn!(
+                    node_id = %target.node_id,
+                    fanout_id = %outcome.pending.id,
+                    error = %err,
+                    "Failed to send fan-out pending credential ciphertext; queueing for retry"
+                );
+                latest_pending =
+                    node_pending_credential_service::mark_fan_out_ciphertext_queued_after_send_failure(
+                        &state.db,
+                        &target.node_id,
+                        &outcome.pending.id,
+                        chrono::Utc::now(),
+                    )
+                    .await?;
+            }
+        }
+    }
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(FanOutPendingCredentialCiphertextResponse {
+            fanout_id,
+            fan_out_revision: latest_pending.fan_out_revision,
+            remote_state: pending_remote_state(&latest_pending)
+                .unwrap_or_else(|| "ciphertext_received".to_string()),
+            targets: fan_out_status_response(latest_pending).targets,
+        }),
+    ))
+}
+
+/// POST /api/v1/nodes/credentials/pending/{fanout_id}/fan-out/retry-failed
+pub async fn retry_failed_fan_out_pending_credential(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(fanout_id): Path<String>,
+    Json(body): Json<RetryFanOutPendingCredentialRequest>,
+) -> AppResult<Json<FanOutPendingCredentialResponse>> {
+    let user_id_str = auth_user.user_id.to_string();
+    let result = node_pending_credential_service::retry_failed_fan_out_nodes(
+        &state.db,
+        &user_id_str,
+        &fanout_id,
+        body.fan_out_revision,
+        chrono::Utc::now(),
+    )
+    .await?;
+
+    rci_audit_service::log_rci_fan_out_for_user(
+        state.db.clone(),
+        &auth_user,
+        &rci_audit_service::RciFanOutAuditSubject::from_pending(&result.pending),
+        rci_audit_service::RciFanOutAuditEventKind::RetryStarted,
+    );
+
+    for target in &result.targets {
+        if state.node_ws_manager.is_connected(&target.node_id)
+            && let Err(err) = state
+                .node_ws_manager
+                .send_pending_credentials_available(&target.node_id)
+        {
+            tracing::warn!(
+                node_id = %target.node_id,
+                error = %err,
+                "Failed to nudge node about fan-out retry"
+            );
+        }
+    }
+
+    Ok(Json(fan_out_pending_response(result)))
 }
 
 /// GET /api/v1/nodes/{node_id}/credentials/pending
@@ -1411,6 +1935,32 @@ mod tests {
         (status, value)
     }
 
+    async fn route_raw(
+        app: axum::Router,
+        method: Method,
+        uri: String,
+        token: &str,
+        body: String,
+    ) -> (StatusCode, Vec<u8>) {
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .expect("build request"),
+            )
+            .await
+            .expect("route response");
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read response body");
+        (status, bytes.to_vec())
+    }
+
     fn b64url(byte: u8, len: usize) -> String {
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(vec![byte; len])
     }
@@ -1421,6 +1971,22 @@ mod tests {
             "admin_pubkey": b64url(10, 32),
             "nonce": b64url(11, 24),
             "ciphertext": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(ciphertext),
+        })
+    }
+
+    fn fan_out_ciphertext_request(ciphertext: Vec<u8>) -> Value {
+        serde_json::json!({
+            "fan_out_revision": 1,
+            "items": [
+                {
+                    "node_id": "node-a",
+                    "generation": 0,
+                    "version": "v1",
+                    "admin_pubkey": b64url(10, 32),
+                    "nonce": b64url(11, 24),
+                    "ciphertext": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(ciphertext),
+                }
+            ],
         })
     }
 
@@ -2144,6 +2710,75 @@ mod tests {
             event_data["error_kind"],
             "pending_credential_ciphertext_too_large"
         );
+    }
+
+    #[tokio::test]
+    async fn route_post_fan_out_ciphertexts_rejects_per_element_oversized_ciphertext() {
+        let db = test_db("pending_route_fanout_per_element_413").await;
+        let actor_id = Uuid::new_v4().to_string();
+        insert_users(&db, vec![test_user(&actor_id, UserType::Person)]).await;
+        let state = test_app_state(db);
+        let token = access_token(&state, &actor_id);
+        let app = api_app(state);
+
+        let (status, body) = route_json(
+            app,
+            Method::POST,
+            "/api/v1/nodes/credentials/pending/fanout-oversized/fan-out/ciphertexts".to_string(),
+            &token,
+            Some(fan_out_ciphertext_request(vec![
+                9;
+                node_pending_credential_service::MAX_CIPHERTEXT_SIZE
+                    + 1
+            ])),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(
+            body["error_code"],
+            PENDING_CREDENTIAL_CIPHERTEXT_TOO_LARGE_CODE
+        );
+        assert_eq!(body["error"], "pending_credential_ciphertext_too_large");
+    }
+
+    #[tokio::test]
+    async fn route_post_fan_out_ciphertexts_rejects_body_limit_oversized_aggregate() {
+        let db = test_db("pending_route_fanout_body_limit_413").await;
+        let actor_id = Uuid::new_v4().to_string();
+        insert_users(&db, vec![test_user(&actor_id, UserType::Person)]).await;
+        let state = test_app_state(db);
+        let token = access_token(&state, &actor_id);
+        let app = api_app(state);
+        let oversized_ciphertext = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(vec![
+            1;
+            node_pending_credential_service::MAX_FAN_OUT_HTTP_BODY_BYTES
+        ]);
+        let body = serde_json::json!({
+            "fan_out_revision": 1,
+            "items": [
+                {
+                    "node_id": "node-a",
+                    "generation": 0,
+                    "version": "v1",
+                    "admin_pubkey": b64url(10, 32),
+                    "nonce": b64url(11, 24),
+                    "ciphertext": oversized_ciphertext,
+                }
+            ],
+        })
+        .to_string();
+
+        let (status, _body) = route_raw(
+            app,
+            Method::POST,
+            "/api/v1/nodes/credentials/pending/fanout-body/fan-out/ciphertexts".to_string(),
+            &token,
+            body,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     #[tokio::test]
@@ -3616,6 +4251,8 @@ mod tests {
             ciphertext_queued_at: None,
             ciphertext_expires_at: None,
             is_active: true,
+            fan_out_nodes: Vec::new(),
+            fan_out_revision: 0,
         };
 
         let response = pending_pubkey_response(pending).expect("pubkey response");
@@ -3657,6 +4294,8 @@ mod tests {
             ciphertext_queued_at: None,
             ciphertext_expires_at: None,
             is_active: true,
+            fan_out_nodes: Vec::new(),
+            fan_out_revision: 0,
         };
 
         assert!(matches!(
@@ -3750,6 +4389,8 @@ mod tests {
             ciphertext_queued_at: None,
             ciphertext_expires_at: None,
             is_active: false,
+            fan_out_nodes: Vec::new(),
+            fan_out_revision: 0,
         };
         let info = pending_credential_info(model.clone());
 

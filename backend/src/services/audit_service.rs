@@ -294,6 +294,8 @@ mod tests {
             service_slug: "openclaw".to_string(),
             owner_user_id: "owner-audit".to_string(),
             remote_state: Some(RemoteCryptoState::PubkeyPosted),
+            fan_out: false,
+            generation: None,
             pending_created_at: now - Duration::minutes(5),
             pending_expires_at: now + Duration::minutes(55),
             ciphertext_queued_at: Some(now - Duration::minutes(1)),

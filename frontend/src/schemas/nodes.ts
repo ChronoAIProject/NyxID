@@ -1,8 +1,11 @@
 import { z } from "zod";
-import { MAX_CIPHERTEXT_SIZE } from "@/lib/crypto";
+import { decodeBase64UrlNoPad, decodeBase64UrlNoPadExact, MAX_CIPHERTEXT_SIZE } from "@/lib/crypto";
 
 export const MAX_REMOTE_CREDENTIAL_PLAINTEXT_SIZE =
   MAX_CIPHERTEXT_SIZE - 16;
+export const MAX_FAN_OUT_TARGETS = 10;
+export const MAX_FAN_OUT_CIPHERTEXT_TOTAL_SIZE =
+  MAX_FAN_OUT_TARGETS * MAX_CIPHERTEXT_SIZE;
 
 const optionalTrimmedString = z
   .string()
@@ -73,6 +76,87 @@ export const pushNodeCredentialSchema = z.object({
   remote_crypto: z.literal(true).default(true),
 });
 
+export const pushNodeCredentialFanOutSchema = pushNodeCredentialSchema.extend({
+  owner_user_id: z.string().min(1, "Owner is required"),
+  service_id: z.string().min(1, "Service is required"),
+});
+
+const ciphertextEnvelopeSchema = z
+  .object({
+    version: z.literal("v1"),
+    admin_pubkey: z.string().min(1),
+    nonce: z.string().min(1),
+    ciphertext: z.string().min(1),
+  })
+  .superRefine((value, ctx) => {
+    try {
+      decodeBase64UrlNoPadExact(value.admin_pubkey, "admin_pubkey", 32);
+    } catch (err) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["admin_pubkey"],
+        message: err instanceof Error ? err.message : "Invalid admin_pubkey",
+      });
+    }
+    try {
+      decodeBase64UrlNoPadExact(value.nonce, "nonce", 24);
+    } catch (err) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["nonce"],
+        message: err instanceof Error ? err.message : "Invalid nonce",
+      });
+    }
+    try {
+      const ciphertext = decodeBase64UrlNoPad(value.ciphertext, "ciphertext");
+      if (ciphertext.length > MAX_CIPHERTEXT_SIZE) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["ciphertext"],
+          message: `Ciphertext must be ${String(MAX_CIPHERTEXT_SIZE)} bytes or less.`,
+        });
+      }
+    } catch (err) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["ciphertext"],
+        message: err instanceof Error ? err.message : "Invalid ciphertext",
+      });
+    }
+  });
+
+export const fanOutCiphertextItemSchema = ciphertextEnvelopeSchema.extend({
+  node_id: z.string().min(1),
+  generation: z.number().int().nonnegative(),
+});
+
+export const fanOutCiphertextsSchema = z
+  .object({
+    fan_out_revision: z.number().int().positive(),
+    items: z
+      .array(fanOutCiphertextItemSchema)
+      .min(1)
+      .max(MAX_FAN_OUT_TARGETS),
+  })
+  .superRefine((value, ctx) => {
+    let total = 0;
+    for (const [index, item] of value.items.entries()) {
+      try {
+        total += decodeBase64UrlNoPad(item.ciphertext, "ciphertext").length;
+      } catch {
+        continue;
+      }
+      if (total > MAX_FAN_OUT_CIPHERTEXT_TOTAL_SIZE) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["items", index, "ciphertext"],
+          message: `Total fan-out ciphertext bytes must be ${String(MAX_FAN_OUT_CIPHERTEXT_TOTAL_SIZE)} or less.`,
+        });
+        break;
+      }
+    }
+  });
+
 export const acceptNodeCredentialSecretSchema = z
   .instanceof(Uint8Array)
   .refine((value) => value.length > 0, "Credential value is required.")
@@ -89,9 +173,13 @@ export type TransferNodeFormData = z.infer<typeof transferNodeSchema>;
 export type PushNodeCredentialFormData = z.infer<
   typeof pushNodeCredentialSchema
 >;
+export type PushNodeCredentialFanOutFormData = z.infer<
+  typeof pushNodeCredentialFanOutSchema
+>;
 export type PushNodeCredentialFormInput = z.input<
   typeof pushNodeCredentialSchema
 >;
 export type AcceptNodeCredentialSecretData = z.infer<
   typeof acceptNodeCredentialSecretSchema
 >;
+export type FanOutCiphertextsData = z.infer<typeof fanOutCiphertextsSchema>;

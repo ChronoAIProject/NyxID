@@ -47,8 +47,40 @@ pub enum RemoteCryptoState {
     CiphertextReceived,
     CiphertextQueued,
     Consumed,
+    PartialDecrypted,
     DecryptFailed,
     Expired,
+    Declined,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FanOutDecryptOutcome {
+    Ok,
+    Error,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FanOutNodeState {
+    pub node_id: String,
+    pub generation: i64,
+    pub crypto: CryptoBundle,
+    pub remote_state: Option<RemoteCryptoState>,
+    pub decrypt_outcome: Option<FanOutDecryptOutcome>,
+    pub error_code: Option<u32>,
+    pub error_kind: Option<String>,
+    #[serde(default, with = "bson_datetime::optional")]
+    pub pubkey_posted_at: Option<DateTime<Utc>>,
+    #[serde(default, with = "bson_datetime::optional")]
+    pub ciphertext_queued_at: Option<DateTime<Utc>>,
+    #[serde(default, with = "bson_datetime::optional")]
+    pub ciphertext_expires_at: Option<DateTime<Utc>>,
+    #[serde(default, with = "bson_datetime::optional")]
+    pub consumed_at: Option<DateTime<Utc>>,
+    #[serde(default, with = "bson_datetime::optional")]
+    pub declined_at: Option<DateTime<Utc>>,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -98,6 +130,10 @@ pub struct NodePendingCredential {
     #[serde(default, with = "bson_datetime::optional")]
     pub ciphertext_expires_at: Option<DateTime<Utc>>,
     pub is_active: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fan_out_nodes: Vec<FanOutNodeState>,
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
+    pub fan_out_revision: i64,
 }
 
 impl fmt::Debug for NodePendingCredential {
@@ -121,8 +157,14 @@ impl fmt::Debug for NodePendingCredential {
             .field("ciphertext_queued_at", &self.ciphertext_queued_at)
             .field("ciphertext_expires_at", &self.ciphertext_expires_at)
             .field("is_active", &self.is_active)
+            .field("fan_out_nodes", &self.fan_out_nodes)
+            .field("fan_out_revision", &self.fan_out_revision)
             .finish()
     }
+}
+
+fn is_zero_i64(value: &i64) -> bool {
+    *value == 0
 }
 
 #[cfg(test)]
@@ -194,6 +236,33 @@ mod tests {
     }
 
     #[test]
+    fn partial_decrypted_and_declined_remote_states_serde() {
+        let partial = serde_json::to_string(&RemoteCryptoState::PartialDecrypted).unwrap();
+        let declined = serde_json::to_string(&RemoteCryptoState::Declined).unwrap();
+
+        assert_eq!(partial, "\"partial_decrypted\"");
+        assert_eq!(declined, "\"declined\"");
+        assert_eq!(
+            serde_json::from_str::<RemoteCryptoState>(&partial).unwrap(),
+            RemoteCryptoState::PartialDecrypted
+        );
+        assert_eq!(
+            serde_json::from_str::<RemoteCryptoState>(&declined).unwrap(),
+            RemoteCryptoState::Declined
+        );
+    }
+
+    #[test]
+    fn fan_out_decrypt_outcome_serde() {
+        let json = serde_json::to_string(&FanOutDecryptOutcome::Error).unwrap();
+        assert_eq!(json, "\"error\"");
+        assert_eq!(
+            serde_json::from_str::<FanOutDecryptOutcome>(&json).unwrap(),
+            FanOutDecryptOutcome::Error
+        );
+    }
+
+    #[test]
     fn legacy_pending_without_crypto_roundtrip() {
         let now = Utc::now();
         let legacy_doc = bson::doc! {
@@ -220,6 +289,99 @@ mod tests {
         assert!(restored.remote_state.is_none());
         assert!(restored.ciphertext_queued_at.is_none());
         assert!(restored.ciphertext_expires_at.is_none());
+        assert!(restored.fan_out_nodes.is_empty());
+        assert_eq!(restored.fan_out_revision, 0);
+    }
+
+    #[test]
+    fn single_node_bson_omits_fan_out_fields() {
+        let now = Utc::now();
+        let cred = NodePendingCredential {
+            id: "single".to_string(),
+            node_id: "node-1".to_string(),
+            service_slug: "openai".to_string(),
+            injection_method: InjectionMethod::Header,
+            field_name: "Authorization".to_string(),
+            target_url: None,
+            label: None,
+            created_by_user_id: "user-1".to_string(),
+            owner_user_id: "user-1".to_string(),
+            created_at: now,
+            expires_at: now + chrono::Duration::hours(1),
+            consumed_at: None,
+            declined_at: None,
+            crypto: None,
+            remote_state: None,
+            ciphertext_queued_at: None,
+            ciphertext_expires_at: None,
+            is_active: true,
+            fan_out_nodes: Vec::new(),
+            fan_out_revision: 0,
+        };
+
+        let doc = bson::to_document(&cred).expect("serialize");
+
+        assert!(!doc.contains_key("fan_out_nodes"));
+        assert!(!doc.contains_key("fan_out_revision"));
+    }
+
+    #[test]
+    fn fan_out_bson_includes_revision_and_nodes_with_chrono_helpers() {
+        let now = Utc::now();
+        let cred = NodePendingCredential {
+            id: "fanout".to_string(),
+            node_id: "node-1".to_string(),
+            service_slug: "openai".to_string(),
+            injection_method: InjectionMethod::Header,
+            field_name: "Authorization".to_string(),
+            target_url: None,
+            label: None,
+            created_by_user_id: "user-1".to_string(),
+            owner_user_id: "user-1".to_string(),
+            created_at: now,
+            expires_at: now + chrono::Duration::hours(1),
+            consumed_at: None,
+            declined_at: None,
+            crypto: None,
+            remote_state: Some(RemoteCryptoState::PubkeyPosted),
+            ciphertext_queued_at: None,
+            ciphertext_expires_at: None,
+            is_active: true,
+            fan_out_nodes: vec![FanOutNodeState {
+                node_id: "node-1".to_string(),
+                generation: 0,
+                crypto: CryptoBundle {
+                    version: "v1".to_string(),
+                    node_pubkey: "node-pubkey".to_string(),
+                    admin_pubkey: None,
+                    nonce: None,
+                    ciphertext: None,
+                },
+                remote_state: Some(RemoteCryptoState::PubkeyPosted),
+                decrypt_outcome: None,
+                error_code: None,
+                error_kind: None,
+                pubkey_posted_at: Some(now),
+                ciphertext_queued_at: None,
+                ciphertext_expires_at: None,
+                consumed_at: None,
+                declined_at: None,
+                updated_at: now,
+            }],
+            fan_out_revision: 1,
+        };
+
+        let doc = bson::to_document(&cred).expect("serialize");
+        assert!(doc.contains_key("fan_out_nodes"));
+        assert_eq!(doc.get_i64("fan_out_revision").unwrap(), 1);
+        let restored: NodePendingCredential = bson::from_document(doc).expect("deserialize");
+        assert_eq!(
+            restored.fan_out_nodes[0]
+                .pubkey_posted_at
+                .expect("pubkey timestamp")
+                .timestamp_millis(),
+            now.timestamp_millis()
+        );
     }
 
     #[test]
@@ -250,6 +412,8 @@ mod tests {
             ciphertext_queued_at: Some(now),
             ciphertext_expires_at: Some(now + chrono::Duration::minutes(15)),
             is_active: true,
+            fan_out_nodes: Vec::new(),
+            fan_out_revision: 0,
         };
 
         let doc = bson::to_document(&cred).expect("serialize");
@@ -301,6 +465,8 @@ mod tests {
             ciphertext_queued_at: Some(now),
             ciphertext_expires_at: Some(now + chrono::Duration::minutes(15)),
             is_active: true,
+            fan_out_nodes: Vec::new(),
+            fan_out_revision: 0,
         };
 
         let debug = format!("{cred:?}");
@@ -310,6 +476,60 @@ mod tests {
         assert!(!debug.contains("admin-pubkey"));
         assert!(!debug.contains("nonce-value-secret"));
         assert!(!debug.contains("[4, 5, 6]"));
+    }
+
+    #[test]
+    fn node_pending_credential_debug_redacts_nested_fan_out_crypto() {
+        let now = Utc::now();
+        let cred = NodePendingCredential {
+            id: "fanout".to_string(),
+            node_id: "node-1".to_string(),
+            service_slug: "openai".to_string(),
+            injection_method: InjectionMethod::Header,
+            field_name: "Authorization".to_string(),
+            target_url: None,
+            label: None,
+            created_by_user_id: "user-1".to_string(),
+            owner_user_id: "user-1".to_string(),
+            created_at: now,
+            expires_at: now + chrono::Duration::hours(1),
+            consumed_at: None,
+            declined_at: None,
+            crypto: None,
+            remote_state: None,
+            ciphertext_queued_at: None,
+            ciphertext_expires_at: None,
+            is_active: true,
+            fan_out_nodes: vec![FanOutNodeState {
+                node_id: "node-1".to_string(),
+                generation: 0,
+                crypto: CryptoBundle {
+                    version: "v1".to_string(),
+                    node_pubkey: "node-pubkey-secret".to_string(),
+                    admin_pubkey: Some("admin-pubkey-secret".to_string()),
+                    nonce: Some("nonce-secret".to_string()),
+                    ciphertext: Some(vec![7, 8, 9]),
+                },
+                remote_state: Some(RemoteCryptoState::CiphertextQueued),
+                decrypt_outcome: None,
+                error_code: None,
+                error_kind: None,
+                pubkey_posted_at: None,
+                ciphertext_queued_at: Some(now),
+                ciphertext_expires_at: Some(now + chrono::Duration::minutes(15)),
+                consumed_at: None,
+                declined_at: None,
+                updated_at: now,
+            }],
+            fan_out_revision: 1,
+        };
+
+        let debug = format!("{cred:?}");
+
+        assert!(!debug.contains("node-pubkey-secret"));
+        assert!(!debug.contains("admin-pubkey-secret"));
+        assert!(!debug.contains("nonce-secret"));
+        assert!(!debug.contains("[7, 8, 9]"));
     }
 
     #[test]
@@ -333,6 +553,8 @@ mod tests {
             ciphertext_queued_at: None,
             ciphertext_expires_at: None,
             is_active: true,
+            fan_out_nodes: Vec::new(),
+            fan_out_revision: 0,
         };
         let doc = bson::to_document(&cred).expect("serialize");
         let restored: NodePendingCredential = bson::from_document(doc).expect("deserialize");
@@ -363,6 +585,8 @@ mod tests {
             ciphertext_queued_at: None,
             ciphertext_expires_at: None,
             is_active: false,
+            fan_out_nodes: Vec::new(),
+            fan_out_revision: 0,
         };
         let doc = bson::to_document(&cred).expect("serialize");
         let restored: NodePendingCredential = bson::from_document(doc).expect("deserialize");

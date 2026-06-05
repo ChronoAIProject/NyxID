@@ -18,7 +18,12 @@ import {
   useNodePendingCredentials,
   useNodes,
   usePostNodePendingCredentialCiphertext,
+  usePostFanOutCiphertexts,
   usePushNodeCredential,
+  usePushNodeCredentialFanOut,
+  useFanOutPendingCredential,
+  useFanOutPendingCredentialPubkeys,
+  useRetryFailedFanOutNodes,
   useRotateNodeToken,
   useTransferNode,
 } from "./use-nodes";
@@ -176,6 +181,26 @@ describe("node queries", () => {
     );
     expect(result.current.data?.node_pubkey).toBe("abc");
   });
+
+  it("fan-out status and pubkey queries use fanout-only cache keys and paths", async () => {
+    mockGet.mockResolvedValue({ fanout_id: "fo-1", targets: [] });
+    const status = renderHook(() => useFanOutPendingCredential("fo-1"), {
+      wrapper: createWrapper(),
+    });
+    await waitFor(() => expect(status.result.current.isSuccess).toBe(true));
+    expect(mockGet).toHaveBeenCalledWith(
+      "/nodes/credentials/pending/fo-1/fan-out",
+    );
+
+    mockGet.mockResolvedValue({ fanout_id: "fo-1", targets: [] });
+    const pubkeys = renderHook(() => useFanOutPendingCredentialPubkeys("fo-1"), {
+      wrapper: createWrapper(),
+    });
+    await waitFor(() => expect(pubkeys.result.current.isSuccess).toBe(true));
+    expect(mockGet).toHaveBeenCalledWith(
+      "/nodes/credentials/pending/fo-1/fan-out/pubkeys",
+    );
+  });
 });
 
 describe("node mutations", () => {
@@ -237,6 +262,29 @@ describe("node mutations", () => {
     });
   });
 
+  it("usePushNodeCredentialFanOut POSTs metadata only", async () => {
+    mockPost.mockResolvedValue({ fanout_id: "fo-1", targets: [] });
+    const { result } = renderHook(() => usePushNodeCredentialFanOut(), {
+      wrapper: createWrapper(),
+    });
+    await result.current.mutateAsync({
+      owner_user_id: "owner-1",
+      service_id: "svc-1",
+      service_slug: "openai",
+      injection_method: "header",
+      field_name: "Authorization",
+      remote_crypto: true,
+    });
+    expect(mockPost).toHaveBeenCalledWith("/nodes/credentials/push/fan-out", {
+      owner_user_id: "owner-1",
+      service_id: "svc-1",
+      service_slug: "openai",
+      injection_method: "header",
+      field_name: "Authorization",
+      remote_crypto: true,
+    });
+  });
+
   it("usePostNodePendingCredentialCiphertext POSTs only the ciphertext envelope", async () => {
     mockPost.mockResolvedValue({
       delivery_status: "sent",
@@ -262,6 +310,49 @@ describe("node mutations", () => {
     const body = mockPost.mock.calls[0]![1] as Record<string, unknown>;
     for (const forbidden of ["secret", "credential", "token", "value"]) {
       expect(body).not.toHaveProperty(forbidden);
+    }
+  });
+
+  it("usePostFanOutCiphertexts and retry use safe paths and no plaintext keys", async () => {
+    mockPost.mockResolvedValue({
+      fanout_id: "fo-1",
+      fan_out_revision: 2,
+      remote_state: "ciphertext_received",
+      targets: [],
+    });
+    const envelope: CiphertextEnvelope = {
+      version: "v1",
+      admin_pubkey: "admin-key",
+      nonce: "nonce",
+      ciphertext: "ciphertext",
+    };
+    const { result } = renderHook(() => usePostFanOutCiphertexts("fo-1"), {
+      wrapper: createWrapper(),
+    });
+    await result.current.mutateAsync({
+      fan_out_revision: 1,
+      items: [{ node_id: "node-1", generation: 0, ...envelope }],
+    });
+    expect(mockPost).toHaveBeenCalledWith(
+      "/nodes/credentials/pending/fo-1/fan-out/ciphertexts",
+      {
+        fan_out_revision: 1,
+        items: [{ node_id: "node-1", generation: 0, ...envelope }],
+      },
+    );
+
+    const retry = renderHook(() => useRetryFailedFanOutNodes("fo-1"), {
+      wrapper: createWrapper(),
+    });
+    await retry.result.current.mutateAsync({ fan_out_revision: 2 });
+    expect(mockPost).toHaveBeenCalledWith(
+      "/nodes/credentials/pending/fo-1/fan-out/retry-failed",
+      { fan_out_revision: 2 },
+    );
+
+    const calls = JSON.stringify(mockPost.mock.calls);
+    for (const forbidden of ["plaintext", "secret-value", "raw-secret"]) {
+      expect(calls).not.toContain(forbidden);
     }
   });
 

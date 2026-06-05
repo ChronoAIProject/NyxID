@@ -6,7 +6,9 @@ use crate::errors::{
     PENDING_CREDENTIAL_NODE_OFFLINE_CODE, PENDING_CREDENTIAL_PUBKEY_AWAITING_CODE,
     PENDING_CREDENTIAL_QUEUE_FULL_CODE, PENDING_CREDENTIAL_VERSION_UNSUPPORTED_CODE,
 };
-use crate::models::node_pending_credential::{NodePendingCredential, RemoteCryptoState};
+use crate::models::node_pending_credential::{
+    FanOutNodeState, NodePendingCredential, RemoteCryptoState,
+};
 use crate::mw::auth::AuthUser;
 use crate::services::{
     audit_service, node_pending_credential_service::PendingCredentialAuditSummary,
@@ -19,6 +21,8 @@ pub struct RciAuditSubject {
     pub service_slug: String,
     pub owner_user_id: String,
     pub remote_state: Option<RemoteCryptoState>,
+    pub fan_out: bool,
+    pub generation: Option<i64>,
     pub pending_created_at: DateTime<Utc>,
     pub pending_expires_at: DateTime<Utc>,
     pub ciphertext_queued_at: Option<DateTime<Utc>>,
@@ -33,6 +37,8 @@ impl RciAuditSubject {
             service_slug: pending.service_slug.clone(),
             owner_user_id: pending.owner_user_id.clone(),
             remote_state: pending.remote_state.clone(),
+            fan_out: false,
+            generation: None,
             pending_created_at: pending.created_at,
             pending_expires_at: pending.expires_at,
             ciphertext_queued_at: pending.ciphertext_queued_at,
@@ -47,6 +53,8 @@ impl RciAuditSubject {
             service_slug: summary.service_slug.clone(),
             owner_user_id: summary.owner_user_id.clone(),
             remote_state: summary.remote_state.clone(),
+            fan_out: summary.fan_out,
+            generation: summary.generation,
             pending_created_at: summary.pending_created_at,
             pending_expires_at: summary.pending_expires_at,
             ciphertext_queued_at: summary.ciphertext_queued_at,
@@ -54,8 +62,26 @@ impl RciAuditSubject {
         }
     }
 
+    pub fn from_fan_out_target(pending: &NodePendingCredential, target: &FanOutNodeState) -> Self {
+        Self {
+            node_id: target.node_id.clone(),
+            pending_credential_id: pending.id.clone(),
+            service_slug: pending.service_slug.clone(),
+            owner_user_id: pending.owner_user_id.clone(),
+            remote_state: target.remote_state.clone(),
+            fan_out: true,
+            generation: Some(target.generation),
+            pending_created_at: pending.created_at,
+            pending_expires_at: pending.expires_at,
+            ciphertext_queued_at: target.ciphertext_queued_at,
+            ciphertext_expires_at: target.ciphertext_expires_at,
+        }
+    }
+
     pub fn pending_is_rci(pending: &NodePendingCredential) -> bool {
-        pending.crypto.is_some() || pending.remote_state.is_some()
+        pending.crypto.is_some()
+            || pending.remote_state.is_some()
+            || !pending.fan_out_nodes.is_empty()
     }
 
     fn remote_state_name(&self) -> Option<&'static str> {
@@ -152,6 +178,90 @@ pub enum RciAuditEventKind {
     },
     Canceled,
     Expired,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RciFanOutAuditSubject {
+    pub fanout_id: String,
+    pub service_slug: String,
+    pub owner_user_id: String,
+    pub target_count: usize,
+    pub succeeded_count: usize,
+    pub failed_count: usize,
+    pub queued_count: usize,
+    pub fan_out_revision: i64,
+    pub remote_state: Option<RemoteCryptoState>,
+    pub pending_created_at: DateTime<Utc>,
+    pub pending_expires_at: DateTime<Utc>,
+}
+
+impl RciFanOutAuditSubject {
+    pub fn from_pending(pending: &NodePendingCredential) -> Self {
+        let succeeded_count = pending
+            .fan_out_nodes
+            .iter()
+            .filter(|target| matches!(target.remote_state, Some(RemoteCryptoState::Consumed)))
+            .count();
+        let failed_count = pending
+            .fan_out_nodes
+            .iter()
+            .filter(|target| {
+                matches!(
+                    target.remote_state,
+                    Some(
+                        RemoteCryptoState::DecryptFailed
+                            | RemoteCryptoState::Declined
+                            | RemoteCryptoState::Expired
+                    )
+                )
+            })
+            .count();
+        let queued_count = pending
+            .fan_out_nodes
+            .iter()
+            .filter(|target| {
+                matches!(
+                    target.remote_state,
+                    Some(RemoteCryptoState::CiphertextQueued)
+                )
+            })
+            .count();
+        Self {
+            fanout_id: pending.id.clone(),
+            service_slug: pending.service_slug.clone(),
+            owner_user_id: pending.owner_user_id.clone(),
+            target_count: pending.fan_out_nodes.len(),
+            succeeded_count,
+            failed_count,
+            queued_count,
+            fan_out_revision: pending.fan_out_revision,
+            remote_state: pending.remote_state.clone(),
+            pending_created_at: pending.created_at,
+            pending_expires_at: pending.expires_at,
+        }
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RciFanOutAuditEventKind {
+    Created,
+    Partial,
+    RetryStarted,
+    Completed,
+    Expired,
+}
+
+impl RciFanOutAuditEventKind {
+    pub fn event_type(self) -> &'static str {
+        match self {
+            Self::Created => "node_credential_rci_fan_out_created",
+            Self::Partial => "node_credential_rci_fan_out_partial",
+            Self::RetryStarted => "node_credential_rci_fan_out_retry_started",
+            Self::Completed => "node_credential_rci_fan_out_completed",
+            Self::Expired => "node_credential_rci_fan_out_expired",
+        }
+    }
 }
 
 impl RciAuditEventKind {
@@ -272,6 +382,40 @@ pub fn log_rci_for_node(
     );
 }
 
+pub fn log_rci_fan_out_for_user(
+    db: mongodb::Database,
+    auth_user: &AuthUser,
+    subject: &RciFanOutAuditSubject,
+    kind: RciFanOutAuditEventKind,
+) {
+    audit_service::log_for_user(
+        db,
+        auth_user,
+        kind.event_type(),
+        Some(rci_fan_out_event_data(subject, Utc::now())),
+    );
+}
+
+pub fn log_rci_fan_out_for_node(
+    db: mongodb::Database,
+    owner_user_id: &str,
+    ip_address: Option<String>,
+    user_agent: Option<String>,
+    subject: &RciFanOutAuditSubject,
+    kind: RciFanOutAuditEventKind,
+) {
+    audit_service::log_async(
+        db,
+        Some(owner_user_id.to_string()),
+        kind.event_type().to_string(),
+        Some(rci_fan_out_event_data(subject, Utc::now())),
+        ip_address,
+        user_agent,
+        None,
+        None,
+    );
+}
+
 pub(crate) fn rci_event_data(
     subject: &RciAuditSubject,
     kind: RciAuditEventKind,
@@ -291,6 +435,19 @@ pub(crate) fn rci_event_data(
         "pending_credential_id".to_string(),
         Value::String(subject.pending_credential_id.clone()),
     );
+    if subject.fan_out {
+        object.insert("fan_out".to_string(), Value::Bool(true));
+        object.insert(
+            "fanout_id".to_string(),
+            Value::String(subject.pending_credential_id.clone()),
+        );
+        if let Some(generation) = subject.generation {
+            object.insert(
+                "generation".to_string(),
+                Value::Number(serde_json::Number::from(generation)),
+            );
+        }
+    }
     object.insert(
         "service_slug".to_string(),
         Value::String(subject.service_slug.clone()),
@@ -351,14 +508,76 @@ pub(crate) fn rci_event_data(
     Value::Object(object)
 }
 
+pub(crate) fn rci_fan_out_event_data(
+    subject: &RciFanOutAuditSubject,
+    event_at: DateTime<Utc>,
+) -> Value {
+    let mut object = Map::new();
+    object.insert(
+        "flow".to_string(),
+        Value::String("remote_credential_injection".to_string()),
+    );
+    object.insert("fan_out".to_string(), Value::Bool(true));
+    object.insert(
+        "fanout_id".to_string(),
+        Value::String(subject.fanout_id.clone()),
+    );
+    object.insert(
+        "service_slug".to_string(),
+        Value::String(subject.service_slug.clone()),
+    );
+    object.insert(
+        "owner_user_id".to_string(),
+        Value::String(subject.owner_user_id.clone()),
+    );
+    object.insert(
+        "target_count".to_string(),
+        Value::Number(serde_json::Number::from(subject.target_count)),
+    );
+    object.insert(
+        "succeeded_count".to_string(),
+        Value::Number(serde_json::Number::from(subject.succeeded_count)),
+    );
+    object.insert(
+        "failed_count".to_string(),
+        Value::Number(serde_json::Number::from(subject.failed_count)),
+    );
+    object.insert(
+        "queued_count".to_string(),
+        Value::Number(serde_json::Number::from(subject.queued_count)),
+    );
+    object.insert(
+        "fan_out_revision".to_string(),
+        Value::Number(serde_json::Number::from(subject.fan_out_revision)),
+    );
+    if let Some(remote_state) = subject.remote_state.as_ref().map(remote_state_name) {
+        object.insert(
+            "remote_state".to_string(),
+            Value::String(remote_state.to_string()),
+        );
+    }
+    object.insert("event_at".to_string(), Value::String(event_at.to_rfc3339()));
+    object.insert(
+        "pending_created_at".to_string(),
+        Value::String(subject.pending_created_at.to_rfc3339()),
+    );
+    object.insert(
+        "pending_expires_at".to_string(),
+        Value::String(subject.pending_expires_at.to_rfc3339()),
+    );
+    Value::Object(object)
+}
+
 fn remote_state_name(state: &RemoteCryptoState) -> &'static str {
     match state {
         RemoteCryptoState::PubkeyPosted => "pubkey_posted",
         RemoteCryptoState::CiphertextReceived => "ciphertext_received",
         RemoteCryptoState::CiphertextQueued => "ciphertext_queued",
         RemoteCryptoState::Consumed => "consumed",
+        RemoteCryptoState::PartialDecrypted => "partial_decrypted",
         RemoteCryptoState::DecryptFailed => "decrypt_failed",
         RemoteCryptoState::Expired => "expired",
+        RemoteCryptoState::Declined => "declined",
     }
 }
 
@@ -366,6 +585,11 @@ fn remote_state_name(state: &RemoteCryptoState) -> &'static str {
 mod tests {
     use super::*;
     use chrono::Duration;
+    use mongodb::bson::doc;
+
+    use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};
+    use crate::services::audit_service;
+    use crate::test_utils::connect_test_database;
 
     fn subject() -> RciAuditSubject {
         let now = Utc::now();
@@ -375,10 +599,46 @@ mod tests {
             service_slug: "openclaw".to_string(),
             owner_user_id: "owner-audit".to_string(),
             remote_state: Some(RemoteCryptoState::PubkeyPosted),
+            fan_out: false,
+            generation: None,
             pending_created_at: now - Duration::minutes(10),
             pending_expires_at: now + Duration::minutes(50),
             ciphertext_queued_at: Some(now - Duration::minutes(1)),
             ciphertext_expires_at: Some(now + Duration::minutes(14)),
+        }
+    }
+
+    fn fan_out_subject() -> RciAuditSubject {
+        let now = Utc::now();
+        RciAuditSubject {
+            node_id: "node-fanout-a".to_string(),
+            pending_credential_id: "fanout-audit".to_string(),
+            service_slug: "openclaw".to_string(),
+            owner_user_id: "owner-audit".to_string(),
+            remote_state: Some(RemoteCryptoState::DecryptFailed),
+            fan_out: true,
+            generation: Some(1),
+            pending_created_at: now - Duration::minutes(10),
+            pending_expires_at: now + Duration::minutes(50),
+            ciphertext_queued_at: None,
+            ciphertext_expires_at: None,
+        }
+    }
+
+    fn fan_out_aggregate_subject() -> RciFanOutAuditSubject {
+        let now = Utc::now();
+        RciFanOutAuditSubject {
+            fanout_id: "fanout-audit".to_string(),
+            service_slug: "openclaw".to_string(),
+            owner_user_id: "owner-audit".to_string(),
+            target_count: 3,
+            succeeded_count: 2,
+            failed_count: 1,
+            queued_count: 0,
+            fan_out_revision: 4,
+            remote_state: Some(RemoteCryptoState::PartialDecrypted),
+            pending_created_at: now - Duration::minutes(10),
+            pending_expires_at: now + Duration::minutes(50),
         }
     }
 
@@ -425,6 +685,58 @@ mod tests {
     fn sorted(mut keys: Vec<&str>) -> Vec<String> {
         keys.sort();
         keys.into_iter().map(str::to_string).collect()
+    }
+
+    async fn test_db(prefix: &str) -> mongodb::Database {
+        connect_test_database(prefix)
+            .await
+            .expect("local MongoDB required for RCI audit read-back tests")
+    }
+
+    async fn load_audit_entry(
+        db: &mongodb::Database,
+        receiver: tokio::sync::oneshot::Receiver<String>,
+    ) -> AuditLog {
+        let audit_id = receiver.await.expect("audit write notification");
+        db.collection::<AuditLog>(AUDIT_LOG)
+            .find_one(doc! { "_id": audit_id })
+            .await
+            .expect("query audit log")
+            .expect("audit log exists")
+    }
+
+    fn assert_no_rci_leakage(event_data: &Value) {
+        let object = event_data.as_object().expect("event data object");
+        for forbidden_key in [
+            "plaintext",
+            "secret",
+            "ciphertext",
+            "nonce",
+            "node_pubkey",
+            "admin_pubkey",
+            "hash",
+            "fingerprint",
+            "length",
+            "bytes",
+            "target_url",
+            "field_name",
+            "raw_error",
+            "raw_node_error",
+        ] {
+            assert!(!object.contains_key(forbidden_key), "{forbidden_key}");
+        }
+        let event_json = event_data.to_string();
+        for forbidden_value in [
+            "super-secret-plaintext-fixture",
+            "admin-pubkey-fixture",
+            "node-pubkey-fixture",
+            "nonce-fixture",
+            "ciphertext-fixture",
+            "raw-node-error-fixture",
+            "https://gateway.example.com/secret",
+        ] {
+            assert!(!event_json.contains(forbidden_value), "{forbidden_value}");
+        }
     }
 
     #[test]
@@ -548,6 +860,166 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn fan_out_per_node_event_data_exact_allowlist() {
+        let event_data = rci_event_data(
+            &fan_out_subject(),
+            RciAuditEventKind::CiphertextTooLarge,
+            Utc::now(),
+        );
+
+        assert_eq!(
+            object_keys(&event_data),
+            sorted(vec![
+                "error_code",
+                "error_kind",
+                "event_at",
+                "fan_out",
+                "fanout_id",
+                "flow",
+                "generation",
+                "node_id",
+                "owner_user_id",
+                "pending_created_at",
+                "pending_credential_id",
+                "pending_expires_at",
+                "remote_state",
+                "routed_via",
+                "service_slug",
+            ])
+        );
+        assert_eq!(event_data["fan_out"], true);
+        assert_eq!(event_data["fanout_id"], "fanout-audit");
+        assert_eq!(event_data["generation"], 1);
+        assert_eq!(
+            event_data["error_code"],
+            PENDING_CREDENTIAL_CIPHERTEXT_TOO_LARGE_CODE
+        );
+        assert_no_rci_leakage(&event_data);
+    }
+
+    #[test]
+    fn fan_out_aggregate_event_data_exact_allowlist() {
+        let event_data = rci_fan_out_event_data(&fan_out_aggregate_subject(), Utc::now());
+
+        assert_eq!(
+            object_keys(&event_data),
+            sorted(vec![
+                "event_at",
+                "failed_count",
+                "fan_out",
+                "fan_out_revision",
+                "fanout_id",
+                "flow",
+                "owner_user_id",
+                "pending_created_at",
+                "pending_expires_at",
+                "queued_count",
+                "remote_state",
+                "service_slug",
+                "succeeded_count",
+                "target_count",
+            ])
+        );
+        assert_eq!(event_data["fan_out"], true);
+        assert_eq!(event_data["fanout_id"], "fanout-audit");
+        assert_eq!(event_data["remote_state"], "partial_decrypted");
+        assert_no_rci_leakage(&event_data);
+    }
+
+    #[tokio::test]
+    async fn fan_out_per_node_and_aggregate_audit_rows_are_metadata_only() {
+        let db = test_db("rci_fanout_audit_readback").await;
+        let per_node_rx = audit_service::notify_on_audit_write(
+            "node_credential_rci_ciphertext_too_large",
+            Some("fanout-audit".to_string()),
+        );
+        log_rci_for_node(
+            db.clone(),
+            "owner-audit",
+            Some("203.0.113.50".to_string()),
+            Some("nyxid-node-test".to_string()),
+            &fan_out_subject(),
+            RciAuditEventKind::CiphertextTooLarge,
+        );
+        let per_node = load_audit_entry(&db, per_node_rx).await;
+        assert_eq!(
+            per_node.event_type,
+            "node_credential_rci_ciphertext_too_large"
+        );
+        assert_eq!(per_node.user_id.as_deref(), Some("owner-audit"));
+        assert_eq!(per_node.ip_address.as_deref(), Some("203.0.113.50"));
+        assert_eq!(per_node.user_agent.as_deref(), Some("nyxid-node-test"));
+        let per_node_data = per_node.event_data.as_ref().expect("event data");
+        assert_eq!(
+            object_keys(per_node_data),
+            sorted(vec![
+                "error_code",
+                "error_kind",
+                "event_at",
+                "fan_out",
+                "fanout_id",
+                "flow",
+                "generation",
+                "node_id",
+                "owner_user_id",
+                "pending_created_at",
+                "pending_credential_id",
+                "pending_expires_at",
+                "remote_state",
+                "routed_via",
+                "service_slug",
+            ])
+        );
+        assert_no_rci_leakage(per_node_data);
+
+        let aggregate_rx =
+            audit_service::notify_on_audit_write("node_credential_rci_fan_out_completed", None);
+        log_rci_fan_out_for_node(
+            db.clone(),
+            "owner-audit",
+            Some("203.0.113.51".to_string()),
+            Some("nyxid-node-test".to_string()),
+            &RciFanOutAuditSubject {
+                remote_state: Some(RemoteCryptoState::Consumed),
+                succeeded_count: 3,
+                failed_count: 0,
+                ..fan_out_aggregate_subject()
+            },
+            RciFanOutAuditEventKind::Completed,
+        );
+        let aggregate = load_audit_entry(&db, aggregate_rx).await;
+        assert_eq!(
+            aggregate.event_type,
+            "node_credential_rci_fan_out_completed"
+        );
+        assert_eq!(aggregate.user_id.as_deref(), Some("owner-audit"));
+        assert_eq!(aggregate.ip_address.as_deref(), Some("203.0.113.51"));
+        assert_eq!(aggregate.user_agent.as_deref(), Some("nyxid-node-test"));
+        let aggregate_data = aggregate.event_data.as_ref().expect("event data");
+        assert_eq!(
+            object_keys(aggregate_data),
+            sorted(vec![
+                "event_at",
+                "failed_count",
+                "fan_out",
+                "fan_out_revision",
+                "fanout_id",
+                "flow",
+                "owner_user_id",
+                "pending_created_at",
+                "pending_expires_at",
+                "queued_count",
+                "remote_state",
+                "service_slug",
+                "succeeded_count",
+                "target_count",
+            ])
+        );
+        assert_eq!(aggregate_data["remote_state"], "consumed");
+        assert_no_rci_leakage(aggregate_data);
     }
 
     #[test]
