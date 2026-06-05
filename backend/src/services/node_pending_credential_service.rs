@@ -13,7 +13,7 @@ use crate::models::node_pending_credential::{
     COLLECTION_NAME as NODE_PENDING_CREDENTIALS, CryptoBundle, FanOutDecryptOutcome,
     FanOutNodeState, InjectionMethod, NodePendingCredential, RemoteCryptoState,
 };
-use crate::services::{node_fanout_resolver, node_service, url_validation};
+use crate::services::{node_fanout_resolver, node_service, rci_audit_service, url_validation};
 
 pub const MAX_CIPHERTEXT_SIZE: usize = 16 * 1024;
 pub const MAX_FAN_OUT_TARGETS: usize = 10;
@@ -1065,9 +1065,17 @@ pub async fn expire_queued_ciphertexts_with_summaries(
         if changed {
             pending.remote_state = Some(RemoteCryptoState::Expired);
             pending.is_active = false;
-            if let Ok(_updated) =
+            if let Ok(updated) =
                 expire_fan_out_nodes_with_revision(db, pending, revision, now).await
             {
+                rci_audit_service::log_rci_fan_out_for_node(
+                    db.clone(),
+                    &updated.owner_user_id,
+                    None,
+                    None,
+                    &rci_audit_service::RciFanOutAuditSubject::from_pending(&updated),
+                    rci_audit_service::RciFanOutAuditEventKind::Expired,
+                );
                 summaries.extend(local_summaries);
             }
         }

@@ -1990,6 +1990,337 @@ mod tests {
         })
     }
 
+    fn fan_out_ciphertext_request_for_targets(
+        revision: i64,
+        first_node_id: &str,
+        second_node_id: &str,
+    ) -> Value {
+        serde_json::json!({
+            "fan_out_revision": revision,
+            "items": [
+                {
+                    "node_id": first_node_id,
+                    "generation": 0,
+                    "version": "v1",
+                    "admin_pubkey": b64url(10, 32),
+                    "nonce": b64url(11, 24),
+                    "ciphertext": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([1, 2, 3]),
+                },
+                {
+                    "node_id": second_node_id,
+                    "generation": 0,
+                    "version": "v1",
+                    "admin_pubkey": b64url(10, 32),
+                    "nonce": b64url(11, 24),
+                    "ciphertext": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([1, 2, 3, 4]),
+                }
+            ],
+        })
+    }
+
+    fn assert_no_fan_out_secret_fields(value: &Value) {
+        fn assert_no_forbidden_keys(value: &Value) {
+            match value {
+                Value::Object(object) => {
+                    for (key, value) in object {
+                        for forbidden_key in [
+                            "admin_pubkey",
+                            "nonce",
+                            "ciphertext",
+                            "plaintext",
+                            "secret",
+                            "node_pubkey_secret",
+                        ] {
+                            assert_ne!(key, forbidden_key, "{forbidden_key}");
+                        }
+                        assert_no_forbidden_keys(value);
+                    }
+                }
+                Value::Array(values) => {
+                    for value in values {
+                        assert_no_forbidden_keys(value);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        assert_no_forbidden_keys(value);
+        let json = value.to_string();
+        for forbidden in [
+            "plaintext",
+            "secret-value-fixture",
+            &b64url(10, 32),
+            &b64url(11, 24),
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([1, 2, 3]),
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([1, 2, 3, 4]),
+        ] {
+            assert!(!json.contains(forbidden), "{forbidden}");
+        }
+    }
+
+    fn response_target<'a>(body: &'a Value, node_id: &str) -> &'a Value {
+        body["targets"]
+            .as_array()
+            .expect("targets array")
+            .iter()
+            .find(|target| target["node_id"] == node_id)
+            .expect("target present")
+    }
+
+    fn fan_out_target_pending_for_audit(
+        pending: &NodePendingCredential,
+        node_id: &str,
+    ) -> NodePendingCredential {
+        let target = node_pending_credential_service::fan_out_target(pending, node_id)
+            .expect("fan-out target exists");
+        let mut target_pending = pending.clone();
+        target_pending.node_id = target.node_id.clone();
+        target_pending.remote_state = target.remote_state.clone();
+        target_pending.ciphertext_queued_at = target.ciphertext_queued_at;
+        target_pending.ciphertext_expires_at = target.ciphertext_expires_at;
+        target_pending
+    }
+
+    fn assert_fan_out_target_audit_row(
+        entry: &AuditLog,
+        expected_event_type: &str,
+        pending: &NodePendingCredential,
+        node_id: &str,
+        expected_remote_state: Option<&str>,
+        extra_keys: &[&str],
+    ) {
+        let target_pending = fan_out_target_pending_for_audit(pending, node_id);
+        let mut expected_extra = vec!["fan_out", "fanout_id", "generation"];
+        expected_extra.extend(extra_keys.iter().copied());
+        assert_rci_audit_row(
+            entry,
+            expected_event_type,
+            &target_pending,
+            expected_remote_state,
+            &expected_extra,
+        );
+        let event_data = entry.event_data.as_ref().expect("audit event data");
+        let target = node_pending_credential_service::fan_out_target(pending, node_id)
+            .expect("fan-out target exists");
+        assert_eq!(event_data["fan_out"], true);
+        assert_eq!(event_data["fanout_id"], pending.id);
+        assert_eq!(event_data["generation"], target.generation);
+    }
+
+    fn sorted_keys(keys: &[&str]) -> Vec<String> {
+        let mut keys: Vec<String> = keys.iter().map(|key| (*key).to_string()).collect();
+        keys.sort();
+        keys
+    }
+
+    fn assert_fan_out_aggregate_audit_row(
+        entry: &AuditLog,
+        expected_event_type: &str,
+        expected_user_id: &str,
+        pending: &NodePendingCredential,
+        expected_remote_state: Option<&str>,
+    ) {
+        assert_eq!(entry.event_type, expected_event_type);
+        assert_eq!(entry.user_id.as_deref(), Some(expected_user_id));
+        let event_data = entry.event_data.as_ref().expect("audit event data");
+        let object = event_data.as_object().expect("audit event data object");
+        let mut expected_keys = vec![
+            "event_at",
+            "failed_count",
+            "fan_out",
+            "fan_out_revision",
+            "fanout_id",
+            "flow",
+            "owner_user_id",
+            "pending_created_at",
+            "pending_expires_at",
+            "queued_count",
+            "service_slug",
+            "succeeded_count",
+            "target_count",
+        ];
+        if expected_remote_state.is_some() {
+            expected_keys.push("remote_state");
+        }
+        let mut actual_keys: Vec<String> = object.keys().cloned().collect();
+        actual_keys.sort();
+        assert_eq!(actual_keys, sorted_keys(&expected_keys));
+
+        assert_eq!(event_data["flow"], "remote_credential_injection");
+        assert_eq!(event_data["fan_out"], true);
+        assert_eq!(event_data["fanout_id"], pending.id);
+        assert_eq!(event_data["service_slug"], pending.service_slug);
+        assert_eq!(event_data["owner_user_id"], pending.owner_user_id);
+        assert_eq!(event_data["target_count"], pending.fan_out_nodes.len());
+        assert_eq!(event_data["fan_out_revision"], pending.fan_out_revision);
+        assert_eq!(
+            event_data["succeeded_count"],
+            pending
+                .fan_out_nodes
+                .iter()
+                .filter(|target| matches!(target.remote_state, Some(RemoteCryptoState::Consumed)))
+                .count()
+        );
+        assert_eq!(
+            event_data["failed_count"],
+            pending
+                .fan_out_nodes
+                .iter()
+                .filter(|target| {
+                    matches!(
+                        target.remote_state,
+                        Some(
+                            RemoteCryptoState::DecryptFailed
+                                | RemoteCryptoState::Declined
+                                | RemoteCryptoState::Expired
+                        )
+                    )
+                })
+                .count()
+        );
+        assert_eq!(
+            event_data["queued_count"],
+            pending
+                .fan_out_nodes
+                .iter()
+                .filter(|target| {
+                    matches!(
+                        target.remote_state,
+                        Some(RemoteCryptoState::CiphertextQueued)
+                    )
+                })
+                .count()
+        );
+        if let Some(remote_state) = expected_remote_state {
+            assert_eq!(event_data["remote_state"], remote_state);
+        } else {
+            assert!(event_data.get("remote_state").is_none());
+        }
+        let pending_created_at = chrono::DateTime::parse_from_rfc3339(
+            event_data["pending_created_at"]
+                .as_str()
+                .expect("pending_created_at string"),
+        )
+        .expect("pending_created_at timestamp");
+        assert_eq!(
+            pending_created_at.timestamp_millis(),
+            pending.created_at.timestamp_millis()
+        );
+        let pending_expires_at = chrono::DateTime::parse_from_rfc3339(
+            event_data["pending_expires_at"]
+                .as_str()
+                .expect("pending_expires_at string"),
+        )
+        .expect("pending_expires_at timestamp");
+        assert_eq!(
+            pending_expires_at.timestamp_millis(),
+            pending.expires_at.timestamp_millis()
+        );
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(
+                event_data["event_at"].as_str().expect("event_at string")
+            )
+            .is_ok()
+        );
+        assert_no_fan_out_secret_fields(event_data);
+        for forbidden_key in [
+            "node_id",
+            "pending_credential_id",
+            "routed_via",
+            "delivery",
+            "error_code",
+            "error_kind",
+        ] {
+            assert!(!object.contains_key(forbidden_key), "{forbidden_key}");
+        }
+    }
+
+    async fn fan_out_route_fixture(
+        prefix: &str,
+    ) -> (
+        mongodb::Database,
+        AppState,
+        axum::Router,
+        String,
+        String,
+        Node,
+        Node,
+    ) {
+        let db = test_db(prefix).await;
+        let actor_id = Uuid::new_v4().to_string();
+        insert_users(&db, vec![test_user(&actor_id, UserType::Person)]).await;
+        let first = test_node(&actor_id, "fanout-first-node");
+        let second = test_node(&actor_id, "fanout-second-node");
+        insert_node(&db, &first).await;
+        insert_node(&db, &second).await;
+        db.collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
+            .insert_many([
+                test_binding(&actor_id, &first.id, "catalog-svc"),
+                test_binding(&actor_id, &second.id, "catalog-svc"),
+            ])
+            .await
+            .expect("insert fan-out bindings");
+
+        let state = test_app_state(db.clone());
+        let token = access_token(&state, &actor_id);
+        let app = api_app(state.clone());
+        (db, state, app, token, actor_id, first, second)
+    }
+
+    async fn route_create_fan_out_pending(
+        app: axum::Router,
+        token: &str,
+        owner_user_id: &str,
+    ) -> Value {
+        let (status, body) = route_json(
+            app,
+            Method::POST,
+            "/api/v1/nodes/credentials/push/fan-out".to_string(),
+            token,
+            Some(serde_json::json!({
+                "owner_user_id": owner_user_id,
+                "service_id": "catalog-svc",
+                "service_slug": "openclaw",
+                "injection_method": "header",
+                "field_name": "X-API-Key",
+                "target_url": "https://gateway.example.com/v1",
+                "label": "Production",
+                "remote_crypto": true,
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        body
+    }
+
+    async fn record_all_fan_out_pubkeys(
+        db: &mongodb::Database,
+        pending_id: &str,
+        first_node_id: &str,
+        second_node_id: &str,
+    ) -> NodePendingCredential {
+        node_pending_credential_service::record_fan_out_pubkey(
+            db,
+            first_node_id,
+            pending_id,
+            "v1",
+            &b64url(12, 32),
+        )
+        .await
+        .expect("record first fan-out pubkey");
+        node_pending_credential_service::record_fan_out_pubkey(
+            db,
+            second_node_id,
+            pending_id,
+            "v1",
+            &b64url(13, 32),
+        )
+        .await
+        .expect("record second fan-out pubkey");
+        load_pending(db, pending_id).await
+    }
+
     async fn create_remote_pending(
         db: &mongodb::Database,
         actor_id: &str,
@@ -2152,6 +2483,592 @@ mod tests {
         assert!(body.get("admin_pubkey").is_none());
         assert!(body.get("nonce").is_none());
         assert!(body.get("ciphertext").is_none());
+    }
+
+    #[tokio::test]
+    async fn route_post_fan_out_push_creates_doc_audits_and_nudges_connected_targets() {
+        let (db, state, app, token, actor_id, first, second) =
+            fan_out_route_fixture("pending_route_fanout_push_success").await;
+        let (first_tx, mut first_rx) = mpsc::channel(2);
+        let (second_tx, mut second_rx) = mpsc::channel(2);
+        state
+            .node_ws_manager
+            .register_connection(&first.id, first_tx);
+        state
+            .node_ws_manager
+            .register_connection(&second.id, second_tx);
+        let created_audit = audit_service::notify_on_audit_write_for_user(
+            "node_credential_rci_fan_out_created",
+            actor_id.clone(),
+        );
+
+        let body = route_create_fan_out_pending(app, &token, &actor_id).await;
+
+        assert_eq!(body["fan_out_revision"], 1);
+        assert_eq!(body["target_count"], 2);
+        assert_eq!(body["service_slug"], "openclaw");
+        assert_eq!(body["injection_method"], "header");
+        assert_eq!(body["field_name"], "X-API-Key");
+        assert_eq!(body["target_url"], "https://gateway.example.com/v1");
+        assert_eq!(body["label"], "Production");
+        assert!(body.get("remote_state").is_none());
+        assert_eq!(response_target(&body, &first.id)["generation"], 0);
+        assert_eq!(response_target(&body, &second.id)["generation"], 0);
+        assert!(
+            response_target(&body, &first.id)
+                .get("remote_state")
+                .is_none()
+        );
+        assert!(
+            response_target(&body, &second.id)
+                .get("remote_state")
+                .is_none()
+        );
+        assert_no_fan_out_secret_fields(&body);
+
+        for rx in [&mut first_rx, &mut second_rx] {
+            let NodeOutboundMessage::Text(frame) = rx.try_recv().expect("nudge frame") else {
+                panic!("expected text outbound frame");
+            };
+            let frame: Value = serde_json::from_str(&frame).expect("frame json");
+            assert_eq!(
+                frame,
+                serde_json::json!({ "type": "pending_credentials_available" })
+            );
+        }
+
+        let fanout_id = body["fanout_id"].as_str().expect("fanout id");
+        let stored = load_pending(&db, fanout_id).await;
+        assert_eq!(stored.id, fanout_id);
+        assert_eq!(stored.owner_user_id, actor_id);
+        assert_eq!(stored.created_by_user_id, actor_id);
+        assert_eq!(stored.node_id, first.id);
+        assert!(stored.crypto.is_none());
+        assert_eq!(stored.fan_out_revision, 1);
+        assert_eq!(stored.fan_out_nodes.len(), 2);
+        assert!(stored.remote_state.is_none());
+        assert!(
+            stored
+                .fan_out_nodes
+                .iter()
+                .all(|target| target.remote_state.is_none())
+        );
+
+        let audit = load_audit_entry(&db, created_audit).await;
+        assert_fan_out_aggregate_audit_row(
+            &audit,
+            "node_credential_rci_fan_out_created",
+            &actor_id,
+            &stored,
+            None,
+        );
+    }
+
+    #[tokio::test]
+    async fn route_get_fan_out_pending_and_pubkeys_return_public_shapes() {
+        let (db, _state, app, token, actor_id, first, second) =
+            fan_out_route_fixture("pending_route_fanout_get_success").await;
+        let created = route_create_fan_out_pending(app.clone(), &token, &actor_id).await;
+        let fanout_id = created["fanout_id"].as_str().expect("fanout id");
+
+        let (status, body) = route_json(
+            app.clone(),
+            Method::GET,
+            format!("/api/v1/nodes/credentials/pending/{fanout_id}/fan-out"),
+            &token,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["fanout_id"], fanout_id);
+        assert_eq!(body["fan_out_revision"], 1);
+        assert_eq!(body["target_count"], 2);
+        assert_eq!(body["service_slug"], "openclaw");
+        assert!(body.get("remote_state").is_none());
+        assert!(
+            response_target(&body, &first.id)
+                .get("remote_state")
+                .is_none()
+        );
+        assert!(
+            response_target(&body, &second.id)
+                .get("remote_state")
+                .is_none()
+        );
+        assert_no_fan_out_secret_fields(&body);
+
+        let (status, body) = route_json(
+            app.clone(),
+            Method::GET,
+            format!("/api/v1/nodes/credentials/pending/{fanout_id}/fan-out/pubkeys"),
+            &token,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["fanout_id"], fanout_id);
+        assert_eq!(body["fan_out_revision"], 1);
+        assert_eq!(body["target_count"], 2);
+        let first_pubkey = response_target(&body, &first.id);
+        let second_pubkey = response_target(&body, &second.id);
+        assert_eq!(first_pubkey["version"], "v1");
+        assert_eq!(second_pubkey["version"], "v1");
+        assert_eq!(
+            first_pubkey["error_code"],
+            crate::errors::PENDING_CREDENTIAL_PUBKEY_AWAITING_CODE
+        );
+        assert_eq!(
+            second_pubkey["error_code"],
+            crate::errors::PENDING_CREDENTIAL_PUBKEY_AWAITING_CODE
+        );
+        assert!(first_pubkey.get("node_pubkey").is_none());
+        assert!(second_pubkey.get("node_pubkey").is_none());
+        assert_no_fan_out_secret_fields(&body);
+
+        node_pending_credential_service::record_fan_out_pubkey(
+            &db,
+            &first.id,
+            fanout_id,
+            "v1",
+            &b64url(12, 32),
+        )
+        .await
+        .expect("record first pubkey");
+        let (status, body) = route_json(
+            app,
+            Method::GET,
+            format!("/api/v1/nodes/credentials/pending/{fanout_id}/fan-out/pubkeys"),
+            &token,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let first_pubkey = response_target(&body, &first.id);
+        let second_pubkey = response_target(&body, &second.id);
+        assert_eq!(first_pubkey["node_pubkey"], b64url(12, 32));
+        assert_eq!(first_pubkey["remote_state"], "pubkey_posted");
+        assert!(first_pubkey.get("error_code").is_none());
+        assert_eq!(
+            second_pubkey["error_code"],
+            crate::errors::PENDING_CREDENTIAL_PUBKEY_AWAITING_CODE
+        );
+        assert!(body.to_string().contains(&b64url(12, 32)));
+        assert!(!body.to_string().contains(&b64url(13, 32)));
+    }
+
+    #[tokio::test]
+    async fn route_post_fan_out_ciphertexts_accepts_online_and_offline_targets() {
+        let (db, state, app, token, actor_id, first, second) =
+            fan_out_route_fixture("pending_route_fanout_ciphertexts_success").await;
+        let created = route_create_fan_out_pending(app.clone(), &token, &actor_id).await;
+        let fanout_id = created["fanout_id"]
+            .as_str()
+            .expect("fanout id")
+            .to_string();
+        let pending = record_all_fan_out_pubkeys(&db, &fanout_id, &first.id, &second.id).await;
+
+        let (first_tx, mut first_rx) = mpsc::channel(4);
+        state
+            .node_ws_manager
+            .register_connection(&first.id, first_tx);
+        state.node_ws_manager.record_capabilities(
+            &first.id,
+            &NodeCapabilitiesMsg {
+                remote_credential_crypto_v1: true,
+                ..NodeCapabilitiesMsg::default()
+            },
+        );
+        let received_first = audit_service::notify_on_audit_write(
+            "node_credential_rci_ciphertext_received",
+            Some(fanout_id.clone()),
+        );
+        let received_second = audit_service::notify_on_audit_write(
+            "node_credential_rci_ciphertext_received",
+            Some(fanout_id.clone()),
+        );
+        let forwarded_first = audit_service::notify_on_audit_write(
+            "node_credential_rci_ciphertext_forwarded",
+            Some(fanout_id.clone()),
+        );
+        let queued_second = audit_service::notify_on_audit_write(
+            "node_credential_rci_ciphertext_queued",
+            Some(fanout_id.clone()),
+        );
+
+        let (status, body) = route_json(
+            app,
+            Method::POST,
+            format!("/api/v1/nodes/credentials/pending/{fanout_id}/fan-out/ciphertexts"),
+            &token,
+            Some(fan_out_ciphertext_request_for_targets(
+                pending.fan_out_revision,
+                &first.id,
+                &second.id,
+            )),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(body["fanout_id"], fanout_id);
+        assert_eq!(body["fan_out_revision"], pending.fan_out_revision + 1);
+        assert_eq!(body["remote_state"], "ciphertext_queued");
+        let first_status = response_target(&body, &first.id);
+        assert_eq!(first_status["generation"], 0);
+        assert_eq!(first_status["remote_state"], "ciphertext_received");
+        assert_eq!(first_status["delivery_status"], "sent");
+        assert!(first_status.get("error_code").is_none());
+        let second_status = response_target(&body, &second.id);
+        assert_eq!(second_status["generation"], 0);
+        assert_eq!(second_status["remote_state"], "ciphertext_queued");
+        assert_eq!(second_status["delivery_status"], "queued");
+        assert_no_fan_out_secret_fields(&body);
+
+        let NodeOutboundMessage::Text(frame) = first_rx.recv().await.expect("ciphertext frame")
+        else {
+            panic!("expected text outbound frame");
+        };
+        let frame: Value = serde_json::from_str(&frame).expect("frame json");
+        assert_eq!(frame["type"], "pending_credential_ciphertext");
+        assert_eq!(frame["pending_id"], fanout_id);
+        assert_eq!(frame["version"], "v1");
+        assert_eq!(frame["admin_pubkey"], b64url(10, 32));
+        assert_eq!(frame["nonce"], b64url(11, 24));
+        assert_eq!(
+            frame["ciphertext"],
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([1, 2, 3])
+        );
+
+        let stored = load_pending(&db, &fanout_id).await;
+        assert_eq!(stored.fan_out_revision, pending.fan_out_revision + 1);
+        assert_eq!(
+            stored.remote_state,
+            Some(RemoteCryptoState::CiphertextQueued)
+        );
+        let first_target = node_pending_credential_service::fan_out_target(&stored, &first.id)
+            .expect("first target");
+        assert_eq!(
+            first_target.remote_state,
+            Some(RemoteCryptoState::CiphertextReceived)
+        );
+        assert!(first_target.ciphertext_queued_at.is_none());
+        assert!(first_target.ciphertext_expires_at.is_none());
+        assert_eq!(
+            first_target.crypto.ciphertext.as_deref(),
+            Some([1, 2, 3].as_slice())
+        );
+        let second_target = node_pending_credential_service::fan_out_target(&stored, &second.id)
+            .expect("second target");
+        assert_eq!(
+            second_target.remote_state,
+            Some(RemoteCryptoState::CiphertextQueued)
+        );
+        assert!(second_target.ciphertext_queued_at.is_some());
+        assert!(second_target.ciphertext_expires_at.is_some());
+        assert_eq!(
+            second_target.crypto.ciphertext.as_deref(),
+            Some([1, 2, 3, 4].as_slice())
+        );
+
+        let received = [
+            load_audit_entry(&db, received_first).await,
+            load_audit_entry(&db, received_second).await,
+        ];
+        for audit in &received {
+            let node_id = audit.event_data.as_ref().unwrap()["node_id"]
+                .as_str()
+                .expect("audit node id");
+            assert!(
+                node_id == first.id || node_id == second.id,
+                "unexpected node id {node_id}"
+            );
+            assert_fan_out_target_audit_row(
+                audit,
+                "node_credential_rci_ciphertext_received",
+                &stored,
+                node_id,
+                Some("ciphertext_received"),
+                &[],
+            );
+        }
+        let forwarded = load_audit_entry(&db, forwarded_first).await;
+        assert_fan_out_target_audit_row(
+            &forwarded,
+            "node_credential_rci_ciphertext_forwarded",
+            &stored,
+            &first.id,
+            Some("ciphertext_received"),
+            &["delivery"],
+        );
+        assert_eq!(
+            forwarded.event_data.as_ref().unwrap()["delivery"],
+            "online_forward"
+        );
+        let queued = load_audit_entry(&db, queued_second).await;
+        assert_fan_out_target_audit_row(
+            &queued,
+            "node_credential_rci_ciphertext_queued",
+            &stored,
+            &second.id,
+            Some("ciphertext_queued"),
+            &[
+                "ciphertext_expires_at",
+                "ciphertext_queued_at",
+                "delivery",
+                "error_code",
+                "error_kind",
+            ],
+        );
+        let queued_data = queued.event_data.as_ref().unwrap();
+        assert_eq!(queued_data["delivery"], "offline_queue");
+        assert_eq!(
+            queued_data["error_code"],
+            PENDING_CREDENTIAL_NODE_OFFLINE_CODE
+        );
+        assert_eq!(queued_data["error_kind"], "pending_credential_node_offline");
+    }
+
+    #[tokio::test]
+    async fn route_retry_failed_fan_out_resets_only_failed_targets_and_audits() {
+        let (db, state, app, token, actor_id, first, second) =
+            fan_out_route_fixture("pending_route_fanout_retry_success").await;
+        let created = route_create_fan_out_pending(app.clone(), &token, &actor_id).await;
+        let fanout_id = created["fanout_id"]
+            .as_str()
+            .expect("fanout id")
+            .to_string();
+        let pending = record_all_fan_out_pubkeys(&db, &fanout_id, &first.id, &second.id).await;
+        node_pending_credential_service::store_fan_out_ciphertexts_revision_guard(
+            &db,
+            &actor_id,
+            &fanout_id,
+            node_pending_credential_service::StoreFanOutCiphertextsInput {
+                fan_out_revision: pending.fan_out_revision,
+                items: vec![
+                    node_pending_credential_service::StoreFanOutCiphertextItemInput::new(
+                        first.id.clone(),
+                        0,
+                        "v1".to_string(),
+                        b64url(10, 32),
+                        b64url(11, 24),
+                        vec![1, 2, 3],
+                    ),
+                    node_pending_credential_service::StoreFanOutCiphertextItemInput::new(
+                        second.id.clone(),
+                        0,
+                        "v1".to_string(),
+                        b64url(10, 32),
+                        b64url(11, 24),
+                        vec![1, 2, 3, 4],
+                    ),
+                ],
+                online_node_ids: [first.id.clone(), second.id.clone()].into_iter().collect(),
+            },
+            Utc::now(),
+        )
+        .await
+        .expect("store fan-out ciphertexts");
+        node_pending_credential_service::record_fan_out_decrypt_result(
+            &db,
+            &first.id,
+            &fanout_id,
+            node_pending_credential_service::PendingCredentialDecryptOutcome::Ok,
+            None,
+            Utc::now(),
+        )
+        .await
+        .expect("first consumes");
+        let failed = node_pending_credential_service::record_fan_out_decrypt_result(
+            &db,
+            &second.id,
+            &fanout_id,
+            node_pending_credential_service::PendingCredentialDecryptOutcome::Error,
+            Some(crate::errors::PENDING_CREDENTIAL_DECRYPT_FAILED_CODE),
+            Utc::now(),
+        )
+        .await
+        .expect("second fails");
+        assert_eq!(
+            failed.remote_state,
+            Some(RemoteCryptoState::PartialDecrypted)
+        );
+        let (second_tx, mut second_rx) = mpsc::channel(2);
+        state
+            .node_ws_manager
+            .register_connection(&second.id, second_tx);
+        let retry_audit = audit_service::notify_on_audit_write(
+            "node_credential_rci_fan_out_retry_started",
+            Some(fanout_id.clone()),
+        );
+
+        let (status, body) = route_json(
+            app,
+            Method::POST,
+            format!("/api/v1/nodes/credentials/pending/{fanout_id}/fan-out/retry-failed"),
+            &token,
+            Some(serde_json::json!({
+                "fan_out_revision": failed.fan_out_revision,
+            })),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["fanout_id"], fanout_id);
+        assert_eq!(body["fan_out_revision"], failed.fan_out_revision + 1);
+        assert_eq!(body["remote_state"], "partial_decrypted");
+        let first_status = response_target(&body, &first.id);
+        assert_eq!(first_status["generation"], 0);
+        assert_eq!(first_status["remote_state"], "consumed");
+        let second_status = response_target(&body, &second.id);
+        assert_eq!(second_status["generation"], 1);
+        assert!(second_status.get("remote_state").is_none());
+        assert!(second_status.get("error_code").is_none());
+        assert!(second_status.get("error_kind").is_none());
+
+        let NodeOutboundMessage::Text(frame) = second_rx.try_recv().expect("retry nudge") else {
+            panic!("expected text outbound frame");
+        };
+        let frame: Value = serde_json::from_str(&frame).expect("frame json");
+        assert_eq!(
+            frame,
+            serde_json::json!({ "type": "pending_credentials_available" })
+        );
+
+        let stored = load_pending(&db, &fanout_id).await;
+        let first_target = node_pending_credential_service::fan_out_target(&stored, &first.id)
+            .expect("first target");
+        assert_eq!(first_target.generation, 0);
+        assert_eq!(first_target.remote_state, Some(RemoteCryptoState::Consumed));
+        let second_target = node_pending_credential_service::fan_out_target(&stored, &second.id)
+            .expect("second target");
+        assert_eq!(second_target.generation, 1);
+        assert!(second_target.remote_state.is_none());
+        assert!(second_target.crypto.node_pubkey.is_empty());
+        assert!(second_target.crypto.admin_pubkey.is_none());
+        assert!(second_target.crypto.nonce.is_none());
+        assert!(second_target.crypto.ciphertext.is_none());
+
+        let audit = load_audit_entry(&db, retry_audit).await;
+        assert_fan_out_aggregate_audit_row(
+            &audit,
+            "node_credential_rci_fan_out_retry_started",
+            &actor_id,
+            &stored,
+            Some("partial_decrypted"),
+        );
+    }
+
+    #[tokio::test]
+    async fn partial_fan_out_expiry_writes_expired_aggregate_audit_row() {
+        let (db, _state, _app, _token, actor_id, first, second) =
+            fan_out_route_fixture("pending_route_fanout_expired_audit").await;
+        let pending = node_pending_credential_service::create_fan_out_pending_credential(
+            &db,
+            &actor_id,
+            node_pending_credential_service::CreateFanOutPendingCredentialInput {
+                owner_user_id: actor_id.clone(),
+                service_id: "catalog-svc".to_string(),
+                service_slug: "openclaw".to_string(),
+                injection_method: InjectionMethod::Header,
+                field_name: "X-API-Key".to_string(),
+                target_url: None,
+                label: None,
+                ttl_secs: 86_400,
+                remote_crypto: true,
+            },
+        )
+        .await
+        .expect("create fan-out pending")
+        .pending;
+        let pending = record_all_fan_out_pubkeys(&db, &pending.id, &first.id, &second.id).await;
+        node_pending_credential_service::store_fan_out_ciphertexts_revision_guard(
+            &db,
+            &actor_id,
+            &pending.id,
+            node_pending_credential_service::StoreFanOutCiphertextsInput {
+                fan_out_revision: pending.fan_out_revision,
+                items: vec![
+                    node_pending_credential_service::StoreFanOutCiphertextItemInput::new(
+                        first.id.clone(),
+                        0,
+                        "v1".to_string(),
+                        b64url(10, 32),
+                        b64url(11, 24),
+                        vec![1, 2, 3],
+                    ),
+                    node_pending_credential_service::StoreFanOutCiphertextItemInput::new(
+                        second.id.clone(),
+                        0,
+                        "v1".to_string(),
+                        b64url(10, 32),
+                        b64url(11, 24),
+                        vec![1, 2, 3, 4],
+                    ),
+                ],
+                online_node_ids: [first.id.clone(), second.id.clone()].into_iter().collect(),
+            },
+            Utc::now(),
+        )
+        .await
+        .expect("store fan-out ciphertexts");
+        node_pending_credential_service::record_fan_out_decrypt_result(
+            &db,
+            &first.id,
+            &pending.id,
+            node_pending_credential_service::PendingCredentialDecryptOutcome::Ok,
+            None,
+            Utc::now(),
+        )
+        .await
+        .expect("first consumes");
+        db.collection::<NodePendingCredential>(NODE_PENDING_CREDENTIALS)
+            .update_one(
+                doc! { "_id": &pending.id },
+                doc! {
+                    "$set": {
+                        "expires_at": mongodb::bson::DateTime::from_chrono(
+                            Utc::now() - chrono::Duration::seconds(1)
+                        ),
+                    },
+                },
+            )
+            .await
+            .expect("force top-level expiry");
+        let expired_audit = audit_service::notify_on_audit_write(
+            "node_credential_rci_fan_out_expired",
+            Some(pending.id.clone()),
+        );
+
+        let summaries = node_pending_credential_service::expire_queued_ciphertexts_with_summaries(
+            &db,
+            Utc::now(),
+        )
+        .await
+        .expect("expire partial fan-out");
+
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].pending_credential_id, pending.id);
+        assert_eq!(summaries[0].node_id, second.id);
+        let stored = load_pending(&db, &pending.id).await;
+        assert!(!stored.is_active);
+        assert_eq!(stored.remote_state, Some(RemoteCryptoState::Expired));
+        let first_target = node_pending_credential_service::fan_out_target(&stored, &first.id)
+            .expect("first target");
+        assert_eq!(first_target.remote_state, Some(RemoteCryptoState::Consumed));
+        let second_target = node_pending_credential_service::fan_out_target(&stored, &second.id)
+            .expect("second target");
+        assert_eq!(second_target.remote_state, Some(RemoteCryptoState::Expired));
+        assert!(second_target.crypto.admin_pubkey.is_none());
+        assert!(second_target.crypto.nonce.is_none());
+        assert!(second_target.crypto.ciphertext.is_none());
+
+        let audit = load_audit_entry(&db, expired_audit).await;
+        assert_fan_out_aggregate_audit_row(
+            &audit,
+            "node_credential_rci_fan_out_expired",
+            &actor_id,
+            &stored,
+            Some("expired"),
+        );
     }
 
     #[tokio::test]

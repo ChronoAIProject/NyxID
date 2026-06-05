@@ -242,7 +242,6 @@ impl RciFanOutAuditSubject {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RciFanOutAuditEventKind {
     Created,

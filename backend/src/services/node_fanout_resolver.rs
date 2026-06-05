@@ -14,9 +14,6 @@ use crate::services::org_service;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FanOutTarget {
     pub node_id: String,
-    pub owner_user_id: String,
-    pub priority: i32,
-    pub is_primary: bool,
 }
 
 pub async fn resolve_credential_fan_out_targets(
@@ -36,7 +33,7 @@ pub async fn resolve_credential_fan_out_targets(
 
     let nodes = load_active_nodes(db, &ordered).await?;
     let mut targets = Vec::new();
-    for (index, node_id) in ordered.into_iter().enumerate() {
+    for node_id in ordered {
         let Some(node) = nodes.get(node_id.as_str()) else {
             continue;
         };
@@ -48,9 +45,6 @@ pub async fn resolve_credential_fan_out_targets(
         }
         targets.push(FanOutTarget {
             node_id: node.id.clone(),
-            owner_user_id: node.user_id.clone(),
-            priority: index as i32,
-            is_primary: index == 0,
         });
     }
 
