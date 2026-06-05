@@ -2999,6 +2999,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn init_pending_remote_crypto_rejects_fan_out_without_initializing() {
+        let db = test_db("pending_credential_init_fanout_rejected").await;
+
+        let actor_id = Uuid::new_v4().to_string();
+        insert_users(&db, vec![test_user(&actor_id, UserType::Person)]).await;
+        let first = test_node(&actor_id, "fanout-init-first");
+        let second = test_node(&actor_id, "fanout-init-second");
+        insert_node(&db, &first).await;
+        insert_node(&db, &second).await;
+        let pending = insert_fan_out_pending(
+            &db,
+            &actor_id,
+            &[first.id.clone(), second.id.clone()],
+            "fanout-init",
+        )
+        .await;
+        assert!(pending.crypto.is_none());
+        assert!(pending.remote_state.is_none());
+
+        let err = init_pending_remote_crypto_for_admin(&db, &actor_id, &first.id, &pending.id)
+            .await
+            .expect_err("fan-out init path is deferred");
+
+        assert!(matches!(
+            err,
+            AppError::ValidationError(message)
+                if message == "fan-out pending credential injection is not supported by this command"
+        ));
+        let stored = load_pending(&db, &pending.id).await;
+        assert!(stored.crypto.is_none());
+        assert!(stored.remote_state.is_none());
+        assert_eq!(stored.fan_out_nodes.len(), 2);
+        assert!(
+            stored
+                .fan_out_nodes
+                .iter()
+                .all(|target| target.remote_state.is_none()
+                    && target.crypto.node_pubkey.is_empty()
+                    && target.crypto.admin_pubkey.is_none()
+                    && target.crypto.nonce.is_none()
+                    && target.crypto.ciphertext.is_none())
+        );
+    }
+
+    #[tokio::test]
     async fn create_remote_crypto_true_initializes_v1_without_pubkey() {
         let db = test_db("pending_credential_remote_true").await;
 

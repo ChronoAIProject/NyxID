@@ -2674,6 +2674,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn route_post_pending_remote_crypto_initializes_metadata_and_nudges_connected_node() {
+        let db = test_db("pending_route_init_remote_crypto").await;
+        let actor_id = Uuid::new_v4().to_string();
+        insert_users(&db, vec![test_user(&actor_id, UserType::Person)]).await;
+        let node = test_node(&actor_id, "init-remote-node");
+        insert_node(&db, &node).await;
+        let pending = node_pending_credential_service::create_pending_credential(
+            &db,
+            &actor_id,
+            &node.id,
+            node_pending_credential_service::CreatePendingCredentialInput {
+                service_slug: "openclaw".to_string(),
+                injection_method: crate::models::node_pending_credential::InjectionMethod::Header,
+                field_name: "X-API-Key".to_string(),
+                target_url: None,
+                label: Some("Production".to_string()),
+                ttl_secs: 86_400,
+                remote_crypto: false,
+            },
+        )
+        .await
+        .expect("create legacy pending credential");
+        assert!(pending.crypto.is_none());
+        assert!(pending.remote_state.is_none());
+
+        let state = test_app_state(db.clone());
+        let (tx, mut rx) = mpsc::channel(1);
+        state.node_ws_manager.register_connection(&node.id, tx);
+        let token = access_token(&state, &actor_id);
+        let app = api_app(state);
+
+        let (status, body) = route_json(
+            app,
+            Method::POST,
+            format!(
+                "/api/v1/nodes/{}/credentials/pending/{}/remote-crypto",
+                node.id, pending.id
+            ),
+            &token,
+            None,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["id"], pending.id);
+        assert_eq!(body["node_id"], node.id);
+        assert_eq!(body["service_slug"], "openclaw");
+        assert_eq!(body["remote_state"], "pubkey_awaiting");
+        assert_eq!(body["is_active"], true);
+
+        let stored = load_pending(&db, &pending.id).await;
+        assert_eq!(stored.remote_state, Some(RemoteCryptoState::PubkeyAwaiting));
+        assert!(stored.ciphertext_queued_at.is_none());
+        assert!(stored.ciphertext_expires_at.is_none());
+        let crypto = stored.crypto.as_ref().expect("crypto metadata");
+        assert_eq!(crypto.version, "v1");
+        assert!(crypto.node_pubkey.is_empty());
+        assert!(crypto.admin_pubkey.is_none());
+        assert!(crypto.nonce.is_none());
+        assert!(crypto.ciphertext.is_none());
+
+        let NodeOutboundMessage::Text(frame) = rx.try_recv().expect("nudge frame") else {
+            panic!("expected text outbound frame");
+        };
+        let frame: Value = serde_json::from_str(&frame).expect("frame json");
+        assert_eq!(
+            frame,
+            serde_json::json!({ "type": "pending_credentials_available" })
+        );
+    }
+
+    #[tokio::test]
     async fn route_get_pending_credential_pubkey_exposes_org_integrity_opt_out() {
         let db = test_db("pending_route_get_pubkey_optout").await;
         let admin_id = Uuid::new_v4().to_string();
