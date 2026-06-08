@@ -102,6 +102,18 @@ vi.mock("@/components/shared/ws-frame-injections-editor", () => ({
 vi.mock("@/components/dashboard/ssh-service-instructions", () => ({
   SshServiceInstructions: () => <div data-testid="ssh-instructions" />,
 }));
+vi.mock("@/components/dashboard/add-key-dialog", () => ({
+  AddKeyDialog: ({
+    open,
+    reconnectKey,
+  }: {
+    readonly open: boolean;
+    readonly reconnectKey?: KeyInfo | null;
+  }) =>
+    open ? (
+      <div data-testid="add-key-dialog" data-reconnect={reconnectKey?.id ?? ""} />
+    ) : null,
+}));
 
 vi.mock("sonner", () => ({
   toast: { success: mockToastSuccess, error: mockToastError },
@@ -256,6 +268,80 @@ describe("KeyDetailPage — core rendering", () => {
     expect(
       screen.getByText(/Real requests will fail until the credential is restored/),
     ).toBeInTheDocument();
+  });
+
+  it("opens reconnect mode for failed OAuth-backed services", async () => {
+    const user = userEvent.setup();
+    hooks.key.data = makeKey({
+      status: "failed",
+      credential_type: "oauth2",
+      auth_method: "oauth2",
+      error_message: "OAuth denied",
+    });
+    hooks.catalogEntry = {
+      slug: "openai",
+      provider_type: "oauth2",
+    };
+
+    render(<KeyDetailPage />);
+
+    await user.click(screen.getByRole("button", { name: /reconnect/i }));
+
+    expect(screen.getByTestId("add-key-dialog")).toHaveAttribute(
+      "data-reconnect",
+      "key-1",
+    );
+  });
+
+  it("uses continue authentication copy for pending OAuth-backed services", async () => {
+    const user = userEvent.setup();
+    hooks.key.data = makeKey({
+      status: "pending_auth",
+      credential_type: "oauth2",
+      auth_method: "oauth2",
+    });
+    hooks.catalogEntry = {
+      slug: "openai",
+      provider_type: "oauth2",
+    };
+
+    render(<KeyDetailPage />);
+
+    await user.click(
+      screen.getByRole("button", { name: /continue authentication/i }),
+    );
+
+    expect(screen.getByTestId("add-key-dialog")).toHaveAttribute(
+      "data-reconnect",
+      "key-1",
+    );
+  });
+
+  it("hides reconnect for read-only org-inherited OAuth services", () => {
+    hooks.key.data = makeKey({
+      status: "failed",
+      credential_type: "oauth2",
+      auth_method: "oauth2",
+      credential_source: {
+        type: "org",
+        org_id: "org-1",
+        org_name: "Acme Org",
+        avatar_url: null,
+        role: "member",
+        allowed: true,
+      },
+    });
+    hooks.catalogEntry = {
+      slug: "openai",
+      provider_type: "oauth2",
+    };
+
+    render(<KeyDetailPage />);
+
+    expect(
+      screen.queryByRole("button", { name: /reconnect/i }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("Shared from Acme Org")).toBeInTheDocument();
   });
 });
 

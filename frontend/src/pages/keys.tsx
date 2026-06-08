@@ -6,6 +6,7 @@ import { PageHeader } from "@/components/shared/page-header";
 import { AddCtaButton } from "@/components/shared/add-cta-button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { Card, CardContent } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -25,6 +26,7 @@ import {
   Router,
   Terminal,
   Zap,
+  RefreshCw,
 } from "lucide-react";
 import { MagicKeyIcon } from "@/components/icons/empty-state";
 import { Switch } from "@/components/ui/switch";
@@ -78,7 +80,42 @@ interface KeyCardProps {
   readonly source: CredentialSource | undefined;
 }
 
-function KeyCardContent({ keyInfo, source }: KeyCardProps) {
+const RECONNECTABLE_STATUSES = new Set([
+  "pending_auth",
+  "refresh_failed",
+  "failed",
+]);
+
+function isNonAdminOrgSource(source: CredentialSource | undefined): boolean {
+  return source?.type === "org" && source.role !== "admin";
+}
+
+function isReconnectableKey(
+  keyInfo: KeyInfo,
+  source: CredentialSource | undefined,
+): boolean {
+  if (keyInfo.auto_connected || isNonAdminOrgSource(source)) return false;
+  if (!RECONNECTABLE_STATUSES.has(keyInfo.status)) return false;
+  return (
+    keyInfo.credential_type === "oauth2" ||
+    keyInfo.auth_method === "oauth2" ||
+    keyInfo.auth_method === "oidc"
+  );
+}
+
+function reconnectLabel(status: string): string {
+  return status === "pending_auth"
+    ? "Continue authentication"
+    : "Reconnect";
+}
+
+function KeyCardContent({
+  keyInfo,
+  source,
+  onReconnect,
+}: KeyCardProps & {
+  readonly onReconnect?: (keyInfo: KeyInfo) => void;
+}) {
   const isSsh = keyInfo.service_type === "ssh";
   const hasSshCertificateAuth = isSsh && keyInfo.ssh_ca_public_key !== null;
   // Issue #416: resolve the bound node's name so the list card shows
@@ -112,6 +149,7 @@ function KeyCardContent({ keyInfo, source }: KeyCardProps) {
     displayStatus === "node_deleted"
       ? "Node Deleted"
       : displayStatus.charAt(0).toUpperCase() + displayStatus.slice(1);
+  const showReconnect = onReconnect && isReconnectableKey(keyInfo, source);
 
   return (
     <Card
@@ -157,6 +195,21 @@ function KeyCardContent({ keyInfo, source }: KeyCardProps) {
           {!keyInfo.is_active && <Badge variant="secondary">Inactive</Badge>}
         </div>
 
+        {showReconnect && (
+          <Button
+            variant="outline"
+            className="w-fit"
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              onReconnect(keyInfo);
+            }}
+          >
+            <ButtonIcon><RefreshCw className="h-3 w-3" /></ButtonIcon>
+            {reconnectLabel(keyInfo.status)}
+          </Button>
+        )}
+
         <div className="mt-auto grid grid-cols-2 gap-x-4 gap-y-3 text-xs text-muted-foreground">
           <div className="flex min-w-0 items-center gap-1.5">
             {isSsh ? (
@@ -200,7 +253,13 @@ function KeyCardContent({ keyInfo, source }: KeyCardProps) {
   );
 }
 
-function KeyCard({ keyInfo, source }: KeyCardProps) {
+function KeyCard({
+  keyInfo,
+  source,
+  onReconnect,
+}: KeyCardProps & {
+  readonly onReconnect?: (keyInfo: KeyInfo) => void;
+}) {
   // Navigation gating:
   //
   // - Personal credentials and admin-role org credentials: fully clickable
@@ -214,7 +273,11 @@ function KeyCard({ keyInfo, source }: KeyCardProps) {
   //   `list_user_services_with_sources` drops them.
   return (
     <Link to="/keys/$keyId" params={{ keyId: keyInfo.id }} className="h-full">
-      <KeyCardContent keyInfo={keyInfo} source={source} />
+      <KeyCardContent
+        keyInfo={keyInfo}
+        source={source}
+        onReconnect={onReconnect}
+      />
     </Link>
   );
 }
@@ -222,7 +285,10 @@ function KeyCard({ keyInfo, source }: KeyCardProps) {
 function ServiceTableRow({
   keyInfo,
   source,
-}: KeyCardProps) {
+  onReconnect,
+}: KeyCardProps & {
+  readonly onReconnect?: (keyInfo: KeyInfo) => void;
+}) {
   const navigate = useNavigate();
   const isSsh = keyInfo.service_type === "ssh";
   const hasSshCertificateAuth = isSsh && keyInfo.ssh_ca_public_key !== null;
@@ -257,6 +323,7 @@ function ServiceTableRow({
         ? "certificate"
         : "ssh tunnel"
       : keyInfo.credential_type;
+  const showReconnect = onReconnect && isReconnectableKey(keyInfo, source);
 
   return (
     <TableRow
@@ -289,14 +356,28 @@ function ServiceTableRow({
       </TableCell>
 
       <TableCell className="h-[60px]">
-        <div className="flex flex-wrap gap-1">
-          {isOrgInherited && <Badge variant="info">Org</Badge>}
-          {isBlocked && <Badge variant="secondary">Read-Only</Badge>}
-          {isReadOnly && !isBlocked && <Badge variant="secondary">View-Only</Badge>}
-          <Badge variant={statusVariant(displayStatus)}>
-            {displayStatusLabel}
-          </Badge>
-          {isSsh && <Badge variant="secondary">SSH</Badge>}
+        <div className="flex flex-wrap items-center gap-1.5">
+          <div className="flex flex-wrap gap-1">
+            {isOrgInherited && <Badge variant="info">Org</Badge>}
+            {isBlocked && <Badge variant="secondary">Read-Only</Badge>}
+            {isReadOnly && !isBlocked && <Badge variant="secondary">View-Only</Badge>}
+            <Badge variant={statusVariant(displayStatus)}>
+              {displayStatusLabel}
+            </Badge>
+            {isSsh && <Badge variant="secondary">SSH</Badge>}
+          </div>
+          {showReconnect && (
+            <Button
+              variant="outline"
+              onClick={(event) => {
+                event.stopPropagation();
+                onReconnect(keyInfo);
+              }}
+            >
+              <ButtonIcon><RefreshCw className="h-3 w-3" /></ButtonIcon>
+              {reconnectLabel(keyInfo.status)}
+            </Button>
+          )}
         </div>
       </TableCell>
     </TableRow>
@@ -305,8 +386,10 @@ function ServiceTableRow({
 
 function ServiceTableView({
   groups,
+  onReconnect,
 }: {
   readonly groups: readonly ServiceGroup[];
+  readonly onReconnect: (keyInfo: KeyInfo) => void;
 }) {
   return (
     <div className="space-y-8">
@@ -348,7 +431,12 @@ function ServiceTableView({
               </TableHeader>
               <TableBody>
                 {group.keys.map(({ keyInfo, source }) => (
-                  <ServiceTableRow key={keyInfo.id} keyInfo={keyInfo} source={source} />
+                  <ServiceTableRow
+                    key={keyInfo.id}
+                    keyInfo={keyInfo}
+                    source={source}
+                    onReconnect={onReconnect}
+                  />
                 ))}
               </TableBody>
             </Table>
@@ -474,10 +562,12 @@ function LoadingSkeleton() {
 
 function ExternalServicesTab({
   onAdd,
+  onReconnect,
   showAutoConnected,
   viewMode,
 }: {
   readonly onAdd: () => void;
+  readonly onReconnect: (keyInfo: KeyInfo) => void;
   readonly showAutoConnected: boolean;
   readonly viewMode: ViewMode;
 }) {
@@ -519,7 +609,7 @@ function ExternalServicesTab({
   const groups = groupKeysBySource(visibleKeys, sourceById);
 
   if (viewMode === "table") {
-    return <ServiceTableView groups={groups} />;
+    return <ServiceTableView groups={groups} onReconnect={onReconnect} />;
   }
 
   // If only personal services exist, skip section headers to preserve the
@@ -529,7 +619,12 @@ function ExternalServicesTab({
     return (
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {firstGroup.keys.map(({ keyInfo, source }) => (
-          <KeyCard key={keyInfo.id} keyInfo={keyInfo} source={source} />
+          <KeyCard
+            key={keyInfo.id}
+            keyInfo={keyInfo}
+            source={source}
+            onReconnect={onReconnect}
+          />
         ))}
       </div>
     );
@@ -563,7 +658,12 @@ function ExternalServicesTab({
           </div>
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {group.keys.map(({ keyInfo, source }) => (
-              <KeyCard key={keyInfo.id} keyInfo={keyInfo} source={source} />
+              <KeyCard
+                key={keyInfo.id}
+                keyInfo={keyInfo}
+                source={source}
+                onReconnect={onReconnect}
+              />
             ))}
           </div>
         </section>
@@ -653,6 +753,7 @@ export function KeysPage() {
   const [servicesViewMode, setServicesViewMode] = useViewMode("keys-services");
   const [agentKeysViewMode, setAgentKeysViewMode] = useViewMode("keys-agent");
   const [pendingPrefillSlug, setPendingPrefillSlug] = useState<string | null>(null);
+  const [reconnectKey, setReconnectKey] = useState<KeyInfo | null>(null);
   const appliedSlugRef = useRef<string | null>(null);
   const appliedActionRef = useRef<string | null>(null);
 
@@ -702,6 +803,7 @@ export function KeysPage() {
     setAddServiceOpen(next);
     if (!next) {
       setPendingPrefillSlug(null);
+      setReconnectKey(null);
       appliedSlugRef.current = null;
       appliedActionRef.current = null;
     }
@@ -757,6 +859,10 @@ export function KeysPage() {
         <TabsContent value="services" className="mt-6">
           <ExternalServicesTab
             onAdd={() => setAddServiceOpen(true)}
+            onReconnect={(keyInfo) => {
+              setReconnectKey(keyInfo);
+              setAddServiceOpen(true);
+            }}
             showAutoConnected={showAutoConnected}
             viewMode={servicesViewMode}
           />
@@ -775,6 +881,7 @@ export function KeysPage() {
         open={addServiceOpen}
         onOpenChange={handleAddServiceOpenChange}
         prefillSlug={pendingPrefillSlug ?? undefined}
+        reconnectKey={reconnectKey}
       />
     </div>
   );

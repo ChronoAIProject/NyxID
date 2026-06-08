@@ -1188,7 +1188,11 @@ function parseAdditionalScopes(raw: string): readonly string[] {
   return out;
 }
 
-async function cleanupPendingAuthKey(key: KeyInfo | null) {
+async function cleanupPendingAuthKey(
+  key: KeyInfo | null,
+  options: { readonly protectExistingKey?: boolean } = {},
+) {
+  if (options.protectExistingKey) return;
   if (key?.status !== "pending_auth") return;
   try {
     await api.delete<void>(
@@ -1206,6 +1210,7 @@ function OAuthStep({
   onKeyCleared,
   onBack,
   targetOrgId,
+  reconnectMode,
 }: {
   readonly catalogEntry: CatalogEntry;
   readonly ensureKey: () => Promise<KeyInfo>;
@@ -1213,6 +1218,7 @@ function OAuthStep({
   readonly onBack: () => void;
   /** When set, initiate the OAuth flow under this org's scope. */
   readonly targetOrgId: string | null;
+  readonly reconnectMode: boolean;
 }) {
   const initiateOAuth = useInitiateOAuth();
   const [error, setError] = useState<string | null>(null);
@@ -1241,8 +1247,10 @@ function OAuthStep({
       });
       hardRedirect(response.authorization_url);
     } catch (err) {
-      await cleanupPendingAuthKey(key);
-      onKeyCleared();
+      await cleanupPendingAuthKey(key, { protectExistingKey: reconnectMode });
+      if (!reconnectMode) {
+        onKeyCleared();
+      }
       const message =
         err instanceof ApiError ? err.message : "Failed to start OAuth flow";
       setError(message);
@@ -1337,6 +1345,7 @@ function DeviceCodeStep({
   onBack: parentOnBack,
   onComplete,
   targetOrgId,
+  reconnectMode,
 }: {
   readonly catalogEntry: CatalogEntry;
   readonly ensureKey: () => Promise<KeyInfo>;
@@ -1345,6 +1354,7 @@ function DeviceCodeStep({
   readonly onComplete: (keyId: string) => void;
   /** When set, initiate the device-code flow under this org's scope. */
   readonly targetOrgId: string | null;
+  readonly reconnectMode: boolean;
 }) {
   const [flowStep, setFlowStep] = useState<DeviceFlowStep>("configure");
   const [userCode, setUserCode] = useState("");
@@ -1385,7 +1395,7 @@ function DeviceCodeStep({
       // `?only_if_pending=true` guard makes this a no-op if the user happened
       // to complete authorization in the same tick (the `complete` poll
       // branch clears the ref so the typical success path skips it entirely).
-      const orphan = createdKeyIdRef.current;
+      const orphan = reconnectMode ? null : createdKeyIdRef.current;
       if (orphan) {
         createdKeyIdRef.current = null;
         void api
@@ -1397,7 +1407,7 @@ function DeviceCodeStep({
           });
       }
     };
-  }, []);
+  }, [reconnectMode]);
 
   // User-driven exit paths (Back / Cancel buttons, `expired`/`denied` poll
   // outcomes). Awaits the DELETE so the parent's `authKey` state is consistent
@@ -1415,7 +1425,10 @@ function DeviceCodeStep({
     if (isMountedRef.current) {
       setCreatedKeyId(null);
     }
-    onKeyCleared();
+    if (!reconnectMode) {
+      onKeyCleared();
+    }
+    if (reconnectMode) return;
     try {
       await api.delete<void>(
         `/keys/${encodeURIComponent(id)}?only_if_pending=true`,
@@ -1424,7 +1437,7 @@ function DeviceCodeStep({
       // Best effort only — the lazy reconciler in the backend will catch
       // any orphan that survives this call.
     }
-  }, [onKeyCleared]);
+  }, [onKeyCleared, reconnectMode]);
 
   // Wrapper around the parent's `onBack` that first cleans up the
   // `pending_auth` placeholder. Named `onBack` so the existing JSX
@@ -1587,8 +1600,10 @@ function DeviceCodeStep({
         response.interval,
       );
     } catch (error) {
-      await cleanupPendingAuthKey(key);
-      onKeyCleared();
+      await cleanupPendingAuthKey(key, { protectExistingKey: reconnectMode });
+      if (!reconnectMode) {
+        onKeyCleared();
+      }
       if (!isMountedRef.current) return;
       if (error instanceof ApiError) {
         setErrorMessage(error.message);
@@ -1992,6 +2007,7 @@ export function AddKeyDialog({
   open,
   onOpenChange,
   prefillSlug,
+  reconnectKey,
 }: {
   readonly open: boolean;
   readonly onOpenChange: (open: boolean) => void;
@@ -2003,6 +2019,7 @@ export function AddKeyDialog({
    * generic catalog grid and have to hunt for the right entry.
    */
   readonly prefillSlug?: string;
+  readonly reconnectKey?: KeyInfo | null;
 }) {
   const navigate = useNavigate();
   const createKey = useCreateKey();
@@ -2012,6 +2029,7 @@ export function AddKeyDialog({
   const [form, setForm] = useState<FormState>(INITIAL_FORM);
   const [authKey, setAuthKey] = useState<KeyInfo | null>(null);
   const [targetOrgId, setTargetOrgId] = useState<string | null>(null);
+  const isReconnect = reconnectKey !== undefined && reconnectKey !== null;
   // Multi-connection BYO: hold the user-typed Custom App credentials
   // from the `oauth_credentials` step so they can ride along on the
   // subsequent `POST /keys`. Without this, the dashboard would only
@@ -2066,14 +2084,41 @@ export function AddKeyDialog({
   // else. Silently no-ops if the slug isn't in the catalog — the
   // catalog step will render and the user can pick manually.
   useEffect(() => {
+    if (!open || !reconnectKey || !catalogEntries) return;
+    if (appliedPrefillRef.current === `reconnect:${reconnectKey.id}`) return;
+    const slug = reconnectKey.catalog_service_slug ?? reconnectKey.slug;
+    const match = catalogEntries.find((e) => e.slug === slug);
+    if (!match) return;
+    appliedPrefillRef.current = `reconnect:${reconnectKey.id}`;
+    setSelectedEntry(match);
+    setAuthKey(reconnectKey);
+    setTargetOrgId(
+      reconnectKey.credential_source?.type === "org" &&
+        reconnectKey.credential_source.role === "admin"
+        ? reconnectKey.credential_source.org_id
+        : null,
+    );
+    setForm({
+      ...INITIAL_FORM,
+      label: reconnectKey.label || match.name,
+      endpointUrl: reconnectKey.endpoint_url || match.base_url,
+      authMethod: reconnectKey.auth_method || match.auth_method || "bearer",
+      authKeyName:
+        reconnectKey.auth_key_name || match.auth_key_name || "Authorization",
+    });
+    setStep(match.provider_type === "device_code" ? "device_code" : "oauth");
+  }, [open, reconnectKey, catalogEntries]);
+
+  useEffect(() => {
     if (!open || !prefillSlug || !catalogEntries) return;
+    if (isReconnect) return;
     if (appliedPrefillRef.current === prefillSlug) return;
     const match = catalogEntries.find((e) => e.slug === prefillSlug);
     if (!match) return;
     appliedPrefillRef.current = prefillSlug;
     // eslint-disable-next-line react-hooks/set-state-in-effect -- prefill selection is guarded to run once per slug
     handleSelectCatalog(match);
-  }, [open, prefillSlug, catalogEntries]);
+  }, [open, prefillSlug, catalogEntries, isReconnect]);
 
   function handleSelectCustom() {
     setSelectedEntry(null);
@@ -2182,6 +2227,9 @@ export function AddKeyDialog({
   }
 
   async function ensureAuthKey(): Promise<KeyInfo> {
+    if (reconnectKey) {
+      return reconnectKey;
+    }
     if (authKey) {
       return authKey;
     }
@@ -2298,7 +2346,7 @@ export function AddKeyDialog({
   function dialogTitle(): string {
     switch (step) {
       case "catalog":
-        return "Add AI Service";
+        return isReconnect ? "Reconnect Service" : "Add AI Service";
       case "routing":
         return "Configure Routing";
       case "node_setup":
@@ -2306,9 +2354,9 @@ export function AddKeyDialog({
       case "oauth_credentials":
         return `Setup ${selectedEntry?.name ?? "Service"} Credentials`;
       case "oauth":
-        return `Connect to ${selectedEntry?.name ?? "Service"}`;
+        return `${isReconnect ? "Reconnect" : "Connect"} to ${selectedEntry?.name ?? "Service"}`;
       case "device_code":
-        return `Connect to ${selectedEntry?.name ?? "Service"}`;
+        return `${isReconnect ? "Reconnect" : "Connect"} to ${selectedEntry?.name ?? "Service"}`;
       default:
         return "Configure Service";
     }
@@ -2317,7 +2365,9 @@ export function AddKeyDialog({
   function dialogDescription(): string {
     switch (step) {
       case "catalog":
-        return "Pick from the catalog or create a custom endpoint.";
+        return isReconnect
+          ? "Restart authentication for this existing service."
+          : "Pick from the catalog or create a custom endpoint.";
       case "routing":
         return "Choose how requests reach the endpoint.";
       case "node_setup":
@@ -2423,15 +2473,18 @@ export function AddKeyDialog({
             ensureKey={ensureAuthKey}
             onKeyCleared={() => setAuthKey(null)}
             targetOrgId={targetOrgId}
+            reconnectMode={isReconnect}
             onBack={() =>
-              setStep(
-                selectedEntry.credential_mode === "user" ||
-                  selectedEntry.credential_mode === "both"
-                  ? "oauth_credentials"
-                  : form.nodeId.trim()
-                    ? "node_setup"
-                    : "routing",
-              )
+              isReconnect
+                ? handleOpenChange(false)
+                : setStep(
+                    selectedEntry.credential_mode === "user" ||
+                      selectedEntry.credential_mode === "both"
+                      ? "oauth_credentials"
+                      : form.nodeId.trim()
+                        ? "node_setup"
+                        : "routing",
+                  )
             }
           />
         )}
@@ -2442,15 +2495,18 @@ export function AddKeyDialog({
             ensureKey={ensureAuthKey}
             onKeyCleared={() => setAuthKey(null)}
             targetOrgId={targetOrgId}
+            reconnectMode={isReconnect}
             onBack={() =>
-              setStep(
-                selectedEntry.credential_mode === "user" ||
-                  selectedEntry.credential_mode === "both"
-                  ? "oauth_credentials"
-                  : form.nodeId.trim()
-                    ? "node_setup"
-                    : "routing",
-              )
+              isReconnect
+                ? handleOpenChange(false)
+                : setStep(
+                    selectedEntry.credential_mode === "user" ||
+                      selectedEntry.credential_mode === "both"
+                      ? "oauth_credentials"
+                      : form.nodeId.trim()
+                        ? "node_setup"
+                        : "routing",
+                  )
             }
             onComplete={handleAuthComplete}
           />
