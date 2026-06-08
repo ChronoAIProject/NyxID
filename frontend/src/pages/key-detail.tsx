@@ -30,6 +30,7 @@ import { PageHeader } from "@/components/shared/page-header";
 import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
 import { SshServiceInstructions } from "@/components/dashboard/ssh-service-instructions";
 import { RoutingSection } from "@/components/dashboard/routing-section";
+import { AddKeyDialog } from "@/components/dashboard/add-key-dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button, ButtonIcon } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -94,6 +95,18 @@ function titleCase(s: string): string {
     .split("_")
     .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
     .join(" ");
+}
+
+const RECONNECTABLE_STATUSES = new Set([
+  "pending_auth",
+  "refresh_failed",
+  "failed",
+]);
+
+function reconnectLabel(status: string): string {
+  return status === "pending_auth"
+    ? "Continue authentication"
+    : "Reconnect";
 }
 
 /**
@@ -1758,6 +1771,7 @@ export function KeyDetailPage() {
   useBreadcrumbLabel(keyInfo?.label ?? keyInfo?.catalog_service_slug);
 
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [reconnectOpen, setReconnectOpen] = useState(false);
 
   const catalogHeaders = useMemo<
     readonly DefaultRequestHeader[] | null
@@ -1820,6 +1834,13 @@ export function KeyDetailPage() {
   const source = keyInfo.credential_source;
   const isOrgSource = source?.type === "org";
   const readOnly = isOrgSource && source.role !== "admin";
+  const canReconnect =
+    !readOnly &&
+    !keyInfo.auto_connected &&
+    RECONNECTABLE_STATUSES.has(keyInfo.status) &&
+    (keyInfo.credential_type === "oauth2" ||
+      catalogEntry?.provider_type === "oauth2" ||
+      catalogEntry?.provider_type === "device_code");
 
   const sshConfig: SshServiceConfig | null =
     isSsh && keyInfo.ssh_host && keyInfo.ssh_port !== null
@@ -1884,6 +1905,15 @@ export function KeyDetailPage() {
               >
                 <ButtonIcon><Terminal className="h-4 w-4" /></ButtonIcon>
                 Terminal
+              </Button>
+            )}
+            {canReconnect && (
+              <Button
+                variant="primary"
+                onClick={() => setReconnectOpen(true)}
+              >
+                <ButtonIcon variant="primary"><RefreshCw className="h-4 w-4" /></ButtonIcon>
+                {reconnectLabel(keyInfo.status)}
               </Button>
             )}
             {!keyInfo.auto_connected && !readOnly && (
@@ -2148,6 +2178,11 @@ export function KeyDetailPage() {
         open={deleteOpen}
         onOpenChange={setDeleteOpen}
         keyId={keyInfo.id}
+      />
+      <AddKeyDialog
+        open={reconnectOpen}
+        onOpenChange={setReconnectOpen}
+        reconnectKey={keyInfo}
       />
     </div>
   );

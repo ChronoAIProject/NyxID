@@ -57,12 +57,18 @@ vi.mock("@/components/dashboard/add-key-dialog", () => ({
   AddKeyDialog: ({
     open,
     prefillSlug,
+    reconnectKey,
   }: {
     readonly open: boolean;
     readonly prefillSlug?: string;
+    readonly reconnectKey?: KeyInfo | null;
   }) =>
     open ? (
-      <div data-testid="add-key-dialog" data-prefill={prefillSlug ?? ""} />
+      <div
+        data-testid="add-key-dialog"
+        data-prefill={prefillSlug ?? ""}
+        data-reconnect={reconnectKey?.id ?? ""}
+      />
     ) : null,
 }));
 
@@ -261,6 +267,83 @@ describe("KeysPage", () => {
     expect(screen.getByTestId("add-key-dialog")).toBeInTheDocument();
   });
 
+  it("opens reconnect mode from a recoverable OAuth service card without navigating", async () => {
+    const user = userEvent.setup();
+    state.keys = [
+      makeKey({
+        id: "oauth-key",
+        label: "Needs Reauth",
+        credential_type: "oauth2",
+        auth_method: "oauth2",
+        status: "refresh_failed",
+      }),
+    ];
+
+    render(<KeysPage />);
+
+    await user.click(screen.getByRole("button", { name: /reconnect/i }));
+
+    expect(screen.getByTestId("add-key-dialog")).toHaveAttribute(
+      "data-reconnect",
+      "oauth-key",
+    );
+    expect(mockNavigate).not.toHaveBeenCalledWith({
+      to: "/keys/$keyId",
+      params: { keyId: "oauth-key" },
+    });
+  });
+
+  it("labels pending OAuth service cards as continue authentication", async () => {
+    const user = userEvent.setup();
+    state.keys = [
+      makeKey({
+        id: "pending-oauth",
+        label: "Pending OAuth",
+        credential_type: "oauth2",
+        auth_method: "oauth2",
+        status: "pending_auth",
+      }),
+    ];
+
+    render(<KeysPage />);
+
+    await user.click(
+      screen.getByRole("button", { name: /continue authentication/i }),
+    );
+
+    expect(screen.getByTestId("add-key-dialog")).toHaveAttribute(
+      "data-reconnect",
+      "pending-oauth",
+    );
+  });
+
+  it("hides reconnect for read-only org-inherited OAuth services", () => {
+    state.keys = [
+      makeKey({
+        id: "org-oauth",
+        label: "Org OAuth",
+        credential_type: "oauth2",
+        auth_method: "oauth2",
+        status: "failed",
+        credential_source: {
+          type: "org",
+          org_id: "org-1",
+          org_name: "Acme Org",
+          avatar_url: null,
+          role: "member",
+          allowed: true,
+        },
+      }),
+    ];
+
+    render(<KeysPage />);
+
+    expect(
+      screen.queryByRole("button", { name: /reconnect/i }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("View-Only")).toBeInTheDocument();
+  });
+
   it("switches to the Agent Keys tab and mounts the API key table + usage dashboard", async () => {
     const user = userEvent.setup();
     state.keys = [makeKey()];
@@ -333,6 +416,37 @@ describe("KeysPage", () => {
       expect(mockNavigate).toHaveBeenCalledWith({
         to: "/keys/$keyId",
         params: { keyId: "key-1" },
+      });
+    } finally {
+      localStorage.removeItem("nyxid-view-mode:keys-services");
+    }
+  });
+
+  it("opens reconnect mode from a table row action without navigating to detail", async () => {
+    localStorage.setItem("nyxid-view-mode:keys-services", "table");
+    const user = userEvent.setup();
+    state.keys = [
+      makeKey({
+        id: "table-oauth",
+        label: "Table OAuth",
+        credential_type: "oauth2",
+        auth_method: "oauth2",
+        status: "failed",
+      }),
+    ];
+
+    try {
+      render(<KeysPage />);
+
+      await user.click(screen.getByRole("button", { name: /reconnect/i }));
+
+      expect(screen.getByTestId("add-key-dialog")).toHaveAttribute(
+        "data-reconnect",
+        "table-oauth",
+      );
+      expect(mockNavigate).not.toHaveBeenCalledWith({
+        to: "/keys/$keyId",
+        params: { keyId: "table-oauth" },
       });
     } finally {
       localStorage.removeItem("nyxid-view-mode:keys-services");

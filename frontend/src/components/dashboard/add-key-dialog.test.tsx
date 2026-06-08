@@ -1,20 +1,74 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { CatalogEntry } from "@/types/keys";
+import type { CatalogEntry, KeyInfo } from "@/types/keys";
 import { ApiError } from "@/lib/api-client";
 import { AddKeyDialog } from "./add-key-dialog";
 
-const { catalog, createKeyMutate, mockNavigate, toastFns } = vi.hoisted(() => ({
+const {
+  catalog,
+  createKeyMutate,
+  createKeyMutateAsync,
+  initiateOAuthMutateAsync,
+  initiateDeviceCodeMutateAsync,
+  pollDeviceCodeMutate,
+  mockApiDelete,
+  mockHardRedirect,
+  mockNavigate,
+  toastFns,
+} = vi.hoisted(() => ({
   catalog: { entries: [] as unknown[] },
   createKeyMutate: vi.fn(),
+  createKeyMutateAsync: vi.fn(),
+  initiateOAuthMutateAsync: vi.fn(),
+  initiateDeviceCodeMutateAsync: vi.fn(),
+  pollDeviceCodeMutate: vi.fn(),
+  mockApiDelete: vi.fn(),
+  mockHardRedirect: vi.fn(),
   mockNavigate: vi.fn(),
   toastFns: { success: vi.fn(), error: vi.fn() },
 }));
 
 vi.mock("@/hooks/use-keys", () => ({
   useCatalog: () => ({ data: catalog.entries, isLoading: false }),
-  useCreateKey: () => ({ mutate: createKeyMutate, isPending: false }),
+  useCreateKey: () => ({
+    mutate: createKeyMutate,
+    mutateAsync: createKeyMutateAsync,
+    isPending: false,
+  }),
+}));
+
+vi.mock("@/hooks/use-providers", () => ({
+  useInitiateOAuth: () => ({
+    mutateAsync: initiateOAuthMutateAsync,
+    isPending: false,
+  }),
+  useInitiateDeviceCode: () => ({
+    mutateAsync: initiateDeviceCodeMutateAsync,
+    isPending: false,
+  }),
+  usePollDeviceCode: () => ({
+    mutate: pollDeviceCodeMutate,
+    isPending: false,
+  }),
+}));
+
+vi.mock("@/lib/api-client", async () => {
+  const actual =
+    await vi.importActual<typeof import("@/lib/api-client")>(
+      "@/lib/api-client",
+    );
+  return {
+    ...actual,
+    api: {
+      ...actual.api,
+      delete: mockApiDelete,
+    },
+  };
+});
+
+vi.mock("@/lib/navigation", () => ({
+  hardRedirect: mockHardRedirect,
 }));
 
 // RoutingStep reads online nodes; OwnerPicker reads admin orgs. Empty
@@ -44,9 +98,76 @@ const OPENAI_ENTRY = {
   service_type: "http",
 } as unknown as CatalogEntry;
 
+const OAUTH_ENTRY = {
+  ...OPENAI_ENTRY,
+  slug: "github",
+  name: "GitHub",
+  provider_config_id: "provider-oauth",
+  provider_type: "oauth2",
+  auth_method: "oauth2",
+  auth_key_name: "Authorization",
+} as unknown as CatalogEntry;
+
+const DEVICE_CODE_ENTRY = {
+  ...OPENAI_ENTRY,
+  slug: "codex",
+  name: "Codex",
+  provider_config_id: "provider-device",
+  provider_type: "device_code",
+  auth_method: "oauth2",
+  auth_key_name: "Authorization",
+  device_code_format: "openai",
+} as unknown as CatalogEntry;
+
+function makeReconnectKey(overrides: Partial<KeyInfo> = {}): KeyInfo {
+  return {
+    id: "existing-service-1",
+    label: "Existing GitHub",
+    slug: "github-existing",
+    endpoint_url: "https://api.github.com",
+    endpoint_id: "endpoint-1",
+    api_key_id: "api-key-1",
+    credential_type: "oauth2",
+    auth_method: "oauth2",
+    auth_key_name: "Authorization",
+    status: "failed",
+    catalog_service_id: "catalog-1",
+    catalog_service_slug: "github",
+    catalog_service_name: "GitHub",
+    node_id: null,
+    node_priority: 0,
+    is_active: true,
+    ws_frame_injections: [],
+    auto_connected: false,
+    expires_at: null,
+    last_used_at: null,
+    error_message: "Previous authorization failed",
+    created_at: "2026-01-01T00:00:00Z",
+    service_type: "http",
+    ssh_host: null,
+    ssh_port: null,
+    ssh_ca_public_key: null,
+    ssh_allowed_principals: null,
+    ssh_certificate_ttl_minutes: null,
+    ...overrides,
+  };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   catalog.entries = [OPENAI_ENTRY];
+  createKeyMutateAsync.mockResolvedValue({ id: "created-service-1" });
+  initiateOAuthMutateAsync.mockResolvedValue({
+    authorization_url: "https://provider.example/oauth",
+  });
+  initiateDeviceCodeMutateAsync.mockResolvedValue({
+    user_code: "ABCD-EFGH",
+    verification_uri: "https://provider.example/device",
+    state: "device-state",
+    expires_in: 900,
+    interval: 5,
+  });
+  mockApiDelete.mockResolvedValue(undefined);
 });
 
 /**
@@ -182,5 +303,174 @@ describe("AddKeyDialog — catalog template path", () => {
       to: "/keys/$keyId",
       params: { keyId: "new-key-2" },
     });
+  });
+});
+
+describe("AddKeyDialog — reconnect path", () => {
+  it("starts OAuth reconnect with the existing key id and detail redirect without creating or deleting a key", async () => {
+    catalog.entries = [OAUTH_ENTRY];
+    const user = userEvent.setup();
+    render(
+      <AddKeyDialog
+        open
+        onOpenChange={vi.fn()}
+        reconnectKey={makeReconnectKey()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /Connect with GitHub/i }));
+
+    await waitFor(() => {
+      expect(initiateOAuthMutateAsync).toHaveBeenCalledTimes(1);
+    });
+    expect(initiateOAuthMutateAsync).toHaveBeenCalledWith({
+      providerId: "provider-oauth",
+      redirectPath: "/keys/existing-service-1",
+      additionalScopes: [],
+      keyId: "existing-service-1",
+    });
+    expect(createKeyMutate).not.toHaveBeenCalled();
+    expect(createKeyMutateAsync).not.toHaveBeenCalled();
+    expect(mockApiDelete).not.toHaveBeenCalled();
+    expect(mockHardRedirect).toHaveBeenCalledWith(
+      "https://provider.example/oauth",
+    );
+  });
+
+  it("passes targetOrgId for admin org-owned OAuth reconnects", async () => {
+    catalog.entries = [OAUTH_ENTRY];
+    const user = userEvent.setup();
+    render(
+      <AddKeyDialog
+        open
+        onOpenChange={vi.fn()}
+        reconnectKey={makeReconnectKey({
+          credential_source: {
+            type: "org",
+            org_id: "org-user-1",
+            org_name: "Acme",
+            avatar_url: null,
+            role: "admin",
+            allowed: true,
+          },
+        })}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /Connect with GitHub/i }));
+
+    expect(initiateOAuthMutateAsync).toHaveBeenCalledWith(
+      expect.objectContaining({
+        keyId: "existing-service-1",
+        redirectPath: "/keys/existing-service-1",
+        targetOrgId: "org-user-1",
+      }),
+    );
+  });
+
+  it("does not delete an existing OAuth key when initiate fails or Back closes the reconnect dialog", async () => {
+    catalog.entries = [OAUTH_ENTRY];
+    initiateOAuthMutateAsync.mockRejectedValue(
+      new ApiError(400, {
+        error: "bad_request",
+        error_code: 1000,
+        message: "provider unavailable",
+      }),
+    );
+    const onOpenChange = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <AddKeyDialog
+        open
+        onOpenChange={onOpenChange}
+        reconnectKey={makeReconnectKey({ status: "pending_auth" })}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /Connect with GitHub/i }));
+    await waitFor(() =>
+      expect(screen.getByText("provider unavailable")).toBeInTheDocument(),
+    );
+    await user.click(screen.getByRole("button", { name: /^Back$/i }));
+
+    expect(mockApiDelete).not.toHaveBeenCalled();
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("starts device-code reconnect with the existing key id and never creates a key", async () => {
+    catalog.entries = [DEVICE_CODE_ENTRY];
+    const user = userEvent.setup();
+    render(
+      <AddKeyDialog
+        open
+        onOpenChange={vi.fn()}
+        reconnectKey={makeReconnectKey({
+          catalog_service_slug: "codex",
+          catalog_service_name: "Codex",
+        })}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+
+    await waitFor(() => {
+      expect(initiateDeviceCodeMutateAsync).toHaveBeenCalledTimes(1);
+    });
+    expect(initiateDeviceCodeMutateAsync).toHaveBeenCalledWith({
+      providerId: "provider-device",
+      additionalScopes: [],
+      keyId: "existing-service-1",
+    });
+    expect(createKeyMutate).not.toHaveBeenCalled();
+    expect(createKeyMutateAsync).not.toHaveBeenCalled();
+    expect(mockApiDelete).not.toHaveBeenCalled();
+  });
+
+  it("does not delete an existing device-code key on Back or unmount during reconnect", async () => {
+    catalog.entries = [DEVICE_CODE_ENTRY];
+    const onOpenChange = vi.fn();
+    const user = userEvent.setup();
+    const first = render(
+      <AddKeyDialog
+        open
+        onOpenChange={onOpenChange}
+        reconnectKey={makeReconnectKey({
+          catalog_service_slug: "codex",
+          catalog_service_name: "Codex",
+          status: "pending_auth",
+        })}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await waitFor(() => {
+      expect(screen.getByText("ABCD-EFGH")).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole("button", { name: /^Back$/i }));
+
+    expect(mockApiDelete).not.toHaveBeenCalled();
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    first.unmount();
+
+    vi.clearAllMocks();
+    catalog.entries = [DEVICE_CODE_ENTRY];
+    const second = render(
+      <AddKeyDialog
+        open
+        onOpenChange={vi.fn()}
+        reconnectKey={makeReconnectKey({
+          catalog_service_slug: "codex",
+          catalog_service_name: "Codex",
+          status: "pending_auth",
+        })}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await waitFor(() => {
+      expect(screen.getByText("ABCD-EFGH")).toBeInTheDocument();
+    });
+    second.unmount();
+
+    expect(mockApiDelete).not.toHaveBeenCalled();
   });
 });

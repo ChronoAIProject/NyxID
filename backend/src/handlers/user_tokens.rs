@@ -301,11 +301,11 @@ async fn resolve_oauth_target_org(
 /// nothing resolves under `owner_id`, or the resolved key carries no
 /// `connection_id`. A `None` result is always safe: the callback simply
 /// takes the legacy write path.
-async fn resolve_connection_id_for_key(
+async fn resolve_api_key_for_auth_flow(
     state: &AppState,
     owner_id: &str,
     key_id: Option<&str>,
-) -> Option<String> {
+) -> Option<crate::models::user_api_key::UserApiKey> {
     let key_id = key_id?;
     // Primary path: `key_id` is a `UserService` id (what both wizard
     // frontends send). Resolve service -> its `api_key_id` -> that
@@ -314,14 +314,13 @@ async fn resolve_connection_id_for_key(
         && let Some(api_key_id) = service.api_key_id.as_deref()
         && let Ok(key) = user_api_key_service::get_api_key(&state.db, owner_id, api_key_id).await
     {
-        return key.connection_id;
+        return Some(key);
     }
     // Fallback: `key_id` may already be a `UserApiKey` id (the original
     // param contract). Preserved so no existing caller regresses.
     user_api_key_service::get_api_key(&state.db, owner_id, key_id)
         .await
         .ok()
-        .and_then(|key| key.connection_id)
 }
 
 /// GET /api/v1/providers/{provider_id}/connect/oauth
@@ -348,8 +347,9 @@ pub async fn initiate_oauth_connect(
     // that key. `None` (legacy provider-connect flows) keeps the
     // `user_provider_tokens` write path.
     let effective_owner = target_org_user_id.as_deref().unwrap_or(&user_id_str);
-    let connection_id =
-        resolve_connection_id_for_key(&state, effective_owner, query.key_id.as_deref()).await;
+    let flow_key =
+        resolve_api_key_for_auth_flow(&state, effective_owner, query.key_id.as_deref()).await;
+    let connection_id = flow_key.as_ref().and_then(|key| key.connection_id.clone());
 
     let auth_url = user_token_service::initiate_oauth_connect(
         &state.db,
@@ -363,6 +363,21 @@ pub async fn initiate_oauth_connect(
         connection_id.as_deref(),
     )
     .await?;
+
+    if let Some(key) = flow_key.as_ref()
+        && matches!(
+            key.status.as_str(),
+            "failed" | "refresh_failed" | "expired" | "pending_auth"
+        )
+    {
+        user_api_key_service::mark_provider_connection_pending(
+            &state.db,
+            effective_owner,
+            &key.id,
+            "oauth2",
+        )
+        .await?;
+    }
 
     audit_service::log_for_user(
         state.db.clone(),
@@ -899,8 +914,9 @@ pub async fn request_device_code(
     // token onto that key. `None` keeps the legacy `user_provider_tokens`
     // path. See `initiate_oauth_connect` for the full rationale.
     let effective_owner = target_org_user_id.as_deref().unwrap_or(&user_id_str);
-    let connection_id =
-        resolve_connection_id_for_key(&state, effective_owner, query.key_id.as_deref()).await;
+    let flow_key =
+        resolve_api_key_for_auth_flow(&state, effective_owner, query.key_id.as_deref()).await;
+    let connection_id = flow_key.as_ref().and_then(|key| key.connection_id.clone());
 
     let result = user_token_service::request_device_code(
         &state.db,
@@ -912,6 +928,21 @@ pub async fn request_device_code(
         connection_id.as_deref(),
     )
     .await?;
+
+    if let Some(key) = flow_key.as_ref()
+        && matches!(
+            key.status.as_str(),
+            "failed" | "refresh_failed" | "expired" | "pending_auth"
+        )
+    {
+        user_api_key_service::mark_provider_connection_pending(
+            &state.db,
+            effective_owner,
+            &key.id,
+            "oauth2",
+        )
+        .await?;
+    }
 
     audit_service::log_for_user(
         state.db.clone(),
@@ -1133,9 +1164,11 @@ mod tests {
     use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
     use crate::models::user::{COLLECTION_NAME as USERS, UserType};
     use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
+    use crate::models::user_endpoint::COLLECTION_NAME as USER_ENDPOINTS;
     use crate::models::user_provider_token::{
         COLLECTION_NAME as USER_PROVIDER_TOKENS, UserProviderToken,
     };
+    use crate::models::user_service::COLLECTION_NAME as USER_SERVICES;
     use crate::mw::auth::AuthMethod;
     use crate::test_utils::{connect_test_database, test_app_state, test_membership, test_user};
     use axum::http::header::LOCATION;
@@ -1342,6 +1375,77 @@ mod tests {
         (format!("http://{addr}/token"), handle)
     }
 
+    async fn spawn_device_code_server() -> (String, tokio::task::JoinHandle<()>) {
+        let app = axum::Router::new().route(
+            "/device",
+            axum::routing::post(|| async {
+                axum::Json(serde_json::json!({
+                    "device_code": "test-device-code",
+                    "user_code": "ABCD-EFGH",
+                    "verification_uri": "https://provider.example/device",
+                    "expires_in": 900,
+                    "interval": 5,
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{addr}/device"), handle)
+    }
+
+    async fn insert_failed_oauth_service(
+        db: &mongodb::Database,
+        user_id: &str,
+        provider_id: &str,
+    ) -> (String, String) {
+        let endpoint_id = Uuid::new_v4().to_string();
+        let key_id = Uuid::new_v4().to_string();
+        let service_id = Uuid::new_v4().to_string();
+        let connection_id = Uuid::new_v4().to_string();
+
+        db.collection(USER_ENDPOINTS)
+            .insert_one(crate::test_utils::test_user_endpoint(
+                &endpoint_id,
+                user_id,
+                "Endpoint",
+                "https://api.example.com",
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+
+        let mut key = test_pending_oauth_api_key(&key_id, user_id, provider_id);
+        key.status = "failed".to_string();
+        key.error_message = Some("previous failure".to_string());
+        key.connection_id = Some(connection_id);
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .insert_one(key)
+            .await
+            .unwrap();
+
+        let mut service = crate::test_utils::test_user_service(
+            &service_id,
+            user_id,
+            "oauth-service",
+            &endpoint_id,
+            None,
+            None,
+        );
+        service.api_key_id = Some(key_id.clone());
+        service.auth_method = "oauth2".to_string();
+        service.auth_key_name = "Authorization".to_string();
+        db.collection(USER_SERVICES)
+            .insert_one(service)
+            .await
+            .unwrap();
+
+        (service_id, key_id)
+    }
+
     #[test]
     fn callback_state_allows_missing_session_cookie() {
         assert!(ensure_callback_user_matches_state(None, "user-123").is_ok());
@@ -1481,6 +1585,150 @@ mod tests {
         assert_eq!(response.tokens.len(), 1);
         assert_eq!(response.tokens[0].provider_id, provider_id);
         assert_eq!(response.tokens[0].provider_name, "GitHub");
+    }
+
+    #[tokio::test]
+    async fn initiate_oauth_with_key_id_resets_failed_service_to_pending() {
+        let Some(db) = connect_test_database("oauth_reconnect_resets_failed").await else {
+            eprintln!(
+                "skipping provider token handler integration test: no local MongoDB available"
+            );
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let user_id = Uuid::new_v4().to_string();
+        let provider_id = Uuid::new_v4().to_string();
+
+        let mut provider = test_provider_config(&provider_id);
+        provider.client_id_encrypted = Some(
+            state
+                .encryption_keys
+                .encrypt(b"test-client-id")
+                .await
+                .unwrap(),
+        );
+        provider.client_secret_encrypted = Some(
+            state
+                .encryption_keys
+                .encrypt(b"test-client-secret")
+                .await
+                .unwrap(),
+        );
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(provider)
+            .await
+            .unwrap();
+        let (service_id, key_id) = insert_failed_oauth_service(&db, &user_id, &provider_id).await;
+        let before = get_api_key(&db, &key_id).await;
+        let connection_id = before.connection_id.clone().expect("connection id");
+        assert_eq!(before.status, "failed");
+
+        let Json(response) = initiate_oauth_connect(
+            State(state),
+            crate::test_utils::test_auth_user(&user_id),
+            Path(provider_id.clone()),
+            Query(OAuthInitiateQuery {
+                redirect_path: Some(format!("/keys/{service_id}")),
+                key_id: Some(service_id.clone()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+
+        let auth_url = url::Url::parse(&response.authorization_url).expect("authorization URL");
+        let state_id = auth_url
+            .query_pairs()
+            .find_map(|(name, value)| (name == "state").then(|| value.into_owned()))
+            .expect("state query param");
+        let oauth_state = db
+            .collection::<OAuthState>(OAUTH_STATES)
+            .find_one(doc! { "_id": state_id })
+            .await
+            .unwrap()
+            .expect("OAuthState");
+        assert_eq!(
+            oauth_state.connection_id.as_deref(),
+            Some(connection_id.as_str())
+        );
+        assert_eq!(
+            oauth_state.redirect_path.as_deref(),
+            Some(format!("/keys/{service_id}").as_str())
+        );
+
+        let after = get_api_key(&db, &key_id).await;
+        assert_eq!(after.status, "pending_auth");
+        assert_eq!(after.credential_type, "oauth2");
+        assert!(after.error_message.is_none());
+        assert_eq!(after.connection_id.as_deref(), Some(connection_id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn request_device_code_with_key_id_resets_failed_service_to_pending() {
+        let Some(db) = connect_test_database("device_reconnect_resets_failed").await else {
+            eprintln!(
+                "skipping provider token handler integration test: no local MongoDB available"
+            );
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let user_id = Uuid::new_v4().to_string();
+        let provider_id = Uuid::new_v4().to_string();
+        let (device_url, server) = spawn_device_code_server().await;
+
+        let mut provider = test_provider_config(&provider_id);
+        provider.provider_type = "device_code".to_string();
+        provider.authorization_url = None;
+        provider.token_url = None;
+        provider.device_code_url = Some(device_url);
+        provider.device_verification_url = Some("https://provider.example/device".to_string());
+        provider.client_id_encrypted = Some(
+            state
+                .encryption_keys
+                .encrypt(b"test-client-id")
+                .await
+                .unwrap(),
+        );
+        provider.client_secret_encrypted = None;
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(provider)
+            .await
+            .unwrap();
+        let (service_id, key_id) = insert_failed_oauth_service(&db, &user_id, &provider_id).await;
+        let before = get_api_key(&db, &key_id).await;
+        let connection_id = before.connection_id.clone().expect("connection id");
+
+        let Json(response) = request_device_code(
+            State(state),
+            crate::test_utils::test_auth_user(&user_id),
+            Path(provider_id),
+            Query(DeviceCodeInitiateQuery {
+                key_id: Some(service_id),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+        server.abort();
+
+        assert_eq!(response.user_code, "ABCD-EFGH");
+        assert_eq!(response.verification_uri, "https://provider.example/device");
+        let oauth_state = db
+            .collection::<OAuthState>(OAUTH_STATES)
+            .find_one(doc! { "_id": response.state })
+            .await
+            .unwrap()
+            .expect("OAuthState");
+        assert_eq!(
+            oauth_state.connection_id.as_deref(),
+            Some(connection_id.as_str())
+        );
+
+        let after = get_api_key(&db, &key_id).await;
+        assert_eq!(after.status, "pending_auth");
+        assert_eq!(after.credential_type, "oauth2");
+        assert!(after.error_message.is_none());
+        assert_eq!(after.connection_id.as_deref(), Some(connection_id.as_str()));
     }
 
     #[tokio::test]
