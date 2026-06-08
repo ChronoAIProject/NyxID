@@ -24,14 +24,15 @@ RUN apt-get update \
 WORKDIR /build
 
 # Copy entire workspace (needed for workspace dependency resolution).
-# `cloud-auth/` (NyxID#716) is a workspace member depended on by the
-# node agent via `cli/Cargo.toml`; missing it makes the workspace
-# refuse to resolve.
+# `cloud-auth/` (NyxID#716) and `nyxid-crypto/` (NyxID#773) are workspace
+# members depended on by the node agent via `cli/Cargo.toml`; missing
+# either makes the workspace refuse to resolve.
 COPY Cargo.toml Cargo.lock ./
 COPY backend/ backend/
 COPY cli/ cli/
 COPY cloud-auth/ cloud-auth/
 COPY mcp-demo/ mcp-demo/
+COPY nyxid-crypto/ nyxid-crypto/
 COPY docs/AI_AGENT_PLAYBOOK.md docs/AI_AGENT_PLAYBOOK.md
 
 # Build only the CLI binary (includes node agent subcommand)

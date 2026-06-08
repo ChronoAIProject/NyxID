@@ -10,24 +10,28 @@ ARG NYXID_GIT_HASH=unknown
 ENV NYXID_GIT_HASH=${NYXID_GIT_HASH}
 
 # Copy workspace manifests and lock file for dependency caching.
-# `cloud-auth/` (NyxID#716) is a workspace member depended on by both
-# backend and CLI; cargo refuses to resolve the workspace if its
-# manifest is missing, so it must be staged here even though the
-# backend binary doesn't link it directly via path.
+# `cloud-auth/` (NyxID#716) and `nyxid-crypto/` (NyxID#773) are workspace
+# members; cargo refuses to resolve the workspace if any member's manifest
+# is missing, so they must be staged here even though the backend binary
+# only links cloud-auth directly via path (nyxid-crypto is CLI-only).
 COPY Cargo.toml Cargo.lock ./
 COPY backend/Cargo.toml backend/Cargo.toml
 COPY cli/Cargo.toml cli/Cargo.toml
 COPY cloud-auth/Cargo.toml cloud-auth/Cargo.toml
 COPY mcp-demo/Cargo.toml mcp-demo/Cargo.toml
+COPY nyxid-crypto/Cargo.toml nyxid-crypto/Cargo.toml
 
 # Create dummy entry points so cargo can resolve and compile dependencies.
 # backend, cli, and mcp-demo are binary crates (need main.rs).
-# cloud-auth is a library crate (needs lib.rs); a stub `pub fn _stub(){}`
-# is enough to satisfy cargo's check that the lib target exists.
+# cloud-auth and nyxid-crypto are library crates (need lib.rs); a stub
+# `pub fn _stub(){}` is enough to satisfy cargo's check that the lib target
+# exists. nyxid-crypto isn't in the backend binary's graph, so its stub is
+# never compiled -- it only needs to exist for workspace resolution.
 RUN mkdir -p backend/src && echo "fn main() {}" > backend/src/main.rs \
     && mkdir -p cli/src && echo "fn main() {}" > cli/src/main.rs \
     && mkdir -p cloud-auth/src && echo "pub fn _stub() {}" > cloud-auth/src/lib.rs \
-    && mkdir -p mcp-demo/src && echo "fn main() {}" > mcp-demo/src/main.rs
+    && mkdir -p mcp-demo/src && echo "fn main() {}" > mcp-demo/src/main.rs \
+    && mkdir -p nyxid-crypto/src && echo "pub fn _stub() {}" > nyxid-crypto/src/lib.rs
 RUN cargo build --release --manifest-path backend/Cargo.toml --features gcp-kms
 
 # Remove the dummy build artifacts (forces recompilation of our code only).
