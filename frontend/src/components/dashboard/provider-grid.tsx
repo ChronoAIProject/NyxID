@@ -45,9 +45,8 @@ export function ProviderGrid() {
   const [apiKeyDialog, setApiKeyDialog] = useState<ProviderConfig | null>(null);
   const [deviceCodeDialog, setDeviceCodeDialog] =
     useState<ProviderConfig | null>(null);
-  const [telegramDialog, setTelegramDialog] = useState<ProviderConfig | null>(
-    null,
-  );
+  const [telegramDialog, setTelegramDialog] =
+    useState<ProviderConfig | null>(null);
   const [credentialsDialog, setCredentialsDialog] =
     useState<ProviderConfig | null>(null);
   // Track which provider is currently being acted upon for per-card disabled state
@@ -78,9 +77,7 @@ export function ProviderGrid() {
   async function handleOAuthConnect(providerId: string) {
     setActiveProviderId(providerId);
     try {
-      const response = await initiateOAuthMutation.mutateAsync(
-        targetOrgId ? { providerId, targetOrgId } : providerId,
-      );
+      const response = await initiateOAuthMutation.mutateAsync(providerId);
       hardRedirect(response.authorization_url);
     } catch (error) {
       if (error instanceof ApiError) {
@@ -205,9 +202,7 @@ export function ProviderGrid() {
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <DishAntennaIcon className="h-64 w-64 text-muted-foreground/30" />
           <div className="space-y-1">
-            <p className="text-[12px] font-medium text-muted-foreground/30">
-              No Provider Tokens
-            </p>
+            <p className="text-[12px] font-medium text-muted-foreground/30">No Provider Tokens</p>
             <p className="text-xs text-muted-foreground/30">
               {targetOrgId
                 ? selectedOrgName

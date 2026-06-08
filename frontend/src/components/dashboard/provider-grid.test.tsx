@@ -198,57 +198,6 @@ describe("ProviderGrid", () => {
     expect(mocks.toastError).not.toHaveBeenCalled();
   });
 
-  it("passes the selected org scope when reconnecting an incomplete OAuth token", async () => {
-    const user = userEvent.setup();
-    const mutateAsync = vi.fn().mockResolvedValue({
-      authorization_url: "https://example.com/oauth/org-authorize",
-    });
-    mocks.useOrgs.mockReturnValue({
-      data: [
-        {
-          id: "org-1",
-          display_name: "Acme Org",
-          avatar_url: null,
-          contact_email: null,
-          your_role: "admin",
-          created_at: "2026-03-09T00:00:00Z",
-        },
-      ],
-      isLoading: false,
-    });
-    mocks.useMyProviderTokens.mockImplementation(
-      ({ targetOrgId }: { readonly targetOrgId: string | null }) => ({
-        data:
-          targetOrgId === "org-1"
-            ? [{ ...providerToken, status: "pending_auth" }]
-            : [],
-        isLoading: false,
-      }),
-    );
-    mocks.useInitiateOAuth.mockReturnValue({
-      mutateAsync,
-      isPending: false,
-    });
-
-    render(<ProviderGrid />);
-
-    await user.selectOptions(
-      screen.getByLabelText("Provider token owner"),
-      "org-1",
-    );
-    await user.click(screen.getByRole("button", { name: "Reconnect" }));
-
-    await waitFor(() => {
-      expect(mutateAsync).toHaveBeenCalledWith({
-        providerId: provider.id,
-        targetOrgId: "org-1",
-      });
-    });
-    expect(mocks.hardRedirect).toHaveBeenCalledWith(
-      "https://example.com/oauth/org-authorize",
-    );
-  });
-
   it("passes the selected org scope to the provider token query", async () => {
     const user = userEvent.setup();
     mocks.useOrgs.mockReturnValue({

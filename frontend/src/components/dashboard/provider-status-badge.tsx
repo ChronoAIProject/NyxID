@@ -17,8 +17,6 @@ const STATUS_CONFIG: Readonly<
   active: { label: "Connected", variant: "success" },
   expired: { label: "Expired", variant: "warning" },
   revoked: { label: "Revoked", variant: "destructive" },
-  pending_auth: { label: "Pending Auth", variant: "warning" },
-  failed: { label: "Failed", variant: "destructive" },
   refresh_failed: { label: "Refresh Failed", variant: "destructive" },
 };
 
