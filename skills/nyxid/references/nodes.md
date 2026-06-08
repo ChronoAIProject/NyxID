@@ -75,6 +75,26 @@ Pending credentials expire automatically. The default TTL is 24 hours (`NODE_PEN
 
 Decline means the VM operator reviewed the metadata and refused to store a local secret for it. It does not remove or modify existing local credentials. Cancel means an admin withdrew the pending push before acceptance; a later VM-side accept for that pending ID fails.
 
+### Remote credential injection (admin supplies the secret, end-to-end encrypted)
+
+The push/accept flow above still needs someone with shell access to the VM to type the secret. Remote credential injection removes that requirement: an org admin supplies the secret **from their own browser or laptop CLI**, encrypted end-to-end, with no SSH or VM access. The node generates a one-time X25519 keypair per pending credential; the admin's browser/CLI does X25519 ECDH → HKDF-SHA256 → XChaCha20-Poly1305 and submits only the ciphertext. NyxID relays the opaque envelope — **the server never sees the plaintext, never decrypts, and never derives the shared key.** Only the node decrypts it, locally.
+
+| Mode | Command (run on the admin's laptop) |
+|---|---|
+| Interactive — secret typed at a no-echo prompt | `nyxid node-credential inject <node> --slug <slug> --injection-method header --field-name X-API-Key [--target-url ...] [--label ...]` |
+| Non-interactive — secret read from an env var (never argv) | `nyxid node-credential inject <node> --slug <slug> --injection-method header --field-name X-API-Key --secret-env MY_SECRET --verify-fingerprint <hex>` |
+| Browser — admin pastes + encrypts the secret in a browser tab; the CLI never reads it | `nyxid node-credential inject <node> --slug <slug> --injection-method header --field-name X-API-Key --browser` |
+| Complete an existing pending push by ID | `nyxid node-credential inject <node> --pending <pending-id>` |
+
+Trust model and rules:
+
+- **Verify the node before sending.** The CLI shows the node's public-key fingerprint and asks you to confirm it out-of-band with the node operator. Pass `--verify-fingerprint <32-char-hex>` to assert the expected fingerprint up front (required together with `--secret-env`, so automation cannot silently skip the check), or `--yes` to skip the interactive confirmation.
+- **The secret never touches argv.** Provide it only via the interactive prompt, `--secret-env <VAR>`, or `--browser` — never as a literal flag value, which would leak through the process list. It is held in zeroizing memory and wiped after encryption.
+- **Browser accept page.** `--browser` (and the web UI "Accept credential" page) loads a standalone, integrity-checked page (SHA-384 SRI + a signed release manifest) where the secret is entered and encrypted in the page; only the ciphertext is posted. The page is honest about its scope: it lets an admin who checks the fingerprint out-of-band *detect* tampering of its own JavaScript — it does not prevent server-side substitution and is not a defense against a node-public-key MITM.
+- **Multi-node fan-out (web UI).** A service backed by several nodes can be provisioned in one logical injection from the web UI: the browser encrypts the secret once per node (each node's own public key) and submits all ciphertexts together; an offline node has its ciphertext queued and delivered on reconnect. The CLI `inject` targets a single node.
+
+Injection-specific failures use error codes 8006–8011 (decrypt failed, unsupported version, ciphertext too large, awaiting node pubkey, node offline, queue full).
+
 ### Transferring an existing personal node to an org
 
 Use `nyxid node transfer <node-id-or-name> --to <org-id>` when a node was registered under a person but should become shared org infrastructure. The caller must have write access to the current owner and be an admin of the destination org.

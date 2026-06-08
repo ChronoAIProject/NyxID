@@ -121,7 +121,7 @@ Load the matching `references/<file>.md` when the user asks for one of these top
 | "call the API", "proxy request", "send a message via Telegram/Discord/Slack" (single call), curl examples, raw HTTP integration, WebSocket auth-frame injection, Home Assistant connection | `references/proxy.md` |
 | "list / rename / delete a service", attaching an OpenAPI spec to a custom endpoint, default headers, "create / rotate / delete an API key", agent key bindings, callback URLs, scope/rate-limit edits | `references/managing.md` |
 | Anything mentioning "org", "organization", "shared credentials", "family / company key", invites, role scopes, primary-org tiebreaker, org-level approval policies, `--via-service`, CLI profiles | `references/organizations.md` |
-| "set up a node", "credentials on my own machine", org-owned/shared nodes, node daemon (install/start/stop/logs), node credentials add/setup/list, SSH node-key credentials, SSH exec / terminal / cert-issue, SSH ProxyCommand | `references/nodes.md` |
+| "set up a node", "credentials on my own machine", org-owned/shared nodes, node daemon (install/start/stop/logs), node credentials add/setup/list, remote credential injection / `node-credential inject` / "push a secret to a node from my laptop or browser without SSH" / fingerprint verification / browser accept page, SSH node-key credentials, SSH exec / terminal / cert-issue, SSH ProxyCommand | `references/nodes.md` |
 | "provision a headless device / 无头设备", "approve a device", "ESP32", "factory key", "nyxprov QR", "device-code grant", `nyxid device approve/onboard/factory-key`, `/devices/code/*`, `/devices/onboard` | `references/devices.md` |
 | "approve / deny", "set up notifications", Telegram link, push notifications, approval grants, per-service approval configs, granular approval rules (method/path/verb), allow-list or deny specific endpoints, `default_effect`, scoped grants | `references/notifications.md` |
 | "channel bot", "register a bot", conversation routing, `/channel-relay/reply`, callback / reply tokens, ADR-013 passthrough semantics, device events / HTTP Event Gateway, `/channel-events/{id}` | `references/channels.md` |
@@ -150,6 +150,7 @@ All requests are made through the `nyxid` CLI, which connects to the NyxID insta
 ## Security and Privacy
 
 - **Credentials are protected.** For server-stored credentials, NyxID injects them server-side. For node-routed services, credentials never leave the user's node -- NyxID passes the request through and the node injects credentials locally.
+- **Remote credential injection is end-to-end encrypted.** When an admin provisions a node credential from a browser or laptop (`nyxid node-credential inject` or the web "Accept credential" page), the secret is encrypted client-side and NyxID relays only the ciphertext -- the server never sees the plaintext, never decrypts, and never derives the shared key. Only the target node decrypts it.
 - **Authentication tokens auto-refresh.** The CLI handles token refresh automatically.
 - **No data is sent to third parties.** All traffic flows between the agent and the user's NyxID instance.
 - **Audit logging.** All proxy requests are logged in NyxID for user review.
