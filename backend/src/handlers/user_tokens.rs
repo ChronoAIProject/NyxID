@@ -281,26 +281,27 @@ async fn resolve_oauth_target_org(
     Ok(Some(target.to_string()))
 }
 
-/// Multi-connection: resolve the `connection_id` for the placeholder the
+/// Multi-connection: resolve the `UserApiKey` for the placeholder the
 /// wizard is authorizing, so the OAuth / device-code callback can scope
-/// its token write to that one `UserApiKey` (`write_oauth_tokens_to_key`)
-/// instead of the legacy `user_provider_tokens` path.
+/// its token write to that one key (`write_oauth_tokens_to_key`) instead
+/// of the legacy `user_provider_tokens` path. The caller derives the
+/// `connection_id` from the returned key separately (it may be `None`).
 ///
 /// The wizard's `key_id` query param carries the `POST /keys` response
 /// `id`, which is the **`UserService`** id (the `UserApiKey` id is the
 /// separate `api_key_id` field on that response). So this resolves
 /// `key_id` as a `UserService` id first — looking up the service, then
-/// reading `connection_id` off its linked `UserApiKey`. As a defensive
-/// fallback — and to honor the original param contract — if no
-/// `UserService` matches it also tries `key_id` as a `UserApiKey` id
-/// directly, so any caller passing a `UserApiKey` id still works.
+/// its linked `UserApiKey`. As a defensive fallback — and to honor the
+/// original param contract — if no `UserService` matches it also tries
+/// `key_id` as a `UserApiKey` id directly, so any caller passing a
+/// `UserApiKey` id still works.
 ///
 /// `owner_id` must be the effective owner of the placeholder — the org
 /// user_id for org-scoped adds, otherwise the caller. Both lookups are
-/// owner-scoped. Returns `None` (legacy path) when `key_id` is absent,
-/// nothing resolves under `owner_id`, or the resolved key carries no
-/// `connection_id`. A `None` result is always safe: the callback simply
-/// takes the legacy write path.
+/// owner-scoped. Returns `None` (legacy path) only when `key_id` is
+/// absent or nothing resolves under `owner_id`; a resolved key is
+/// returned even if it has no `connection_id`. A `None` result is always
+/// safe: the callback simply takes the legacy write path.
 async fn resolve_api_key_for_auth_flow(
     state: &AppState,
     owner_id: &str,
