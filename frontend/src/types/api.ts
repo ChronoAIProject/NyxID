@@ -361,9 +361,7 @@ export type UpdateServicePayload =
        * - `null` clears the list
        * - array replaces with a validated list
        */
-      readonly default_request_headers?:
-        | null
-        | readonly DefaultRequestHeader[];
+      readonly default_request_headers?: null | readonly DefaultRequestHeader[];
       readonly ws_frame_injections?: readonly WsFrameInjection[];
     }
   | {
@@ -517,7 +515,11 @@ export interface ProviderConfig {
   readonly slug: string;
   readonly name: string;
   readonly description: string | null;
-  readonly provider_type: "oauth2" | "api_key" | "device_code" | "telegram_widget";
+  readonly provider_type:
+    | "oauth2"
+    | "api_key"
+    | "device_code"
+    | "telegram_widget";
   readonly has_oauth_config: boolean;
   readonly credential_mode: CredentialMode;
   readonly default_scopes: readonly string[] | null;
@@ -553,7 +555,13 @@ export interface UserProviderToken {
   readonly provider_name: string;
   readonly provider_slug: string;
   readonly provider_type: string;
-  readonly status: "active" | "expired" | "revoked" | "refresh_failed";
+  readonly status:
+    | "active"
+    | "expired"
+    | "revoked"
+    | "pending_auth"
+    | "failed"
+    | "refresh_failed";
   readonly label: string | null;
   readonly gateway_url: string | null;
   readonly expires_at: string | null;

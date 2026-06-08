@@ -66,7 +66,15 @@ export function ProviderCard({
   const isConnected = token !== undefined;
   const isExpired = token?.status === "expired";
   const needsAttention =
-    token?.status === "expired" || token?.status === "refresh_failed";
+    token?.status === "expired" ||
+    token?.status === "pending_auth" ||
+    token?.status === "failed" ||
+    token?.status === "refresh_failed";
+  const canReconnect =
+    provider.provider_type === "oauth2" &&
+    (token?.status === "pending_auth" ||
+      token?.status === "failed" ||
+      token?.status === "refresh_failed");
   const brand = getProviderBrand(provider.slug);
   const hasBrand = hasKnownBrand(provider.slug);
   const canConnect = canConnectProvider(provider, hasUserCredentials);
@@ -154,22 +162,23 @@ export function ProviderCard({
         {isConnected && token ? (
           <div className="flex flex-col gap-3">
             <div className="flex flex-col gap-0.5">
-              {provider.provider_type === "telegram_widget" && token.metadata && (
-                <div className="flex items-center gap-2">
-                  {sanitizeAvatarUrl(token.metadata.photo_url) && (
-                    <img
-                      src={sanitizeAvatarUrl(token.metadata.photo_url)!}
-                      alt=""
-                      className="h-5 w-5 rounded-full"
-                    />
-                  )}
-                  <span className="text-xs font-medium">
-                    {token.metadata.username
-                      ? `@${token.metadata.username}`
-                      : token.metadata.first_name ?? "Telegram User"}
-                  </span>
-                </div>
-              )}
+              {provider.provider_type === "telegram_widget" &&
+                token.metadata && (
+                  <div className="flex items-center gap-2">
+                    {sanitizeAvatarUrl(token.metadata.photo_url) && (
+                      <img
+                        src={sanitizeAvatarUrl(token.metadata.photo_url)!}
+                        alt=""
+                        className="h-5 w-5 rounded-full"
+                      />
+                    )}
+                    <span className="text-xs font-medium">
+                      {token.metadata.username
+                        ? `@${token.metadata.username}`
+                        : (token.metadata.first_name ?? "Telegram User")}
+                    </span>
+                  </div>
+                )}
               <span className="text-xs text-muted-foreground">
                 Connected {formatDate(token.connected_at)}
               </span>
@@ -199,17 +208,34 @@ export function ProviderCard({
                     disabled={isRefreshing}
                     isLoading={isRefreshing}
                   >
-                    <ButtonIcon><RefreshCw className="h-3 w-3" /></ButtonIcon>
+                    <ButtonIcon>
+                      <RefreshCw className="h-3 w-3" />
+                    </ButtonIcon>
                     Refresh
                   </Button>
                 )}
+              {canReconnect && (
+                <Button
+                  variant="primary"
+                  onClick={() => onConnect(provider, hasUserCredentials)}
+                  disabled={isConnecting}
+                  isLoading={isConnecting}
+                >
+                  <ButtonIcon>
+                    <Plug className="h-3 w-3" />
+                  </ButtonIcon>
+                  Reconnect
+                </Button>
+              )}
               <Button
                 variant="outline"
                 onClick={() => onDisconnect(provider.id)}
                 disabled={isDisconnecting}
                 isLoading={isDisconnecting}
               >
-                <ButtonIcon><Unlink className="h-3 w-3" /></ButtonIcon>
+                <ButtonIcon>
+                  <Unlink className="h-3 w-3" />
+                </ButtonIcon>
                 Disconnect
               </Button>
             </div>
@@ -245,7 +271,9 @@ export function ProviderCard({
                   variant="outline"
                   onClick={() => onSetupCredentials(provider)}
                 >
-                  <ButtonIcon><Settings2 className="h-3 w-3" /></ButtonIcon>
+                  <ButtonIcon>
+                    <Settings2 className="h-3 w-3" />
+                  </ButtonIcon>
                   Setup OAuth App
                 </Button>
               )}
@@ -254,7 +282,9 @@ export function ProviderCard({
                   variant="ghost"
                   onClick={() => onSetupCredentials(provider)}
                 >
-                  <ButtonIcon><Settings2 className="h-3 w-3" /></ButtonIcon>
+                  <ButtonIcon>
+                    <Settings2 className="h-3 w-3" />
+                  </ButtonIcon>
                   Manage App
                 </Button>
               )}
@@ -264,7 +294,9 @@ export function ProviderCard({
                 disabled={isConnecting || !canConnect}
                 isLoading={isConnecting}
               >
-                <ButtonIcon><Plug className="h-3 w-3" /></ButtonIcon>
+                <ButtonIcon>
+                  <Plug className="h-3 w-3" />
+                </ButtonIcon>
                 {connectLabel}
               </Button>
             </div>
