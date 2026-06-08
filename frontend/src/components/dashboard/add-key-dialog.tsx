@@ -2090,6 +2090,7 @@ export function AddKeyDialog({
     const match = catalogEntries.find((e) => e.slug === slug);
     if (!match) return;
     appliedPrefillRef.current = `reconnect:${reconnectKey.id}`;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- reconnect prefill is guarded by appliedPrefillRef to run once per reconnect key
     setSelectedEntry(match);
     setAuthKey(reconnectKey);
     setTargetOrgId(
