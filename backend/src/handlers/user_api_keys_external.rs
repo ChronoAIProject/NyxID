@@ -536,6 +536,80 @@ mod tests {
             .unwrap();
     }
 
+    async fn seed_org_actor(
+        db: &mongodb::Database,
+        org_id: &str,
+        actor_id: &str,
+        role: OrgRole,
+        allowed_service_ids: Option<Vec<String>>,
+    ) {
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_many([
+                test_user(actor_id, UserType::Person),
+                test_user(org_id, UserType::Org),
+            ])
+            .await
+            .unwrap();
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(org_id, actor_id, role, allowed_service_ids))
+            .await
+            .unwrap();
+    }
+
+    async fn seed_unbound_service(
+        db: &mongodb::Database,
+        owner_id: &str,
+        service_id: &str,
+        slug: &str,
+    ) -> UserService {
+        let service = test_user_service(
+            service_id,
+            owner_id,
+            slug,
+            &uuid::Uuid::new_v4().to_string(),
+            None,
+            None,
+        );
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(&service)
+            .await
+            .unwrap();
+        service
+    }
+
+    fn gcp_sa_body(
+        label: Option<&str>,
+        key_json: String,
+        service_slugs: &[&str],
+        target_org_id: Option<&str>,
+    ) -> CreateGcpServiceAccountRequest {
+        CreateGcpServiceAccountRequest {
+            label: label.map(str::to_string),
+            key_json,
+            scopes: None,
+            service_slugs: service_slugs.iter().map(|slug| slug.to_string()).collect(),
+            target_org_id: target_org_id.map(str::to_string),
+        }
+    }
+
+    async fn spawn_gcp_token_server(access_token: &str) -> (String, tokio::task::JoinHandle<()>) {
+        spawn_mock_token_server(
+            serde_json::json!({ "access_token": access_token, "expires_in": 3600 }),
+            StatusCode::OK,
+        )
+        .await
+    }
+
+    async fn spawn_counting_gcp_token_server(
+        access_token: &str,
+    ) -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+        spawn_counting_token_server(
+            serde_json::json!({ "access_token": access_token, "expires_in": 3600 }),
+            StatusCode::OK,
+        )
+        .await
+    }
+
     async fn spawn_counting_token_server(
         response: serde_json::Value,
         status: axum::http::StatusCode,
@@ -770,22 +844,14 @@ mod tests {
         let key_id = uuid::Uuid::new_v4().to_string();
         let service_id = uuid::Uuid::new_v4().to_string();
 
-        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
-            .insert_many([
-                test_user(&actor_id, UserType::Person),
-                test_user(&org_id, UserType::Org),
-            ])
-            .await
-            .unwrap();
-        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
-            .insert_one(test_membership(
-                &org_id,
-                &actor_id,
-                OrgRole::Admin,
-                Some(vec![service_id.clone()]),
-            ))
-            .await
-            .unwrap();
+        seed_org_actor(
+            &db,
+            &org_id,
+            &actor_id,
+            OrgRole::Admin,
+            Some(vec![service_id.clone()]),
+        )
+        .await;
         db.collection::<UserApiKey>(USER_API_KEYS)
             .insert_one(fixture_external_key(&key_id, &org_id, "Org Credential"))
             .await
@@ -809,22 +875,14 @@ mod tests {
         let org_id = uuid::Uuid::new_v4().to_string();
         let key_id = uuid::Uuid::new_v4().to_string();
 
-        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
-            .insert_many([
-                test_user(&actor_id, UserType::Person),
-                test_user(&org_id, UserType::Org),
-            ])
-            .await
-            .unwrap();
-        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
-            .insert_one(test_membership(
-                &org_id,
-                &actor_id,
-                OrgRole::Admin,
-                Some(vec![uuid::Uuid::new_v4().to_string()]),
-            ))
-            .await
-            .unwrap();
+        seed_org_actor(
+            &db,
+            &org_id,
+            &actor_id,
+            OrgRole::Admin,
+            Some(vec![uuid::Uuid::new_v4().to_string()]),
+        )
+        .await;
         db.collection::<UserApiKey>(USER_API_KEYS)
             .insert_one(fixture_external_key(
                 &key_id,
@@ -855,17 +913,7 @@ mod tests {
         let key_id = uuid::Uuid::new_v4().to_string();
         let service_id = uuid::Uuid::new_v4().to_string();
 
-        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
-            .insert_many([
-                test_user(&actor_id, UserType::Person),
-                test_user(&org_id, UserType::Org),
-            ])
-            .await
-            .unwrap();
-        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
-            .insert_one(test_membership(&org_id, &actor_id, OrgRole::Viewer, None))
-            .await
-            .unwrap();
+        seed_org_actor(&db, &org_id, &actor_id, OrgRole::Viewer, None).await;
         db.collection::<UserApiKey>(USER_API_KEYS)
             .insert_one(fixture_external_key(&key_id, &org_id, "Org Credential"))
             .await
@@ -928,41 +976,26 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_gcp_service_account_stores_and_rebinds() {
-        use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
-
         let Some(db) = connect_test_database("h_ext_gcp_sa_create").await else {
             return;
         };
         let user_id = uuid::Uuid::new_v4().to_string();
         let state = test_app_state(db.clone());
 
-        let (token_uri, _handle) = spawn_mock_token_server(
-            serde_json::json!({ "access_token": "ya29.minted", "expires_in": 3600 }),
-            axum::http::StatusCode::OK,
+        let (token_uri, _handle) = spawn_gcp_token_server("ya29.minted").await;
+        seed_unbound_service(
+            &db,
+            &user_id,
+            &uuid::Uuid::new_v4().to_string(),
+            "google-bigquery",
         )
         .await;
-
-        // A pre-existing service for the rebind target.
-        let svc = test_user_service(
-            &uuid::Uuid::new_v4().to_string(),
-            &user_id,
-            "google-bigquery",
-            &uuid::Uuid::new_v4().to_string(),
-            None,
+        let body = gcp_sa_body(
+            Some("GCP Cost Reader"),
+            test_gcp_sa_json(&token_uri),
+            &["google-bigquery"],
             None,
         );
-        db.collection::<UserService>(USER_SERVICES)
-            .insert_one(&svc)
-            .await
-            .unwrap();
-
-        let body = CreateGcpServiceAccountRequest {
-            label: Some("GCP Cost Reader".to_string()),
-            key_json: test_gcp_sa_json(&token_uri),
-            scopes: None,
-            service_slugs: vec!["google-bigquery".to_string()],
-            target_org_id: None,
-        };
 
         let (status, Json(resp)) =
             create_gcp_service_account_key(State(state), test_auth_user(&user_id), Json(body))
@@ -1005,46 +1038,20 @@ mod tests {
         };
         let admin_id = uuid::Uuid::new_v4().to_string();
         let org_id = uuid::Uuid::new_v4().to_string();
-        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
-            .insert_many([
-                test_user(&admin_id, UserType::Person),
-                test_user(&org_id, UserType::Org),
-            ])
-            .await
-            .unwrap();
-        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
-            .insert_one(test_membership(&org_id, &admin_id, OrgRole::Admin, None))
-            .await
-            .unwrap();
+        seed_org_actor(&db, &org_id, &admin_id, OrgRole::Admin, None).await;
 
         let service_id = uuid::Uuid::new_v4().to_string();
-        let svc = test_user_service(
-            &service_id,
-            &org_id,
-            "google-bigquery",
-            &uuid::Uuid::new_v4().to_string(),
-            None,
-            None,
-        );
-        db.collection::<UserService>(USER_SERVICES)
-            .insert_one(&svc)
-            .await
-            .unwrap();
+        seed_unbound_service(&db, &org_id, &service_id, "google-bigquery").await;
 
         let state = test_app_state(db.clone());
-        let (token_uri, _handle) = spawn_mock_token_server(
-            serde_json::json!({ "access_token": "ya29.org-admin", "expires_in": 3600 }),
-            axum::http::StatusCode::OK,
-        )
-        .await;
+        let (token_uri, _handle) = spawn_gcp_token_server("ya29.org-admin").await;
         let key_json = test_gcp_sa_json(&token_uri);
-        let body = CreateGcpServiceAccountRequest {
-            label: Some("Org GCP Cost Reader".to_string()),
-            key_json: key_json.clone(),
-            scopes: None,
-            service_slugs: vec!["google-bigquery".to_string()],
-            target_org_id: Some(org_id.clone()),
-        };
+        let body = gcp_sa_body(
+            Some("Org GCP Cost Reader"),
+            key_json.clone(),
+            &["google-bigquery"],
+            Some(&org_id),
+        );
 
         let (status, Json(resp)) = create_gcp_service_account_key(
             State(state.clone()),
@@ -1096,30 +1103,16 @@ mod tests {
         };
         let member_id = uuid::Uuid::new_v4().to_string();
         let org_id = uuid::Uuid::new_v4().to_string();
-        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
-            .insert_many([
-                test_user(&member_id, UserType::Person),
-                test_user(&org_id, UserType::Org),
-            ])
-            .await
-            .unwrap();
-        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
-            .insert_one(test_membership(&org_id, &member_id, OrgRole::Member, None))
-            .await
-            .unwrap();
+        seed_org_actor(&db, &org_id, &member_id, OrgRole::Member, None).await;
         let state = test_app_state(db.clone());
-        let (token_uri, calls, _handle) = spawn_counting_token_server(
-            serde_json::json!({ "access_token": "ya29.must-not-mint", "expires_in": 3600 }),
-            axum::http::StatusCode::OK,
-        )
-        .await;
-        let body = CreateGcpServiceAccountRequest {
-            label: None,
-            key_json: test_gcp_sa_json(&token_uri),
-            scopes: None,
-            service_slugs: vec!["google-bigquery".to_string()],
-            target_org_id: Some(org_id),
-        };
+        let (token_uri, calls, _handle) =
+            spawn_counting_gcp_token_server("ya29.must-not-mint").await;
+        let body = gcp_sa_body(
+            None,
+            test_gcp_sa_json(&token_uri),
+            &["google-bigquery"],
+            Some(&org_id),
+        );
 
         let err =
             create_gcp_service_account_key(State(state), test_auth_user(&member_id), Json(body))
@@ -1150,51 +1143,32 @@ mod tests {
         let org_id = uuid::Uuid::new_v4().to_string();
         let in_scope_service_id = uuid::Uuid::new_v4().to_string();
         let out_of_scope_service_id = uuid::Uuid::new_v4().to_string();
-        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
-            .insert_many([
-                test_user(&admin_id, UserType::Person),
-                test_user(&org_id, UserType::Org),
-            ])
-            .await
-            .unwrap();
-        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
-            .insert_one(test_membership(
-                &org_id,
-                &admin_id,
-                OrgRole::Admin,
-                Some(vec![in_scope_service_id]),
-            ))
-            .await
-            .unwrap();
-
-        let mut out_of_scope_service = test_user_service(
-            &out_of_scope_service_id,
+        seed_org_actor(
+            &db,
             &org_id,
-            "google-out-of-scope",
-            &uuid::Uuid::new_v4().to_string(),
-            None,
-            None,
-        );
-        out_of_scope_service.auth_method = "none".to_string();
-        db.collection::<UserService>(USER_SERVICES)
-            .insert_one(&out_of_scope_service)
-            .await
-            .unwrap();
-
-        let state = test_app_state(db.clone());
-        let (token_uri, _handle) = spawn_mock_token_server(
-            serde_json::json!({ "access_token": "ya29.scoped-admin", "expires_in": 3600 }),
-            axum::http::StatusCode::OK,
+            &admin_id,
+            OrgRole::Admin,
+            Some(vec![in_scope_service_id]),
         )
         .await;
 
-        let empty_body = CreateGcpServiceAccountRequest {
-            label: Some("Scoped Admin Empty".to_string()),
-            key_json: test_gcp_sa_json(&token_uri),
-            scopes: None,
-            service_slugs: vec![],
-            target_org_id: Some(org_id.clone()),
-        };
+        seed_unbound_service(
+            &db,
+            &org_id,
+            &out_of_scope_service_id,
+            "google-out-of-scope",
+        )
+        .await;
+
+        let state = test_app_state(db.clone());
+        let (token_uri, _handle) = spawn_gcp_token_server("ya29.scoped-admin").await;
+
+        let empty_body = gcp_sa_body(
+            Some("Scoped Admin Empty"),
+            test_gcp_sa_json(&token_uri),
+            &[],
+            Some(&org_id),
+        );
         let (_, Json(empty_resp)) = create_gcp_service_account_key(
             State(state.clone()),
             test_auth_user(&admin_id),
@@ -1210,13 +1184,12 @@ mod tests {
             .unwrap();
         assert_eq!(empty_key.user_id, org_id);
 
-        let out_of_scope_body = CreateGcpServiceAccountRequest {
-            label: Some("Scoped Admin Out Of Scope".to_string()),
-            key_json: test_gcp_sa_json(&token_uri),
-            scopes: None,
-            service_slugs: vec!["google-out-of-scope".to_string()],
-            target_org_id: Some(org_id.clone()),
-        };
+        let out_of_scope_body = gcp_sa_body(
+            Some("Scoped Admin Out Of Scope"),
+            test_gcp_sa_json(&token_uri),
+            &["google-out-of-scope"],
+            Some(&org_id),
+        );
         let (_, Json(bound_resp)) = create_gcp_service_account_key(
             State(state),
             test_auth_user(&admin_id),
@@ -1243,13 +1216,7 @@ mod tests {
         let user_id = uuid::Uuid::new_v4().to_string();
         let state = test_app_state(db);
 
-        let body = CreateGcpServiceAccountRequest {
-            label: None,
-            key_json: "not json".to_string(),
-            scopes: None,
-            service_slugs: vec![],
-            target_org_id: None,
-        };
+        let body = gcp_sa_body(None, "not json".to_string(), &[], None);
 
         let result =
             create_gcp_service_account_key(State(state), test_auth_user(&user_id), Json(body))

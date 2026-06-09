@@ -5937,6 +5937,20 @@ mod proxy_resolution_integration_tests {
         }
     }
 
+    async fn seed_org_actor(db: &mongodb::Database, org_id: &str, actor_id: &str, role: OrgRole) {
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_many([
+                test_user(org_id, UserType::Org),
+                test_user(actor_id, UserType::Person),
+            ])
+            .await
+            .unwrap();
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(org_id, actor_id, role, None))
+            .await
+            .unwrap();
+    }
+
     async fn insert_user_service(
         db: &mongodb::Database,
         owner_user_id: &str,
@@ -5971,6 +5985,53 @@ mod proxy_resolution_integration_tests {
             .expect("insert user service");
 
         service
+    }
+
+    async fn insert_gcp_service_account_key(
+        state: &AppState,
+        owner_user_id: &str,
+        access_token: &[u8],
+    ) -> String {
+        let credential_key = state
+            .encryption_keys
+            .encrypt(br#"{"type":"service_account","private_key":"redacted"}"#)
+            .await
+            .expect("encrypt service-account JSON");
+        let access_token = state
+            .encryption_keys
+            .encrypt(access_token)
+            .await
+            .expect("encrypt cached GCP access token");
+        let api_key_id = Uuid::new_v4().to_string();
+        let now = Utc::now();
+        state
+            .db
+            .collection::<UserApiKey>(USER_API_KEYS)
+            .insert_one(UserApiKey {
+                id: api_key_id.clone(),
+                user_id: owner_user_id.to_string(),
+                label: "Org GCP SA".to_string(),
+                credential_type: "gcp_service_account".to_string(),
+                credential_encrypted: Some(credential_key),
+                access_token_encrypted: Some(access_token),
+                refresh_token_encrypted: None,
+                token_scopes: Some("https://www.googleapis.com/auth/cloud-platform".to_string()),
+                expires_at: Some(now + chrono::Duration::hours(1)),
+                provider_config_id: None,
+                connection_id: None,
+                user_oauth_client_id_encrypted: None,
+                user_oauth_client_secret_encrypted: None,
+                status: "active".to_string(),
+                last_used_at: None,
+                error_message: None,
+                source: Some("user_created".to_string()),
+                source_id: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .expect("insert org GCP SA key");
+        api_key_id
     }
 
     async fn insert_online_node(state: &AppState, owner_user_id: &str, name: &str) -> Node {
@@ -6147,17 +6208,7 @@ mod proxy_resolution_integration_tests {
 
         let org_id = Uuid::new_v4().to_string();
         let member_id = Uuid::new_v4().to_string();
-        db.collection::<crate::models::user::User>(USERS)
-            .insert_many([
-                test_user(&org_id, UserType::Org),
-                test_user(&member_id, UserType::Person),
-            ])
-            .await
-            .unwrap();
-        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
-            .insert_one(test_membership(&org_id, &member_id, OrgRole::Member, None))
-            .await
-            .unwrap();
+        seed_org_actor(&db, &org_id, &member_id, OrgRole::Member).await;
 
         let state = test_app_state(db.clone());
         let node = insert_online_node(&state, &org_id, "org-node").await;
@@ -6256,56 +6307,11 @@ mod proxy_resolution_integration_tests {
         let (base_url, server) = start_auth_downstream().await;
         let org_id = Uuid::new_v4().to_string();
         let member_id = Uuid::new_v4().to_string();
-        db.collection::<crate::models::user::User>(USERS)
-            .insert_many([
-                test_user(&org_id, UserType::Org),
-                test_user(&member_id, UserType::Person),
-            ])
-            .await
-            .unwrap();
-        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
-            .insert_one(test_membership(&org_id, &member_id, OrgRole::Member, None))
-            .await
-            .unwrap();
+        seed_org_actor(&db, &org_id, &member_id, OrgRole::Member).await;
 
         let state = test_app_state(db.clone());
-        let credential_key = state
-            .encryption_keys
-            .encrypt(br#"{"type":"service_account","private_key":"redacted"}"#)
-            .await
-            .expect("encrypt service-account JSON");
-        let access_token = state
-            .encryption_keys
-            .encrypt(b"ya29.bound-org-sa")
-            .await
-            .expect("encrypt cached GCP access token");
-        let api_key_id = Uuid::new_v4().to_string();
-        let now = Utc::now();
-        db.collection::<UserApiKey>(USER_API_KEYS)
-            .insert_one(UserApiKey {
-                id: api_key_id.clone(),
-                user_id: org_id.clone(),
-                label: "Org GCP SA".to_string(),
-                credential_type: "gcp_service_account".to_string(),
-                credential_encrypted: Some(credential_key),
-                access_token_encrypted: Some(access_token),
-                refresh_token_encrypted: None,
-                token_scopes: Some("https://www.googleapis.com/auth/cloud-platform".to_string()),
-                expires_at: Some(now + chrono::Duration::hours(1)),
-                provider_config_id: None,
-                connection_id: None,
-                user_oauth_client_id_encrypted: None,
-                user_oauth_client_secret_encrypted: None,
-                status: "active".to_string(),
-                last_used_at: None,
-                error_message: None,
-                source: Some("user_created".to_string()),
-                source_id: None,
-                created_at: now,
-                updated_at: now,
-            })
-            .await
-            .expect("insert org GCP SA key");
+        let api_key_id =
+            insert_gcp_service_account_key(&state, &org_id, b"ya29.bound-org-sa").await;
 
         let mut service =
             insert_user_service(&db, &org_id, "org-gcp-billing", &base_url, None).await;
@@ -6361,17 +6367,7 @@ mod proxy_resolution_integration_tests {
 
         let org_id = Uuid::new_v4().to_string();
         let member_id = Uuid::new_v4().to_string();
-        db.collection::<crate::models::user::User>(USERS)
-            .insert_many([
-                test_user(&org_id, UserType::Org),
-                test_user(&member_id, UserType::Person),
-            ])
-            .await
-            .unwrap();
-        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
-            .insert_one(test_membership(&org_id, &member_id, OrgRole::Member, None))
-            .await
-            .unwrap();
+        seed_org_actor(&db, &org_id, &member_id, OrgRole::Member).await;
 
         let state = test_app_state(db.clone());
         let node = insert_online_node(&state, &org_id, "org-ws-node").await;
@@ -6482,17 +6478,7 @@ mod proxy_resolution_integration_tests {
         let org_id = Uuid::new_v4().to_string();
         let admin_id = Uuid::new_v4().to_string();
         let sa_id = Uuid::new_v4().to_string();
-        db.collection::<crate::models::user::User>(USERS)
-            .insert_many([
-                test_user(&org_id, UserType::Org),
-                test_user(&admin_id, UserType::Person),
-            ])
-            .await
-            .unwrap();
-        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
-            .insert_one(test_membership(&org_id, &admin_id, OrgRole::Admin, None))
-            .await
-            .unwrap();
+        seed_org_actor(&db, &org_id, &admin_id, OrgRole::Admin).await;
         db.collection::<NotificationChannel>(NOTIFICATION_CHANNELS)
             .insert_one(notification_channel(&admin_id, 0))
             .await
@@ -6623,17 +6609,7 @@ mod proxy_resolution_integration_tests {
         let (base_url, server) = start_downstream().await;
         let org_id = Uuid::new_v4().to_string();
         let admin_id = Uuid::new_v4().to_string();
-        db.collection::<crate::models::user::User>(USERS)
-            .insert_many([
-                test_user(&org_id, UserType::Org),
-                test_user(&admin_id, UserType::Person),
-            ])
-            .await
-            .unwrap();
-        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
-            .insert_one(test_membership(&org_id, &admin_id, OrgRole::Admin, None))
-            .await
-            .unwrap();
+        seed_org_actor(&db, &org_id, &admin_id, OrgRole::Admin).await;
         db.collection::<NotificationChannel>(NOTIFICATION_CHANNELS)
             .insert_one(notification_channel(&admin_id, 0))
             .await
