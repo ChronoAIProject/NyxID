@@ -219,6 +219,11 @@ fn allowlist_for(kind: FlowKind) -> Vec<ProxyRoute> {
             },
             ProxyRoute {
                 method: Method::GET,
+                path_template: "/api/v1/runtime-config",
+                body_fields: &[],
+            },
+            ProxyRoute {
+                method: Method::GET,
                 path_template: "/api/v1/catalog",
                 body_fields: &[],
             },
@@ -2378,6 +2383,26 @@ mod tests {
             keys_post.body_fields.contains(&"target_org_id"),
             "ai-key wizard create route should permit org owner passthrough",
         );
+    }
+
+    #[test]
+    fn ai_key_allowlist_permits_runtime_config_for_oauth_callback_guidance() {
+        let routes = allowlist_for(FlowKind::AiKey);
+
+        let route = routes
+            .iter()
+            .find(|route| {
+                route.method == Method::GET && route.path_template == "/api/v1/runtime-config"
+            })
+            .expect("GET /api/v1/runtime-config route");
+
+        assert!(
+            route.body_fields.is_empty(),
+            "runtime config allowlist route must not accept a body",
+        );
+        assert!(route.matches(&Method::GET, "/api/v1/runtime-config"));
+        assert!(!route.matches(&Method::POST, "/api/v1/runtime-config"));
+        assert!(!route.matches(&Method::GET, "/api/v1/runtime-config/extra"));
     }
 
     #[test]
