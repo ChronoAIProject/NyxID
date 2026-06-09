@@ -2721,9 +2721,7 @@ mod tests {
     async fn rebind_test_subject(
         db_name: &str,
     ) -> Option<(mongodb::Database, String, String, String)> {
-        let Some(db) = connect_test_database(db_name).await else {
-            return None;
-        };
+        let db = connect_test_database(db_name).await?;
         let user_id = uuid::Uuid::new_v4().to_string();
         let key_id = uuid::Uuid::new_v4().to_string();
         let service_id = insert_rebind_service(&db, &user_id, "google-bigquery", true).await;
