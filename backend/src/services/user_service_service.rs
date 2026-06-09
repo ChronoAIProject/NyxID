@@ -2688,124 +2688,171 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn rebind_user_service_api_key_repoints_and_forces_bearer() {
-        let Some(db) = connect_test_database("rebind_user_service_api_key").await else {
-            return;
+    async fn insert_rebind_key(db: &mongodb::Database, user_id: &str, key_id: &str, status: &str) {
+        db.collection::<mongodb::bson::Document>(USER_API_KEYS)
+            .insert_one(doc! { "_id": key_id, "user_id": user_id, "status": status })
+            .await
+            .unwrap();
+    }
+
+    async fn insert_rebind_service(
+        db: &mongodb::Database,
+        user_id: &str,
+        slug: &str,
+        is_active: bool,
+    ) -> String {
+        let mut service = test_user_service(
+            &uuid::Uuid::new_v4().to_string(),
+            user_id,
+            slug,
+            &uuid::Uuid::new_v4().to_string(),
+            None,
+            None,
+        );
+        service.is_active = is_active;
+        let id = service.id.clone();
+        db.collection::<UserService>(COLLECTION_NAME)
+            .insert_one(service)
+            .await
+            .unwrap();
+        id
+    }
+
+    async fn rebind_test_subject(
+        db_name: &str,
+    ) -> Option<(mongodb::Database, String, String, String)> {
+        let Some(db) = connect_test_database(db_name).await else {
+            return None;
         };
         let user_id = uuid::Uuid::new_v4().to_string();
         let key_id = uuid::Uuid::new_v4().to_string();
+        let service_id = insert_rebind_service(&db, &user_id, "google-bigquery", true).await;
+        insert_rebind_key(&db, &user_id, &key_id, "active").await;
+        Some((db, user_id, key_id, service_id))
+    }
 
-        // A service currently bound to nothing (auth_method "none").
-        let svc = test_user_service(
-            &uuid::Uuid::new_v4().to_string(),
-            &user_id,
-            "google-bigquery",
-            &uuid::Uuid::new_v4().to_string(),
-            None,
-            None,
-        );
+    async fn find_test_service(db: &mongodb::Database, service_id: &str) -> UserService {
         db.collection::<UserService>(COLLECTION_NAME)
-            .insert_one(&svc)
+            .find_one(doc! { "_id": service_id })
             .await
-            .unwrap();
-        // The destination key (ownership is verified by the rebind).
-        db.collection::<mongodb::bson::Document>(USER_API_KEYS)
-            .insert_one(doc! { "_id": &key_id, "user_id": &user_id, "status": "active" })
-            .await
-            .unwrap();
-        let failed_key_id = uuid::Uuid::new_v4().to_string();
-        let revoked_key_id = uuid::Uuid::new_v4().to_string();
-        db.collection::<mongodb::bson::Document>(USER_API_KEYS)
-            .insert_many([
-                doc! { "_id": &failed_key_id, "user_id": &user_id, "status": "failed" },
-                doc! { "_id": &revoked_key_id, "user_id": &user_id, "status": "revoked" },
-            ])
-            .await
-            .unwrap();
-        let mut inactive_same_slug = test_user_service(
-            &uuid::Uuid::new_v4().to_string(),
-            &user_id,
-            "google-bigquery",
-            &uuid::Uuid::new_v4().to_string(),
-            None,
-            None,
-        );
-        inactive_same_slug.is_active = false;
-        db.collection::<UserService>(COLLECTION_NAME)
-            .insert_one(&inactive_same_slug)
-            .await
-            .unwrap();
-        let mut inactive_only = test_user_service(
-            &uuid::Uuid::new_v4().to_string(),
-            &user_id,
-            "inactive-only",
-            &uuid::Uuid::new_v4().to_string(),
-            None,
-            None,
-        );
-        inactive_only.is_active = false;
-        db.collection::<UserService>(COLLECTION_NAME)
-            .insert_one(&inactive_only)
-            .await
-            .unwrap();
+            .unwrap()
+            .unwrap()
+    }
+
+    fn assert_rebind_not_found(err: AppError) {
+        assert!(matches!(err, AppError::NotFound(_)), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn rebind_user_service_api_key_active_service_repoints_and_forces_bearer() {
+        let Some((db, user_id, key_id, service_id)) =
+            rebind_test_subject("rebind_user_service_api_key_active").await
+        else {
+            return;
+        };
 
         rebind_user_service_api_key(&db, &user_id, "google-bigquery", &key_id)
             .await
             .unwrap();
 
-        let rebound = db
-            .collection::<UserService>(COLLECTION_NAME)
-            .find_one(doc! { "slug": "google-bigquery", "user_id": &user_id })
-            .await
-            .unwrap()
-            .unwrap();
+        let rebound = find_test_service(&db, &service_id).await;
         assert_eq!(rebound.api_key_id.as_deref(), Some(key_id.as_str()));
         assert_eq!(rebound.auth_method, "bearer");
-        let inactive_duplicate = db
-            .collection::<UserService>(COLLECTION_NAME)
-            .find_one(doc! { "_id": &inactive_same_slug.id })
+    }
+
+    #[tokio::test]
+    async fn rebind_user_service_api_key_inactive_duplicate_ignored() {
+        let Some((db, user_id, key_id, _)) =
+            rebind_test_subject("rebind_user_service_api_key_inactive_duplicate").await
+        else {
+            return;
+        };
+        let inactive_id = insert_rebind_service(&db, &user_id, "google-bigquery", false).await;
+
+        rebind_user_service_api_key(&db, &user_id, "google-bigquery", &key_id)
             .await
-            .unwrap()
             .unwrap();
+
+        let inactive_duplicate = find_test_service(&db, &inactive_id).await;
         assert!(inactive_duplicate.api_key_id.is_none());
         assert_eq!(inactive_duplicate.auth_method, "none");
+    }
+
+    #[tokio::test]
+    async fn rebind_user_service_api_key_inactive_only_lookup_rejected() {
+        let Some((db, user_id, key_id, _)) =
+            rebind_test_subject("rebind_user_service_api_key_inactive_only").await
+        else {
+            return;
+        };
+        insert_rebind_service(&db, &user_id, "inactive-only", false).await;
 
         let inactive = rebind_user_service_api_key(&db, &user_id, "inactive-only", &key_id)
             .await
             .unwrap_err();
-        assert!(
-            matches!(inactive, AppError::NotFound(_)),
-            "got {inactive:?}"
-        );
+        assert_rebind_not_found(inactive);
+    }
 
-        // Unknown slug is rejected.
+    #[tokio::test]
+    async fn rebind_user_service_api_key_unknown_or_foreign_slug_rejected() {
+        let Some((db, user_id, key_id, _)) =
+            rebind_test_subject("rebind_user_service_api_key_unknown_slug").await
+        else {
+            return;
+        };
+        let foreign_user_id = uuid::Uuid::new_v4().to_string();
+        insert_rebind_service(&db, &foreign_user_id, "foreign-google-bigquery", true).await;
+
         let err = rebind_user_service_api_key(&db, &user_id, "no-such-slug", &key_id)
             .await
             .unwrap_err();
-        assert!(matches!(err, AppError::NotFound(_)), "got {err:?}");
+        assert_rebind_not_found(err);
+        let foreign =
+            rebind_user_service_api_key(&db, &user_id, "foreign-google-bigquery", &key_id)
+                .await
+                .unwrap_err();
+        assert_rebind_not_found(foreign);
+    }
 
-        // A key that doesn't belong to the user is rejected (no rebind to
-        // someone else's credential).
-        let foreign = rebind_user_service_api_key(
-            &db,
-            &user_id,
-            "google-bigquery",
-            &uuid::Uuid::new_v4().to_string(),
-        )
-        .await
-        .unwrap_err();
-        assert!(matches!(foreign, AppError::NotFound(_)), "got {foreign:?}");
+    #[tokio::test]
+    async fn rebind_user_service_api_key_foreign_key_rejected() {
+        let Some((db, user_id, _, _)) =
+            rebind_test_subject("rebind_user_service_api_key_foreign_key").await
+        else {
+            return;
+        };
+        let foreign_user_id = uuid::Uuid::new_v4().to_string();
+        let foreign_key_id = uuid::Uuid::new_v4().to_string();
+        insert_rebind_key(&db, &foreign_user_id, &foreign_key_id, "active").await;
+
+        let foreign =
+            rebind_user_service_api_key(&db, &user_id, "google-bigquery", &foreign_key_id)
+                .await
+                .unwrap_err();
+        assert_rebind_not_found(foreign);
+    }
+
+    #[tokio::test]
+    async fn rebind_user_service_api_key_failed_and_revoked_keys_rejected_as_inactive() {
+        let Some((db, user_id, _, _)) =
+            rebind_test_subject("rebind_user_service_api_key_inactive_keys").await
+        else {
+            return;
+        };
+        let failed_key_id = uuid::Uuid::new_v4().to_string();
+        let revoked_key_id = uuid::Uuid::new_v4().to_string();
+        insert_rebind_key(&db, &user_id, &failed_key_id, "failed").await;
+        insert_rebind_key(&db, &user_id, &revoked_key_id, "revoked").await;
 
         let failed = rebind_user_service_api_key(&db, &user_id, "google-bigquery", &failed_key_id)
             .await
             .unwrap_err();
-        assert!(matches!(failed, AppError::NotFound(_)), "got {failed:?}");
+        assert_rebind_not_found(failed);
 
         let revoked =
             rebind_user_service_api_key(&db, &user_id, "google-bigquery", &revoked_key_id)
                 .await
                 .unwrap_err();
-        assert!(matches!(revoked, AppError::NotFound(_)), "got {revoked:?}");
+        assert_rebind_not_found(revoked);
     }
 }
