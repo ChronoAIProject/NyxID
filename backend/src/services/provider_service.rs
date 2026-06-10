@@ -1506,6 +1506,50 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
+    if !slug_exists!("aevatar") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "aevatar".to_string(),
+            name: "aevatar".to_string(),
+            description: Some(
+                "Connect your self-hosted aevatar runtime for Codex, Cursor, and channel inbound routing"
+                    .to_string(),
+            ),
+            provider_type: "api_key".to_string(),
+            authorization_url: None,
+            token_url: None,
+            revocation_url: None,
+            default_scopes: None,
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: Some(
+                "Enter the bearer token accepted by your aevatar gateway. You must also provide your aevatar gateway URL."
+                    .to_string(),
+            ),
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: None,
+            is_active: true,
+            credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            requires_gateway_url: true,
+            created_by: "system".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = "aevatar", "Seeded default provider: aevatar");
+        seeded_count += 1;
+    }
+
     // Cloud billing providers (NyxID#716, #778). AWS uses direct sigv4
     // injection (non-delegated). Google Cloud uses the standard OAuth2
     // delegated flow via the new `google-cloud` provider + `api-google-cloud`
@@ -1734,6 +1778,28 @@ struct SeededHeader {
     sensitive: bool,
 }
 
+struct SeededServiceContract {
+    description: String,
+    streaming_supported: bool,
+    capabilities: Option<ServiceCapabilities>,
+    identity_propagation_mode: &'static str,
+    identity_include_user_id: bool,
+    identity_include_email: bool,
+    identity_include_name: bool,
+    identity_jwt_audience: Option<String>,
+    forward_access_token: bool,
+    inject_delegation_token: bool,
+    delegation_token_scope: &'static str,
+    homepage_url: Option<&'static str>,
+    repository_url: Option<&'static str>,
+    issues_url: Option<&'static str>,
+    auth_notes: Option<&'static str>,
+    known_limitations: Option<&'static str>,
+    required_permissions: Option<&'static [&'static str]>,
+    examples_url: Option<&'static str>,
+    recommended_skills: Option<&'static [&'static str]>,
+}
+
 /// Per-slug capability overrides for seeded services.
 ///
 /// Returns explicit `ServiceCapabilities` and `streaming_supported` values
@@ -1760,8 +1826,82 @@ fn seed_capability_override(slug: &str) -> Option<(ServiceCapabilities, bool)> {
             },
             true,
         )),
+        "aevatar" => Some((
+            ServiceCapabilities {
+                supports_proxy_read: true,
+                supports_proxy_write: true,
+                supports_proxy_binary_upload: false,
+                supports_direct_downstream_auth: true,
+                supports_authoring_via_nyx: false,
+                supports_websocket: false,
+                supports_streaming: true,
+            },
+            true,
+        )),
         _ => None,
     }
+}
+
+fn seeded_service_contract(seed: &DefaultServiceSeed) -> SeededServiceContract {
+    let is_llm_service = seed.service_slug.starts_with("llm-");
+    let description = seed.description.map(String::from).unwrap_or_else(|| {
+        if is_llm_service {
+            format!("{} proxied via NyxID LLM gateway", seed.service_name)
+        } else {
+            format!("{} proxied via NyxID proxy", seed.service_name)
+        }
+    });
+    let (capabilities, streaming_supported) = match seed_capability_override(seed.service_slug) {
+        Some((caps, streaming)) => (Some(caps), streaming),
+        None => (None, false),
+    };
+
+    let mut contract = SeededServiceContract {
+        description,
+        streaming_supported,
+        capabilities,
+        identity_propagation_mode: "none",
+        identity_include_user_id: false,
+        identity_include_email: false,
+        identity_include_name: false,
+        identity_jwt_audience: None,
+        forward_access_token: false,
+        inject_delegation_token: false,
+        delegation_token_scope: if is_llm_service {
+            "llm:proxy"
+        } else {
+            "proxy:*"
+        },
+        homepage_url: None,
+        repository_url: None,
+        issues_url: None,
+        auth_notes: None,
+        known_limitations: None,
+        required_permissions: None,
+        examples_url: None,
+        recommended_skills: None,
+    };
+
+    if seed.service_slug == "aevatar" {
+        contract.identity_propagation_mode = "jwt";
+        contract.identity_include_user_id = true;
+        contract.identity_include_email = true;
+        contract.delegation_token_scope = "llm:proxy";
+        contract.auth_notes = Some(
+            "NyxID injects the user's aevatar bearer credential as Authorization: Bearer <token> and sends a short-lived X-NyxID-Identity-Token JWT. The raw caller access token is not forwarded.",
+        );
+        contract.known_limitations = Some(
+            "The aevatar instance URL is user supplied. NyxID does not provide a dedicated /llm/aevatar namespace or translate request formats; clients call the aevatar runtime through the existing slug proxy.",
+        );
+        contract.required_permissions = Some(&[
+            "aevatar:responses",
+            "aevatar:streaming",
+            "nyxid:identity-jwt",
+        ]);
+        contract.recommended_skills = Some(&["nyxid"]);
+    }
+
+    contract
 }
 
 /// Required Anthropic API headers. `anthropic-version` is mandatory on every
@@ -2162,6 +2302,23 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         description: None,
         default_request_headers: None,
     },
+    DefaultServiceSeed {
+        provider_slug: "aevatar",
+        service_slug: "aevatar",
+        service_name: "aevatar",
+        base_url: "https://aevatar-gateway.invalid",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: Some(
+            "Self-hosted aevatar runtime exposed through NyxID's slug proxy. Use this \
+             catalog entry for Codex, Cursor, and channel inbound routing that speaks \
+             OpenAI Responses-compatible HTTP and SSE streaming. Users provide their \
+             own gateway URL and bearer token.",
+        ),
+        default_request_headers: None,
+    },
     // Cloud-billing catalog entries (NyxID#716, #778). AWS uses direct
     // (non-delegated) sigv4 injection. Google Cloud uses delegated OAuth
     // via the `google-cloud` provider (service_auth_method=None so a
@@ -2295,6 +2452,7 @@ async fn backfill_seeded_capability_overrides(
         // stale metadata.
         let filter = doc! {
             "slug": *slug,
+            "created_by": "system",
             "$or": [
                 { "capabilities": { "$exists": false } },
                 { "capabilities": null },
@@ -2366,6 +2524,9 @@ async fn backfill_missing_service_provider_requirements(
         else {
             continue;
         };
+        if seed.service_slug == "aevatar" && service.created_by != "system" {
+            continue;
+        }
 
         let existing = req_col.find_one(doc! { "service_id": &service.id }).await?;
         if existing.is_some() {
@@ -2627,23 +2788,24 @@ pub async fn seed_default_services(
             continue; // Already seeded
         }
 
+        if seed.service_slug == "aevatar"
+            && service_col
+                .find_one(doc! { "slug": seed.service_slug, "is_active": true })
+                .await?
+                .is_some()
+        {
+            tracing::info!(
+                slug = seed.service_slug,
+                "Skipping default service seed because an active service already uses this slug"
+            );
+            continue;
+        }
+
         // Create an empty encrypted credential (field is required)
         let empty_credential = encryption_keys.encrypt(b"").await?;
 
         let service_id = Uuid::new_v4().to_string();
-        let is_llm_service = seed.service_slug.starts_with("llm-");
-        let description = seed.description.map(String::from).unwrap_or_else(|| {
-            if is_llm_service {
-                format!("{} proxied via NyxID LLM gateway", seed.service_name)
-            } else {
-                format!("{} proxied via NyxID proxy", seed.service_name)
-            }
-        });
-        let delegation_scope = if is_llm_service {
-            "llm:proxy"
-        } else {
-            "proxy:*"
-        };
+        let contract = seeded_service_contract(seed);
 
         // For services with a static auth method (e.g. body, bot_bearer),
         // the credential is stored on the user's UserService and injected by
@@ -2667,12 +2829,6 @@ pub async fn seed_default_services(
                 None
             };
 
-        let (capabilities, streaming_supported) = match seed_capability_override(seed.service_slug)
-        {
-            Some((caps, streaming)) => (Some(caps), streaming),
-            None => (None, false),
-        };
-
         let default_request_headers = seed
             .default_request_headers
             .map(|entries| entries.iter().map(seeded_header_to_model).collect());
@@ -2681,7 +2837,7 @@ pub async fn seed_default_services(
             id: service_id.clone(),
             name: seed.service_name.to_string(),
             slug: seed.service_slug.to_string(),
-            description: Some(description),
+            description: Some(contract.description),
             base_url: seed.base_url.to_string(),
             service_type: "http".to_string(),
             visibility: "public".to_string(),
@@ -2691,31 +2847,35 @@ pub async fn seed_default_services(
             auth_type: None,
             openapi_spec_url: None,
             asyncapi_spec_url: None,
-            streaming_supported,
+            streaming_supported: contract.streaming_supported,
             ssh_config: None,
             oauth_client_id: None,
             service_category: "internal".to_string(),
             requires_user_credential: false,
             is_active: true,
             created_by: "system".to_string(),
-            identity_propagation_mode: "none".to_string(),
-            identity_include_user_id: false,
-            identity_include_email: false,
-            identity_include_name: false,
-            identity_jwt_audience: None,
-            forward_access_token: false,
-            inject_delegation_token: false,
-            delegation_token_scope: delegation_scope.to_string(),
+            identity_propagation_mode: contract.identity_propagation_mode.to_string(),
+            identity_include_user_id: contract.identity_include_user_id,
+            identity_include_email: contract.identity_include_email,
+            identity_include_name: contract.identity_include_name,
+            identity_jwt_audience: contract.identity_jwt_audience,
+            forward_access_token: contract.forward_access_token,
+            inject_delegation_token: contract.inject_delegation_token,
+            delegation_token_scope: contract.delegation_token_scope.to_string(),
             provider_config_id: Some(provider.id.clone()),
-            homepage_url: None,
-            repository_url: None,
-            issues_url: None,
-            capabilities,
-            auth_notes: None,
-            known_limitations: None,
-            required_permissions: None,
-            examples_url: None,
-            recommended_skills: None,
+            homepage_url: contract.homepage_url.map(str::to_string),
+            repository_url: contract.repository_url.map(str::to_string),
+            issues_url: contract.issues_url.map(str::to_string),
+            capabilities: contract.capabilities,
+            auth_notes: contract.auth_notes.map(str::to_string),
+            known_limitations: contract.known_limitations.map(str::to_string),
+            required_permissions: contract
+                .required_permissions
+                .map(|values| values.iter().map(|value| value.to_string()).collect()),
+            examples_url: contract.examples_url.map(str::to_string),
+            recommended_skills: contract
+                .recommended_skills
+                .map(|values| values.iter().map(|value| value.to_string()).collect()),
             custom_user_agent: None,
             default_request_headers,
             ws_frame_injections: Vec::new(),
@@ -2976,6 +3136,9 @@ pub async fn seed_default_services(
         else {
             continue;
         };
+        if seed.service_slug == "aevatar" && existing.created_by != "system" {
+            continue;
+        }
 
         // Only overwrite if the description looks auto-generated, empty,
         // or matches a known stale seed value we previously shipped.
@@ -3820,6 +3983,21 @@ mod tests {
     }
 
     #[test]
+    fn seed_capability_override_aevatar_has_streaming_flags() {
+        let (caps, streaming) =
+            seed_capability_override("aevatar").expect("aevatar should have a capability override");
+
+        assert!(caps.supports_proxy_read);
+        assert!(caps.supports_proxy_write);
+        assert!(!caps.supports_proxy_binary_upload);
+        assert!(caps.supports_direct_downstream_auth);
+        assert!(!caps.supports_authoring_via_nyx);
+        assert!(!caps.supports_websocket);
+        assert!(caps.supports_streaming);
+        assert!(streaming);
+    }
+
+    #[test]
     fn seed_capability_override_returns_none_for_unknown_slug() {
         assert!(seed_capability_override("llm-openai").is_none());
         assert!(seed_capability_override("api-github").is_none());
@@ -4157,6 +4335,66 @@ mod tests {
         let caps = openclaw.capabilities.expect("openclaw capabilities");
         assert!(caps.supports_websocket);
         assert!(caps.supports_streaming);
+    }
+
+    #[tokio::test]
+    async fn seed_default_services_seeds_aevatar_contract() {
+        let Some(db) = seed_default_catalog("prov_seed_aevatar_contract").await else {
+            return;
+        };
+        let provider_col = db.collection::<ProviderConfig>(COLLECTION_NAME);
+        let service_col = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
+        let req_col = db.collection::<ServiceProviderRequirement>(REQUIREMENTS);
+
+        let provider = provider_col
+            .find_one(doc! { "slug": "aevatar" })
+            .await
+            .expect("query aevatar provider")
+            .expect("aevatar provider");
+        assert_eq!(provider.provider_type, "api_key");
+        assert!(provider.requires_gateway_url);
+
+        let service = service_col
+            .find_one(doc! { "slug": "aevatar" })
+            .await
+            .expect("query aevatar service")
+            .expect("aevatar service");
+        assert_eq!(service.name, "aevatar");
+        assert_eq!(service.base_url, "https://aevatar-gateway.invalid");
+        assert_eq!(
+            service.provider_config_id.as_deref(),
+            Some(provider.id.as_str())
+        );
+        assert_eq!(service.auth_method, "none");
+        assert_eq!(service.auth_key_name, "");
+        assert!(service.streaming_supported);
+        let caps = service.capabilities.expect("aevatar capabilities");
+        assert!(caps.supports_proxy_read);
+        assert!(caps.supports_proxy_write);
+        assert!(caps.supports_streaming);
+        assert!(!caps.supports_websocket);
+        assert_eq!(service.identity_propagation_mode, "jwt");
+        assert!(service.identity_include_user_id);
+        assert!(service.identity_include_email);
+        assert!(!service.identity_include_name);
+        assert!(!service.forward_access_token);
+        assert!(!service.inject_delegation_token);
+        assert_eq!(service.delegation_token_scope, "llm:proxy");
+        assert!(
+            service
+                .required_permissions
+                .as_ref()
+                .is_some_and(|permissions| permissions.contains(&"nyxid:identity-jwt".to_string()))
+        );
+
+        let requirement = req_col
+            .find_one(doc! { "service_id": &service.id })
+            .await
+            .expect("query aevatar requirement")
+            .expect("aevatar provider requirement");
+        assert_eq!(requirement.provider_config_id, provider.id);
+        assert_eq!(requirement.injection_method, "bearer");
+        assert_eq!(requirement.injection_key.as_deref(), Some("Authorization"));
     }
 
     #[tokio::test]
