@@ -378,9 +378,9 @@ function getDesktopMemberRow(displayName: string): HTMLElement {
   const row = screen
     .getAllByText(displayName)
     .map((element) => element.closest("tr"))
-    .find((rowElement): rowElement is HTMLElement => rowElement !== null);
+    .find((rowElement): rowElement is HTMLTableRowElement => rowElement !== null);
   expect(row).toBeDefined();
-  return row;
+  return row as HTMLElement;
 }
 
 async function expectLastAdminTooltip(control: HTMLElement) {
