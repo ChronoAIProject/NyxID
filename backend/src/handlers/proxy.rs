@@ -5901,6 +5901,27 @@ mod proxy_resolution_integration_tests {
         }
     }
 
+    fn api_key_auth(user_id: &str) -> AuthUser {
+        AuthUser {
+            user_id: Uuid::parse_str(user_id).expect("valid user id"),
+            session_id: None,
+            scope: "proxy".to_string(),
+            acting_client_id: None,
+            approval_owner_user_id: None,
+            auth_method: AuthMethod::ApiKey,
+            allow_all_services: true,
+            allow_all_nodes: true,
+            allowed_service_ids: vec![],
+            allowed_node_ids: vec![],
+            api_key_id: Some(Uuid::new_v4().to_string()),
+            api_key_name: Some("test-api-key".to_string()),
+            rate_limit_per_second: None,
+            rate_limit_burst: None,
+            ip_address: None,
+            user_agent: None,
+        }
+    }
+
     fn notification_channel(user_id: &str, timeout_secs: u32) -> NotificationChannel {
         let now = Utc::now();
         NotificationChannel {
@@ -6196,6 +6217,79 @@ mod proxy_resolution_integration_tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(resolved_slug, service.slug);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn slug_proxy_forwards_user_service_path() {
+        let Some(db) = connect_test_database("proxy_slug_user_service").await else {
+            eprintln!("skipping proxy integration test: no local MongoDB available");
+            return;
+        };
+
+        let (base_url, server) = start_downstream().await;
+        let owner_id = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_one(test_user(&owner_id, UserType::Person))
+            .await
+            .unwrap();
+        let service = insert_user_service(&db, &owner_id, "aevatar", &base_url, None).await;
+
+        let state = test_app_state(db.clone());
+        let mut resolved_slug = String::new();
+        let response = proxy_request_by_slug_inner(
+            &state,
+            &access_token_auth(&owner_id),
+            &service.slug,
+            "v1/responses",
+            proxy_request("/proxy/s/aevatar/v1/responses"),
+            &mut resolved_slug,
+        )
+        .await
+        .expect("slug proxy should resolve the user's service");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(resolved_slug, service.slug);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(std::str::from_utf8(&body).unwrap(), "ok:/v1/responses");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn api_key_scope_forbidden_service() {
+        let Some(db) = connect_test_database("proxy_api_key_scope_denied").await else {
+            eprintln!("skipping proxy integration test: no local MongoDB available");
+            return;
+        };
+
+        let (base_url, server) = start_downstream().await;
+        let owner_id = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_one(test_user(&owner_id, UserType::Person))
+            .await
+            .unwrap();
+        let service = insert_user_service(&db, &owner_id, "aevatar", &base_url, None).await;
+
+        let state = test_app_state(db.clone());
+        let mut auth = api_key_auth(&owner_id);
+        auth.allow_all_services = false;
+        auth.allowed_service_ids = vec![Uuid::new_v4().to_string()];
+        let mut resolved_slug = String::new();
+        let err = proxy_request_by_slug_inner(
+            &state,
+            &auth,
+            &service.slug,
+            "v1/responses",
+            proxy_request("/proxy/s/aevatar/v1/responses"),
+            &mut resolved_slug,
+        )
+        .await
+        .expect_err("service-scoped API key should deny unlisted user service");
+
+        assert!(
+            matches!(err, AppError::ApiKeyScopeForbidden(_)),
+            "expected service scope denial, got: {err}"
+        );
         server.abort();
     }
 
