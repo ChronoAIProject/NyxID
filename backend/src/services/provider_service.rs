@@ -4398,6 +4398,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn seed_default_services_preserves_active_non_system_aevatar() {
+        let Some(db) = connect_test_database("prov_seed_aevatar_custom_preserved").await else {
+            return;
+        };
+        let enc = test_encryption_keys();
+        let service_col = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
+        let req_col = db.collection::<ServiceProviderRequirement>(REQUIREMENTS);
+
+        let mut custom_service = crate::models::downstream_service::test_helpers::dummy_service();
+        custom_service.id = Uuid::new_v4().to_string();
+        custom_service.name = "Custom aevatar".to_string();
+        custom_service.slug = "aevatar".to_string();
+        custom_service.description = Some("operator-owned description".to_string());
+        custom_service.base_url = "https://operator-aevatar.example.com".to_string();
+        custom_service.created_by = "operator-admin".to_string();
+        custom_service.provider_config_id = None;
+        custom_service.auth_method = "bearer".to_string();
+        custom_service.auth_key_name = "Authorization".to_string();
+        custom_service.streaming_supported = false;
+        custom_service.capabilities = None;
+        custom_service.identity_propagation_mode = "none".to_string();
+        custom_service.identity_include_user_id = false;
+        custom_service.identity_include_email = false;
+        custom_service.delegation_token_scope = "proxy:*".to_string();
+        let custom_service_id = custom_service.id.clone();
+
+        service_col
+            .insert_one(custom_service)
+            .await
+            .expect("insert custom aevatar service");
+
+        super::seed_default_providers(&db, &enc)
+            .await
+            .expect("seed providers");
+        super::seed_default_services(&db, &enc)
+            .await
+            .expect("seed services");
+
+        assert_eq!(
+            service_col
+                .count_documents(doc! { "slug": "aevatar", "is_active": true })
+                .await
+                .expect("count active aevatar services"),
+            1,
+            "seeding must not insert a second active aevatar row over an operator-owned slug"
+        );
+
+        let preserved = service_col
+            .find_one(doc! { "_id": &custom_service_id })
+            .await
+            .expect("query preserved custom service")
+            .expect("custom aevatar service should remain");
+        assert_eq!(preserved.name, "Custom aevatar");
+        assert_eq!(
+            preserved.description.as_deref(),
+            Some("operator-owned description")
+        );
+        assert_eq!(preserved.base_url, "https://operator-aevatar.example.com");
+        assert_eq!(preserved.created_by, "operator-admin");
+        assert_eq!(preserved.provider_config_id, None);
+        assert_eq!(preserved.auth_method, "bearer");
+        assert_eq!(preserved.auth_key_name, "Authorization");
+        assert!(!preserved.streaming_supported);
+        assert!(preserved.capabilities.is_none());
+        assert_eq!(preserved.identity_propagation_mode, "none");
+        assert!(!preserved.identity_include_user_id);
+        assert!(!preserved.identity_include_email);
+        assert_eq!(preserved.delegation_token_scope, "proxy:*");
+
+        assert_eq!(
+            req_col
+                .count_documents(doc! { "service_id": &custom_service_id })
+                .await
+                .expect("count custom aevatar requirements"),
+            0,
+            "SPR backfill must not attach the seeded provider requirement to an operator-owned aevatar row"
+        );
+    }
+
+    #[tokio::test]
     async fn seed_default_services_seeds_telegram_bot_as_direct_path_auth() {
         let Some(db) = seed_default_catalog("prov_seed_telegram_bot").await else {
             return;

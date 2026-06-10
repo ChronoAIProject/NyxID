@@ -53,6 +53,7 @@ export const DOCS_TABS: readonly DocTab[] = [
           { slug: "ai/guides/wrap-rest-api-as-mcp", title: "Wrap a REST API as MCP tools" },
           { slug: "ai/guides/approvals-for-agents", title: "Approvals for agents" },
           { slug: "ai/guides/llms-txt-playbook", title: "The llms.txt playbook" },
+          { slug: "ai/guides/aevatar", title: "Connect aevatar" },
         ],
       },
     ],

@@ -6221,7 +6221,7 @@ mod proxy_resolution_integration_tests {
     }
 
     #[tokio::test]
-    async fn proxy_request_by_slug() {
+    async fn slug_proxy_forwards_user_service_path() {
         let Some(db) = connect_test_database("proxy_slug_user_service").await else {
             eprintln!("skipping proxy integration test: no local MongoDB available");
             return;
