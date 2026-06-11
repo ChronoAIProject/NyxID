@@ -269,45 +269,122 @@ async function clickMatchingModelItem(page, wanted) {
 
 async function selectModel(page, modelLabel) {
   try {
-    const wanted = normalizeModelLabel(modelLabel);
+    await page.bringToFront().catch(() => {});
+    const rawLabel = (modelLabel || "").trim();
+    const wanted = normalizeModelLabel(rawLabel);
     if (!wanted) return;
 
+    const target = await page.evaluate((label) => {
+      const raw = (label || "").trim();
+      const lower = raw.toLowerCase();
+      const compact = lower
+        .replace(/^(chatgpt|openai)-/, "")
+        .replace(/[\s._-]+/g, "");
+      if (lower.includes("pro")) return "Pro 扩展";
+      if (/极速|fast/.test(lower)) return "极速";
+      if (/均衡|balanced/.test(lower)) return "均衡";
+      if (/高级|advanced/.test(lower)) return "高级";
+      if (/超高|ultra/.test(lower)) return "超高";
+      if (/扩展|extended/.test(lower)) return "Pro 扩展";
+      if (/gpt[\s-]*5(\.5)?\b/.test(lower) || /\b5\.5\b/.test(lower) || compact === "gpt55" || compact === "gpt5") {
+        return "GPT-5.5";
+      }
+      return raw;
+    }, rawLabel);
+
     log(`selecting model "${modelLabel}"`);
-    const testIdPicker = page.locator('button[data-testid="model-switcher-dropdown-button"]').first();
-    const ariaPicker = page.locator('button[aria-label*="model" i]').first();
-    const topTextPicker = page
-      .locator("main button, header button, nav button, body > div button")
-      .filter({ hasText: /gpt|o\d|chatgpt/i })
-      .first();
-
-    let opened = false;
-    for (const picker of [testIdPicker, ariaPicker, topTextPicker]) {
+    const opened = await page.evaluate(() => {
       try {
-        await picker.click({ timeout: 5000 });
-        opened = await waitForModelMenu(page, 5000);
-        if (opened) break;
-      } catch (e) {}
-    }
+        const visible = (el) => {
+          const r = el.getBoundingClientRect();
+          const style = getComputedStyle(el);
+          return r.width > 0 && r.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+        };
+        let picker = document.querySelector('button.__composer-pill[aria-haspopup="menu"]');
+        if (!picker || !visible(picker)) {
+          picker = Array.from(document.querySelectorAll('button[aria-haspopup="menu"]')).find((btn) => {
+            if (!visible(btn)) return false;
+            const text = (btn.innerText || btn.textContent || "").trim();
+            return text.length > 0 &&
+              text.length < 30 &&
+              /pro|gpt|思考|扩展|极速|均衡|高级|超高|\b5(\.|\b)/i.test(text);
+          });
+        }
+        if (!picker) return false;
+        picker.click();
+        return true;
+      } catch (e) {
+        return false;
+      }
+    });
 
-    if (!opened) {
+    if (!opened || !(await waitForModelMenu(page, 5000))) {
       log(`model picker unavailable for "${modelLabel}", using current`);
       return;
     }
 
-    const directMatch = await clickMatchingModelItem(page, wanted);
+    const clickMatch = async () => page.evaluate(({ label, resolvedTarget }) => {
+      try {
+        const normalize = (value) => (value || "")
+          .toLowerCase()
+          .trim()
+          .replace(/^(chatgpt|openai)-/, "")
+          .replace(/[\s._-]+/g, "");
+        const rawNeedle = (label || "").trim();
+        const rawTarget = (resolvedTarget || "").trim();
+        const wantedValues = Array.from(new Set([
+          normalize(rawNeedle),
+          normalize(rawTarget),
+        ].filter(Boolean)));
+        const directValues = [rawNeedle.toLowerCase(), rawTarget.toLowerCase()].filter(Boolean);
+        const visible = (el) => {
+          const r = el.getBoundingClientRect();
+          const style = getComputedStyle(el);
+          return r.width > 0 && r.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+        };
+        const items = Array.from(document.querySelectorAll('[role="menuitemradio"],[role="menuitem"],[role="option"]'));
+        for (const item of items) {
+          if (!visible(item)) continue;
+          const text = (item.innerText || item.textContent || "").trim();
+          if (!text) continue;
+          const candidate = normalize(text);
+          const direct = text.toLowerCase();
+          const matched = wantedValues.some((wanted) => candidate === wanted || candidate.includes(wanted) || wanted.includes(candidate)) ||
+            directValues.some((wanted) => direct === wanted || direct.includes(wanted) || wanted.includes(direct));
+          if (!matched) continue;
+          const role = item.getAttribute("role") || "";
+          item.click();
+          return { text, role };
+        }
+      } catch (e) {}
+      return null;
+    }, { label: rawLabel, resolvedTarget: target });
+
+    let directMatch = await clickMatch();
+    if (directMatch && directMatch.role === "menuitem" && normalizeModelLabel(target) === "gpt55") {
+      await sleep(600);
+      directMatch = (await clickMatch()) || directMatch;
+    }
     if (directMatch) {
-      log(`model "${modelLabel}" selected via picker item "${directMatch}"`);
+      log(`model set to "${target}"`);
       return;
     }
 
-    const submenus = page
-      .locator('[role="menuitem"], [role="option"], button')
-      .filter({ hasText: /more models|legacy models/i });
-    if (await clickFirstVisible(submenus, 3000)) {
-      await waitForModelMenu(page, 5000);
-      const submenuMatch = await clickMatchingModelItem(page, wanted);
-      if (submenuMatch) {
-        log(`model "${modelLabel}" selected via picker item "${submenuMatch}"`);
+    const openedEffortSubmenu = await page.evaluate(() => {
+      try {
+        const trigger = document.querySelector('[data-testid="composer-intelligence-pro-thinking-effort-trigger"]');
+        if (!trigger) return false;
+        trigger.click();
+        return true;
+      } catch (e) {
+        return false;
+      }
+    });
+    if (openedEffortSubmenu) {
+      await sleep(600);
+      directMatch = await clickMatch();
+      if (directMatch) {
+        log(`model set to "${target}"`);
         return;
       }
     }
@@ -325,6 +402,7 @@ async function selectModel(page, modelLabel) {
 async function handlePrompt(page, task) {
   const { task_id } = task;
   log(`prompt task ${task_id} (followup=${!!task.is_followup})`);
+  await page.bringToFront().catch(() => {});
 
   // Navigate: continue an existing conversation, or start a FRESH chat.
   // For a fresh prompt we must leave any /c/<uuid> page we're parked on,
@@ -340,6 +418,7 @@ async function handlePrompt(page, task) {
   if (navTarget) {
     await page.goto(navTarget, { waitUntil: "domcontentloaded" });
     await installDomCore(page);
+    await page.bringToFront().catch(() => {});
     await sleep(2500);
   }
 
@@ -441,6 +520,8 @@ async function loadFullTranscript(page) {
     }
   }
 
+  await expandCollapsibles(page);
+
   const acc = [];
   const seen = new Set();
   let bottomStable = 0;
@@ -479,12 +560,14 @@ async function loadFullTranscript(page) {
 async function handleScrape(page, task) {
   const { task_id, conversation_url } = task;
   log(`scrape task ${task_id} → ${conversation_url}`);
+  await page.bringToFront().catch(() => {});
   if (!conversation_url) {
     await apiPost("/transcript", { task_id, worker: LABEL, turns: [], chatgpt_url: page.url() });
     return;
   }
   await page.goto(conversation_url, { waitUntil: "domcontentloaded" });
   await installDomCore(page);
+  await page.bringToFront().catch(() => {});
   await ack(task_id, "scraping");
 
   const turns = await loadFullTranscript(page);
@@ -523,6 +606,55 @@ async function scrollLazyPage(page) {
   }
 }
 
+async function expandCollapsibles(page) {
+  try {
+    await page.evaluate(() => {
+      try {
+        const root = document.querySelector("main") || document.body;
+        if (!root) return;
+        const isVisible = (el) => {
+          const r = el.getBoundingClientRect();
+          const style = getComputedStyle(el);
+          return r.width > 0 && r.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+        };
+        const inComposerOrChrome = (el) => {
+          const text = (el.innerText || el.textContent || "").trim();
+          if (el.closest("#prompt-textarea, form, textarea, [contenteditable='true'][role='textbox'], [class*='composer'], [data-testid='composer'], [data-testid='send-button'], [data-testid='stop-button']")) {
+            return true;
+          }
+          if (el.matches("button.__composer-pill, button[aria-haspopup='menu'], button[data-testid='send-button'], button[data-testid='stop-button']")) {
+            return true;
+          }
+          if (/^(Send|Stop|发送|停止|GPT-|Pro|极速|均衡|高级|超高)$/i.test(text)) return true;
+          return false;
+        };
+        let clicked = 0;
+        for (const detail of Array.from(root.querySelectorAll("details:not([open])"))) {
+          if (clicked >= 40) break;
+          try {
+            detail.open = true;
+            clicked += 1;
+          } catch (e) {}
+        }
+        const candidates = Array.from(root.querySelectorAll('[aria-expanded="false"], button, [role="button"]'));
+        for (const el of candidates) {
+          if (clicked >= 40) break;
+          try {
+            if (!isVisible(el) || inComposerOrChrome(el)) continue;
+            const text = (el.innerText || el.textContent || el.getAttribute("aria-label") || "").trim();
+            const collapsed = el.getAttribute("aria-expanded") === "false";
+            const looksExpandable = collapsed || /Thought for|思考|显示更多|Show more|展开/i.test(text);
+            if (!looksExpandable) continue;
+            el.click();
+            clicked += 1;
+          } catch (e) {}
+        }
+      } catch (e) {}
+    });
+    await sleep(300);
+  } catch (e) {}
+}
+
 async function handleExtract(page, task) {
   const { task_id } = task;
   let targetHost = "-";
@@ -532,9 +664,11 @@ async function handleExtract(page, task) {
   log(`extract task ${task_id} → host=${targetHost}`);
   try {
     await page.goto(task.target_url, { waitUntil: "domcontentloaded" });
+    await page.bringToFront().catch(() => {});
     await page.waitForLoadState("networkidle", { timeout: 8000 }).catch(() => {});
     await ack(task_id, "extracting");
     await scrollLazyPage(page);
+    await expandCollapsibles(page);
     const content = await page.evaluate(() => {
       const root = document.querySelector("main, article") || document.body;
       return ((root && root.innerText) || "").trim().slice(0, 200000);

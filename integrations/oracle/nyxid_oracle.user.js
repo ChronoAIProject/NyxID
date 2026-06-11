@@ -1206,6 +1206,79 @@
     return Math.max(lastCount, 0);
   }
 
+  function expandCollapsiblesInPage() {
+    try {
+      const root = document.querySelector("main") || scrollContainer() || document.body;
+      if (!root) return 0;
+      const maxActions = 40;
+      let actions = 0;
+      const expandTextRe = /Thought for|思考|Show more|显示更多|展开/i;
+      const blockedButtonRe = /send|stop|model|attach|mic|voice|dictation|file|plus|new|search|发送|停止|模型|附件|添加|文件|语音|听写|搜索/i;
+
+      function visible(el) {
+        try {
+          const rect = el.getBoundingClientRect();
+          const style = window.getComputedStyle(el);
+          return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+        } catch {
+          return false;
+        }
+      }
+
+      function inComposerArea(el) {
+        try {
+          if (el.closest("form, [class*='composer'], [class*='input-area'], [id='prompt-textarea']")) return true;
+          const prompt = findPromptInput();
+          return !!(prompt && (el === prompt || prompt.contains(el) || el.contains(prompt)));
+        } catch {
+          return false;
+        }
+      }
+
+      function blockedButton(el) {
+        const btn = el.closest("button, [role='button']");
+        if (!btn) return false;
+        const tid = btn.getAttribute("data-testid") || "";
+        const label = btn.getAttribute("aria-label") || "";
+        const text = btn.textContent || "";
+        return blockedButtonRe.test(`${tid} ${label} ${text}`);
+      }
+
+      for (const details of Array.from(root.querySelectorAll("details:not([open])"))) {
+        if (actions >= maxActions) break;
+        if (inComposerArea(details)) continue;
+        details.open = true;
+        actions += 1;
+      }
+
+      for (const el of Array.from(root.querySelectorAll('[aria-expanded="false"]'))) {
+        if (actions >= maxActions) break;
+        if (inComposerArea(el) || blockedButton(el) || !visible(el)) continue;
+        try {
+          el.click();
+          actions += 1;
+        } catch {}
+      }
+
+      for (const el of Array.from(root.querySelectorAll("button, [role='button'], summary"))) {
+        if (actions >= maxActions) break;
+        if (inComposerArea(el) || blockedButton(el) || !visible(el)) continue;
+        const text = (el.innerText || el.textContent || "").trim();
+        if (!expandTextRe.test(text)) continue;
+        try {
+          el.click();
+          actions += 1;
+        } catch {}
+      }
+
+      if (actions > 0) log(`scrape: expanded ${actions} collapsed blocks`);
+      return actions;
+    } catch (e) {
+      log(`scrape: expand skipped (${e.message})`);
+      return 0;
+    }
+  }
+
   async function loadFullTranscriptInPage() {
     let lastHeight = -1;
     let stableHeight = 0;
@@ -1227,6 +1300,9 @@
         lastHeight = height;
       }
     }
+
+    expandCollapsiblesInPage();
+    await sleep(500);
 
     const acc = [];
     const seen = new Set();
