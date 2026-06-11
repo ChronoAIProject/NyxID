@@ -34,7 +34,10 @@ fn oauth_public_cors() -> CorsLayer {
 /// The caller must attach separate CORS layers to each before merging.
 /// Public OAuth endpoints allow any origin (per RFC 9207) while private
 /// API endpoints restrict origin to FRONTEND_URL.
-pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<AppState>) {
+pub fn build_router(
+    proxy_max_body_size: usize,
+    public_proxy_max_body_size: usize,
+) -> (Router<AppState>, Router<AppState>) {
     let mfa_routes = Router::new()
         .route("/setup", post(handlers::mfa::setup))
         .route("/confirm", post(handlers::mfa::confirm))
@@ -143,6 +146,16 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
         .route(
             "/{service_id}/discover-endpoints",
             post(handlers::endpoints::discover_endpoints),
+        )
+        .route(
+            "/{service_id}/anonymous-endpoints",
+            get(handlers::admin_anonymous_endpoints::list_anonymous_endpoints)
+                .post(handlers::admin_anonymous_endpoints::create_anonymous_endpoint),
+        )
+        .route(
+            "/{service_id}/anonymous-endpoints/{rule_id}",
+            put(handlers::admin_anonymous_endpoints::update_anonymous_endpoint)
+                .delete(handlers::admin_anonymous_endpoints::delete_anonymous_endpoint),
         )
         .route(
             "/{service_id}/requirements",
@@ -819,6 +832,17 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
         )
         .layer(RequestBodyLimitLayer::new(proxy_max_body_size));
 
+    let public_passthrough_routes = Router::new()
+        .route(
+            "/public/s/{slug}/{*path}",
+            axum::routing::any(handlers::public_proxy::public_proxy_request),
+        )
+        .route(
+            "/public/s/{slug}",
+            axum::routing::any(handlers::public_proxy::public_proxy_request_root),
+        )
+        .layer(RequestBodyLimitLayer::new(public_proxy_max_body_size));
+
     // LLM gateway routes get a moderate limit (10 MB for LLM payloads).
     let llm_routes = llm_routes.layer(RequestBodyLimitLayer::new(10 * 1024 * 1024));
 
@@ -999,10 +1023,12 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
         .nest("/api/v1/integrations", integration_routes)
         .nest("/api/v1/node-agent", node_agent_routes)
         .nest("/api/v1", api_v1)
+        .merge(public_passthrough_routes)
         // WebSocket endpoint for node agents. Auth happens in-message (not middleware).
         // Rate limiting: global per-IP rate limiter covers HTTP upgrade requests.
         // Connection limiting: NodeWsManager enforces max concurrent connections.
         .route("/api/v1/nodes/ws", get(handlers::node_ws::ws_handler))
+        .route("/public/mcp", post(handlers::public_mcp::public_mcp_post))
         .route(
             "/mcp",
             post(handlers::mcp_transport::mcp_post)

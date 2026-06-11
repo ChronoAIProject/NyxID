@@ -298,6 +298,9 @@ pub enum AppError {
 
     #[error("Invite code has already been redeemed")]
     InviteCodeAlreadyRedeemed,
+
+    #[error("Anonymous endpoint incompatible with service identity exposure: {0}")]
+    AnonymousIncompatibleService(String),
 }
 
 impl AppError {
@@ -386,6 +389,7 @@ impl AppError {
             | Self::InviteCodeExhausted
             | Self::InviteCodeDeactivated
             | Self::InviteCodeAlreadyRedeemed => StatusCode::BAD_REQUEST,
+            Self::AnonymousIncompatibleService(_) => StatusCode::BAD_REQUEST,
             Self::Internal(_) | Self::DatabaseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -482,6 +486,7 @@ impl AppError {
             Self::InviteCodeExhausted => 8201,
             Self::InviteCodeDeactivated => 8202,
             Self::InviteCodeAlreadyRedeemed => 8203,
+            Self::AnonymousIncompatibleService(_) => 11001,
         }
     }
 
@@ -610,6 +615,7 @@ impl AppError {
             Self::InviteCodeExhausted => "invite_code_exhausted",
             Self::InviteCodeDeactivated => "invite_code_deactivated",
             Self::InviteCodeAlreadyRedeemed => "invite_code_already_redeemed",
+            Self::AnonymousIncompatibleService(_) => "anonymous_incompatible_service",
         }
     }
 }

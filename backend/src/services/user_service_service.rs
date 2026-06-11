@@ -1725,6 +1725,7 @@ mod tests {
             ws_frame_injections: Vec::new(),
             developer_app_ids: None,
             token_exchange_config: None,
+            anonymous_endpoints: Vec::new(),
             created_at: now,
             updated_at: now,
         }

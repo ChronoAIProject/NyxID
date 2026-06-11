@@ -15,6 +15,7 @@ use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService}
 use crate::models::user_service_connection::{
     COLLECTION_NAME as CONNECTIONS, UserServiceConnection,
 };
+use crate::services::anonymous_endpoint_service;
 use crate::services::content_type::{
     is_binary_content_type, is_json_content_type, normalize_content_type, schema_is_binary,
 };
@@ -1173,6 +1174,144 @@ pub fn generate_tool_definitions(
     }
 
     tools
+}
+
+pub async fn load_public_tools(db: &mongodb::Database) -> AppResult<Vec<McpToolService>> {
+    let services: Vec<DownstreamService> = db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find(doc! {
+            "is_active": true,
+            "service_type": "http",
+            "anonymous_endpoints": { "$elemMatch": { "enabled": true } },
+        })
+        .await?
+        .try_collect()
+        .await?;
+
+    let mut public_services = Vec::new();
+    for svc in services {
+        if anonymous_endpoint_service::validate_anonymous_service_runtime_safety(&svc).is_err() {
+            continue;
+        }
+
+        let endpoints: Vec<McpToolEndpoint> = svc
+            .anonymous_endpoints
+            .iter()
+            .filter(|rule| rule.enabled)
+            .map(|rule| McpToolEndpoint {
+                endpoint_id: rule.id.clone(),
+                name: public_endpoint_tool_name(&rule.method, &rule.path_pattern),
+                description: Some(format!(
+                    "{} {} via public NyxID proxy",
+                    rule.method, rule.path_pattern
+                )),
+                method: rule.method.clone(),
+                path: rule.path_pattern.clone(),
+                parameters: None,
+                request_body_schema: Some(public_request_body_schema()),
+                request_content_type: Some("application/json".to_string()),
+                request_body_required: false,
+                response_description: None,
+            })
+            .collect();
+
+        if endpoints.is_empty() {
+            continue;
+        }
+
+        public_services.push(McpToolService {
+            service_id: svc.id.clone(),
+            service_name: svc.name.clone(),
+            service_slug: format!("public__{}", sanitize_tool_segment(&svc.slug)),
+            description: svc.description.clone(),
+            service_category: "public".to_string(),
+            endpoints,
+            source: McpToolSource::Platform {
+                downstream_service_id: svc.id,
+            },
+            is_generic_proxy: false,
+        });
+    }
+
+    Ok(public_services)
+}
+
+pub fn generate_public_tool_definitions(services: &[McpToolService]) -> Vec<McpToolDefinition> {
+    services
+        .iter()
+        .flat_map(|service| {
+            service.endpoints.iter().map(move |endpoint| {
+                let description = endpoint
+                    .description
+                    .clone()
+                    .unwrap_or_else(|| format!("{} {}", endpoint.method, endpoint.path));
+                McpToolDefinition {
+                    name: format!("{}__{}", service.service_slug, endpoint.name),
+                    description: format!("[{}] {}", service.service_name, description),
+                    input_schema: public_proxy_input_schema(endpoint),
+                }
+            })
+        })
+        .collect()
+}
+
+fn public_proxy_input_schema(endpoint: &McpToolEndpoint) -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": format!("Request path matching {}", endpoint.path)
+            },
+            "query": {
+                "type": "object",
+                "additionalProperties": { "type": "string" },
+                "description": "Optional query string parameters"
+            },
+            "body": public_request_body_schema()
+        },
+        "required": []
+    })
+}
+
+fn public_request_body_schema() -> serde_json::Value {
+    serde_json::json!({
+        "description": "Optional JSON request body for public proxy execution"
+    })
+}
+
+fn public_endpoint_tool_name(method: &str, path_pattern: &str) -> String {
+    let path = path_pattern
+        .trim_matches('/')
+        .strip_suffix("/**")
+        .unwrap_or_else(|| path_pattern.trim_matches('/'));
+    let path = if path.is_empty() { "root" } else { path };
+    format!(
+        "{}_{}",
+        method.to_ascii_lowercase(),
+        sanitize_tool_segment(path)
+    )
+}
+
+fn sanitize_tool_segment(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut last_was_underscore = false;
+    for ch in value.chars() {
+        let valid = ch.is_ascii_alphanumeric();
+        if valid {
+            out.push(ch.to_ascii_lowercase());
+            last_was_underscore = false;
+        } else if !last_was_underscore {
+            out.push('_');
+            last_was_underscore = true;
+        }
+    }
+    let trimmed = out.trim_matches('_').to_string();
+    if trimmed.is_empty() {
+        "root".to_string()
+    } else {
+        trimmed
+    }
 }
 
 /// Build a JSON Schema `inputSchema` from endpoint parameters and body schema.

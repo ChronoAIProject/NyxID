@@ -158,6 +158,7 @@ fn command_names(command: &Commands) -> (&'static str, &'static str) {
         Commands::Device { .. } => ("device", "subcommand"),
         Commands::NodeCredential { .. } => ("node_credential", "subcommand"),
         Commands::Proxy { .. } => ("proxy", "subcommand"),
+        Commands::Public { .. } => ("public", "subcommand"),
         Commands::Ssh(_) => ("ssh", "subcommand"),
         Commands::Openclaw { .. } => ("openclaw", "subcommand"),
         Commands::Mcp { .. } => ("mcp", "subcommand"),
@@ -223,6 +224,7 @@ async fn run(cli: Cli) -> Result<()> {
 
         // C8-C10: Proxy
         Commands::Proxy { command } => commands::proxy::run(command).await,
+        Commands::Public { command } => commands::public::run(command).await,
 
         Commands::Ssh(ssh) => commands::ssh::run(ssh).await,
         Commands::Openclaw { command } => commands::openclaw::run(command).await,

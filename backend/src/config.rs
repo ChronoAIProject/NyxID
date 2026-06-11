@@ -231,6 +231,12 @@ pub struct AppConfig {
     pub ssh_max_tunnel_duration_secs: u64,
     /// Maximum concurrent WebSocket passthrough connections (default: 200)
     pub ws_passthrough_max_connections: usize,
+    /// Maximum request body size for anonymous public proxy/MCP routes.
+    pub public_proxy_max_body_size: usize,
+    /// Per-IP anonymous public proxy request cap per minute.
+    pub public_proxy_rate_limit_per_minute: u32,
+    /// Per-IP anonymous public MCP request cap per minute.
+    pub public_mcp_rate_limit_per_minute: u32,
 
     // Channel Bot Relay
     /// Timeout in seconds for delivering inbound messages to agent callback URLs (default: 30)
@@ -458,6 +464,18 @@ impl std::fmt::Debug for AppConfig {
             .field(
                 "ws_passthrough_max_connections",
                 &self.ws_passthrough_max_connections,
+            )
+            .field(
+                "public_proxy_max_body_size",
+                &self.public_proxy_max_body_size,
+            )
+            .field(
+                "public_proxy_rate_limit_per_minute",
+                &self.public_proxy_rate_limit_per_minute,
+            )
+            .field(
+                "public_mcp_rate_limit_per_minute",
+                &self.public_mcp_rate_limit_per_minute,
             )
             .field(
                 "channel_relay_callback_timeout_secs",
@@ -787,6 +805,24 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(200),
+            public_proxy_max_body_size: env::var("PUBLIC_PROXY_MAX_BODY_SIZE")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(
+                    crate::services::anonymous_endpoint_service::DEFAULT_PUBLIC_PROXY_MAX_BODY_SIZE,
+                ),
+            public_proxy_rate_limit_per_minute: env::var("PUBLIC_PROXY_RATE_LIMIT_PER_MINUTE")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(
+                    crate::services::anonymous_endpoint_service::DEFAULT_PUBLIC_PROXY_RATE_LIMIT_PER_MINUTE,
+                ),
+            public_mcp_rate_limit_per_minute: env::var("PUBLIC_MCP_RATE_LIMIT_PER_MINUTE")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(
+                    crate::services::anonymous_endpoint_service::DEFAULT_PUBLIC_MCP_RATE_LIMIT_PER_MINUTE,
+                ),
             channel_relay_callback_timeout_secs: env::var("CHANNEL_RELAY_CALLBACK_TIMEOUT_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -1150,6 +1186,12 @@ mod tests {
             ssh_connect_timeout_secs: 10,
             ssh_max_tunnel_duration_secs: 3600,
             ws_passthrough_max_connections: 200,
+            public_proxy_max_body_size:
+                crate::services::anonymous_endpoint_service::DEFAULT_PUBLIC_PROXY_MAX_BODY_SIZE,
+            public_proxy_rate_limit_per_minute:
+                crate::services::anonymous_endpoint_service::DEFAULT_PUBLIC_PROXY_RATE_LIMIT_PER_MINUTE,
+            public_mcp_rate_limit_per_minute:
+                crate::services::anonymous_endpoint_service::DEFAULT_PUBLIC_MCP_RATE_LIMIT_PER_MINUTE,
             channel_relay_callback_timeout_secs: 30,
             channel_relay_max_bots_per_user: 5,
             channel_relay_message_ttl_days: 30,

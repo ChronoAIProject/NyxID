@@ -231,6 +231,12 @@ pub(crate) fn test_app_config() -> AppConfig {
         ssh_connect_timeout_secs: 10,
         ssh_max_tunnel_duration_secs: 3600,
         ws_passthrough_max_connections: 200,
+        public_proxy_max_body_size:
+            crate::services::anonymous_endpoint_service::DEFAULT_PUBLIC_PROXY_MAX_BODY_SIZE,
+        public_proxy_rate_limit_per_minute:
+            crate::services::anonymous_endpoint_service::DEFAULT_PUBLIC_PROXY_RATE_LIMIT_PER_MINUTE,
+        public_mcp_rate_limit_per_minute:
+            crate::services::anonymous_endpoint_service::DEFAULT_PUBLIC_MCP_RATE_LIMIT_PER_MINUTE,
         channel_relay_callback_timeout_secs: 30,
         channel_relay_max_bots_per_user: 5,
         channel_relay_message_ttl_days: 30,
@@ -370,6 +376,14 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         per_agent_limiter: Arc::new(crate::mw::rate_limit::PerAgentRateLimiter::new()),
         device_code_pubkey_limiter: crate::mw::rate_limit::create_per_pubkey_rate_limiter(),
         device_code_ip_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(5, 60),
+        public_proxy_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(
+            config.public_proxy_rate_limit_per_minute,
+            60,
+        ),
+        public_mcp_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(
+            config.public_mcp_rate_limit_per_minute,
+            60,
+        ),
         // Production default from backend/src/main.rs — 5 claims per
         // 60s per IP; mirror here so claim-rate-limit tests see the
         // same shape.

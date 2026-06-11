@@ -1353,6 +1353,7 @@ mod tests {
             ws_frame_injections: vec![],
             developer_app_ids: None,
             token_exchange_config: None,
+            anonymous_endpoints: Vec::new(),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }

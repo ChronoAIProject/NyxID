@@ -103,6 +103,10 @@ pub struct AppState {
     /// is generous enough (1/12s avg) that legitimate retypes aren't
     /// blocked.
     pub cli_pairing_claim_limiter: mw::rate_limit::SharedPerIpRateLimiter,
+    /// Dedicated per-IP limiter for anonymous public proxy requests.
+    pub public_proxy_limiter: mw::rate_limit::SharedPerIpRateLimiter,
+    /// Dedicated per-IP limiter for anonymous public MCP requests.
+    pub public_mcp_limiter: mw::rate_limit::SharedPerIpRateLimiter,
     /// Server-side HMAC key used to derive `CliPairing.code_hash`.
     /// Lives in process memory only (never persisted), so a MongoDB
     /// snapshot alone doesn't let an attacker brute-force the 32^8
@@ -477,6 +481,14 @@ async fn main() {
         // 5 claim attempts per 60 seconds per IP; window-based, not token
         // bucket, because we want a hard cap on guesses per unit time.
         cli_pairing_claim_limiter: mw::rate_limit::create_per_ip_rate_limiter(5, 60),
+        public_proxy_limiter: mw::rate_limit::create_per_ip_rate_limiter(
+            config.public_proxy_rate_limit_per_minute,
+            60,
+        ),
+        public_mcp_limiter: mw::rate_limit::create_per_ip_rate_limiter(
+            config.public_mcp_rate_limit_per_minute,
+            60,
+        ),
         cli_pairing_hmac_key,
         per_channel_event_limiter,
         per_message_edit_limiter,
@@ -524,6 +536,22 @@ async fn main() {
         loop {
             interval.tick().await;
             cleanup_pairing_claim_limiter.cleanup();
+        }
+    });
+    let cleanup_public_proxy_limiter = state.public_proxy_limiter.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            cleanup_public_proxy_limiter.cleanup();
+        }
+    });
+    let cleanup_public_mcp_limiter = state.public_mcp_limiter.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            cleanup_public_mcp_limiter.cleanup();
         }
     });
 
@@ -785,7 +813,10 @@ async fn main() {
 
     // Build router — public OAuth routes get open CORS (per RFC 9207),
     // private API routes get restricted CORS (FRONTEND_URL only).
-    let (public_oauth, private_api) = routes::build_router(config.proxy_max_body_size);
+    let (public_oauth, private_api) = routes::build_router(
+        config.proxy_max_body_size,
+        config.public_proxy_max_body_size,
+    );
 
     let csrf_state = state.clone();
     let private_api = private_api.layer(cors).layer(axum_mw::from_fn_with_state(

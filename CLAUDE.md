@@ -63,6 +63,7 @@ Reserved device-code binding errors live in numeric block 9500-9599.
 - JWT auth middleware (`mw/auth.rs`)
 - PKCE for OAuth flows
 - Input validation on all endpoints
+- Enabled anonymous catalog endpoints are valid only when the catalog service has `identity_propagation_mode = "none"`, `forward_access_token = false`, and `inject_delegation_token = false`; disabled draft rules may be stored on any service. Admin writes that violate this return `AppError::AnonymousIncompatibleService`, HTTP 400, code 11001. Public execution still force-strips identity propagation, access-token forwarding, delegation-token injection, and downstream auth defaults as defense in depth.
 
 ### 5a. Vendor URN Namespace
 

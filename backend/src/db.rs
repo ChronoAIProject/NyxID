@@ -8,6 +8,7 @@ use mongodb::options::{ClientOptions, IndexOptions};
 use mongodb::{Client, Database, IndexModel};
 
 use crate::config::AppConfig;
+use crate::models::anonymous_endpoint_usage::COLLECTION_NAME as ANONYMOUS_ENDPOINT_USAGE;
 use crate::models::device_code::COLLECTION_NAME as DEVICE_CODES;
 use crate::models::device_onboard_credential::COLLECTION_NAME as DEVICE_ONBOARD_CREDENTIALS;
 use crate::models::downstream_service::{
@@ -270,6 +271,24 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .build(),
         )
         .await?;
+    services
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {
+                    "slug": 1,
+                    "is_active": 1,
+                    "service_type": 1,
+                    "anonymous_endpoints.enabled": 1,
+                    "anonymous_endpoints.method": 1,
+                })
+                .options(
+                    IndexOptions::builder()
+                        .name("anonymous_endpoint_lookup".to_string())
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
 
     services
         .create_index(
@@ -310,6 +329,34 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         .create_index(
             IndexModel::builder()
                 .keys(doc! { "api_key_id": 1, "created_at": -1 })
+                .build(),
+        )
+        .await?;
+
+    let anonymous_usage = db.collection::<mongodb::bson::Document>(ANONYMOUS_ENDPOINT_USAGE);
+    anonymous_usage
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "service_id": 1, "rule_id": 1, "day": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("anonymous_usage_service_rule_day_unique".to_string())
+                        .unique(true)
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    anonymous_usage
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "updated_at": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("anonymous_usage_day_ttl".to_string())
+                        .expire_after(Duration::from_secs(90 * 24 * 60 * 60))
+                        .build(),
+                )
                 .build(),
         )
         .await?;
@@ -2946,6 +2993,7 @@ mod tests {
             ws_frame_injections: Vec::new(),
             developer_app_ids: None,
             token_exchange_config: None,
+            anonymous_endpoints: Vec::new(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

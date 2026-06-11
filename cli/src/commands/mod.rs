@@ -24,6 +24,7 @@ pub mod pairing;
 pub mod profile;
 pub mod provider;
 pub mod proxy;
+pub mod public;
 pub mod repo;
 pub mod service;
 pub mod service_account;

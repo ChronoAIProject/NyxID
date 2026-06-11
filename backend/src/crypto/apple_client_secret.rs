@@ -199,6 +199,12 @@ ci0O2dgc19c2/sLtanU7P2KAzhEo8O0tIc0Dwe/nMqKfue82eGVL3DqM\n\
             ssh_connect_timeout_secs: 10,
             ssh_max_tunnel_duration_secs: 3600,
             ws_passthrough_max_connections: 200,
+            public_proxy_max_body_size:
+                crate::services::anonymous_endpoint_service::DEFAULT_PUBLIC_PROXY_MAX_BODY_SIZE,
+            public_proxy_rate_limit_per_minute:
+                crate::services::anonymous_endpoint_service::DEFAULT_PUBLIC_PROXY_RATE_LIMIT_PER_MINUTE,
+            public_mcp_rate_limit_per_minute:
+                crate::services::anonymous_endpoint_service::DEFAULT_PUBLIC_MCP_RATE_LIMIT_PER_MINUTE,
             channel_relay_callback_timeout_secs: 30,
             channel_relay_max_bots_per_user: 5,
             channel_relay_message_ttl_days: 30,

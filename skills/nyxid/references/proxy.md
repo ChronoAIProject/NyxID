@@ -112,6 +112,29 @@ What happens server-side on that single request:
 - A second `Authorization` header intended for the downstream (e.g. a Lark `tenant_access_token`). The allowlist strips any forwarded Authorization header by design, and raw HTTP clients that append instead of replace (reqwest's `RequestBuilder::header`, some JVM clients) would put duplicate Authorization lines on the wire and hit Cloudflare 400 at the edge. Let NyxID inject the downstream Authorization header.
 - Downstream credentials (API keys, app secrets, tokens) in the request body or query string. NyxID already has them encrypted at rest and injects them according to the service's `auth_method`.
 
+## Anonymous public proxy endpoints
+
+Admins can expose selected catalog-service methods and paths through explicit anonymous endpoint rules. These routes are separate from the authenticated proxy:
+
+| Path | Auth | Notes |
+|---|---|---|
+| `GET/POST/... /public/s/{slug}/{path}` | None | Only matches enabled `DownstreamService.anonymous_endpoints` rules for the same method and path pattern. |
+| `POST /public/mcp` | None | Returns an MCP `tools/list` projection containing only enabled anonymous rules. |
+
+Enabled anonymous rules are valid only when the catalog service has `identity_propagation_mode = "none"`, `forward_access_token = false`, and `inject_delegation_token = false`. Disabled rules are drafts and may be stored before the service is made compatible. Runtime public execution still force-strips identity propagation, access-token forwarding, delegation-token injection, downstream auth defaults, WebSocket upgrades, and NyxID auth/session response headers.
+
+```bash
+nyxid public request <slug> /public/a -X GET
+
+curl "https://nyx-api.chrono-ai.fun/public/s/<slug>/public/a"
+
+curl -X POST "https://nyx-api.chrono-ai.fun/public/mcp" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
+Anonymous public routes have their own per-IP limits and smaller request body cap. Configure `PUBLIC_PROXY_RATE_LIMIT_PER_MINUTE`, `PUBLIC_MCP_RATE_LIMIT_PER_MINUTE`, and `PUBLIC_PROXY_MAX_BODY_SIZE` in the backend environment when the defaults are not appropriate.
+
 ## Common service examples
 
 Paths below are relative to each service's base URL. Check `nyxid service show <id> --output json`

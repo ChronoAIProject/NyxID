@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
@@ -6,6 +7,12 @@ import {
   useDeleteService,
   useTestSshConnection,
 } from "@/hooks/use-services";
+import {
+  useAnonymousEndpoints,
+  useCreateAnonymousEndpoint,
+  useDeleteAnonymousEndpoint,
+  useUpdateAnonymousEndpoint,
+} from "@/hooks/use-anonymous-endpoints";
 import { usePushNodeCredential } from "@/hooks/use-nodes";
 import {
   isOidcService,
@@ -40,6 +47,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Button, ButtonIcon } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+import { Switch } from "@/components/ui/switch";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { ApiError } from "@/lib/api-client";
 import {
@@ -49,6 +57,8 @@ import {
   Router,
   ExternalLink,
   Send,
+  Plus,
+  Globe2,
 } from "lucide-react";
 import {
   Card,
@@ -77,7 +87,13 @@ import {
   FormLabel,
   FormMessage,
 } from "@/components/ui/form";
+import {
+  anonymousEndpointCreateSchema,
+  type AnonymousEndpointRuleFormData,
+  type AnonymousEndpointRuleFormInput,
+} from "@/schemas/anonymous-endpoints";
 import type { NodePendingCredentialInjectionMethod } from "@/types/nodes";
+import type { AnonymousEndpointRule } from "@/types/api";
 import { toast } from "sonner";
 
 const PROPAGATION_MODE_LABELS: Readonly<Record<string, string>> = {
@@ -631,6 +647,9 @@ export function ServiceDetailPage() {
           </DetailSection>
 
           <Separator />
+          <AnonymousEndpointsSection serviceId={service.id} />
+
+          <Separator />
           <DetailSection title="Provider Requirements">
             <ServiceRequirementsView
               serviceId={service.id}
@@ -727,110 +746,409 @@ function ServiceCredentialPushSection({
             void form.handleSubmit(handlePushCredential)(event)
           }
         >
-        <p className="text-[12px] text-muted-foreground">
-          Create pending metadata for the node, then encrypt the secret in the
-          browser on the accept page.
-        </p>
-        <div className="grid gap-4 md:grid-cols-2">
-          <FormField
-            control={form.control}
-            name="injection_method"
-            render={({ field }) => (
-              <FormItem>
-                <FormLabel>Injection method</FormLabel>
-                <Select
-                  value={field.value}
-                  onValueChange={(value) => {
-                    const method = value as NodePendingCredentialInjectionMethod;
-                    const previousDefault = defaultFieldName(
-                      field.value,
-                      service.auth_key_name,
-                    );
-                    const currentFieldName = form.getValues("field_name");
-                    field.onChange(method);
-                    if (
-                      currentFieldName.trim() === "" ||
-                      currentFieldName === previousDefault
-                    ) {
-                      form.setValue(
-                        "field_name",
-                        defaultFieldName(method, service.auth_key_name),
-                        { shouldDirty: true, shouldValidate: true },
+          <p className="text-[12px] text-muted-foreground">
+            Create pending metadata for the node, then encrypt the secret in the
+            browser on the accept page.
+          </p>
+          <div className="grid gap-4 md:grid-cols-2">
+            <FormField
+              control={form.control}
+              name="injection_method"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Injection method</FormLabel>
+                  <Select
+                    value={field.value}
+                    onValueChange={(value) => {
+                      const method =
+                        value as NodePendingCredentialInjectionMethod;
+                      const previousDefault = defaultFieldName(
+                        field.value,
+                        service.auth_key_name,
                       );
-                    }
-                  }}
-                >
+                      const currentFieldName = form.getValues("field_name");
+                      field.onChange(method);
+                      if (
+                        currentFieldName.trim() === "" ||
+                        currentFieldName === previousDefault
+                      ) {
+                        form.setValue(
+                          "field_name",
+                          defaultFieldName(method, service.auth_key_name),
+                          { shouldDirty: true, shouldValidate: true },
+                        );
+                      }
+                    }}
+                  >
+                    <FormControl>
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                    </FormControl>
+                    <SelectContent>
+                      <SelectItem value="header">Header</SelectItem>
+                      <SelectItem value="query-param">Query param</SelectItem>
+                      <SelectItem value="path-prefix">Path prefix</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={form.control}
+              name="field_name"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Field name</FormLabel>
                   <FormControl>
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
+                    <Input {...field} />
                   </FormControl>
-                  <SelectContent>
-                    <SelectItem value="header">Header</SelectItem>
-                    <SelectItem value="query-param">Query param</SelectItem>
-                    <SelectItem value="path-prefix">Path prefix</SelectItem>
-                  </SelectContent>
-                </Select>
-                <FormMessage />
-              </FormItem>
-            )}
-          />
-          <FormField
-            control={form.control}
-            name="field_name"
-            render={({ field }) => (
-              <FormItem>
-                <FormLabel>Field name</FormLabel>
-                <FormControl>
-                  <Input {...field} />
-                </FormControl>
-                <FormMessage />
-              </FormItem>
-            )}
-          />
-          <FormField
-            control={form.control}
-            name="target_url"
-            render={({ field }) => (
-              <FormItem>
-                <FormLabel>Target URL</FormLabel>
-                <FormControl>
-                  <Input {...field} value={field.value ?? ""} />
-                </FormControl>
-                <FormMessage />
-              </FormItem>
-            )}
-          />
-          <FormField
-            control={form.control}
-            name="label"
-            render={({ field }) => (
-              <FormItem>
-                <FormLabel>Label</FormLabel>
-                <FormControl>
-                  <Input {...field} value={field.value ?? ""} />
-                </FormControl>
-                <FormMessage />
-              </FormItem>
-            )}
-          />
-        </div>
-        <div className="flex justify-end">
-          <Button
-            variant="primary"
-            type="submit"
-            disabled={!watchedFieldName.trim() || !service.slug || !nodeId}
-            isLoading={pushCredentialMutation.isPending}
-          >
-            <ButtonIcon variant="primary">
-              <Send className="h-3 w-3" />
-            </ButtonIcon>
-            Push
-          </Button>
-        </div>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={form.control}
+              name="target_url"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Target URL</FormLabel>
+                  <FormControl>
+                    <Input {...field} value={field.value ?? ""} />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={form.control}
+              name="label"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Label</FormLabel>
+                  <FormControl>
+                    <Input {...field} value={field.value ?? ""} />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+          </div>
+          <div className="flex justify-end">
+            <Button
+              variant="primary"
+              type="submit"
+              disabled={!watchedFieldName.trim() || !service.slug || !nodeId}
+              isLoading={pushCredentialMutation.isPending}
+            >
+              <ButtonIcon variant="primary">
+                <Send className="h-3 w-3" />
+              </ButtonIcon>
+              Push
+            </Button>
+          </div>
         </form>
       </Form>
     </DetailSection>
+  );
+}
+
+function AnonymousEndpointsSection({
+  serviceId,
+}: {
+  readonly serviceId: string;
+}) {
+  const { data: endpoints, isLoading } = useAnonymousEndpoints(serviceId);
+  const createMutation = useCreateAnonymousEndpoint(serviceId);
+  const updateMutation = useUpdateAnonymousEndpoint(serviceId);
+  const deleteMutation = useDeleteAnonymousEndpoint(serviceId);
+  const form = useForm<
+    AnonymousEndpointRuleFormInput,
+    unknown,
+    AnonymousEndpointRuleFormData
+  >({
+    resolver: zodResolver(anonymousEndpointCreateSchema),
+    defaultValues: {
+      enabled: false,
+      method: "GET",
+      path_pattern: "/public/**",
+      daily_quota: 1000,
+    },
+  });
+
+  async function handleCreate(data: AnonymousEndpointRuleFormData) {
+    try {
+      await createMutation.mutateAsync(data);
+      form.reset({
+        enabled: false,
+        method: "GET",
+        path_pattern: "/public/**",
+        daily_quota: 1000,
+      });
+      toast.success("Anonymous endpoint created");
+    } catch (err) {
+      toast.error(
+        err instanceof ApiError
+          ? err.message
+          : "Failed to create anonymous endpoint",
+      );
+    }
+  }
+
+  async function handleRuleUpdate(
+    rule: AnonymousEndpointRule,
+    data: Partial<AnonymousEndpointRuleFormData>,
+  ) {
+    try {
+      await updateMutation.mutateAsync({ ruleId: rule.id, data });
+      toast.success("Anonymous endpoint updated");
+    } catch (err) {
+      toast.error(
+        err instanceof ApiError
+          ? err.message
+          : "Failed to update anonymous endpoint",
+      );
+    }
+  }
+
+  async function handleDelete(ruleId: string) {
+    try {
+      await deleteMutation.mutateAsync(ruleId);
+      toast.success("Anonymous endpoint deleted");
+    } catch (err) {
+      toast.error(
+        err instanceof ApiError
+          ? err.message
+          : "Failed to delete anonymous endpoint",
+      );
+    }
+  }
+
+  return (
+    <DetailSection title="Anonymous endpoints">
+      <div className="space-y-5 p-5">
+        <div className="flex items-center gap-2">
+          <Globe2 className="h-4 w-4 text-primary" />
+          <span className="text-[13px] font-medium">Public proxy rules</span>
+        </div>
+
+        <Form {...form}>
+          <form
+            className="grid gap-3 md:grid-cols-[120px_minmax(180px,1fr)_140px_auto]"
+            onSubmit={(event) => void form.handleSubmit(handleCreate)(event)}
+          >
+            <FormField
+              control={form.control}
+              name="method"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Method</FormLabel>
+                  <Select
+                    value={field.value}
+                    onValueChange={(value) => field.onChange(value)}
+                  >
+                    <FormControl>
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                    </FormControl>
+                    <SelectContent>
+                      {PUBLIC_METHODS.map((method) => (
+                        <SelectItem key={method} value={method}>
+                          {method}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={form.control}
+              name="path_pattern"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Path</FormLabel>
+                  <FormControl>
+                    <Input {...field} />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={form.control}
+              name="daily_quota"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Daily quota</FormLabel>
+                  <FormControl>
+                    <Input
+                      {...field}
+                      type="number"
+                      min={1}
+                      value={
+                        typeof field.value === "number" ||
+                        typeof field.value === "string"
+                          ? field.value
+                          : ""
+                      }
+                    />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <div className="flex items-end">
+              <Button
+                type="submit"
+                variant="primary"
+                isLoading={createMutation.isPending}
+              >
+                <ButtonIcon variant="primary">
+                  <Plus className="h-3 w-3" />
+                </ButtonIcon>
+                Add
+              </Button>
+            </div>
+          </form>
+        </Form>
+
+        <div className="space-y-2">
+          {isLoading && <Skeleton className="h-12 w-full" />}
+          {!isLoading && (!endpoints || endpoints.length === 0) && (
+            <div className="rounded-lg bg-white/[0.03] px-4 py-3 text-[12px] text-muted-foreground">
+              No anonymous endpoints configured.
+            </div>
+          )}
+          {endpoints?.map((rule) => (
+            <AnonymousEndpointRow
+              key={rule.id}
+              rule={rule}
+              onUpdate={handleRuleUpdate}
+              onDelete={(ruleId) => void handleDelete(ruleId)}
+              isUpdating={updateMutation.isPending}
+              isDeleting={deleteMutation.isPending}
+            />
+          ))}
+        </div>
+      </div>
+    </DetailSection>
+  );
+}
+
+const PUBLIC_METHODS = [
+  "GET",
+  "POST",
+  "PUT",
+  "PATCH",
+  "DELETE",
+  "HEAD",
+  "OPTIONS",
+] as const;
+
+function AnonymousEndpointRow({
+  rule,
+  onUpdate,
+  onDelete,
+  isUpdating,
+  isDeleting,
+}: {
+  readonly rule: AnonymousEndpointRule;
+  readonly onUpdate: (
+    rule: AnonymousEndpointRule,
+    data: Partial<AnonymousEndpointRuleFormData>,
+  ) => Promise<void>;
+  readonly onDelete: (ruleId: string) => void;
+  readonly isUpdating: boolean;
+  readonly isDeleting: boolean;
+}) {
+  const [method, setMethod] = useState(rule.method);
+  const [pathPattern, setPathPattern] = useState(rule.path_pattern);
+  const [dailyQuota, setDailyQuota] = useState(String(rule.daily_quota));
+
+  useEffect(() => {
+    setMethod(rule.method);
+    setPathPattern(rule.path_pattern);
+    setDailyQuota(String(rule.daily_quota));
+  }, [rule]);
+
+  const dirty =
+    method !== rule.method ||
+    pathPattern !== rule.path_pattern ||
+    Number(dailyQuota) !== rule.daily_quota;
+
+  return (
+    <div className="grid gap-3 rounded-lg border border-white/[0.08] bg-white/[0.02] p-3 md:grid-cols-[88px_120px_minmax(180px,1fr)_120px_auto_auto] md:items-center">
+      <div className="flex items-center gap-2">
+        <Switch
+          checked={rule.enabled}
+          onCheckedChange={(enabled) =>
+            void onUpdate(rule, { enabled: Boolean(enabled) })
+          }
+          disabled={isUpdating}
+        />
+        <Badge variant={rule.enabled ? "success" : "secondary"}>
+          {rule.enabled ? "Enabled" : "Draft"}
+        </Badge>
+      </div>
+      <Select
+        value={method}
+        onValueChange={(value) =>
+          setMethod(value as AnonymousEndpointRule["method"])
+        }
+      >
+        <SelectTrigger>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {PUBLIC_METHODS.map((item) => (
+            <SelectItem key={item} value={item}>
+              {item}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      <Input
+        value={pathPattern}
+        onChange={(e) => setPathPattern(e.target.value)}
+      />
+      <Input
+        type="number"
+        min={1}
+        value={dailyQuota}
+        onChange={(e) => setDailyQuota(e.target.value)}
+      />
+      <Button
+        size="sm"
+        variant="outline"
+        disabled={!dirty || isUpdating}
+        isLoading={isUpdating}
+        onClick={() =>
+          void onUpdate(rule, {
+            method,
+            path_pattern: pathPattern,
+            daily_quota: Number(dailyQuota),
+          })
+        }
+      >
+        Save
+      </Button>
+      <Button
+        size="sm"
+        variant="destructive"
+        disabled={isDeleting}
+        isLoading={isDeleting}
+        onClick={() => onDelete(rule.id)}
+      >
+        <ButtonIcon variant="destructive">
+          <Trash2 className="h-3 w-3 text-destructive" />
+        </ButtonIcon>
+        Delete
+      </Button>
+    </div>
   );
 }
 

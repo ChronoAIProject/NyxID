@@ -94,6 +94,11 @@ pub enum Commands {
         #[command(subcommand)]
         command: ProxyCommands,
     },
+    /// Call admin-enabled anonymous public proxy endpoints
+    Public {
+        #[command(subcommand)]
+        command: PublicCommands,
+    },
     /// SSH client helper commands
     Ssh(SshCli),
     /// Set up OpenClaw integration
@@ -395,6 +400,31 @@ pub struct UpdateArgs {
 pub enum OutputFormat {
     Table,
     Json,
+}
+
+#[derive(Subcommand)]
+pub enum PublicCommands {
+    /// Send a no-auth request to /public/s/{slug}/{path}
+    Request {
+        /// Service slug
+        slug: String,
+        /// Public endpoint path
+        path: String,
+        /// HTTP method
+        #[arg(short = 'X', long, default_value = "GET")]
+        method: String,
+        /// Request body. Use @file to read from a file or - for stdin.
+        #[arg(short = 'd', long)]
+        data: Option<String>,
+        /// Header to send to the downstream endpoint. Repeatable.
+        #[arg(short = 'H', long = "header")]
+        headers: Vec<String>,
+        /// Stream response bytes to stdout
+        #[arg(long)]
+        stream: bool,
+        #[command(flatten)]
+        base: BaseUrlArgs,
+    },
 }
 
 // ---- Login ----
