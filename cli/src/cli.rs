@@ -170,6 +170,11 @@ pub enum Commands {
         #[command(subcommand)]
         command: TelemetryCommands,
     },
+    /// Call ChatGPT Pro (and other browser oracles) through NyxID
+    Oracle {
+        #[command(subcommand)]
+        command: OracleCommands,
+    },
     /// Show the NyxID project repository URL
     Repo(RepoArgs),
     /// Resume a `--no-wait` remote pairing and pick up the result
@@ -3755,6 +3760,191 @@ pub enum ChannelEventChannelCommands {
         /// Skip confirmation prompt.
         #[arg(long)]
         yes: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+// ---- Oracle (browser LLM relay) ----
+
+#[derive(Subcommand)]
+pub enum OracleCommands {
+    /// Ask a one-shot question and wait for the answer
+    Ask {
+        /// Pool slug or id to route through (e.g. chatgpt-pro)
+        pool: String,
+        /// The prompt. Omit to read from --file or stdin.
+        prompt: Option<String>,
+        /// Read the prompt from a file (use `-` for stdin)
+        #[arg(long, value_name = "PATH")]
+        file: Option<String>,
+        /// Attach a PDF (uploaded by the worker on the first turn)
+        #[arg(long, value_name = "PATH")]
+        pdf: Option<String>,
+        /// Model hint forwarded to the worker (defaults to the pool's)
+        #[arg(long)]
+        model: Option<String>,
+        /// Free-form tag recorded on the task
+        #[arg(long)]
+        tag: Option<String>,
+        /// Continue an existing conversation by id (multi-turn)
+        #[arg(long)]
+        conversation: Option<String>,
+        /// Start a multi-turn conversation and print its id
+        #[arg(long, conflicts_with = "conversation")]
+        new_conversation: bool,
+        /// Submitter-scoped idempotency key (safe blind retries)
+        #[arg(long)]
+        client_ref: Option<String>,
+        /// Max seconds to wait for the answer before giving up
+        #[arg(long, default_value_t = 3600)]
+        wait: u64,
+        /// Submit and print the task id without waiting
+        #[arg(long)]
+        no_wait: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Fetch a task's current state (or its answer if done)
+    Result {
+        /// Task id returned by `oracle ask --no-wait`
+        task_id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Cancel a queued or in-flight task
+    Cancel {
+        /// Task id
+        task_id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Show a pool's queue and active workers
+    Status {
+        /// Pool slug or id
+        pool: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Manage oracle pools (capacity = your browser tabs)
+    Pool {
+        #[command(subcommand)]
+        command: OraclePoolCommands,
+    },
+    /// List your multi-turn conversations
+    Sessions {
+        /// Filter to a single pool (slug or id)
+        #[arg(long)]
+        pool: Option<String>,
+        /// Max sessions to list
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Show a conversation transcript
+    Session {
+        /// Conversation id (conv_...)
+        conversation_id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Close a conversation (blocks further turns)
+    CloseSession {
+        /// Conversation id (conv_...)
+        conversation_id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum OraclePoolCommands {
+    /// Create a pool and print its one-time worker token
+    Create {
+        /// URL-safe slug (e.g. chatgpt-pro)
+        slug: String,
+        /// Human-readable name
+        #[arg(long)]
+        name: String,
+        /// Description
+        #[arg(long)]
+        description: Option<String>,
+        /// Who may submit: private (default) | org | platform
+        #[arg(long, value_parser = ["private", "org", "platform"])]
+        visibility: Option<String>,
+        /// ChatGPT Project URL workers must stay pinned to
+        #[arg(long)]
+        project_url: Option<String>,
+        /// Default model hint recorded on tasks
+        #[arg(long)]
+        model: Option<String>,
+        /// Max tasks dispatched at once (across all worker tabs)
+        #[arg(long)]
+        max_workers: Option<u32>,
+        /// Max queued tasks before submits are rejected
+        #[arg(long)]
+        max_queue: Option<u32>,
+        /// Per-submitter cap on in-flight tasks
+        #[arg(long)]
+        per_user_inflight: Option<u32>,
+        /// Dispatch lease seconds (heartbeats refresh it)
+        #[arg(long)]
+        task_timeout: Option<u64>,
+        /// Create under this org (you must be an org admin)
+        #[arg(
+            long,
+            value_name = "ID|SLUG|NAME",
+            help = "Organization to act on (UUID, slug, or display name)"
+        )]
+        org: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// List pools you can see
+    List {
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Show one pool
+    Show {
+        /// Pool slug or id
+        pool: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Update a pool's settings
+    Update {
+        /// Pool slug or id
+        pool: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long, value_parser = ["private", "org", "platform"])]
+        visibility: Option<String>,
+        #[arg(long)]
+        project_url: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        max_workers: Option<u32>,
+        #[arg(long)]
+        max_queue: Option<u32>,
+        #[arg(long)]
+        per_user_inflight: Option<u32>,
+        #[arg(long)]
+        task_timeout: Option<u64>,
+        /// Activate or deactivate the pool
+        #[arg(long)]
+        active: Option<bool>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Rotate the worker token (invalidates all paired tabs)
+    RotateToken {
+        /// Pool slug or id
+        pool: String,
         #[command(flatten)]
         auth: AuthArgs,
     },

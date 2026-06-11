@@ -19,6 +19,7 @@ pub mod node_credential;
 pub mod notification;
 pub mod oauth;
 pub mod openclaw;
+pub mod oracle;
 pub mod org;
 pub mod pairing;
 pub mod profile;

@@ -174,6 +174,7 @@ fn command_names(command: &Commands) -> (&'static str, &'static str) {
         Commands::ChannelEvent { .. } => ("channel_event", "subcommand"),
         Commands::Admin { .. } => ("admin", "subcommand"),
         Commands::Telemetry { .. } => ("telemetry", "subcommand"),
+        Commands::Oracle { .. } => ("oracle", "subcommand"),
         Commands::Repo(_) => ("repo", "repo"),
         Commands::Pairing { .. } => ("pairing", "subcommand"),
         Commands::Info => ("repo", "info"),
@@ -265,6 +266,8 @@ async fn run(cli: Cli) -> Result<()> {
 
         // Telemetry (consent editor; also docs/TELEMETRY.md §3)
         Commands::Telemetry { command } => commands::telemetry::run(command, None).await,
+
+        Commands::Oracle { command } => commands::oracle::run(command).await,
 
         // Project links
         Commands::Repo(args) => commands::repo::run_repo(args).await,
