@@ -184,6 +184,70 @@ pub async fn submit_result(
 }
 
 #[derive(Deserialize)]
+pub struct TranscriptTurnDto {
+    pub role: String,
+    pub text: String,
+}
+
+#[derive(Deserialize)]
+pub struct WorkerTranscriptRequest {
+    pub task_id: String,
+    pub worker: String,
+    pub turns: Vec<TranscriptTurnDto>,
+    #[serde(default)]
+    pub chatgpt_url: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct WorkerTranscriptResponse {
+    /// "imported" | "ignored"
+    pub status: String,
+    pub imported_pairs: usize,
+}
+
+pub async fn submit_transcript(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<WorkerTranscriptRequest>,
+) -> AppResult<Json<WorkerTranscriptResponse>> {
+    let pool = authenticate_worker(&state, &headers).await?;
+    let turns: Vec<oracle_task_service::TranscriptTurn> = body
+        .turns
+        .into_iter()
+        .map(|turn| oracle_task_service::TranscriptTurn {
+            role: turn.role,
+            text: turn.text,
+        })
+        .collect();
+    let outcome = oracle_task_service::worker_submit_transcript(
+        &state.db,
+        &pool,
+        &body.worker,
+        &body.task_id,
+        &turns,
+        body.chatgpt_url.as_deref(),
+        state.config.oracle_task_retention_days,
+    )
+    .await?;
+
+    let (status, imported_pairs) = match outcome {
+        oracle_task_service::TranscriptOutcome::Imported { pairs } => ("imported", pairs),
+        oracle_task_service::TranscriptOutcome::Ignored => ("ignored", 0),
+    };
+    tracing::info!(
+        task_id = %body.task_id,
+        pool_id = %pool.id,
+        imported_pairs,
+        "Oracle worker transcript received"
+    );
+
+    Ok(Json(WorkerTranscriptResponse {
+        status: status.to_string(),
+        imported_pairs,
+    }))
+}
+
+#[derive(Deserialize)]
 pub struct PinConvUrlRequest {
     pub task_id: String,
     pub worker: String,
@@ -228,6 +292,7 @@ mod tests {
         let task = PollTaskResponse::Task {
             task: oracle_task_service::WorkerTaskPayload {
                 task_id: "t1".to_string(),
+                kind: "prompt".to_string(),
                 prompt: "p".to_string(),
                 conversation_id: Some("conv_1".to_string()),
                 conversation_url: None,

@@ -884,6 +884,10 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
             post(handlers::oracle_tasks::submit_task),
         )
         .route(
+            "/pools/{id_or_slug}/attach",
+            post(handlers::oracle_tasks::attach_conversation),
+        )
+        .route(
             "/pools/{id_or_slug}/status",
             get(handlers::oracle_tasks::pool_status),
         )
@@ -1051,6 +1055,10 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
                 .route("/task", get(handlers::oracle_worker::poll_task))
                 .route("/ack", post(handlers::oracle_worker::ack))
                 .route("/result", post(handlers::oracle_worker::submit_result))
+                .route(
+                    "/transcript",
+                    post(handlers::oracle_worker::submit_transcript),
+                )
                 .route("/pin-conv-url", post(handlers::oracle_worker::pin_conv_url))
                 .layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
         )

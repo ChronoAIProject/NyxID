@@ -65,7 +65,10 @@ pub async fn list_session_tasks(
     let session = get_session_for_consumer(db, actor_user_id, conversation_id).await?;
     let tasks = db
         .collection::<OracleTask>(ORACLE_TASKS)
-        .find(doc! { "conversation_id": conversation_id })
+        .find(doc! {
+            "conversation_id": conversation_id,
+            "kind": { "$ne": "scrape" },
+        })
         .sort(doc! { "created_at": 1 })
         .await?
         .try_collect()

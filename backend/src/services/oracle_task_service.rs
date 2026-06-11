@@ -73,6 +73,18 @@ pub struct SubmitOutcome {
     pub deduplicated: bool,
 }
 
+#[derive(Debug, serde::Deserialize)]
+pub struct TranscriptTurn {
+    pub role: String,
+    pub text: String,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum TranscriptOutcome {
+    Imported { pairs: usize },
+    Ignored,
+}
+
 fn validate_submit_input(input: &SubmitTaskInput) -> AppResult<()> {
     if input.prompt.trim().is_empty() {
         return Err(AppError::ValidationError("prompt is required".to_string()));
@@ -190,6 +202,7 @@ pub async fn submit_task(
                 id: conv_id.clone(),
                 pool_id: pool.id.clone(),
                 owner_user_id: submitter.user_id.clone(),
+                origin: "nyxid".to_string(),
                 api_key_id: submitter.api_key_id.clone(),
                 tag: input.tag.clone(),
                 chatgpt_url: None,
@@ -231,6 +244,7 @@ pub async fn submit_task(
         id: uuid::Uuid::new_v4().to_string(),
         pool_id: pool.id.clone(),
         submitter_user_id: submitter.user_id.clone(),
+        kind: "prompt".to_string(),
         api_key_id: submitter.api_key_id.clone(),
         api_key_name: submitter.api_key_name.clone(),
         prompt: input.prompt,
@@ -296,6 +310,118 @@ pub async fn submit_task(
         queue_position: position,
         deduplicated: false,
     })
+}
+
+fn validate_attach_url(chatgpt_url: &str) -> AppResult<()> {
+    if chatgpt_url.is_empty() || chatgpt_url.len() > MAX_URL_LEN {
+        return Err(AppError::ValidationError(
+            "chatgpt_url must be 1-2048 chars".to_string(),
+        ));
+    }
+    let trusted_origin = chatgpt_url.starts_with("https://chatgpt.com/")
+        || chatgpt_url.starts_with("https://chat.openai.com/");
+    if !trusted_origin || !chatgpt_url.contains("/c/") {
+        return Err(AppError::ValidationError(
+            "chatgpt_url must be a ChatGPT conversation URL".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+pub async fn attach_conversation(
+    db: &mongodb::Database,
+    pool: &OraclePool,
+    submitter: &SubmitterIdentity,
+    chatgpt_url: &str,
+    tag: Option<String>,
+) -> AppResult<(OracleSession, OracleTask)> {
+    validate_attach_url(chatgpt_url)?;
+    if tag.as_deref().is_some_and(|t| t.len() > MAX_TAG_LEN) {
+        return Err(AppError::ValidationError(format!(
+            "tag exceeds {MAX_TAG_LEN} chars"
+        )));
+    }
+
+    // Same fairness caps as normal prompt submission.
+    let queued = count_tasks(db, doc! { "pool_id": &pool.id, "status": "queued" }).await?;
+    if queued >= u64::from(pool.max_queue_length) {
+        return Err(AppError::OracleQueueFull(format!(
+            "pool '{}' already has {queued} queued tasks",
+            pool.slug
+        )));
+    }
+    let inflight = count_tasks(
+        db,
+        doc! {
+            "pool_id": &pool.id,
+            "submitter_user_id": &submitter.user_id,
+            "status": { "$in": ["queued", "dispatched"] },
+        },
+    )
+    .await?;
+    if inflight >= u64::from(pool.per_user_max_inflight) {
+        return Err(AppError::OracleQuotaExceeded(format!(
+            "you already have {inflight} tasks in flight in pool '{}' (limit {})",
+            pool.slug, pool.per_user_max_inflight
+        )));
+    }
+
+    let now = Utc::now();
+    let session = OracleSession {
+        id: mint_conversation_id(),
+        pool_id: pool.id.clone(),
+        owner_user_id: submitter.user_id.clone(),
+        origin: "imported".to_string(),
+        api_key_id: submitter.api_key_id.clone(),
+        tag: tag.clone(),
+        chatgpt_url: Some(chatgpt_url.to_string()),
+        turn_count: 0,
+        last_task_id: None,
+        closed_at: None,
+        created_at: now,
+        updated_at: now,
+    };
+    db.collection::<OracleSession>(ORACLE_SESSIONS)
+        .insert_one(&session)
+        .await?;
+
+    let task = OracleTask {
+        id: uuid::Uuid::new_v4().to_string(),
+        pool_id: pool.id.clone(),
+        submitter_user_id: submitter.user_id.clone(),
+        kind: "scrape".to_string(),
+        api_key_id: submitter.api_key_id.clone(),
+        api_key_name: submitter.api_key_name.clone(),
+        prompt: "[scrape transcript]".to_string(),
+        model_label: pool.default_model_label.clone(),
+        tag,
+        pdf_base64: None,
+        pdf_name: None,
+        conversation_id: Some(session.id.clone()),
+        is_followup: false,
+        client_ref: None,
+        status: OracleTaskStatus::Queued,
+        phase: None,
+        phase_detail: None,
+        phase_at: None,
+        assigned_worker_id: None,
+        dispatched_at: None,
+        lease_expires_at: None,
+        response: None,
+        response_chars: None,
+        chatgpt_url: Some(chatgpt_url.to_string()),
+        failure_reason: None,
+        worker_script_version: None,
+        completed_at: None,
+        expires_at: None,
+        created_at: now,
+        updated_at: now,
+    };
+    db.collection::<OracleTask>(ORACLE_TASKS)
+        .insert_one(&task)
+        .await?;
+
+    Ok((session, task))
 }
 
 /// 1-based position among queued tasks of the same pool (0 = not queued).
@@ -483,6 +609,7 @@ async fn requeue_expired_leases(db: &mongodb::Database, pool_id: &str) -> AppRes
 #[derive(Debug, serde::Serialize)]
 pub struct WorkerTaskPayload {
     pub task_id: String,
+    pub kind: String,
     pub prompt: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
@@ -520,6 +647,7 @@ async fn worker_payload(
     };
     Ok(WorkerTaskPayload {
         task_id: task.id.clone(),
+        kind: task.kind.clone(),
         prompt: task.prompt.clone(),
         conversation_id: task.conversation_id.clone(),
         conversation_url,
@@ -805,6 +933,160 @@ pub async fn worker_submit_result(
     } else {
         ResultOutcome::Completed
     })
+}
+
+fn transcript_pairs(turns: &[TranscriptTurn]) -> (Vec<(String, String)>, usize, usize) {
+    let mut pairs = Vec::new();
+    let mut ignored_leading_assistant = 0;
+    let mut ignored_trailing_user = 0;
+    let mut i = 0;
+    while i < turns.len() {
+        let role = turns[i].role.trim().to_ascii_lowercase();
+        if role == "user" {
+            if i + 1 < turns.len() && turns[i + 1].role.trim().eq_ignore_ascii_case("assistant") {
+                pairs.push((
+                    truncate_chars(&turns[i].text, MAX_RESPONSE_CHARS),
+                    truncate_chars(&turns[i + 1].text, MAX_RESPONSE_CHARS),
+                ));
+                i += 2;
+                continue;
+            }
+            ignored_trailing_user += 1;
+        } else if role == "assistant" && pairs.is_empty() {
+            ignored_leading_assistant += 1;
+        }
+        i += 1;
+    }
+    if pairs.len() > 200 {
+        pairs.truncate(200);
+    }
+    (pairs, ignored_leading_assistant, ignored_trailing_user)
+}
+
+pub async fn worker_submit_transcript(
+    db: &mongodb::Database,
+    pool: &OraclePool,
+    worker_label: &str,
+    task_id: &str,
+    turns: &[TranscriptTurn],
+    chatgpt_url: Option<&str>,
+    retention_days: u32,
+) -> AppResult<TranscriptOutcome> {
+    validate_worker_label(worker_label)?;
+    if let Some(url) = chatgpt_url.filter(|u| !u.is_empty()) {
+        validate_attach_url(url)?;
+    }
+
+    let now = Utc::now();
+    let (pairs, ignored_leading_assistant, ignored_trailing_user) = transcript_pairs(turns);
+    tracing::debug!(
+        task_id = %task_id,
+        pool_id = %pool.id,
+        pairs = pairs.len(),
+        ignored_leading_assistant,
+        ignored_trailing_user,
+        "Oracle transcript paired"
+    );
+
+    let response = format!("[imported {} pairs]", pairs.len());
+    let expires_at = terminal_expiry(retention_days);
+    let updated = db
+        .collection::<OracleTask>(ORACLE_TASKS)
+        .find_one_and_update(
+            doc! {
+                "_id": task_id,
+                "pool_id": &pool.id,
+                "status": "dispatched",
+                "assigned_worker_id": worker_label,
+                "kind": "scrape",
+            },
+            doc! { "$set": {
+                "status": "completed",
+                "response": &response,
+                "response_chars": response.chars().count() as i64,
+                "completed_at": bson::DateTime::from_chrono(now),
+                "expires_at": bson::DateTime::from_chrono(expires_at),
+                "updated_at": bson::DateTime::from_chrono(now),
+            } },
+        )
+        .with_options(
+            FindOneAndUpdateOptions::builder()
+                .return_document(ReturnDocument::After)
+                .build(),
+        )
+        .await?;
+
+    upsert_worker_presence(db, pool, worker_label, None, None, chatgpt_url).await?;
+
+    let Some(scrape_task) = updated else {
+        return Ok(TranscriptOutcome::Ignored);
+    };
+    let Some(session_id) = scrape_task.conversation_id.clone() else {
+        return Ok(TranscriptOutcome::Ignored);
+    };
+
+    let task_collection = db.collection::<OracleTask>(ORACLE_TASKS);
+    let pair_count = pairs.len();
+    let imported_expires_at = terminal_expiry(retention_days);
+    for (i, (user_text, assistant_text)) in pairs.into_iter().enumerate() {
+        let created_at = now - Duration::seconds((pair_count - i) as i64);
+        let response_chars = assistant_text.chars().count() as u64;
+        let task = OracleTask {
+            id: uuid::Uuid::new_v4().to_string(),
+            pool_id: pool.id.clone(),
+            submitter_user_id: scrape_task.submitter_user_id.clone(),
+            kind: "prompt".to_string(),
+            api_key_id: scrape_task.api_key_id.clone(),
+            api_key_name: scrape_task.api_key_name.clone(),
+            prompt: user_text,
+            model_label: scrape_task.model_label.clone(),
+            tag: scrape_task.tag.clone(),
+            pdf_base64: None,
+            pdf_name: None,
+            conversation_id: Some(session_id.clone()),
+            is_followup: true,
+            client_ref: None,
+            status: OracleTaskStatus::Completed,
+            phase: None,
+            phase_detail: None,
+            phase_at: None,
+            assigned_worker_id: Some(worker_label.to_string()),
+            dispatched_at: scrape_task.dispatched_at,
+            lease_expires_at: None,
+            response: Some(assistant_text),
+            response_chars: Some(response_chars),
+            chatgpt_url: chatgpt_url
+                .filter(|u| !u.is_empty())
+                .map(|u| truncate_chars(u, MAX_URL_LEN))
+                .or_else(|| scrape_task.chatgpt_url.clone()),
+            failure_reason: None,
+            worker_script_version: scrape_task.worker_script_version.clone(),
+            completed_at: Some(now),
+            expires_at: Some(imported_expires_at),
+            created_at,
+            updated_at: now,
+        };
+        task_collection.insert_one(&task).await?;
+    }
+
+    let mut session_set = doc! {
+        "last_task_id": &scrape_task.id,
+        "updated_at": bson::DateTime::from_chrono(now),
+    };
+    if let Some(url) = chatgpt_url.filter(|u| !u.is_empty()) {
+        session_set.insert("chatgpt_url", truncate_chars(url, MAX_URL_LEN));
+    }
+    db.collection::<OracleSession>(ORACLE_SESSIONS)
+        .update_one(
+            doc! { "_id": &session_id },
+            doc! {
+                "$set": session_set,
+                "$inc": { "turn_count": pair_count as i64 },
+            },
+        )
+        .await?;
+
+    Ok(TranscriptOutcome::Imported { pairs: pair_count })
 }
 
 /// Pin the browser-side conversation URL mid-task (the worker calls this
@@ -1324,6 +1606,122 @@ mod tests {
         )
         .await;
         assert!(matches!(missing, Err(AppError::OracleSessionNotFound(_))));
+
+        db.drop().await.ok();
+    }
+
+    #[tokio::test]
+    async fn attach_conversation_imports_transcript_turns() {
+        let Some(db) = connect_test_database("oracle_task_attach").await else {
+            return;
+        };
+        let owner = uuid::Uuid::new_v4().to_string();
+        let mut pool = test_pool(&owner);
+        pool.per_user_max_inflight = 5;
+        seed_pool(&db, &pool).await;
+
+        let invalid = attach_conversation(
+            &db,
+            &pool,
+            &submitter(&owner),
+            "https://example.com/c/nope",
+            None,
+        )
+        .await;
+        assert!(matches!(invalid, Err(AppError::ValidationError(_))));
+
+        let (session, scrape_task) = attach_conversation(
+            &db,
+            &pool,
+            &submitter(&owner),
+            "https://chatgpt.com/c/abc",
+            Some("import".to_string()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(session.origin, "imported");
+        assert_eq!(
+            session.chatgpt_url.as_deref(),
+            Some("https://chatgpt.com/c/abc")
+        );
+        assert_eq!(scrape_task.kind, "scrape");
+        assert_eq!(
+            scrape_task.conversation_id.as_deref(),
+            Some(session.id.as_str())
+        );
+
+        let claimed = claim_task(&db, &pool, "tab_1", None, None)
+            .await
+            .unwrap()
+            .expect("scrape task");
+        assert_eq!(claimed.kind, "scrape");
+        assert_eq!(
+            claimed.conversation_url.as_deref(),
+            Some("https://chatgpt.com/c/abc")
+        );
+
+        let outcome = worker_submit_transcript(
+            &db,
+            &pool,
+            "tab_1",
+            &scrape_task.id,
+            &[
+                TranscriptTurn {
+                    role: "assistant".to_string(),
+                    text: "ignored intro".to_string(),
+                },
+                TranscriptTurn {
+                    role: "user".to_string(),
+                    text: "first question".to_string(),
+                },
+                TranscriptTurn {
+                    role: "assistant".to_string(),
+                    text: "first answer".to_string(),
+                },
+                TranscriptTurn {
+                    role: "user".to_string(),
+                    text: "second question".to_string(),
+                },
+                TranscriptTurn {
+                    role: "assistant".to_string(),
+                    text: "second answer".to_string(),
+                },
+                TranscriptTurn {
+                    role: "user".to_string(),
+                    text: "trailing".to_string(),
+                },
+            ],
+            Some("https://chatgpt.com/c/abc"),
+            30,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, TranscriptOutcome::Imported { pairs: 2 });
+
+        let (_, tasks) =
+            crate::services::oracle_session_service::list_session_tasks(&db, &owner, &session.id)
+                .await
+                .unwrap();
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(tasks[0].kind, "prompt");
+        assert_eq!(tasks[0].prompt, "first question");
+        assert_eq!(tasks[0].response.as_deref(), Some("first answer"));
+        assert_eq!(tasks[1].prompt, "second question");
+        assert_eq!(tasks[1].response.as_deref(), Some("second answer"));
+
+        let imported_session = crate::services::oracle_session_service::get_session_for_consumer(
+            &db,
+            &owner,
+            &session.id,
+        )
+        .await
+        .unwrap();
+        assert_eq!(imported_session.turn_count, 2);
+
+        let late = worker_submit_transcript(&db, &pool, "tab_1", &scrape_task.id, &[], None, 30)
+            .await
+            .unwrap();
+        assert_eq!(late, TranscriptOutcome::Ignored);
 
         db.drop().await.ok();
     }

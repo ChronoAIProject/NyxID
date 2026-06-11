@@ -113,6 +113,51 @@ pub async fn run(command: OracleCommands) -> Result<()> {
             let status: Value = api.get(&format!("/oracle/pools/{pool}/status")).await?;
             print_status(output, &pool, &status)
         }
+        OracleCommands::Attach {
+            pool,
+            url,
+            tag,
+            wait,
+            no_wait,
+            auth,
+        } => {
+            let output = auth.output;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let mut body = serde_json::json!({ "chatgpt_url": url });
+            if let Some(t) = &tag {
+                body["tag"] = Value::String(t.clone());
+            }
+
+            let submit: Value = api
+                .post(&format!("/oracle/pools/{pool}/attach"), &body)
+                .await?;
+            let task_id = submit["task_id"]
+                .as_str()
+                .context("server did not return a task_id")?
+                .to_string();
+            let conversation_id = submit["conversation_id"]
+                .as_str()
+                .context("server did not return a conversation_id")?
+                .to_string();
+
+            if no_wait {
+                return print_attach_submit(output, &submit);
+            }
+
+            eprintln!(
+                "Attached conversation {conversation_id} via pool '{pool}'. Waiting for import…"
+            );
+            let task = poll_until_terminal(&mut api, &task_id, wait).await?;
+            let status = task["status"].as_str().unwrap_or("");
+            if status != "completed" {
+                print_result(output, &task)?;
+                return Ok(());
+            }
+            let session: Value = api
+                .get(&format!("/oracle/sessions/{conversation_id}"))
+                .await?;
+            print_session_detail(output, &session)
+        }
         OracleCommands::Pool { command } => run_pool(command).await,
         OracleCommands::Sessions { pool, limit, auth } => {
             let output = auth.output;
@@ -427,6 +472,27 @@ fn print_submit(
             }
             eprintln!();
             eprintln!("Fetch the answer with: nyxid oracle result {task_id}");
+        }
+    }
+    Ok(())
+}
+
+fn print_attach_submit(output: OutputFormat, submit: &Value) -> Result<()> {
+    match output {
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(submit)?),
+        OutputFormat::Table => {
+            let mut table = Table::new();
+            table.load_preset(UTF8_FULL_CONDENSED);
+            table.set_header(["Conversation", "Task", "Status"]);
+            table.add_row([
+                submit["conversation_id"]
+                    .as_str()
+                    .unwrap_or("-")
+                    .to_string(),
+                submit["task_id"].as_str().unwrap_or("-").to_string(),
+                submit["status"].as_str().unwrap_or("-").to_string(),
+            ]);
+            println!("{table}");
         }
     }
     Ok(())
@@ -749,6 +815,103 @@ mod tests {
         })
         .await
         .expect("ask should poll once and return the completed answer");
+    }
+
+    #[tokio::test]
+    async fn attach_no_wait_posts_expected_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/oracle/pools/chatgpt-pro/attach"))
+            .and(body_json(serde_json::json!({
+                "chatgpt_url": "https://chatgpt.com/c/abc",
+                "tag": "import",
+            })))
+            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
+                "conversation_id": "conv_abc",
+                "task_id": "task-scrape",
+                "status": "queued",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(OracleCommands::Attach {
+            pool: "chatgpt-pro".to_string(),
+            url: "https://chatgpt.com/c/abc".to_string(),
+            tag: Some("import".to_string()),
+            wait: 120,
+            no_wait: true,
+            auth: mock_auth_with_output(server.uri(), OutputFormat::Json),
+        })
+        .await
+        .expect("attach --no-wait should submit and return without polling");
+    }
+
+    #[tokio::test]
+    async fn attach_waits_then_fetches_session() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/oracle/pools/p/attach"))
+            .and(body_json(serde_json::json!({
+                "chatgpt_url": "https://chat.openai.com/c/abc",
+            })))
+            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
+                "conversation_id": "conv_abc",
+                "task_id": "task-scrape",
+                "status": "queued",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/oracle/tasks/task-scrape"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "task_id": "task-scrape",
+                "pool_id": "p1",
+                "status": "completed",
+                "conversation_id": "conv_abc",
+                "is_followup": false,
+                "queue_position": 0,
+                "response": "[imported 1 pairs]",
+                "created_at": "2026-06-11T00:00:00Z",
+                "completed_at": "2026-06-11T00:00:01Z",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/oracle/sessions/conv_abc"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "conversation_id": "conv_abc",
+                "pool_id": "p1",
+                "chatgpt_url": "https://chat.openai.com/c/abc",
+                "turn_count": 1,
+                "closed": false,
+                "created_at": "2026-06-11T00:00:00Z",
+                "updated_at": "2026-06-11T00:00:01Z",
+                "turns": [{
+                    "task_id": "task-turn-1",
+                    "status": "completed",
+                    "prompt": "hello",
+                    "response": "world",
+                    "created_at": "2026-06-11T00:00:00Z",
+                    "completed_at": "2026-06-11T00:00:01Z"
+                }],
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(OracleCommands::Attach {
+            pool: "p".to_string(),
+            url: "https://chat.openai.com/c/abc".to_string(),
+            tag: None,
+            wait: 120,
+            no_wait: false,
+            auth: mock_auth_with_output(server.uri(), OutputFormat::Json),
+        })
+        .await
+        .expect("attach should poll the scrape task and fetch the imported session");
     }
 
     #[tokio::test]

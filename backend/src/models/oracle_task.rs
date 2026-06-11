@@ -5,6 +5,10 @@ use super::bson_datetime;
 
 pub const COLLECTION_NAME: &str = "oracle_tasks";
 
+pub fn default_task_kind() -> String {
+    "prompt".into()
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum OracleTaskStatus {
@@ -47,6 +51,10 @@ pub struct OracleTask {
     pub id: String,
     pub pool_id: String,
     pub submitter_user_id: String,
+    /// "prompt" for normal oracle turns; "scrape" for transcript-import
+    /// control tasks.
+    #[serde(default = "default_task_kind")]
+    pub kind: String,
     /// API key attribution when submitted by an agent (mirrors AuditLog).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key_id: Option<String>,
@@ -126,6 +134,7 @@ mod tests {
             id: uuid::Uuid::new_v4().to_string(),
             pool_id: uuid::Uuid::new_v4().to_string(),
             submitter_user_id: uuid::Uuid::new_v4().to_string(),
+            kind: "prompt".to_string(),
             api_key_id: None,
             api_key_name: None,
             prompt: "What is the BEDC closure of item 8?".to_string(),
@@ -164,6 +173,16 @@ mod tests {
         assert_eq!(restored.status, OracleTaskStatus::Queued);
         assert!(restored.lease_expires_at.is_none());
         assert!(!restored.is_followup);
+        assert_eq!(restored.kind, "prompt");
+    }
+
+    #[test]
+    fn missing_kind_defaults_to_prompt() {
+        let task = make_task();
+        let mut doc = bson::to_document(&task).expect("serialize");
+        doc.remove("kind");
+        let restored: OracleTask = bson::from_document(doc).expect("deserialize");
+        assert_eq!(restored.kind, "prompt");
     }
 
     #[test]

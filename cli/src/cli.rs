@@ -3826,6 +3826,24 @@ pub enum OracleCommands {
         #[command(flatten)]
         auth: AuthArgs,
     },
+    /// Attach an existing ChatGPT conversation URL and import its transcript
+    Attach {
+        /// Pool slug or id to route through (e.g. chatgpt-pro)
+        pool: String,
+        /// Existing ChatGPT conversation URL (`https://chatgpt.com/c/...`)
+        url: String,
+        /// Free-form tag recorded on the session and scrape task
+        #[arg(long)]
+        tag: Option<String>,
+        /// Max seconds to wait for the transcript import before giving up
+        #[arg(long, default_value_t = 120)]
+        wait: u64,
+        /// Submit and print the conversation/task ids without waiting
+        #[arg(long)]
+        no_wait: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
     /// Manage oracle pools (capacity = your browser tabs)
     Pool {
         #[command(subcommand)]

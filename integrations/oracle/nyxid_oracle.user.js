@@ -1144,6 +1144,50 @@
     return candidates[0].text;
   }
 
+  // NyxID ADD: full-transcript extraction for "attach existing conversation"
+  // (kind=scrape) tasks. Walks every user/assistant message node in DOM
+  // (= conversation) order and returns [{role, text}], reusing the same
+  // math-aware per-message extraction + chrome/SSR cleaning as the
+  // single-answer path. System/tool messages are skipped.
+  function extractFullTranscript() {
+    const main = document.querySelector("main") || document.body;
+    if (!main) return [];
+    const nodes = main.querySelectorAll("[data-message-author-role]");
+    const turns = [];
+    for (const el of nodes) {
+      const role = el.getAttribute("data-message-author-role");
+      if (role !== "user" && role !== "assistant") continue;
+      const text = cleanText(extractTextWithMath(el));
+      if (!text) continue;
+      turns.push({ role, text });
+    }
+    return turns;
+  }
+
+  // NyxID ADD: wait for an existing conversation's DOM to finish rendering
+  // (virtualized transcripts hydrate progressively). We are NOT waiting for
+  // generation here — just for the message count to stabilize. Returns the
+  // final message-node count.
+  async function waitForTranscriptLoad(maxMs) {
+    const start = Date.now();
+    let lastCount = -1;
+    let stable = 0;
+    while (Date.now() - start < maxMs) {
+      const count = document.querySelectorAll("[data-message-author-role]").length;
+      if (count > 0 && count === lastCount) {
+        stable += 1;
+        if (stable >= 3) return count;
+      } else {
+        stable = 0;
+      }
+      lastCount = count;
+      // Nudge virtualized transcripts to materialize earlier turns.
+      try { scrollConversationToBottom("scrape-load", true); } catch {}
+      await sleep(2000);
+    }
+    return Math.max(lastCount, 0);
+  }
+
   function extractResponseText() {
     const main = document.querySelector("main");
     if (!main) return "";
@@ -1379,6 +1423,65 @@
   // NOTE: the NyxID server has no re_extract mode in its wire spec, so
   // task.re_extract is always falsy here and the RE-EXTRACT branch is inert.
   // It is preserved verbatim so the DOM-resume logic stays identical to BEDC.
+  // NyxID ADD: scrape an existing conversation by URL (kind=scrape). Navigate
+  // to the target /c/<uuid> (the RAW url — an attached conversation may live
+  // outside the pool's project, so we do NOT pin to project here), wait for the
+  // transcript DOM to settle, extract every user/assistant turn, and POST it to
+  // /worker/transcript. No prompt is injected and nothing is sent. ChatGPT
+  // full-reloads on the first /c/<uuid> navigation, so we save state and resume
+  // after reload via the same nav machinery the prompt flow uses.
+  async function processScrapeTask(task) {
+    const { task_id, conversation_url } = task;
+    log(`=== Task: ${task_id} [SCRAPE] ${(conversation_url || "").slice(-50)} ===`);
+    busy = true;
+    updatePanel();
+    try {
+      const target = conversation_url;
+      if (!target) throw new Error("scrape task has no conversation_url");
+      const idMatch = target.match(/\/c\/([a-f0-9-]{6,})/);
+      const onTarget = window.location.href === target
+        || (idMatch && window.location.href.includes(idMatch[1]));
+      if (!onTarget) {
+        tabSet("navigating", true);
+        tabSet("nav_task_id", task_id);
+        saveTaskState(task);
+        setTaskPhase("navigating");
+        setInFlightTaskId(task_id);
+        log(`Navigating to ${target.slice(-60)} for scrape ...`);
+        busy = false;
+        updatePanel();
+        window.location.href = target;
+        return;
+      }
+      try { await serverPost("/ack", { task_id, worker: workerLabel(), phase: "scraping" }); } catch {}
+      await sleep(2500); // let the SPA mount the conversation
+      const count = await waitForTranscriptLoad(60000);
+      log(`scrape: ${count} message nodes rendered`);
+      const turns = extractFullTranscript();
+      const chatUrl = currentChatUrl();
+      const res = await serverPost("/worker/transcript", {
+        task_id, worker: workerLabel(), turns, chatgpt_url: chatUrl,
+      });
+      log(`DONE (scrape): ${task_id} — ${turns.length} turns, imported ${res && res.imported_pairs != null ? res.imported_pairs : "?"} pairs`);
+      clearTaskState();
+      setInFlightTaskId("");
+    } catch (err) {
+      log(`ERROR (scrape): ${err.message}`);
+      // Post an empty transcript so the control task completes instead of
+      // looping on lease expiry; the consumer sees an empty imported session.
+      try {
+        await serverPost("/worker/transcript", {
+          task_id, worker: workerLabel(), turns: [], chatgpt_url: currentChatUrl(),
+        });
+      } catch {}
+      clearTaskState();
+      setInFlightTaskId("");
+    } finally {
+      busy = false;
+      updatePanel();
+    }
+  }
+
   async function processTask(task) {
     const { task_id, prompt, conversation_url, is_followup, conversation_id, re_extract, pdf_base64, pdf_name, tag } = task;
     const noOutputIdleTimeout = (tag === "bedc-deep-board-refill")
@@ -1386,6 +1489,14 @@
       : NO_OUTPUT_IDLE_TIMEOUT;
     busy = true;
     updatePanel();
+
+    // NyxID ADD: scrape tasks attach an existing conversation by URL. They run
+    // before project enforcement (the target may be outside the pool project)
+    // and never inject a prompt.
+    if (task.kind === "scrape") {
+      await processScrapeTask(task);
+      return;
+    }
 
     if (!isInsideRequiredProject()) {
       navigateTaskBackToProject(task, "outside project before task");
@@ -1823,6 +1934,10 @@
       tag: resp.tag || "",
       pdf_base64: resp.pdf_base64 || "",
       pdf_name: resp.pdf_name || "",
+      // NyxID ADD: "scrape" tasks attach an existing conversation by URL —
+      // navigate there, extract the whole transcript, post it back. Default
+      // "prompt" preserves the normal inject-and-answer flow.
+      kind: resp.kind || "prompt",
       // No re_extract in the NyxID wire spec; default false (branch stays inert).
       re_extract: !!resp.re_extract,
     };
