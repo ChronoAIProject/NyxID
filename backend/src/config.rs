@@ -254,6 +254,11 @@ pub struct AppConfig {
     /// Event dedup TTL in seconds (default 300 = 5 minutes).
     pub channel_event_dedup_ttl_secs: u64,
 
+    // Oracle relay (browser worker pools)
+    /// Days to retain terminal oracle tasks (prompt + response bodies)
+    /// before MongoDB TTL expiry (default: 30).
+    pub oracle_task_retention_days: u32,
+
     /// Response-cache TTL (seconds) for the `aws_sigv4` proxy auth
     /// method. AWS Cost Explorer charges $0.01 per paginated request,
     /// so identical proxy requests in a short window get served from
@@ -494,6 +499,10 @@ impl std::fmt::Debug for AppConfig {
             .field(
                 "channel_event_dedup_ttl_secs",
                 &self.channel_event_dedup_ttl_secs,
+            )
+            .field(
+                "oracle_task_retention_days",
+                &self.oracle_task_retention_days,
             )
             .finish()
     }
@@ -830,6 +839,10 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(300),
+            oracle_task_retention_days: env::var("ORACLE_TASK_RETENTION_DAYS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(30),
             cloud_response_cache_ttl_secs: env::var("CLOUD_RESPONSE_CACHE_TTL_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -1159,6 +1172,7 @@ mod tests {
             channel_event_rate_limit_burst: 200,
             channel_event_dedup_capacity: 32_768,
             channel_event_dedup_ttl_secs: 300,
+            oracle_task_retention_days: 30,
             cloud_response_cache_ttl_secs: 0,
             cloud_response_cache_max_entry_bytes:
                 crate::services::cloud_response_cache::DEFAULT_MAX_ENTRY_BYTES,

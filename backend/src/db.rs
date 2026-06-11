@@ -1521,6 +1521,113 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         .create_index(IndexModel::builder().keys(doc! { "user_id": 1 }).build())
         .await?;
 
+    // ── oracle_pools ──
+    let oracle_pools = db.collection::<Document>(crate::models::oracle_pool::COLLECTION_NAME);
+    oracle_pools
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "slug": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    oracle_pools
+        .create_index(IndexModel::builder().keys(doc! { "user_id": 1 }).build())
+        .await?;
+
+    // ── oracle_tasks ──
+    // `pool_id + status + created_at` matches the atomic FIFO claim
+    // (oldest queued task per pool) and the pool status counters.
+    let oracle_tasks = db.collection::<Document>(crate::models::oracle_task::COLLECTION_NAME);
+    oracle_tasks
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "pool_id": 1, "status": 1, "created_at": 1 })
+                .build(),
+        )
+        .await?;
+    oracle_tasks
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "submitter_user_id": 1, "created_at": -1 })
+                .build(),
+        )
+        .await?;
+    oracle_tasks
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "conversation_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .partial_filter_expression(doc! {
+                            "conversation_id": { "$exists": true }
+                        })
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    // Submitter-scoped idempotency: a retried submit with the same
+    // `client_ref` must hit the duplicate-key error instead of enqueueing
+    // a second task.
+    oracle_tasks
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "submitter_user_id": 1, "client_ref": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .unique(true)
+                        .partial_filter_expression(doc! {
+                            "client_ref": { "$exists": true }
+                        })
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    // TTL retention: `expires_at` is set when a task reaches a terminal
+    // status (created_at + ORACLE_TASK_RETENTION_DAYS). Queued/dispatched
+    // tasks have no `expires_at` and are never expired by MongoDB.
+    oracle_tasks
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "expires_at": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(Duration::from_secs(0))
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+
+    // ── oracle_sessions ──
+    let oracle_sessions = db.collection::<Document>(crate::models::oracle_session::COLLECTION_NAME);
+    oracle_sessions
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "pool_id": 1, "updated_at": -1 })
+                .build(),
+        )
+        .await?;
+    oracle_sessions
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "owner_user_id": 1, "updated_at": -1 })
+                .build(),
+        )
+        .await?;
+
+    // ── oracle_workers ──
+    let oracle_workers = db.collection::<Document>(crate::models::oracle_worker::COLLECTION_NAME);
+    oracle_workers
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "pool_id": 1, "last_seen_at": -1 })
+                .build(),
+        )
+        .await?;
+
     backfill_downstream_service_types(db).await?;
     migrate_legacy_ssh_auth_mode(db).await?;
     backfill_org_scope_sources(db).await?;
