@@ -184,7 +184,26 @@ window.__nyx = (function () {
     return turns;
   }
 
-  return { isStillGenerating, assistantCount, extractResponse, extractTranscript, scrollContainer };
+  function extractTranscriptKeys() {
+    const main = document.querySelector("main") || document.body;
+    const nodes = Array.from(main.querySelectorAll("[data-message-author-role]"));
+    const turns = [];
+    let fallbackIndex = 0;
+    for (const el of nodes) {
+      const role = el.getAttribute("data-message-author-role");
+      if (role !== "user" && role !== "assistant") continue;
+      const turn = el.closest('[data-testid^="conversation-turn"]');
+      const testid = turn ? turn.getAttribute("data-testid") : "";
+      let key = testid || role + "#" + fallbackIndex++;
+      const text = cleanText(extractTextWithMath(el));
+      if (!text) continue;
+      if (!testid) key = key + "|" + text;
+      turns.push({ key, role, text });
+    }
+    return { rendered: nodes.length, turns };
+  }
+
+  return { isStillGenerating, assistantCount, extractResponse, extractTranscript, extractTranscriptKeys, scrollContainer, extractTextWithMath, cleanText };
 })();
 `;
 
@@ -499,62 +518,110 @@ async function waitForResponse(page, task_id, beforeCount) {
 
 // ── Scrape flow (attach existing conversation) ───────────────────────────
 async function loadFullTranscript(page) {
-  let lastHeight = -1;
-  let stableHeight = 0;
-  for (let i = 0; i < 50; i++) {
-    await page.evaluate(() => {
-      const sc = window.__nyx.scrollContainer();
-      sc.scrollTop = 0;
-    });
+  let renderedCount = 0;
+  const renderStart = Date.now();
+  while (Date.now() - renderStart < 20000) {
+    renderedCount = await page.evaluate(() => document.querySelectorAll("[data-message-author-role]").length);
+    if (renderedCount > 0) break;
     await sleep(700);
-    const height = await page.evaluate(() => {
-      const sc = window.__nyx.scrollContainer();
-      return sc.scrollHeight || 0;
-    });
-    if (height === lastHeight) {
-      stableHeight += 1;
-      if (stableHeight >= 3) break;
-    } else {
-      stableHeight = 0;
-      lastHeight = height;
-    }
   }
+  await sleep(1500);
 
   await expandCollapsibles(page);
 
-  const acc = [];
-  const seen = new Set();
-  let bottomStable = 0;
-  for (let i = 0; i < 80 && acc.length < 1000; i++) {
-    const turns = await page.evaluate(() => window.__nyx.extractTranscript());
-    for (const turn of turns) {
-      const text = (turn.text || "").slice(0, 200000);
-      const key = `${turn.role}|${text.slice(0, 120)}`;
-      if (!seen.has(key)) {
+  const result = await page.evaluate(async () => {
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const nyx = window.__nyx || {};
+    const clean = (text) => nyx.cleanText ? nyx.cleanText(text || "") : (text || "").trim();
+    const extract = (el) => nyx.extractTextWithMath ? nyx.extractTextWithMath(el) : ((el && el.innerText) || "");
+    const wraps = Array.from(document.querySelectorAll('[data-testid^="conversation-turn"]')).slice(0, 2000);
+
+    if (wraps.length > 0) {
+      const turns = [];
+      const seen = new Set();
+      for (const w of wraps) {
+        try {
+          w.scrollIntoView({ block: "center" });
+        } catch (e) {}
+        await sleep(150);
+        const roleEl = w.querySelector("[data-message-author-role]");
+        if (!roleEl) continue;
+        const role = roleEl.getAttribute("data-message-author-role");
+        if (role !== "user" && role !== "assistant") continue;
+        const key = w.getAttribute("data-testid");
+        if (!key || seen.has(key)) continue;
+        const text = clean(extract(roleEl)).slice(0, 200000);
+        if (!text) continue;
         seen.add(key);
-        acc.push({ role: turn.role, text });
-        if (acc.length >= 1000) break;
+        turns.push({ role, text });
+      }
+      return { rendered: wraps.length, turns };
+    }
+
+    let lastHeight = -1;
+    let stableHeight = 0;
+    for (let i = 0; i < 50; i++) {
+      try {
+        const sc = nyx.scrollContainer();
+        sc.scrollTop = 0;
+      } catch (e) {}
+      await sleep(700);
+      let height = 0;
+      try {
+        const sc = nyx.scrollContainer();
+        height = sc.scrollHeight || 0;
+      } catch (e) {}
+      if (height === lastHeight) {
+        stableHeight += 1;
+        if (stableHeight >= 3) break;
+      } else {
+        stableHeight = 0;
+        lastHeight = height;
       }
     }
 
-    await page.evaluate(() => {
-      const sc = window.__nyx.scrollContainer();
-      const step = Math.floor((sc.clientHeight || window.innerHeight || 800) * 0.8);
-      sc.scrollTop = Math.min(sc.scrollHeight, sc.scrollTop + step);
-    });
-    await sleep(500);
-    const atBottom = await page.evaluate(() => {
-      const sc = window.__nyx.scrollContainer();
-      return sc.scrollTop + sc.clientHeight >= sc.scrollHeight - 4;
-    });
-    if (atBottom) {
-      bottomStable += 1;
-      if (bottomStable >= 2) break;
-    } else {
-      bottomStable = 0;
+    const acc = new Map();
+    const order = [];
+    let rendered = document.querySelectorAll("[data-message-author-role]").length;
+    let bottomStable = 0;
+    for (let i = 0; i < 120 && acc.size < 2000; i++) {
+      const snapshot = nyx.extractTranscriptKeys();
+      rendered = Math.max(rendered, snapshot.rendered || 0);
+      for (const turn of snapshot.turns || []) {
+        const text = (turn.text || "").slice(0, 200000);
+        if (!text) continue;
+        if (!acc.has(turn.key)) order.push(turn.key);
+        acc.set(turn.key, { role: turn.role, text });
+        if (acc.size >= 2000) {
+          break;
+        }
+      }
+
+      try {
+        const sc = nyx.scrollContainer();
+        const step = Math.floor((sc.clientHeight || window.innerHeight || 800) * 0.8);
+        sc.scrollTop = Math.min(sc.scrollHeight, sc.scrollTop + step);
+      } catch (e) {}
+      await sleep(600);
+      let atBottom = false;
+      try {
+        const sc = nyx.scrollContainer();
+        atBottom = sc.scrollTop + sc.clientHeight >= sc.scrollHeight - 4;
+      } catch (e) {}
+      if (atBottom) {
+        bottomStable += 1;
+        if (bottomStable >= 2) break;
+      } else {
+        bottomStable = 0;
+      }
     }
-  }
-  return acc;
+    return { rendered, turns: order.map((key) => acc.get(key)).filter(Boolean) };
+  });
+
+  const turns = result.turns || [];
+  renderedCount = Math.max(renderedCount, result.rendered || 0);
+  log(`scrape: rendered≈${renderedCount} turns, accumulated ${turns.length}`);
+  return turns;
 }
 
 async function handleScrape(page, task) {
