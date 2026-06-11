@@ -197,6 +197,113 @@ async function getChatPage(context) {
 }
 
 // ── Prompt flow ──────────────────────────────────────────────────────────
+function normalizeModelLabel(label) {
+  return (label || "")
+    .toLowerCase()
+    .trim()
+    .replace(/^(chatgpt|openai)-/, "")
+    .replace(/-(pro|extended)$/g, "")
+    .replace(/[\s.-]+/g, "");
+}
+
+async function clickFirstVisible(locator, timeout = 5000) {
+  const count = await locator.count();
+  for (let i = 0; i < count; i++) {
+    const item = locator.nth(i);
+    try {
+      await item.click({ timeout });
+      return true;
+    } catch (e) {}
+  }
+  return false;
+}
+
+async function waitForModelMenu(page, timeout = 5000) {
+  try {
+    await page.locator('[role="menu"], [role="listbox"]').first().waitFor({ state: "visible", timeout });
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+async function clickMatchingModelItem(page, wanted) {
+  const items = page.locator('[role="menuitem"], [role="option"]');
+  const count = await items.count();
+  for (let i = 0; i < count; i++) {
+    const item = items.nth(i);
+    let text = "";
+    try {
+      if (!(await item.isVisible())) continue;
+      text = (await item.innerText({ timeout: 1000 })).trim();
+    } catch (e) {
+      continue;
+    }
+    const candidate = normalizeModelLabel(text);
+    if (!candidate) continue;
+    if (candidate.includes(wanted) || wanted.includes(candidate)) {
+      await item.click({ timeout: 5000 });
+      return text || candidate;
+    }
+  }
+  return null;
+}
+
+async function selectModel(page, modelLabel) {
+  try {
+    const wanted = normalizeModelLabel(modelLabel);
+    if (!wanted) return;
+
+    log(`selecting model "${modelLabel}"`);
+    const testIdPicker = page.locator('button[data-testid="model-switcher-dropdown-button"]').first();
+    const ariaPicker = page.locator('button[aria-label*="model" i]').first();
+    const topTextPicker = page
+      .locator("main button, header button, nav button, body > div button")
+      .filter({ hasText: /gpt|o\d|chatgpt/i })
+      .first();
+
+    let opened = false;
+    for (const picker of [testIdPicker, ariaPicker, topTextPicker]) {
+      try {
+        await picker.click({ timeout: 5000 });
+        opened = await waitForModelMenu(page, 5000);
+        if (opened) break;
+      } catch (e) {}
+    }
+
+    if (!opened) {
+      log(`model picker unavailable for "${modelLabel}", using current`);
+      return;
+    }
+
+    const directMatch = await clickMatchingModelItem(page, wanted);
+    if (directMatch) {
+      log(`model "${modelLabel}" selected via picker item "${directMatch}"`);
+      return;
+    }
+
+    const submenus = page
+      .locator('[role="menuitem"], [role="option"], button')
+      .filter({ hasText: /more models|legacy models/i });
+    if (await clickFirstVisible(submenus, 3000)) {
+      await waitForModelMenu(page, 5000);
+      const submenuMatch = await clickMatchingModelItem(page, wanted);
+      if (submenuMatch) {
+        log(`model "${modelLabel}" selected via picker item "${submenuMatch}"`);
+        return;
+      }
+    }
+
+    await page.keyboard.press("Escape");
+    log(`model "${modelLabel}" not found in picker, using current`);
+  } catch (err) {
+    try {
+      await page.keyboard.press("Escape");
+    } catch (e) {}
+    log(`model "${modelLabel}" selection failed: ${err.message}; using current`);
+  }
+}
+
 async function handlePrompt(page, task) {
   const { task_id } = task;
   log(`prompt task ${task_id} (followup=${!!task.is_followup})`);
@@ -219,6 +326,11 @@ async function handlePrompt(page, task) {
   }
 
   await ack(task_id, "page_ready");
+
+  if (task.model && task.model !== "unknown") {
+    await ack(task_id, "selecting_model");
+    await selectModel(page, task.model);
+  }
 
   // Type the prompt into the composer (native — more robust than the
   // userscript's execCommand fallbacks) and send.
