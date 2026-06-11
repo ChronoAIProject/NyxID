@@ -418,10 +418,14 @@ pub async fn seed_default_providers(
             revocation_url: Some("https://api.x.com/2/oauth2/revoke".to_string()),
             // Write access is intentional: NyxID is a credential broker, so delegated
             // clients commonly need to post on behalf of users. Admins can customise
-            // scopes per deployment.
+            // scopes per deployment. `media.write` is included so delegated clients can
+            // attach images/video to posts via `POST /2/media/upload`; without it that
+            // endpoint returns 403 and there is currently no scope input in the CLI pair
+            // wizard to add it after the fact.
             default_scopes: Some(vec![
                 "tweet.read".to_string(),
                 "tweet.write".to_string(),
+                "media.write".to_string(),
                 "users.read".to_string(),
                 "offline.access".to_string(),
             ]),
