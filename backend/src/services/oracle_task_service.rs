@@ -34,6 +34,7 @@ const MAX_TAG_LEN: usize = 128;
 const MAX_MODEL_LABEL_LEN: usize = 128;
 const MAX_CLIENT_REF_LEN: usize = 128;
 const MAX_PDF_NAME_LEN: usize = 256;
+const MAX_PROJECT_URL_LEN: usize = 2048;
 const MAX_PHASE_LEN: usize = 80;
 const MAX_PHASE_DETAIL_LEN: usize = 500;
 const MAX_URL_LEN: usize = 2048;
@@ -53,6 +54,7 @@ pub struct SubmitterIdentity {
 pub struct SubmitTaskInput {
     pub prompt: String,
     pub model_label: Option<String>,
+    pub project_url: Option<String>,
     pub tag: Option<String>,
     /// Three-state, mirroring the local oracle protocol:
     /// - `None`: single-shot task, no session.
@@ -141,6 +143,13 @@ fn validate_submit_input(input: &SubmitTaskInput) -> AppResult<()> {
         return Err(AppError::ValidationError(format!(
             "client_ref must be 1-{MAX_CLIENT_REF_LEN} chars"
         )));
+    }
+    if let Some(project_url) = &input.project_url
+        && (!project_url.starts_with("https://") || project_url.len() > MAX_PROJECT_URL_LEN)
+    {
+        return Err(AppError::ValidationError(
+            "project_url must start with https:// and be at most 2048 chars".to_string(),
+        ));
     }
     Ok(())
 }
@@ -252,6 +261,7 @@ pub async fn submit_task(
         model_label: input
             .model_label
             .or_else(|| pool.default_model_label.clone()),
+        project_url: input.project_url,
         tag: input.tag,
         pdf_base64: input.pdf_base64,
         pdf_name: input.pdf_name,
@@ -402,6 +412,7 @@ pub async fn extract_url(
         api_key_name: submitter.api_key_name.clone(),
         prompt: "[extract url]".to_string(),
         model_label: model_label.or_else(|| pool.default_model_label.clone()),
+        project_url: None,
         tag: None,
         pdf_base64: None,
         pdf_name: None,
@@ -499,6 +510,7 @@ pub async fn attach_conversation(
         api_key_name: submitter.api_key_name.clone(),
         prompt: "[scrape transcript]".to_string(),
         model_label: pool.default_model_label.clone(),
+        project_url: None,
         tag,
         pdf_base64: None,
         pdf_name: None,
@@ -764,7 +776,10 @@ async fn worker_payload(
         tag: task.tag.clone(),
         pdf_base64: task.pdf_base64.clone(),
         pdf_name: task.pdf_name.clone(),
-        required_project_url: pool.chatgpt_project_url.clone(),
+        required_project_url: task
+            .project_url
+            .clone()
+            .or_else(|| pool.chatgpt_project_url.clone()),
         assigned_worker: worker_label.to_string(),
         submitted_at: task.created_at.to_rfc3339(),
     })
@@ -1149,6 +1164,7 @@ pub async fn worker_submit_transcript(
             api_key_name: scrape_task.api_key_name.clone(),
             prompt: user_text,
             model_label: scrape_task.model_label.clone(),
+            project_url: None,
             tag: scrape_task.tag.clone(),
             pdf_base64: None,
             pdf_name: None,
@@ -1385,6 +1401,30 @@ mod tests {
             ..prompt_input("p")
         };
         assert!(validate_submit_input(&long_client_ref).is_err());
+
+        let project_override = SubmitTaskInput {
+            project_url: Some("https://chatgpt.com/g/g-p-y/project".to_string()),
+            ..prompt_input("p")
+        };
+        assert!(validate_submit_input(&project_override).is_ok());
+
+        let insecure_project = SubmitTaskInput {
+            project_url: Some("http://chatgpt.com/g/g-p-y/project".to_string()),
+            ..prompt_input("p")
+        };
+        assert!(matches!(
+            validate_submit_input(&insecure_project),
+            Err(AppError::ValidationError(_))
+        ));
+
+        let long_project = SubmitTaskInput {
+            project_url: Some(format!("https://{}", "x".repeat(MAX_PROJECT_URL_LEN))),
+            ..prompt_input("p")
+        };
+        assert!(matches!(
+            validate_submit_input(&long_project),
+            Err(AppError::ValidationError(_))
+        ));
     }
 
     #[test]
@@ -1535,6 +1575,66 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(late, ResultOutcome::Ignored);
+
+        db.drop().await.ok();
+    }
+
+    #[tokio::test]
+    async fn worker_payload_uses_task_project_url_before_pool_default() {
+        let Some(db) = connect_test_database("oracle_task_project_url").await else {
+            return;
+        };
+        let owner = uuid::Uuid::new_v4().to_string();
+        let mut pool = test_pool(&owner);
+        pool.per_user_max_inflight = 3;
+        seed_pool(&db, &pool).await;
+
+        let override_url = "https://chatgpt.com/g/g-p-task/project".to_string();
+        let with_override = submit_task(
+            &db,
+            &pool,
+            &submitter(&owner),
+            SubmitTaskInput {
+                project_url: Some(override_url.clone()),
+                ..prompt_input("use task project")
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            with_override.task.project_url.as_deref(),
+            Some(override_url.as_str())
+        );
+
+        let without_override = submit_task(
+            &db,
+            &pool,
+            &submitter(&owner),
+            prompt_input("use pool project"),
+        )
+        .await
+        .unwrap();
+        assert!(without_override.task.project_url.is_none());
+
+        let claimed_override = claim_task(&db, &pool, "tab_1", None, None)
+            .await
+            .unwrap()
+            .expect("override task");
+        assert_eq!(claimed_override.task_id, with_override.task.id);
+        assert_eq!(
+            claimed_override.required_project_url.as_deref(),
+            Some(override_url.as_str())
+        );
+
+        let claimed_default = claim_task(&db, &pool, "tab_2", None, None)
+            .await
+            .unwrap()
+            .expect("fallback task");
+        assert_eq!(claimed_default.task_id, without_override.task.id);
+        assert_eq!(
+            claimed_default.required_project_url.as_deref(),
+            pool.chatgpt_project_url.as_deref()
+        );
 
         db.drop().await.ok();
     }

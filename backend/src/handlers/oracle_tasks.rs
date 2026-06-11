@@ -29,6 +29,8 @@ pub struct SubmitOracleTaskRequest {
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
+    pub project_url: Option<String>,
+    #[serde(default)]
     pub tag: Option<String>,
     /// Omitted = single-shot. `""` = open a new session. An existing id =
     /// continue that session (owner only).
@@ -228,6 +230,7 @@ pub async fn submit_task(
         oracle_task_service::SubmitTaskInput {
             prompt: body.prompt,
             model_label: body.model,
+            project_url: body.project_url,
             tag: body.tag,
             conversation_id: body.conversation_id,
             pdf_base64: body.pdf_base64,
@@ -492,6 +495,7 @@ mod tests {
             api_key_name: None,
             prompt: "the prompt".to_string(),
             model_label: Some("chatgpt-5.5-pro".to_string()),
+            project_url: None,
             tag: None,
             pdf_base64: Some("cGRm".to_string()),
             pdf_name: Some("a.pdf".to_string()),

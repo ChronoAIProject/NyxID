@@ -28,6 +28,7 @@ pub async fn run(command: OracleCommands) -> Result<()> {
             file,
             pdf,
             model,
+            project_url,
             tag,
             conversation,
             new_conversation,
@@ -41,15 +42,10 @@ pub async fn run(command: OracleCommands) -> Result<()> {
             let prompt_text = resolve_prompt(prompt.as_deref(), file.as_deref())?;
 
             let mut body = serde_json::json!({ "prompt": prompt_text });
-            if let Some(m) = &model {
-                body["model"] = Value::String(m.clone());
-            }
-            if let Some(t) = &tag {
-                body["tag"] = Value::String(t.clone());
-            }
-            if let Some(c) = &client_ref {
-                body["client_ref"] = Value::String(c.clone());
-            }
+            insert_opt_str(&mut body, "model", model.as_deref());
+            insert_opt_str(&mut body, "project_url", project_url.as_deref());
+            insert_opt_str(&mut body, "tag", tag.as_deref());
+            insert_opt_str(&mut body, "client_ref", client_ref.as_deref());
             // Three-state conversation_id: continue an id, open a new
             // session (""), or single-shot (omitted).
             if let Some(conv) = &conversation {
@@ -757,6 +753,7 @@ mod tests {
             file: None,
             pdf: None,
             model: Some("chatgpt-5.5-pro".to_string()),
+            project_url: None,
             tag: Some("smoke".to_string()),
             conversation: None,
             new_conversation: false,
@@ -796,6 +793,7 @@ mod tests {
             file: None,
             pdf: None,
             model: None,
+            project_url: None,
             tag: None,
             conversation: None,
             new_conversation: true,
@@ -806,6 +804,44 @@ mod tests {
         })
         .await
         .expect("new conversation submit should succeed");
+    }
+
+    #[tokio::test]
+    async fn ask_project_url_posts_task_override() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/oracle/pools/p/tasks"))
+            .and(body_json(serde_json::json!({
+                "prompt": "route this prompt",
+                "project_url": "https://chatgpt.com/g/g-p-task/project",
+            })))
+            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
+                "task_id": "task-project",
+                "status": "queued",
+                "queue_position": 1,
+                "deduplicated": false,
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(OracleCommands::Ask {
+            pool: "p".to_string(),
+            prompt: Some("route this prompt".to_string()),
+            file: None,
+            pdf: None,
+            model: None,
+            project_url: Some("https://chatgpt.com/g/g-p-task/project".to_string()),
+            tag: None,
+            conversation: None,
+            new_conversation: false,
+            client_ref: None,
+            wait: 3600,
+            no_wait: true,
+            auth: mock_auth_with_output(server.uri(), OutputFormat::Json),
+        })
+        .await
+        .expect("ask --project-url should include the per-task override");
     }
 
     #[tokio::test]
@@ -844,6 +880,7 @@ mod tests {
             file: None,
             pdf: None,
             model: None,
+            project_url: None,
             tag: None,
             conversation: None,
             new_conversation: false,

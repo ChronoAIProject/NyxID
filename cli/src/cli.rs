@@ -3784,6 +3784,9 @@ pub enum OracleCommands {
         /// Model hint forwarded to the worker (defaults to the pool's)
         #[arg(long)]
         model: Option<String>,
+        /// ChatGPT Project URL for this prompt (overrides the pool default)
+        #[arg(long)]
+        project_url: Option<String>,
         /// Free-form tag recorded on the task
         #[arg(long)]
         tag: Option<String>,

@@ -67,6 +67,9 @@ pub struct OracleTask {
     /// Opaque model hint forwarded to the worker and echoed on results.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_label: Option<String>,
+    /// Optional per-task ChatGPT Project URL override for prompt tasks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tag: Option<String>,
     /// Optional PDF attachment (base64), uploaded by the worker on the
@@ -143,6 +146,7 @@ mod tests {
             api_key_name: None,
             prompt: "What is the BEDC closure of item 8?".to_string(),
             model_label: Some("chatgpt-5.5-pro".to_string()),
+            project_url: None,
             tag: Some("bedc-deep".to_string()),
             pdf_base64: None,
             pdf_name: None,
