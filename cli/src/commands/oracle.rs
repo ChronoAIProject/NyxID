@@ -64,9 +64,8 @@ pub async fn run(command: OracleCommands) -> Result<()> {
                     .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("attachment.pdf");
-                body["pdf_base64"] = Value::String(
-                    base64::engine::general_purpose::STANDARD.encode(&bytes),
-                );
+                body["pdf_base64"] =
+                    Value::String(base64::engine::general_purpose::STANDARD.encode(&bytes));
                 body["pdf_name"] = Value::String(name.to_string());
             }
 
@@ -222,7 +221,9 @@ async fn run_pool(command: OraclePoolCommands) -> Result<()> {
                 OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&resp)?),
                 OutputFormat::Table => {
                     if pools.is_empty() {
-                        eprintln!("No oracle pools visible. Create one with `nyxid oracle pool create`.");
+                        eprintln!(
+                            "No oracle pools visible. Create one with `nyxid oracle pool create`."
+                        );
                         return Ok(());
                     }
                     let mut table = Table::new();
@@ -253,9 +254,15 @@ async fn run_pool(command: OraclePoolCommands) -> Result<()> {
                     eprintln!("Slug:        {}", p["slug"].as_str().unwrap_or("-"));
                     eprintln!("Name:        {}", p["name"].as_str().unwrap_or("-"));
                     eprintln!("Visibility:  {}", p["visibility"].as_str().unwrap_or("-"));
-                    eprintln!("Active:      {}", yes_no(p["is_active"].as_bool().unwrap_or(false)));
+                    eprintln!(
+                        "Active:      {}",
+                        yes_no(p["is_active"].as_bool().unwrap_or(false))
+                    );
                     eprintln!("Max workers: {}", p["max_workers"].as_u64().unwrap_or(0));
-                    eprintln!("Max queue:   {}", p["max_queue_length"].as_u64().unwrap_or(0));
+                    eprintln!(
+                        "Max queue:   {}",
+                        p["max_queue_length"].as_u64().unwrap_or(0)
+                    );
                     eprintln!(
                         "Per-user:    {}",
                         p["per_user_max_inflight"].as_u64().unwrap_or(0)
@@ -311,10 +318,9 @@ async fn run_pool(command: OraclePoolCommands) -> Result<()> {
             let p: Value = api.patch(&format!("/oracle/pools/{pool}"), &body).await?;
             match output {
                 OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&p)?),
-                OutputFormat::Table => eprintln!(
-                    "Pool '{}' updated.",
-                    p["slug"].as_str().unwrap_or(&pool)
-                ),
+                OutputFormat::Table => {
+                    eprintln!("Pool '{}' updated.", p["slug"].as_str().unwrap_or(&pool))
+                }
             }
             Ok(())
         }
@@ -344,11 +350,7 @@ async fn run_pool(command: OraclePoolCommands) -> Result<()> {
 /// Poll `GET /oracle/tasks/{id}` until the task reaches a terminal status
 /// or the wait budget expires. Long browser thinking lives here, not in a
 /// single HTTP request.
-async fn poll_until_terminal(
-    api: &mut ApiClient,
-    task_id: &str,
-    wait_secs: u64,
-) -> Result<Value> {
+async fn poll_until_terminal(api: &mut ApiClient, task_id: &str, wait_secs: u64) -> Result<Value> {
     let deadline = Duration::from_secs(wait_secs);
     let mut elapsed = Duration::ZERO;
     let mut last_phase: Option<String> = None;
@@ -396,11 +398,12 @@ fn resolve_prompt(prompt: Option<&str>, file: Option<&str>) -> Result<String> {
             }
             Ok(buf)
         }
-        (None, Some(path)) => {
-            std::fs::read_to_string(path).with_context(|| format!("Failed to read prompt at {path}"))
-        }
+        (None, Some(path)) => std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read prompt at {path}")),
         (Some(_), Some(_)) => bail!("Pass the prompt as an argument OR --file, not both"),
-        (None, None) => bail!("No prompt. Pass it as an argument, or use --file <path> (or --file -)"),
+        (None, None) => {
+            bail!("No prompt. Pass it as an argument, or use --file <path> (or --file -)")
+        }
     }
 }
 
@@ -477,7 +480,10 @@ fn print_status(output: OutputFormat, pool: &str, status: &Value) -> Result<()> 
                 "  Diagnosis:  {}",
                 status["diagnosis"].as_str().unwrap_or("-")
             );
-            let workers = status["active_workers"].as_array().cloned().unwrap_or_default();
+            let workers = status["active_workers"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
             if workers.is_empty() {
                 eprintln!("  Workers:    none active (open a ChatGPT tab with the userscript)");
             } else {
@@ -542,7 +548,11 @@ fn print_session_detail(output: OutputFormat, resp: &Value) -> Result<()> {
             let turns = resp["turns"].as_array().cloned().unwrap_or_default();
             for (i, turn) in turns.iter().enumerate() {
                 eprintln!();
-                eprintln!("─── Turn {} ({}) ───", i + 1, turn["status"].as_str().unwrap_or("-"));
+                eprintln!(
+                    "─── Turn {} ({}) ───",
+                    i + 1,
+                    turn["status"].as_str().unwrap_or("-")
+                );
                 if let Some(prompt) = turn["prompt"].as_str() {
                     eprintln!("Q: {prompt}");
                 }
@@ -568,7 +578,11 @@ fn insert_opt_u64(body: &mut Value, key: &str, value: Option<u64>) {
 }
 
 fn yes_no(b: bool) -> String {
-    if b { "yes".to_string() } else { "no".to_string() }
+    if b {
+        "yes".to_string()
+    } else {
+        "no".to_string()
+    }
 }
 
 #[cfg(test)]

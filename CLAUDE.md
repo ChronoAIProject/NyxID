@@ -226,6 +226,21 @@ Rich metadata on `DownstreamService` for AI agent discovery (issue #148). Agents
 
 **Legacy migration:** `migrate_legacy_api_spec_url()` runs at startup to rename `api_spec_url` -> `openapi_spec_url` and remove duplicates. Update handler includes `$unset: { api_spec_url: "" }` as belt-and-suspenders.
 
+### 11. Oracle Relay (browser LLM pools)
+
+Generic async task relay that lets any NyxID user/agent call a browser-driven LLM (ChatGPT Pro, etc.) through NyxID. A logged-in ChatGPT tab running the `integrations/oracle/nyxid_oracle.user.js` userscript is a **worker**; a **pool** is the capacity unit that owns the worker token. Consumers submit prompts via `/api/v1/oracle` and poll for answers; the browser/LLM specifics live entirely in the userscript, so the backend stays a neutral relay. See `docs/ORACLE_RELAY.md`.
+
+- **Models** (all UUID-string `_id`, `COLLECTION_NAME`): `oracle_pool` (polymorphic `user_id` owner like Node/UserService; `visibility` = private/org/platform; `worker_token_hash`; quotas), `oracle_task` (prompt/response bodies + lease + status + TTL `expires_at`), `oracle_session` (multi-turn `conv_…`), `oracle_worker` (tab presence, id = `{pool_id}:{label}`).
+- **Queue** (`oracle_task_service`): MongoDB-backed, no in-memory state — any instance serves any request. FIFO claim via `find_one_and_update` sorted by `created_at`; `task_timeout_secs` lease (default 4h) refreshed by `ack` heartbeats; expired leases requeue to the FIFO front (preserved `created_at`, the Mongo analogue of the local servers' `appendleft`); idempotent re-claim survives mid-task tab reload; `client_ref` gives submitter-scoped submit idempotency (partial unique index); empty/`ERROR:`-prefixed results → `failed` (extraction-failure detection).
+- **Worker token** `nyx_owk_…` (32 random bytes, SHA-256 stored, shown once, rotatable). Worker endpoints (`/api/v1/oracle/worker/{task,ack,result,pin-conv-url}`) authenticate by Bearer token **inside the handler**, mounted outside JWT middleware like `/api/v1/node-agent`. `ack` returning `{status:"cancelled"}` is the cancellation back-channel.
+- **ACL**: `oracle_pool_service::ensure_can_submit` gates by visibility via `org_service::resolve_owner_access`; `ensure_can_manage` (owner/org-admin) gates pool mutation + token rotation. Unauthorized task/session reads return a not-found-shaped error (don't leak existence).
+- **Privacy**: prompt/response bodies live only on the task doc (TTL `ORACLE_TASK_RETENTION_DAYS`, default 30); audit + tracing are metadata-only (ids/sizes/outcomes), never the prompt or answer — same discipline as WS frame injection.
+- **Error codes 11000-11099** (oracle relay): 11000 `OraclePoolNotFound`, 11001 `OraclePoolSlugTaken`, 11002 `OraclePoolInactive`, 11003 `OracleWorkerTokenInvalid`, 11004 `OracleQueueFull`, 11005 `OracleQuotaExceeded`, 11006 `OracleTaskNotFound`, 11007 `OracleSessionNotFound`, 11008 `OracleSessionClosed`, 11009 `OraclePayloadTooLarge`.
+- **CLI**: `nyxid oracle ask` (submit + poll; `--no-wait`, `--pdf`, `--new-conversation`/`--conversation`, `--client-ref`), `oracle result/cancel/status/sessions/session/close-session`, `oracle pool create/list/show/update/rotate-token`.
+- **Userscript**: forked from newmath `bedc-deep` bridge; DOM-automation core verbatim, only config (GM-stored `nyxid_base_url`/`nyxid_worker_token`/`nyxid_worker_label`, `?nyx=N` → `tab_N`) + networking (Bearer + NyxID worker API) rewritten. Project pinning is server-driven via the pool's `chatgpt_project_url` (a no-op when unset).
+
+Key files: `models/oracle_{pool,task,session,worker}.rs`, `services/oracle_{pool,task,session}_service.rs`, `handlers/oracle_{pools,tasks,worker}.rs`, `cli/src/commands/oracle.rs`, `integrations/oracle/nyxid_oracle.user.js`.
+
 ## File Structure
 
 ```
@@ -308,6 +323,7 @@ All API routes under `/api/v1`:
 - `/api-keys/external` -- user's external API keys / credentials (list, update, delete)
 - `/user-services` -- user's proxy routing config (list, update, delete)
 - `/catalog` -- read-only service catalog for users (list templates, get template by slug, `?include_all=true` for full discovery including system services). Supports `/{slug}/endpoints` for OpenAPI endpoint discovery via hardened spec fetch.
+- `/oracle` -- browser LLM relay (§11). Consumer side (JWT or `nyxid_ag_` key): `/pools` CRUD + `/pools/{slug}/rotate-token`, `/pools/{slug}/tasks` submit, `/pools/{slug}/status`, `/tasks/{id}` poll + `/tasks/{id}/cancel`, `/sessions` list + `/sessions/{conv_id}` transcript + `/close`. Worker side `/oracle/worker/{task,ack,result,pin-conv-url}` authenticates by pool worker token (`nyx_owk_…`) inside the handler, mounted outside JWT middleware. 16 MiB body cap (PDF attach / multi-MB answers).
 - `/channel-bots` -- channel bot registration CRUD + PATCH updates for platform verification material
 - `/channel-conversations` -- conversation-to-agent routing (CRUD). Maps platform conversations to agent API keys.
 - `/channel-relay/reply` -- agent async reply to a platform conversation. **Only async replies are supported** — sync 200+body replies from agent callbacks were removed per ADR-013 / NyxID#221. Agents must return 202 to the callback and post replies here. Accepts two auth modes: (a) the agent's API key (`Authorization: Bearer nyxid_ag_…`), scoped by `conversation.agent_api_key_id`; or (b) a per-callback reply token (`Authorization: Bearer <reply_token>`) delivered in the inbound callback payload's `reply_token` field. Reply tokens are RS256 JWTs with `aud="channel-relay/reply"`, bound to one `inbound_message_id` + `conversation_id` + `api_key_id` + `platform`, single-use (enforced via MongoDB `reply_token_uses`), and valid for `JWT_RELAY_REPLY_TTL_SECS` (default 30 min). Intended for downstream runtimes (e.g. Aevatar) that want to reply without persisting agent API keys.

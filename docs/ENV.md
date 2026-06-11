@@ -248,6 +248,14 @@ For development, Mailpit is provided via Docker Compose (SMTP on `localhost:1025
 | `CHANNEL_RELAY_MAX_BOTS_PER_USER` | `5` | Maximum bots per user across all platforms |
 | `CHANNEL_RELAY_MESSAGE_TTL_DAYS` | `30` | TTL for `channel_messages` auto-cleanup |
 
+## Oracle Relay
+
+See [ORACLE_RELAY.md](ORACLE_RELAY.md) for the full design.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ORACLE_TASK_RETENTION_DAYS` | `30` | Days to retain terminal oracle tasks (prompt + response bodies) before MongoDB TTL expiry. Queued/dispatched tasks are never auto-expired. |
+
 ## Logging
 
 | Variable | Default | Description |
