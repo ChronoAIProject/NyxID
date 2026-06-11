@@ -950,6 +950,24 @@
     }
   }
 
+  function scrollContainer() {
+    const firstMessage = document.querySelector("[data-message-author-role]");
+    let el = firstMessage ? firstMessage.parentElement : null;
+    while (el && el !== document.body && el !== document.documentElement) {
+      try {
+        const style = getComputedStyle(el);
+        if (
+          el.scrollHeight > el.clientHeight + 4 &&
+          (style.overflowY === "auto" || style.overflowY === "scroll")
+        ) {
+          return el;
+        }
+      } catch {}
+      el = el.parentElement;
+    }
+    return document.scrollingElement || document.body;
+  }
+
   function setSentPrompt(text) { sentPromptText = text; }
 
   function looksLikePromptEcho(text) {
@@ -1186,6 +1204,64 @@
       await sleep(2000);
     }
     return Math.max(lastCount, 0);
+  }
+
+  async function loadFullTranscriptInPage() {
+    let lastHeight = -1;
+    let stableHeight = 0;
+    for (let i = 0; i < 50; i++) {
+      try {
+        const sc = scrollContainer();
+        sc.scrollTop = 0;
+      } catch {}
+      await sleep(700);
+      let height = 0;
+      try {
+        height = scrollContainer().scrollHeight || 0;
+      } catch {}
+      if (height === lastHeight) {
+        stableHeight += 1;
+        if (stableHeight >= 3) break;
+      } else {
+        stableHeight = 0;
+        lastHeight = height;
+      }
+    }
+
+    const acc = [];
+    const seen = new Set();
+    let bottomStable = 0;
+    for (let i = 0; i < 80 && acc.length < 1000; i++) {
+      const turns = extractFullTranscript();
+      for (const turn of turns) {
+        const text = (turn.text || "").slice(0, 200000);
+        const key = `${turn.role}|${text.slice(0, 120)}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          acc.push({ role: turn.role, text });
+          if (acc.length >= 1000) break;
+        }
+      }
+
+      try {
+        const sc = scrollContainer();
+        const step = Math.floor((sc.clientHeight || window.innerHeight || 800) * 0.8);
+        sc.scrollTop = Math.min(sc.scrollHeight, sc.scrollTop + step);
+      } catch {}
+      await sleep(500);
+      let atBottom = false;
+      try {
+        const sc = scrollContainer();
+        atBottom = sc.scrollTop + sc.clientHeight >= sc.scrollHeight - 4;
+      } catch {}
+      if (atBottom) {
+        bottomStable += 1;
+        if (bottomStable >= 2) break;
+      } else {
+        bottomStable = 0;
+      }
+    }
+    return acc;
   }
 
   function extractResponseText() {
@@ -1455,9 +1531,8 @@
       }
       try { await serverPost("/ack", { task_id, worker: workerLabel(), phase: "scraping" }); } catch {}
       await sleep(2500); // let the SPA mount the conversation
-      const count = await waitForTranscriptLoad(60000);
-      log(`scrape: ${count} message nodes rendered`);
-      const turns = extractFullTranscript();
+      const turns = await loadFullTranscriptInPage();
+      log(`scrape: ${turns.length} turns loaded`);
       const chatUrl = currentChatUrl();
       const res = await serverPost("/worker/transcript", {
         task_id, worker: workerLabel(), turns, chatgpt_url: chatUrl,

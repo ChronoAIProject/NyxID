@@ -143,6 +143,24 @@ window.__nyx = (function () {
     return document.querySelectorAll("[data-message-author-role='assistant']").length;
   }
 
+  function scrollContainer() {
+    const firstMessage = document.querySelector("[data-message-author-role]");
+    let el = firstMessage ? firstMessage.parentElement : null;
+    while (el && el !== document.body && el !== document.documentElement) {
+      try {
+        const style = getComputedStyle(el);
+        if (
+          el.scrollHeight > el.clientHeight + 4 &&
+          (style.overflowY === "auto" || style.overflowY === "scroll")
+        ) {
+          return el;
+        }
+      } catch (e) {}
+      el = el.parentElement;
+    }
+    return document.scrollingElement || document.body;
+  }
+
   // Latest assistant message text (the answer to the last prompt).
   function extractResponse() {
     const main = document.querySelector("main");
@@ -166,7 +184,7 @@ window.__nyx = (function () {
     return turns;
   }
 
-  return { isStillGenerating, assistantCount, extractResponse, extractTranscript };
+  return { isStillGenerating, assistantCount, extractResponse, extractTranscript, scrollContainer };
 })();
 `;
 
@@ -401,6 +419,63 @@ async function waitForResponse(page, task_id, beforeCount) {
 }
 
 // ── Scrape flow (attach existing conversation) ───────────────────────────
+async function loadFullTranscript(page) {
+  let lastHeight = -1;
+  let stableHeight = 0;
+  for (let i = 0; i < 50; i++) {
+    await page.evaluate(() => {
+      const sc = window.__nyx.scrollContainer();
+      sc.scrollTop = 0;
+    });
+    await sleep(700);
+    const height = await page.evaluate(() => {
+      const sc = window.__nyx.scrollContainer();
+      return sc.scrollHeight || 0;
+    });
+    if (height === lastHeight) {
+      stableHeight += 1;
+      if (stableHeight >= 3) break;
+    } else {
+      stableHeight = 0;
+      lastHeight = height;
+    }
+  }
+
+  const acc = [];
+  const seen = new Set();
+  let bottomStable = 0;
+  for (let i = 0; i < 80 && acc.length < 1000; i++) {
+    const turns = await page.evaluate(() => window.__nyx.extractTranscript());
+    for (const turn of turns) {
+      const text = (turn.text || "").slice(0, 200000);
+      const key = `${turn.role}|${text.slice(0, 120)}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        acc.push({ role: turn.role, text });
+        if (acc.length >= 1000) break;
+      }
+    }
+
+    await page.evaluate(() => {
+      const sc = window.__nyx.scrollContainer();
+      const step = Math.floor((sc.clientHeight || window.innerHeight || 800) * 0.8);
+      sc.scrollTop = Math.min(sc.scrollHeight, sc.scrollTop + step);
+    });
+    await sleep(500);
+    const atBottom = await page.evaluate(() => {
+      const sc = window.__nyx.scrollContainer();
+      return sc.scrollTop + sc.clientHeight >= sc.scrollHeight - 4;
+    });
+    if (atBottom) {
+      bottomStable += 1;
+      if (bottomStable >= 2) break;
+    } else {
+      bottomStable = 0;
+    }
+  }
+  return acc;
+}
+
 async function handleScrape(page, task) {
   const { task_id, conversation_url } = task;
   log(`scrape task ${task_id} → ${conversation_url}`);
@@ -412,24 +487,42 @@ async function handleScrape(page, task) {
   await installDomCore(page);
   await ack(task_id, "scraping");
 
-  // Wait for the transcript to settle (count stable) — not for generation.
-  let last = -1;
-  let stable = 0;
-  for (let i = 0; i < 30; i++) {
-    await sleep(2000);
-    const c = await page.evaluate(() => document.querySelectorAll("[data-message-author-role]").length);
-    if (c > 0 && c === last) {
-      stable += 1;
-      if (stable >= 3) break;
-    } else stable = 0;
-    last = c;
-  }
-  const turns = await page.evaluate(() => window.__nyx.extractTranscript());
+  const turns = await loadFullTranscript(page);
   const res = await apiPost("/transcript", { task_id, worker: LABEL, turns, chatgpt_url: page.url() });
   log(`scrape ${task_id} → ${res.status} (${turns.length} turns, ${res.imported_pairs} pairs)`);
 }
 
 // ── General web extraction flow ──────────────────────────────────────────
+async function scrollLazyPage(page) {
+  let lastHeight = -1;
+  let stableHeight = 0;
+  for (let i = 0; i < 6; i++) {
+    const height = await page.evaluate(() => {
+      const sc = document.scrollingElement || document.documentElement || document.body;
+      const before = sc ? sc.scrollHeight : document.body.scrollHeight;
+      try {
+        if (sc) sc.scrollTop = before;
+        else window.scrollTo(0, before);
+      } catch (e) {
+        try { window.scrollTo(0, before); } catch (inner) {}
+      }
+      return before || 0;
+    });
+    await sleep(600);
+    const nextHeight = await page.evaluate(() => {
+      const sc = document.scrollingElement || document.documentElement || document.body;
+      return (sc && sc.scrollHeight) || document.body.scrollHeight || 0;
+    });
+    if (nextHeight === lastHeight || nextHeight === height) {
+      stableHeight += 1;
+      if (stableHeight >= 2) break;
+    } else {
+      stableHeight = 0;
+    }
+    lastHeight = nextHeight;
+  }
+}
+
 async function handleExtract(page, task) {
   const { task_id } = task;
   let targetHost = "-";
@@ -439,8 +532,9 @@ async function handleExtract(page, task) {
   log(`extract task ${task_id} → host=${targetHost}`);
   try {
     await page.goto(task.target_url, { waitUntil: "domcontentloaded" });
+    await page.waitForLoadState("networkidle", { timeout: 8000 }).catch(() => {});
     await ack(task_id, "extracting");
-    await sleep(2500);
+    await scrollLazyPage(page);
     const content = await page.evaluate(() => {
       const root = document.querySelector("main, article") || document.body;
       return ((root && root.innerText) || "").trim().slice(0, 200000);
