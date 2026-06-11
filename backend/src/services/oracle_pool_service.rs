@@ -650,23 +650,23 @@ mod tests {
 
         let users = db.collection::<crate::models::user::User>("users");
         users
-            .insert_one(&test_user(&owner, UserType::Person))
+            .insert_one(test_user(&owner, UserType::Person))
             .await
             .unwrap();
         users
-            .insert_one(&test_user(&org_id, UserType::Org))
+            .insert_one(test_user(&org_id, UserType::Org))
             .await
             .unwrap();
         users
-            .insert_one(&test_user(&member, UserType::Person))
+            .insert_one(test_user(&member, UserType::Person))
             .await
             .unwrap();
         users
-            .insert_one(&test_user(&stranger, UserType::Person))
+            .insert_one(test_user(&stranger, UserType::Person))
             .await
             .unwrap();
         db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
-            .insert_one(&test_membership(&org_id, &member, OrgRole::Member, None))
+            .insert_one(test_membership(&org_id, &member, OrgRole::Member, None))
             .await
             .unwrap();
 
