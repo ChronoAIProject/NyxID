@@ -123,7 +123,26 @@ nyxid oracle result "$TASK"
 nyxid oracle ask chatgpt-pro "First question" --new-conversation
 # note the conv_… id from the output, then:
 nyxid oracle ask chatgpt-pro "Follow-up" --conversation conv_abc123…
+
+# Attach an EXISTING conversation by URL (a worker tab must have access):
+nyxid oracle attach chatgpt-pro https://chatgpt.com/c/<uuid>
+# scrapes the whole transcript into a conv_… session, then:
+nyxid oracle session conv_abc123…                     # read the imported history
+nyxid oracle ask chatgpt-pro "Keep going" --conversation conv_abc123…  # write back into it
 ```
+
+### Attaching an existing conversation
+
+`oracle attach` is the bidirectional bridge: instead of NyxID originating
+the chat, you point it at a conversation you already have in the browser.
+A worker tab navigates to the URL, scrapes every user/assistant turn, and
+NyxID imports them as a normal session (`origin: "imported"`). From then
+on the conversation is first-class — read it with `oracle session`,
+continue it with `oracle ask --conversation`. Each scraped
+(user, assistant) pair becomes a completed turn, so the transcript and
+continue flows work unchanged. The worker must be in a tab that can open
+the URL; if the pool pins a ChatGPT Project, attaching conversations
+inside that project works best.
 
 Agents authenticate with a scoped key instead of a session:
 
@@ -155,6 +174,7 @@ has a 16 MiB body cap.
 | `PATCH /pools/{id_or_slug}` | Update settings (owner / org admin only). |
 | `POST /pools/{id_or_slug}/rotate-token` | New worker token, shown once. |
 | `POST /pools/{id_or_slug}/tasks` | Submit a task. Returns `task_id` + `queue_position`. |
+| `POST /pools/{id_or_slug}/attach` | Attach an existing conversation by `{chatgpt_url, tag?}`. Returns `conversation_id` + `task_id` (a `scrape` task). |
 | `GET /pools/{id_or_slug}/status` | Queue depth + active workers. |
 | `GET /tasks/{task_id}` | Poll a task. Terminal `status` carries `response`. |
 | `POST /tasks/{task_id}/cancel` | Cancel a queued/in-flight task. |
@@ -195,6 +215,11 @@ the relay replaces, so porting their userscript is a thin diff.
 | `POST /ack` | `{task_id, worker, phase?, phase_detail?, script_version?, page_url?}` | `{status:"ok"}` or `{status:"cancelled"}` |
 | `POST /result` | `{task_id, worker, response, chatgpt_url?, model?, script_version?}` | `{status:"saved"\|"saved_failed"\|"ignored"}` |
 | `POST /pin-conv-url` | `{task_id, worker, chatgpt_url}` | `{status:"pinned"}` |
+| `POST /transcript` | `{task_id, worker, turns:[{role,text}], chatgpt_url?}` | `{status:"imported"\|"ignored", imported_pairs}` |
+
+A `task` poll carries `kind` (`"prompt"` or `"scrape"`): on `"scrape"` the
+worker navigates to `conversation_url`, extracts the full transcript, and
+POSTs `/transcript` instead of injecting a prompt.
 
 `ack` doubles as the cancellation back-channel: a heartbeat for a task
 that's been cancelled or reclaimed returns `{status:"cancelled"}`, telling
