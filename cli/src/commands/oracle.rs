@@ -158,6 +158,37 @@ pub async fn run(command: OracleCommands) -> Result<()> {
                 .await?;
             print_session_detail(output, &session)
         }
+        OracleCommands::Extract {
+            pool,
+            url,
+            model,
+            wait,
+            no_wait,
+            auth,
+        } => {
+            let output = auth.output;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let mut body = serde_json::json!({ "url": url });
+            if let Some(m) = &model {
+                body["model"] = Value::String(m.clone());
+            }
+
+            let submit: Value = api
+                .post(&format!("/oracle/pools/{pool}/extract"), &body)
+                .await?;
+            let task_id = submit["task_id"]
+                .as_str()
+                .context("server did not return a task_id")?
+                .to_string();
+
+            if no_wait {
+                return print_extract_submit(output, &task_id, &submit);
+            }
+
+            eprintln!("Submitted extract task {task_id} to pool '{pool}'. Waiting for content…");
+            let task = poll_until_terminal(&mut api, &task_id, wait).await?;
+            print_result(output, &task)
+        }
         OracleCommands::Pool { command } => run_pool(command).await,
         OracleCommands::Sessions { pool, limit, auth } => {
             let output = auth.output;
@@ -494,6 +525,14 @@ fn print_attach_submit(output: OutputFormat, submit: &Value) -> Result<()> {
             ]);
             println!("{table}");
         }
+    }
+    Ok(())
+}
+
+fn print_extract_submit(output: OutputFormat, task_id: &str, submit: &Value) -> Result<()> {
+    match output {
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(submit)?),
+        OutputFormat::Table => println!("{task_id}"),
     }
     Ok(())
 }
@@ -845,6 +884,35 @@ mod tests {
         })
         .await
         .expect("attach --no-wait should submit and return without polling");
+    }
+
+    #[tokio::test]
+    async fn extract_no_wait_posts_expected_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/oracle/pools/browser/extract"))
+            .and(body_json(serde_json::json!({
+                "url": "https://example.com/articles/alpha?tracking=1",
+                "model": "reader",
+            })))
+            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
+                "task_id": "task-extract",
+                "status": "queued",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(OracleCommands::Extract {
+            pool: "browser".to_string(),
+            url: "https://example.com/articles/alpha?tracking=1".to_string(),
+            model: Some("reader".to_string()),
+            wait: 180,
+            no_wait: true,
+            auth: mock_auth_with_output(server.uri(), OutputFormat::Json),
+        })
+        .await
+        .expect("extract --no-wait should submit and return without polling");
     }
 
     #[tokio::test]

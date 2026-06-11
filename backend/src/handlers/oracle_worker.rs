@@ -294,6 +294,7 @@ mod tests {
                 task_id: "t1".to_string(),
                 kind: "prompt".to_string(),
                 prompt: "p".to_string(),
+                target_url: None,
                 conversation_id: Some("conv_1".to_string()),
                 conversation_url: None,
                 is_followup: false,

@@ -52,9 +52,12 @@ pub struct OracleTask {
     pub pool_id: String,
     pub submitter_user_id: String,
     /// "prompt" for normal oracle turns; "scrape" for transcript-import
-    /// control tasks.
+    /// control tasks; "extract" for general web page extraction.
     #[serde(default = "default_task_kind")]
     pub kind: String,
+    /// Target URL for general web extraction tasks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_url: Option<String>,
     /// API key attribution when submitted by an agent (mirrors AuditLog).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key_id: Option<String>,
@@ -135,6 +138,7 @@ mod tests {
             pool_id: uuid::Uuid::new_v4().to_string(),
             submitter_user_id: uuid::Uuid::new_v4().to_string(),
             kind: "prompt".to_string(),
+            target_url: None,
             api_key_id: None,
             api_key_name: None,
             prompt: "What is the BEDC closure of item 8?".to_string(),

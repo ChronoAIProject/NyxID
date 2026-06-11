@@ -317,6 +317,42 @@ async function handleScrape(page, task) {
   log(`scrape ${task_id} → ${res.status} (${turns.length} turns, ${res.imported_pairs} pairs)`);
 }
 
+// ── General web extraction flow ──────────────────────────────────────────
+async function handleExtract(page, task) {
+  const { task_id } = task;
+  let targetHost = "-";
+  try {
+    targetHost = new URL(task.target_url).host || "-";
+  } catch (e) {}
+  log(`extract task ${task_id} → host=${targetHost}`);
+  try {
+    await page.goto(task.target_url, { waitUntil: "domcontentloaded" });
+    await ack(task_id, "extracting");
+    await sleep(2500);
+    const content = await page.evaluate(() => {
+      const root = document.querySelector("main, article") || document.body;
+      return ((root && root.innerText) || "").trim().slice(0, 200000);
+    });
+    const response = content || "ERROR: empty extraction";
+    const res = await apiPost("/result", {
+      task_id,
+      worker: LABEL,
+      response,
+      chatgpt_url: page.url(),
+      model: task.model,
+    });
+    log(`extract ${task_id} → ${res.status} (${content.length} chars)`);
+  } catch (err) {
+    await apiPost("/result", {
+      task_id,
+      worker: LABEL,
+      response: `ERROR: ${err.message}`,
+      chatgpt_url: page.url(),
+      model: task.model,
+    });
+  }
+}
+
 async function ack(task_id, phase) {
   try {
     const r = await apiPost("/ack", { task_id, worker: LABEL, phase });
@@ -343,6 +379,7 @@ async function main() {
       if (resp.status === "task" && resp.task_id) {
         try {
           if (resp.kind === "scrape") await handleScrape(page, resp);
+          else if (resp.kind === "extract") await handleExtract(page, resp);
           else await handlePrompt(page, resp);
         } catch (err) {
           log(`task ${resp.task_id} errored: ${err.message}`);

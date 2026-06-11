@@ -68,6 +68,19 @@ pub struct AttachConversationResponse {
     pub status: String,
 }
 
+#[derive(Deserialize)]
+pub struct ExtractRequest {
+    pub url: String,
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct ExtractResponse {
+    pub task_id: String,
+    pub status: String,
+}
+
 #[derive(Serialize)]
 pub struct OracleTaskInfo {
     pub task_id: String,
@@ -294,6 +307,50 @@ pub async fn attach_conversation(
     ))
 }
 
+pub async fn extract_url(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(pool_id_or_slug): Path<String>,
+    Json(body): Json<ExtractRequest>,
+) -> AppResult<impl IntoResponse> {
+    let actor = auth_user.user_id.to_string();
+    let pool = oracle_pool_service::get_pool(&state.db, &pool_id_or_slug).await?;
+    oracle_pool_service::ensure_can_submit(&state.db, &actor, &pool).await?;
+
+    let host = url::Url::parse(&body.url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string));
+    let task = oracle_task_service::extract_url(
+        &state.db,
+        &pool,
+        &submitter_identity(&auth_user),
+        &body.url,
+        body.model,
+    )
+    .await?;
+
+    // Metadata only — never extracted content or full URL path/query.
+    audit_service::log_for_user(
+        state.db.clone(),
+        &auth_user,
+        "oracle_extract_submitted",
+        Some(serde_json::json!({
+            "task_id": &task.id,
+            "pool_id": &pool.id,
+            "pool_slug": &pool.slug,
+            "url_host": host,
+        })),
+    );
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(ExtractResponse {
+            task_id: task.id.clone(),
+            status: task.status.as_str().to_string(),
+        }),
+    ))
+}
+
 pub async fn get_task(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -430,6 +487,7 @@ mod tests {
             pool_id: "p1".to_string(),
             submitter_user_id: "u1".to_string(),
             kind: "prompt".to_string(),
+            target_url: None,
             api_key_id: None,
             api_key_name: None,
             prompt: "the prompt".to_string(),

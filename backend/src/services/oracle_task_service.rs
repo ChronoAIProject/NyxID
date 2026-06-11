@@ -245,6 +245,7 @@ pub async fn submit_task(
         pool_id: pool.id.clone(),
         submitter_user_id: submitter.user_id.clone(),
         kind: "prompt".to_string(),
+        target_url: None,
         api_key_id: submitter.api_key_id.clone(),
         api_key_name: submitter.api_key_name.clone(),
         prompt: input.prompt,
@@ -328,6 +329,109 @@ fn validate_attach_url(chatgpt_url: &str) -> AppResult<()> {
     Ok(())
 }
 
+fn validate_extract_url(url: &str) -> AppResult<()> {
+    if url.is_empty() || url.len() > MAX_URL_LEN {
+        return Err(AppError::ValidationError(
+            "url must be 1-2048 chars".to_string(),
+        ));
+    }
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err(AppError::ValidationError(
+            "url must start with http:// or https://".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+async fn enforce_submit_quotas(
+    db: &mongodb::Database,
+    pool: &OraclePool,
+    submitter: &SubmitterIdentity,
+) -> AppResult<()> {
+    let queued = count_tasks(db, doc! { "pool_id": &pool.id, "status": "queued" }).await?;
+    if queued >= u64::from(pool.max_queue_length) {
+        return Err(AppError::OracleQueueFull(format!(
+            "pool '{}' already has {queued} queued tasks",
+            pool.slug
+        )));
+    }
+    let inflight = count_tasks(
+        db,
+        doc! {
+            "pool_id": &pool.id,
+            "submitter_user_id": &submitter.user_id,
+            "status": { "$in": ["queued", "dispatched"] },
+        },
+    )
+    .await?;
+    if inflight >= u64::from(pool.per_user_max_inflight) {
+        return Err(AppError::OracleQuotaExceeded(format!(
+            "you already have {inflight} tasks in flight in pool '{}' (limit {})",
+            pool.slug, pool.per_user_max_inflight
+        )));
+    }
+    Ok(())
+}
+
+pub async fn extract_url(
+    db: &mongodb::Database,
+    pool: &OraclePool,
+    submitter: &SubmitterIdentity,
+    url: &str,
+    model_label: Option<String>,
+) -> AppResult<OracleTask> {
+    validate_extract_url(url)?;
+    if model_label
+        .as_deref()
+        .is_some_and(|m| m.len() > MAX_MODEL_LABEL_LEN)
+    {
+        return Err(AppError::ValidationError(format!(
+            "model exceeds {MAX_MODEL_LABEL_LEN} chars"
+        )));
+    }
+    enforce_submit_quotas(db, pool, submitter).await?;
+
+    let now = Utc::now();
+    let task = OracleTask {
+        id: uuid::Uuid::new_v4().to_string(),
+        pool_id: pool.id.clone(),
+        submitter_user_id: submitter.user_id.clone(),
+        kind: "extract".to_string(),
+        target_url: Some(url.to_string()),
+        api_key_id: submitter.api_key_id.clone(),
+        api_key_name: submitter.api_key_name.clone(),
+        prompt: "[extract url]".to_string(),
+        model_label: model_label.or_else(|| pool.default_model_label.clone()),
+        tag: None,
+        pdf_base64: None,
+        pdf_name: None,
+        conversation_id: None,
+        is_followup: false,
+        client_ref: None,
+        status: OracleTaskStatus::Queued,
+        phase: None,
+        phase_detail: None,
+        phase_at: None,
+        assigned_worker_id: None,
+        dispatched_at: None,
+        lease_expires_at: None,
+        response: None,
+        response_chars: None,
+        chatgpt_url: None,
+        failure_reason: None,
+        worker_script_version: None,
+        completed_at: None,
+        expires_at: None,
+        created_at: now,
+        updated_at: now,
+    };
+    db.collection::<OracleTask>(ORACLE_TASKS)
+        .insert_one(&task)
+        .await?;
+
+    Ok(task)
+}
+
 pub async fn attach_conversation(
     db: &mongodb::Database,
     pool: &OraclePool,
@@ -390,6 +494,7 @@ pub async fn attach_conversation(
         pool_id: pool.id.clone(),
         submitter_user_id: submitter.user_id.clone(),
         kind: "scrape".to_string(),
+        target_url: None,
         api_key_id: submitter.api_key_id.clone(),
         api_key_name: submitter.api_key_name.clone(),
         prompt: "[scrape transcript]".to_string(),
@@ -612,6 +717,8 @@ pub struct WorkerTaskPayload {
     pub kind: String,
     pub prompt: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub conversation_url: Option<String>,
@@ -649,6 +756,7 @@ async fn worker_payload(
         task_id: task.id.clone(),
         kind: task.kind.clone(),
         prompt: task.prompt.clone(),
+        target_url: task.target_url.clone(),
         conversation_id: task.conversation_id.clone(),
         conversation_url,
         is_followup: task.is_followup,
@@ -1036,6 +1144,7 @@ pub async fn worker_submit_transcript(
             pool_id: pool.id.clone(),
             submitter_user_id: scrape_task.submitter_user_id.clone(),
             kind: "prompt".to_string(),
+            target_url: None,
             api_key_id: scrape_task.api_key_id.clone(),
             api_key_name: scrape_task.api_key_name.clone(),
             prompt: user_text,
@@ -1722,6 +1831,98 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(late, TranscriptOutcome::Ignored);
+
+        db.drop().await.ok();
+    }
+
+    #[tokio::test]
+    async fn extract_url_mints_task_and_enforces_quotas() {
+        let Some(db) = connect_test_database("oracle_task_extract").await else {
+            return;
+        };
+        let owner = uuid::Uuid::new_v4().to_string();
+        let other = uuid::Uuid::new_v4().to_string();
+        let mut pool = test_pool(&owner);
+        pool.max_queue_length = 2;
+        pool.per_user_max_inflight = 1;
+        seed_pool(&db, &pool).await;
+
+        let task = extract_url(
+            &db,
+            &pool,
+            &submitter(&owner),
+            "https://example.com/articles/alpha?tracking=1",
+            Some("reader".to_string()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(task.kind, "extract");
+        assert_eq!(
+            task.target_url.as_deref(),
+            Some("https://example.com/articles/alpha?tracking=1")
+        );
+        assert_eq!(task.prompt, "[extract url]");
+        assert_eq!(task.conversation_id, None);
+        assert!(!task.is_followup);
+        assert_eq!(task.model_label.as_deref(), Some("reader"));
+
+        let claimed = claim_task(&db, &pool, "tab_1", None, None)
+            .await
+            .unwrap()
+            .expect("extract task");
+        assert_eq!(claimed.kind, "extract");
+        assert_eq!(claimed.task_id, task.id);
+        assert_eq!(
+            claimed.target_url.as_deref(),
+            Some("https://example.com/articles/alpha?tracking=1")
+        );
+
+        let per_user_block = extract_url(
+            &db,
+            &pool,
+            &submitter(&owner),
+            "https://example.com/articles/beta",
+            None,
+        )
+        .await;
+        assert!(matches!(
+            per_user_block,
+            Err(AppError::OracleQuotaExceeded(_))
+        ));
+
+        let other_task = extract_url(
+            &db,
+            &pool,
+            &submitter(&other),
+            "https://example.org/queued",
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(other_task.model_label.as_deref(), Some("chatgpt-5.5-pro"));
+
+        extract_url(
+            &db,
+            &pool,
+            &submitter(&uuid::Uuid::new_v4().to_string()),
+            "https://example.org/also-queued",
+            None,
+        )
+        .await
+        .unwrap();
+
+        let queue_full = extract_url(
+            &db,
+            &pool,
+            &submitter(&uuid::Uuid::new_v4().to_string()),
+            "https://example.net/full",
+            None,
+        )
+        .await;
+        assert!(matches!(queue_full, Err(AppError::OracleQueueFull(_))));
+
+        let invalid = extract_url(&db, &pool, &submitter(&owner), "ftp://example.com/", None).await;
+        assert!(matches!(invalid, Err(AppError::ValidationError(_))));
 
         db.drop().await.ok();
     }

@@ -3844,6 +3844,24 @@ pub enum OracleCommands {
         #[command(flatten)]
         auth: AuthArgs,
     },
+    /// Extract readable main content from any web page
+    Extract {
+        /// Pool slug or id to route through (e.g. browser-worker)
+        pool: String,
+        /// URL to extract (`http://` or `https://`)
+        url: String,
+        /// Model label echoed by the worker result (defaults to the pool's)
+        #[arg(long)]
+        model: Option<String>,
+        /// Max seconds to wait for extraction before giving up
+        #[arg(long, default_value_t = 180)]
+        wait: u64,
+        /// Submit and print the task id without waiting
+        #[arg(long)]
+        no_wait: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
     /// Manage oracle pools (capacity = your browser tabs)
     Pool {
         #[command(subcommand)]

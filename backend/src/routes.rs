@@ -888,6 +888,10 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
             post(handlers::oracle_tasks::attach_conversation),
         )
         .route(
+            "/pools/{id_or_slug}/extract",
+            post(handlers::oracle_tasks::extract_url),
+        )
+        .route(
             "/pools/{id_or_slug}/status",
             get(handlers::oracle_tasks::pool_status),
         )
