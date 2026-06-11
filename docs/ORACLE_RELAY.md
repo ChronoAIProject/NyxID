@@ -75,17 +75,31 @@ You have ChatGPT Pro and want to share it.
    Optional: pin workers to a ChatGPT Project (carries system instructions
    / attached files) with `--project-url https://chatgpt.com/g/g-p-…/project`.
 
-2. **Install the userscript** `integrations/oracle/nyxid_oracle.user.js`
-   in Tampermonkey.
+2. **Connect a ChatGPT browser** — two options, same pool:
 
-3. **Configure a tab**: open chatgpt.com (logged into Pro), click ⚙ in the
-   NyxID Oracle panel (bottom-right), and set:
-   - NyxID base URL — e.g. `https://auth.nyxid.dev`
-   - Worker token — the `nyx_owk_…` from step 1
-   - Worker label — `tab_1` (or open the tab with `?nyx=1`)
+   **Option A — CDP worker (recommended, lower friction).** Drives your
+   real logged-in Chrome over the DevTools protocol as a background daemon;
+   no extension, no tab to babysit. See
+   `integrations/oracle/cdp-worker/README.md`:
 
-   Click **Start**. The tab now polls for work. Open more tabs with
-   `?nyx=2`, `?nyx=3`, … (up to the pool's `max_workers`) to add capacity.
+   ```bash
+   cd integrations/oracle/cdp-worker && npm install
+   ./start-chrome.sh                       # launches Chrome on a debug port; log into ChatGPT once
+   NYXID_BASE_URL=https://auth.nyxid.dev \
+   NYXID_WORKER_TOKEN=nyx_owk_… \
+   node worker.mjs
+   ```
+
+   **Option B — userscript (zero local process).** Install
+   `integrations/oracle/nyxid_oracle.user.js` in Tampermonkey, open
+   chatgpt.com (logged into Pro), click ⚙ in the NyxID Oracle panel, set
+   the NyxID base URL + worker token + label (`tab_1`, or open with
+   `?nyx=1`), and click **Start**. Open more tabs with `?nyx=2`, `?nyx=3`,
+   … (up to `max_workers`) for capacity.
+
+   Both speak the same worker API; pick whichever fits. The CDP worker
+   drives your real Chrome session (lowest setup friction, low detection);
+   the userscript needs nothing installed locally.
 
 4. **Verify** the tab is seen:
 
