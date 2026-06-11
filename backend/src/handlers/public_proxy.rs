@@ -553,17 +553,12 @@ mod tests {
         /// (the quota is hard-enforced: no unbounded free proxying) and MUST
         /// NOT reach the downstream a second time.
         ///
-        /// SECURITY NOTE / PRODUCTION BUG (reported, not patched here):
-        /// `anonymous_endpoint_service::increment_daily_usage` is intended to
-        /// return `AppError::RateLimited` (HTTP 429, code 1005) when the quota
-        /// is reached. It actually surfaces a raw MongoDB E11000 duplicate-key
-        /// error (HTTP 500), because the `find_one_and_update` filter
-        /// `{ _id, count: { $lt: quota } }` stops matching the existing usage
-        /// doc once the count hits the quota, and `upsert: true` then attempts
-        /// to insert a second doc with the same `_id`. The denial is still
-        /// fail-closed (the request is rejected and never forwarded), but the
-        /// status code/shape is wrong. This test asserts the real, enforced
-        /// behavior and documents the discrepancy so it is not silently lost.
+        /// QUOTA EXHAUSTION shape: `increment_daily_usage` returns
+        /// `AppError::RateLimited` (HTTP 429, code 1005) when the daily quota is
+        /// reached — never a raw MongoDB E11000 duplicate-key error (HTTP 500),
+        /// which would leak an internal DB error class to clients (CLAUDE.md §3).
+        /// The denial is fail-closed: the over-quota request is rejected and
+        /// never forwarded to the downstream.
         #[tokio::test]
         async fn quota_exhaustion_denies_and_does_not_forward() {
             let Some(db) = connect_test_database("pproxy_quota").await else {
@@ -600,19 +595,23 @@ mod tests {
             .expect_err("second request must be denied once quota is exhausted");
 
             // Quota is hard-enforced: the over-quota request is denied and is
-            // NOT a successful proxy response. (Today this is a DatabaseError
-            // due to the increment_daily_usage E11000 bug described above; the
-            // intended shape is AppError::RateLimited / 429. We accept either to
-            // keep the security assertion — "denied, not forwarded" — green
-            // whether or not the bug is fixed, while the dedicated assertion
-            // below pins the current behavior.)
+            // NOT a successful proxy response. The denial must be quota-driven
+            // (RateLimited / 429), not a routing miss and not a leaked DB error.
             assert!(
                 !matches!(err, AppError::NotFound(_)),
                 "denial must be quota-driven, not a routing miss: {err:?}"
             );
             assert!(
-                matches!(err, AppError::RateLimited | AppError::DatabaseError(_)),
-                "over-quota request must be denied (got {err:?})"
+                matches!(err, AppError::RateLimited),
+                "over-quota request must be RateLimited (HTTP 429), not a 500/E11000 \
+                 DatabaseError (got {err:?})"
+            );
+            // The rendered HTTP response must be 429, not a 500 leaking a DB error.
+            use axum::response::IntoResponse;
+            assert_eq!(
+                err.into_response().status(),
+                StatusCode::TOO_MANY_REQUESTS,
+                "over-quota response must be HTTP 429"
             );
 
             // The downstream must have been hit exactly once: the over-quota

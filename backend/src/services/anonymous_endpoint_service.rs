@@ -336,32 +336,79 @@ pub async fn increment_daily_usage(
 ) -> AppResult<i64> {
     let today = Utc::now().format("%Y-%m-%d").to_string();
     let id = format!("{service_id}:{rule_id}:{today}");
-    let now = Utc::now();
-    let options = FindOneAndUpdateOptions::builder()
-        .upsert(true)
-        .return_document(ReturnDocument::After)
-        .build();
+    let collection = db.collection::<AnonymousEndpointUsage>(ANONYMOUS_ENDPOINT_USAGE);
 
-    let usage = db
-        .collection::<AnonymousEndpointUsage>(ANONYMOUS_ENDPOINT_USAGE)
-        .find_one_and_update(
-            doc! { "_id": &id, "count": { "$lt": i64::from(daily_quota) } },
-            doc! {
-                "$setOnInsert": {
-                    "_id": &id,
-                    "service_id": service_id,
-                    "rule_id": rule_id,
-                    "day": &today,
-                    "created_at": bson::DateTime::from_chrono(now),
+    // The counter is incremented with an atomic conditional update (no upsert):
+    // `{ _id, count < quota }` only matches a doc still under quota. If it
+    // matches, the increment is applied and the new count returned. If it does
+    // NOT match, we must distinguish two cases:
+    //   - the doc exists (count has reached the quota) -> RateLimited (429), or
+    //   - the doc is missing (first request of the day) -> create it at count 1.
+    // The first-insert path can lose a race against a concurrent first request;
+    // that surfaces as an E11000 duplicate-key error, which is NOT a quota hit,
+    // so we loop back and retry the conditional increment instead of reporting
+    // RateLimited. The loop is bounded; RateLimited is the final fallback.
+    const MAX_ATTEMPTS: usize = 3;
+    for _ in 0..MAX_ATTEMPTS {
+        let now = Utc::now();
+        let options = FindOneAndUpdateOptions::builder()
+            .upsert(false)
+            .return_document(ReturnDocument::After)
+            .build();
+
+        let updated = collection
+            .find_one_and_update(
+                doc! { "_id": &id, "count": { "$lt": i64::from(daily_quota) } },
+                doc! {
+                    "$inc": { "count": 1_i64 },
+                    "$set": { "updated_at": bson::DateTime::from_chrono(now) },
                 },
-                "$inc": { "count": 1_i64 },
-                "$set": { "updated_at": bson::DateTime::from_chrono(now) },
-            },
-        )
-        .with_options(options)
-        .await?;
+            )
+            .with_options(options)
+            .await?;
 
-    usage.map(|usage| usage.count).ok_or(AppError::RateLimited)
+        if let Some(usage) = updated {
+            return Ok(usage.count);
+        }
+
+        // No matching under-quota doc. If a doc already exists for this key, the
+        // quota is exhausted; deny with RateLimited.
+        let exists = collection.find_one(doc! { "_id": &id }).await?.is_some();
+        if exists {
+            return Err(AppError::RateLimited);
+        }
+
+        // First request of the day: insert a fresh counter at count 1.
+        let fresh = AnonymousEndpointUsage {
+            id: id.clone(),
+            service_id: service_id.to_string(),
+            rule_id: rule_id.to_string(),
+            day: today.clone(),
+            count: 1,
+            created_at: now,
+            updated_at: now,
+        };
+        match collection.insert_one(&fresh).await {
+            Ok(_) => return Ok(1),
+            // A concurrent first request won the insert race. Retry the
+            // conditional increment rather than treating this as a quota hit.
+            Err(error) if is_duplicate_key_error(&error) => continue,
+            Err(error) => return Err(AppError::DatabaseError(error)),
+        }
+    }
+
+    // All attempts exhausted under contention; fail closed.
+    Err(AppError::RateLimited)
+}
+
+/// Returns true if the given MongoDB error is an E11000 unique-index violation.
+fn is_duplicate_key_error(error: &mongodb::error::Error) -> bool {
+    if let mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(we)) =
+        error.kind.as_ref()
+    {
+        return we.code == 11000;
+    }
+    false
 }
 
 pub fn is_safe_public_response_header(name: &str) -> bool {
@@ -552,5 +599,71 @@ mod tests {
 
         assert_eq!(event.path.len(), PUBLIC_AUDIT_PATH_MAX_LEN);
         assert_eq!(event.user_agent.unwrap().len(), PUBLIC_AUDIT_UA_MAX_LEN);
+    }
+
+    #[test]
+    fn duplicate_key_detector_only_matches_e11000() {
+        // A non-write error (e.g. a custom error) must not be treated as a
+        // duplicate-key violation.
+        let custom = mongodb::error::Error::custom("boom");
+        assert!(!is_duplicate_key_error(&custom));
+    }
+
+    /// The first request of the day creates the counter and returns 1; the
+    /// over-quota request returns `RateLimited` (HTTP 429), never a raw
+    /// database error (HTTP 500).
+    #[tokio::test]
+    async fn increment_daily_usage_first_then_rate_limited_at_quota() {
+        let Some(db) = crate::test_utils::connect_test_database("anon_usage_quota").await else {
+            return;
+        };
+
+        // First request of the day with no existing doc -> creates counter, count 1.
+        let first = increment_daily_usage(&db, "svc-1", "rule-1", 2)
+            .await
+            .expect("first request creates counter");
+        assert_eq!(first, 1, "first request of the day returns count 1");
+
+        // Second request still under quota (quota = 2) -> count 2.
+        let second = increment_daily_usage(&db, "svc-1", "rule-1", 2)
+            .await
+            .expect("second request still under quota");
+        assert_eq!(second, 2);
+
+        // Third request is at/over quota -> RateLimited (429), NOT a 500/E11000.
+        let err = increment_daily_usage(&db, "svc-1", "rule-1", 2)
+            .await
+            .expect_err("over-quota request must be denied");
+        assert!(
+            matches!(err, AppError::RateLimited),
+            "over-quota request must be RateLimited (429), got {err:?}"
+        );
+
+        // A subsequent over-quota request stays RateLimited (idempotent denial).
+        let err = increment_daily_usage(&db, "svc-1", "rule-1", 2)
+            .await
+            .expect_err("still over quota");
+        assert!(matches!(err, AppError::RateLimited), "got {err:?}");
+    }
+
+    /// A quota of 1 is denied on the very second call with RateLimited.
+    #[tokio::test]
+    async fn increment_daily_usage_quota_one_denies_second_call() {
+        let Some(db) = crate::test_utils::connect_test_database("anon_usage_quota1").await else {
+            return;
+        };
+
+        let first = increment_daily_usage(&db, "svc-2", "rule-2", 1)
+            .await
+            .expect("first request within quota");
+        assert_eq!(first, 1);
+
+        let err = increment_daily_usage(&db, "svc-2", "rule-2", 1)
+            .await
+            .expect_err("second request must be denied");
+        assert!(
+            matches!(err, AppError::RateLimited),
+            "got {err:?}, expected RateLimited"
+        );
     }
 }
