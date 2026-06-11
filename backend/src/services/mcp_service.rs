@@ -4934,4 +4934,166 @@ mod tests {
         };
         assert!(user.is_user_service());
     }
+
+    mod public_tools {
+        use crate::models::downstream_service::{
+            AnonymousEndpointRule, COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
+        };
+        use crate::services::mcp_service;
+        use crate::test_utils::connect_test_database;
+        use chrono::Utc;
+        use uuid::Uuid;
+
+        /// Build a runtime-safe (`identity_propagation_mode="none"`, no token
+        /// forwarding/delegation) catalog service whose anonymous endpoints are
+        /// supplied by the caller.
+        fn safe_service(slug: &str, rules: Vec<AnonymousEndpointRule>) -> DownstreamService {
+            DownstreamService {
+                id: Uuid::new_v4().to_string(),
+                name: format!("Service {slug}"),
+                slug: slug.to_string(),
+                description: None,
+                base_url: "https://example.test".to_string(),
+                service_type: "http".to_string(),
+                visibility: "public".to_string(),
+                auth_method: "none".to_string(),
+                auth_key_name: String::new(),
+                credential_encrypted: vec![],
+                auth_type: None,
+                openapi_spec_url: None,
+                asyncapi_spec_url: None,
+                streaming_supported: false,
+                ssh_config: None,
+                oauth_client_id: None,
+                service_category: "internal".to_string(),
+                requires_user_credential: false,
+                is_active: true,
+                created_by: "admin".to_string(),
+                identity_propagation_mode: "none".to_string(),
+                identity_include_user_id: false,
+                identity_include_email: false,
+                identity_include_name: false,
+                identity_jwt_audience: None,
+                forward_access_token: false,
+                inject_delegation_token: false,
+                delegation_token_scope: "llm:proxy".to_string(),
+                provider_config_id: None,
+                homepage_url: None,
+                repository_url: None,
+                issues_url: None,
+                capabilities: None,
+                auth_notes: None,
+                known_limitations: None,
+                required_permissions: None,
+                examples_url: None,
+                recommended_skills: None,
+                custom_user_agent: None,
+                default_request_headers: None,
+                ws_frame_injections: Vec::new(),
+                developer_app_ids: None,
+                token_exchange_config: None,
+                anonymous_endpoints: rules,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            }
+        }
+
+        fn rule(enabled: bool, method: &str, pattern: &str) -> AnonymousEndpointRule {
+            AnonymousEndpointRule {
+                id: Uuid::new_v4().to_string(),
+                enabled,
+                method: method.to_string(),
+                path_pattern: pattern.to_string(),
+                daily_quota: 100,
+            }
+        }
+
+        /// `load_public_tools` exposes only enabled rules of runtime-safe
+        /// services; identity-propagating services and disabled rules are
+        /// filtered out. `generate_public_tool_definitions` then projects the
+        /// safe rule into a `public__...` tool with a sanitized name and a
+        /// structured input schema.
+        #[tokio::test]
+        async fn load_and_generate_filters_unsafe_and_disabled() {
+            let Some(db) = connect_test_database("mcp_public_tools_filter").await else {
+                return;
+            };
+
+            // (1) Safe service with one enabled + one disabled rule.
+            let safe = safe_service(
+                "safe-svc",
+                vec![
+                    rule(true, "GET", "/public/**"),
+                    rule(false, "POST", "/draft/**"),
+                ],
+            );
+            // (2) Identity-propagating service (enabled rule) -> excluded.
+            let mut unsafe_svc = safe_service("identity-svc", vec![rule(true, "GET", "/x/**")]);
+            unsafe_svc.identity_propagation_mode = "headers".to_string();
+            unsafe_svc.forward_access_token = true;
+            // (3) Safe service with only a disabled rule -> excluded entirely.
+            let disabled_only = safe_service("disabled-svc", vec![rule(false, "GET", "/y/**")]);
+
+            db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+                .insert_many([safe.clone(), unsafe_svc, disabled_only])
+                .await
+                .expect("insert services");
+
+            let services = mcp_service::load_public_tools(&db)
+                .await
+                .expect("load public tools");
+
+            // Only the safe service is present, and only its enabled rule.
+            assert_eq!(services.len(), 1);
+            assert_eq!(services[0].service_slug, "public__safe_svc");
+            assert_eq!(services[0].endpoints.len(), 1);
+            assert_eq!(services[0].endpoints[0].method, "GET");
+            assert_eq!(services[0].endpoints[0].path, "/public/**");
+
+            let tools = mcp_service::generate_public_tool_definitions(&services);
+            assert_eq!(tools.len(), 1);
+            let tool = &tools[0];
+
+            // Name is sanitized: only [a-z0-9_], public__ prefixed, no wildcard
+            // characters leak through.
+            assert!(tool.name.starts_with("public__safe_svc__"));
+            assert!(
+                tool.name
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
+                "tool name must be sanitized: {}",
+                tool.name
+            );
+            assert!(!tool.name.contains('*'));
+            assert!(!tool.name.contains('/'));
+
+            // Input schema is a structured object exposing path/query/body.
+            let schema = &tool.input_schema;
+            assert_eq!(schema["type"], "object");
+            assert!(schema["properties"]["path"].is_object());
+            assert!(schema["properties"]["query"].is_object());
+            assert!(schema["properties"].get("body").is_some());
+        }
+
+        /// A service with no enabled anonymous rules yields no public tools at
+        /// all (defense in depth: the `$elemMatch` filter and the per-rule
+        /// enabled filter both exclude it).
+        #[tokio::test]
+        async fn service_without_enabled_rules_yields_no_tools() {
+            let Some(db) = connect_test_database("mcp_public_tools_none").await else {
+                return;
+            };
+            let disabled_only = safe_service("only-disabled", vec![rule(false, "GET", "/z/**")]);
+            db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+                .insert_one(&disabled_only)
+                .await
+                .expect("insert service");
+
+            let services = mcp_service::load_public_tools(&db)
+                .await
+                .expect("load public tools");
+            assert!(services.is_empty());
+            assert!(mcp_service::generate_public_tool_definitions(&services).is_empty());
+        }
+    }
 }
