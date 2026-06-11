@@ -97,6 +97,13 @@ vi.mock("@/hooks/use-developer-apps", () => ({
   useDeveloperApps: () => ({ data: { clients: [] } }),
 }));
 
+vi.mock("@/hooks/use-anonymous-endpoints", () => ({
+  useAnonymousEndpoints: () => ({ data: [], isLoading: false }),
+  useCreateAnonymousEndpoint: () => ({ mutateAsync: vi.fn(), isPending: false }),
+  useUpdateAnonymousEndpoint: () => ({ mutateAsync: vi.fn(), isPending: false }),
+  useDeleteAnonymousEndpoint: () => ({ mutateAsync: vi.fn(), isPending: false }),
+}));
+
 vi.mock("@/stores/auth-store", () => ({
   useAuthStore: (selector: (state: { user: { id: string } }) => unknown) =>
     selector({ user: { id: "user-1" } }),
