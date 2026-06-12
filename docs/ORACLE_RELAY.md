@@ -231,9 +231,11 @@ the relay replaces, so porting their userscript is a thin diff.
 | `POST /pin-conv-url` | `{task_id, worker, chatgpt_url}` | `{status:"pinned"}` |
 | `POST /transcript` | `{task_id, worker, turns:[{role,text}], chatgpt_url?}` | `{status:"imported"\|"ignored", imported_pairs}` |
 
-A `task` poll carries `kind` (`"prompt"` or `"scrape"`): on `"scrape"` the
-worker navigates to `conversation_url`, extracts the full transcript, and
-POSTs `/transcript` instead of injecting a prompt.
+A `task` poll carries `kind` (`"prompt"`, `"scrape"`, or `"extract"`): on
+`"scrape"` the worker navigates to `conversation_url`, extracts the full
+transcript, and POSTs `/transcript` instead of injecting a prompt; on
+`"extract"` it navigates to an arbitrary `target_url` and POSTs the page's
+readable main text back as the `/result` (see the SSRF note under Security).
 
 `ack` doubles as the cancellation back-channel: a heartbeat for a task
 that's been cancelled or reclaimed returns `{status:"cancelled"}`, telling
@@ -287,6 +289,21 @@ the worker to abandon it and re-poll.
   browser-automation bridge through a shared service changes the *consumer*
   transport only — be mindful of the upstream provider's terms when
   widening `visibility` to `platform`.
+- **`extract` (read any web page) is an SSRF-shaped primitive — opt-in per
+  pool, off by default.** Because the worker fetches `target_url` inside the
+  operator's real browser (on its private network, with its cookies), an
+  unrestricted `extract` on a `platform` pool would let any authenticated
+  submitter read internal dashboards, cloud-metadata
+  (`169.254.169.254`), and other private-network services and get the text
+  back. Three layers contain this: (1) the pool's `allow_extract` flag must be
+  explicitly enabled by the owner (default `false`, gated with
+  `oracle_extract_disabled` / **11010**); (2) the server-side
+  `validate_extract_url` rejects non-`http(s)`, credentialed URLs, and
+  loopback/private/link-local/ULA/CGNAT/metadata hosts (literal IPs and an
+  internal-name denylist); (3) the worker re-resolves the host at navigation
+  time and refuses any non-public address, closing the DNS-rebinding gap the
+  server can't see. Only enable `allow_extract` on pools whose submitters you
+  trust with that blast radius.
 
 ---
 
@@ -307,6 +324,7 @@ Oracle errors occupy the **11000–11099** block (see
 | 11007 | `oracle_session_not_found` | 404 |
 | 11008 | `oracle_session_closed` | 409 |
 | 11009 | `oracle_payload_too_large` | 413 |
+| 11010 | `oracle_extract_disabled` | 403 |
 
 ---
 

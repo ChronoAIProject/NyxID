@@ -237,6 +237,7 @@ async fn run_pool(command: OraclePoolCommands) -> Result<()> {
             visibility,
             project_url,
             model,
+            allow_extract,
             max_workers,
             max_queue,
             per_user_inflight,
@@ -256,6 +257,7 @@ async fn run_pool(command: OraclePoolCommands) -> Result<()> {
             insert_opt_str(&mut body, "visibility", visibility.as_deref());
             insert_opt_str(&mut body, "chatgpt_project_url", project_url.as_deref());
             insert_opt_str(&mut body, "default_model_label", model.as_deref());
+            body["allow_extract"] = Value::Bool(allow_extract);
             insert_opt_str(&mut body, "target_org_id", target_org_id.as_deref());
             insert_opt_u64(&mut body, "max_workers", max_workers.map(u64::from));
             insert_opt_u64(&mut body, "max_queue_length", max_queue.map(u64::from));
@@ -330,6 +332,10 @@ async fn run_pool(command: OraclePoolCommands) -> Result<()> {
                         "Active:      {}",
                         yes_no(p["is_active"].as_bool().unwrap_or(false))
                     );
+                    eprintln!(
+                        "Allow extract: {}",
+                        yes_no(p["allow_extract"].as_bool().unwrap_or(false))
+                    );
                     eprintln!("Max workers: {}", p["max_workers"].as_u64().unwrap_or(0));
                     eprintln!(
                         "Max queue:   {}",
@@ -360,6 +366,7 @@ async fn run_pool(command: OraclePoolCommands) -> Result<()> {
             visibility,
             project_url,
             model,
+            allow_extract,
             max_workers,
             max_queue,
             per_user_inflight,
@@ -375,6 +382,9 @@ async fn run_pool(command: OraclePoolCommands) -> Result<()> {
             insert_opt_str(&mut body, "visibility", visibility.as_deref());
             insert_opt_str(&mut body, "chatgpt_project_url", project_url.as_deref());
             insert_opt_str(&mut body, "default_model_label", model.as_deref());
+            if let Some(allow_extract) = allow_extract {
+                body["allow_extract"] = Value::Bool(allow_extract);
+            }
             insert_opt_u64(&mut body, "max_workers", max_workers.map(u64::from));
             insert_opt_u64(&mut body, "max_queue_length", max_queue.map(u64::from));
             insert_opt_u64(
@@ -1054,6 +1064,7 @@ mod tests {
                 "slug": "chatgpt-pro",
                 "name": "ChatGPT Pro",
                 "visibility": "platform",
+                "allow_extract": false,
                 "max_workers": 4,
             })))
             .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
@@ -1063,6 +1074,7 @@ mod tests {
                 "visibility": "platform",
                 "owner_user_id": "u1",
                 "can_manage": true,
+                "allow_extract": false,
                 "max_workers": 4,
                 "max_queue_length": 50,
                 "per_user_max_inflight": 2,
@@ -1083,6 +1095,7 @@ mod tests {
             visibility: Some("platform".to_string()),
             project_url: None,
             model: None,
+            allow_extract: false,
             max_workers: Some(4),
             max_queue: None,
             per_user_inflight: None,

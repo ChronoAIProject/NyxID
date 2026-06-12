@@ -1567,13 +1567,13 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .build(),
         )
         .await?;
-    // Submitter-scoped idempotency: a retried submit with the same
+    // Pool + submitter-scoped idempotency: a retried submit with the same
     // `client_ref` must hit the duplicate-key error instead of enqueueing
-    // a second task.
+    // a second task, while allowing the same client_ref in another pool.
     oracle_tasks
         .create_index(
             IndexModel::builder()
-                .keys(doc! { "submitter_user_id": 1, "client_ref": 1 })
+                .keys(doc! { "pool_id": 1, "submitter_user_id": 1, "client_ref": 1 })
                 .options(
                     IndexOptions::builder()
                         .unique(true)

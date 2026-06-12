@@ -1646,6 +1646,13 @@
     try {
       const target = conversation_url;
       if (!target) throw new Error("scrape task has no conversation_url");
+      // Defense-in-depth: the server validates attach URLs to ChatGPT origins,
+      // but assert it again before assigning to location.href so untrusted
+      // task input can never redirect this logged-in tab off-origin (only
+      // matters if the pool server itself is compromised — cheap to close).
+      if (!/^https:\/\/(chatgpt\.com|chat\.openai\.com)\//.test(target)) {
+        throw new Error("scrape target is not a ChatGPT URL");
+      }
       const idMatch = target.match(/\/c\/([a-f0-9-]{6,})/);
       const onTarget = window.location.href === target
         || (idMatch && window.location.href.includes(idMatch[1]));

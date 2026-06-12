@@ -328,6 +328,9 @@ pub enum AppError {
 
     #[error("Oracle payload too large: {0}")]
     OraclePayloadTooLarge(String),
+
+    #[error("Oracle extract disabled: {0}")]
+    OracleExtractDisabled(String),
 }
 
 impl AppError {
@@ -426,6 +429,7 @@ impl AppError {
             Self::OracleSessionNotFound(_) => StatusCode::NOT_FOUND,
             Self::OracleSessionClosed(_) => StatusCode::CONFLICT,
             Self::OraclePayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
+            Self::OracleExtractDisabled(_) => StatusCode::FORBIDDEN,
             Self::Internal(_) | Self::DatabaseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -532,6 +536,7 @@ impl AppError {
             Self::OracleSessionNotFound(_) => 11007,
             Self::OracleSessionClosed(_) => 11008,
             Self::OraclePayloadTooLarge(_) => 11009,
+            Self::OracleExtractDisabled(_) => 11010,
         }
     }
 
@@ -670,6 +675,7 @@ impl AppError {
             Self::OracleSessionNotFound(_) => "oracle_session_not_found",
             Self::OracleSessionClosed(_) => "oracle_session_closed",
             Self::OraclePayloadTooLarge(_) => "oracle_payload_too_large",
+            Self::OracleExtractDisabled(_) => "oracle_extract_disabled",
         }
     }
 }
@@ -1100,6 +1106,7 @@ mod tests {
             AppError::OracleSessionNotFound("".into()).error_code(),
             AppError::OracleSessionClosed("".into()).error_code(),
             AppError::OraclePayloadTooLarge("".into()).error_code(),
+            AppError::OracleExtractDisabled("".into()).error_code(),
         ];
         let unique: std::collections::HashSet<u32> = codes.iter().copied().collect();
         assert_eq!(
@@ -1407,6 +1414,10 @@ mod tests {
             AppError::OraclePayloadTooLarge("".into()).error_code(),
             11009
         );
+        assert_eq!(
+            AppError::OracleExtractDisabled("".into()).error_code(),
+            11010
+        );
 
         assert_eq!(
             AppError::OraclePoolNotFound("".into()).status_code(),
@@ -1440,6 +1451,10 @@ mod tests {
             AppError::OraclePayloadTooLarge("".into()).status_code(),
             StatusCode::PAYLOAD_TOO_LARGE
         );
+        assert_eq!(
+            AppError::OracleExtractDisabled("".into()).status_code(),
+            StatusCode::FORBIDDEN
+        );
 
         assert_eq!(
             AppError::OracleWorkerTokenInvalid.error_key(),
@@ -1452,6 +1467,10 @@ mod tests {
         assert_eq!(
             AppError::OracleSessionClosed("".into()).error_key(),
             "oracle_session_closed"
+        );
+        assert_eq!(
+            AppError::OracleExtractDisabled("".into()).error_key(),
+            "oracle_extract_disabled"
         );
     }
 

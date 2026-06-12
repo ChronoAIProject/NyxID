@@ -116,6 +116,7 @@ mod tests {
             worker_token_hash: "h".repeat(64),
             chatgpt_project_url: None,
             default_model_label: None,
+            allow_extract: false,
             max_workers: 3,
             max_queue_length: 50,
             per_user_max_inflight: 10,

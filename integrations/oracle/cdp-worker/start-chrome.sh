@@ -5,6 +5,13 @@
 #
 # macOS. For Linux use `google-chrome`, for Windows use chrome.exe with the
 # same flags.
+#
+# SECURITY: --remote-debugging-port is an UNAUTHENTICATED control channel. Any
+# local process that can reach this port gets full control of this Chrome
+# profile (ChatGPT session + cookies). We bind it to localhost only (we do NOT
+# pass --remote-debugging-address) and isolate it in a dedicated --user-data-dir.
+# Do not widen the bind address, and do not reuse this profile for other
+# sensitive logins. On a shared machine prefer --remote-debugging-pipe.
 set -euo pipefail
 
 PORT="${CHROME_DEBUG_PORT:-9222}"

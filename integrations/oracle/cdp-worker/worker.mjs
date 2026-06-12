@@ -24,9 +24,19 @@
 // Requires: Node 18+ (built-in fetch) and `npm i` (playwright-core only).
 
 import { chromium } from "playwright-core";
+import { lookup } from "node:dns/promises";
+import { isIP } from "node:net";
+import { readFileSync } from "node:fs";
 
 const BASE_URL = (process.env.NYXID_BASE_URL || "").replace(/\/$/, "");
-const TOKEN = process.env.NYXID_WORKER_TOKEN || "";
+// Prefer a token file (NYXID_WORKER_TOKEN_FILE) so the long-lived worker token
+// stays out of shell history and the process environment (`ps e`,
+// /proc/<pid>/environ). Falls back to NYXID_WORKER_TOKEN for convenience.
+const TOKEN = (() => {
+  const file = process.env.NYXID_WORKER_TOKEN_FILE;
+  if (file) return readFileSync(file, "utf8").trim();
+  return process.env.NYXID_WORKER_TOKEN || "";
+})();
 const LABEL = process.env.NYXID_WORKER_LABEL || "tab_1";
 const CDP_URL = process.env.CHROME_CDP_URL || "http://localhost:9222";
 const SCRIPT_VERSION = "cdp-1.0";
@@ -37,7 +47,8 @@ const HEARTBEAT_MS = 60000;
 
 if (!BASE_URL || !TOKEN) {
   console.error(
-    "Missing config. Set NYXID_BASE_URL and NYXID_WORKER_TOKEN (the pool worker token, nyx_owk_...)."
+    "Missing config. Set NYXID_BASE_URL and the pool worker token (nyx_owk_...) " +
+      "via NYXID_WORKER_TOKEN_FILE (preferred) or NYXID_WORKER_TOKEN."
   );
   process.exit(1);
 }
@@ -50,11 +61,16 @@ function log(msg) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ── NyxID worker API (Bearer worker token) ───────────────────────────────
+function httpError(method, path, status) {
+  const err = new Error(`${method} ${path} → ${status}`);
+  err.status = status;
+  return err;
+}
 async function apiGet(path) {
   const res = await fetch(`${API}${path}`, {
     headers: { Authorization: `Bearer ${TOKEN}` },
   });
-  if (!res.ok) throw new Error(`GET ${path} → ${res.status}`);
+  if (!res.ok) throw httpError("GET", path, res.status);
   return res.json();
 }
 async function apiPost(path, body) {
@@ -66,8 +82,72 @@ async function apiPost(path, body) {
     },
     body: JSON.stringify({ ...body, script_version: SCRIPT_VERSION }),
   });
-  if (!res.ok) throw new Error(`POST ${path} → ${res.status}`);
+  if (!res.ok) throw httpError("POST", path, res.status);
   return res.json();
+}
+
+// ── SSRF defense for `extract` (defense-in-depth with the server-side
+// `validate_extract_url` guard) ──────────────────────────────────────────
+// The server authoritatively rejects loopback/private/link-local/metadata
+// targets, but it can't see DNS-rebinding (a public name that resolves to a
+// private address). The worker drives the operator's REAL logged-in Chrome,
+// so re-validate here at navigation time: resolve the host and refuse any
+// non-public address. Best-effort (a TOCTOU window remains before goto), but
+// it closes the rebinding gap the server cannot.
+function isBlockedIp(ip) {
+  const v = isIP(ip);
+  if (v === 4) {
+    const o = ip.split(".").map(Number);
+    if (o[0] === 10) return true; // 10/8 private
+    if (o[0] === 127) return true; // loopback
+    if (o[0] === 0) return true; // unspecified / this-network
+    if (o[0] === 169 && o[1] === 254) return true; // link-local + metadata
+    if (o[0] === 172 && o[1] >= 16 && o[1] <= 31) return true; // 172.16/12
+    if (o[0] === 192 && o[1] === 168) return true; // 192.168/16
+    if (o[0] === 100 && o[1] >= 64 && o[1] <= 127) return true; // 100.64/10 CGNAT
+    if (o[0] >= 224) return true; // multicast + reserved + broadcast
+    return false;
+  }
+  if (v === 6) {
+    const a = ip.toLowerCase();
+    if (a === "::" || a === "::1") return true; // unspecified / loopback
+    const head = a.split(":")[0] || "";
+    const b0 = parseInt(head.padStart(4, "0").slice(0, 2), 16);
+    if ((b0 & 0xfe) === 0xfc) return true; // fc00::/7 unique-local
+    if (b0 === 0xfe) {
+      const b1 = parseInt(head.padStart(4, "0").slice(2, 4), 16);
+      if ((b1 & 0xc0) === 0x80) return true; // fe80::/10 link-local
+    }
+    if (a.startsWith("ff")) return true; // multicast
+    // IPv4-mapped ::ffff:a.b.c.d — re-check the embedded v4.
+    const m = a.match(/::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+    if (m) return isBlockedIp(m[1]);
+    return false;
+  }
+  return true; // not a recognizable IP → refuse
+}
+async function assertPublicTarget(rawUrl) {
+  let u;
+  try {
+    u = new URL(rawUrl);
+  } catch {
+    throw new Error("invalid extract url");
+  }
+  if (u.protocol !== "http:" && u.protocol !== "https:") {
+    throw new Error("extract url scheme not allowed");
+  }
+  const host = u.hostname.replace(/^\[|\]$/g, "");
+  if (isIP(host)) {
+    if (isBlockedIp(host)) throw new Error("extract target host is not allowed");
+    return;
+  }
+  const addrs = await lookup(host, { all: true });
+  if (!addrs.length) throw new Error("extract host did not resolve");
+  for (const { address } of addrs) {
+    if (isBlockedIp(address)) {
+      throw new Error("extract target resolves to a non-public address");
+    }
+  }
 }
 
 // ── DOM core injected into the ChatGPT page ──────────────────────────────
@@ -429,7 +509,8 @@ async function handlePrompt(page, task) {
   let navTarget = null;
   const onConvPage = /\/c\/[a-f0-9-]{6,}/.test(page.url());
   if (task.is_followup && task.conversation_url) {
-    if (!page.url().includes(convId(task.conversation_url))) navTarget = task.conversation_url;
+    const cid = convId(task.conversation_url);
+    if (!cid || !page.url().includes(cid)) navTarget = task.conversation_url;
   } else {
     const base = task.required_project_url || "https://chatgpt.com/";
     if (onConvPage || !page.url().startsWith(base)) navTarget = base;
@@ -478,7 +559,7 @@ async function handlePrompt(page, task) {
 
 function convId(url) {
   const m = (url || "").match(/\/c\/([a-f0-9-]{6,})/);
-  return m ? m[1] : " never";
+  return m ? m[1] : null;
 }
 
 async function waitForResponse(page, task_id, beforeCount) {
@@ -730,7 +811,14 @@ async function handleExtract(page, task) {
   } catch (e) {}
   log(`extract task ${task_id} → host=${targetHost}`);
   try {
-    await page.goto(task.target_url, { waitUntil: "domcontentloaded" });
+    // Defense-in-depth SSRF check at navigation time (catches DNS rebinding
+    // the server-side guard can't see); explicit timeout so a slow/hostile
+    // URL can't stall this single worker page.
+    await assertPublicTarget(task.target_url);
+    await page.goto(task.target_url, {
+      waitUntil: "domcontentloaded",
+      timeout: 30000,
+    });
     await page.bringToFront().catch(() => {});
     await page.waitForLoadState("networkidle", { timeout: 8000 }).catch(() => {});
     await ack(task_id, "extracting");
@@ -801,6 +889,17 @@ async function main() {
         }
       }
     } catch (err) {
+      if (err.status === 401 || err.status === 403) {
+        // Distinct, loud signal: a revoked/invalid worker token (or an
+        // inactive pool) otherwise loops quietly forever. Back off hard so
+        // we don't hammer the server while still recovering if the token is
+        // rotated back.
+        log(
+          `AUTH FAILED (HTTP ${err.status}): worker token rejected. Verify NYXID_WORKER_TOKEN and that the pool is active. Backing off…`
+        );
+        await sleep(Math.max(POLL_MS, 30000));
+        continue;
+      }
       log(`poll error: ${err.message}`);
     }
     await sleep(POLL_MS);

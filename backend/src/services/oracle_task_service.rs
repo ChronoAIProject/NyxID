@@ -13,6 +13,8 @@
 //! (TTL-expired via `expires_at`); tracing and audit events stay
 //! metadata-only.
 
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
 use chrono::{Duration, Utc};
 use futures::TryStreamExt;
 use mongodb::bson::{Document, doc};
@@ -174,32 +176,7 @@ pub async fn submit_task(
     input: SubmitTaskInput,
 ) -> AppResult<SubmitOutcome> {
     validate_submit_input(&input)?;
-
-    // Quotas. Counts are read-then-insert (no transaction); a concurrent
-    // burst can overshoot by a few tasks, which is acceptable for a
-    // fairness cap.
-    let queued = count_tasks(db, doc! { "pool_id": &pool.id, "status": "queued" }).await?;
-    if queued >= u64::from(pool.max_queue_length) {
-        return Err(AppError::OracleQueueFull(format!(
-            "pool '{}' already has {queued} queued tasks",
-            pool.slug
-        )));
-    }
-    let inflight = count_tasks(
-        db,
-        doc! {
-            "pool_id": &pool.id,
-            "submitter_user_id": &submitter.user_id,
-            "status": { "$in": ["queued", "dispatched"] },
-        },
-    )
-    .await?;
-    if inflight >= u64::from(pool.per_user_max_inflight) {
-        return Err(AppError::OracleQuotaExceeded(format!(
-            "you already have {inflight} tasks in flight in pool '{}' (limit {})",
-            pool.slug, pool.per_user_max_inflight
-        )));
-    }
+    enforce_submit_quotas(db, pool, submitter).await?;
 
     // Session resolution (three-state conversation_id).
     let now = Utc::now();
@@ -291,14 +268,16 @@ pub async fn submit_task(
         .insert_one(&task)
         .await;
     if let Err(e) = insert {
-        // Submitter-scoped idempotency: a duplicate client_ref returns the
-        // original task instead of erroring, so blind retries are safe.
+        // Pool + submitter-scoped idempotency: a duplicate client_ref
+        // returns the original task instead of erroring, so blind retries
+        // are safe without cross-pool collisions.
         if oracle_pool_service::is_duplicate_key(&e)
             && let Some(client_ref) = &task.client_ref
         {
             let existing = db
                 .collection::<OracleTask>(ORACLE_TASKS)
                 .find_one(doc! {
+                    "pool_id": &task.pool_id,
                     "submitter_user_id": &submitter.user_id,
                     "client_ref": client_ref,
                 })
@@ -345,12 +324,105 @@ fn validate_extract_url(url: &str) -> AppResult<()> {
             "url must be 1-2048 chars".to_string(),
         ));
     }
-    if !(url.starts_with("http://") || url.starts_with("https://")) {
+
+    let parsed = url::Url::parse(url)
+        .map_err(|_| AppError::ValidationError("url host is not allowed".to_string()))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
         return Err(AppError::ValidationError(
-            "url must start with http:// or https://".to_string(),
+            "url host is not allowed".to_string(),
         ));
     }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(AppError::ValidationError(
+            "url host is not allowed".to_string(),
+        ));
+    }
+
+    match parsed.host() {
+        Some(url::Host::Ipv4(ip)) => {
+            if is_blocked_ip(IpAddr::V4(ip)) {
+                return Err(AppError::ValidationError(
+                    "url host is not allowed".to_string(),
+                ));
+            }
+        }
+        Some(url::Host::Ipv6(ip)) => {
+            if is_blocked_ip(IpAddr::V6(ip)) {
+                return Err(AppError::ValidationError(
+                    "url host is not allowed".to_string(),
+                ));
+            }
+        }
+        Some(url::Host::Domain(host)) => {
+            if is_blocked_domain(host) {
+                return Err(AppError::ValidationError(
+                    "url host is not allowed".to_string(),
+                ));
+            }
+        }
+        None => {
+            return Err(AppError::ValidationError(
+                "url host is not allowed".to_string(),
+            ));
+        }
+    }
     Ok(())
+}
+
+fn is_blocked_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => is_blocked_ipv4(v4),
+        IpAddr::V6(v6) => {
+            if is_blocked_ipv6(v6) {
+                return true;
+            }
+            if let Some(v4) = v6.to_ipv4_mapped().or_else(|| v6.to_ipv4()) {
+                return is_blocked_ipv4(v4);
+            }
+            false
+        }
+    }
+}
+
+fn is_blocked_ipv4(ip: Ipv4Addr) -> bool {
+    ip.is_loopback()
+        || ip.is_private()
+        || ip.is_link_local()
+        || ip.is_unspecified()
+        || ip.is_broadcast()
+        || ip.is_documentation()
+        || ip.is_multicast()
+        || is_shared_cgnat_ipv4(ip)
+}
+
+fn is_shared_cgnat_ipv4(ip: Ipv4Addr) -> bool {
+    let octets = ip.octets();
+    octets[0] == 100 && (64..=127).contains(&octets[1])
+}
+
+fn is_blocked_ipv6(ip: Ipv6Addr) -> bool {
+    let octets = ip.octets();
+    ip.is_loopback()
+        || ip.is_unspecified()
+        || ip.is_multicast()
+        || (octets[0] & 0xfe) == 0xfc
+        || (octets[0] == 0xfe && (octets[1] & 0xc0) == 0x80)
+}
+
+fn is_blocked_domain(host: &str) -> bool {
+    let normalized = host.trim_end_matches('.').to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "localhost"
+            | "metadata.google.internal"
+            | "metadata"
+            | "instance-data"
+            | "instance-data.ec2.internal"
+    ) || normalized.ends_with(".localhost")
+        || normalized.ends_with(".local")
+        || normalized.ends_with(".internal")
+        || normalized.ends_with(".intranet")
+        || normalized.ends_with(".lan")
 }
 
 async fn enforce_submit_quotas(
@@ -391,6 +463,11 @@ pub async fn extract_url(
     model_label: Option<String>,
 ) -> AppResult<OracleTask> {
     validate_extract_url(url)?;
+    if !pool.allow_extract {
+        return Err(AppError::OracleExtractDisabled(
+            "extract is not enabled for this pool".to_string(),
+        ));
+    }
     if model_label
         .as_deref()
         .is_some_and(|m| m.len() > MAX_MODEL_LABEL_LEN)
@@ -456,30 +533,7 @@ pub async fn attach_conversation(
             "tag exceeds {MAX_TAG_LEN} chars"
         )));
     }
-
-    // Same fairness caps as normal prompt submission.
-    let queued = count_tasks(db, doc! { "pool_id": &pool.id, "status": "queued" }).await?;
-    if queued >= u64::from(pool.max_queue_length) {
-        return Err(AppError::OracleQueueFull(format!(
-            "pool '{}' already has {queued} queued tasks",
-            pool.slug
-        )));
-    }
-    let inflight = count_tasks(
-        db,
-        doc! {
-            "pool_id": &pool.id,
-            "submitter_user_id": &submitter.user_id,
-            "status": { "$in": ["queued", "dispatched"] },
-        },
-    )
-    .await?;
-    if inflight >= u64::from(pool.per_user_max_inflight) {
-        return Err(AppError::OracleQuotaExceeded(format!(
-            "you already have {inflight} tasks in flight in pool '{}' (limit {})",
-            pool.slug, pool.per_user_max_inflight
-        )));
-    }
+    enforce_submit_quotas(db, pool, submitter).await?;
 
     let now = Utc::now();
     let session = OracleSession {
@@ -1151,47 +1205,53 @@ pub async fn worker_submit_transcript(
     let task_collection = db.collection::<OracleTask>(ORACLE_TASKS);
     let pair_count = pairs.len();
     let imported_expires_at = terminal_expiry(retention_days);
-    for (i, (user_text, assistant_text)) in pairs.into_iter().enumerate() {
-        let created_at = now - Duration::seconds((pair_count - i) as i64);
-        let response_chars = assistant_text.chars().count() as u64;
-        let task = OracleTask {
-            id: uuid::Uuid::new_v4().to_string(),
-            pool_id: pool.id.clone(),
-            submitter_user_id: scrape_task.submitter_user_id.clone(),
-            kind: "prompt".to_string(),
-            target_url: None,
-            api_key_id: scrape_task.api_key_id.clone(),
-            api_key_name: scrape_task.api_key_name.clone(),
-            prompt: user_text,
-            model_label: scrape_task.model_label.clone(),
-            project_url: None,
-            tag: scrape_task.tag.clone(),
-            pdf_base64: None,
-            pdf_name: None,
-            conversation_id: Some(session_id.clone()),
-            is_followup: true,
-            client_ref: None,
-            status: OracleTaskStatus::Completed,
-            phase: None,
-            phase_detail: None,
-            phase_at: None,
-            assigned_worker_id: Some(worker_label.to_string()),
-            dispatched_at: scrape_task.dispatched_at,
-            lease_expires_at: None,
-            response: Some(assistant_text),
-            response_chars: Some(response_chars),
-            chatgpt_url: chatgpt_url
-                .filter(|u| !u.is_empty())
-                .map(|u| truncate_chars(u, MAX_URL_LEN))
-                .or_else(|| scrape_task.chatgpt_url.clone()),
-            failure_reason: None,
-            worker_script_version: scrape_task.worker_script_version.clone(),
-            completed_at: Some(now),
-            expires_at: Some(imported_expires_at),
-            created_at,
-            updated_at: now,
-        };
-        task_collection.insert_one(&task).await?;
+    let imported_tasks: Vec<OracleTask> = pairs
+        .into_iter()
+        .enumerate()
+        .map(|(i, (user_text, assistant_text))| {
+            let created_at = now - Duration::seconds((pair_count - i) as i64);
+            let response_chars = assistant_text.chars().count() as u64;
+            OracleTask {
+                id: uuid::Uuid::new_v4().to_string(),
+                pool_id: pool.id.clone(),
+                submitter_user_id: scrape_task.submitter_user_id.clone(),
+                kind: "prompt".to_string(),
+                target_url: None,
+                api_key_id: scrape_task.api_key_id.clone(),
+                api_key_name: scrape_task.api_key_name.clone(),
+                prompt: user_text,
+                model_label: scrape_task.model_label.clone(),
+                project_url: None,
+                tag: scrape_task.tag.clone(),
+                pdf_base64: None,
+                pdf_name: None,
+                conversation_id: Some(session_id.clone()),
+                is_followup: true,
+                client_ref: None,
+                status: OracleTaskStatus::Completed,
+                phase: None,
+                phase_detail: None,
+                phase_at: None,
+                assigned_worker_id: Some(worker_label.to_string()),
+                dispatched_at: scrape_task.dispatched_at,
+                lease_expires_at: None,
+                response: Some(assistant_text),
+                response_chars: Some(response_chars),
+                chatgpt_url: chatgpt_url
+                    .filter(|u| !u.is_empty())
+                    .map(|u| truncate_chars(u, MAX_URL_LEN))
+                    .or_else(|| scrape_task.chatgpt_url.clone()),
+                failure_reason: None,
+                worker_script_version: scrape_task.worker_script_version.clone(),
+                completed_at: Some(now),
+                expires_at: Some(imported_expires_at),
+                created_at,
+                updated_at: now,
+            }
+        })
+        .collect();
+    if !imported_tasks.is_empty() {
+        task_collection.insert_many(imported_tasks).await?;
     }
 
     let mut session_set = doc! {
@@ -1355,6 +1415,7 @@ mod tests {
             worker_token_hash: "h".repeat(64),
             chatgpt_project_url: Some("https://chatgpt.com/g/g-p-x/project".to_string()),
             default_model_label: Some("chatgpt-5.5-pro".to_string()),
+            allow_extract: false,
             max_workers: 2,
             max_queue_length: 3,
             per_user_max_inflight: 2,
@@ -1434,6 +1495,36 @@ mod tests {
         assert!(validate_worker_label("").is_err());
         assert!(validate_worker_label("has space").is_err());
         assert!(validate_worker_label(&"x".repeat(65)).is_err());
+    }
+
+    #[test]
+    fn validate_extract_url_accepts_public_http_url() {
+        assert!(validate_extract_url("https://example.com/path?q=1").is_ok());
+    }
+
+    #[test]
+    fn validate_extract_url_rejects_blocked_hosts_and_schemes() {
+        for url in [
+            "http://127.0.0.1/",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://localhost:3001/",
+            "http://10.0.0.5/",
+            "http://[::1]/",
+            "http://[fd00::1]/",
+            "http://[fe80::1]/",
+            "http://metadata.google.internal/",
+            "http://192.168.1.1/",
+            "https://foo.local/",
+            "http://100.64.0.1/",
+            "file:///etc/passwd",
+            "ftp://x/",
+            "https://user:pass@example.com/",
+        ] {
+            assert!(
+                matches!(validate_extract_url(url), Err(AppError::ValidationError(msg)) if msg == "url host is not allowed"),
+                "expected {url} to be rejected"
+            );
+        }
     }
 
     #[test]
@@ -1945,6 +2036,7 @@ mod tests {
         let mut pool = test_pool(&owner);
         pool.max_queue_length = 2;
         pool.per_user_max_inflight = 1;
+        pool.allow_extract = true;
         seed_pool(&db, &pool).await;
 
         let task = extract_url(
@@ -2028,6 +2120,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn extract_url_rejects_when_pool_disallows() {
+        let Some(db) = connect_test_database("oracle_task_extract_disabled").await else {
+            return;
+        };
+        let owner = uuid::Uuid::new_v4().to_string();
+        let pool = test_pool(&owner);
+        seed_pool(&db, &pool).await;
+
+        let result = extract_url(
+            &db,
+            &pool,
+            &submitter(&owner),
+            "https://example.com/article",
+            None,
+        )
+        .await;
+        assert!(matches!(result, Err(AppError::OracleExtractDisabled(_))));
+
+        db.drop().await.ok();
+    }
+
+    #[tokio::test]
     async fn cancel_and_idempotent_client_ref() {
         let Some(db) = connect_test_database("oracle_task_cancel").await else {
             return;
@@ -2037,7 +2151,7 @@ mod tests {
         db.collection::<Document>(ORACLE_TASKS)
             .create_index(
                 mongodb::IndexModel::builder()
-                    .keys(doc! { "submitter_user_id": 1, "client_ref": 1 })
+                    .keys(doc! { "pool_id": 1, "submitter_user_id": 1, "client_ref": 1 })
                     .options(
                         mongodb::options::IndexOptions::builder()
                             .unique(true)
@@ -2054,6 +2168,9 @@ mod tests {
         let mut pool = test_pool(&owner);
         pool.per_user_max_inflight = 5;
         seed_pool(&db, &pool).await;
+        let mut other_pool = test_pool(&owner);
+        other_pool.per_user_max_inflight = 5;
+        seed_pool(&db, &other_pool).await;
 
         let submitted = submit_task(
             &db,
@@ -2082,6 +2199,20 @@ mod tests {
         .unwrap();
         assert!(retried.deduplicated);
         assert_eq!(retried.task.id, submitted.task.id);
+
+        let other_pool_submit = submit_task(
+            &db,
+            &other_pool,
+            &submitter(&owner),
+            SubmitTaskInput {
+                client_ref: Some("retry-key-1".to_string()),
+                ..prompt_input("same ref, different pool")
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!other_pool_submit.deduplicated);
+        assert_ne!(other_pool_submit.task.id, submitted.task.id);
 
         // Strangers cannot read or cancel someone else's task.
         let read = get_task_for_consumer(&db, &stranger, &submitted.task.id).await;

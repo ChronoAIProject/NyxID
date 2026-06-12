@@ -43,6 +43,7 @@ pub struct CreatePoolInput {
     pub visibility: Option<OraclePoolVisibility>,
     pub chatgpt_project_url: Option<String>,
     pub default_model_label: Option<String>,
+    pub allow_extract: Option<bool>,
     pub max_workers: Option<u32>,
     pub max_queue_length: Option<u32>,
     pub per_user_max_inflight: Option<u32>,
@@ -57,6 +58,7 @@ pub struct UpdatePoolInput {
     pub visibility: Option<OraclePoolVisibility>,
     pub chatgpt_project_url: Option<String>,
     pub default_model_label: Option<String>,
+    pub allow_extract: Option<bool>,
     pub max_workers: Option<u32>,
     pub max_queue_length: Option<u32>,
     pub per_user_max_inflight: Option<u32>,
@@ -230,6 +232,7 @@ pub async fn create_pool(
         worker_token_hash: token_hash,
         chatgpt_project_url: input.chatgpt_project_url.filter(|u| !u.is_empty()),
         default_model_label: input.default_model_label.filter(|m| !m.is_empty()),
+        allow_extract: input.allow_extract.unwrap_or(false),
         max_workers,
         max_queue_length,
         per_user_max_inflight,
@@ -371,6 +374,9 @@ pub async fn update_pool(
     }
     if let Some(m) = input.default_model_label {
         set.insert("default_model_label", m);
+    }
+    if let Some(allow_extract) = input.allow_extract {
+        set.insert("allow_extract", allow_extract);
     }
     if let Some(active) = input.is_active {
         set.insert("is_active", active);

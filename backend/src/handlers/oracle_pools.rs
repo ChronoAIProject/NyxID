@@ -31,6 +31,8 @@ pub struct CreateOraclePoolRequest {
     #[serde(default)]
     pub default_model_label: Option<String>,
     #[serde(default)]
+    pub allow_extract: Option<bool>,
+    #[serde(default)]
     pub max_workers: Option<u32>,
     #[serde(default)]
     pub max_queue_length: Option<u32>,
@@ -55,6 +57,8 @@ pub struct UpdateOraclePoolRequest {
     pub chatgpt_project_url: Option<String>,
     #[serde(default)]
     pub default_model_label: Option<String>,
+    #[serde(default)]
+    pub allow_extract: Option<bool>,
     #[serde(default)]
     pub max_workers: Option<u32>,
     #[serde(default)]
@@ -82,6 +86,7 @@ pub struct OraclePoolInfo {
     pub chatgpt_project_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_model_label: Option<String>,
+    pub allow_extract: bool,
     pub max_workers: u32,
     pub max_queue_length: u32,
     pub per_user_max_inflight: u32,
@@ -134,6 +139,7 @@ fn pool_info(pool: &OraclePool, can_manage: bool) -> OraclePoolInfo {
         can_manage,
         chatgpt_project_url: pool.chatgpt_project_url.clone(),
         default_model_label: pool.default_model_label.clone(),
+        allow_extract: pool.allow_extract,
         max_workers: pool.max_workers,
         max_queue_length: pool.max_queue_length,
         per_user_max_inflight: pool.per_user_max_inflight,
@@ -184,6 +190,7 @@ pub async fn create_pool(
             visibility,
             chatgpt_project_url: body.chatgpt_project_url,
             default_model_label: body.default_model_label,
+            allow_extract: body.allow_extract,
             max_workers: body.max_workers,
             max_queue_length: body.max_queue_length,
             per_user_max_inflight: body.per_user_max_inflight,
@@ -262,6 +269,7 @@ pub async fn update_pool(
             visibility,
             chatgpt_project_url: body.chatgpt_project_url,
             default_model_label: body.default_model_label,
+            allow_extract: body.allow_extract,
             max_workers: body.max_workers,
             max_queue_length: body.max_queue_length,
             per_user_max_inflight: body.per_user_max_inflight,
@@ -350,6 +358,7 @@ mod tests {
             worker_token_hash: "secret-hash".to_string(),
             chatgpt_project_url: None,
             default_model_label: None,
+            allow_extract: false,
             max_workers: 3,
             max_queue_length: 50,
             per_user_max_inflight: 2,

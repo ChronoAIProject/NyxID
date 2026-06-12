@@ -3918,6 +3918,9 @@ pub enum OraclePoolCommands {
         /// Default model hint recorded on tasks
         #[arg(long)]
         model: Option<String>,
+        /// Allow this pool to drive worker browsers to extract arbitrary URLs
+        #[arg(long)]
+        allow_extract: bool,
         /// Max tasks dispatched at once (across all worker tabs)
         #[arg(long)]
         max_workers: Option<u32>,
@@ -3966,6 +3969,9 @@ pub enum OraclePoolCommands {
         project_url: Option<String>,
         #[arg(long)]
         model: Option<String>,
+        /// Enable or disable browser URL extraction for this pool
+        #[arg(long, action = clap::ArgAction::Set)]
+        allow_extract: Option<bool>,
         #[arg(long)]
         max_workers: Option<u32>,
         #[arg(long)]

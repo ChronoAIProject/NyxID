@@ -57,6 +57,9 @@ pub struct OraclePool {
     /// Opaque model label forwarded to workers and recorded on results.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_model_label: Option<String>,
+    /// Whether this pool may drive a worker browser to extract arbitrary URLs.
+    #[serde(default)]
+    pub allow_extract: bool,
     /// Maximum tasks dispatched (in flight) at once across all workers.
     pub max_workers: u32,
     /// Maximum queued (not yet dispatched) tasks before submits are rejected.
@@ -98,6 +101,7 @@ mod tests {
             worker_token_hash: "deadbeef".repeat(8),
             chatgpt_project_url: None,
             default_model_label: Some("chatgpt-5.5-pro".to_string()),
+            allow_extract: false,
             max_workers: DEFAULT_MAX_WORKERS,
             max_queue_length: DEFAULT_MAX_QUEUE_LENGTH,
             per_user_max_inflight: DEFAULT_PER_USER_MAX_INFLIGHT,
@@ -116,6 +120,7 @@ mod tests {
         assert_eq!(pool.id, restored.id);
         assert_eq!(pool.slug, restored.slug);
         assert_eq!(restored.visibility, OraclePoolVisibility::Platform);
+        assert!(!restored.allow_extract);
         assert_eq!(restored.max_workers, DEFAULT_MAX_WORKERS);
         assert_eq!(restored.task_timeout_secs, DEFAULT_TASK_TIMEOUT_SECS);
     }
