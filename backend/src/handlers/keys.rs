@@ -2,6 +2,7 @@ use axum::{
     Json,
     extract::{Path, Query, State},
 };
+use futures::TryStreamExt;
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -13,13 +14,14 @@ use crate::models::downstream_service::{
 };
 use crate::models::ssh_auth_mode::SshAuthMode;
 use crate::models::user_api_key::UserApiKey;
+use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
 use crate::models::ws_frame_injection::WsFrameInjection;
 use crate::mw::auth::AuthUser;
 use crate::services::{
     catalog_service, cloud_credential_verify, credential_push_service, lark_permission,
-    node_service, org_service, unified_key_service, user_api_key_service, user_endpoint_service,
-    user_service_service,
+    node_service, org_service, proxy_discovery_service, unified_key_service, user_api_key_service,
+    user_endpoint_service, user_service_service,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
@@ -380,8 +382,12 @@ impl std::fmt::Debug for CreateKeyRequest {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct KeyResponse {
     pub id: String,
+    pub name: String,
     pub label: String,
     pub slug: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub service_category: String,
     pub endpoint_url: String,
     pub endpoint_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -403,6 +409,20 @@ pub struct KeyResponse {
     pub node_status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub node_last_heartbeat_at: Option<String>,
+    pub connected: bool,
+    pub requires_connection: bool,
+    pub has_node_binding: bool,
+    pub proxy_url: String,
+    pub proxy_url_slug: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub docs_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub openapi_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asyncapi_url: Option<String>,
+    pub streaming_supported: bool,
+    pub websocket_supported: bool,
+    pub source: String,
     pub service_type: String,
     pub ssh_auth_mode: SshAuthMode,
     pub ssh_node_keys_stale: bool,
@@ -937,6 +957,7 @@ pub async fn create_key(
         &state.node_ws_manager,
         &actor,
         state.config.node_heartbeat_timeout_secs,
+        state.config.base_url.trim_end_matches('/'),
         &mut response,
     )
     .await?;
@@ -974,6 +995,7 @@ pub async fn list_keys(
         &state.node_ws_manager,
         &user_id_str,
         state.config.node_heartbeat_timeout_secs,
+        state.config.base_url.trim_end_matches('/'),
         &mut keys,
     )
     .await?;
@@ -1060,6 +1082,7 @@ pub async fn get_key(
         &state.node_ws_manager,
         &actor,
         state.config.node_heartbeat_timeout_secs,
+        state.config.base_url.trim_end_matches('/'),
         &mut response,
     )
     .await?;
@@ -1921,6 +1944,7 @@ pub async fn update_key(
         &state.node_ws_manager,
         &actor,
         state.config.node_heartbeat_timeout_secs,
+        state.config.base_url.trim_end_matches('/'),
         &mut response,
     )
     .await?;
@@ -2022,13 +2046,24 @@ pub async fn delete_key(
 }
 
 fn key_response_from_result(result: &unified_key_service::CreateKeyResult) -> KeyResponse {
+    let label = result.api_key.as_ref().map_or_else(
+        || result.endpoint.label.clone(),
+        |api_key| api_key.label.clone(),
+    );
+    let source = if result.service.catalog_service_id.is_some() {
+        "catalog"
+    } else {
+        "custom"
+    }
+    .to_string();
+
     KeyResponse {
         id: result.service.id.clone(),
-        label: result.api_key.as_ref().map_or_else(
-            || result.endpoint.label.clone(),
-            |api_key| api_key.label.clone(),
-        ),
+        name: label.clone(),
+        label,
         slug: result.service.slug.clone(),
+        description: None,
+        service_category: source.clone(),
         endpoint_url: result.endpoint.url.clone(),
         endpoint_id: result.endpoint.id.clone(),
         api_key_id: result.api_key.as_ref().map(|api_key| api_key.id.clone()),
@@ -2051,6 +2086,21 @@ fn key_response_from_result(result: &unified_key_service::CreateKeyResult) -> Ke
         node_priority: result.service.node_priority,
         node_status: None,
         node_last_heartbeat_at: None,
+        connected: true,
+        requires_connection: false,
+        has_node_binding: result
+            .service
+            .node_id
+            .as_ref()
+            .is_some_and(|node_id| !node_id.is_empty()),
+        proxy_url: String::new(),
+        proxy_url_slug: String::new(),
+        docs_url: None,
+        openapi_url: None,
+        asyncapi_url: None,
+        streaming_supported: false,
+        websocket_supported: false,
+        source,
         service_type: result.service.service_type.clone(),
         ssh_auth_mode: result.service.ssh_auth_mode,
         ssh_node_keys_stale: result.service.ssh_node_keys_stale,
@@ -2108,10 +2158,27 @@ fn key_response_from_result(result: &unified_key_service::CreateKeyResult) -> Ke
 }
 
 fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
+    let source = if view.catalog_service_id.is_some() {
+        "catalog"
+    } else {
+        "custom"
+    }
+    .to_string();
+    let has_node_binding = view
+        .node_id
+        .as_ref()
+        .is_some_and(|node_id| !node_id.is_empty());
+
     KeyResponse {
         id: view.id,
+        name: view
+            .catalog_service_name
+            .clone()
+            .unwrap_or_else(|| view.label.clone()),
         label: view.label,
         slug: view.slug,
+        description: None,
+        service_category: source.clone(),
         endpoint_url: view.endpoint_url,
         endpoint_id: view.endpoint_id,
         api_key_id: view.api_key_id,
@@ -2126,6 +2193,17 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
         node_priority: view.node_priority,
         node_status: None,
         node_last_heartbeat_at: None,
+        connected: true,
+        requires_connection: false,
+        has_node_binding,
+        proxy_url: String::new(),
+        proxy_url_slug: String::new(),
+        docs_url: None,
+        openapi_url: None,
+        asyncapi_url: None,
+        streaming_supported: false,
+        websocket_supported: false,
+        source,
         service_type: view.service_type,
         ssh_auth_mode: view.ssh_auth_mode,
         ssh_node_keys_stale: view.ssh_node_keys_stale,
@@ -2169,6 +2247,7 @@ async fn enrich_key_responses(
     ws_manager: &crate::services::node_ws_manager::NodeWsManager,
     actor_user_id: &str,
     heartbeat_timeout_secs: u64,
+    base_url: &str,
     keys: &mut [KeyResponse],
 ) -> AppResult<()> {
     let mut distinct_node_ids = Vec::new();
@@ -2195,7 +2274,7 @@ async fn enrich_key_responses(
         }
     }
 
-    for key in keys {
+    for key in keys.iter_mut() {
         if let Some(ref node_id) = key.node_id {
             if node_id.is_empty() {
                 continue;
@@ -2235,6 +2314,8 @@ async fn enrich_key_responses(
             }
         }
     }
+
+    enrich_key_discovery_metadata(db, base_url, keys).await?;
     Ok(())
 }
 
@@ -2243,6 +2324,7 @@ async fn enrich_key_response(
     ws_manager: &crate::services::node_ws_manager::NodeWsManager,
     actor_user_id: &str,
     heartbeat_timeout_secs: u64,
+    base_url: &str,
     key: &mut KeyResponse,
 ) -> AppResult<()> {
     enrich_key_responses(
@@ -2250,9 +2332,111 @@ async fn enrich_key_response(
         ws_manager,
         actor_user_id,
         heartbeat_timeout_secs,
+        base_url,
         std::slice::from_mut(key),
     )
     .await
+}
+
+async fn enrich_key_discovery_metadata(
+    db: &mongodb::Database,
+    base_url: &str,
+    keys: &mut [KeyResponse],
+) -> AppResult<()> {
+    let catalog_ids: Vec<&str> = keys
+        .iter()
+        .filter_map(|key| key.catalog_service_id.as_deref())
+        .collect();
+    let catalog_services: Vec<DownstreamService> = if catalog_ids.is_empty() {
+        vec![]
+    } else {
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find(doc! { "_id": { "$in": &catalog_ids } })
+            .await?
+            .try_collect()
+            .await?
+    };
+    let catalog_by_id: std::collections::HashMap<&str, &DownstreamService> = catalog_services
+        .iter()
+        .map(|service| (service.id.as_str(), service))
+        .collect();
+
+    let key_ids: Vec<&str> = keys.iter().map(|key| key.id.as_str()).collect();
+    let services: Vec<UserService> = if key_ids.is_empty() {
+        vec![]
+    } else {
+        db.collection::<UserService>(USER_SERVICES)
+            .find(doc! { "_id": { "$in": &key_ids } })
+            .await?
+            .try_collect()
+            .await?
+    };
+    let service_by_id: std::collections::HashMap<&str, &UserService> = services
+        .iter()
+        .map(|service| (service.id.as_str(), service))
+        .collect();
+
+    let endpoint_ids: Vec<&str> = services
+        .iter()
+        .map(|service| service.endpoint_id.as_str())
+        .collect();
+    let endpoints: Vec<UserEndpoint> = if endpoint_ids.is_empty() {
+        vec![]
+    } else {
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .find(doc! { "_id": { "$in": &endpoint_ids } })
+            .await?
+            .try_collect()
+            .await?
+    };
+    let endpoint_by_id: std::collections::HashMap<&str, &UserEndpoint> = endpoints
+        .iter()
+        .map(|endpoint| (endpoint.id.as_str(), endpoint))
+        .collect();
+
+    for key in keys {
+        let Some(service) = service_by_id.get(key.id.as_str()) else {
+            continue;
+        };
+
+        let projection = if let Some(catalog_id) = key.catalog_service_id.as_deref() {
+            catalog_by_id.get(catalog_id).map(|catalog| {
+                proxy_discovery_service::project_catalog_key(
+                    catalog,
+                    &key.id,
+                    &key.slug,
+                    base_url,
+                    key.connected,
+                    key.has_node_binding,
+                )
+            })
+        } else {
+            endpoint_by_id
+                .get(service.endpoint_id.as_str())
+                .map(|endpoint| {
+                    proxy_discovery_service::project_custom_key(service, endpoint, base_url)
+                })
+        };
+
+        if let Some(projection) = projection {
+            key.name = projection.name;
+            key.description = projection.description;
+            key.service_category = projection.service_category;
+            key.connected = projection.connected;
+            key.requires_connection = projection.requires_connection;
+            key.has_node_binding = projection.has_node_binding;
+            key.proxy_url = projection.proxy_url;
+            key.proxy_url_slug = projection.proxy_url_slug;
+            key.docs_url = projection.docs_url;
+            key.openapi_url = projection.openapi_url;
+            key.asyncapi_url = projection.asyncapi_url;
+            key.streaming_supported = projection.streaming_supported;
+            key.websocket_supported = projection.websocket_supported;
+            key.source = projection.source.as_str().to_string();
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2266,11 +2450,14 @@ mod tests {
     use crate::crypto::aes::EncryptionKeys;
     use crate::crypto::local_key_provider::LocalKeyProvider;
     use crate::errors::AppError;
+    use crate::models::downstream_service::{
+        COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
+    };
     use crate::models::org_membership::{COLLECTION_NAME as ORG_MEMBERSHIPS, OrgRole};
     use crate::models::user::{COLLECTION_NAME as USERS, UserType};
     use crate::models::user_api_key::COLLECTION_NAME as USER_API_KEYS;
     use crate::models::user_api_key::UserApiKey;
-    use crate::models::user_endpoint::COLLECTION_NAME as USER_ENDPOINTS;
+    use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
     use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
     use crate::telemetry::TelemetryContext;
     use crate::test_utils::{
@@ -3711,6 +3898,231 @@ mod tests {
         assert!(response.keys.len() >= 2);
         assert!(response.keys.iter().any(|k| k.id == svc1));
         assert!(response.keys.iter().any(|k| k.id == svc2));
+    }
+
+    #[tokio::test]
+    async fn list_keys_includes_discovery_fields_for_catalog_and_custom_services() {
+        let Some(db) = connect_test_database("h_keys_list_discovery_fields").await else {
+            eprintln!("skipping keys handler integration test: no local MongoDB available");
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let user_id = uuid::Uuid::new_v4().to_string();
+        insert_user(&db, &user_id, UserType::Person).await;
+
+        let catalog_id = uuid::Uuid::new_v4().to_string();
+        let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
+        catalog.id = catalog_id.clone();
+        catalog.name = "Catalog API".to_string();
+        catalog.slug = "catalog-api".to_string();
+        catalog.description = Some("Catalog description".to_string());
+        catalog.service_category = "connection".to_string();
+        catalog.requires_user_credential = true;
+        catalog.openapi_spec_url = Some("https://example.com/catalog-openapi.json".to_string());
+        catalog.asyncapi_spec_url = Some("https://example.com/catalog-asyncapi.json".to_string());
+        catalog.streaming_supported = true;
+        catalog.capabilities = Some(crate::models::downstream_service::ServiceCapabilities {
+            supports_websocket: true,
+            ..Default::default()
+        });
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(catalog)
+            .await
+            .unwrap();
+
+        let catalog_endpoint_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(test_user_endpoint(
+                &catalog_endpoint_id,
+                &user_id,
+                "Catalog User Label",
+                "https://catalog-user.example.com",
+                Some("https://example.com/user-catalog-openapi.json"),
+                Some(&catalog_id),
+            ))
+            .await
+            .unwrap();
+        let catalog_service_id = uuid::Uuid::new_v4().to_string();
+        let mut catalog_service = test_user_service(
+            &catalog_service_id,
+            &user_id,
+            "my-catalog-api",
+            &catalog_endpoint_id,
+            Some(&catalog_id),
+            Some("node-1"),
+        );
+        catalog_service.auth_method = "bearer".to_string();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(catalog_service)
+            .await
+            .unwrap();
+
+        let custom_endpoint_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(test_user_endpoint(
+                &custom_endpoint_id,
+                &user_id,
+                "Custom API",
+                "https://custom.example.com",
+                Some("https://example.com/custom-openapi.json"),
+                None,
+            ))
+            .await
+            .unwrap();
+        let custom_service_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(test_user_service(
+                &custom_service_id,
+                &user_id,
+                "custom-api",
+                &custom_endpoint_id,
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+
+        let Json(response) = super::list_keys(State(state), test_auth_user(&user_id))
+            .await
+            .unwrap();
+
+        let catalog_key = response
+            .keys
+            .iter()
+            .find(|key| key.id == catalog_service_id)
+            .expect("catalog-backed key should be listed");
+        assert_eq!(catalog_key.name, "Catalog API");
+        assert_eq!(
+            catalog_key.description.as_deref(),
+            Some("Catalog description")
+        );
+        assert_eq!(catalog_key.service_category, "connection");
+        assert!(catalog_key.connected);
+        assert!(catalog_key.requires_connection);
+        assert!(catalog_key.has_node_binding);
+        assert_eq!(catalog_key.source, "catalog");
+        assert_eq!(
+            catalog_key.proxy_url,
+            format!("http://localhost:3001/api/v1/proxy/{catalog_service_id}/{{path}}")
+        );
+        assert_eq!(
+            catalog_key.proxy_url_slug,
+            "http://localhost:3001/api/v1/proxy/s/my-catalog-api/{path}"
+        );
+        assert_eq!(
+            catalog_key.docs_url.as_deref(),
+            Some(
+                format!("http://localhost:3001/api/v1/proxy/services/{catalog_service_id}/docs")
+                    .as_str()
+            )
+        );
+        assert_eq!(
+            catalog_key.openapi_url.as_deref(),
+            Some(
+                format!(
+                    "http://localhost:3001/api/v1/proxy/services/{catalog_service_id}/openapi.json"
+                )
+                .as_str()
+            )
+        );
+        assert_eq!(
+            catalog_key.asyncapi_url.as_deref(),
+            Some(
+                format!(
+                    "http://localhost:3001/api/v1/proxy/services/{catalog_service_id}/asyncapi.json"
+                )
+                .as_str()
+            )
+        );
+        assert!(catalog_key.streaming_supported);
+        assert!(catalog_key.websocket_supported);
+
+        let custom_key = response
+            .keys
+            .iter()
+            .find(|key| key.id == custom_service_id)
+            .expect("custom key should be listed");
+        assert_eq!(custom_key.name, "Custom API");
+        assert!(custom_key.description.is_none());
+        assert_eq!(custom_key.service_category, "custom");
+        assert!(custom_key.connected);
+        assert!(!custom_key.requires_connection);
+        assert!(!custom_key.has_node_binding);
+        assert_eq!(custom_key.source, "custom");
+        assert_eq!(
+            custom_key.proxy_url,
+            format!("http://localhost:3001/api/v1/proxy/{custom_service_id}/{{path}}")
+        );
+        assert_eq!(
+            custom_key.proxy_url_slug,
+            "http://localhost:3001/api/v1/proxy/s/custom-api/{path}"
+        );
+        assert_eq!(
+            custom_key.docs_url.as_deref(),
+            Some(
+                format!("http://localhost:3001/api/v1/proxy/services/{custom_service_id}/docs")
+                    .as_str()
+            )
+        );
+        assert_eq!(
+            custom_key.openapi_url.as_deref(),
+            Some(
+                format!(
+                    "http://localhost:3001/api/v1/proxy/services/{custom_service_id}/openapi.json"
+                )
+                .as_str()
+            )
+        );
+        assert!(custom_key.asyncapi_url.is_none());
+        assert!(!custom_key.streaming_supported);
+        assert!(!custom_key.websocket_supported);
+    }
+
+    #[test]
+    fn older_key_list_consumers_ignore_additive_discovery_fields() {
+        #[derive(Debug, serde::Deserialize)]
+        struct OldKeyInfo {
+            id: String,
+            label: String,
+            slug: String,
+            endpoint_url: String,
+        }
+
+        #[derive(Debug, serde::Deserialize)]
+        struct OldKeyListResponse {
+            keys: Vec<OldKeyInfo>,
+        }
+
+        let payload = serde_json::json!({
+            "keys": [{
+                "id": "svc-1",
+                "name": "Catalog API",
+                "label": "Catalog API",
+                "slug": "catalog-api",
+                "description": "Catalog description",
+                "service_category": "connection",
+                "endpoint_url": "https://api.example.com",
+                "connected": true,
+                "requires_connection": true,
+                "has_node_binding": false,
+                "proxy_url": "http://localhost:3001/api/v1/proxy/svc-1/{path}",
+                "proxy_url_slug": "http://localhost:3001/api/v1/proxy/s/catalog-api/{path}",
+                "docs_url": "http://localhost:3001/api/v1/proxy/services/svc-1/docs",
+                "openapi_url": "http://localhost:3001/api/v1/proxy/services/svc-1/openapi.json",
+                "asyncapi_url": null,
+                "streaming_supported": true,
+                "websocket_supported": false,
+                "source": "catalog"
+            }]
+        });
+
+        let old: OldKeyListResponse =
+            serde_json::from_value(payload).expect("additive fields should deserialize");
+        assert_eq!(old.keys.len(), 1);
+        assert_eq!(old.keys[0].id, "svc-1");
+        assert_eq!(old.keys[0].label, "Catalog API");
+        assert_eq!(old.keys[0].slug, "catalog-api");
+        assert_eq!(old.keys[0].endpoint_url, "https://api.example.com");
     }
 
     // ---- get_key org scoping tests ----

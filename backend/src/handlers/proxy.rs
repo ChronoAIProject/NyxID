@@ -5,29 +5,21 @@ use axum::{
     http::{Method, Request, StatusCode},
     response::{IntoResponse, Response},
 };
-use futures::{SinkExt, StreamExt, TryStreamExt};
+use futures::{SinkExt, StreamExt};
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
 use tokio_stream::wrappers::ReceiverStream;
 use utoipa::ToSchema;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
-use crate::models::downstream_service::{
-    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, legacy_http_service_type_filter,
-};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
-use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
-use crate::models::user_service_connection::{
-    COLLECTION_NAME as USER_SERVICE_CONNECTIONS, UserServiceConnection,
-};
 use crate::mw::auth::AuthUser;
 use crate::services::node_ws_manager::{NodeProxyRequest, ProxyResponseType, StreamChunk};
 use crate::services::{
     approval_service, audit_service, chatgpt_translator, delegation_service, identity_service,
     llm_usage_service, node_metrics_service, node_routing_service, node_service,
-    notification_service, operation_descriptor, proxy_service, sse_parser, user_service_service,
+    notification_service, operation_descriptor, proxy_discovery_service, proxy_service, sse_parser,
     ws_frame_injector,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
@@ -6772,6 +6764,28 @@ pub struct ProxyServiceItem {
     pub websocket_supported: bool,
 }
 
+impl From<proxy_discovery_service::ProxyDiscoveryItem> for ProxyServiceItem {
+    fn from(item: proxy_discovery_service::ProxyDiscoveryItem) -> Self {
+        Self {
+            id: item.id,
+            name: item.name,
+            slug: item.slug,
+            description: item.description,
+            service_category: item.service_category,
+            connected: item.connected,
+            requires_connection: item.requires_connection,
+            has_node_binding: item.has_node_binding,
+            proxy_url: item.proxy_url,
+            proxy_url_slug: item.proxy_url_slug,
+            docs_url: item.docs_url,
+            openapi_url: item.openapi_url,
+            asyncapi_url: item.asyncapi_url,
+            streaming_supported: item.streaming_supported,
+            websocket_supported: item.websocket_supported,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ProxyServicesQuery {
     pub page: Option<u64>,
@@ -6814,174 +6828,26 @@ pub async fn list_proxy_services(
 
     let user_id_str = auth_user.user_id.to_string();
     let base = state.config.base_url.trim_end_matches('/');
-
-    let page = query.page.unwrap_or(1).max(1);
-    let per_page = query.per_page.unwrap_or(50).min(100);
-    let offset = (page - 1) * per_page;
-
-    let mut filter = doc! {
-        "is_active": true,
-        "service_category": { "$ne": "provider" },
-    };
-    filter.extend(legacy_http_service_type_filter());
-
-    // Get total count for pagination metadata
-    let total = state
-        .db
-        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-        .count_documents(filter.clone())
-        .await?;
-
-    // Get paginated active, non-provider services
-    let services: Vec<DownstreamService> = state
-        .db
-        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-        .find(filter)
-        .sort(doc! { "name": 1 })
-        .skip(offset)
-        .limit(per_page as i64)
-        .await?
-        .try_collect()
-        .await?;
-
-    // Get user's active connections in a single query
-    let service_ids: Vec<&str> = services.iter().map(|s| s.id.as_str()).collect();
-    let connections: Vec<UserServiceConnection> = if service_ids.is_empty() {
-        vec![]
-    } else {
-        state
-            .db
-            .collection::<UserServiceConnection>(USER_SERVICE_CONNECTIONS)
-            .find(doc! {
-                "user_id": &user_id_str,
-                "service_id": { "$in": &service_ids },
-                "is_active": true,
-            })
-            .await?
-            .try_collect()
-            .await?
-    };
-
-    let connected_set: HashSet<&str> = connections.iter().map(|c| c.service_id.as_str()).collect();
-
-    let bound_service_ids = node_routing_service::list_routable_service_ids(
+    let discovery = proxy_discovery_service::list_proxy_discovery(
         &state.db,
         &user_id_str,
         state.node_ws_manager.as_ref(),
+        base,
+        query.page.unwrap_or(1),
+        query.per_page.unwrap_or(50),
     )
     .await?;
-    let node_bound_set: HashSet<&str> = bound_service_ids.iter().map(|s| s.as_str()).collect();
-
-    let items: Vec<ProxyServiceItem> = services
-        .iter()
-        .map(|s| ProxyServiceItem {
-            id: s.id.clone(),
-            name: s.name.clone(),
-            slug: s.slug.clone(),
-            description: s.description.clone(),
-            service_category: s.service_category.clone(),
-            connected: connected_set.contains(s.id.as_str()),
-            requires_connection: s.requires_user_credential,
-            has_node_binding: node_bound_set.contains(s.id.as_str()),
-            proxy_url: format!("{base}/api/v1/proxy/{}/{{path}}", s.id),
-            proxy_url_slug: format!("{base}/api/v1/proxy/s/{}/{{path}}", s.slug),
-            docs_url: s
-                .openapi_spec_url
-                .as_ref()
-                .or(s.asyncapi_spec_url.as_ref())
-                .map(|_| format!("{base}/api/v1/proxy/services/{}/docs", s.id)),
-            openapi_url: s
-                .openapi_spec_url
-                .as_ref()
-                .map(|_| format!("{base}/api/v1/proxy/services/{}/openapi.json", s.id)),
-            asyncapi_url: s
-                .asyncapi_spec_url
-                .as_ref()
-                .map(|_| format!("{base}/api/v1/proxy/services/{}/asyncapi.json", s.id)),
-            streaming_supported: s.streaming_supported,
-            websocket_supported: s
-                .capabilities
-                .as_ref()
-                .is_some_and(|c| c.supports_websocket),
-        })
-        .collect();
-
-    let visible_user_services =
-        user_service_service::list_user_services_with_sources(&state.db, &user_id_str).await?;
-    let custom_user_services: Vec<_> = visible_user_services
-        .into_iter()
-        .map(|entry| entry.service)
-        .filter(|service| service.catalog_service_id.is_none() && service.service_type == "http")
-        .collect();
-
-    let endpoint_ids: Vec<&str> = custom_user_services
-        .iter()
-        .map(|service| service.endpoint_id.as_str())
-        .collect();
-    let endpoints: Vec<UserEndpoint> = if endpoint_ids.is_empty() {
-        vec![]
-    } else {
-        state
-            .db
-            .collection::<UserEndpoint>(USER_ENDPOINTS)
-            .find(doc! { "_id": { "$in": &endpoint_ids } })
-            .await?
-            .try_collect()
-            .await?
-    };
-    let endpoint_by_id: HashMap<String, UserEndpoint> = endpoints
-        .into_iter()
-        .map(|endpoint| (endpoint.id.clone(), endpoint))
-        .collect();
-
-    let mut custom_services: Vec<ProxyServiceItem> = custom_user_services
-        .into_iter()
-        .filter_map(|service| {
-            let endpoint = endpoint_by_id.get(&service.endpoint_id)?;
-            endpoint.openapi_spec_url.as_ref()?;
-
-            let name = if endpoint.label.trim().is_empty() {
-                service.slug.clone()
-            } else {
-                endpoint.label.clone()
-            };
-
-            Some(ProxyServiceItem {
-                id: service.id.clone(),
-                name,
-                slug: service.slug.clone(),
-                description: None,
-                service_category: "custom".to_string(),
-                connected: true,
-                requires_connection: false,
-                has_node_binding: service.node_id.is_some(),
-                proxy_url: format!("{base}/api/v1/proxy/{}/{{path}}", service.id),
-                proxy_url_slug: format!("{base}/api/v1/proxy/s/{}/{{path}}", service.slug),
-                docs_url: Some(format!("{base}/api/v1/proxy/services/{}/docs", service.id)),
-                openapi_url: Some(format!(
-                    "{base}/api/v1/proxy/services/{}/openapi.json",
-                    service.id
-                )),
-                asyncapi_url: None,
-                streaming_supported: false,
-                websocket_supported: false,
-            })
-        })
-        .collect();
-    custom_services.sort_by(|left, right| {
-        left.name
-            .to_lowercase()
-            .cmp(&right.name.to_lowercase())
-            .then_with(|| left.slug.cmp(&right.slug))
-            .then_with(|| left.id.cmp(&right.id))
-    });
 
     Ok(Json(ProxyServicesResponse {
-        services: items,
-        custom_services,
-        total,
-        page,
-        per_page,
+        services: discovery.services.into_iter().map(Into::into).collect(),
+        custom_services: discovery
+            .custom_services
+            .into_iter()
+            .map(Into::into)
+            .collect(),
+        total: discovery.total,
+        page: discovery.page,
+        per_page: discovery.per_page,
     }))
 }
 

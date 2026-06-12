@@ -31,6 +31,7 @@ The response includes:
 - `endpoint_url`: where requests are routed
 - `node_id`: whether routing through a node agent
 - `credential_source`: `{ "type": "personal" }` for the user's own credentials, or `{ "type": "org", "org_id": ..., "org_name": ..., "role": ..., "allowed": ... }` for credentials inherited from an organization the user belongs to. Org-inherited services with `allowed: false` are visible to viewers but cannot be proxied -- do not attempt to call them.
+- Discovery projection fields: `name`, `description`, `service_category`, `connected`, `requires_connection`, `has_node_binding`, `proxy_url`, `proxy_url_slug`, `docs_url`, `openapi_url`, `asyncapi_url`, `streaming_supported`, `websocket_supported`, and `source` (`catalog` or `custom`). Use these fields when an agent needs the same read-only proxy metadata exposed by `GET /api/v1/proxy/services`.
 
 If the target service is missing, help the user add it:
 

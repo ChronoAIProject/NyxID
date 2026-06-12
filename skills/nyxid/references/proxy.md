@@ -82,6 +82,8 @@ server-side.
 | `POST/GET/... /api/v1/proxy/{user_service_id}/{path}` | UUID-based, when you already have the id from `GET /api/v1/keys` |
 | `...?_nyxid_via=<user_service_id>` | Optional query param on either path. Bypasses auto-resolution and uses the specified UserService directly. The selected UserService must match the route's slug or service_id (returns 400 otherwise). Useful when both personal and org credentials exist for the same slug. Stripped before forwarding to downstream. |
 
+`GET /api/v1/keys` includes the same read-only discovery projection needed to build proxy calls: `proxy_url`, `proxy_url_slug`, documentation/spec URLs, streaming/WebSocket support flags, connection/node-binding state, and `source` (`catalog` or `custom`). Prefer those fields when you already have the user's configured services; use `GET /api/v1/proxy/services` for catalog discovery and paginated proxy metadata.
+
 **Example -- send a Lark message as a bot (no Lark token management):**
 
 ```bash
