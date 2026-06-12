@@ -593,8 +593,15 @@ async function waitForResponse(page, task_id, beforeCount) {
       lastKey = key;
     }
   }
-  // Timed out — return whatever we have.
-  return page.evaluate(() => window.__nyx.extractResponse());
+  // Timed out. Only return text if a NEW assistant message actually appeared
+  // since we sent the prompt; otherwise the latest message is stale (a
+  // previous turn), so return "" and let the server mark the task failed
+  // instead of handing back the wrong answer.
+  const [count, text] = await page.evaluate(() => [
+    window.__nyx.assistantCount(),
+    window.__nyx.extractResponse(),
+  ]);
+  return count > beforeCount ? text : "";
 }
 
 // ── Scrape flow (attach existing conversation) ───────────────────────────
