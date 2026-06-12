@@ -387,9 +387,9 @@ pub fn enforce_public_ip_rate_limit(
     path: &str,
 ) -> Result<Option<IpAddr>, AppError> {
     let Some(client_ip) = resolve_client_ip_for_rate_limit(headers, peer, trusted_proxies) else {
-        tracing::debug!(
+        tracing::warn!(
             path = %path,
-            "Skipping public per-IP rate limit because no trusted peer IP is available"
+            "Skipping public per-IP throttle: client IP unresolved; per-IP rate limiting is disabled for this request (daily quota remains the backstop)"
         );
         return Ok(None);
     };

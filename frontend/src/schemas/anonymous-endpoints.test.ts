@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { anonymousEndpointCreateSchema } from "./anonymous-endpoints";
+import {
+  anonymousEndpointCreateSchema,
+  isWideOpenAnonymousPattern,
+} from "./anonymous-endpoints";
 
 describe("anonymous endpoint schemas", () => {
   it("normalizes paths and coerces daily quota", () => {
@@ -47,5 +50,22 @@ describe("anonymous endpoint schemas", () => {
         daily_quota: 0,
       }),
     ).toThrow(/at least 1/);
+  });
+});
+
+describe("isWideOpenAnonymousPattern", () => {
+  it("flags the root wildcard pattern", () => {
+    expect(isWideOpenAnonymousPattern("/**")).toBe(true);
+  });
+
+  it("flags the root wildcard after trimming and leading-slash normalization", () => {
+    expect(isWideOpenAnonymousPattern("  /**  ")).toBe(true);
+    expect(isWideOpenAnonymousPattern("**")).toBe(true);
+  });
+
+  it("does not flag scoped wildcard patterns", () => {
+    expect(isWideOpenAnonymousPattern("/public/**")).toBe(false);
+    expect(isWideOpenAnonymousPattern("/public")).toBe(false);
+    expect(isWideOpenAnonymousPattern("")).toBe(false);
   });
 });

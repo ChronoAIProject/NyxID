@@ -59,6 +59,7 @@ import {
   Send,
   Plus,
   Globe2,
+  AlertTriangle,
 } from "lucide-react";
 import {
   Card,
@@ -89,6 +90,7 @@ import {
 } from "@/components/ui/form";
 import {
   anonymousEndpointCreateSchema,
+  isWideOpenAnonymousPattern,
   type AnonymousEndpointRuleFormData,
   type AnonymousEndpointRuleFormInput,
 } from "@/schemas/anonymous-endpoints";
@@ -877,6 +879,11 @@ function AnonymousEndpointsSection({
     },
   });
 
+  const watchedPathPattern = form.watch("path_pattern");
+  const createFormIsWideOpen =
+    typeof watchedPathPattern === "string" &&
+    isWideOpenAnonymousPattern(watchedPathPattern);
+
   async function handleCreate(data: AnonymousEndpointRuleFormData) {
     try {
       await createMutation.mutateAsync(data);
@@ -1016,6 +1023,8 @@ function AnonymousEndpointsSection({
           </form>
         </Form>
 
+        {createFormIsWideOpen && <WideOpenAnonymousWarning />}
+
         <div className="space-y-2">
           {isLoading && <Skeleton className="h-12 w-full" />}
           {!isLoading && (!endpoints || endpoints.length === 0) && (
@@ -1049,6 +1058,28 @@ const PUBLIC_METHODS = [
   "OPTIONS",
 ] as const;
 
+/**
+ * Non-blocking advisory shown when an anonymous rule's path pattern is the
+ * root wildcard `/**`. Such a rule matches every path and exposes the entire
+ * downstream unauthenticated. The rule remains valid and savable; this only
+ * prompts the admin to confirm the exposure is intentional.
+ */
+function WideOpenAnonymousWarning() {
+  return (
+    <div className="flex items-start gap-3 rounded-xl border border-warning/15 bg-warning/[0.04] px-4 py-3 text-[12px] text-warning">
+      <span className="flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-[6px] border border-warning/20 bg-warning/10">
+        <AlertTriangle className="h-3.5 w-3.5" />
+      </span>
+      <p>
+        This pattern (<code className="font-mono">/**</code>) matches every path
+        and exposes the entire downstream service unauthenticated. Scope it to a
+        specific prefix (e.g. <code className="font-mono">/public/**</code>)
+        unless full public access is intended.
+      </p>
+    </div>
+  );
+}
+
 function AnonymousEndpointRow({
   rule,
   onUpdate,
@@ -1080,7 +1111,13 @@ function AnonymousEndpointRow({
     pathPattern !== rule.path_pattern ||
     Number(dailyQuota) !== rule.daily_quota;
 
+  // Advisory only: surface the wide-open warning for an enabled rule whose
+  // (possibly edited) pattern is the root wildcard. Never blocks save.
+  const showWideOpenWarning =
+    rule.enabled && isWideOpenAnonymousPattern(pathPattern);
+
   return (
+    <div className="space-y-2">
     <div className="grid gap-3 rounded-lg border border-white/[0.08] bg-white/[0.02] p-3 md:grid-cols-[88px_120px_minmax(180px,1fr)_120px_auto_auto] md:items-center">
       <div className="flex items-center gap-2">
         <Switch
@@ -1148,6 +1185,8 @@ function AnonymousEndpointRow({
         </ButtonIcon>
         Delete
       </Button>
+    </div>
+      {showWideOpenWarning && <WideOpenAnonymousWarning />}
     </div>
   );
 }

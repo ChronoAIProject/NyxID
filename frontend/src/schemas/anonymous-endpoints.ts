@@ -45,6 +45,19 @@ export const anonymousEndpointRuleSchema = z.object({
     .min(1, "Daily quota must be at least 1"),
 });
 
+/**
+ * Returns true when an anonymous-endpoint path pattern is the root wildcard
+ * `/**`, which matches every path and therefore exposes the entire downstream
+ * unauthenticated. This is a non-blocking advisory only: such a rule is still
+ * valid and savable. The UI surfaces an inline warning so an admin enabling it
+ * does so deliberately.
+ */
+export function isWideOpenAnonymousPattern(pattern: string): boolean {
+  const trimmed = pattern.trim();
+  const normalized = trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+  return normalized === "/**";
+}
+
 export const anonymousEndpointCreateSchema = anonymousEndpointRuleSchema.omit({
   id: true,
 });
