@@ -542,7 +542,7 @@ This auto-creates:
 
 ### Option B: Add from catalog with custom endpoint URL
 
-For services like OpenClaw where the user provides their own instance URL:
+For self-hosted catalog services like OpenClaw or aevatar, the user provides their own instance URL:
 
 ```bash
 # User sets env var: ! export SERVICE_CREDENTIAL="my-bearer-token"
@@ -561,6 +561,15 @@ curl -X POST http://localhost:3001/api/v1/keys \
     \"endpoint_url\": \"http://localhost:18789\",
     \"label\": \"Local OpenClaw\"
   }"
+```
+
+For aevatar, use the stable catalog slug `aevatar`. The resulting service is called through `/api/v1/proxy/s/aevatar/*`; there is no `/api/v1/llm/aevatar/*` route.
+
+```bash
+# User sets env var: ! export AEVATAR_TOKEN="my-aevatar-bearer-token"
+
+nyxid service add aevatar --credential "$AEVATAR_TOKEN" \
+  --endpoint-url "https://aevatar.example.com" --label "Aevatar"
 ```
 
 ### Option C: Fully custom endpoint (no catalog)
@@ -818,6 +827,19 @@ curl http://localhost:3001/api/v1/proxy/$SERVICE_ID/v1/chat/completions \
 ```
 
 NyxID automatically injects the user's stored credential (e.g., `Authorization: Bearer sk-proj-...`) into the outgoing request.
+
+### Proxy to aevatar
+
+The seeded `aevatar` catalog entry uses the regular REST proxy path. The client request to NyxID must authenticate with a session, access token, service account token, or API key that has `proxy` or `proxy:*`; `llm:proxy` alone does not grant REST proxy access. If the API key is service-scoped, include the concrete `UserService.id` created by `nyxid service add aevatar` in the key's allowlist.
+
+```bash
+curl -X POST http://localhost:3001/api/v1/proxy/s/aevatar/v1/responses \
+  -H "X-API-Key: $NYXID_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "aevatar-default", "input": "Handle this channel event", "stream": true}'
+```
+
+NyxID injects the stored aevatar bearer token as downstream `Authorization` and sends `X-NyxID-Identity-Token` with the user's ID and email. It does not forward the raw NyxID caller token, and it does not inject `X-NyxID-Delegation-Token` unless an operator explicitly enables delegation for that service later.
 
 ### Streaming and large files
 
@@ -2172,6 +2194,22 @@ curl http://localhost:3001/api/v1/proxy/s/llm-openclaw/v1/responses \
 ```
 
 Each user's requests route to their own OpenClaw instance (per-user gateway URL). If a node binding exists, requests are proxied through the node agent with local credential injection.
+
+### Route through aevatar
+
+aevatar is exposed as a catalog-backed downstream service on the existing slug proxy, not through the LLM gateway translator. Connect it with an endpoint URL and bearer token, then call its Responses-compatible ingress directly:
+
+```bash
+nyxid service add aevatar --credential-env AEVATAR_TOKEN \
+  --endpoint-url "https://aevatar.example.com" --label "Aevatar"
+
+curl -X POST http://localhost:3001/api/v1/proxy/s/aevatar/v1/responses \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "aevatar-default", "input": "Analyze this", "stream": true}'
+```
+
+Streaming responses use the normal proxy streaming path. aevatar receives `X-NyxID-Identity-Token`; delegation tokens are reserved with scope `llm:proxy` but are disabled by default.
 
 ---
 

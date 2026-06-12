@@ -3064,6 +3064,21 @@ curl -X POST http://localhost:3001/api/v1/proxy/s/analytics/v1/events \
   -d '{"event": "page_view", "page": "/home"}'
 ```
 
+**Aevatar catalog contract:**
+
+`aevatar` is a seeded self-hosted catalog service, not a separate LLM gateway namespace. Users connect it through `POST /api/v1/keys` or `nyxid service add aevatar` with an `endpoint_url` for their own runtime and a bearer credential for that runtime. Requests then use the existing slug proxy:
+
+```bash
+curl -X POST http://localhost:3001/api/v1/proxy/s/aevatar/v1/responses \
+  -H "X-API-Key: nyxid_ag_..." \
+  -H "Content-Type: application/json" \
+  -d '{"model":"aevatar-default","input":"Plan the next step","stream":true}'
+```
+
+The outbound request to the aevatar runtime receives the stored aevatar credential as `Authorization: Bearer <credential>` and a short-lived `X-NyxID-Identity-Token` JWT containing the NyxID user ID and email. NyxID does not forward the caller's raw access token for this catalog entry. `X-NyxID-Delegation-Token` is not injected by default; `llm:proxy` is reserved as the delegation scope for deployments that explicitly enable delegation later.
+
+API keys that call this route still need the standard REST proxy scope (`proxy` or `proxy:*`). Service allowlists are enforced against the resolved concrete `UserService.id`, including for `/proxy/s/aevatar/*`; adding the catalog slug alone is not an authorization grant.
+
 ---
 
 ### Proxy Service Discovery

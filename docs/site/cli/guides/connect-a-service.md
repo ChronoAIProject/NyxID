@@ -29,6 +29,17 @@ nyxid service add llm-openai --credential-env OPENAI_API_KEY
 
 The CLI prints a `Slug:` line — that's the handle you proxy through. If you already had an `llm-openai`, the new one is suffixed (e.g. `llm-openai-2`).
 
+Self-hosted catalog entries require an endpoint URL. For aevatar:
+
+```bash
+export AEVATAR_TOKEN="aevatar-runtime-token"
+nyxid service add aevatar \
+  --endpoint-url https://aevatar.example.com \
+  --credential-env AEVATAR_TOKEN
+```
+
+Proxy calls then use the existing slug route, for example `nyxid proxy request aevatar v1/responses -m POST --stream ...`. NyxID injects the stored aevatar bearer token and a short-lived identity JWT; it does not use a separate LLM namespace for this service.
+
 :::tip
 For multi-field credentials like `aws_sigv4`, use `--credential-file <path>` (or `-` for stdin) instead of `--credential-env`.
 :::
