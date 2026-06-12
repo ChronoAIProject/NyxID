@@ -100,13 +100,15 @@ async fn probe_test_mongo_client() -> Option<mongodb::Client> {
         let Ok(mut options) = mongodb::options::ClientOptions::parse(&uri).await else {
             continue;
         };
-        // The TCP pre-check already confirmed a listener, so a healthy mongod is
-        // selected well within these bounds; they only cap the rare case where a
-        // port accepts TCP but never answers (down from 10s/5s, which the dead
-        // 27018 probe used to pay in full on every CI test).
-        options.server_selection_timeout = Some(Duration::from_secs(2));
-        options.connect_timeout = Some(Duration::from_secs(2));
-        options.max_pool_size = Some(1);
+        // The TCP pre-check guards against dead-port stalls in milliseconds, so
+        // these generous driver timeouts only bound the real-mongod-present
+        // case. Under cargo llvm-cov, argon2 plus instrumentation can starve the
+        // driver's heartbeat monitor long enough to otherwise trigger
+        // ConnectionPoolCleared("server monitor timeout") flakes, observed on
+        // reset_password_happy_path.
+        options.server_selection_timeout = Some(Duration::from_secs(30));
+        options.connect_timeout = Some(Duration::from_secs(20));
+        options.max_pool_size = Some(4);
         let Ok(client) = mongodb::Client::with_options(options) else {
             continue;
         };
