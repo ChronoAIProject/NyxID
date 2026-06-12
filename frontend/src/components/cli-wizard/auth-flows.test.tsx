@@ -501,3 +501,124 @@ describe("OAuthFlow error phase", () => {
     expect(screen.getByRole("button", { name: /^Cancel$/ })).toBeTruthy();
   });
 });
+
+// NyxID#917 — the pair wizard forwards the user's upstream
+// "additional scopes" to the same backend query param the dashboard
+// (`use-providers.ts`) and the CLI `--scope` flag feed: a
+// comma-joined `scope` on the OAuth / device-code initiate request.
+describe("upstream additional scopes forwarding (issue #917)", () => {
+  beforeEach(() => {
+    resetFlowMocks();
+  });
+
+  /** Wire mocks so the flow reaches the initiate request instead of
+   *  short-circuiting on an already-active placeholder. */
+  function arrangePendingPlaceholder() {
+    mockPost.mockImplementation(async (path: string) => {
+      if (path === "/keys") {
+        return {
+          id: "key-1",
+          status: "pending_auth",
+          slug: "llm-openai",
+          label: "OpenAI",
+        };
+      }
+      if (path.includes("/connect/device-code/initiate")) {
+        return {
+          user_code: "ABCD-1234",
+          verification_uri: "https://example.com/device",
+          state: "state-1",
+          interval: 5,
+          expires_in: 900,
+        };
+      }
+      throw new Error(`unexpected POST ${path}`);
+    });
+    mockGet.mockImplementation(async (path: string) => {
+      if (path.startsWith("/providers/") && path.includes("/connect/oauth?")) {
+        return { authorization_url: "https://example.com/oauth" };
+      }
+      if (path === "/keys/key-1") {
+        return {
+          id: "key-1",
+          status: "pending_auth",
+          slug: "llm-openai",
+          label: "OpenAI",
+        };
+      }
+      throw new Error(`unexpected GET ${path}`);
+    });
+  }
+
+  it("appends a comma-joined scope param to the OAuth initiate URL", async () => {
+    arrangePendingPlaceholder();
+
+    renderOAuthFlow({
+      additionalScopes: ["media.write", "tweet.read"],
+    });
+
+    await waitFor(() => {
+      const initiateCall = mockGet.mock.calls.find(([path]) =>
+        (path as string).includes("/connect/oauth?"),
+      );
+      expect(initiateCall).toBeTruthy();
+      const url = initiateCall?.[0] as string;
+      const query = new URLSearchParams(url.split("?")[1]);
+      expect(query.get("scope")).toBe("media.write,tweet.read");
+      // Existing params survive the rewrite to URLSearchParams.
+      expect(query.get("key_id")).toBe("key-1");
+      expect(query.get("redirect_path")).toBe("/keys/key-1");
+    });
+  });
+
+  it("omits the scope param from the OAuth initiate URL when no scopes given", async () => {
+    arrangePendingPlaceholder();
+
+    renderOAuthFlow();
+
+    await waitFor(() => {
+      const initiateCall = mockGet.mock.calls.find(([path]) =>
+        (path as string).includes("/connect/oauth?"),
+      );
+      expect(initiateCall).toBeTruthy();
+      const url = initiateCall?.[0] as string;
+      const query = new URLSearchParams(url.split("?")[1]);
+      expect(query.get("scope")).toBeNull();
+    });
+  });
+
+  it("appends a comma-joined scope param to the device-code initiate URL", async () => {
+    arrangePendingPlaceholder();
+
+    renderDeviceCodeFlow({
+      additionalScopes: ["repo", "read:org"],
+    });
+
+    await waitFor(() => {
+      const initiateCall = mockPost.mock.calls.find(([path]) =>
+        (path as string).includes("/connect/device-code/initiate"),
+      );
+      expect(initiateCall).toBeTruthy();
+      const url = initiateCall?.[0] as string;
+      const query = new URLSearchParams(url.split("?")[1]);
+      expect(query.get("scope")).toBe("repo,read:org");
+      expect(query.get("key_id")).toBe("key-1");
+    });
+  });
+
+  it("omits the scope param from the device-code initiate URL when no scopes given", async () => {
+    arrangePendingPlaceholder();
+
+    renderDeviceCodeFlow();
+
+    await waitFor(() => {
+      const initiateCall = mockPost.mock.calls.find(([path]) =>
+        (path as string).includes("/connect/device-code/initiate"),
+      );
+      expect(initiateCall).toBeTruthy();
+      const url = initiateCall?.[0] as string;
+      const query = new URLSearchParams(url.split("?")[1]);
+      expect(query.get("scope")).toBeNull();
+    });
+  });
+});

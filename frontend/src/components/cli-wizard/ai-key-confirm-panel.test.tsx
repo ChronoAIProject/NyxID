@@ -16,11 +16,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 //     point — regression guard for the existing `service add <slug>`
 //     flow.
 
-const { mockGet, mockPost, mockUseOrgs } = vi.hoisted(() => ({
-  mockGet: vi.fn(),
-  mockPost: vi.fn(),
-  mockUseOrgs: vi.fn(),
-}));
+const { mockGet, mockPost, mockUseOrgs, mockOAuthFlow, mockDeviceCodeFlow } =
+  vi.hoisted(() => ({
+    mockGet: vi.fn(),
+    mockPost: vi.fn(),
+    mockUseOrgs: vi.fn(),
+    mockOAuthFlow: vi.fn(),
+    mockDeviceCodeFlow: vi.fn(),
+  }));
 
 vi.mock("@/lib/api-client", () => ({
   api: {
@@ -81,11 +84,19 @@ vi.mock("./catalog-grid", () => ({
   CatalogGrid: () => <div data-testid="catalog-grid">CATALOG_GRID_MARKER</div>,
 }));
 
-// auth-flows pulls in OAuth / device-code subflows that aren't part of
-// our path. Stub them out so they don't try to render.
+// auth-flows pulls in OAuth / device-code subflows whose internals
+// aren't under test here. Stub them with prop recorders so the
+// additional-scopes handoff (issue #917) can be asserted without
+// running the real placeholder/polling machinery.
 vi.mock("./auth-flows", () => ({
-  OAuthFlow: () => null,
-  DeviceCodeFlow: () => null,
+  OAuthFlow: (props: Record<string, unknown>) => {
+    mockOAuthFlow(props);
+    return <div data-testid="oauth-flow">OAUTH_FLOW_MARKER</div>;
+  },
+  DeviceCodeFlow: (props: Record<string, unknown>) => {
+    mockDeviceCodeFlow(props);
+    return <div data-testid="device-code-flow">DEVICE_CODE_FLOW_MARKER</div>;
+  },
 }));
 
 function createWrapper() {
@@ -670,5 +681,159 @@ describe("AiKeyConfirm — catalog services routed via node", () => {
     expect(
       screen.getByRole("button", { name: /Connect via node/i }),
     ).toBeDisabled();
+  });
+});
+
+// NyxID#917 — the pair wizard mirrors the dashboard's
+// "Additional scopes (optional)" input for OAuth / device-code
+// providers, gated identically (`device_code_format !== "openai"`),
+// and hands the parsed list to the auth sub-flow.
+describe("AiKeyConfirm — upstream additional scopes (issue #917)", () => {
+  const oauthEntry = {
+    slug: "social-twitter",
+    name: "Twitter / X",
+    base_url: "https://api.twitter.com",
+    auth_method: "bearer",
+    provider_type: "oauth2",
+    provider_config_id: "prov-twitter",
+    service_type: "rest",
+    requires_credential: true,
+    requires_gateway_url: false,
+  };
+  const deviceCodeEntry = {
+    slug: "vcs-github",
+    name: "GitHub",
+    base_url: "https://api.github.com",
+    auth_method: "bearer",
+    provider_type: "device_code",
+    provider_config_id: "prov-github",
+    device_code_format: "oauth2",
+    service_type: "rest",
+    requires_credential: true,
+    requires_gateway_url: false,
+  };
+  const openaiDeviceCodeEntry = {
+    ...deviceCodeEntry,
+    slug: "llm-codex",
+    name: "Codex",
+    provider_config_id: "prov-codex",
+    device_code_format: "openai",
+  };
+  const apiKeyEntry = {
+    slug: "llm-openai",
+    name: "OpenAI",
+    base_url: "https://api.openai.com",
+    auth_method: "bearer",
+    service_type: "rest",
+    requires_credential: true,
+    requires_gateway_url: false,
+  };
+
+  beforeEach(() => {
+    mockGet.mockReset();
+    mockPost.mockReset();
+    mockOAuthFlow.mockReset();
+    mockDeviceCodeFlow.mockReset();
+    baseProps.onSuccess = vi.fn();
+    baseProps.onSlugPicked = vi.fn();
+  });
+
+  it("parses the scope input and hands it to the OAuth sub-flow", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue(oauthEntry);
+
+    render(
+      <AiKeyConfirm {...baseProps} prefill={{ slug: "social-twitter" }} />,
+      { wrapper: createWrapper() },
+    );
+
+    const scopeInput = await screen.findByLabelText(
+      /Additional scopes \(optional\)/i,
+    );
+    // Mixed separators + duplicate — the shared splitter must trim
+    // and dedupe before the handoff.
+    await user.type(scopeInput, "media.write, tweet.read media.write");
+    await user.click(
+      screen.getByRole("button", { name: /Continue with provider sign-in/i }),
+    );
+
+    await waitFor(() => {
+      expect(mockOAuthFlow).toHaveBeenCalledWith(
+        expect.objectContaining({
+          providerId: "prov-twitter",
+          additionalScopes: ["media.write", "tweet.read"],
+        }),
+      );
+    });
+  });
+
+  it("shows the scope input for non-openai device-code providers and forwards parsed scopes", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue(deviceCodeEntry);
+
+    render(<AiKeyConfirm {...baseProps} prefill={{ slug: "vcs-github" }} />, {
+      wrapper: createWrapper(),
+    });
+
+    const scopeInput = await screen.findByLabelText(
+      /Additional scopes \(optional\)/i,
+    );
+    await user.type(scopeInput, "repo,read:org");
+    await user.click(screen.getByRole("button", { name: /Get device code/i }));
+
+    await waitFor(() => {
+      expect(mockDeviceCodeFlow).toHaveBeenCalledWith(
+        expect.objectContaining({
+          providerId: "prov-github",
+          additionalScopes: ["repo", "read:org"],
+        }),
+      );
+    });
+  });
+
+  it("hides the scope input for openai-format device-code providers and passes no scopes", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue(openaiDeviceCodeEntry);
+
+    render(<AiKeyConfirm {...baseProps} prefill={{ slug: "llm-codex" }} />, {
+      wrapper: createWrapper(),
+    });
+
+    await screen.findByRole("button", { name: /Get device code/i });
+    expect(
+      screen.queryByLabelText(/Additional scopes \(optional\)/i),
+    ).not.toBeInTheDocument();
+    // Parity with the dashboard: explain WHY there's no input rather
+    // than silently omitting it.
+    expect(
+      screen.getByText(/does not accept additional scopes/i),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /Get device code/i }));
+
+    await waitFor(() => {
+      expect(mockDeviceCodeFlow).toHaveBeenCalledWith(
+        expect.objectContaining({
+          providerId: "prov-codex",
+          additionalScopes: [],
+        }),
+      );
+    });
+  });
+
+  it("does not render the scope input for plain api-key providers", async () => {
+    mockGet.mockResolvedValue(apiKeyEntry);
+
+    render(<AiKeyConfirm {...baseProps} prefill={{ slug: "llm-openai" }} />, {
+      wrapper: createWrapper(),
+    });
+
+    await screen.findByLabelText(/API key/i);
+    expect(
+      screen.queryByLabelText(/Additional scopes \(optional\)/i),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/does not accept additional scopes/i),
+    ).not.toBeInTheDocument();
   });
 });

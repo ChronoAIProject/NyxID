@@ -59,6 +59,15 @@ interface FlowProps {
   readonly credentialMode?: string;
   /** Admin-provided docs URL rendered in the OAuth-credentials step. */
   readonly documentationUrl?: string;
+  /**
+   * Upstream provider scopes to request on top of the provider's
+   * `default_scopes` (NyxID#917). Already parsed/deduped by the
+   * confirm panel via `parseAdditionalScopes`. Forwarded as a
+   * comma-separated `scope` query param on the OAuth initiate /
+   * device-code initiate request — same backend field the dashboard
+   * (`use-providers.ts`) and the CLI `--scope` flag feed.
+   */
+  readonly additionalScopes?: readonly string[];
   readonly onSuccess: (result: AiKeyPairingSuccess) => void;
   /**
    * Called when the user bails before success so the parent can reset
@@ -527,6 +536,7 @@ export function OAuthFlow({
   pairingId,
   credentialMode,
   documentationUrl,
+  additionalScopes,
   onSuccess,
   onCancel,
 }: FlowProps) {
@@ -905,10 +915,18 @@ export function OAuthFlow({
         // UserApiKey (rather than the legacy user_provider_tokens path).
         // Harmless for legacy keys: the backend just falls back to the
         // legacy write path when the key carries no connection_id.
+        const initiateQuery = new URLSearchParams({
+          redirect_path: `/keys/${placeholder.id}`,
+          key_id: placeholder.id,
+        });
+        // Upstream additional scopes (NyxID#917) — comma-joined to match
+        // the dashboard's `useInitiateOAuth`; the backend splits, validates,
+        // and merges with the provider's `default_scopes`.
+        if (additionalScopes && additionalScopes.length > 0) {
+          initiateQuery.set("scope", additionalScopes.join(","));
+        }
         const initiate = await api.get<InitiateOAuthResponse>(
-          `/providers/${encodeURIComponent(providerId)}/connect/oauth?redirect_path=${encodeURIComponent(
-            `/keys/${placeholder.id}`,
-          )}&key_id=${encodeURIComponent(placeholder.id)}`,
+          `/providers/${encodeURIComponent(providerId)}/connect/oauth?${initiateQuery.toString()}`,
         );
         if (cancel) return;
         if (!initiate.authorization_url) {
@@ -1207,6 +1225,7 @@ export function DeviceCodeFlow({
   targetOrgId,
   endpointUrl,
   pairingId,
+  additionalScopes,
   onSuccess,
   onCancel,
 }: FlowProps) {
@@ -1464,9 +1483,19 @@ export function DeviceCodeFlow({
       // device-code OAuth state so completion writes the token directly
       // onto this UserApiKey. Omitted when no placeholder id is known;
       // the backend falls back to the legacy write path either way.
+      const initQuery = new URLSearchParams();
+      if (keyId) initQuery.set("key_id", keyId);
+      // Upstream additional scopes (NyxID#917) — same comma-joined `scope`
+      // param the dashboard's `useInitiateDeviceCode` sends. The confirm
+      // panel never passes scopes for `device_code_format === "openai"`
+      // providers, which reject a `scope` parameter outright.
+      if (additionalScopes && additionalScopes.length > 0) {
+        initQuery.set("scope", additionalScopes.join(","));
+      }
+      const initQueryString = initQuery.toString();
       const init = await api.post<DeviceCodeInitiateResponse>(
         `/providers/${encodeURIComponent(providerId)}/connect/device-code/initiate${
-          keyId ? `?key_id=${encodeURIComponent(keyId)}` : ""
+          initQueryString ? `?${initQueryString}` : ""
         }`,
         {},
       );

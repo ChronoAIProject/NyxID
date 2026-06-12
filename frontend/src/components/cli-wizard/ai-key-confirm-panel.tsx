@@ -18,6 +18,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { OrgScopeSelect } from "@/components/shared/org-scope-select";
 import { useOrgs } from "@/hooks/use-orgs";
 import { ApiError, api } from "@/lib/api-client";
+import { parseAdditionalScopes } from "@/lib/parse-additional-scopes";
 import { Building2, ExternalLink } from "lucide-react";
 import type { AiKeyPrefill } from "@/pages/cli-pair/types";
 import { DeviceCodeFlow, OAuthFlow } from "./auth-flows";
@@ -75,6 +76,13 @@ interface CatalogEntryShape {
   readonly credential_mode?: string;
   /** Admin-provided docs URL shown inside the user-OAuth-app step. */
   readonly documentation_url?: string;
+  /**
+   * Device-code wire format (`oauth2`, `openai`, ...). `openai`-format
+   * providers (Codex) reject a `scope` parameter — scopes are baked
+   * into the upstream client registration — so the additional-scopes
+   * input is hidden for them (NyxID#917, mirrors `add-key-dialog`).
+   */
+  readonly device_code_format?: string | null;
   /**
    * Multi-field credential schema. When present and non-empty, this
    * catalog entry uses the `token_exchange` flow — render one form
@@ -709,6 +717,10 @@ function CatalogConfirmForm({
   // submit. One hook per entry so flipping between entries doesn't
   // leak values across providers.
   const [tokenFields, setTokenFields] = useState<Record<string, string>>({});
+  // Free-form upstream "additional scopes" for OAuth / device-code
+  // flows (NyxID#917). Parsed with the shared splitter on handoff to
+  // the sub-flow; kept as raw text here so the user can edit freely.
+  const [scopeInput, setScopeInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const viaNode = prefill.via_node?.trim() ?? "";
@@ -897,6 +909,18 @@ function CatalogConfirmForm({
   // this or self-hosted services will bind to the wrong host.
   const effectiveEndpointUrl = endpointUrl.trim() || prefill.endpoint_url;
 
+  // Whether the upstream provider accepts additional scopes on the
+  // initiate request. OAuth always does; `openai`-format device-code
+  // providers (Codex) reject a `scope` parameter, so hide the input
+  // for them — same gate as `add-key-dialog.tsx::DeviceCodeStep`
+  // (NyxID#917).
+  const supportsAdditionalScopes =
+    shape === "oauth" ||
+    (shape === "device-code" && entry.device_code_format !== "openai");
+  const additionalScopes = supportsAdditionalScopes
+    ? parseAdditionalScopes(scopeInput)
+    : [];
+
   if (authFlowActive && shape === "oauth" && entry.provider_config_id) {
     return (
       <OAuthFlow
@@ -909,6 +933,7 @@ function CatalogConfirmForm({
         pairingId={pairingId}
         credentialMode={entry.credential_mode}
         documentationUrl={entry.documentation_url}
+        additionalScopes={additionalScopes}
         onSuccess={onSuccess}
         onCancel={() => {
           setAuthFlowActive(false);
@@ -927,6 +952,7 @@ function CatalogConfirmForm({
         endpointUrl={effectiveEndpointUrl}
         pairingId={pairingId}
         documentationUrl={entry.documentation_url}
+        additionalScopes={additionalScopes}
         onSuccess={onSuccess}
         onCancel={() => {
           setAuthFlowActive(false);
@@ -1064,6 +1090,35 @@ function CatalogConfirmForm({
               </Field>
             ))
           : null}
+
+        {supportsAdditionalScopes ? (
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="pair-aikey-additional-scopes">
+              Additional scopes (optional)
+            </Label>
+            <Input
+              id="pair-aikey-additional-scopes"
+              value={scopeInput}
+              onChange={(e) => {
+                setScopeInput(e.target.value);
+              }}
+              placeholder={
+                shape === "oauth" ? "e.g. media.write" : "e.g. repo,read:org"
+              }
+              autoComplete="off"
+              spellCheck={false}
+            />
+            <p className="text-xs text-muted-foreground">
+              Comma- or space-separated. Merged with the provider's default
+              scopes. The upstream provider decides whether to grant them.
+            </p>
+          </div>
+        ) : shape === "device-code" ? (
+          <p className="text-xs text-muted-foreground">
+            This provider does not accept additional scopes — they are
+            fixed by the upstream client registration.
+          </p>
+        ) : null}
 
         {viaNode ? (
           <div className="rounded-lg border border-border bg-muted/40 px-3 py-2">

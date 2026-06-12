@@ -30,6 +30,7 @@ frontend/src/hooks/use-orgs.ts
 frontend/src/hooks/use-runtime-config.ts
 frontend/src/lib/api-client.ts
 frontend/src/lib/navigation.ts
+frontend/src/lib/parse-additional-scopes.ts
 frontend/src/lib/telemetry.ts
 frontend/src/lib/utils.ts
 frontend/src/pages/cli-pair/reserve-action.ts
