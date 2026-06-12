@@ -634,13 +634,22 @@ jobs:
           if-no-files-found: warn
 
   # ---------------------------------------------------------------------------
-  # PR comment: aggregate the three coverage summaries into one sticky comment
-  # showing each component's line %, its enforced threshold, and the delta vs.
-  # the base branch (AC #4). Runs only on pull_request, after the measurement
-  # jobs, and tolerates skipped components (docs-only PR -> some jobs skip).
+  # PR comment payload: aggregate the three coverage summaries into one sticky
+  # comment body showing each component's line %, its enforced threshold, and
+  # the delta vs. the base branch (AC #4). Runs only on pull_request, after the
+  # measurement jobs, and tolerates skipped components (docs-only PR -> some
+  # jobs skip).
+  #
+  # This job only BUILDS the comment body and uploads it as an artifact; the
+  # actual posting happens in coverage-comment.yml. Posting needs a
+  # write-scoped token, but `pull_request` runs from forks get a read-only
+  # GITHUB_TOKEN (the job's `permissions:` block is capped, not honored), so an
+  # in-line `issues.createComment` 403s on every fork PR. The companion
+  # `workflow_run` workflow runs from the default branch with the base repo's
+  # token and never executes PR/fork code, so it can post safely.
   # ---------------------------------------------------------------------------
   coverage-comment:
-    name: Coverage PR Comment
+    name: Coverage Comment Payload
     if: always() && github.event_name == 'pull_request'
     needs:
       - coverage-backend
@@ -649,9 +658,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       # `actions/checkout` needs contents:read; declaring any permissions block
-      # otherwise drops all unlisted scopes to none and the checkout 403s.
+      # otherwise drops all unlisted scopes to none and the checkout 403s. No
+      # write scopes here -- this job never touches the PR conversation.
       contents: read
-      pull-requests: write
     steps:
       - uses: actions/checkout@v6
       - name: Download coverage summaries
@@ -661,33 +670,24 @@ jobs:
           path: coverage-artifacts
           merge-multiple: true
       - name: Build comment body
-        id: body
         run: |
           python3 .github/scripts/coverage_comment.py \
             coverage-artifacts > coverage-comment.md
           cat coverage-comment.md
-      - name: Post or update PR comment
-        uses: actions/github-script@v7
+      - name: Record PR number
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: echo "$PR_NUMBER" > pr-number.txt
+      - name: Upload coverage comment payload
+        uses: actions/upload-artifact@v4
         with:
-          script: |
-            const fs = require('fs');
-            const body = fs.readFileSync('coverage-comment.md', 'utf8');
-            const marker = '<!-- nyxid-coverage-report -->';
-            const { owner, repo } = context.repo;
-            const issue_number = context.issue.number;
-            const { data: comments } = await github.rest.issues.listComments({
-              owner, repo, issue_number, per_page: 100,
-            });
-            const existing = comments.find((c) => c.body && c.body.includes(marker));
-            if (existing) {
-              await github.rest.issues.updateComment({
-                owner, repo, comment_id: existing.id, body,
-              });
-            } else {
-              await github.rest.issues.createComment({
-                owner, repo, issue_number, body,
-              });
-            }
+          # Deliberately NOT matching `coverage-*` so the pattern download
+          # above never picks this payload up on a re-run.
+          name: pr-coverage-comment
+          path: |
+            coverage-comment.md
+            pr-number.txt
+          if-no-files-found: error
 
   # ---------------------------------------------------------------------------
   # Aggregator: a single status check that summarises the whole pipeline.
