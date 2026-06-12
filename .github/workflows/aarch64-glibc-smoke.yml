@@ -1,0 +1,68 @@
+name: aarch64 glibc smoke
+
+# Proves the aarch64 Linux release approach (build inside a bullseye / glibc 2.31
+# container, per Cargo.toml [workspace.metadata.dist] and issue #802) yields a
+# binary that actually RUNS on a glibc 2.31 host — not merely that it compiles.
+#
+# It builds the CLI in buildpack-deps:bullseye (glibc 2.31, same baseline as the
+# release job) on a native arm64 runner, then executes it inside ubuntu:20.04
+# (glibc 2.31, the NVIDIA Jetson L4T / Raspberry Pi OS / Ubuntu 20.04 floor) and
+# asserts `nyxid --version` exits 0. A binary linked against a newer glibc would
+# fail here with `GLIBC_2.3x not found`, turning the "runs on Jetson" claim into
+# a CI gate. Path-filtered to release/build config so normal code PRs are unaffected.
+
+on:
+  pull_request:
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "cli/Cargo.toml"
+      - "skills/nyxid/scripts/install.sh"
+      - ".github/workflows/release.yml"
+      - ".github/workflows/aarch64-glibc-smoke.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aarch64-glibc-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: build in bullseye, run on ubuntu:20.04 (glibc 2.31)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build nyxid CLI in buildpack-deps:bullseye (glibc 2.31)
+        run: |
+          docker run --rm -v "$PWD":/src -w /src \
+            -e CARGO_TERM_COLOR=always -e CARGO_NET_RETRY=3 \
+            buildpack-deps:bullseye bash -euo pipefail -c '
+              apt-get update -qq
+              apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
+              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
+                | sh -s -- -y --profile minimal --default-toolchain stable
+              . "$HOME/.cargo/env"
+              cc --version | head -1
+              cargo build -p nyxid-cli --release --bin nyxid
+            '
+
+      - name: Run on ubuntu:20.04 (glibc 2.31) — must not require a newer glibc
+        run: |
+          docker run --rm -v "$PWD/target/release":/out ubuntu:20.04 bash -euo pipefail -c '
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq
+            # libdbus-1-3: the CLI dynamically links it via the `keyring` crate
+            # (sync-secret-service feature). It ships by default on real targets
+            # (NVIDIA Jetson L4T, Ubuntu 20.04 desktop) but not in the minimal
+            # docker base image. binutils provides objdump for the symbol check.
+            apt-get install -y --no-install-recommends libdbus-1-3 binutils
+            echo "host glibc:"; ldd --version | head -1
+            echo "max GLIBC_ symbol required by binary (must be <= 2.31):"
+            objdump -T /out/nyxid | grep -oE "GLIBC_[0-9.]+" | sort -uV | tail -1
+            /out/nyxid --version
+          '

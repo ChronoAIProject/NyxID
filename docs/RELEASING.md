@@ -18,10 +18,12 @@ Use the same `X.Y.Z` version as `cli/Cargo.toml`. Do not reuse a published tag f
 
 The `Release` workflow runs cargo-dist and publishes the `nyxid-cli` package for:
 
-- `x86_64-unknown-linux-gnu` on `ubuntu-24.04`
-- `aarch64-unknown-linux-gnu` on `ubuntu-24.04-arm`
+- `x86_64-unknown-linux-gnu` on `ubuntu-24.04` (host glibc, currently 2.39)
+- `aarch64-unknown-linux-gnu` on `ubuntu-24.04-arm`, built inside the `buildpack-deps:bullseye` container (glibc 2.31)
 - `x86_64-apple-darwin` on `macos-latest`
 - `aarch64-apple-darwin` on `macos-latest`
+
+The aarch64 Linux build runs inside a Debian Bullseye container so the resulting binary is forward-compatible with long-tail aarch64 hosts: NVIDIA Jetson L4T (Ubuntu 20.04, glibc 2.31), Raspberry Pi OS, and other older boards. The minimum supported glibc for the published aarch64 artifact is therefore 2.31. The x86_64 Linux artifact is still built directly on the runner; its glibc baseline tracks whatever ships on `ubuntu-24.04` at release time. See NyxID issue #802 for context.
 
 Windows is not yet a release target. `pty-process`, `nix`, and parts of `rustix` used by the SSH/PTY paths in `cli/src/node/ws_client.rs` are Unix-only and aren't yet `cfg(unix)`-gated. Until that audit lands, Windows users should run `nyxid` under WSL — see [docs/WINDOWS_SETUP.md](WINDOWS_SETUP.md).
 
