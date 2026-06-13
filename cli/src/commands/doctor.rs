@@ -245,11 +245,7 @@ fn path_row() -> DoctorRow {
 fn install_version_row(current_exe: Option<&Path>) -> DoctorRow {
     let version = update_check::installed_release_tag();
     let status = current_exe
-        .and_then(|path| {
-            update::install_versions_root()
-                .ok()
-                .map(|root| (path, root))
-        })
+        .zip(update::install_versions_root().ok())
         .map(|(path, root)| {
             if path.starts_with(root) {
                 DoctorStatus::Pass
