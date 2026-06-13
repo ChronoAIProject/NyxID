@@ -37,6 +37,18 @@ const SEEDED_USER_CREDENTIAL_OAUTH_PROVIDER_SLUGS: &[&str] = &[
     "lark",
 ];
 
+/// Default OAuth scopes seeded for the Twitter / X provider. `media.write` is required so
+/// delegated clients can attach images/video via `POST /2/media/upload`; without it that
+/// endpoint returns 403 and the CLI pair wizard exposes no scope input to add it afterward.
+/// Kept as a constant so it is unit-testable and shared by the seed and the migration below.
+const TWITTER_DEFAULT_SCOPES: &[&str] = &[
+    "tweet.read",
+    "tweet.write",
+    "media.write",
+    "users.read",
+    "offline.access",
+];
+
 /// Seed default AI provider configurations at startup (idempotent).
 ///
 /// Checks for each provider by slug; if it does not exist, inserts it.
@@ -416,15 +428,14 @@ pub async fn seed_default_providers(
             authorization_url: Some("https://x.com/i/oauth2/authorize".to_string()),
             token_url: Some("https://api.x.com/2/oauth2/token".to_string()),
             revocation_url: Some("https://api.x.com/2/oauth2/revoke".to_string()),
-            // Write access is intentional: NyxID is a credential broker, so delegated
-            // clients commonly need to post on behalf of users. Admins can customise
-            // scopes per deployment.
-            default_scopes: Some(vec![
-                "tweet.read".to_string(),
-                "tweet.write".to_string(),
-                "users.read".to_string(),
-                "offline.access".to_string(),
-            ]),
+            // Write access is intentional: NyxID is a credential broker, so delegated clients
+            // commonly need to post on behalf of users (see TWITTER_DEFAULT_SCOPES).
+            default_scopes: Some(
+                TWITTER_DEFAULT_SCOPES
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            ),
             client_id_encrypted: None,
             client_secret_encrypted: None,
             supports_pkce: true,
@@ -474,6 +485,26 @@ pub async fn seed_default_providers(
         tracing::info!(
             slug = "twitter",
             "Migrated existing Twitter provider to credential_mode=user, token_endpoint_auth_method=client_secret_basic"
+        );
+    }
+
+    // Migration: ensure the existing Twitter provider's default_scopes include `media.write`
+    // (see TWITTER_DEFAULT_SCOPES). The seed change alone never reaches an already-seeded
+    // provider, and the CLI pair wizard exposes no scope input to add it after connecting.
+    // `$ne` makes this a no-op once present; `$addToSet` appends without disturbing scopes.
+    let twitter_media_write_migration = collection
+        .update_one(
+            doc! { "slug": "twitter", "default_scopes": { "$ne": "media.write" } },
+            doc! {
+                "$addToSet": { "default_scopes": "media.write" },
+                "$set": { "updated_at": bson::DateTime::from_chrono(Utc::now()) },
+            },
+        )
+        .await?;
+    if twitter_media_write_migration.modified_count > 0 {
+        tracing::info!(
+            slug = "twitter",
+            "Migrated existing Twitter provider default_scopes to include media.write"
         );
     }
 
@@ -3773,7 +3804,7 @@ pub async fn delete_provider(db: &mongodb::Database, provider_id: &str) -> AppRe
 #[cfg(test)]
 mod tests {
     use super::{
-        ANTHROPIC_DEFAULT_HEADERS, DEFAULT_SERVICE_SEEDS, SeededHeader,
+        ANTHROPIC_DEFAULT_HEADERS, DEFAULT_SERVICE_SEEDS, SeededHeader, TWITTER_DEFAULT_SCOPES,
         normalize_telegram_bot_token, normalize_telegram_bot_username, reconcile_seeded_headers,
         seed_capability_override,
     };
@@ -3798,6 +3829,14 @@ mod tests {
 
         assert_eq!(seed.service_auth_method, Some("path"));
         assert_eq!(seed.service_auth_key_name, Some("bot"));
+    }
+
+    #[test]
+    fn twitter_seed_includes_media_write() {
+        assert!(
+            TWITTER_DEFAULT_SCOPES.contains(&"media.write"),
+            "Twitter default scopes must include media.write so delegated clients can POST /2/media/upload"
+        );
     }
 
     #[test]
