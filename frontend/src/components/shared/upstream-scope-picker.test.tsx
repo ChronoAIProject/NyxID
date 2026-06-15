@@ -15,11 +15,13 @@ function Harness({
   catalog = CATALOG,
   defaultScopes = ["tweet.read"],
   initial = ["tweet.read"],
+  lockedScopes,
   onChangeSpy,
 }: {
   catalog?: ScopeCatalogEntry[];
   defaultScopes?: string[];
   initial?: string[];
+  lockedScopes?: string[];
   onChangeSpy?: (s: readonly string[]) => void;
 }) {
   const [value, setValue] = useState<readonly string[]>(initial);
@@ -28,6 +30,7 @@ function Harness({
       catalog={catalog}
       defaultScopes={defaultScopes}
       value={value}
+      lockedScopes={lockedScopes}
       onChange={(next) => {
         onChangeSpy?.(next);
         setValue(next);
@@ -113,6 +116,61 @@ describe("UpstreamScopePicker", () => {
       />,
     );
     expect(screen.queryByText(/write or admin-level scope/i)).not.toBeInTheDocument();
+  });
+
+  // Append-only edit mode (NyxID#917 follow-up): granted scopes are locked.
+  it("renders locked scopes as selected, non-removable, tagged 'granted'", () => {
+    render(
+      <Harness
+        defaultScopes={[]}
+        initial={["tweet.read"]}
+        lockedScopes={["tweet.read"]}
+      />,
+    );
+    const granted = screen.getByRole("button", { name: /Read posts/i });
+    expect(granted).toHaveAttribute("aria-pressed", "true");
+    expect(granted).toBeDisabled();
+    expect(granted).toHaveTextContent(/granted/i);
+  });
+
+  it("does not remove a locked scope when clicked", async () => {
+    const onChange = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <Harness
+        defaultScopes={[]}
+        initial={["tweet.read"]}
+        lockedScopes={["tweet.read"]}
+        onChangeSpy={onChange}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: /Read posts/i }));
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("allows adding a scope alongside locked ones (append-only)", async () => {
+    const onChange = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <Harness
+        defaultScopes={[]}
+        initial={["tweet.read"]}
+        lockedScopes={["tweet.read"]}
+        onChangeSpy={onChange}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: /Upload media/i }));
+    expect(onChange).toHaveBeenLastCalledWith(
+      expect.arrayContaining(["tweet.read", "media.write"]),
+    );
+  });
+
+  it("shows the append-only helper note when scopes are locked", () => {
+    render(
+      <Harness defaultScopes={[]} initial={["tweet.read"]} lockedScopes={["tweet.read"]} />,
+    );
+    expect(screen.getByText(/already authorized and stay/i)).toBeInTheDocument();
+    expect(screen.getByText(/Removing a granted scope isn.t supported/i)).toBeInTheDocument();
   });
 
   it("shows default scopes as pills even when absent from the catalog", () => {

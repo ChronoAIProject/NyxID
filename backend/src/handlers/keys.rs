@@ -430,6 +430,13 @@ pub struct KeyResponse {
     /// — so safe to surface. The `client_secret` is never returned by the API.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub oauth_client_id: Option<String>,
+    /// Scopes currently granted on this OAuth connection (NyxID#917 follow-up),
+    /// parsed from the backing `UserApiKey.token_scopes`. The connect UIs
+    /// pre-select and lock these when adding scopes to an existing connection
+    /// (append-only edit). Omitted for non-OAuth keys / never-authorized
+    /// connections.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub granted_scopes: Option<Vec<String>>,
     /// Per-user default HTTP headers (NyxID#356). Only user-owned entries
     /// are surfaced here; catalog-level admin defaults are described on
     /// the `/catalog/{slug}` response.
@@ -2076,6 +2083,9 @@ fn key_response_from_result(result: &unified_key_service::CreateKeyResult) -> Ke
         // wizard can call `GET /keys/:id` immediately after create if
         // it needs the field rendered.
         oauth_client_id: None,
+        // Fresh create: an OAuth connection has no granted scopes until the
+        // authorize callback completes, so there's nothing to surface yet.
+        granted_scopes: None,
         default_request_headers: crate::models::default_request_header::redact_list_for_response(
             result.service.default_request_headers.clone(),
         ),
@@ -2141,6 +2151,7 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
         custom_user_agent: view.custom_user_agent,
         connection_id: view.connection_id,
         oauth_client_id: view.oauth_client_id,
+        granted_scopes: view.granted_scopes,
         default_request_headers: crate::models::default_request_header::redact_list_for_response(
             view.default_request_headers,
         ),

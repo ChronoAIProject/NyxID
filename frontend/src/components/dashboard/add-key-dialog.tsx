@@ -1193,6 +1193,7 @@ function OAuthStep({
   onBack,
   targetOrgId,
   reconnectMode,
+  lockedScopes = [],
 }: {
   readonly catalogEntry: CatalogEntry;
   readonly ensureKey: () => Promise<KeyInfo>;
@@ -1201,15 +1202,21 @@ function OAuthStep({
   /** When set, initiate the OAuth flow under this org's scope. */
   readonly targetOrgId: string | null;
   readonly reconnectMode: boolean;
+  /**
+   * Already-granted scopes for an existing connection (append-only edit,
+   * NyxID#917 follow-up). Locked in the picker and used as the seed; empty
+   * for a fresh add, where the seed falls back to provider defaults.
+   */
+  readonly lockedScopes?: readonly string[];
 }) {
   const initiateOAuth = useInitiateOAuth();
   const [error, setError] = useState<string | null>(null);
-  // Scope picker (NyxID#917): seed the selection with the provider's defaults
-  // (all pre-selected) so an unedited submit requests exactly today's scopes.
-  // The user can deselect a default or add custom scopes; the full selected
-  // set is sent as `scopeOverride`.
+  // Scope picker (NyxID#917): seed from the connection's granted scopes when
+  // editing an existing connection (append-only), otherwise the provider's
+  // defaults (all pre-selected) so an unedited add requests today's scopes.
+  // The full selection is sent as `scopeOverride`.
   const [selectedScopes, setSelectedScopes] = useState<readonly string[]>(
-    catalogEntry.default_scopes ?? [],
+    lockedScopes.length > 0 ? lockedScopes : (catalogEntry.default_scopes ?? []),
   );
 
   async function handleConnect() {
@@ -1274,6 +1281,7 @@ function OAuthStep({
         defaultScopes={catalogEntry.default_scopes ?? []}
         value={selectedScopes}
         onChange={setSelectedScopes}
+        lockedScopes={lockedScopes}
         idPrefix="oauth-scope"
       />
 
@@ -1323,6 +1331,7 @@ function DeviceCodeStep({
   onComplete,
   targetOrgId,
   reconnectMode,
+  lockedScopes = [],
 }: {
   readonly catalogEntry: CatalogEntry;
   readonly ensureKey: () => Promise<KeyInfo>;
@@ -1332,6 +1341,8 @@ function DeviceCodeStep({
   /** When set, initiate the device-code flow under this org's scope. */
   readonly targetOrgId: string | null;
   readonly reconnectMode: boolean;
+  /** Already-granted scopes for append-only edit (see `OAuthStep`). */
+  readonly lockedScopes?: readonly string[];
 }) {
   const [flowStep, setFlowStep] = useState<DeviceFlowStep>("configure");
   const [userCode, setUserCode] = useState("");
@@ -1339,10 +1350,11 @@ function DeviceCodeStep({
   const [errorMessage, setErrorMessage] = useState("");
   const [secondsRemaining, setSecondsRemaining] = useState(0);
   const [createdKeyId, setCreatedKeyId] = useState<string | null>(null);
-  // Scope picker selection (NyxID#917), seeded with the provider defaults.
-  // Only used for non-openai device-code providers (openai rejects scopes).
+  // Scope picker selection (NyxID#917): granted scopes when editing an
+  // existing connection (append-only), else provider defaults. Only used for
+  // non-openai device-code providers (openai rejects scopes).
   const [selectedScopes, setSelectedScopes] = useState<readonly string[]>(
-    catalogEntry.default_scopes ?? [],
+    lockedScopes.length > 0 ? lockedScopes : (catalogEntry.default_scopes ?? []),
   );
 
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1661,6 +1673,7 @@ function DeviceCodeStep({
             defaultScopes={catalogEntry.default_scopes ?? []}
             value={selectedScopes}
             onChange={setSelectedScopes}
+            lockedScopes={lockedScopes}
             idPrefix="device-scope"
           />
         ) : (
@@ -2445,6 +2458,7 @@ export function AddKeyDialog({
             onKeyCleared={() => setAuthKey(null)}
             targetOrgId={targetOrgId}
             reconnectMode={isReconnect}
+            lockedScopes={isReconnect ? (reconnectKey?.granted_scopes ?? []) : []}
             onBack={() =>
               isReconnect
                 ? handleOpenChange(false)
@@ -2467,6 +2481,7 @@ export function AddKeyDialog({
             onKeyCleared={() => setAuthKey(null)}
             targetOrgId={targetOrgId}
             reconnectMode={isReconnect}
+            lockedScopes={isReconnect ? (reconnectKey?.granted_scopes ?? []) : []}
             onBack={() =>
               isReconnect
                 ? handleOpenChange(false)

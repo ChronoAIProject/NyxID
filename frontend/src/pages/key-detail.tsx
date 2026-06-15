@@ -68,6 +68,7 @@ import {
   ExternalLink,
   FileJson,
   Power,
+  Plus,
 } from "lucide-react";
 import { toast } from "sonner";
 import type { SshServiceConfig } from "@/types/api";
@@ -1842,6 +1843,21 @@ export function KeyDetailPage() {
       catalogEntry?.provider_type === "oauth2" ||
       catalogEntry?.provider_type === "device_code");
 
+  // Append-only scope editing on a healthy connection (NyxID#917 follow-up):
+  // re-authorize with additional scopes via the same reconnect dialog (it
+  // reuses the connection_id and locks the already-granted scopes). Only for
+  // active OAuth connections; `openai`-format device code rejects scopes, so
+  // it's excluded.
+  const isOpenAiDeviceCode = catalogEntry?.device_code_format === "openai";
+  const canEditScopes =
+    !readOnly &&
+    !keyInfo.auto_connected &&
+    keyInfo.status === "active" &&
+    !isOpenAiDeviceCode &&
+    (keyInfo.credential_type === "oauth2" ||
+      catalogEntry?.provider_type === "oauth2" ||
+      catalogEntry?.provider_type === "device_code");
+
   const sshConfig: SshServiceConfig | null =
     isSsh && keyInfo.ssh_host && keyInfo.ssh_port !== null
       ? {
@@ -1914,6 +1930,15 @@ export function KeyDetailPage() {
               >
                 <ButtonIcon variant="primary"><RefreshCw className="h-4 w-4" /></ButtonIcon>
                 {reconnectLabel(keyInfo.status)}
+              </Button>
+            )}
+            {canEditScopes && (
+              <Button
+                variant="outline"
+                onClick={() => setReconnectOpen(true)}
+              >
+                <ButtonIcon><Plus className="h-4 w-4" /></ButtonIcon>
+                Add permissions
               </Button>
             )}
             {!keyInfo.auto_connected && !readOnly && (

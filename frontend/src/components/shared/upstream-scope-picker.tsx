@@ -32,9 +32,17 @@ export interface UpstreamScopePickerProps {
   readonly customPlaceholder?: string;
   /** Optional id prefix so multiple pickers on one page keep unique ids. */
   readonly idPrefix?: string;
+  /**
+   * Scopes already granted on an existing connection (append-only edit,
+   * NyxID#917 follow-up). Rendered selected + non-removable (a "granted" tag,
+   * no ×) and always kept in the emitted set — the user can add scopes but not
+   * drop a current one (removal/revoke is a later, separate flow). Empty/unset
+   * = fresh add, where defaults are removable.
+   */
+  readonly lockedScopes?: readonly string[];
 }
 
-/** A pill row entry resolved from catalog ∪ defaults ∪ custom selections. */
+/** A pill row entry resolved from catalog ∪ defaults ∪ locked ∪ custom. */
 interface PillEntry {
   readonly scope: string;
   readonly label: string;
@@ -42,6 +50,8 @@ interface PillEntry {
   readonly sensitive: boolean;
   /** True for the provider's default scopes (rendered with a subtle marker). */
   readonly isDefault: boolean;
+  /** True for already-granted scopes that can't be removed in edit mode. */
+  readonly locked: boolean;
 }
 
 /**
@@ -55,9 +65,11 @@ function buildPills(
   catalog: readonly ScopeCatalogEntry[],
   defaultScopes: readonly string[],
   value: readonly string[],
+  lockedScopes: readonly string[],
 ): readonly PillEntry[] {
   const seen = new Set<string>();
   const defaults = new Set(defaultScopes);
+  const locked = new Set(lockedScopes);
   const pills: PillEntry[] = [];
 
   for (const e of catalog) {
@@ -69,18 +81,26 @@ function buildPills(
       description: e.description || null,
       sensitive: Boolean(e.sensitive),
       isDefault: defaults.has(e.scope),
+      locked: locked.has(e.scope),
     });
+  }
+  // Locked (already-granted) scopes that aren't in the catalog must still
+  // render — they're part of the connection's grant.
+  for (const scope of lockedScopes) {
+    if (seen.has(scope)) continue;
+    seen.add(scope);
+    pills.push({ scope, label: scope, description: null, sensitive: false, isDefault: false, locked: true });
   }
   for (const scope of defaultScopes) {
     if (seen.has(scope)) continue;
     seen.add(scope);
-    pills.push({ scope, label: scope, description: null, sensitive: false, isDefault: true });
+    pills.push({ scope, label: scope, description: null, sensitive: false, isDefault: true, locked: false });
   }
   for (const scope of value) {
     if (seen.has(scope)) continue;
     seen.add(scope);
     // Custom scope the user typed — unknown to catalog and not a default.
-    pills.push({ scope, label: scope, description: null, sensitive: false, isDefault: false });
+    pills.push({ scope, label: scope, description: null, sensitive: false, isDefault: false, locked: false });
   }
   return pills;
 }
@@ -92,12 +112,16 @@ export function UpstreamScopePicker({
   onChange,
   customPlaceholder = "e.g. custom.scope",
   idPrefix = "scope",
+  lockedScopes = [],
 }: UpstreamScopePickerProps) {
   const [customInput, setCustomInput] = useState("");
   const selected = new Set(value);
-  const pills = buildPills(catalog, defaultScopes, value);
+  const locked = new Set(lockedScopes);
+  const pills = buildPills(catalog, defaultScopes, value, lockedScopes);
 
   function toggle(scope: string) {
+    // Locked (already-granted) scopes are append-only — can't be deselected.
+    if (locked.has(scope)) return;
     const next = new Set(selected);
     if (next.has(scope)) {
       next.delete(scope);
@@ -125,21 +149,28 @@ export function UpstreamScopePicker({
       {pills.length > 0 ? (
         <div role="group" aria-label="Scopes" className="flex flex-wrap gap-1.5">
           {pills.map((p) => {
-            const isOn = selected.has(p.scope);
+            const isOn = selected.has(p.scope) || p.locked;
             return (
               <button
                 key={p.scope}
                 type="button"
                 aria-pressed={isOn}
-                title={p.description ?? p.scope}
+                disabled={p.locked}
+                title={
+                  p.locked
+                    ? `${p.description ?? p.scope} — already granted; can't be removed here`
+                    : (p.description ?? p.scope)
+                }
                 onClick={() => {
                   toggle(p.scope);
                 }}
                 className={
                   "group inline-flex max-w-full items-center gap-1.5 rounded-full border px-3 py-1.5 text-left text-[12px] transition-colors " +
-                  (isOn
-                    ? "border-primary bg-primary/15 text-foreground"
-                    : "border-border bg-transparent text-muted-foreground hover:border-primary/50 hover:bg-muted/40")
+                  (p.locked
+                    ? "cursor-default border-primary/60 bg-primary/10 text-foreground"
+                    : isOn
+                      ? "border-primary bg-primary/15 text-foreground"
+                      : "border-border bg-transparent text-muted-foreground hover:border-primary/50 hover:bg-muted/40")
                 }
               >
                 {p.sensitive ? (
@@ -156,12 +187,16 @@ export function UpstreamScopePicker({
                   </>
                 ) : null}
                 <span className="truncate">{p.label}</span>
-                {p.isDefault ? (
+                {p.locked ? (
+                  <span className="shrink-0 text-[11px] text-muted-foreground">
+                    granted
+                  </span>
+                ) : p.isDefault ? (
                   <span className="shrink-0 text-[11px] text-muted-foreground">
                     default
                   </span>
                 ) : null}
-                {isOn ? (
+                {isOn && !p.locked ? (
                   <X className="h-3 w-3 shrink-0 opacity-50 group-hover:opacity-100" />
                 ) : null}
               </button>
@@ -210,9 +245,11 @@ export function UpstreamScopePicker({
         </Button>
       </div>
       <p className="text-xs text-muted-foreground">
-        {pills.length > 0
-          ? "Selected scopes are requested at sign-in. Defaults are pre-selected — deselect to drop one. Add anything missing above; the upstream provider decides whether to grant them."
-          : "Comma- or space-separated. The upstream provider decides whether to grant them."}
+        {locked.size > 0
+          ? "Scopes marked “granted” are already authorized and stay — adding more re-authorizes this connection with the extra access. Removing a granted scope isn’t supported here yet."
+          : pills.length > 0
+            ? "Selected scopes are requested at sign-in. Defaults are pre-selected — deselect to drop one. Add anything missing above; the upstream provider decides whether to grant them."
+            : "Comma- or space-separated. The upstream provider decides whether to grant them."}
       </p>
     </div>
   );

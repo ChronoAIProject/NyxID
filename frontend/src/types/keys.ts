@@ -77,6 +77,13 @@ export interface KeyInfo {
   readonly permission_setup_url?: string | null;
   /** Scope keys encoded in `permission_setup_url`. */
   readonly permission_setup_scopes?: readonly string[] | null;
+  /**
+   * Scopes currently granted on this OAuth connection (NyxID#917 follow-up),
+   * parsed from the backing token. Used to pre-select and lock the existing
+   * grant when adding scopes to an existing connection (append-only edit).
+   * `null`/absent for non-OAuth keys or connections that never authorized.
+   */
+  readonly granted_scopes?: readonly string[] | null;
 }
 
 export interface KeyListResponse {
