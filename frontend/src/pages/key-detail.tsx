@@ -1834,6 +1834,16 @@ export function KeyDetailPage() {
   const source = keyInfo.credential_source;
   const isOrgSource = source?.type === "org";
   const readOnly = isOrgSource && source.role !== "admin";
+  const platformManagedAuth =
+    keyInfo.auto_connected && keyInfo.auth_method !== "none";
+  const platformManagedDescription = platformManagedAuth
+    ? "This service uses a platform-managed credential. It is managed by the platform and cannot be modified."
+    : keyInfo.source_app_name
+      ? `This service was auto-connected via ${keyInfo.source_app_name}. It is managed by the platform and cannot be modified.`
+      : "This service requires no authentication and was auto-connected from the catalog. It is managed by the platform and cannot be modified.";
+  const platformAuthLabel = platformManagedAuth
+    ? `Platform-managed (${keyInfo.auth_method})`
+    : "None (no credentials required)";
   const canReconnect =
     !readOnly &&
     !keyInfo.auto_connected &&
@@ -1953,9 +1963,7 @@ export function KeyDetailPage() {
             <CardHeader>
               <CardTitle className="text-[15px]">Service Details</CardTitle>
               <CardDescription>
-                {keyInfo.source_app_name
-                  ? `This service was auto-connected via ${keyInfo.source_app_name}. It is managed by the platform and cannot be modified.`
-                  : "This service requires no authentication and was auto-connected from the catalog. It is managed by the platform and cannot be modified."}
+                {platformManagedDescription}
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
@@ -1978,7 +1986,7 @@ export function KeyDetailPage() {
                   <span className="text-xs font-medium text-muted-foreground">
                     Auth Method
                   </span>
-                  <p className="text-xs">None (no credentials required)</p>
+                  <p className="text-xs">{platformAuthLabel}</p>
                 </div>
                 <div>
                   <span className="text-xs font-medium text-muted-foreground">

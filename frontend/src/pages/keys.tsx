@@ -109,6 +109,16 @@ function reconnectLabel(status: string): string {
     : "Reconnect";
 }
 
+function authDisplayLabel(keyInfo: KeyInfo): string {
+  if (keyInfo.auto_connected) {
+    return keyInfo.auth_method === "none" ? "No auth" : "Platform-managed";
+  }
+  if (keyInfo.service_type === "ssh") {
+    return keyInfo.ssh_ca_public_key !== null ? "certificate" : "ssh tunnel";
+  }
+  return keyInfo.credential_type;
+}
+
 function KeyCardContent({
   keyInfo,
   source,
@@ -117,7 +127,6 @@ function KeyCardContent({
   readonly onReconnect?: (keyInfo: KeyInfo) => void;
 }) {
   const isSsh = keyInfo.service_type === "ssh";
-  const hasSshCertificateAuth = isSsh && keyInfo.ssh_ca_public_key !== null;
   // Issue #416: resolve the bound node's name so the list card shows
   // "Via my-node" instead of bare "Via node". TanStack Query dedupes
   // the request across all rendered cards.
@@ -226,13 +235,7 @@ function KeyCardContent({
               <KeyRound className="h-3 w-3 shrink-0" />
             )}
             <span className="truncate">
-              {keyInfo.auto_connected
-                ? "No auth required"
-                : isSsh
-                  ? hasSshCertificateAuth
-                    ? "certificate"
-                    : "ssh tunnel"
-                  : keyInfo.credential_type}
+              {authDisplayLabel(keyInfo)}
             </span>
           </div>
           <div className="flex min-w-0 items-center gap-1.5">
@@ -291,7 +294,6 @@ function ServiceTableRow({
 }) {
   const navigate = useNavigate();
   const isSsh = keyInfo.service_type === "ssh";
-  const hasSshCertificateAuth = isSsh && keyInfo.ssh_ca_public_key !== null;
   const { data: nodes } = useNodes();
   const nodeName = keyInfo.node_id
     ? (nodes?.find((n) => n.id === keyInfo.node_id)?.name ??
@@ -316,13 +318,7 @@ function ServiceTableRow({
     ? `${keyInfo.ssh_host ?? "unknown"}:${keyInfo.ssh_port ?? 22}`
     : keyInfo.endpoint_url;
 
-  const authLabel = keyInfo.auto_connected
-    ? "No auth"
-    : isSsh
-      ? hasSshCertificateAuth
-        ? "certificate"
-        : "ssh tunnel"
-      : keyInfo.credential_type;
+  const authLabel = authDisplayLabel(keyInfo);
   const showReconnect = onReconnect && isReconnectableKey(keyInfo, source);
 
   return (

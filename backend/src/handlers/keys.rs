@@ -1022,7 +1022,29 @@ pub async fn get_key(
     Path(key_id): Path<String>,
 ) -> AppResult<Json<KeyResponse>> {
     let actor = auth_user.user_id.to_string();
-    let access = resolve_key_read_owner(&state, &actor, &key_id).await?;
+    let access = match resolve_key_read_owner(&state, &actor, &key_id).await {
+        Ok(access) => access,
+        Err(AppError::NotFound(_)) => {
+            if let Some(view) =
+                unified_key_service::get_public_internal_platform_service_view(&state.db, &key_id)
+                    .await?
+            {
+                let mut response = key_response_from_view(view);
+                enrich_key_response(
+                    &state.db,
+                    &state.node_ws_manager,
+                    &actor,
+                    state.config.node_heartbeat_timeout_secs,
+                    state.config.base_url.trim_end_matches('/'),
+                    &mut response,
+                )
+                .await?;
+                return Ok(Json(response));
+            }
+            return Err(AppError::NotFound("Key not found".to_string()));
+        }
+        Err(err) => return Err(err),
+    };
 
     // Lazy reconciliation of pending_auth OAuth placeholders (issue #653).
     // Wizard polling hits this handler every ~2s; treating each poll as a
@@ -1112,7 +1134,21 @@ pub async fn update_key(
     Json(body): Json<UpdateKeyRequest>,
 ) -> AppResult<Json<KeyResponse>> {
     let actor = auth_user.user_id.to_string();
-    let access = resolve_key_write_owner(&state, &actor, &key_id).await?;
+    let access = match resolve_key_write_owner(&state, &actor, &key_id).await {
+        Ok(access) => access,
+        Err(AppError::NotFound(_)) => {
+            if unified_key_service::get_public_internal_platform_service_view(&state.db, &key_id)
+                .await?
+                .is_some()
+            {
+                return Err(crate::errors::AppError::BadRequest(
+                    "Platform-managed services cannot be modified".to_string(),
+                ));
+            }
+            return Err(AppError::NotFound("Key not found".to_string()));
+        }
+        Err(err) => return Err(err),
+    };
     let user_id_str = access.owner_id;
     let key_id = access.service_id;
 
@@ -1988,7 +2024,21 @@ pub async fn delete_key(
     Query(query): Query<DeleteKeyQuery>,
 ) -> AppResult<Json<DeleteKeyResponse>> {
     let actor = auth_user.user_id.to_string();
-    let access = resolve_key_write_owner(&state, &actor, &key_id).await?;
+    let access = match resolve_key_write_owner(&state, &actor, &key_id).await {
+        Ok(access) => access,
+        Err(AppError::NotFound(_)) => {
+            if unified_key_service::get_public_internal_platform_service_view(&state.db, &key_id)
+                .await?
+                .is_some()
+            {
+                return Err(crate::errors::AppError::BadRequest(
+                    "Platform-managed services cannot be deleted".to_string(),
+                ));
+            }
+            return Err(AppError::NotFound("Key not found".to_string()));
+        }
+        Err(err) => return Err(err),
+    };
     let user_id_str = access.owner_id;
     let key_id = access.service_id;
 
@@ -2395,10 +2445,6 @@ async fn enrich_key_discovery_metadata(
         .collect();
 
     for key in keys {
-        let Some(service) = service_by_id.get(key.id.as_str()) else {
-            continue;
-        };
-
         let projection = if let Some(catalog_id) = key.catalog_service_id.as_deref() {
             catalog_by_id.get(catalog_id).map(|catalog| {
                 proxy_discovery_service::project_catalog_key(
@@ -2411,6 +2457,9 @@ async fn enrich_key_discovery_metadata(
                 )
             })
         } else {
+            let Some(service) = service_by_id.get(key.id.as_str()) else {
+                continue;
+            };
             endpoint_by_id
                 .get(service.endpoint_id.as_str())
                 .map(|endpoint| {
@@ -3898,6 +3947,153 @@ mod tests {
         assert!(response.keys.len() >= 2);
         assert!(response.keys.iter().any(|k| k.id == svc1));
         assert!(response.keys.iter().any(|k| k.id == svc2));
+    }
+
+    #[tokio::test]
+    async fn list_keys_includes_public_internal_platform_service_without_user_rows() {
+        let Some(db) = connect_test_database("h_keys_list_platform_internal").await else {
+            eprintln!("skipping: no local MongoDB");
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let user_id = uuid::Uuid::new_v4().to_string();
+        insert_user(&db, &user_id, UserType::Person).await;
+
+        let catalog_id = uuid::Uuid::new_v4().to_string();
+        let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
+        catalog.id = catalog_id.clone();
+        catalog.name = "Chrono LLM".to_string();
+        catalog.slug = "chrono-llm-public".to_string();
+        catalog.base_url = "https://llm.example.test/v1".to_string();
+        catalog.service_category = "internal".to_string();
+        catalog.requires_user_credential = false;
+        catalog.visibility = "public".to_string();
+        catalog.auth_method = "bearer".to_string();
+        catalog.auth_key_name = "Authorization".to_string();
+        catalog.credential_encrypted = test_encryption_keys()
+            .encrypt(b"platform-secret")
+            .await
+            .unwrap();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(catalog)
+            .await
+            .unwrap();
+
+        let Json(response) = super::list_keys(State(state), test_auth_user(&user_id))
+            .await
+            .unwrap();
+
+        let key = response
+            .keys
+            .iter()
+            .find(|key| key.id == catalog_id)
+            .expect("public internal platform service should be visible");
+        assert_eq!(key.label, "Chrono LLM");
+        assert_eq!(key.slug, "chrono-llm-public");
+        assert_eq!(key.endpoint_url, "https://llm.example.test/v1");
+        assert_eq!(key.api_key_id, None);
+        assert_eq!(key.credential_type, "platform_managed");
+        assert_eq!(key.auth_method, "bearer");
+        assert!(key.auto_connected);
+        assert_eq!(key.source, "catalog");
+        assert_eq!(key.catalog_service_id.as_deref(), Some(catalog_id.as_str()));
+        assert_eq!(
+            key.proxy_url_slug,
+            "http://localhost:3001/api/v1/proxy/s/chrono-llm-public/{path}"
+        );
+        assert_eq!(
+            db.collection::<UserService>(USER_SERVICES)
+                .count_documents(doc! { "user_id": &user_id })
+                .await
+                .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn platform_service_detail_is_readable_but_not_mutable() {
+        let Some(db) = connect_test_database("h_keys_platform_readonly").await else {
+            eprintln!("skipping: no local MongoDB");
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let user_id = uuid::Uuid::new_v4().to_string();
+        insert_user(&db, &user_id, UserType::Person).await;
+
+        let catalog_id = uuid::Uuid::new_v4().to_string();
+        let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
+        catalog.id = catalog_id.clone();
+        catalog.name = "Platform API".to_string();
+        catalog.slug = "platform-api".to_string();
+        catalog.service_category = "internal".to_string();
+        catalog.requires_user_credential = false;
+        catalog.visibility = "public".to_string();
+        catalog.auth_method = "header".to_string();
+        catalog.auth_key_name = "X-Platform-Key".to_string();
+        catalog.credential_encrypted = test_encryption_keys()
+            .encrypt(b"platform-secret")
+            .await
+            .unwrap();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(catalog)
+            .await
+            .unwrap();
+
+        let Json(detail) = super::get_key(
+            State(state.clone()),
+            test_auth_user(&user_id),
+            Path(catalog_id.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(detail.id, catalog_id);
+        assert_eq!(detail.slug, "platform-api");
+        assert_eq!(detail.auth_method, "header");
+        assert_eq!(detail.auth_key_name, "X-Platform-Key");
+        assert!(detail.auto_connected);
+
+        let update_err = super::update_key(
+            State(state.clone()),
+            test_auth_user(&user_id),
+            Path("platform-api".to_string()),
+            Json(UpdateKeyRequest {
+                label: Some("Renamed".to_string()),
+                endpoint_url: None,
+                auth_method: None,
+                auth_key_name: None,
+                node_id: None,
+                credential: None,
+                is_active: None,
+                identity_propagation_mode: None,
+                identity_include_user_id: None,
+                identity_include_email: None,
+                identity_include_name: None,
+                identity_jwt_audience: None,
+                forward_access_token: None,
+                inject_delegation_token: None,
+                delegation_token_scope: None,
+                custom_user_agent: None,
+                default_request_headers: None,
+                openapi_spec_url: None,
+                oauth_client_id: None,
+                oauth_client_secret: None,
+                copy_oauth_client_from: None,
+            }),
+        )
+        .await
+        .expect_err("platform services should reject update");
+        assert!(matches!(update_err, AppError::BadRequest(_)));
+
+        let delete_err = super::delete_key(
+            State(state),
+            test_auth_user(&user_id),
+            TelemetryContext::default(),
+            Path("platform-api".to_string()),
+            axum::extract::Query(DeleteKeyQuery::default()),
+        )
+        .await
+        .expect_err("platform services should reject delete");
+        assert!(matches!(delete_err, AppError::BadRequest(_)));
     }
 
     #[tokio::test]

@@ -448,6 +448,118 @@ pub struct KeyView {
     pub credential_source: user_service_service::CredentialSource,
 }
 
+pub fn is_public_internal_platform_service(svc: &DownstreamService) -> bool {
+    svc.is_active
+        && svc.visibility == "public"
+        && svc.service_category == "internal"
+        && svc.service_type == "http"
+        && !svc.requires_user_credential
+        && svc.auth_method != "none"
+}
+
+fn build_platform_service_view(svc: DownstreamService) -> KeyView {
+    KeyView {
+        id: svc.id.clone(),
+        label: svc.name.clone(),
+        slug: svc.slug.clone(),
+        endpoint_url: svc.base_url.clone(),
+        endpoint_id: svc.id.clone(),
+        api_key_id: None,
+        credential_type: "platform_managed".to_string(),
+        auth_method: svc.auth_method.clone(),
+        auth_key_name: svc.auth_key_name.clone(),
+        status: "active".to_string(),
+        catalog_service_id: Some(svc.id.clone()),
+        catalog_service_slug: Some(svc.slug.clone()),
+        catalog_service_name: Some(svc.name.clone()),
+        node_id: None,
+        node_priority: 0,
+        service_type: svc.service_type.clone(),
+        ssh_auth_mode: SshAuthMode::ProxyOnly,
+        ssh_node_keys_stale: false,
+        is_active: svc.is_active,
+        identity_propagation_mode: svc.identity_propagation_mode.clone(),
+        identity_include_user_id: svc.identity_include_user_id,
+        identity_include_email: svc.identity_include_email,
+        identity_include_name: svc.identity_include_name,
+        identity_jwt_audience: svc.identity_jwt_audience.clone(),
+        forward_access_token: svc.forward_access_token,
+        inject_delegation_token: svc.inject_delegation_token,
+        delegation_token_scope: svc.delegation_token_scope.clone(),
+        custom_user_agent: svc.custom_user_agent.clone(),
+        default_request_headers: None,
+        ws_frame_injections: Vec::new(),
+        auto_connected: true,
+        source_app_id: None,
+        source_app_name: None,
+        connection_id: None,
+        oauth_client_id: None,
+        expires_at: None,
+        last_used_at: None,
+        error_message: None,
+        created_at: svc.created_at.to_rfc3339(),
+        ssh_host: None,
+        ssh_port: None,
+        ssh_ca_public_key: None,
+        ssh_allowed_principals: None,
+        ssh_certificate_ttl_minutes: None,
+        openapi_spec_url: svc.openapi_spec_url.clone(),
+        credential_source: user_service_service::CredentialSource::Personal,
+    }
+}
+
+async fn list_public_internal_platform_service_views(
+    db: &mongodb::Database,
+    existing_catalog_ids: &std::collections::HashSet<String>,
+) -> AppResult<Vec<KeyView>> {
+    let services: Vec<DownstreamService> = db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find(doc! {
+            "is_active": true,
+            "visibility": "public",
+            "service_category": "internal",
+            "service_type": "http",
+            "requires_user_credential": false,
+            "auth_method": { "$ne": "none" },
+        })
+        .await?
+        .try_collect()
+        .await?;
+
+    let mut views = Vec::new();
+    for svc in services {
+        if existing_catalog_ids.contains(&svc.id) || !is_public_internal_platform_service(&svc) {
+            continue;
+        }
+        views.push(build_platform_service_view(svc));
+    }
+    Ok(views)
+}
+
+pub async fn get_public_internal_platform_service_view(
+    db: &mongodb::Database,
+    id_or_slug: &str,
+) -> AppResult<Option<KeyView>> {
+    let svc = db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find_one(doc! {
+            "$or": [
+                { "_id": id_or_slug },
+                { "slug": id_or_slug },
+            ],
+        })
+        .await?;
+
+    let Some(svc) = svc else {
+        return Ok(None);
+    };
+    if is_public_internal_platform_service(&svc) {
+        Ok(Some(build_platform_service_view(svc)))
+    } else {
+        Ok(None)
+    }
+}
+
 /// Validate that a catalog `token_exchange` service gets a properly
 /// shaped credential from the caller. Older CLIs (pre-#220) and raw
 /// HTTP clients that haven't learned the new credential format will
@@ -1936,9 +2048,6 @@ pub async fn list_keys(
     user_id: &str,
 ) -> AppResult<Vec<KeyView>> {
     let tagged = user_service_service::list_user_services_with_sources(db, user_id).await?;
-    if tagged.is_empty() {
-        return Ok(vec![]);
-    }
 
     // Batch-load endpoints. Endpoints are looked up by `_id` only, so personal
     // and org-owned endpoints can be fetched in the same query.
@@ -2039,6 +2148,12 @@ pub async fn list_keys(
             .and_then(|k| k.user_oauth_client_id_encrypted.as_ref());
         enrich_view_with_oauth_client_id(encryption_keys, view, enc).await;
     }
+
+    let existing_catalog_ids: std::collections::HashSet<String> = views
+        .iter()
+        .filter_map(|view| view.catalog_service_id.clone())
+        .collect();
+    views.extend(list_public_internal_platform_service_views(db, &existing_catalog_ids).await?);
 
     Ok(views)
 }
