@@ -10,7 +10,7 @@ import {
 } from "@/hooks/use-providers";
 import { ApiError, api } from "@/lib/api-client";
 import { hardRedirect } from "@/lib/navigation";
-import { parseAdditionalScopes } from "@/lib/parse-additional-scopes";
+import { UpstreamScopePicker } from "@/components/shared/upstream-scope-picker";
 import { copyToClipboard } from "@/lib/utils";
 import { Button, ButtonIcon } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -1204,7 +1204,13 @@ function OAuthStep({
 }) {
   const initiateOAuth = useInitiateOAuth();
   const [error, setError] = useState<string | null>(null);
-  const [scopeInput, setScopeInput] = useState("");
+  // Scope picker (NyxID#917): seed the selection with the provider's defaults
+  // (all pre-selected) so an unedited submit requests exactly today's scopes.
+  // The user can deselect a default or add custom scopes; the full selected
+  // set is sent as `scopeOverride`.
+  const [selectedScopes, setSelectedScopes] = useState<readonly string[]>(
+    catalogEntry.default_scopes ?? [],
+  );
 
   async function handleConnect() {
     if (!catalogEntry.provider_config_id) return;
@@ -1212,11 +1218,10 @@ function OAuthStep({
     let key: KeyInfo | null = null;
     try {
       key = await ensureKey();
-      const additionalScopes = parseAdditionalScopes(scopeInput);
       const response = await initiateOAuth.mutateAsync({
         providerId: catalogEntry.provider_config_id,
         redirectPath: `/keys/${key.id}`,
-        additionalScopes,
+        scopeOverride: selectedScopes,
         // Multi-connection: thread the placeholder's id so the OAuth
         // callback writes the resulting tokens straight onto THIS
         // `UserApiKey` (via its `connection_id`) instead of taking
@@ -1264,23 +1269,13 @@ function OAuthStep({
         connect your account.
       </p>
 
-      <div className="space-y-1.5">
-        <Label htmlFor="oauth-additional-scopes" className="text-xs">
-          Additional scopes (optional)
-        </Label>
-        <Input
-          id="oauth-additional-scopes"
-          value={scopeInput}
-          onChange={(e) => setScopeInput(e.target.value)}
-          placeholder="e.g. contact:contact.base:readonly, contact:department.base:readonly"
-          autoComplete="off"
-          spellCheck={false}
-        />
-        <p className="text-xs text-muted-foreground">
-          Comma- or space-separated. Merged with the provider's default scopes.
-          The upstream provider decides whether to grant them.
-        </p>
-      </div>
+      <UpstreamScopePicker
+        catalog={catalogEntry.scope_catalog ?? []}
+        defaultScopes={catalogEntry.default_scopes ?? []}
+        value={selectedScopes}
+        onChange={setSelectedScopes}
+        idPrefix="oauth-scope"
+      />
 
       {error && (
         <div className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive">
@@ -1344,7 +1339,11 @@ function DeviceCodeStep({
   const [errorMessage, setErrorMessage] = useState("");
   const [secondsRemaining, setSecondsRemaining] = useState(0);
   const [createdKeyId, setCreatedKeyId] = useState<string | null>(null);
-  const [scopeInput, setScopeInput] = useState("");
+  // Scope picker selection (NyxID#917), seeded with the provider defaults.
+  // Only used for non-openai device-code providers (openai rejects scopes).
+  const [selectedScopes, setSelectedScopes] = useState<readonly string[]>(
+    catalogEntry.default_scopes ?? [],
+  );
 
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const countdownTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -1552,15 +1551,14 @@ function DeviceCodeStep({
       key = await ensureKey();
       if (!isMountedRef.current) return;
       setCreatedKeyId(key.id);
-      // Only forward additional scopes for formats that accept them. OpenAI
-      // device-code providers reject a `scope` parameter at the backend.
-      const additionalScopes =
-        catalogEntry.device_code_format === "openai"
-          ? []
-          : parseAdditionalScopes(scopeInput);
+      // Only forward scopes for formats that accept them. OpenAI device-code
+      // providers reject a `scope` parameter at the backend, so omit the
+      // override there entirely. Otherwise send the picker's complete set.
+      const scopeOverride =
+        catalogEntry.device_code_format === "openai" ? undefined : selectedScopes;
       const response = await initiateMutation.mutateAsync({
         providerId: catalogEntry.provider_config_id,
-        additionalScopes,
+        scopeOverride,
         // Multi-connection: same rationale as the OAuth step — thread
         // the placeholder id so the device-code completion writes onto
         // THIS `UserApiKey` instead of the legacy `user_provider_tokens`
@@ -1658,23 +1656,13 @@ function DeviceCodeStep({
         </p>
 
         {supportsAdditionalScopes ? (
-          <div className="space-y-1.5">
-            <Label htmlFor="device-additional-scopes" className="text-xs">
-              Additional scopes (optional)
-            </Label>
-            <Input
-              id="device-additional-scopes"
-              value={scopeInput}
-              onChange={(e) => setScopeInput(e.target.value)}
-              placeholder="e.g. repo,read:org"
-              autoComplete="off"
-              spellCheck={false}
-            />
-            <p className="text-xs text-muted-foreground">
-              Comma- or space-separated. Merged with the provider's default
-              scopes. The upstream provider decides whether to grant them.
-            </p>
-          </div>
+          <UpstreamScopePicker
+            catalog={catalogEntry.scope_catalog ?? []}
+            defaultScopes={catalogEntry.default_scopes ?? []}
+            value={selectedScopes}
+            onChange={setSelectedScopes}
+            idPrefix="device-scope"
+          />
         ) : (
           <p className="text-xs text-muted-foreground">
             This provider does not accept additional scopes -- they are fixed

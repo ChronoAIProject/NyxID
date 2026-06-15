@@ -16,6 +16,7 @@ frontend/src/components/cli-wizard/upstream-error-banner.tsx
 frontend/src/components/cli-wizard/wizard-footer.tsx
 frontend/src/components/shared/org-scope-select.tsx
 frontend/src/components/shared/twitter-oauth-guidance.tsx
+frontend/src/components/shared/upstream-scope-picker.tsx
 frontend/src/components/ui/button.tsx
 frontend/src/components/ui/checkbox.tsx
 frontend/src/components/ui/input.tsx

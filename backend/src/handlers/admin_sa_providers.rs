@@ -245,6 +245,7 @@ pub async fn initiate_oauth_for_sa(
         Some(&sa_id),
         Some(&redirect_path),
         &[],
+        None, // no scope_override: SA-connect picker is a later pass (NyxID#917)
         None, // admin-on-behalf-of flow stays single-tenant per SA
     )
     .await?;
@@ -292,6 +293,7 @@ pub async fn initiate_device_code_for_sa(
         &provider_id,
         Some(&sa_id),
         &[],
+        None, // no scope_override: SA-connect picker is a later pass (NyxID#917)
         None, // admin-on-behalf-of flow stays single-tenant per SA
     )
     .await?;

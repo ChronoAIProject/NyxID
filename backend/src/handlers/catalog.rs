@@ -68,6 +68,12 @@ pub struct CatalogEntryResponse {
     pub device_token_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_scopes: Option<Vec<String>>,
+    /// Curated menu of notable available scopes for this provider (NyxID#917).
+    /// Connect UIs render these as selectable pills; defaults are pre-selected
+    /// and a free-form field covers anything not listed. `None` for providers
+    /// with no curated catalog.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope_catalog: Option<Vec<crate::services::scope_catalog::ScopeCatalogEntry>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supports_pkce: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -281,6 +287,7 @@ fn catalog_entry_response(entry: catalog_service::CatalogEntry) -> CatalogEntryR
         device_verification_url: entry.device_verification_url,
         device_token_url: entry.device_token_url,
         default_scopes: entry.default_scopes,
+        scope_catalog: entry.scope_catalog,
         supports_pkce,
         device_code_format: entry.device_code_format,
         token_endpoint_auth_method: entry.token_endpoint_auth_method,
@@ -836,6 +843,7 @@ mod tests {
             device_verification_url: None,
             device_token_url: None,
             default_scopes: None,
+            scope_catalog: None,
             supports_pkce: false,
             device_code_format: None,
             token_endpoint_auth_method: None,

@@ -73,6 +73,14 @@ pub struct OAuthInitiateQuery {
     /// to append to the provider's `default_scopes` when building the
     /// authorization URL. The upstream provider decides whether to grant them.
     pub scope: Option<String>,
+    /// Optional comma- or space-separated *complete* scope set (NyxID#917).
+    /// When present (even empty), it REPLACES the provider's `default_scopes`
+    /// rather than appending — the scope-picker UI sends the full set the user
+    /// selected, including pre-checked defaults they kept and minus any they
+    /// removed. Mutually exclusive with `scope` in practice; if both are sent,
+    /// `scope_override` wins. Absent for every legacy additive caller, so
+    /// their behavior is unchanged.
+    pub scope_override: Option<String>,
     /// When set, initiate the OAuth flow on behalf of an org. The resulting
     /// `UserProviderToken` is stored under the org's user_id so that every
     /// member of the org can proxy through the resulting credential. The
@@ -94,6 +102,11 @@ pub struct DeviceCodeInitiateQuery {
     /// to append to the provider's `default_scopes` when requesting the
     /// device code.
     pub scope: Option<String>,
+    /// Complete scope set that REPLACES `default_scopes` (NyxID#917). See
+    /// [`OAuthInitiateQuery::scope_override`]. Ignored by `openai`-format
+    /// device-code providers, which reject any `scope` (the guard in
+    /// `ensure_additional_scopes_supported` rejects a non-empty override).
+    pub scope_override: Option<String>,
     /// When set, initiate the device-code flow on behalf of an org. The
     /// resulting token is stored under the org's user_id. The caller must
     /// be an admin of the org. See [`OAuthInitiateQuery::target_org_id`].
@@ -336,6 +349,13 @@ pub async fn initiate_oauth_connect(
         validate_redirect_path(redirect_path)?;
     }
     let additional_scopes = user_token_service::parse_additional_scopes(query.scope.as_deref())?;
+    // Scope-picker override (NyxID#917): when the query param is present
+    // (even empty), it is the COMPLETE validated scope set and replaces the
+    // additive default-merge in the service. `None` keeps legacy behavior.
+    let scope_override = match query.scope_override.as_deref() {
+        Some(raw) => Some(user_token_service::parse_additional_scopes(Some(raw))?),
+        None => None,
+    };
 
     // Optional org-targeted flow. When set, the admin is initiating OAuth
     // on behalf of the org -- the resulting token lives under the org's
@@ -361,6 +381,7 @@ pub async fn initiate_oauth_connect(
         target_org_user_id.as_deref(),
         query.redirect_path.as_deref(),
         &additional_scopes,
+        scope_override.as_deref(),
         connection_id.as_deref(),
     )
     .await?;
@@ -905,6 +926,12 @@ pub async fn request_device_code(
 ) -> AppResult<Json<DeviceCodeInitiateResponse>> {
     let user_id_str = auth_user.user_id.to_string();
     let additional_scopes = user_token_service::parse_additional_scopes(query.scope.as_deref())?;
+    // Scope-picker override (NyxID#917) — see the matching block in the OAuth
+    // initiate handler. Present (even empty) → replaces default-merge.
+    let scope_override = match query.scope_override.as_deref() {
+        Some(raw) => Some(user_token_service::parse_additional_scopes(Some(raw))?),
+        None => None,
+    };
 
     // See `initiate_oauth_connect` for the org-targeting contract.
     let target_org_user_id =
@@ -926,6 +953,7 @@ pub async fn request_device_code(
         &provider_id,
         target_org_user_id.as_deref(),
         &additional_scopes,
+        scope_override.as_deref(),
         connection_id.as_deref(),
     )
     .await?;

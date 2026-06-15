@@ -684,11 +684,11 @@ describe("AiKeyConfirm — catalog services routed via node", () => {
   });
 });
 
-// NyxID#917 — the pair wizard mirrors the dashboard's
-// "Additional scopes (optional)" input for OAuth / device-code
-// providers, gated identically (`device_code_format !== "openai"`),
-// and hands the parsed list to the auth sub-flow.
-describe("AiKeyConfirm — upstream additional scopes (issue #917)", () => {
+// NyxID#917 follow-up — the pair wizard renders the shared scope picker for
+// OAuth / device-code providers (defaults pre-selected as pills + a custom
+// "Add" field), gated identically (`device_code_format !== "openai"`), and
+// hands the COMPLETE selection to the auth sub-flow as `scopeOverride`.
+describe("AiKeyConfirm — upstream scope picker (issue #917)", () => {
   const oauthEntry = {
     slug: "social-twitter",
     name: "Twitter / X",
@@ -699,6 +699,11 @@ describe("AiKeyConfirm — upstream additional scopes (issue #917)", () => {
     service_type: "rest",
     requires_credential: true,
     requires_gateway_url: false,
+    default_scopes: ["tweet.read", "users.read"],
+    scope_catalog: [
+      { scope: "tweet.read", label: "Read posts", description: "Read posts." },
+      { scope: "media.write", label: "Upload media", description: "Upload media.", sensitive: true },
+    ],
   };
   const deviceCodeEntry = {
     slug: "vcs-github",
@@ -711,6 +716,11 @@ describe("AiKeyConfirm — upstream additional scopes (issue #917)", () => {
     service_type: "rest",
     requires_credential: true,
     requires_gateway_url: false,
+    default_scopes: ["read:user"],
+    scope_catalog: [
+      { scope: "read:user", label: "Read profile", description: "Read profile." },
+      { scope: "repo", label: "Repositories", description: "Full repo access.", sensitive: true },
+    ],
   };
   const openaiDeviceCodeEntry = {
     ...deviceCodeEntry,
@@ -718,6 +728,7 @@ describe("AiKeyConfirm — upstream additional scopes (issue #917)", () => {
     name: "Codex",
     provider_config_id: "prov-codex",
     device_code_format: "openai",
+    scope_catalog: null,
   };
   const apiKeyEntry = {
     slug: "llm-openai",
@@ -738,7 +749,7 @@ describe("AiKeyConfirm — upstream additional scopes (issue #917)", () => {
     baseProps.onSlugPicked = vi.fn();
   });
 
-  it("parses the scope input and hands it to the OAuth sub-flow", async () => {
+  it("pre-selects defaults and forwards the picker selection (incl. a toggled-on scope) to OAuth", async () => {
     const user = userEvent.setup();
     mockGet.mockResolvedValue(oauthEntry);
 
@@ -747,27 +758,56 @@ describe("AiKeyConfirm — upstream additional scopes (issue #917)", () => {
       { wrapper: createWrapper() },
     );
 
-    const scopeInput = await screen.findByLabelText(
-      /Additional scopes \(optional\)/i,
-    );
-    // Mixed separators + duplicate — the shared splitter must trim
-    // and dedupe before the handoff.
-    await user.type(scopeInput, "media.write, tweet.read media.write");
+    // Defaults render as pills; "Upload media" (media.write) starts off.
+    const mediaPill = await screen.findByRole("button", {
+      name: /Upload media/i,
+    });
+    await user.click(mediaPill); // toggle it on
     await user.click(
       screen.getByRole("button", { name: /Continue with provider sign-in/i }),
     );
 
     await waitFor(() => {
-      expect(mockOAuthFlow).toHaveBeenCalledWith(
-        expect.objectContaining({
-          providerId: "prov-twitter",
-          additionalScopes: ["media.write", "tweet.read"],
-        }),
-      );
+      expect(mockOAuthFlow).toHaveBeenCalled();
     });
+    const props = mockOAuthFlow.mock.calls.at(-1)?.[0] as {
+      readonly providerId: string;
+      readonly scopeOverride: readonly string[];
+    };
+    expect(props.providerId).toBe("prov-twitter");
+    // Defaults stay selected; the toggled-on catalog scope is added.
+    expect([...props.scopeOverride].sort()).toEqual(
+      ["media.write", "tweet.read", "users.read"].sort(),
+    );
   });
 
-  it("shows the scope input for non-openai device-code providers and forwards parsed scopes", async () => {
+  it("adds a custom scope via the Add field and forwards it to OAuth", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue(oauthEntry);
+
+    render(
+      <AiKeyConfirm {...baseProps} prefill={{ slug: "social-twitter" }} />,
+      { wrapper: createWrapper() },
+    );
+
+    const custom = await screen.findByPlaceholderText(/media\.write/i);
+    await user.type(custom, "dm.read");
+    await user.click(screen.getByRole("button", { name: /^Add$/i }));
+    await user.click(
+      screen.getByRole("button", { name: /Continue with provider sign-in/i }),
+    );
+
+    await waitFor(() => {
+      expect(mockOAuthFlow).toHaveBeenCalled();
+    });
+    const props = mockOAuthFlow.mock.calls.at(-1)?.[0] as {
+      readonly scopeOverride: readonly string[];
+    };
+    expect(props.scopeOverride).toContain("dm.read");
+    expect(props.scopeOverride).toContain("tweet.read");
+  });
+
+  it("forwards the picker selection to the device-code sub-flow", async () => {
     const user = userEvent.setup();
     mockGet.mockResolvedValue(deviceCodeEntry);
 
@@ -775,23 +815,21 @@ describe("AiKeyConfirm — upstream additional scopes (issue #917)", () => {
       wrapper: createWrapper(),
     });
 
-    const scopeInput = await screen.findByLabelText(
-      /Additional scopes \(optional\)/i,
-    );
-    await user.type(scopeInput, "repo,read:org");
+    await screen.findByRole("button", { name: /Repositories/i });
     await user.click(screen.getByRole("button", { name: /Get device code/i }));
 
     await waitFor(() => {
-      expect(mockDeviceCodeFlow).toHaveBeenCalledWith(
-        expect.objectContaining({
-          providerId: "prov-github",
-          additionalScopes: ["repo", "read:org"],
-        }),
-      );
+      expect(mockDeviceCodeFlow).toHaveBeenCalled();
     });
+    const props = mockDeviceCodeFlow.mock.calls.at(-1)?.[0] as {
+      readonly providerId: string;
+      readonly scopeOverride: readonly string[];
+    };
+    expect(props.providerId).toBe("prov-github");
+    expect(props.scopeOverride).toEqual(["read:user"]); // default pre-selected
   });
 
-  it("hides the scope input for openai-format device-code providers and passes no scopes", async () => {
+  it("hides the picker for openai-format device-code providers and passes no override", async () => {
     const user = userEvent.setup();
     mockGet.mockResolvedValue(openaiDeviceCodeEntry);
 
@@ -800,11 +838,8 @@ describe("AiKeyConfirm — upstream additional scopes (issue #917)", () => {
     });
 
     await screen.findByRole("button", { name: /Get device code/i });
-    expect(
-      screen.queryByLabelText(/Additional scopes \(optional\)/i),
-    ).not.toBeInTheDocument();
-    // Parity with the dashboard: explain WHY there's no input rather
-    // than silently omitting it.
+    expect(screen.queryByRole("button", { name: /^Add$/i })).not.toBeInTheDocument();
+    // Parity with the dashboard: explain WHY there's no picker.
     expect(
       screen.getByText(/does not accept additional scopes/i),
     ).toBeInTheDocument();
@@ -812,16 +847,15 @@ describe("AiKeyConfirm — upstream additional scopes (issue #917)", () => {
     await user.click(screen.getByRole("button", { name: /Get device code/i }));
 
     await waitFor(() => {
-      expect(mockDeviceCodeFlow).toHaveBeenCalledWith(
-        expect.objectContaining({
-          providerId: "prov-codex",
-          additionalScopes: [],
-        }),
-      );
+      expect(mockDeviceCodeFlow).toHaveBeenCalled();
     });
+    const props = mockDeviceCodeFlow.mock.calls.at(-1)?.[0] as {
+      readonly scopeOverride: readonly string[] | undefined;
+    };
+    expect(props.scopeOverride).toBeUndefined();
   });
 
-  it("does not render the scope input for plain api-key providers", async () => {
+  it("does not render the scope picker for plain api-key providers", async () => {
     mockGet.mockResolvedValue(apiKeyEntry);
 
     render(<AiKeyConfirm {...baseProps} prefill={{ slug: "llm-openai" }} />, {
@@ -829,9 +863,7 @@ describe("AiKeyConfirm — upstream additional scopes (issue #917)", () => {
     });
 
     await screen.findByLabelText(/API key/i);
-    expect(
-      screen.queryByLabelText(/Additional scopes \(optional\)/i),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Add$/i })).not.toBeInTheDocument();
     expect(
       screen.queryByText(/does not accept additional scopes/i),
     ).not.toBeInTheDocument();

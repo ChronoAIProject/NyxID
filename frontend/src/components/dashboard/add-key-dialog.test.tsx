@@ -326,7 +326,9 @@ describe("AddKeyDialog — reconnect path", () => {
     expect(initiateOAuthMutateAsync).toHaveBeenCalledWith({
       providerId: "provider-oauth",
       redirectPath: "/keys/existing-service-1",
-      additionalScopes: [],
+      // Scope picker (NyxID#917): unedited submit sends the provider defaults
+      // as the complete override set. OAUTH_ENTRY has no defaults → empty.
+      scopeOverride: [],
       keyId: "existing-service-1",
     });
     expect(createKeyMutate).not.toHaveBeenCalled();
@@ -418,7 +420,8 @@ describe("AddKeyDialog — reconnect path", () => {
     });
     expect(initiateDeviceCodeMutateAsync).toHaveBeenCalledWith({
       providerId: "provider-device",
-      additionalScopes: [],
+      // DEVICE_CODE_ENTRY is openai-format → no scope override is sent.
+      scopeOverride: undefined,
       keyId: "existing-service-1",
     });
     expect(createKeyMutate).not.toHaveBeenCalled();

@@ -60,14 +60,14 @@ interface FlowProps {
   /** Admin-provided docs URL rendered in the OAuth-credentials step. */
   readonly documentationUrl?: string;
   /**
-   * Upstream provider scopes to request on top of the provider's
-   * `default_scopes` (NyxID#917). Already parsed/deduped by the
-   * confirm panel via `parseAdditionalScopes`. Forwarded as a
-   * comma-separated `scope` query param on the OAuth initiate /
-   * device-code initiate request — same backend field the dashboard
-   * (`use-providers.ts`) and the CLI `--scope` flag feed.
+   * Complete upstream scope set selected in the scope picker (NyxID#917).
+   * When defined (even empty), forwarded as the `scope_override` query param,
+   * which REPLACES the provider's default scopes server-side rather than
+   * appending — letting the user drop a default. `undefined` when the
+   * provider doesn't accept scopes (e.g. `openai`-format device code), in
+   * which case no scope param is sent at all.
    */
-  readonly additionalScopes?: readonly string[];
+  readonly scopeOverride?: readonly string[];
   readonly onSuccess: (result: AiKeyPairingSuccess) => void;
   /**
    * Called when the user bails before success so the parent can reset
@@ -536,7 +536,7 @@ export function OAuthFlow({
   pairingId,
   credentialMode,
   documentationUrl,
-  additionalScopes,
+  scopeOverride,
   onSuccess,
   onCancel,
 }: FlowProps) {
@@ -919,11 +919,12 @@ export function OAuthFlow({
           redirect_path: `/keys/${placeholder.id}`,
           key_id: placeholder.id,
         });
-        // Upstream additional scopes (NyxID#917) — comma-joined to match
-        // the dashboard's `useInitiateOAuth`; the backend splits, validates,
-        // and merges with the provider's `default_scopes`.
-        if (additionalScopes && additionalScopes.length > 0) {
-          initiateQuery.set("scope", additionalScopes.join(","));
+        // Scope picker selection (NyxID#917). Sent as `scope_override` (the
+        // complete set, replacing the provider defaults) whenever defined —
+        // including an empty array, which the backend treats as "user cleared
+        // all scopes". Matches the dashboard's `useInitiateOAuth`.
+        if (scopeOverride !== undefined) {
+          initiateQuery.set("scope_override", scopeOverride.join(","));
         }
         const initiate = await api.get<InitiateOAuthResponse>(
           `/providers/${encodeURIComponent(providerId)}/connect/oauth?${initiateQuery.toString()}`,
@@ -1225,7 +1226,7 @@ export function DeviceCodeFlow({
   targetOrgId,
   endpointUrl,
   pairingId,
-  additionalScopes,
+  scopeOverride,
   onSuccess,
   onCancel,
 }: FlowProps) {
@@ -1485,12 +1486,12 @@ export function DeviceCodeFlow({
       // the backend falls back to the legacy write path either way.
       const initQuery = new URLSearchParams();
       if (keyId) initQuery.set("key_id", keyId);
-      // Upstream additional scopes (NyxID#917) — same comma-joined `scope`
-      // param the dashboard's `useInitiateDeviceCode` sends. The confirm
-      // panel never passes scopes for `device_code_format === "openai"`
-      // providers, which reject a `scope` parameter outright.
-      if (additionalScopes && additionalScopes.length > 0) {
-        initQuery.set("scope", additionalScopes.join(","));
+      // Scope picker selection (NyxID#917). Sent as `scope_override` whenever
+      // defined. The confirm panel passes `undefined` for
+      // `device_code_format === "openai"` providers, which reject a `scope`
+      // parameter outright — so nothing is sent for them.
+      if (scopeOverride !== undefined) {
+        initQuery.set("scope_override", scopeOverride.join(","));
       }
       const initQueryString = initQuery.toString();
       const init = await api.post<DeviceCodeInitiateResponse>(

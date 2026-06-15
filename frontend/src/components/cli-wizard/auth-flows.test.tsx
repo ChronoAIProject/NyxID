@@ -502,11 +502,11 @@ describe("OAuthFlow error phase", () => {
   });
 });
 
-// NyxID#917 — the pair wizard forwards the user's upstream
-// "additional scopes" to the same backend query param the dashboard
-// (`use-providers.ts`) and the CLI `--scope` flag feed: a
-// comma-joined `scope` on the OAuth / device-code initiate request.
-describe("upstream additional scopes forwarding (issue #917)", () => {
+// NyxID#917 — the pair wizard forwards the scope-picker selection as the
+// `scope_override` query param (the COMPLETE set, replacing the provider's
+// default scopes) on the OAuth / device-code initiate request. `undefined`
+// means the provider doesn't accept scopes, so no scope param is sent.
+describe("upstream scope override forwarding (issue #917)", () => {
   beforeEach(() => {
     resetFlowMocks();
   });
@@ -550,11 +550,11 @@ describe("upstream additional scopes forwarding (issue #917)", () => {
     });
   }
 
-  it("appends a comma-joined scope param to the OAuth initiate URL", async () => {
+  it("sends scope_override (complete set) on the OAuth initiate URL", async () => {
     arrangePendingPlaceholder();
 
     renderOAuthFlow({
-      additionalScopes: ["media.write", "tweet.read"],
+      scopeOverride: ["media.write", "tweet.read"],
     });
 
     await waitFor(() => {
@@ -564,14 +564,33 @@ describe("upstream additional scopes forwarding (issue #917)", () => {
       expect(initiateCall).toBeTruthy();
       const url = initiateCall?.[0] as string;
       const query = new URLSearchParams(url.split("?")[1]);
-      expect(query.get("scope")).toBe("media.write,tweet.read");
+      expect(query.get("scope_override")).toBe("media.write,tweet.read");
+      // Additive `scope` is not used by the picker path.
+      expect(query.get("scope")).toBeNull();
       // Existing params survive the rewrite to URLSearchParams.
       expect(query.get("key_id")).toBe("key-1");
       expect(query.get("redirect_path")).toBe("/keys/key-1");
     });
   });
 
-  it("omits the scope param from the OAuth initiate URL when no scopes given", async () => {
+  it("sends an empty scope_override when the user cleared every scope", async () => {
+    arrangePendingPlaceholder();
+
+    renderOAuthFlow({ scopeOverride: [] });
+
+    await waitFor(() => {
+      const initiateCall = mockGet.mock.calls.find(([path]) =>
+        (path as string).includes("/connect/oauth?"),
+      );
+      expect(initiateCall).toBeTruthy();
+      const url = initiateCall?.[0] as string;
+      const query = new URLSearchParams(url.split("?")[1]);
+      // Present-but-empty: the backend reads this as "drop all scopes".
+      expect(query.get("scope_override")).toBe("");
+    });
+  });
+
+  it("omits scope params from the OAuth initiate URL when scopeOverride is undefined", async () => {
     arrangePendingPlaceholder();
 
     renderOAuthFlow();
@@ -583,15 +602,16 @@ describe("upstream additional scopes forwarding (issue #917)", () => {
       expect(initiateCall).toBeTruthy();
       const url = initiateCall?.[0] as string;
       const query = new URLSearchParams(url.split("?")[1]);
+      expect(query.get("scope_override")).toBeNull();
       expect(query.get("scope")).toBeNull();
     });
   });
 
-  it("appends a comma-joined scope param to the device-code initiate URL", async () => {
+  it("sends scope_override on the device-code initiate URL", async () => {
     arrangePendingPlaceholder();
 
     renderDeviceCodeFlow({
-      additionalScopes: ["repo", "read:org"],
+      scopeOverride: ["repo", "read:org"],
     });
 
     await waitFor(() => {
@@ -601,12 +621,12 @@ describe("upstream additional scopes forwarding (issue #917)", () => {
       expect(initiateCall).toBeTruthy();
       const url = initiateCall?.[0] as string;
       const query = new URLSearchParams(url.split("?")[1]);
-      expect(query.get("scope")).toBe("repo,read:org");
+      expect(query.get("scope_override")).toBe("repo,read:org");
       expect(query.get("key_id")).toBe("key-1");
     });
   });
 
-  it("omits the scope param from the device-code initiate URL when no scopes given", async () => {
+  it("omits scope params from the device-code initiate URL when scopeOverride is undefined", async () => {
     arrangePendingPlaceholder();
 
     renderDeviceCodeFlow();
@@ -618,6 +638,7 @@ describe("upstream additional scopes forwarding (issue #917)", () => {
       expect(initiateCall).toBeTruthy();
       const url = initiateCall?.[0] as string;
       const query = new URLSearchParams(url.split("?")[1]);
+      expect(query.get("scope_override")).toBeNull();
       expect(query.get("scope")).toBeNull();
     });
   });

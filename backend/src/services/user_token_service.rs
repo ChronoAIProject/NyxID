@@ -136,6 +136,38 @@ fn merge_scopes(default_scopes: Option<&Vec<String>>, additional_scopes: &[Strin
     merged
 }
 
+/// Resolve the space-joined `scope` value to send to the provider, or `None`
+/// to omit the parameter entirely. Single source of truth shared by the OAuth
+/// and device-code initiate paths (NyxID#917).
+///
+/// Precedence:
+/// 1. `scope_override` present (from the scope-picker UI) → use it verbatim,
+///    bypassing the default merge so the user can drop a default. An empty
+///    override returns `None` (omit the param; let the provider apply its own
+///    minimum) rather than emitting a malformed empty `scope`.
+/// 2. No override, no additional scopes → the provider's `default_scopes`
+///    verbatim (emitting an empty string when defaults are `Some(vec![])`, to
+///    stay byte-identical with the pre-feature behavior).
+/// 3. No override, with additional scopes → default-merge + dedupe (legacy
+///    additive `--scope` / `scope=` callers).
+fn resolve_scope_param(
+    default_scopes: Option<&Vec<String>>,
+    additional_scopes: &[String],
+    scope_override: Option<&[String]>,
+) -> Option<String> {
+    if let Some(ov) = scope_override {
+        if ov.is_empty() {
+            None
+        } else {
+            Some(ov.join(" "))
+        }
+    } else if additional_scopes.is_empty() {
+        default_scopes.map(|scopes| scopes.join(" "))
+    } else {
+        Some(merge_scopes(default_scopes, additional_scopes).join(" "))
+    }
+}
+
 /// Validate that a given provider supports user-supplied additional scopes.
 ///
 /// Only providers that need/accept scopes should receive them:
@@ -549,6 +581,7 @@ pub async fn initiate_oauth_connect(
     on_behalf_of: Option<&str>,
     redirect_path: Option<&str>,
     additional_scopes: &[String],
+    scope_override: Option<&[String]>,
     connection_id: Option<&str>,
 ) -> AppResult<String> {
     let provider = db
@@ -565,6 +598,13 @@ pub async fn initiate_oauth_connect(
 
     ensure_oauth_provider_configured(&provider)?;
     ensure_additional_scopes_supported(&provider, additional_scopes)?;
+    // A non-empty override is still subject to the same provider-type guard
+    // (e.g. an `openai`-format device-code provider would reject it). An empty
+    // override is the user clearing every scope — allowed; the provider then
+    // decides at consent time.
+    if let Some(ov) = scope_override {
+        ensure_additional_scopes_supported(&provider, ov)?;
+    }
 
     let authorization_url = provider
         .authorization_url
@@ -652,18 +692,15 @@ pub async fn initiate_oauth_connect(
         urlencoding::encode(&state_id),
     );
 
-    // Backward-compat: when there are no user-supplied additional scopes we
-    // take the exact pre-feature code path so every existing OAuth flow
-    // builds a byte-identical authorization URL (e.g. an admin-seeded
-    // provider with `default_scopes: Some(vec![])` still emits `&scope=`).
-    if additional_scopes.is_empty() {
-        if let Some(ref scopes) = provider.default_scopes {
-            let scope_str = scopes.join(" ");
-            auth_url.push_str(&format!("&scope={}", urlencoding::encode(&scope_str)));
-        }
-    } else {
-        let merged = merge_scopes(provider.default_scopes.as_ref(), additional_scopes);
-        let scope_str = merged.join(" ");
+    // Scope resolution (NyxID#917) — see `resolve_scope_param`. `None` means
+    // omit `scope` entirely; a `Some("")` is only produced for an admin-seeded
+    // `default_scopes: Some(vec![])`, preserving the byte-identical
+    // pre-feature URL.
+    if let Some(scope_str) = resolve_scope_param(
+        provider.default_scopes.as_ref(),
+        additional_scopes,
+        scope_override,
+    ) {
         auth_url.push_str(&format!("&scope={}", urlencoding::encode(&scope_str)));
     }
 
@@ -747,6 +784,7 @@ pub struct DeviceCodePollResult {
 /// single-tenant path (writing to `user_provider_tokens` keyed by
 /// `(user_id, provider_config_id)`). Mirrors the `connection_id`
 /// semantics of [`initiate_oauth_connect`].
+#[allow(clippy::too_many_arguments)]
 pub async fn request_device_code(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
@@ -754,6 +792,7 @@ pub async fn request_device_code(
     provider_id: &str,
     on_behalf_of: Option<&str>,
     additional_scopes: &[String],
+    scope_override: Option<&[String]>,
     connection_id: Option<&str>,
 ) -> AppResult<DeviceCodeInitiateResult> {
     let provider = db
@@ -769,6 +808,9 @@ pub async fn request_device_code(
     }
 
     ensure_additional_scopes_supported(&provider, additional_scopes)?;
+    if let Some(ov) = scope_override {
+        ensure_additional_scopes_supported(&provider, ov)?;
+    }
 
     let device_code_url = provider.device_code_url.as_ref().ok_or_else(|| {
         AppError::Internal("Device code provider missing device_code_url".to_string())
@@ -818,13 +860,13 @@ pub async fn request_device_code(
         // byte-identical (an admin-seeded provider with empty default_scopes
         // still skips the `scope` form field, matching the old behavior).
         let mut params = vec![oauth_flow::client_id_form_field(&provider, &client_id)];
-        if additional_scopes.is_empty() {
-            if let Some(ref scopes) = provider.default_scopes {
-                params.push(("scope".to_string(), scopes.join(" ")));
-            }
-        } else {
-            let merged = merge_scopes(provider.default_scopes.as_ref(), additional_scopes);
-            params.push(("scope".to_string(), merged.join(" ")));
+        // Scope resolution shared with `initiate_oauth_connect` (NyxID#917).
+        if let Some(scope_str) = resolve_scope_param(
+            provider.default_scopes.as_ref(),
+            additional_scopes,
+            scope_override,
+        ) {
+            params.push(("scope".to_string(), scope_str));
         }
         oauth_flow::expect_json_response(oauth_flow::token_exchange_client().post(device_code_url))
             .form(&params)
@@ -2735,8 +2777,8 @@ mod tests {
         DevicePollFlow, build_telegram_identity_metadata, build_telegram_identity_update_doc,
         build_user_token_summary, classify_device_poll_failure, ensure_additional_scopes_supported,
         merge_scopes, normalize_telegram_bot_api_key, oauth_token_payload, params_to_json_body,
-        parse_additional_scopes, parse_token_exchange_response, token_exchange_provider_error,
-        uses_json_oauth_token_exchange,
+        parse_additional_scopes, parse_token_exchange_response, resolve_scope_param,
+        token_exchange_provider_error, uses_json_oauth_token_exchange,
     };
     use crate::crypto::telegram::TelegramLoginData;
     use crate::errors::AppError;
@@ -3082,6 +3124,60 @@ mod tests {
     fn parse_additional_scopes_rejects_overlong_scope() {
         let huge = "a".repeat(257);
         assert!(parse_additional_scopes(Some(&huge)).is_err());
+    }
+
+    #[test]
+    fn resolve_scope_param_override_replaces_defaults() {
+        // The picker sends a complete set that drops a default (`email`).
+        let defaults = vec!["openid".to_string(), "email".to_string()];
+        let override_set = vec!["openid".to_string(), "tweet.read".to_string()];
+        let resolved = resolve_scope_param(Some(&defaults), &[], Some(&override_set));
+        assert_eq!(resolved, Some("openid tweet.read".to_string()));
+    }
+
+    #[test]
+    fn resolve_scope_param_empty_override_omits_param() {
+        // User cleared every scope -> omit `scope` rather than emit empty.
+        let defaults = vec!["openid".to_string()];
+        let resolved = resolve_scope_param(Some(&defaults), &[], Some(&[]));
+        assert_eq!(resolved, None);
+    }
+
+    #[test]
+    fn resolve_scope_param_override_wins_over_additive() {
+        // If both are somehow supplied, override takes precedence.
+        let defaults = vec!["openid".to_string()];
+        let additional = vec!["should_be_ignored".to_string()];
+        let override_set = vec!["only".to_string(), "these".to_string()];
+        let resolved = resolve_scope_param(Some(&defaults), &additional, Some(&override_set));
+        assert_eq!(resolved, Some("only these".to_string()));
+    }
+
+    #[test]
+    fn resolve_scope_param_no_override_no_additional_uses_defaults() {
+        let defaults = vec!["openid".to_string(), "email".to_string()];
+        assert_eq!(
+            resolve_scope_param(Some(&defaults), &[], None),
+            Some("openid email".to_string())
+        );
+        // Byte-identical pre-feature behavior: Some(vec![]) -> emit empty.
+        assert_eq!(
+            resolve_scope_param(Some(&vec![]), &[], None),
+            Some(String::new())
+        );
+        // No defaults at all -> omit the param.
+        assert_eq!(resolve_scope_param(None, &[], None), None);
+    }
+
+    #[test]
+    fn resolve_scope_param_no_override_with_additional_merges() {
+        let defaults = vec!["openid".to_string()];
+        let additional = vec!["profile".to_string(), "openid".to_string()];
+        // Merge + dedupe, defaults first.
+        assert_eq!(
+            resolve_scope_param(Some(&defaults), &additional, None),
+            Some("openid profile".to_string())
+        );
     }
 
     #[test]

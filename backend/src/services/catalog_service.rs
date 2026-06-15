@@ -48,6 +48,11 @@ pub struct CatalogEntry {
     pub device_verification_url: Option<String>,
     pub device_token_url: Option<String>,
     pub default_scopes: Option<Vec<String>>,
+    /// Curated menu of notable available scopes for this provider (NyxID#917),
+    /// keyed off the provider slug via `scope_catalog::for_provider`. `None`
+    /// for providers with no curated catalog. The connect UIs render these as
+    /// selectable pills alongside a free-form custom-scope field.
+    pub scope_catalog: Option<Vec<crate::services::scope_catalog::ScopeCatalogEntry>>,
     pub supports_pkce: bool,
     pub device_code_format: Option<String>,
     pub token_endpoint_auth_method: Option<String>,
@@ -142,6 +147,7 @@ fn build_catalog_entry(
         device_verification_url: provider.and_then(|p| p.device_verification_url.clone()),
         device_token_url: provider.and_then(|p| p.device_token_url.clone()),
         default_scopes: provider.and_then(|p| p.default_scopes.clone()),
+        scope_catalog: provider.and_then(|p| crate::services::scope_catalog::for_provider(&p.slug)),
         supports_pkce: provider.is_some_and(|p| p.supports_pkce),
         device_code_format: provider.map(|p| p.device_code_format.clone()),
         token_endpoint_auth_method: provider.map(|p| p.token_endpoint_auth_method.clone()),

@@ -18,7 +18,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { OrgScopeSelect } from "@/components/shared/org-scope-select";
 import { useOrgs } from "@/hooks/use-orgs";
 import { ApiError, api } from "@/lib/api-client";
-import { parseAdditionalScopes } from "@/lib/parse-additional-scopes";
+import { UpstreamScopePicker } from "@/components/shared/upstream-scope-picker";
+import type { ScopeCatalogEntry } from "@/types/keys";
 import { Building2, ExternalLink } from "lucide-react";
 import type { AiKeyPrefill } from "@/pages/cli-pair/types";
 import { DeviceCodeFlow, OAuthFlow } from "./auth-flows";
@@ -83,6 +84,10 @@ interface CatalogEntryShape {
    * input is hidden for them (NyxID#917, mirrors `add-key-dialog`).
    */
   readonly device_code_format?: string | null;
+  /** Provider default scopes — pre-selected in the scope picker (NyxID#917). */
+  readonly default_scopes?: readonly string[] | null;
+  /** Curated selectable scope menu for this provider (NyxID#917). */
+  readonly scope_catalog?: readonly ScopeCatalogEntry[] | null;
   /**
    * Multi-field credential schema. When present and non-empty, this
    * catalog entry uses the `token_exchange` flow — render one form
@@ -717,10 +722,13 @@ function CatalogConfirmForm({
   // submit. One hook per entry so flipping between entries doesn't
   // leak values across providers.
   const [tokenFields, setTokenFields] = useState<Record<string, string>>({});
-  // Free-form upstream "additional scopes" for OAuth / device-code
-  // flows (NyxID#917). Parsed with the shared splitter on handoff to
-  // the sub-flow; kept as raw text here so the user can edit freely.
-  const [scopeInput, setScopeInput] = useState("");
+  // Upstream scope selection for OAuth / device-code flows (NyxID#917).
+  // Seeded with the provider's defaults (all pre-selected) so an unedited
+  // submit requests exactly today's scopes; the picker lets the user drop a
+  // default or add custom scopes. Passed to the sub-flow as `scopeOverride`.
+  const [selectedScopes, setSelectedScopes] = useState<readonly string[]>(
+    entry.default_scopes ?? [],
+  );
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const viaNode = prefill.via_node?.trim() ?? "";
@@ -911,15 +919,14 @@ function CatalogConfirmForm({
 
   // Whether the upstream provider accepts additional scopes on the
   // initiate request. OAuth always does; `openai`-format device-code
-  // providers (Codex) reject a `scope` parameter, so hide the input
+  // providers (Codex) reject a `scope` parameter, so hide the picker
   // for them — same gate as `add-key-dialog.tsx::DeviceCodeStep`
-  // (NyxID#917).
+  // (NyxID#917). When supported, the sub-flow receives the picker's
+  // complete selection as `scopeOverride`; when not, no override.
   const supportsAdditionalScopes =
     shape === "oauth" ||
     (shape === "device-code" && entry.device_code_format !== "openai");
-  const additionalScopes = supportsAdditionalScopes
-    ? parseAdditionalScopes(scopeInput)
-    : [];
+  const scopeOverride = supportsAdditionalScopes ? selectedScopes : undefined;
 
   if (authFlowActive && shape === "oauth" && entry.provider_config_id) {
     return (
@@ -933,7 +940,7 @@ function CatalogConfirmForm({
         pairingId={pairingId}
         credentialMode={entry.credential_mode}
         documentationUrl={entry.documentation_url}
-        additionalScopes={additionalScopes}
+        scopeOverride={scopeOverride}
         onSuccess={onSuccess}
         onCancel={() => {
           setAuthFlowActive(false);
@@ -952,7 +959,7 @@ function CatalogConfirmForm({
         endpointUrl={effectiveEndpointUrl}
         pairingId={pairingId}
         documentationUrl={entry.documentation_url}
-        additionalScopes={additionalScopes}
+        scopeOverride={scopeOverride}
         onSuccess={onSuccess}
         onCancel={() => {
           setAuthFlowActive(false);
@@ -1092,27 +1099,16 @@ function CatalogConfirmForm({
           : null}
 
         {supportsAdditionalScopes ? (
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="pair-aikey-additional-scopes">
-              Additional scopes (optional)
-            </Label>
-            <Input
-              id="pair-aikey-additional-scopes"
-              value={scopeInput}
-              onChange={(e) => {
-                setScopeInput(e.target.value);
-              }}
-              placeholder={
-                shape === "oauth" ? "e.g. media.write" : "e.g. repo,read:org"
-              }
-              autoComplete="off"
-              spellCheck={false}
-            />
-            <p className="text-xs text-muted-foreground">
-              Comma- or space-separated. Merged with the provider's default
-              scopes. The upstream provider decides whether to grant them.
-            </p>
-          </div>
+          <UpstreamScopePicker
+            catalog={entry.scope_catalog ?? []}
+            defaultScopes={entry.default_scopes ?? []}
+            value={selectedScopes}
+            onChange={setSelectedScopes}
+            customPlaceholder={
+              shape === "oauth" ? "e.g. media.write" : "e.g. repo,read:org"
+            }
+            idPrefix="pair-aikey-scope"
+          />
         ) : shape === "device-code" ? (
           <p className="text-xs text-muted-foreground">
             This provider does not accept additional scopes — they are

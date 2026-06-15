@@ -109,6 +109,16 @@ export interface CredentialFieldSpec {
   readonly secret: boolean;
 }
 
+/** One curated, selectable OAuth scope for a provider (NyxID#917). Mirrors the
+ *  backend `scope_catalog::ScopeCatalogEntry`. Rendered as a pill in the
+ *  connect UIs; `sensitive` marks write/admin/DM-grade scopes for emphasis. */
+export interface ScopeCatalogEntry {
+  readonly scope: string;
+  readonly label: string;
+  readonly description: string;
+  readonly sensitive?: boolean;
+}
+
 export interface CatalogEntry {
   readonly slug: string;
   readonly name: string;
@@ -135,6 +145,13 @@ export interface CatalogEntry {
   readonly token_url: string | null;
   readonly device_code_url: string | null;
   readonly default_scopes: readonly string[] | null;
+  /**
+   * Curated menu of notable available scopes for this provider (NyxID#917).
+   * The connect UIs render these as selectable pills (defaults pre-selected)
+   * alongside a free-form custom-scope field. `null`/absent when the provider
+   * has no curated catalog — the UI then shows free-form entry only.
+   */
+  readonly scope_catalog?: readonly ScopeCatalogEntry[] | null;
   readonly supports_pkce: boolean | null;
   /** "rfc8628" (default) or "openai". Determines whether a device-code
    *  provider accepts a `scope` parameter. OpenAI-format providers do not. */

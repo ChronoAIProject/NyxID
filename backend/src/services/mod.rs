@@ -62,6 +62,7 @@ pub mod push_service;
 pub mod rbac_helpers;
 pub mod rci_audit_service;
 pub mod role_service;
+pub mod scope_catalog;
 pub mod service_account_service;
 pub mod service_endpoint_service;
 pub mod social_auth_service;

@@ -117,6 +117,14 @@ export function useInitiateOAuth() {
              */
             readonly additionalScopes?: readonly string[];
             /**
+             * Complete scope set from the scope picker (NyxID#917). When
+             * provided (even empty), sent as `scope_override`, which REPLACES
+             * the provider's default scopes server-side instead of appending —
+             * so the user can drop a default. Takes precedence over
+             * `additionalScopes`.
+             */
+            readonly scopeOverride?: readonly string[];
+            /**
              * When set, initiate the OAuth flow on behalf of the given org.
              * The resulting token is stored under the org's user_id so every
              * org member can proxy through it. Caller must be an org admin.
@@ -143,7 +151,13 @@ export function useInitiateOAuth() {
       if (params.redirectPath) {
         query.set("redirect_path", params.redirectPath);
       }
-      if (params.additionalScopes && params.additionalScopes.length > 0) {
+      // `scope_override` (full set) wins over additive `scope`. Sent whenever
+      // defined — including an empty array, which the backend reads as "user
+      // cleared all scopes" and omits the param so the provider applies its
+      // own minimum.
+      if (params.scopeOverride !== undefined) {
+        query.set("scope_override", params.scopeOverride.join(","));
+      } else if (params.additionalScopes && params.additionalScopes.length > 0) {
         query.set("scope", params.additionalScopes.join(","));
       }
       if (params.targetOrgId) {
@@ -169,6 +183,8 @@ export function useInitiateDeviceCode() {
         | {
             readonly providerId: string;
             readonly additionalScopes?: readonly string[];
+            /** Same contract as `useInitiateOAuth`'s `scopeOverride`. */
+            readonly scopeOverride?: readonly string[];
             /** Same contract as `useInitiateOAuth`'s `targetOrgId`. */
             readonly targetOrgId?: string;
             /** Same contract as `useInitiateOAuth`'s `keyId`. */
@@ -178,7 +194,9 @@ export function useInitiateDeviceCode() {
       const params =
         typeof input === "string" ? { providerId: input } : input;
       const query = new URLSearchParams();
-      if (params.additionalScopes && params.additionalScopes.length > 0) {
+      if (params.scopeOverride !== undefined) {
+        query.set("scope_override", params.scopeOverride.join(","));
+      } else if (params.additionalScopes && params.additionalScopes.length > 0) {
         query.set("scope", params.additionalScopes.join(","));
       }
       if (params.targetOrgId) {
