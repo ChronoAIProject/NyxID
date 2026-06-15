@@ -143,15 +143,21 @@ export function UpstreamScopePicker({
                 }
               >
                 {p.sensitive ? (
-                  <span
-                    aria-hidden="true"
-                    title="Write/admin-level scope"
-                    className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500"
-                  />
+                  <>
+                    {/* Warning-token status dot — DESIGN.md semantic
+                        "warning/attention" (#F59E0B). Decorative; the
+                        sr-only text + the legend below carry the meaning
+                        so it isn't conveyed by color alone. */}
+                    <span
+                      aria-hidden="true"
+                      className="h-1.5 w-1.5 shrink-0 rounded-full bg-warning"
+                    />
+                    <span className="sr-only">(write or admin access) </span>
+                  </>
                 ) : null}
                 <span className="truncate">{p.label}</span>
                 {p.isDefault ? (
-                  <span className="shrink-0 text-[10px] text-muted-foreground">
+                  <span className="shrink-0 text-[11px] text-muted-foreground">
                     default
                   </span>
                 ) : null}
@@ -162,6 +168,16 @@ export function UpstreamScopePicker({
             );
           })}
         </div>
+      ) : null}
+
+      {pills.some((p) => p.sensitive) ? (
+        <p className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+          <span
+            aria-hidden="true"
+            className="h-1.5 w-1.5 shrink-0 rounded-full bg-warning"
+          />
+          Dot marks a write or admin-level scope.
+        </p>
       ) : null}
 
       <div className="flex items-center gap-1.5">

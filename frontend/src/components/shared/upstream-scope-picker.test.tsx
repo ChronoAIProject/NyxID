@@ -95,6 +95,26 @@ describe("UpstreamScopePicker", () => {
     expect(add).toBeDisabled();
   });
 
+  it("renders a legend and sr-only text for sensitive scopes (not color-only)", () => {
+    render(<Harness />);
+    // Legend explaining the warning dot is present because media.write is sensitive.
+    expect(screen.getByText(/write or admin-level scope/i)).toBeInTheDocument();
+    // The sensitive pill carries non-visual meaning for screen readers.
+    const uploadMedia = screen.getByRole("button", { name: /Upload media/i });
+    expect(uploadMedia).toHaveTextContent(/write or admin access/i);
+  });
+
+  it("omits the sensitive legend when no scope is sensitive", () => {
+    render(
+      <Harness
+        catalog={[{ scope: "read", label: "Read", description: "Read." }]}
+        defaultScopes={["read"]}
+        initial={["read"]}
+      />,
+    );
+    expect(screen.queryByText(/write or admin-level scope/i)).not.toBeInTheDocument();
+  });
+
   it("shows default scopes as pills even when absent from the catalog", () => {
     render(
       <Harness catalog={[]} defaultScopes={["offline_access"]} initial={["offline_access"]} />,
