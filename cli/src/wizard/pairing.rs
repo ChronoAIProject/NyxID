@@ -830,6 +830,12 @@ pub fn prefill_ai_key(p: &WizardPrefill) -> Value {
     if let Some(v) = &p.auth_key_name {
         obj.insert("auth_key_name".into(), Value::String(v.clone()));
     }
+    // Manage-scopes mode (NyxID#917 follow-up). Only emitted when set so
+    // ordinary add-flow pairing records stay byte-identical (bundle freshness
+    // test + pairing-record log consumers).
+    if let Some(v) = &p.reconnect_key_id {
+        obj.insert("reconnect_key_id".into(), Value::String(v.clone()));
+    }
     Value::Object(obj)
 }
 

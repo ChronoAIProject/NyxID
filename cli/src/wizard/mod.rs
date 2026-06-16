@@ -86,6 +86,12 @@ pub struct WizardPrefill {
     /// Auth key name (e.g. Authorization, X-API-Key, app_secret).
     /// When unset, defaults are derived per auth_method by the SPA.
     pub auth_key_name: Option<String>,
+    /// Manage-scopes mode (NyxID#917 follow-up): existing connection key id to
+    /// re-authorize with a new scope set rather than creating a new
+    /// connection. Set by `nyxid service scopes <slug>`; the wizard SPA reads
+    /// it, skips the catalog grid, and renders the scope picker seeded from the
+    /// connection's current granted scopes.
+    pub reconnect_key_id: Option<String>,
 }
 
 /// CLI-supplied prefill for rotation flows (`api-key rotate`,

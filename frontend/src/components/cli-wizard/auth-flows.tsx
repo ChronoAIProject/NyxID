@@ -68,6 +68,23 @@ interface FlowProps {
    * which case no scope param is sent at all.
    */
   readonly scopeOverride?: readonly string[];
+  /**
+   * Manage-scopes mode (NyxID#917 follow-up): re-authorize this EXISTING
+   * connection (its key id) with `scopeOverride`, instead of creating a new
+   * placeholder. The flow skips placeholder creation + the reserve latch,
+   * reuses the connection's id (so its `connection_id` is preserved), and —
+   * because the connection is already `active` — completes when its granted
+   * scopes change rather than on `status === "active"`. The existing
+   * connection is never deleted on cancel/unmount.
+   */
+  readonly reconnectKeyId?: string;
+  /**
+   * The connection's granted scopes at the moment the manage-scopes flow
+   * started. Used as the completion baseline: re-auth is "done" once the
+   * connection's granted scopes differ from this. Only meaningful with
+   * `reconnectKeyId`.
+   */
+  readonly baselineScopes?: readonly string[];
   readonly onSuccess: (result: AiKeyPairingSuccess) => void;
   /**
    * Called when the user bails before success so the parent can reset
@@ -99,6 +116,9 @@ interface ActiveKeyResponse {
   readonly slug: string;
   readonly label: string;
   readonly status: string;
+  /** Scopes currently granted on the connection (NyxID#917). Read by the
+   *  manage-scopes re-auth path to detect completion as a change. */
+  readonly granted_scopes?: readonly string[] | null;
 }
 
 interface InitiateOAuthResponse {
@@ -537,9 +557,15 @@ export function OAuthFlow({
   credentialMode,
   documentationUrl,
   scopeOverride,
+  reconnectKeyId,
+  baselineScopes,
   onSuccess,
   onCancel,
 }: FlowProps) {
+  // Manage-scopes mode: re-auth an existing connection rather than minting a
+  // placeholder. The credential sub-step is skipped (the connection already
+  // carries its BYO creds), so we go straight to "starting".
+  const isReconnect = Boolean(reconnectKeyId);
   // Distinct phase for the user-OAuth-app credential sub-step. When
   // `credentialMode` allows user credentials we first GET the existing
   // metadata; if already set we skip straight to the OAuth redirect,
@@ -551,7 +577,11 @@ export function OAuthFlow({
     | "waiting"
     | "done"
     | "error"
-  >(needsUserOAuthCredentials(credentialMode) ? "checking-credentials" : "starting");
+  >(
+    !isReconnect && needsUserOAuthCredentials(credentialMode)
+      ? "checking-credentials"
+      : "starting",
+  );
   const [error, setError] = useState<string | null>(null);
   const [authUrl, setAuthUrl] = useState<string | null>(null);
   const [clientId, setClientId] = useState("");
@@ -560,7 +590,10 @@ export function OAuthFlow({
   const [existingConnections, setExistingConnections] = useState<
     Array<{ id: string; slug: string; oauthClientId: string }>
   >([]);
-  const keyIdRef = useRef<string | null>(null);
+  // Manage-scopes mode preseeds this with the existing connection id, so the
+  // "reuse placeholder" branch below skips createPlaceholderKey + the reserve
+  // latch and re-auths the connection in place.
+  const keyIdRef = useRef<string | null>(reconnectKeyId ?? null);
   const cancelledRef = useRef(false);
   // Set to `true` once THIS tab has successfully latched
   // `reservePairingAction` on the server. Used to gate the rewind
@@ -609,6 +642,10 @@ export function OAuthFlow({
   useEffect(() => {
     function handleBeforeUnload() {
       if (successRef.current) return;
+      // Manage-scopes mode: the "key" is a real existing connection, not a
+      // disposable placeholder. Never DELETE it or fire a spurious /complete
+      // on unload — leaving mid-re-auth just keeps the current scopes.
+      if (isReconnect) return;
       const stale = keyIdRef.current;
       if (stale) {
         // Placeholder has already resolved (keyId is populated).
@@ -638,6 +675,9 @@ export function OAuthFlow({
     return () => {
       window.removeEventListener("beforeunload", handleBeforeUnload);
       if (successRef.current) return;
+      // Manage-scopes mode never created server-side state to release, and
+      // must not touch the existing connection.
+      if (isReconnect) return;
       // SPA navigation cleanup. Pass refs (not snapshots) so the
       // helper can await any in-flight `createPlaceholderKey`
       // before reading keyId / create-sent — a late 4xx or a
@@ -652,7 +692,7 @@ export function OAuthFlow({
         placeholderCreateInFlightRef,
       );
     };
-  }, [pairingId, slug, label]);
+  }, [pairingId, slug, label, isReconnect]);
 
   /**
    * Release whatever server-side state this sub-flow may have
@@ -678,6 +718,9 @@ export function OAuthFlow({
   async function releaseServerState(): Promise<
     "active" | "released" | "uncertain"
   > {
+    // Manage-scopes mode created no placeholder and holds no reservation, and
+    // must never delete the existing connection. Nothing to release.
+    if (isReconnect) return "uncertain";
     // Wait for any in-flight `createPlaceholderKey` to settle
     // FIRST — a clean 4xx will reset `placeholderCreateSentRef`
     // to `false`, which is the signal that rewind is safe. Doing
@@ -776,6 +819,9 @@ export function OAuthFlow({
   // it lands we err on the side of correctness (re-paste) over
   // convenience (silent breakage).
   useEffect(() => {
+    // Manage-scopes mode re-auths an existing connection that already carries
+    // its BYO credentials — skip the credential sub-step entirely.
+    if (isReconnect) return;
     if (!needsUserOAuthCredentials(credentialMode)) return;
     setPhase("needs-credentials");
     // Fetch existing active keys to offer "copy from" when the user
@@ -1000,12 +1046,31 @@ export function OAuthFlow({
   }, []);
 
   async function pollUntilActive(keyId: string) {
+    // Manage-scopes mode: the connection is ALREADY `active`, so completion
+    // can't be "status === active" (that's true on the first poll, before the
+    // user re-consents). Instead wait for the granted scopes to change from
+    // the baseline captured when the flow started — that only happens after
+    // the callback writes the re-authorized token.
+    const baseline = new Set(baselineScopes ?? []);
+    const scopesChanged = (granted: readonly string[] | null | undefined) => {
+      const next = granted ?? [];
+      if (next.length !== baseline.size) return true;
+      return next.some((s) => !baseline.has(s));
+    };
     await pollOAuthKeyUntilActive({
       keyId,
       getKey: (id) =>
         api.get<ActiveKeyResponse>(`/keys/${encodeURIComponent(id)}`),
       completeWithKey,
       isCancelled: () => cancelledRef.current,
+      ...(isReconnect
+        ? {
+            isComplete: (key: {
+              readonly status: string;
+              readonly granted_scopes?: readonly string[] | null;
+            }) => key.status === "active" && scopesChanged(key.granted_scopes),
+          }
+        : {}),
       onTerminalFailure: () => {
         setPhase("error");
         setError(

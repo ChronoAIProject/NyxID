@@ -332,6 +332,9 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                     custom_slug: custom_slug.clone(),
                     auth_method: auth_method.clone(),
                     auth_key_name: auth_key_name.clone(),
+                    // `service add` always creates a new connection; the
+                    // manage-scopes (re-auth existing) path is `service scopes`.
+                    reconnect_key_id: None,
                 };
                 return crate::wizard::run_ai_key_wizard(&auth, prefill, no_wait).await;
             }
@@ -1065,6 +1068,74 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 }
             }
             Ok(())
+        }
+
+        ServiceCommands::Scopes { id, no_wait, auth } => {
+            // Resolve the existing connection (by id or slug) and confirm it's
+            // a manageable OAuth connection before launching the wizard.
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let svc: Value = match api.get_value(&format!("/keys/{id}")).await {
+                Ok(v) => v,
+                Err(_) => {
+                    let resp: Value = api.get("/keys").await?;
+                    resp.get("keys")
+                        .and_then(|v| v.as_array())
+                        .and_then(|items| {
+                            items.iter().find(|item| {
+                                item.get("id").and_then(|v| v.as_str()) == Some(id.as_str())
+                                    || item.get("slug").and_then(|v| v.as_str())
+                                        == Some(id.as_str())
+                            })
+                        })
+                        .cloned()
+                        .with_context(|| format!("Could not find connection '{id}'"))?
+                }
+            };
+
+            let key_id = svc
+                .get("id")
+                .or_else(|| svc.get("_id"))
+                .and_then(|v| v.as_str())
+                .with_context(|| format!("Connection '{id}' response did not include an id"))?
+                .to_string();
+            let slug = svc
+                .get("slug")
+                .or_else(|| svc.get("service_slug"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let label = svc
+                .get("label")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let credential_type = svc
+                .get("credential_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let status = svc
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+
+            if credential_type != "oauth2" {
+                anyhow::bail!(
+                    "'{id}' is not an OAuth connection (credential type: {credential_type}). \
+                     Scope management is only available for OAuth services."
+                );
+            }
+            if status != "active" {
+                anyhow::bail!(
+                    "Connection '{id}' is {status}, not active. Reconnect it first \
+                     (the dashboard's Reconnect button), then manage its scopes."
+                );
+            }
+
+            let prefill = crate::wizard::WizardPrefill {
+                slug,
+                label,
+                reconnect_key_id: Some(key_id),
+                ..Default::default()
+            };
+            return crate::wizard::run_ai_key_wizard(&auth, prefill, no_wait).await;
         }
 
         ServiceCommands::Delete { id, yes, auth } => {

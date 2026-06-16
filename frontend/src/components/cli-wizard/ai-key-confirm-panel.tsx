@@ -88,6 +88,9 @@ interface CatalogEntryShape {
   readonly default_scopes?: readonly string[] | null;
   /** Curated selectable scope menu for this provider (NyxID#917). */
   readonly scope_catalog?: readonly ScopeCatalogEntry[] | null;
+  /** Per-provider scope-removal capability (NyxID#917). `unsupported` →
+   *  granted scopes stay locked in manage-scopes mode (e.g. GitHub). */
+  readonly scope_removal?: "auto" | "manual" | "unsupported" | null;
   /**
    * Multi-field credential schema. When present and non-empty, this
    * catalog entry uses the `token_exchange` flow — render one form
@@ -231,6 +234,20 @@ export function AiKeyConfirm({
     return `Couldn't load catalog entry "${trimmedSlug}".`;
   })();
 
+  // Manage-scopes mode (NyxID#917 follow-up): `nyxid service scopes <slug>`
+  // sends `reconnect_key_id`. Re-authorize that existing connection with a new
+  // scope set instead of the add-a-service flow. Checked after this
+  // component's hooks so hook order stays stable (rules-of-hooks).
+  if (prefill.reconnect_key_id) {
+    return (
+      <ManageScopesPanel
+        keyId={prefill.reconnect_key_id}
+        pairingId={pairingId}
+        onSuccess={onSuccess}
+      />
+    );
+  }
+
   // When no slug is picked yet, we're effectively on "Step 1 · pick a
   // service" (the catalog grid below). Once the user clicks a card we
   // transition to "Step 2 · enter credential" via the per-entry form.
@@ -297,6 +314,164 @@ export function AiKeyConfirm({
           onSuccess={onSuccess}
         />
       ) : null}
+    </div>
+  );
+}
+
+// ── manage-scopes (re-auth existing connection) ────────────────────
+
+/** Shape of `GET /keys/{id}` we read for manage-scopes mode. */
+interface ExistingKeyShape {
+  readonly id: string;
+  readonly slug: string;
+  readonly label: string;
+  readonly status: string;
+  readonly catalog_service_slug?: string | null;
+  readonly granted_scopes?: readonly string[] | null;
+}
+
+/**
+ * Manage-scopes mode (NyxID#917 follow-up): re-authorize an EXISTING
+ * connection with a new scope set. Reached from `nyxid service scopes <slug>`
+ * via `prefill.reconnect_key_id`. Fetches the connection + its catalog entry,
+ * renders the picker seeded from the current grant (capability-gated), and
+ * hands off to `OAuthFlow` in reconnect mode (reuses the connection_id; the
+ * old token stays live until the new one lands).
+ */
+function ManageScopesPanel({
+  keyId,
+  pairingId,
+  onSuccess,
+}: {
+  readonly keyId: string;
+  readonly pairingId: string;
+  readonly onSuccess: (result: AiKeyPairingSuccess) => void;
+}) {
+  const {
+    data: key,
+    isLoading: keyLoading,
+    error: keyError,
+  } = useQuery({
+    queryKey: ["cli-pair", "manage-scopes", "key", keyId],
+    queryFn: () =>
+      api.get<ExistingKeyShape>(`/keys/${encodeURIComponent(keyId)}`),
+  });
+
+  const catalogSlug = key?.catalog_service_slug ?? key?.slug ?? "";
+  const {
+    data: entry,
+    isLoading: entryLoading,
+    error: entryError,
+  } = useQuery({
+    queryKey: ["cli-pair", "manage-scopes", "catalog", catalogSlug],
+    queryFn: () =>
+      api.get<CatalogEntryShape>(
+        `/catalog/${encodeURIComponent(catalogSlug)}`,
+      ),
+    enabled: Boolean(catalogSlug),
+  });
+
+  const granted = key?.granted_scopes ?? [];
+  // Effect-free seeding: the selection defaults to the connection's current
+  // grant until the user edits it (then `override` takes over). Avoids a
+  // setState-in-effect cascade and a flash of empty selection.
+  const [override, setOverride] = useState<readonly string[] | null>(null);
+  const selectedScopes = override ?? granted;
+  const setSelectedScopes = setOverride;
+
+  const [authFlowActive, setAuthFlowActive] = useState(false);
+
+  const errMsg = (() => {
+    const e = keyError ?? entryError;
+    if (!e) return null;
+    if (e instanceof ApiError) return e.message;
+    return "Couldn't load this connection.";
+  })();
+
+  if (keyLoading || (catalogSlug && entryLoading)) {
+    return <Skeleton className="h-24 w-full" />;
+  }
+  if (errMsg) {
+    return <ErrorLine message={errMsg} />;
+  }
+  if (!key || !entry) {
+    return <ErrorLine message="Connection not found." />;
+  }
+
+  const isOAuth = (entry.provider_type ?? "").toLowerCase() === "oauth2";
+  // Scoped management only applies to OAuth providers. (The only device-code
+  // provider, openai-codex, has fixed scopes — nothing to manage.)
+  if (!isOAuth || !entry.provider_config_id) {
+    return (
+      <div className="flex flex-col gap-1">
+        <h2 className="font-serif text-[28px] font-normal">Manage permissions</h2>
+        <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[12px]">
+          {entry.name} doesn't support managing scopes here — its permissions
+          are fixed by the provider.
+        </p>
+      </div>
+    );
+  }
+
+  // `unsupported` providers (e.g. GitHub) can't narrow a grant by re-auth, so
+  // lock the granted scopes (add-only).
+  const lockedScopes =
+    entry.scope_removal === "unsupported" ? granted : [];
+
+  if (authFlowActive) {
+    return (
+      <OAuthFlow
+        providerId={entry.provider_config_id}
+        slug={key.slug}
+        label={key.label}
+        pairingId={pairingId}
+        credentialMode={entry.credential_mode}
+        documentationUrl={entry.documentation_url}
+        scopeOverride={selectedScopes}
+        reconnectKeyId={keyId}
+        baselineScopes={granted}
+        onSuccess={onSuccess}
+        onCancel={() => {
+          setAuthFlowActive(false);
+        }}
+      />
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-col gap-1">
+        <h2 className="font-serif text-[28px] font-normal">Manage permissions</h2>
+        <p className="text-[12px] text-muted-foreground">
+          Adjust what {key.label} can do, then re-authorize at the provider.
+          Your CLI is waiting for you to finish here.
+        </p>
+      </div>
+
+      <div className="flex items-start gap-3 rounded-lg border bg-muted/30 p-3">
+        {entry.icon_url ? (
+          <img src={entry.icon_url} alt="" className="h-8 w-8 rounded" loading="lazy" />
+        ) : null}
+        <div className="flex flex-col gap-0.5">
+          <h3 className="font-medium">{entry.name}</h3>
+          <p className="text-xs text-muted-foreground">{key.slug}</p>
+        </div>
+      </div>
+
+      <UpstreamScopePicker
+        catalog={entry.scope_catalog ?? []}
+        defaultScopes={entry.default_scopes ?? []}
+        value={selectedScopes}
+        onChange={setSelectedScopes}
+        lockedScopes={lockedScopes}
+        grantedScopes={granted}
+        providerName={entry.name}
+        idPrefix="pair-manage-scope"
+      />
+
+      <Button variant="primary" onClick={() => setAuthFlowActive(true)}>
+        Re-authorize with these permissions
+      </Button>
     </div>
   );
 }

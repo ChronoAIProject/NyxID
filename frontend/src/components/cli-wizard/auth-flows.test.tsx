@@ -182,6 +182,41 @@ describe("cli wizard auth flows", () => {
     expect(onTimeout).not.toHaveBeenCalled();
   });
 
+  // Manage-scopes mode (NyxID#917 follow-up): the connection is already
+  // `active`, so completion must be a CHANGE, not `status === active`. A
+  // custom isComplete predicate waits for the granted scopes to differ.
+  it("does NOT complete on active alone when an isComplete predicate is supplied", async () => {
+    const baseline = ["tweet.read", "tweet.write"];
+    // First poll: still the old scopes (re-consent not done) → must keep going.
+    // Second poll: new scopes → complete.
+    const getKey = vi
+      .fn()
+      .mockResolvedValueOnce({ status: "active", granted_scopes: baseline })
+      .mockResolvedValueOnce({ status: "active", granted_scopes: ["tweet.read"] });
+    const completeWithKey = vi.fn().mockResolvedValue(undefined);
+    const baselineSet = new Set(baseline);
+    await pollOAuthKeyUntilActive({
+      keyId: "key-1",
+      getKey,
+      completeWithKey,
+      isCancelled: () => false,
+      onTerminalFailure: vi.fn(),
+      onTimeout: vi.fn(),
+      sleepMs: vi.fn().mockResolvedValue(undefined),
+      isComplete: (k) => {
+        const next = k.granted_scopes ?? [];
+        return (
+          k.status === "active" &&
+          (next.length !== baselineSet.size ||
+            next.some((s) => !baselineSet.has(s)))
+        );
+      },
+    });
+    // Should have polled twice (first = no change, second = changed).
+    expect(getKey).toHaveBeenCalledTimes(2);
+    expect(completeWithKey).toHaveBeenCalledWith("key-1");
+  });
+
   // Issue #653 stale-tab path: a 404 means the placeholder no longer
   // exists (abandoned by another tab, hard-deleted, never persisted).
   // Treat as terminal so the wizard exits with a clear message instead

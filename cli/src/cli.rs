@@ -801,6 +801,19 @@ pub enum ServiceCommands {
         #[command(flatten)]
         auth: AuthArgs,
     },
+    /// Manage OAuth scopes on an existing connection (re-authorize with a new
+    /// scope set). Opens the browser wizard seeded with the connection's
+    /// current scopes; the upstream provider re-consents.
+    Scopes {
+        /// Service id or slug of the existing OAuth connection
+        id: String,
+        /// Remote-pair mode: print the URL + code and exit without polling
+        /// (resume with `nyxid pairing resume <PAIRING_ID>`).
+        #[arg(long)]
+        no_wait: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
     /// Delete a service
     Delete {
         /// Service ID

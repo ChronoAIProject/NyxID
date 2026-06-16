@@ -16,24 +16,35 @@ export function isTerminalAuthFailureStatus(
  */
 const MAX_CONSECUTIVE_POLL_ERRORS = 5;
 
+interface PolledKey {
+  readonly status: string;
+  readonly error_message?: string | null;
+  /** Scopes currently granted on the connection (NyxID#917). Used by the
+   *  manage-scopes re-auth path to detect completion as a *change*, since the
+   *  connection is already `active` before the user re-consents. */
+  readonly granted_scopes?: readonly string[] | null;
+}
+
 interface PollOAuthKeyUntilActiveOptions {
   readonly keyId: string;
-  readonly getKey: (keyId: string) => Promise<{
-    readonly status: string;
-    readonly error_message?: string | null;
-  }>;
+  readonly getKey: (keyId: string) => Promise<PolledKey>;
   readonly completeWithKey: (keyId: string) => Promise<void>;
   readonly isCancelled: () => boolean;
-  readonly onTerminalFailure: (key: {
-    readonly status: string;
-    readonly error_message?: string | null;
-  }) => void;
+  readonly onTerminalFailure: (key: PolledKey) => void;
   readonly onTimeout: () => void;
   readonly sleepMs?: (ms: number) => Promise<void>;
   readonly nowMs?: () => number;
   readonly timeoutMs?: number;
   readonly intervalMs?: number;
   readonly maxConsecutiveErrors?: number;
+  /**
+   * Completion predicate. Defaults to "status is active" — correct for a
+   * fresh add where the placeholder starts `pending_auth` and flips to
+   * `active` on callback. The manage-scopes re-auth path overrides this:
+   * the connection is *already* `active`, so it must instead wait for the
+   * granted scopes to change (the callback wrote a new token).
+   */
+  readonly isComplete?: (key: PolledKey) => boolean;
 }
 
 export async function pollOAuthKeyUntilActive({
@@ -48,6 +59,7 @@ export async function pollOAuthKeyUntilActive({
   timeoutMs = 5 * 60 * 1000,
   intervalMs = 2000,
   maxConsecutiveErrors = MAX_CONSECUTIVE_POLL_ERRORS,
+  isComplete = (key) => key.status === "active",
 }: PollOAuthKeyUntilActiveOptions): Promise<void> {
   const deadline = nowMs() + timeoutMs;
   let consecutiveErrors = 0;
@@ -58,7 +70,7 @@ export async function pollOAuthKeyUntilActive({
     try {
       const key = await getKey(keyId);
       consecutiveErrors = 0;
-      if (key.status === "active") {
+      if (isComplete(key)) {
         await completeWithKey(keyId);
         return;
       }
