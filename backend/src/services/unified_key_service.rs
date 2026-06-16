@@ -2060,9 +2060,10 @@ pub async fn get_key(
         None
     };
 
-    let cat_map: HashMap<&str, &DownstreamService> = catalog_ds
-        .as_ref()
-        .and_then(|ds| svc.catalog_service_id.as_deref().map(|id| (id, ds)))
+    let cat_map: HashMap<&str, &DownstreamService> = svc
+        .catalog_service_id
+        .as_deref()
+        .zip(catalog_ds.as_ref())
         .into_iter()
         .collect();
 

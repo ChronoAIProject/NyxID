@@ -244,20 +244,15 @@ fn path_row() -> DoctorRow {
 
 fn install_version_row(current_exe: Option<&Path>) -> DoctorRow {
     let version = update_check::installed_release_tag();
-    let status = current_exe
-        .and_then(|path| {
-            update::install_versions_root()
-                .ok()
-                .map(|root| (path, root))
-        })
-        .map(|(path, root)| {
-            if path.starts_with(root) {
-                DoctorStatus::Pass
-            } else {
-                DoctorStatus::Warn
-            }
-        })
-        .unwrap_or(DoctorStatus::Warn);
+    // Resolve the install root lazily so missing `current_exe` does not
+    // trigger extra env/path work.
+    let status = match current_exe {
+        Some(path) => match update::install_versions_root() {
+            Ok(root) if path.starts_with(&root) => DoctorStatus::Pass,
+            _ => DoctorStatus::Warn,
+        },
+        None => DoctorStatus::Warn,
+    };
 
     row("nyxid version", version, status)
 }
