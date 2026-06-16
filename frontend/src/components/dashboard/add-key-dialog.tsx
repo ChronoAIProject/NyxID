@@ -1194,6 +1194,7 @@ function OAuthStep({
   targetOrgId,
   reconnectMode,
   lockedScopes = [],
+  grantedScopes = [],
 }: {
   readonly catalogEntry: CatalogEntry;
   readonly ensureKey: () => Promise<KeyInfo>;
@@ -1203,20 +1204,24 @@ function OAuthStep({
   readonly targetOrgId: string | null;
   readonly reconnectMode: boolean;
   /**
-   * Already-granted scopes for an existing connection (append-only edit,
-   * NyxID#917 follow-up). Locked in the picker and used as the seed; empty
-   * for a fresh add, where the seed falls back to provider defaults.
+   * Subset of granted scopes that can't be removed (provider `scope_removal`
+   * is `unsupported`, e.g. GitHub).
    */
   readonly lockedScopes?: readonly string[];
+  /**
+   * The connection's currently-granted scopes when editing (NyxID#917).
+   * Drives the change summary + removal warning, and seeds the selection.
+   */
+  readonly grantedScopes?: readonly string[];
 }) {
   const initiateOAuth = useInitiateOAuth();
   const [error, setError] = useState<string | null>(null);
   // Scope picker (NyxID#917): seed from the connection's granted scopes when
-  // editing an existing connection (append-only), otherwise the provider's
-  // defaults (all pre-selected) so an unedited add requests today's scopes.
-  // The full selection is sent as `scopeOverride`.
+  // editing an existing connection, otherwise the provider's defaults (all
+  // pre-selected) so an unedited add requests today's scopes. The full
+  // selection is sent as `scopeOverride`.
   const [selectedScopes, setSelectedScopes] = useState<readonly string[]>(
-    lockedScopes.length > 0 ? lockedScopes : (catalogEntry.default_scopes ?? []),
+    grantedScopes.length > 0 ? grantedScopes : (catalogEntry.default_scopes ?? []),
   );
 
   async function handleConnect() {
@@ -1282,6 +1287,8 @@ function OAuthStep({
         value={selectedScopes}
         onChange={setSelectedScopes}
         lockedScopes={lockedScopes}
+        grantedScopes={reconnectMode ? grantedScopes : undefined}
+        providerName={catalogEntry.name}
         idPrefix="oauth-scope"
       />
 
@@ -1332,6 +1339,7 @@ function DeviceCodeStep({
   targetOrgId,
   reconnectMode,
   lockedScopes = [],
+  grantedScopes = [],
 }: {
   readonly catalogEntry: CatalogEntry;
   readonly ensureKey: () => Promise<KeyInfo>;
@@ -1341,8 +1349,10 @@ function DeviceCodeStep({
   /** When set, initiate the device-code flow under this org's scope. */
   readonly targetOrgId: string | null;
   readonly reconnectMode: boolean;
-  /** Already-granted scopes for append-only edit (see `OAuthStep`). */
+  /** Subset of granted scopes that can't be removed (see `OAuthStep`). */
   readonly lockedScopes?: readonly string[];
+  /** The connection's currently-granted scopes when editing (see `OAuthStep`). */
+  readonly grantedScopes?: readonly string[];
 }) {
   const [flowStep, setFlowStep] = useState<DeviceFlowStep>("configure");
   const [userCode, setUserCode] = useState("");
@@ -1351,10 +1361,10 @@ function DeviceCodeStep({
   const [secondsRemaining, setSecondsRemaining] = useState(0);
   const [createdKeyId, setCreatedKeyId] = useState<string | null>(null);
   // Scope picker selection (NyxID#917): granted scopes when editing an
-  // existing connection (append-only), else provider defaults. Only used for
-  // non-openai device-code providers (openai rejects scopes).
+  // existing connection, else provider defaults. Only used for non-openai
+  // device-code providers (openai rejects scopes).
   const [selectedScopes, setSelectedScopes] = useState<readonly string[]>(
-    lockedScopes.length > 0 ? lockedScopes : (catalogEntry.default_scopes ?? []),
+    grantedScopes.length > 0 ? grantedScopes : (catalogEntry.default_scopes ?? []),
   );
 
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1674,6 +1684,8 @@ function DeviceCodeStep({
             value={selectedScopes}
             onChange={setSelectedScopes}
             lockedScopes={lockedScopes}
+            grantedScopes={reconnectMode ? grantedScopes : undefined}
+            providerName={catalogEntry.name}
             idPrefix="device-scope"
           />
         ) : (
@@ -2458,7 +2470,12 @@ export function AddKeyDialog({
             onKeyCleared={() => setAuthKey(null)}
             targetOrgId={targetOrgId}
             reconnectMode={isReconnect}
-            lockedScopes={isReconnect ? (reconnectKey?.granted_scopes ?? []) : []}
+            grantedScopes={isReconnect ? (reconnectKey?.granted_scopes ?? []) : []}
+            lockedScopes={
+              isReconnect && selectedEntry.scope_removal === "unsupported"
+                ? (reconnectKey?.granted_scopes ?? [])
+                : []
+            }
             onBack={() =>
               isReconnect
                 ? handleOpenChange(false)
@@ -2481,7 +2498,12 @@ export function AddKeyDialog({
             onKeyCleared={() => setAuthKey(null)}
             targetOrgId={targetOrgId}
             reconnectMode={isReconnect}
-            lockedScopes={isReconnect ? (reconnectKey?.granted_scopes ?? []) : []}
+            grantedScopes={isReconnect ? (reconnectKey?.granted_scopes ?? []) : []}
+            lockedScopes={
+              isReconnect && selectedEntry.scope_removal === "unsupported"
+                ? (reconnectKey?.granted_scopes ?? [])
+                : []
+            }
             onBack={() =>
               isReconnect
                 ? handleOpenChange(false)

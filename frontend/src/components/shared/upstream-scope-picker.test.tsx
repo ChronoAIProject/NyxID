@@ -16,12 +16,16 @@ function Harness({
   defaultScopes = ["tweet.read"],
   initial = ["tweet.read"],
   lockedScopes,
+  grantedScopes,
+  providerName,
   onChangeSpy,
 }: {
   catalog?: ScopeCatalogEntry[];
   defaultScopes?: string[];
   initial?: string[];
   lockedScopes?: string[];
+  grantedScopes?: string[];
+  providerName?: string;
   onChangeSpy?: (s: readonly string[]) => void;
 }) {
   const [value, setValue] = useState<readonly string[]>(initial);
@@ -31,6 +35,8 @@ function Harness({
       defaultScopes={defaultScopes}
       value={value}
       lockedScopes={lockedScopes}
+      grantedScopes={grantedScopes}
+      providerName={providerName}
       onChange={(next) => {
         onChangeSpy?.(next);
         setValue(next);
@@ -165,12 +171,61 @@ describe("UpstreamScopePicker", () => {
     );
   });
 
-  it("shows the append-only helper note when scopes are locked", () => {
+  it("shows the locked helper note when scopes can't be removed", () => {
     render(
       <Harness defaultScopes={[]} initial={["tweet.read"]} lockedScopes={["tweet.read"]} />,
     );
-    expect(screen.getByText(/already authorized and stay/i)).toBeInTheDocument();
-    expect(screen.getByText(/Removing a granted scope isn.t supported/i)).toBeInTheDocument();
+    expect(screen.getByText(/already authorized and locked/i)).toBeInTheDocument();
+    expect(screen.getByText(/can.t be removed here/i)).toBeInTheDocument();
+  });
+
+  // Declarative edit mode (NyxID#917 follow-up): grantedScopes drives a
+  // change summary; removing a granted scope shows a warning.
+  it("shows a change summary when adding a scope in edit mode", async () => {
+    const user = userEvent.setup();
+    render(
+      <Harness
+        defaultScopes={[]}
+        initial={["tweet.read"]}
+        grantedScopes={["tweet.read"]}
+      />,
+    );
+    // Nothing changed yet → no summary.
+    expect(screen.queryByText(/Adding:/i)).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /Upload media/i }));
+    const addingLine = screen.getByText(/Adding:/i).closest("p");
+    expect(addingLine).toHaveTextContent(/Upload media/);
+  });
+
+  it("shows a removal warning when a granted scope is deselected in edit mode", async () => {
+    const user = userEvent.setup();
+    render(
+      <Harness
+        defaultScopes={[]}
+        initial={["tweet.read", "media.write"]}
+        grantedScopes={["tweet.read", "media.write"]}
+        providerName="Twitter / X"
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: /Upload media/i }));
+    expect(screen.getByText(/Removing:/i)).toBeInTheDocument();
+    expect(screen.getByText(/stop any app that relies on it/i)).toBeInTheDocument();
+    expect(screen.getByText(/Twitter \/ X/)).toBeInTheDocument();
+  });
+
+  it("allows deselecting a granted scope when it is not locked", async () => {
+    const onChange = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <Harness
+        defaultScopes={[]}
+        initial={["tweet.read", "media.write"]}
+        grantedScopes={["tweet.read", "media.write"]}
+        onChangeSpy={onChange}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: /Upload media/i }));
+    expect(onChange).toHaveBeenLastCalledWith(["tweet.read"]);
   });
 
   it("shows default scopes as pills even when absent from the catalog", () => {

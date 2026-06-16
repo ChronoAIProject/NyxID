@@ -74,6 +74,10 @@ pub struct CatalogEntryResponse {
     /// with no curated catalog.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope_catalog: Option<Vec<crate::services::scope_catalog::ScopeCatalogEntry>>,
+    /// How safely granted scopes can be removed from an existing connection
+    /// (`auto` / `manual` / `unsupported`). Drives the Permissions panel.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope_removal: Option<crate::services::scope_catalog::ScopeRemoval>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supports_pkce: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -288,6 +292,7 @@ fn catalog_entry_response(entry: catalog_service::CatalogEntry) -> CatalogEntryR
         device_token_url: entry.device_token_url,
         default_scopes: entry.default_scopes,
         scope_catalog: entry.scope_catalog,
+        scope_removal: entry.scope_removal,
         supports_pkce,
         device_code_format: entry.device_code_format,
         token_endpoint_auth_method: entry.token_endpoint_auth_method,
@@ -844,6 +849,7 @@ mod tests {
             device_token_url: None,
             default_scopes: None,
             scope_catalog: None,
+            scope_removal: None,
             supports_pkce: false,
             device_code_format: None,
             token_endpoint_auth_method: None,

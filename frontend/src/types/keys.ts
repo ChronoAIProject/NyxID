@@ -159,6 +159,13 @@ export interface CatalogEntry {
    * has no curated catalog — the UI then shows free-form entry only.
    */
   readonly scope_catalog?: readonly ScopeCatalogEntry[] | null;
+  /**
+   * How safely granted scopes can be removed from an existing connection to
+   * this provider (NyxID#917 follow-up). `unsupported` → the Permissions panel
+   * keeps granted scopes locked (re-auth can't narrow, e.g. GitHub);
+   * `auto`/`manual` → removal is allowed. `null`/absent for non-OAuth entries.
+   */
+  readonly scope_removal?: "auto" | "manual" | "unsupported" | null;
   readonly supports_pkce: boolean | null;
   /** "rfc8628" (default) or "openai". Determines whether a device-code
    *  provider accepts a `scope` parameter. OpenAI-format providers do not. */

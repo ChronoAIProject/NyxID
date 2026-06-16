@@ -53,6 +53,10 @@ pub struct CatalogEntry {
     /// for providers with no curated catalog. The connect UIs render these as
     /// selectable pills alongside a free-form custom-scope field.
     pub scope_catalog: Option<Vec<crate::services::scope_catalog::ScopeCatalogEntry>>,
+    /// How safely granted scopes can be removed from an existing connection to
+    /// this provider (drives the Permissions panel). `None` for non-OAuth
+    /// catalog entries (no provider).
+    pub scope_removal: Option<crate::services::scope_catalog::ScopeRemoval>,
     pub supports_pkce: bool,
     pub device_code_format: Option<String>,
     pub token_endpoint_auth_method: Option<String>,
@@ -148,6 +152,8 @@ fn build_catalog_entry(
         device_token_url: provider.and_then(|p| p.device_token_url.clone()),
         default_scopes: provider.and_then(|p| p.default_scopes.clone()),
         scope_catalog: provider.and_then(|p| crate::services::scope_catalog::for_provider(&p.slug)),
+        scope_removal: provider
+            .map(|p| crate::services::scope_catalog::removal_capability(&p.slug)),
         supports_pkce: provider.is_some_and(|p| p.supports_pkce),
         device_code_format: provider.map(|p| p.device_code_format.clone()),
         token_endpoint_auth_method: provider.map(|p| p.token_endpoint_auth_method.clone()),

@@ -40,6 +40,47 @@ pub struct ScopeCatalogEntry {
     pub sensitive: bool,
 }
 
+/// How safely a granted scope can be *removed* from an existing connection.
+/// Drives the Permissions panel: whether deselecting a granted scope is
+/// offered, and whether NyxID can clean up the old grant at the provider or
+/// the user must do it manually. (Adding scopes works on every provider, so
+/// there's no "add" capability.)
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ScopeRemoval {
+    /// Re-authorizing with a narrower set yields a narrower token AND the
+    /// provider exposes a token-revocation endpoint, so NyxID cancels the old
+    /// grant automatically. Fully hands-off.
+    Auto,
+    /// Re-auth narrows the token NyxID holds, but there's no programmatic
+    /// revoke — the prior grant lingers until the user removes it in the
+    /// provider's own settings. UI allows removal with a "revoke at <provider>"
+    /// note.
+    Manual,
+    /// Removal can't be achieved by re-auth because the provider tracks scopes
+    /// at the grant level as a union (e.g. GitHub). Needs a provider-specific
+    /// teardown not yet implemented; UI keeps granted scopes locked.
+    Unsupported,
+}
+
+/// Per-provider scope-removal capability. `auto` = providers with a seeded
+/// `revocation_url` and standard downscope-on-reauth; `manual` = downscope
+/// works but no programmatic revoke; `unsupported` = grant-level union
+/// (GitHub) where re-auth can't narrow. Unknown/uncurated providers default to
+/// `manual` (allow removal, advise verifying at the provider) — the long tail
+/// still needs per-provider verification before promising `auto`.
+pub fn removal_capability(slug: &str) -> ScopeRemoval {
+    match slug {
+        "twitter" | "google" | "google-cloud" | "discord" | "slack" | "tiktok" | "twitch"
+        | "reddit" => ScopeRemoval::Auto,
+        "facebook" | "spotify" | "linkedin" | "microsoft" | "lark" | "feishu" => {
+            ScopeRemoval::Manual
+        }
+        "github" => ScopeRemoval::Unsupported,
+        _ => ScopeRemoval::Manual,
+    }
+}
+
 /// Curated available-scope menu for a provider, keyed by its `ProviderConfig`
 /// slug (e.g. `twitter`, `google`, `github`). Returns `None` for providers
 /// with no curated catalog (api_key providers, `openai`-format device-code
@@ -882,6 +923,41 @@ const LARK: &[(&str, &str, &str, bool)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn removal_capability_matches_provider_revoke_support() {
+        // revoke-endpoint providers → auto
+        for slug in [
+            "twitter",
+            "google",
+            "google-cloud",
+            "discord",
+            "slack",
+            "tiktok",
+            "twitch",
+            "reddit",
+        ] {
+            assert_eq!(removal_capability(slug), ScopeRemoval::Auto, "{slug}");
+        }
+        // downscope works but no programmatic revoke → manual
+        for slug in [
+            "facebook",
+            "spotify",
+            "linkedin",
+            "microsoft",
+            "lark",
+            "feishu",
+        ] {
+            assert_eq!(removal_capability(slug), ScopeRemoval::Manual, "{slug}");
+        }
+        // grant-level union, re-auth can't narrow → unsupported
+        assert_eq!(removal_capability("github"), ScopeRemoval::Unsupported);
+        // unknown providers default to manual (allow, advise verifying)
+        assert_eq!(
+            removal_capability("some-future-provider"),
+            ScopeRemoval::Manual
+        );
+    }
 
     #[test]
     fn known_oauth_providers_have_catalogs() {

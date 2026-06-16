@@ -40,6 +40,20 @@ export interface UpstreamScopePickerProps {
    * = fresh add, where defaults are removable.
    */
   readonly lockedScopes?: readonly string[];
+  /**
+   * The connection's currently-granted scopes when editing an existing
+   * connection (NyxID#917 follow-up). Drives the change summary + removal
+   * warning. Distinct from `lockedScopes`: `grantedScopes` is what they have
+   * now (for the diff); `lockedScopes` is the subset that can't be removed
+   * (used when the provider's `scope_removal` is `unsupported`). Unset = a
+   * fresh add (no diff shown).
+   */
+  readonly grantedScopes?: readonly string[];
+  /**
+   * Human provider name for the removal warning copy (e.g. "Twitter / X").
+   * Falls back to "the provider".
+   */
+  readonly providerName?: string;
 }
 
 /** A pill row entry resolved from catalog ∪ defaults ∪ locked ∪ custom. */
@@ -113,11 +127,25 @@ export function UpstreamScopePicker({
   customPlaceholder = "e.g. custom.scope",
   idPrefix = "scope",
   lockedScopes = [],
+  grantedScopes,
+  providerName,
 }: UpstreamScopePickerProps) {
   const [customInput, setCustomInput] = useState("");
   const selected = new Set(value);
   const locked = new Set(lockedScopes);
   const pills = buildPills(catalog, defaultScopes, value, lockedScopes);
+
+  // Edit-mode change summary (NyxID#917): when editing an existing connection,
+  // diff the current selection against what's already granted. `labelFor` maps
+  // a scope to its human pill label for readable copy.
+  const labelFor = (scope: string) =>
+    pills.find((p) => p.scope === scope)?.label ?? scope;
+  const grantedSet = grantedScopes ? new Set(grantedScopes) : null;
+  const added = grantedSet ? value.filter((s) => !grantedSet.has(s)) : [];
+  const removed = grantedScopes
+    ? grantedScopes.filter((s) => !selected.has(s))
+    : [];
+  const hasChanges = added.length > 0 || removed.length > 0;
 
   function toggle(scope: string) {
     // Locked (already-granted) scopes are append-only — can't be deselected.
@@ -244,12 +272,43 @@ export function UpstreamScopePicker({
           Add
         </Button>
       </div>
+      {grantedSet && hasChanges ? (
+        <div className="flex flex-col gap-1 rounded-lg border border-border bg-muted/40 px-3 py-2 text-[12px]">
+          <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+            Changes
+          </span>
+          {added.length > 0 ? (
+            <p className="text-foreground">
+              <span className="text-success">+ Adding:</span>{" "}
+              {added.map(labelFor).join(", ")}
+            </p>
+          ) : null}
+          {removed.length > 0 ? (
+            <>
+              <p className="text-foreground">
+                <span className="text-destructive">− Removing:</span>{" "}
+                {removed.map(labelFor).join(", ")}
+              </p>
+              <p className="text-[11px] text-warning">
+                Removing a permission re-authorizes this connection and will
+                stop any app that relies on it. NyxID will use only the
+                remaining permissions; the old access at{" "}
+                {providerName ?? "the provider"} stays until you revoke it
+                there.
+              </p>
+            </>
+          ) : null}
+        </div>
+      ) : null}
+
       <p className="text-xs text-muted-foreground">
         {locked.size > 0
-          ? "Scopes marked “granted” are already authorized and stay — adding more re-authorizes this connection with the extra access. Removing a granted scope isn’t supported here yet."
-          : pills.length > 0
-            ? "Selected scopes are requested at sign-in. Defaults are pre-selected — deselect to drop one. Add anything missing above; the upstream provider decides whether to grant them."
-            : "Comma- or space-separated. The upstream provider decides whether to grant them."}
+          ? "Scopes marked “granted” are already authorized and locked — this provider can’t narrow them by re-authorizing, so they can’t be removed here. Add anything missing above."
+          : grantedSet
+            ? "Tick to add a permission, untick to remove one, then update. Changes re-authorize this connection at the provider."
+            : pills.length > 0
+              ? "Selected scopes are requested at sign-in. Defaults are pre-selected — deselect to drop one. Add anything missing above; the upstream provider decides whether to grant them."
+              : "Comma- or space-separated. The upstream provider decides whether to grant them."}
       </p>
     </div>
   );

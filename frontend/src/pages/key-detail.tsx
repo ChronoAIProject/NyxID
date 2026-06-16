@@ -68,7 +68,7 @@ import {
   ExternalLink,
   FileJson,
   Power,
-  Plus,
+  SlidersHorizontal,
 } from "lucide-react";
 import { toast } from "sonner";
 import type { SshServiceConfig } from "@/types/api";
@@ -1937,8 +1937,8 @@ export function KeyDetailPage() {
                 variant="outline"
                 onClick={() => setReconnectOpen(true)}
               >
-                <ButtonIcon><Plus className="h-4 w-4" /></ButtonIcon>
-                Add permissions
+                <ButtonIcon><SlidersHorizontal className="h-4 w-4" /></ButtonIcon>
+                Manage permissions
               </Button>
             )}
             {!keyInfo.auto_connected && !readOnly && (
