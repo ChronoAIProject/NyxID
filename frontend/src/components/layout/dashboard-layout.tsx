@@ -11,7 +11,9 @@ import { AmbientStatusLine } from "@/components/chrome/ambient-status-line";
 import { useAuthStore } from "@/stores/auth-store";
 import { useLogout } from "@/hooks/use-auth";
 import { useShouldShowOnboarding } from "@/hooks/use-onboarding";
+import { useApplyDashboardTheme } from "@/hooks/use-theme";
 import { OnboardingTakeover } from "@/components/dashboard/onboarding-takeover";
+import { ThemeToggle } from "@/components/dashboard/theme-toggle";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -56,6 +58,11 @@ export function DashboardLayout() {
   const [mobileNavState, setMobileNavState] = useState<"closed" | "open" | "closing">("closed");
   const [rightPanel, setRightPanel] = useState<React.ReactNode>(null);
   const [breadcrumbLabel, setBreadcrumbLabel] = useState<string | null>(null);
+
+  // Confines the light/dark theme to the dashboard: applies the resolved
+  // theme class to <html> on mount, reverts to dark on unmount. Must run
+  // before the onboarding early-returns below to satisfy rules-of-hooks.
+  useApplyDashboardTheme();
 
   const closeMobileNav = useCallback(() => setMobileNavState("closing"), []);
 
@@ -293,15 +300,18 @@ function TopBar({
 
         {/* Right actions */}
         <div className="flex items-center gap-2">
+        {/* Theme toggle — light/dark, all breakpoints */}
+        <ThemeToggle />
+
         {/* Search — desktop only */}
         <button
           type="button"
           onClick={onSearch}
-          className="hidden md:flex h-8 items-center gap-2 rounded-lg border border-white/[0.08] px-3 text-[12px] text-text-tertiary transition-colors duration-300 hover:border-white/[0.15] hover:text-muted-foreground"
+          className="hidden md:flex h-8 items-center gap-2 rounded-lg border border-hairline px-3 text-[12px] text-text-tertiary transition-colors duration-300 hover:border-hairline-strong hover:text-muted-foreground"
         >
           <Search className="h-[14px] w-[14px]" />
           <span>Search...</span>
-          <kbd className="ml-1 flex h-[18px] w-[18px] items-center justify-center rounded-[4px] border border-white/[0.08] bg-white/[0.04] text-[10px] text-text-tertiary">/</kbd>
+          <kbd className="ml-1 flex h-[18px] w-[18px] items-center justify-center rounded-[4px] border border-hairline bg-overlay-strong text-[10px] text-text-tertiary">/</kbd>
         </button>
 
         {/* Profile — desktop only (mobile has it in the menu) */}
@@ -309,7 +319,7 @@ function TopBar({
           <DropdownMenuTrigger asChild>
             <button
               type="button"
-              className="hidden md:flex h-8 w-8 items-center justify-center rounded-lg border border-white/[0.08] text-text-tertiary transition-colors duration-300 hover:border-white/[0.15] hover:text-muted-foreground focus-visible:outline-none"
+              className="hidden md:flex h-8 w-8 items-center justify-center rounded-lg border border-hairline text-text-tertiary transition-colors duration-300 hover:border-hairline-strong hover:text-muted-foreground focus-visible:outline-none"
               aria-label="User menu"
             >
               <User className="h-[14px] w-[14px]" />
@@ -340,9 +350,9 @@ function TopBar({
           href="https://github.com/ChronoAIProject"
           target="_blank"
           rel="noopener noreferrer"
-          className="hidden md:flex h-8 items-center gap-1.5 rounded-lg border border-white/[0.08] px-3 text-[12px] text-text-tertiary transition-colors duration-300 hover:border-white/[0.15] hover:text-muted-foreground"
+          className="hidden md:flex h-8 items-center gap-1.5 rounded-lg border border-hairline px-3 text-[12px] text-text-tertiary transition-colors duration-300 hover:border-hairline-strong hover:text-muted-foreground"
         >
-          <span className="flex h-[18px] w-[18px] items-center justify-center rounded-[4px] border border-white/[0.08] bg-white/[0.04]">
+          <span className="flex h-[18px] w-[18px] items-center justify-center rounded-[4px] border border-hairline bg-overlay-strong">
             <Github className="h-3 w-3" />
           </span>
           <span>GitHub</span>
@@ -353,7 +363,7 @@ function TopBar({
           <DropdownMenuTrigger asChild>
             <button
               type="button"
-              className="flex md:hidden h-8 w-8 items-center justify-center rounded-lg border border-white/[0.08] text-text-tertiary"
+              className="flex md:hidden h-8 w-8 items-center justify-center rounded-lg border border-hairline text-text-tertiary"
               aria-label="User menu"
             >
               <User className="h-[14px] w-[14px]" />
@@ -384,7 +394,7 @@ function TopBar({
           href="https://github.com/ChronoAIProject"
           target="_blank"
           rel="noopener noreferrer"
-          className="flex md:hidden h-8 w-8 items-center justify-center rounded-lg border border-white/[0.08] text-text-tertiary transition-colors duration-300 hover:border-white/[0.15] hover:text-muted-foreground"
+          className="flex md:hidden h-8 w-8 items-center justify-center rounded-lg border border-hairline text-text-tertiary transition-colors duration-300 hover:border-hairline-strong hover:text-muted-foreground"
           aria-label="GitHub"
         >
           <Github className="h-[14px] w-[14px]" />
@@ -421,8 +431,8 @@ function MobileNavItem({
       onClick={onClick}
       className={`flex items-center gap-3 rounded-xl px-4 py-3 text-[14px] transition-colors ${
         active
-          ? "bg-white/[0.06] font-medium text-foreground"
-          : "text-muted-foreground active:bg-white/[0.04]"
+          ? "bg-overlay-strong font-medium text-foreground"
+          : "text-muted-foreground active:bg-overlay-strong"
       }`}
     >
       <item.icon
@@ -513,7 +523,7 @@ function MobileNav({
 
       {/* Search input */}
       <div className="px-5 pb-3">
-        <div className="flex h-10 items-center gap-3 rounded-xl border border-white/[0.08] bg-white/[0.02] px-4">
+        <div className="flex h-10 items-center gap-3 rounded-xl border border-hairline bg-overlay px-4">
           <Search className="h-4 w-4 shrink-0 text-text-tertiary" />
           <input
             type="text"
@@ -540,7 +550,7 @@ function MobileNav({
                   key={`${item.to ?? "action"}-${item.label}`}
                   type="button"
                   onClick={() => handleSearchSelect(item)}
-                  className="flex items-center gap-3 rounded-xl px-4 py-3 text-[14px] text-muted-foreground active:bg-white/[0.04]"
+                  className="flex items-center gap-3 rounded-xl px-4 py-3 text-[14px] text-muted-foreground active:bg-overlay-strong"
                 >
                   <item.icon className="h-[18px] w-[18px] shrink-0 text-text-tertiary" />
                   <span className="flex-1 text-left">{item.label}</span>
@@ -626,7 +636,7 @@ function MobileNav({
       {/* Footer — user info + logout */}
       <div className="shrink-0 border-t border-border/60 px-5 py-4 space-y-2" style={{ paddingBottom: "max(1rem, var(--sab))" }}>
         <div className="flex items-center gap-3">
-          <div className="flex h-8 w-8 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.04]">
+          <div className="flex h-8 w-8 items-center justify-center rounded-lg border border-hairline bg-overlay-strong">
             <User className="h-[14px] w-[14px] text-text-tertiary" />
           </div>
           <div className="min-w-0 flex-1">
@@ -638,7 +648,7 @@ function MobileNav({
           <button
             type="button"
             onClick={() => { onClose(); void navigate({ to: "/settings" }); }}
-            className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-white/[0.08] bg-white/[0.02] py-2.5 text-[12px] text-muted-foreground active:bg-white/[0.04]"
+            className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-hairline bg-overlay py-2.5 text-[12px] text-muted-foreground active:bg-overlay-strong"
           >
             <Settings className="h-3.5 w-3.5" />
             Settings
@@ -646,7 +656,7 @@ function MobileNav({
           <button
             type="button"
             onClick={() => void handleLogout()}
-            className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-white/[0.08] bg-white/[0.02] py-2.5 text-[12px] text-destructive active:bg-white/[0.04]"
+            className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-hairline bg-overlay py-2.5 text-[12px] text-destructive active:bg-overlay-strong"
           >
             <LogOut className="h-3.5 w-3.5" />
             Log out
