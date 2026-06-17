@@ -1,6 +1,6 @@
 {
   "name": "@nyxids/oauth-core",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "NyxID OAuth core SDK with PKCE and token handling",
   "type": "module",
   "main": "./dist/index.js",
