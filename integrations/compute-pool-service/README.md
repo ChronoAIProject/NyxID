@@ -1,10 +1,14 @@
 # Compute Pool Service
 
-This integration is the long-term shape for shared GPU / Mac / lab compute:
-the queue and worker protocol live outside NyxID core. NyxID manages the
-service as a normal user/org service: auth, agent API keys, credential
-injection, node routing, audit metadata, and future load balancing stay in
+This integration is a reference external service for shared GPU / Mac / lab
+compute. The queue and worker protocol live outside NyxID core. NyxID
+manages the service as a normal user/org service: auth, agent API keys,
+credential injection, node routing, proxying, and audit metadata stay in
 NyxID; compute-specific task state stays in this service.
+
+This is not a NyxID service-pool framework. Cross-service counting, quotas,
+metering, and load balancing should be handled by a future generic NyxID
+service-pool design rather than by a compute-specific core API.
 
 This integration does not require a NyxID org model change. To share it with
 company members, create the NyxID service under the existing org owner and
@@ -40,6 +44,8 @@ The standalone service stores task input/output in its own local store. The
 default store is a JSON file intended for smoke tests and small trusted
 deployments, not production durability. A production version should replace
 the store with Postgres, Redis, MongoDB, or another managed queue backend.
+NyxID-level metering and quota decisions should count proxied calls to this
+service the same way they would count any other registered service.
 
 ## Start The Service
 
@@ -162,8 +168,10 @@ The OpenAPI spec for the consumer API is in `openapi.yaml`.
 - One task per worker process at a time.
 - No built-in Slurm adapter yet.
 - No NyxID catalog seed yet; add as a custom service for now.
-- No service-level load balancing in NyxID yet; route one service instance
-  through one node, then extend NyxID service routing separately.
+- No NyxID-level service pool yet. This service exposes `/v1/status` as a
+  capacity signal, but generic service-instance load balancing, org/agent
+  quotas, usage counting, and metering belong in NyxID's future service-pool
+  layer.
 
 ## Why This Is Not NyxID Core
 
