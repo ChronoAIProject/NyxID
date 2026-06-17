@@ -328,6 +328,9 @@ interface ExistingKeyShape {
   readonly status: string;
   readonly catalog_service_slug?: string | null;
   readonly granted_scopes?: readonly string[] | null;
+  /** Fresh-authorization timestamp (NyxID#917) — manage-scopes completion
+   *  baseline handed to OAuthFlow. */
+  readonly last_authorized_at?: string | null;
 }
 
 /**
@@ -372,11 +375,22 @@ function ManageScopesPanel({
   });
 
   const granted = key?.granted_scopes ?? [];
+  const defaultScopes = entry?.default_scopes ?? [];
   // Effect-free seeding: the selection defaults to the connection's current
-  // grant until the user edits it (then `override` takes over). Avoids a
-  // setState-in-effect cascade and a flash of empty selection.
+  // grant until the user edits it (then `override` takes over). When the
+  // connection has no recorded grant (legacy keys, or providers that didn't
+  // return `scope` in their token response), seed the picker from the
+  // catalog defaults so the user sees a sensible starting set rather than
+  // an empty list. NyxID#917: a present-but-empty `scope_override` is
+  // interpreted by the backend as "drop all defaults", so we send
+  // `scopeOverride={undefined}` until either (a) the user actually edits
+  // the picker or (b) we know the real current grant — otherwise legacy
+  // keys would silently re-auth with zero scopes.
+  const seedScopes = granted.length > 0 ? granted : defaultScopes;
   const [override, setOverride] = useState<readonly string[] | null>(null);
-  const selectedScopes = override ?? granted;
+  const selectedScopes = override ?? seedScopes;
+  const scopeOverride =
+    override !== null ? override : granted.length > 0 ? granted : undefined;
   const setSelectedScopes = setOverride;
 
   const [authFlowActive, setAuthFlowActive] = useState(false);
@@ -427,9 +441,9 @@ function ManageScopesPanel({
         pairingId={pairingId}
         credentialMode={entry.credential_mode}
         documentationUrl={entry.documentation_url}
-        scopeOverride={selectedScopes}
+        scopeOverride={scopeOverride}
         reconnectKeyId={keyId}
-        baselineScopes={granted}
+        baselineAuthorizedAt={key.last_authorized_at ?? null}
         onSuccess={onSuccess}
         onCancel={() => {
           setAuthFlowActive(false);

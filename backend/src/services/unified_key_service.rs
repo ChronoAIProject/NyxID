@@ -435,6 +435,10 @@ pub struct KeyView {
     /// (append-only edit, NyxID#917 follow-up). `None` for non-OAuth keys or
     /// connections that never completed authorization.
     pub granted_scopes: Option<Vec<String>>,
+    /// RFC3339 timestamp of the last fresh OAuth authorization on this
+    /// connection (NyxID#917). Completion signal for the manage-scopes re-auth
+    /// flow — advances when a new token lands, even if scopes don't change.
+    pub last_authorized_at: Option<String>,
     pub expires_at: Option<String>,
     pub last_used_at: Option<String>,
     pub error_message: Option<String>,
@@ -2975,6 +2979,7 @@ fn build_key_view(
                 }
             })
         }),
+        last_authorized_at: ak.and_then(|k| k.last_authorized_at.map(|dt| dt.to_rfc3339())),
         expires_at: ak.and_then(|k| k.expires_at.map(|dt| dt.to_rfc3339())),
         last_used_at: ak.and_then(|k| k.last_used_at.map(|dt| dt.to_rfc3339())),
         error_message: ak.and_then(|k| k.error_message.clone()),
@@ -3097,6 +3102,7 @@ mod tests {
             user_oauth_client_secret_encrypted: None,
             status: "active".to_string(),
             last_used_at: None,
+            last_authorized_at: None,
             error_message: None,
             source: None,
             source_id: None,
@@ -5650,6 +5656,7 @@ mod tests {
                 user_oauth_client_secret_encrypted: None,
                 status: "active".to_string(),
                 last_used_at: None,
+                last_authorized_at: None,
                 error_message: None,
                 source: Some("user_created".to_string()),
                 source_id: None,

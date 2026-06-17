@@ -79,12 +79,14 @@ interface FlowProps {
    */
   readonly reconnectKeyId?: string;
   /**
-   * The connection's granted scopes at the moment the manage-scopes flow
-   * started. Used as the completion baseline: re-auth is "done" once the
-   * connection's granted scopes differ from this. Only meaningful with
-   * `reconnectKeyId`.
+   * The connection's `last_authorized_at` at the moment the manage-scopes flow
+   * started (may be null for a connection that predates the field). Completion
+   * baseline: re-auth is "done" once `last_authorized_at` advances past this —
+   * the callback always stamps it, so this fires even when the granted scopes
+   * are unchanged (provider ignored a removal, same-set re-auth). Per Codex
+   * review. Only meaningful with `reconnectKeyId`.
    */
-  readonly baselineScopes?: readonly string[];
+  readonly baselineAuthorizedAt?: string | null;
   readonly onSuccess: (result: AiKeyPairingSuccess) => void;
   /**
    * Called when the user bails before success so the parent can reset
@@ -116,9 +118,11 @@ interface ActiveKeyResponse {
   readonly slug: string;
   readonly label: string;
   readonly status: string;
-  /** Scopes currently granted on the connection (NyxID#917). Read by the
-   *  manage-scopes re-auth path to detect completion as a change. */
+  /** Scopes currently granted on the connection (NyxID#917). */
   readonly granted_scopes?: readonly string[] | null;
+  /** Last fresh-authorization timestamp (NyxID#917) — manage-scopes completion
+   *  signal. */
+  readonly last_authorized_at?: string | null;
 }
 
 interface InitiateOAuthResponse {
@@ -558,7 +562,7 @@ export function OAuthFlow({
   documentationUrl,
   scopeOverride,
   reconnectKeyId,
-  baselineScopes,
+  baselineAuthorizedAt,
   onSuccess,
   onCancel,
 }: FlowProps) {
@@ -1048,15 +1052,12 @@ export function OAuthFlow({
   async function pollUntilActive(keyId: string) {
     // Manage-scopes mode: the connection is ALREADY `active`, so completion
     // can't be "status === active" (that's true on the first poll, before the
-    // user re-consents). Instead wait for the granted scopes to change from
-    // the baseline captured when the flow started — that only happens after
-    // the callback writes the re-authorized token.
-    const baseline = new Set(baselineScopes ?? []);
-    const scopesChanged = (granted: readonly string[] | null | undefined) => {
-      const next = granted ?? [];
-      if (next.length !== baseline.size) return true;
-      return next.some((s) => !baseline.has(s));
-    };
+    // user re-consents). Wait for `last_authorized_at` to advance past the
+    // baseline captured when the flow started. The callback stamps it on every
+    // fresh authorization, so this fires even when the granted scopes don't
+    // change (provider ignored a removal, same-set re-auth) — the granted-
+    // scope-diff signal would hang forever in those cases (Codex review P1).
+    const baselineAuth = baselineAuthorizedAt ?? null;
     await pollOAuthKeyUntilActive({
       keyId,
       getKey: (id) =>
@@ -1067,8 +1068,11 @@ export function OAuthFlow({
         ? {
             isComplete: (key: {
               readonly status: string;
-              readonly granted_scopes?: readonly string[] | null;
-            }) => key.status === "active" && scopesChanged(key.granted_scopes),
+              readonly last_authorized_at?: string | null;
+            }) =>
+              key.status === "active" &&
+              !!key.last_authorized_at &&
+              key.last_authorized_at !== baselineAuth,
           }
         : {}),
       onTerminalFailure: () => {

@@ -51,6 +51,15 @@ pub struct UserApiKey {
     pub status: String,
     #[serde(default, with = "bson_datetime::optional")]
     pub last_used_at: Option<DateTime<Utc>>,
+    /// When a fresh OAuth authorization last wrote a token onto this
+    /// connection (set by `write_oauth_tokens_to_key`, NOT by token refresh).
+    /// The manage-scopes re-auth flow uses this as its completion signal: an
+    /// already-active connection's re-auth is "done" when this advances past
+    /// the value captured at re-auth start — robust even when the granted
+    /// scopes don't change (provider ignored a removal, user re-auth'd with
+    /// the same set, etc.). NyxID#917 follow-up.
+    #[serde(default, with = "bson_datetime::optional")]
+    pub last_authorized_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
 
@@ -94,6 +103,7 @@ mod tests {
             user_oauth_client_secret_encrypted: None,
             status: "active".to_string(),
             last_used_at: None,
+            last_authorized_at: None,
             error_message: None,
             source: Some("user_created".to_string()),
             source_id: None,
@@ -127,6 +137,7 @@ mod tests {
             user_oauth_client_secret_encrypted: Some(vec![12, 13]),
             status: "active".to_string(),
             last_used_at: Some(Utc::now()),
+            last_authorized_at: None,
             error_message: None,
             source: Some("migration_provider_token".to_string()),
             source_id: Some("old-token-id".to_string()),

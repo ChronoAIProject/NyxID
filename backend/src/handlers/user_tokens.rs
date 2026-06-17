@@ -253,7 +253,8 @@ pub async fn connect_api_key(
         body.gateway_url.as_deref(),
     )
     .await?;
-    sync_provider_credentials_to_unified_keys(&state, &user_id_str, &provider_id, true).await?;
+    sync_provider_credentials_to_unified_keys(&state, &user_id_str, &provider_id, true, false)
+        .await?;
 
     audit_service::log_for_user(
         state.db.clone(),
@@ -674,6 +675,10 @@ async fn generic_oauth_callback_impl(
                 &outcome.user_id,
                 provider_id,
                 true,
+                // NyxID#917: fresh OAuth callback — stamp `last_authorized_at`
+                // on legacy keys so the manage-scopes wizard's polling
+                // completion predicate fires instead of timing out at 5 min.
+                true,
             )
             .await
             {
@@ -849,8 +854,14 @@ pub async fn disconnect_provider(
         &provider_id,
     )
     .await?;
-    sync_provider_credentials_to_unified_keys(&state, effective_user_id, &provider_id, false)
-        .await?;
+    sync_provider_credentials_to_unified_keys(
+        &state,
+        effective_user_id,
+        &provider_id,
+        false,
+        false,
+    )
+    .await?;
 
     let mut event_data = serde_json::json!({ "provider_id": &provider_id });
     if effective_user_id != user_id_str {
@@ -893,7 +904,7 @@ pub async fn manual_refresh(
         &provider_id,
     )
     .await?;
-    sync_provider_credentials_to_unified_keys(&state, effective_user_id, &provider_id, true)
+    sync_provider_credentials_to_unified_keys(&state, effective_user_id, &provider_id, true, false)
         .await?;
 
     let mut event_data = serde_json::json!({ "provider_id": &provider_id });
@@ -1018,8 +1029,14 @@ pub async fn poll_device_code(
 
     if result.status == "complete" {
         let effective_user_id = result.effective_user_id.as_deref().unwrap_or(&user_id_str);
-        sync_provider_credentials_to_unified_keys(&state, effective_user_id, &provider_id, true)
-            .await?;
+        sync_provider_credentials_to_unified_keys(
+            &state,
+            effective_user_id,
+            &provider_id,
+            true,
+            false,
+        )
+        .await?;
         let mut event_data = serde_json::json!({
             "provider_id": &provider_id,
             "token_type": "device_code",
@@ -1138,8 +1155,24 @@ async fn sync_provider_credentials_to_unified_keys(
     user_id: &str,
     provider_id: &str,
     push_to_nodes: bool,
+    fresh_authorization: bool,
 ) -> AppResult<()> {
-    user_api_key_service::sync_provider_token_to_api_keys(&state.db, user_id, provider_id).await?;
+    // NyxID#917: only the fresh-OAuth-callback path stamps
+    // `last_authorized_at`. The manage-scopes wizard polls for this stamp to
+    // advance as its completion signal; stamping on refresh / disconnect /
+    // manual-credential sync would let the wizard falsely complete on flows
+    // the user didn't initiate.
+    if fresh_authorization {
+        user_api_key_service::sync_provider_token_to_api_keys_after_authorization(
+            &state.db,
+            user_id,
+            provider_id,
+        )
+        .await?;
+    } else {
+        user_api_key_service::sync_provider_token_to_api_keys(&state.db, user_id, provider_id)
+            .await?;
+    }
 
     if push_to_nodes {
         let db = state.db.clone();
@@ -1327,6 +1360,7 @@ mod tests {
             user_oauth_client_secret_encrypted: None,
             status: "pending_auth".to_string(),
             last_used_at: None,
+            last_authorized_at: None,
             error_message: None,
             source: Some("user_created".to_string()),
             source_id: None,

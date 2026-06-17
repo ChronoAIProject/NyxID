@@ -1725,7 +1725,35 @@ pub async fn handle_oauth_callback(
     }
 
     // ── Legacy single-tenant path ──
-    // Upsert: remove existing token for this user+provider, insert new
+    // Upsert: remove existing token for this user+provider, insert new.
+    //
+    // NyxID#917: before deleting, snapshot the existing token's
+    // refresh_token_encrypted and token_scopes. Many providers omit
+    // `refresh_token` on subsequent authorization-code exchanges (it was
+    // issued once at initial grant) and `scope` is optional in OAuth token
+    // responses. Without this preservation, a manage-scopes re-auth on a
+    // legacy `connection_id: null` connection would advance
+    // `last_authorized_at` (so the wizard reports success) while wiping
+    // the central UserProviderToken's refresh token / recorded scopes —
+    // making `sync_provider_token_to_api_keys_after_authorization` fan
+    // those nulls back out to the legacy UserApiKey rows.
+    let existing_token = db
+        .collection::<UserProviderToken>(COLLECTION_NAME)
+        .find_one(doc! {
+            "user_id": user_id,
+            "provider_config_id": provider_id,
+        })
+        .await?;
+
+    let preserved_refresh_enc = refresh_enc.or_else(|| {
+        existing_token
+            .as_ref()
+            .and_then(|t| t.refresh_token_encrypted.clone())
+    });
+    let preserved_scope = scope
+        .map(String::from)
+        .or_else(|| existing_token.as_ref().and_then(|t| t.token_scopes.clone()));
+
     db.collection::<UserProviderToken>(COLLECTION_NAME)
         .delete_many(doc! {
             "user_id": user_id,
@@ -1741,8 +1769,8 @@ pub async fn handle_oauth_callback(
         credential_user_id: resolved.credential_user_id.clone(),
         token_type: "oauth2".to_string(),
         access_token_encrypted: Some(access_enc),
-        refresh_token_encrypted: refresh_enc,
-        token_scopes: scope.map(String::from),
+        refresh_token_encrypted: preserved_refresh_enc,
+        token_scopes: preserved_scope,
         expires_at: token_expires_at,
         api_key_encrypted: None,
         status: "active".to_string(),
@@ -3463,6 +3491,7 @@ mod tests {
             user_oauth_client_secret_encrypted: user_client_secret_enc,
             status: "active".to_string(),
             last_used_at: None,
+            last_authorized_at: None,
             error_message: None,
             source: Some("user_created".to_string()),
             source_id: None,
@@ -3828,6 +3857,7 @@ mod tests {
             user_oauth_client_secret_encrypted: None,
             status: "active".to_string(),
             last_used_at: None,
+            last_authorized_at: None,
             error_message: None,
             source: Some("user_created".to_string()),
             source_id: None,
@@ -4700,6 +4730,7 @@ mod tests {
             user_oauth_client_secret_encrypted: None,
             status: status.to_string(),
             last_used_at: None,
+            last_authorized_at: None,
             error_message: None,
             source: Some("user_created".to_string()),
             source_id: None,

@@ -187,6 +187,7 @@ pub async fn create_api_key(
         user_oauth_client_secret_encrypted,
         status: params.status.to_string(),
         last_used_at: None,
+        last_authorized_at: None,
         error_message: None,
         source: Some(params.source.unwrap_or("user_created").to_string()),
         source_id: params.source_id.map(str::to_string),
@@ -255,6 +256,7 @@ pub async fn create_api_key_from_provider_token(
         user_oauth_client_secret_encrypted: None,
         status: provider_token.status.clone(),
         last_used_at: provider_token.last_used_at,
+        last_authorized_at: None,
         error_message: provider_token.error_message.clone(),
         source: Some("user_created".to_string()),
         source_id: Some(provider_token.id.clone()),
@@ -283,6 +285,35 @@ pub async fn sync_provider_token_to_api_keys(
     db: &mongodb::Database,
     user_id: &str,
     provider_config_id: &str,
+) -> AppResult<()> {
+    sync_provider_token_to_api_keys_impl(db, user_id, provider_config_id, None).await
+}
+
+/// Fresh-authorization variant: identical to
+/// [`sync_provider_token_to_api_keys`] but also stamps `last_authorized_at`
+/// on each updated legacy key (NyxID#917). The wizard's manage-scopes
+/// completion predicate polls for this stamp to advance, so legacy
+/// (`connection_id: null`) OAuth callbacks must take this path or the
+/// wizard hangs the full 5-minute timeout on every legacy re-auth.
+///
+/// Refresh-only sync paths (proxy lazy refresh, manual disconnect) must
+/// continue calling the non-stamping wrapper: stamping there would let the
+/// wizard falsely complete on a background refresh that the user didn't
+/// initiate.
+pub async fn sync_provider_token_to_api_keys_after_authorization(
+    db: &mongodb::Database,
+    user_id: &str,
+    provider_config_id: &str,
+) -> AppResult<()> {
+    let authorized_at = bson::DateTime::from_chrono(Utc::now());
+    sync_provider_token_to_api_keys_impl(db, user_id, provider_config_id, Some(authorized_at)).await
+}
+
+async fn sync_provider_token_to_api_keys_impl(
+    db: &mongodb::Database,
+    user_id: &str,
+    provider_config_id: &str,
+    last_authorized_at: Option<bson::DateTime>,
 ) -> AppResult<()> {
     // Exclude terminal failure keys from provider-token sync. Without
     // this filter, a placeholder that was revoked via the
@@ -329,7 +360,7 @@ pub async fn sync_provider_token_to_api_keys(
             continue;
         }
 
-        let set_doc = if let Some(ref token) = provider_token {
+        let mut set_doc = if let Some(ref token) = provider_token {
             doc! {
                 "credential_type": provider_token_type_to_api_key_type(&token.token_type)?,
                 "credential_encrypted": optional_binary_bson(token.api_key_encrypted.as_ref()),
@@ -354,6 +385,13 @@ pub async fn sync_provider_token_to_api_keys(
                 "updated_at": &now,
             }
         };
+
+        // Stamp only on the fresh-auth path (NyxID#917) — refresh-only syncs
+        // pass `None` and must not advance the manage-scopes completion
+        // signal that the wizard polls for.
+        if let Some(ts) = last_authorized_at.as_ref() {
+            set_doc.insert("last_authorized_at", ts);
+        }
 
         db.collection::<UserApiKey>(COLLECTION_NAME)
             .update_one(doc! { "_id": &key.id }, doc! { "$set": set_doc })
@@ -402,13 +440,32 @@ pub async fn write_oauth_tokens_to_key(
     let mut set_doc = doc! {
         "credential_type": "oauth2",
         "access_token_encrypted": optional_binary_bson(Some(&access_enc)),
-        "refresh_token_encrypted": optional_binary_bson(refresh_enc.as_ref()),
-        "token_scopes": optional_string_bson(token_scopes),
         "expires_at": optional_datetime_bson(expires_at),
         "status": "active",
         "error_message": bson::Bson::Null,
+        // Fresh-authorization marker (NyxID#917): set here (the only fresh-auth
+        // callback write path), NOT on token refresh, so the manage-scopes
+        // re-auth flow can complete when it advances — robust even when the
+        // granted scopes don't change.
+        "last_authorized_at": &now,
         "updated_at": &now,
     };
+    // Preserve existing `refresh_token_encrypted` / `token_scopes` when the
+    // provider omits them on this exchange. Many providers only return
+    // `refresh_token` on the initial grant, and `scope` is optional in token
+    // responses (NyxID#917 follow-up): writing Null on every callback would
+    // silently destroy refresh capability or the recorded grant while
+    // `last_authorized_at` still advances, so the wizard would report success
+    // on a connection that's about to fail or has lost its scope set.
+    if let Some(refresh) = refresh_enc.as_ref() {
+        set_doc.insert(
+            "refresh_token_encrypted",
+            optional_binary_bson(Some(refresh)),
+        );
+    }
+    if let Some(scopes) = token_scopes {
+        set_doc.insert("token_scopes", optional_string_bson(Some(scopes)));
+    }
     // Preserve the existing `credential_encrypted` (which is None for
     // OAuth keys); explicit unset so a previously-set credential cannot
     // mask the new access_token at proxy time.
@@ -1177,6 +1234,7 @@ mod tests {
             user_oauth_client_secret_encrypted: None,
             status: "active".to_string(),
             last_used_at: None,
+            last_authorized_at: None,
             error_message: None,
             source: Some("user_created".to_string()),
             source_id: None,
@@ -1254,6 +1312,7 @@ mod tests {
                 user_oauth_client_secret_encrypted: None,
                 status: "pending_auth".to_string(),
                 last_used_at: None,
+                last_authorized_at: None,
                 error_message: None,
                 source: Some("user_created".to_string()),
                 source_id: None,
@@ -2354,6 +2413,7 @@ mod tests {
                 user_oauth_client_secret_encrypted: None,
                 status: "pending_auth".to_string(),
                 last_used_at: None,
+                last_authorized_at: None,
                 error_message: None,
                 source: Some("user_created".to_string()),
                 source_id: None,
@@ -2384,6 +2444,13 @@ mod tests {
         assert_eq!(restored.token_scopes.as_deref(), Some("openid profile"));
         assert!(restored.expires_at.is_some());
         assert!(restored.error_message.is_none());
+        // NyxID#917: fresh OAuth writes must stamp `last_authorized_at` —
+        // the wizard's manage-scopes completion predicate polls for this to
+        // advance, so dropping it silently would hang every re-auth flow.
+        assert!(
+            restored.last_authorized_at.is_some(),
+            "fresh OAuth writes must stamp last_authorized_at for manage-scopes polling"
+        );
 
         // Decrypt and verify the stored access token is the plaintext we wrote.
         let access_bytes = encryption_keys
@@ -2883,6 +2950,7 @@ mod tests {
                 user_oauth_client_secret_encrypted: None,
                 status: "pending_auth".to_string(),
                 last_used_at: None,
+                last_authorized_at: None,
                 error_message: None,
                 source: Some("user_created".to_string()),
                 source_id: None,
@@ -2911,6 +2979,95 @@ mod tests {
         assert_eq!(restored.status, "active");
         assert!(restored.refresh_token_encrypted.is_none());
         assert!(restored.token_scopes.is_none());
+    }
+
+    #[tokio::test]
+    async fn write_oauth_tokens_to_key_preserves_existing_refresh_and_scopes_on_reauth() {
+        // NyxID#917: manage-scopes re-auth often exchanges a code that returns
+        // a new access_token but omits `refresh_token` (issued once at initial
+        // grant) and/or `scope` (optional in OAuth token responses). The write
+        // must preserve the previously-stored values rather than overwriting
+        // them with Null, otherwise the wizard reports success while the
+        // connection silently loses refresh capability or its recorded grant.
+        let Some(db) = connect_test_database("user_api_key_write_oauth_preserves_reauth").await
+        else {
+            eprintln!("skipping write_oauth_tokens_to_key test: no local MongoDB available");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+
+        let now = Utc::now();
+        let connection_id = uuid::Uuid::new_v4().to_string();
+        let key_id = uuid::Uuid::new_v4().to_string();
+        let existing_refresh = encryption_keys
+            .encrypt(b"existing-refresh-token")
+            .await
+            .unwrap();
+
+        db.collection::<UserApiKey>(super::COLLECTION_NAME)
+            .insert_one(UserApiKey {
+                id: key_id.clone(),
+                user_id: uuid::Uuid::new_v4().to_string(),
+                label: "preserve-on-reauth".to_string(),
+                credential_type: "oauth2".to_string(),
+                credential_encrypted: None,
+                access_token_encrypted: Some(vec![0xAA]),
+                refresh_token_encrypted: Some(existing_refresh.clone()),
+                token_scopes: Some("openid profile email".to_string()),
+                expires_at: None,
+                provider_config_id: Some(uuid::Uuid::new_v4().to_string()),
+                connection_id: Some(connection_id.clone()),
+                user_oauth_client_id_encrypted: None,
+                user_oauth_client_secret_encrypted: None,
+                status: "active".to_string(),
+                last_used_at: None,
+                last_authorized_at: None,
+                error_message: None,
+                source: Some("user_created".to_string()),
+                source_id: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+
+        // Re-auth: provider returned a new access_token but omitted both
+        // `refresh_token` and `scope`. Existing values must survive.
+        write_oauth_tokens_to_key(
+            &db,
+            &encryption_keys,
+            &connection_id,
+            "new-access-token",
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let restored = get_key(&db, &key_id).await;
+        assert_eq!(restored.status, "active");
+        // Access token rotated to the new value.
+        let access_bytes = encryption_keys
+            .decrypt(restored.access_token_encrypted.as_ref().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(String::from_utf8(access_bytes).unwrap(), "new-access-token");
+        // Refresh token preserved (provider didn't return one).
+        assert_eq!(
+            restored.refresh_token_encrypted.as_deref(),
+            Some(existing_refresh.as_slice()),
+            "refresh_token_encrypted must survive when provider omits refresh_token on re-auth"
+        );
+        // Scopes preserved (provider didn't return `scope`).
+        assert_eq!(
+            restored.token_scopes.as_deref(),
+            Some("openid profile email"),
+            "token_scopes must survive when provider omits scope on re-auth"
+        );
+        // Fresh-auth stamp advances even when scopes/refresh don't change —
+        // this is the completion signal the wizard polls for.
+        assert!(restored.last_authorized_at.is_some());
     }
 
     #[tokio::test]
@@ -2972,6 +3129,7 @@ mod tests {
                 user_oauth_client_secret_encrypted: None,
                 status: "revoked".to_string(),
                 last_used_at: None,
+                last_authorized_at: None,
                 error_message: None,
                 source: Some("user_created".to_string()),
                 source_id: None,
@@ -3042,6 +3200,7 @@ mod tests {
                     user_oauth_client_secret_encrypted: None,
                     status: "pending_auth".to_string(),
                     last_used_at: None,
+                    last_authorized_at: None,
                     error_message: None,
                     source: Some("user_created".to_string()),
                     source_id: None,

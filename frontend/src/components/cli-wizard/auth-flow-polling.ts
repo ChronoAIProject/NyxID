@@ -19,10 +19,13 @@ const MAX_CONSECUTIVE_POLL_ERRORS = 5;
 interface PolledKey {
   readonly status: string;
   readonly error_message?: string | null;
-  /** Scopes currently granted on the connection (NyxID#917). Used by the
-   *  manage-scopes re-auth path to detect completion as a *change*, since the
-   *  connection is already `active` before the user re-consents. */
+  /** Scopes currently granted on the connection (NyxID#917). */
   readonly granted_scopes?: readonly string[] | null;
+  /** Last fresh-authorization timestamp (NyxID#917). The manage-scopes re-auth
+   *  path completes when this advances from the baseline — robust even when the
+   *  granted scopes don't change (provider ignored a removal, same-set re-auth).
+   *  Per Codex review. */
+  readonly last_authorized_at?: string | null;
 }
 
 interface PollOAuthKeyUntilActiveOptions {
