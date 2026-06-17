@@ -21,6 +21,8 @@
 import type { ReactNode } from "react"
 import { WizardFooter } from "./wizard-footer"
 import { formatStepLabel, type WizardStep } from "./step-label"
+import { useApplyTheme } from "@/hooks/use-theme"
+import { NyxidLogo } from "@/components/brand/nyxid-logo"
 
 export interface WizardShellProps {
   readonly step?: WizardStep
@@ -30,12 +32,13 @@ export interface WizardShellProps {
 }
 
 export function WizardShell({ step, context, localOrigin, children }: WizardShellProps) {
+  useApplyTheme()
   return (
     <div className="min-h-screen bg-background text-foreground">
     <div className="mx-auto flex min-h-screen max-h-screen w-full max-w-[1040px] flex-col px-6 pt-10 pb-6">
       <header className="mb-6 flex items-center justify-between">
         <div className="flex items-center">
-          <img src="/nyxid-wordmark.svg" alt="NyxID" className="h-9 w-auto" />
+          <NyxidLogo className="h-9 w-auto" />
         </div>
         {step ? (
           <div className="text-[12px] text-muted-foreground">{formatStepLabel(step)}</div>

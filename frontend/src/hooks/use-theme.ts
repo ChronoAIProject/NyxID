@@ -13,18 +13,19 @@ export function useResolvedTheme(): ResolvedTheme {
 }
 
 /**
- * Applies the resolved theme to `<html>` for the lifetime of the dashboard.
+ * Applies the resolved theme to `<html>` for the lifetime of the host surface.
  *
- * Mounted only by `DashboardLayout`, so the theme class is confined to
- * logged-in surfaces — public pages (landing/blog) never get one and keep the
- * dark token defaults. Applying at `<html>` (rather than a nested wrapper) is
- * deliberate: Radix portals (dropdowns, dialogs, the command palette) render
- * into `document.body`, so they only inherit the light tokens when the class
- * lives on a common ancestor. A layout effect lands the class before first
- * paint (no flash); the cleanup strips it on unmount so leaving the dashboard
- * reverts to dark.
+ * Mounted by every app layout/standalone page (dashboard, docs, auth, OAuth
+ * consent/error, legal docs, CLI wizard, onboarding takeover) so the whole
+ * product respects the theme choice. Landing/blog still skip it and keep
+ * the dark token defaults. Applying at `<html>` (rather than a nested
+ * wrapper) is deliberate: Radix portals (dropdowns, dialogs, the command
+ * palette) render into `document.body`, so they only inherit the light tokens
+ * when the class lives on a common ancestor. A layout effect lands the class
+ * before first paint (no flash); the cleanup strips it on unmount so leaving
+ * the themed surface reverts to dark.
  */
-export function useApplyDashboardTheme(): void {
+export function useApplyTheme(): void {
   const resolved = useResolvedTheme();
   useLayoutEffect(() => {
     const root = document.documentElement;

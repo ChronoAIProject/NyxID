@@ -697,11 +697,11 @@ function RightPanelContent() {
 
 function AiSetupCard({ onDismiss }: { readonly onDismiss: () => void }) {
   return (
-    <div className="group relative overflow-hidden rounded-xl border border-nyx-500/30 transition-[border-color] duration-300 hover:border-nyx-500/50">
-      <div className="absolute inset-0 bg-gradient-to-b from-nyx-500/15 via-nyx-500/5 to-transparent" />
-      <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[200%] h-[120px] bg-[radial-gradient(ellipse_at_50%_0%,rgba(90,42,241,0.25)_0%,transparent_70%)]" />
+    <div className="group relative overflow-hidden rounded-xl border border-nyx-500/20 transition-[border-color] duration-300 hover:border-nyx-500/40 dark:border-nyx-500/30 dark:hover:border-nyx-500/50">
+      <div className="absolute inset-0 bg-gradient-to-b from-nyx-500/[0.04] via-nyx-500/[0.02] to-transparent dark:from-nyx-500/15 dark:via-nyx-500/5 dark:to-transparent" />
+      <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[200%] h-[120px] bg-[radial-gradient(ellipse_at_50%_0%,rgba(90,42,241,0.07)_0%,transparent_70%)] dark:bg-[radial-gradient(ellipse_at_50%_0%,rgba(90,42,241,0.25)_0%,transparent_70%)]" />
       <div className="relative flex flex-col gap-3 p-4">
-        <span className="inline-flex w-fit items-center rounded-md bg-nyx-500/20 px-2 py-0.5 text-[10px] font-semibold text-nyx-secondary-400">
+        <span className="inline-flex w-fit items-center rounded-md bg-nyx-100 px-2 py-0.5 text-[10px] font-semibold text-nyx-700 dark:bg-nyx-500/20 dark:text-nyx-secondary-400">
           NEW
         </span>
         <h3 className="text-[15px] font-bold text-foreground leading-snug">

@@ -11,7 +11,9 @@ import { AmbientStatusLine } from "@/components/chrome/ambient-status-line";
 import { useAuthStore } from "@/stores/auth-store";
 import { useLogout } from "@/hooks/use-auth";
 import { useShouldShowOnboarding } from "@/hooks/use-onboarding";
-import { useApplyDashboardTheme } from "@/hooks/use-theme";
+import { useApplyTheme } from "@/hooks/use-theme";
+import { NyxidIcon } from "@/components/brand/nyxid-icon";
+import { NyxidLogo } from "@/components/brand/nyxid-logo";
 import { OnboardingTakeover } from "@/components/dashboard/onboarding-takeover";
 import { ThemeToggle } from "@/components/dashboard/theme-toggle";
 import {
@@ -59,10 +61,10 @@ export function DashboardLayout() {
   const [rightPanel, setRightPanel] = useState<React.ReactNode>(null);
   const [breadcrumbLabel, setBreadcrumbLabel] = useState<string | null>(null);
 
-  // Confines the light/dark theme to the dashboard: applies the resolved
-  // theme class to <html> on mount, reverts to dark on unmount. Must run
-  // before the onboarding early-returns below to satisfy rules-of-hooks.
-  useApplyDashboardTheme();
+  // Applies the resolved theme class to <html> on mount, reverts to dark on
+  // unmount. Must run before the onboarding early-returns below to satisfy
+  // rules-of-hooks.
+  useApplyTheme();
 
   const closeMobileNav = useCallback(() => setMobileNavState("closing"), []);
 
@@ -274,7 +276,7 @@ function TopBar({
           </button>
         ) : (
           <Link to="/dashboard" className="pl-2">
-            <img src="/nyxid-coloured-icon.svg" alt="NyxID" className="h-5 w-5" />
+            <NyxidIcon />
           </Link>
         )}
       </div>
@@ -285,11 +287,7 @@ function TopBar({
         className="hidden md:flex items-center shrink-0 justify-center w-[52px] transition-[width] duration-300 ease-in-out"
         style={{ width: "var(--sidebar-width, 52px)", justifyContent: "start", paddingLeft: "16px" }}
       >
-        <img
-          src="/nyxid-coloured-icon.svg"
-          alt="NyxID"
-          className="h-5 w-5 shrink-0"
-        />
+        <NyxidIcon className="h-5 w-5 shrink-0" />
       </Link>
 
       {/* Content zone */}
@@ -507,10 +505,7 @@ function MobileNav({
     >
       {/* Header */}
       <div className="flex items-center justify-between shrink-0 h-[56px] px-5" style={{ paddingTop: "var(--sat)" }}>
-        <div className="flex items-center gap-3">
-          <img src="/nyxid-coloured-icon.svg" alt="NyxID" className="h-5 w-5" />
-          <span className="text-[14px] font-semibold text-foreground">NyxID</span>
-        </div>
+        <NyxidLogo className="h-6 w-auto" />
         <button
           type="button"
           onClick={onClose}

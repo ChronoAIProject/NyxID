@@ -6,9 +6,9 @@
  * is re-derived on each boot and kept current via a `matchMedia` listener, so
  * a stale persisted value can never override the real system setting.
  *
- * The theme is applied (and confined) to the dashboard by
- * `useApplyDashboardTheme` in `hooks/use-theme.ts`; public surfaces
- * (landing/blog) never carry a theme class and stay on the dark defaults.
+ * The theme is applied by `useApplyTheme` in `hooks/use-theme.ts`, mounted by
+ * `DashboardLayout` and `DocsLayout`; landing/blog never carry a theme class
+ * and stay on the dark defaults.
  */
 
 import { create } from "zustand";

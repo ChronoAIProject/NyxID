@@ -1,4 +1,5 @@
 frontend/src/app.css
+frontend/src/components/brand/nyxid-logo.tsx
 frontend/src/components/cli-wizard/access-scope-card.tsx
 frontend/src/components/cli-wizard/ai-key-confirm-panel.tsx
 frontend/src/components/cli-wizard/auth-flow-polling.ts
@@ -28,6 +29,7 @@ frontend/src/hooks/use-keys.ts
 frontend/src/hooks/use-nodes.ts
 frontend/src/hooks/use-orgs.ts
 frontend/src/hooks/use-runtime-config.ts
+frontend/src/hooks/use-theme.ts
 frontend/src/lib/api-client.ts
 frontend/src/lib/navigation.ts
 frontend/src/lib/telemetry.ts
@@ -37,5 +39,6 @@ frontend/src/schemas/api-keys.ts
 frontend/src/schemas/cli-wizard.ts
 frontend/src/schemas/runtime-config.ts
 frontend/src/stores/auth-store.ts
+frontend/src/stores/theme-store.ts
 frontend/src/wizard-entry.tsx
 frontend/wizard.html

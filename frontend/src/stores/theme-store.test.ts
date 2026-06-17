@@ -4,7 +4,7 @@ import { useThemeStore, resolveTheme } from "./theme-store";
 const STORAGE_KEY = "nyxid.theme";
 
 /**
- * The toggle must actually persist `mode` — `useApplyDashboardTheme` reads it
+ * The toggle must actually persist `mode` — `useApplyTheme` reads it
  * at boot to set the `<html>` class before first paint, so a non-persisted
  * choice would silently revert on reload (the same failure mode the
  * consent-store test guards against).

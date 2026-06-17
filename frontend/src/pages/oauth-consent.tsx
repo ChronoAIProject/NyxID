@@ -13,6 +13,8 @@ import {
   scopeRiskClass,
   scopeRiskLabel,
 } from "@/lib/constants";
+import { useApplyTheme } from "@/hooks/use-theme";
+import { NyxidLogo } from "@/components/brand/nyxid-logo";
 
 function readParam(search: URLSearchParams, key: string): string {
   return search.get(key) ?? "";
@@ -27,6 +29,7 @@ function parseHost(uri: string): string {
 }
 
 export function OAuthConsentPage() {
+  useApplyTheme();
   const search = new URLSearchParams(window.location.search);
 
   const responseType = readParam(search, "response_type");
@@ -89,7 +92,7 @@ export function OAuthConsentPage() {
       <Card className="w-full">
         <CardHeader className="space-y-4">
           <div className="flex items-center">
-            <img src="/nyxid-wordmark.svg" alt="NyxID" className="h-7 w-auto" />
+            <NyxidLogo className="h-7 w-auto" />
           </div>
           <CardTitle>Authorize Application</CardTitle>
           <CardDescription>
