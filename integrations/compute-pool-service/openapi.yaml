@@ -1,0 +1,201 @@
+openapi: 3.1.0
+info:
+  title: NyxID Compute Pool Service
+  version: 0.1.0
+  description: Standalone worker-pull compute queue service managed by NyxID as a custom service.
+servers:
+  - url: http://localhost:8787
+security:
+  - bearerAuth: []
+paths:
+  /health:
+    get:
+      security: []
+      summary: Health check
+      responses:
+        "200":
+          description: Service is healthy.
+  /v1/status:
+    get:
+      summary: Get queue and worker status
+      responses:
+        "200":
+          description: Current queue status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Status"
+  /v1/tasks:
+    post:
+      summary: Submit a compute task
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SubmitTask"
+      responses:
+        "202":
+          description: Task accepted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Task"
+  /v1/tasks/{task_id}:
+    get:
+      summary: Get task state or result
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Task state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Task"
+  /v1/tasks/{task_id}/cancel:
+    post:
+      summary: Cancel a queued or dispatched task
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Cancelled task state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Task"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  schemas:
+    SubmitTask:
+      type: object
+      required:
+        - model
+      properties:
+        kind:
+          type: string
+          default: chat_completion
+        model:
+          type: string
+        input:
+          type: object
+          additionalProperties: true
+        priority:
+          type: integer
+          default: 0
+        client_ref:
+          type: string
+          description: Optional idempotency key scoped to this service instance.
+    Task:
+      type: object
+      properties:
+        task_id:
+          type: string
+        kind:
+          type: string
+        model:
+          type: string
+        priority:
+          type: integer
+        status:
+          type: string
+          enum:
+            - queued
+            - dispatched
+            - completed
+            - failed
+            - cancelled
+        phase:
+          type:
+            - string
+            - "null"
+        phase_detail:
+          type:
+            - string
+            - "null"
+        assigned_worker:
+          type:
+            - string
+            - "null"
+        output:
+          type:
+            - object
+            - array
+            - string
+            - number
+            - boolean
+            - "null"
+        failure_reason:
+          type:
+            - string
+            - "null"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        completed_at:
+          type:
+            - string
+            - "null"
+          format: date-time
+    Status:
+      type: object
+      properties:
+        queued:
+          type: integer
+        dispatched:
+          type: integer
+        active_workers:
+          type: array
+          items:
+            $ref: "#/components/schemas/Worker"
+    Worker:
+      type: object
+      properties:
+        worker_label:
+          type: string
+        host_kind:
+          type:
+            - string
+            - "null"
+        gpu_name:
+          type:
+            - string
+            - "null"
+        backend:
+          type:
+            - string
+            - "null"
+        models:
+          type: array
+          items:
+            type: string
+        max_concurrency:
+          type: integer
+        current_inflight:
+          type: integer
+        current_task_id:
+          type:
+            - string
+            - "null"
+        worker_version:
+          type:
+            - string
+            - "null"
+        last_seen_at:
+          type: string
+          format: date-time
