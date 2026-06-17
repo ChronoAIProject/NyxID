@@ -416,6 +416,7 @@ export function ServiceEditPage() {
                                 v
                                   ? [...current, app.id]
                                   : current.filter((id) => id !== app.id),
+                                { shouldDirty: true, shouldValidate: true },
                               );
                             }}
                           />
@@ -481,7 +482,10 @@ export function ServiceEditPage() {
                     id="edit-ssh-cert-auth"
                     checked={form.watch("certificate_auth_enabled") ?? false}
                     onCheckedChange={(checked) =>
-                      form.setValue("certificate_auth_enabled", checked)
+                      form.setValue("certificate_auth_enabled", checked, {
+                        shouldDirty: true,
+                        shouldValidate: true,
+                      })
                     }
                   />
                 </div>
@@ -628,19 +632,32 @@ export function ServiceEditPage() {
                           form.setValue(
                             "identity_propagation_mode",
                             v as UpdateServiceFormData["identity_propagation_mode"],
+                            { shouldDirty: true, shouldValidate: true },
                           )
                         }
                         onIncludeUserIdChange={(v) =>
-                          form.setValue("identity_include_user_id", v)
+                          form.setValue("identity_include_user_id", v, {
+                            shouldDirty: true,
+                            shouldValidate: true,
+                          })
                         }
                         onIncludeEmailChange={(v) =>
-                          form.setValue("identity_include_email", v)
+                          form.setValue("identity_include_email", v, {
+                            shouldDirty: true,
+                            shouldValidate: true,
+                          })
                         }
                         onIncludeNameChange={(v) =>
-                          form.setValue("identity_include_name", v)
+                          form.setValue("identity_include_name", v, {
+                            shouldDirty: true,
+                            shouldValidate: true,
+                          })
                         }
                         onJwtAudienceChange={(v) =>
-                          form.setValue("identity_jwt_audience", v)
+                          form.setValue("identity_jwt_audience", v, {
+                            shouldDirty: true,
+                            shouldValidate: true,
+                          })
                         }
                       />
                     </div>
@@ -907,7 +924,10 @@ export function ServiceEditPage() {
                                 id={`cap-${key}`}
                                 checked={form.watch(key) ?? false}
                                 onCheckedChange={(v) =>
-                                  form.setValue(key, v)
+                                  form.setValue(key, v, {
+                                    shouldDirty: true,
+                                    shouldValidate: true,
+                                  })
                                 }
                               />
                             </div>
@@ -941,7 +961,10 @@ export function ServiceEditPage() {
                             form.watch("forward_access_token") ?? false
                           }
                           onCheckedChange={(v) =>
-                            form.setValue("forward_access_token", v)
+                            form.setValue("forward_access_token", v, {
+                              shouldDirty: true,
+                              shouldValidate: true,
+                            })
                           }
                         />
                       </div>
@@ -975,7 +998,10 @@ export function ServiceEditPage() {
                             form.watch("inject_delegation_token") ?? false
                           }
                           onCheckedChange={(v) =>
-                            form.setValue("inject_delegation_token", v)
+                            form.setValue("inject_delegation_token", v, {
+                              shouldDirty: true,
+                              shouldValidate: true,
+                            })
                           }
                         />
                       </div>
