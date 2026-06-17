@@ -869,3 +869,124 @@ describe("AiKeyConfirm — upstream scope picker (issue #917)", () => {
     ).not.toBeInTheDocument();
   });
 });
+
+describe("AiKeyConfirm — manage-scopes (NyxID#917 codex follow-up)", () => {
+  // Codex's tech-lead consult: assert that when an existing connection has
+  // no recorded grant (granted_scopes=[]) — common for legacy keys or
+  // providers that didn't return `scope` in their token response — the
+  // wizard sends `scopeOverride: undefined` so the backend uses catalog
+  // defaults, instead of sending [] which the backend treats as
+  // "drop all defaults" → silent zero-scope re-auth.
+  const oauthCatalogEntry = {
+    slug: "social-twitter",
+    name: "Twitter / X",
+    base_url: "https://api.twitter.com",
+    auth_method: "bearer",
+    provider_type: "oauth2",
+    provider_config_id: "prov-twitter",
+    service_type: "rest",
+    requires_credential: true,
+    requires_gateway_url: false,
+    default_scopes: ["tweet.read", "users.read"],
+    scope_catalog: [
+      { scope: "tweet.read", label: "Read posts", description: "Read posts." },
+      { scope: "users.read", label: "Read profile", description: "Read profile." },
+      { scope: "media.write", label: "Upload media", description: "Upload media.", sensitive: true },
+    ],
+  };
+
+  function mockManageScopesEndpoints(opts: {
+    grantedScopes: readonly string[] | null;
+  }) {
+    mockGet.mockImplementation((url: string) => {
+      if (url.startsWith("/keys/")) {
+        return Promise.resolve({
+          id: "key-legacy-abc",
+          label: "My Twitter",
+          slug: "social-twitter",
+          catalog_service_slug: "social-twitter",
+          credential_type: "oauth2",
+          granted_scopes: opts.grantedScopes,
+          last_authorized_at: null,
+        });
+      }
+      if (url.startsWith("/catalog/")) {
+        return Promise.resolve(oauthCatalogEntry);
+      }
+      return Promise.reject(new Error(`unexpected GET ${url}`));
+    });
+  }
+
+  beforeEach(() => {
+    mockGet.mockReset();
+    mockPost.mockReset();
+    mockOAuthFlow.mockReset();
+    baseProps.onSuccess = vi.fn();
+  });
+
+  it("sends scopeOverride=undefined on re-auth when the existing connection has no recorded grant", async () => {
+    // Setup: legacy key with granted_scopes = [] (no recorded grant). The
+    // picker seeds from catalog defaults for display, but until the user
+    // edits, no override is transmitted.
+    const user = userEvent.setup();
+    mockManageScopesEndpoints({ grantedScopes: [] });
+
+    render(
+      <AiKeyConfirm
+        {...baseProps}
+        prefill={{ reconnect_key_id: "key-legacy-abc" }}
+      />,
+      { wrapper: createWrapper() },
+    );
+
+    // Wait for the ManageScopesPanel to mount.
+    await screen.findByRole("heading", { name: /Manage permissions/i });
+    await user.click(
+      screen.getByRole("button", { name: /Re-authorize with these permissions/i }),
+    );
+
+    await waitFor(() => {
+      expect(mockOAuthFlow).toHaveBeenCalled();
+    });
+    const props = mockOAuthFlow.mock.calls.at(-1)?.[0] as {
+      readonly scopeOverride: readonly string[] | undefined;
+      readonly reconnectKeyId: string;
+    };
+    expect(props.reconnectKeyId).toBe("key-legacy-abc");
+    expect(props.scopeOverride).toBeUndefined();
+  });
+
+  it("forwards an explicit empty array when the user actively clears all picker scopes", async () => {
+    // Setup: existing connection HAS a recorded grant. User deliberately
+    // toggles every default pill OFF (intent to revoke all scopes). The
+    // wizard must respect that — scopeOverride: [] is the user's stated
+    // intent here, distinct from the legacy-empty-grant case above.
+    const user = userEvent.setup();
+    mockManageScopesEndpoints({ grantedScopes: ["tweet.read", "users.read"] });
+
+    render(
+      <AiKeyConfirm
+        {...baseProps}
+        prefill={{ reconnect_key_id: "key-legacy-abc" }}
+      />,
+      { wrapper: createWrapper() },
+    );
+
+    await screen.findByRole("heading", { name: /Manage permissions/i });
+    // Toggle off both granted defaults.
+    await user.click(await screen.findByRole("button", { name: /Read posts/i }));
+    await user.click(await screen.findByRole("button", { name: /Read profile/i }));
+    await user.click(
+      screen.getByRole("button", { name: /Re-authorize with these permissions/i }),
+    );
+
+    await waitFor(() => {
+      expect(mockOAuthFlow).toHaveBeenCalled();
+    });
+    const props = mockOAuthFlow.mock.calls.at(-1)?.[0] as {
+      readonly scopeOverride: readonly string[] | undefined;
+    };
+    expect(props.scopeOverride).toBeDefined();
+    expect([...(props.scopeOverride ?? [])]).toEqual([]);
+  });
+});

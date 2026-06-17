@@ -1208,7 +1208,7 @@ mod tests {
         OAUTH_STATES, USER_PROVIDER_TOKENS, fail_connection_placeholder,
         fail_pending_placeholders_for_provider, has_server_credential,
         reconcile_pending_oauth_placeholder, sync_provider_token_to_api_keys,
-        write_oauth_tokens_to_key,
+        sync_provider_token_to_api_keys_after_authorization, write_oauth_tokens_to_key,
     };
     use crate::models::oauth_state::OAuthState;
     use crate::models::user_api_key::UserApiKey;
@@ -3068,6 +3068,140 @@ mod tests {
         // Fresh-auth stamp advances even when scopes/refresh don't change —
         // this is the completion signal the wizard polls for.
         assert!(restored.last_authorized_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn sync_after_authorization_stamps_last_authorized_at_on_legacy_keys() {
+        // NyxID#917: the fresh-auth wrapper must stamp `last_authorized_at`
+        // on legacy (`connection_id: null`) UserApiKey rows when fanning out
+        // a freshly-minted UserProviderToken. The wizard's manage-scopes
+        // completion predicate polls for this stamp to advance — without it,
+        // every legacy re-auth times out at 5 minutes.
+        let Some(db) = connect_test_database("user_api_key_sync_after_auth_stamps").await else {
+            eprintln!("skipping integration test: no local MongoDB available");
+            return;
+        };
+
+        let now = Utc::now();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let provider_id = uuid::Uuid::new_v4().to_string();
+        let key_id = uuid::Uuid::new_v4().to_string();
+
+        // Legacy key (connection_id=None) that has previously been
+        // authorized at some point. last_authorized_at starts None — the
+        // wizard captures this value before initiating re-auth and waits
+        // for it to advance.
+        let mut legacy = provider_key(&key_id, &user_id, &provider_id, "active", "oauth2");
+        legacy.last_authorized_at = None;
+        db.collection::<UserApiKey>(super::COLLECTION_NAME)
+            .insert_one(legacy)
+            .await
+            .unwrap();
+
+        db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
+            .insert_one(UserProviderToken {
+                id: uuid::Uuid::new_v4().to_string(),
+                user_id: user_id.clone(),
+                provider_config_id: provider_id.clone(),
+                connection_id: None,
+                credential_user_id: None,
+                token_type: "oauth2".to_string(),
+                access_token_encrypted: Some(vec![1, 2, 3]),
+                refresh_token_encrypted: Some(vec![4, 5, 6]),
+                token_scopes: Some("read".to_string()),
+                expires_at: None,
+                api_key_encrypted: None,
+                status: "active".to_string(),
+                last_refreshed_at: None,
+                last_used_at: None,
+                error_message: None,
+                label: None,
+                metadata: None,
+                gateway_url: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+
+        sync_provider_token_to_api_keys_after_authorization(&db, &user_id, &provider_id)
+            .await
+            .unwrap();
+
+        let after = get_key(&db, &key_id).await;
+        assert!(
+            after.last_authorized_at.is_some(),
+            "fresh-auth wrapper must stamp last_authorized_at so the wizard's manage-scopes poller exits instead of timing out"
+        );
+        // Sanity: the token did fan out too.
+        assert_eq!(after.access_token_encrypted, Some(vec![1, 2, 3]));
+    }
+
+    #[tokio::test]
+    async fn sync_without_authorization_does_not_stamp_last_authorized_at() {
+        // NyxID#917 (codex review #4 risk): the non-stamping wrapper must
+        // NOT advance `last_authorized_at`, otherwise the wizard's
+        // manage-scopes poller would false-complete on a background
+        // refresh / disconnect / proxy-time sync the user didn't initiate.
+        let Some(db) = connect_test_database("user_api_key_sync_no_stamp").await else {
+            eprintln!("skipping integration test: no local MongoDB available");
+            return;
+        };
+
+        let now = Utc::now();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let provider_id = uuid::Uuid::new_v4().to_string();
+        let key_id = uuid::Uuid::new_v4().to_string();
+
+        let mut legacy = provider_key(&key_id, &user_id, &provider_id, "active", "oauth2");
+        legacy.last_authorized_at = None;
+        db.collection::<UserApiKey>(super::COLLECTION_NAME)
+            .insert_one(legacy)
+            .await
+            .unwrap();
+
+        db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
+            .insert_one(UserProviderToken {
+                id: uuid::Uuid::new_v4().to_string(),
+                user_id: user_id.clone(),
+                provider_config_id: provider_id.clone(),
+                connection_id: None,
+                credential_user_id: None,
+                token_type: "oauth2".to_string(),
+                access_token_encrypted: Some(vec![9, 9, 9]),
+                refresh_token_encrypted: Some(vec![8, 8, 8]),
+                token_scopes: Some("read".to_string()),
+                expires_at: None,
+                api_key_encrypted: None,
+                status: "active".to_string(),
+                last_refreshed_at: None,
+                last_used_at: None,
+                error_message: None,
+                label: None,
+                metadata: None,
+                gateway_url: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+
+        // Plain (non-stamping) sync — used by refresh / manual disconnect /
+        // proxy-time refresh paths.
+        sync_provider_token_to_api_keys(&db, &user_id, &provider_id)
+            .await
+            .unwrap();
+
+        let after = get_key(&db, &key_id).await;
+        // Token still fans out…
+        assert_eq!(after.access_token_encrypted, Some(vec![9, 9, 9]));
+        // …but `last_authorized_at` stays None — only the fresh-auth
+        // wrapper advances it, so a background refresh can't accidentally
+        // satisfy the wizard's manage-scopes completion predicate.
+        assert!(
+            after.last_authorized_at.is_none(),
+            "non-stamping wrapper must leave last_authorized_at untouched"
+        );
     }
 
     #[tokio::test]
