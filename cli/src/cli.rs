@@ -126,6 +126,11 @@ pub enum Commands {
         #[command(subcommand)]
         command: ApprovalCommands,
     },
+    /// Manage shared compute pools and queued GPU tasks
+    Compute {
+        #[command(subcommand)]
+        command: ComputeCommands,
+    },
     /// Manage user endpoints
     Endpoint {
         #[command(subcommand)]
@@ -4022,5 +4027,188 @@ pub enum OraclePoolCommands {
         pool: String,
         #[command(flatten)]
         auth: AuthArgs,
+    },
+}
+
+// ---- Compute pools / tasks ----
+
+#[derive(Subcommand)]
+pub enum ComputeCommands {
+    /// Submit a compute task and optionally wait for completion
+    Submit {
+        /// Pool slug or id
+        pool: String,
+        /// Model name to route to a matching worker
+        #[arg(long)]
+        model: String,
+        /// Task kind: chat_completion, completion, embedding, batch
+        #[arg(long, default_value = "chat_completion")]
+        kind: String,
+        /// JSON request body. Use @file to read from a file, or - for stdin.
+        #[arg(long, value_name = "JSON|@PATH|-")]
+        input: String,
+        /// Higher priority is claimed first within the pool.
+        #[arg(long, default_value_t = 0)]
+        priority: i32,
+        /// Submitter-scoped idempotency key.
+        #[arg(long)]
+        client_ref: Option<String>,
+        /// Max seconds to wait for terminal status.
+        #[arg(long, default_value_t = 3600)]
+        wait: u64,
+        /// Submit and print task id without waiting.
+        #[arg(long)]
+        no_wait: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Fetch a compute task's current state or result
+    Result {
+        task_id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Cancel a queued or in-flight compute task
+    Cancel {
+        task_id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Show queue and active workers for a pool
+    Status {
+        pool: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Manage compute pools
+    Pool {
+        #[command(subcommand)]
+        command: ComputePoolCommands,
+    },
+    /// Run trusted worker daemons on GPU/Mac hosts
+    Worker {
+        #[command(subcommand)]
+        command: ComputeWorkerCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ComputePoolCommands {
+    /// Create a compute pool and print its one-time worker token
+    Create {
+        slug: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long, value_parser = ["private", "org", "platform"])]
+        visibility: Option<String>,
+        #[arg(long, value_parser = ["fifo", "least_busy", "model_fit"])]
+        scheduling_policy: Option<String>,
+        #[arg(long)]
+        max_workers: Option<u32>,
+        #[arg(long)]
+        max_queue: Option<u32>,
+        #[arg(long)]
+        per_user_inflight: Option<u32>,
+        #[arg(long)]
+        task_timeout: Option<u64>,
+        /// Create under this org (you must be an org admin)
+        #[arg(long, value_name = "ID|SLUG|NAME")]
+        org: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// List compute pools you can see
+    List {
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Show one compute pool
+    Show {
+        pool: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Update a compute pool
+    Update {
+        pool: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long, value_parser = ["private", "org", "platform"])]
+        visibility: Option<String>,
+        #[arg(long, value_parser = ["fifo", "least_busy", "model_fit"])]
+        scheduling_policy: Option<String>,
+        #[arg(long)]
+        max_workers: Option<u32>,
+        #[arg(long)]
+        max_queue: Option<u32>,
+        #[arg(long)]
+        per_user_inflight: Option<u32>,
+        #[arg(long)]
+        task_timeout: Option<u64>,
+        #[arg(long)]
+        active: Option<bool>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Rotate the pool worker token
+    RotateToken {
+        pool: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ComputeWorkerCommands {
+    /// Poll a compute pool and execute tasks against a local OpenAI-compatible endpoint
+    Run {
+        /// Stable worker label, e.g. home-4090-a
+        #[arg(long)]
+        worker: String,
+        /// Pool worker token. Prefer --token-env on shared machines.
+        #[arg(long)]
+        token: Option<String>,
+        /// Environment variable containing the pool worker token.
+        #[arg(long, default_value = "NYXID_COMPUTE_WORKER_TOKEN")]
+        token_env: String,
+        /// Local OpenAI-compatible endpoint URL, e.g. http://127.0.0.1:8000/v1/chat/completions
+        #[arg(long)]
+        endpoint_url: String,
+        /// Environment variable containing a local backend bearer token.
+        #[arg(long)]
+        backend_token_env: Option<String>,
+        /// Backend label shown in pool status, e.g. vllm, ollama, mlx, openclaw.
+        #[arg(long)]
+        backend: Option<String>,
+        /// Advertised model. Repeat for multiple models. Use '*' to accept any model.
+        #[arg(long = "model")]
+        models: Vec<String>,
+        /// GPU/accelerator name shown in pool status.
+        #[arg(long)]
+        gpu_name: Option<String>,
+        /// Host kind shown in pool status, e.g. linux-nvidia, mac-mlx.
+        #[arg(long)]
+        host_kind: Option<String>,
+        /// Optional NyxID node id for inventory correlation.
+        #[arg(long)]
+        node_id: Option<String>,
+        /// Advertised max local concurrency. MVP worker executes one task at a time.
+        #[arg(long)]
+        max_concurrency: Option<u32>,
+        /// Poll interval when the pool is idle.
+        #[arg(long, default_value_t = 5)]
+        poll_interval_secs: u64,
+        /// Heartbeat interval while a local request is running.
+        #[arg(long, default_value_t = 30)]
+        ack_interval_secs: u64,
+        /// Local backend request timeout in seconds.
+        #[arg(long, default_value_t = 14400)]
+        request_timeout_secs: u64,
+        #[command(flatten)]
+        base: BaseUrlArgs,
     },
 }

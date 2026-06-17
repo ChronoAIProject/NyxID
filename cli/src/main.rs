@@ -165,6 +165,7 @@ fn command_names(command: &Commands) -> (&'static str, &'static str) {
         Commands::Notification { .. } => ("notification", "subcommand"),
         Commands::Oauth { .. } => ("oauth", "subcommand"),
         Commands::Approval { .. } => ("approval", "subcommand"),
+        Commands::Compute { .. } => ("compute", "subcommand"),
         Commands::Endpoint { .. } => ("endpoint", "subcommand"),
         Commands::ExternalKey { .. } => ("external_key", "subcommand"),
         Commands::ServiceAccount { .. } => ("service_account", "subcommand"),
@@ -238,6 +239,8 @@ async fn run(cli: Cli) -> Result<()> {
 
         // I15-I20: Approvals
         Commands::Approval { command } => commands::approval::run(command).await,
+
+        Commands::Compute { command } => commands::compute::run(command).await,
 
         // I24: Endpoints
         Commands::Endpoint { command } => commands::endpoint::run(command).await,

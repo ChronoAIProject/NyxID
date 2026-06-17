@@ -1675,6 +1675,89 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    // ── compute_pools ──
+    let compute_pools = db.collection::<Document>(crate::models::compute_pool::COLLECTION_NAME);
+    compute_pools
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "slug": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    compute_pools
+        .create_index(IndexModel::builder().keys(doc! { "user_id": 1 }).build())
+        .await?;
+    compute_pools
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "worker_token_hash": 1, "is_active": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+
+    // ── compute_tasks ──
+    let compute_tasks = db.collection::<Document>(crate::models::compute_task::COLLECTION_NAME);
+    compute_tasks
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "pool_id": 1, "status": 1, "priority": -1, "created_at": 1 })
+                .build(),
+        )
+        .await?;
+    compute_tasks
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "submitter_user_id": 1, "created_at": -1 })
+                .build(),
+        )
+        .await?;
+    compute_tasks
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "pool_id": 1, "submitter_user_id": 1, "client_ref": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .unique(true)
+                        .partial_filter_expression(doc! {
+                            "client_ref": { "$exists": true }
+                        })
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    compute_tasks
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "expires_at": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(Duration::from_secs(0))
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+
+    // ── compute_workers ──
+    let compute_workers = db.collection::<Document>(crate::models::compute_worker::COLLECTION_NAME);
+    compute_workers
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "pool_id": 1, "last_seen_at": -1 })
+                .build(),
+        )
+        .await?;
+    compute_workers
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "pool_id": 1, "models": 1 })
+                .build(),
+        )
+        .await?;
+
     backfill_downstream_service_types(db).await?;
     migrate_legacy_ssh_auth_mode(db).await?;
     backfill_org_scope_sources(db).await?;

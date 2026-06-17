@@ -333,6 +333,30 @@ pub enum AppError {
 
     #[error("Oracle extract disabled: {0}")]
     OracleExtractDisabled(String),
+
+    #[error("Compute pool not found: {0}")]
+    ComputePoolNotFound(String),
+
+    #[error("Compute pool slug is already taken: {0}")]
+    ComputePoolSlugTaken(String),
+
+    #[error("Compute pool is inactive: {0}")]
+    ComputePoolInactive(String),
+
+    #[error("Compute worker token invalid")]
+    ComputeWorkerTokenInvalid,
+
+    #[error("Compute pool queue is full: {0}")]
+    ComputeQueueFull(String),
+
+    #[error("Compute quota exceeded: {0}")]
+    ComputeQuotaExceeded(String),
+
+    #[error("Compute task not found: {0}")]
+    ComputeTaskNotFound(String),
+
+    #[error("Compute payload too large: {0}")]
+    ComputePayloadTooLarge(String),
 }
 
 impl AppError {
@@ -433,6 +457,14 @@ impl AppError {
             Self::OracleSessionClosed(_) => StatusCode::CONFLICT,
             Self::OraclePayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             Self::OracleExtractDisabled(_) => StatusCode::FORBIDDEN,
+            Self::ComputePoolNotFound(_) => StatusCode::NOT_FOUND,
+            Self::ComputePoolSlugTaken(_) => StatusCode::CONFLICT,
+            Self::ComputePoolInactive(_) => StatusCode::SERVICE_UNAVAILABLE,
+            Self::ComputeWorkerTokenInvalid => StatusCode::UNAUTHORIZED,
+            Self::ComputeQueueFull(_) => StatusCode::TOO_MANY_REQUESTS,
+            Self::ComputeQuotaExceeded(_) => StatusCode::TOO_MANY_REQUESTS,
+            Self::ComputeTaskNotFound(_) => StatusCode::NOT_FOUND,
+            Self::ComputePayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             Self::Internal(_) | Self::DatabaseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -541,6 +573,14 @@ impl AppError {
             Self::OracleSessionClosed(_) => 11008,
             Self::OraclePayloadTooLarge(_) => 11009,
             Self::OracleExtractDisabled(_) => 11010,
+            Self::ComputePoolNotFound(_) => 11200,
+            Self::ComputePoolSlugTaken(_) => 11201,
+            Self::ComputePoolInactive(_) => 11202,
+            Self::ComputeWorkerTokenInvalid => 11203,
+            Self::ComputeQueueFull(_) => 11204,
+            Self::ComputeQuotaExceeded(_) => 11205,
+            Self::ComputeTaskNotFound(_) => 11206,
+            Self::ComputePayloadTooLarge(_) => 11207,
         }
     }
 
@@ -681,6 +721,14 @@ impl AppError {
             Self::OracleSessionClosed(_) => "oracle_session_closed",
             Self::OraclePayloadTooLarge(_) => "oracle_payload_too_large",
             Self::OracleExtractDisabled(_) => "oracle_extract_disabled",
+            Self::ComputePoolNotFound(_) => "compute_pool_not_found",
+            Self::ComputePoolSlugTaken(_) => "compute_pool_slug_taken",
+            Self::ComputePoolInactive(_) => "compute_pool_inactive",
+            Self::ComputeWorkerTokenInvalid => "compute_worker_token_invalid",
+            Self::ComputeQueueFull(_) => "compute_queue_full",
+            Self::ComputeQuotaExceeded(_) => "compute_quota_exceeded",
+            Self::ComputeTaskNotFound(_) => "compute_task_not_found",
+            Self::ComputePayloadTooLarge(_) => "compute_payload_too_large",
         }
     }
 }

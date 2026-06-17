@@ -935,11 +935,40 @@ pub fn build_router(
         )
         .layer(DefaultBodyLimit::max(16 * 1024 * 1024));
 
+    let compute_consumer_routes = Router::new()
+        .route(
+            "/pools",
+            get(handlers::compute_pools::list_pools).post(handlers::compute_pools::create_pool),
+        )
+        .route(
+            "/pools/{id_or_slug}",
+            get(handlers::compute_pools::get_pool).patch(handlers::compute_pools::update_pool),
+        )
+        .route(
+            "/pools/{id_or_slug}/rotate-token",
+            post(handlers::compute_pools::rotate_token),
+        )
+        .route(
+            "/pools/{id_or_slug}/tasks",
+            post(handlers::compute_tasks::submit_task),
+        )
+        .route(
+            "/pools/{id_or_slug}/status",
+            get(handlers::compute_tasks::pool_status),
+        )
+        .route("/tasks/{task_id}", get(handlers::compute_tasks::get_task))
+        .route(
+            "/tasks/{task_id}/cancel",
+            post(handlers::compute_tasks::cancel_task),
+        )
+        .layer(DefaultBodyLimit::max(16 * 1024 * 1024));
+
     // Routes accessible by both users and service accounts (block delegated tokens)
     let api_v1_shared = Router::new()
         .nest("/connections", connection_routes)
         .nest("/providers", provider_routes)
         .nest("/oracle", oracle_consumer_routes)
+        .nest("/compute", compute_consumer_routes)
         .layer(middleware::from_fn(reject_delegated_tokens));
 
     // Routes that BLOCK service account tokens (human-only endpoints)
@@ -1088,6 +1117,14 @@ pub fn build_router(
                     post(handlers::oracle_worker::submit_transcript),
                 )
                 .route("/pin-conv-url", post(handlers::oracle_worker::pin_conv_url))
+                .layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
+        )
+        .nest(
+            "/api/v1/compute/worker",
+            Router::new()
+                .route("/task", post(handlers::compute_worker::poll_task))
+                .route("/ack", post(handlers::compute_worker::ack))
+                .route("/result", post(handlers::compute_worker::submit_result))
                 .layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
         )
         .nest("/api/v1", api_v1)

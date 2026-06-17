@@ -19,6 +19,8 @@ pub mod chatgpt_translator;
 pub mod cli_pairing_service;
 pub mod cloud_credential_verify;
 pub mod cloud_response_cache;
+pub mod compute_pool_service;
+pub mod compute_task_service;
 pub mod connection_service;
 pub mod consent_service;
 pub mod content_type;

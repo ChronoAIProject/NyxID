@@ -52,6 +52,7 @@ See [KMS_MIGRATION_GUIDE.md](KMS_MIGRATION_GUIDE.md) and [KMS_OPERATIONS_GUIDE.m
 | `BASE_URL` | `http://localhost:3001` | Backend base URL (used in JWT `aud`) |
 | `FRONTEND_URL` | `http://localhost:3000` | Frontend origin for CORS |
 | `ENVIRONMENT` | `development` | `development`, `staging`, `production` |
+| `COMPUTE_TASK_RETENTION_DAYS` | `30` | Days to retain terminal compute task input/output bodies before MongoDB TTL expiry. |
 
 The standalone remote credential accept routes are backend-served. In split
 frontend/backend deployments, reverse proxies must route
