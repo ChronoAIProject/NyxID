@@ -23,13 +23,27 @@ The external credential is pasted once and never seen again. The Agent Key is wh
 From **AI Services → External Services**, click **Add Service**. Pick a catalog entry (OpenAI, Anthropic, GitHub, etc.) or enter a custom endpoint URL. Credentials are accepted as:
 
 - **API key / bearer token** — pasted directly in the dialog
-- **OAuth 2.0** — NyxID redirects you through the provider's consent flow and stores the resulting token + refresh token
+- **OAuth 2.0** — NyxID redirects you through the provider's consent flow and stores the resulting token + refresh token. Before redirecting, OAuth providers show a **scope picker**: the provider's default scopes are pre-selected as pills, and you can toggle extra ones (write/admin scopes are marked with a dot) or type any not listed in the **Add** field.
 - **Device code** — NyxID opens a device-code flow (used by providers like Anthropic and OpenAI for delegated access)
 - **Node-managed** — the credential never reaches NyxID; it is stored locally on a [credential node](/docs/shared/concepts/credential-nodes)
 
 ### Update a credential
 
 Open the service's detail page from **AI Services → External Services**, click the service card, then click **Edit Credential**. The new value replaces the previous one immediately; any in-flight proxy requests that started before the update use the old credential.
+
+### Manage OAuth scopes (permissions)
+
+On an active OAuth connection's detail page, click **Manage permissions**. The scope picker opens seeded with the connection's **current** scopes — tick to add a permission, untick to remove one — then confirm. NyxID re-authorizes the **same** connection at the provider (a browser re-consent, like the first connect), so your agent bindings and routing are preserved.
+
+Adding scopes works for every OAuth provider. Whether you can **remove** one depends on the provider:
+
+- **Removable + cleaned up** (X, Google, Discord, Slack, Twitch, Reddit, TikTok) — the old grant is revoked at the provider.
+- **Removable, manual cleanup** (Facebook, Spotify, LinkedIn, Microsoft, Lark/Feishu) — NyxID uses only the new scopes, but the old grant stays on the provider until you revoke it in that provider's own connected-apps settings.
+- **Locked** (GitHub) — granted scopes can't be narrowed by re-authorizing, so they're shown locked; you can still add scopes.
+
+Removing "Stay connected" (`offline.access`) drops the refresh token and stops auto-refresh — leave it selected unless you intend that.
+
+From the CLI, the same operation is `nyxid service scopes <slug> --set "..."` — see [Connect a service](/docs/cli/guides/connect-a-service).
 
 ### Delete a service
 

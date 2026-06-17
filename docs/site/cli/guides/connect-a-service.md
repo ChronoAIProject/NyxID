@@ -71,6 +71,35 @@ nyxid service add api-lark --oauth \
   --scope "contact:contact.base:readonly"
 ```
 
+`--scope` is **additive** — it adds to the provider's default scopes. To change the scopes of a connection you already have (including removing one), use `service scopes` below.
+
+## Change an OAuth connection's scopes
+
+To re-scope an existing OAuth connection, declare the exact set you want with `service scopes <id|slug> --set`:
+
+```bash
+# Replace this connection's scopes with exactly this set (adds and/or removes)
+nyxid service scopes api-twitter --set "tweet.read,media.write"
+
+# No --set: opens the picker seeded with the connection's current scopes
+nyxid service scopes api-twitter
+
+# Headless host: print a URL + code to approve on another device, then exit
+nyxid service scopes api-twitter --set "tweet.read,media.write" --no-wait
+```
+
+This re-authorizes the **same** connection in place — its agent bindings, node routing, and org sharing are preserved (it never creates a duplicate). Because changing scopes means re-consenting, the provider's authorization screen still opens in a browser, exactly as when you first add the connection; `--no-wait` lets that browser be on a different device.
+
+What you can remove depends on the provider:
+
+| Provider behavior | Removal |
+|---|---|
+| Has a token-revocation endpoint (X, Google, Discord, Slack, Twitch, Reddit, TikTok) | Removal applies; the old grant is revoked. |
+| No revocation endpoint (Facebook, Spotify, LinkedIn, Microsoft, Lark/Feishu) | NyxID uses only the new scopes, but the old grant lingers until you revoke it in the provider's own settings. |
+| Grant-level scope union (GitHub) | Granted scopes are locked — re-auth can't narrow them. You can still add scopes. |
+
+> **Note:** dropping `offline.access` ("Stay connected") removes the refresh token, so the connection stops auto-refreshing and will need reconnecting when the access token expires. Keep it unless you mean to.
+
 ## Inspect and verify
 
 ```bash

@@ -540,6 +540,15 @@ This auto-creates:
 - **UserApiKey** with the encrypted credential
 - **UserService** with the proxy slug, auth method, and auth key name from catalog defaults
 
+For **OAuth providers**, request scopes at add time with `--scope` (additive on the
+provider defaults), and change an existing connection's scopes with
+`nyxid service scopes <slug> --set "a,b,c"` (declarative — the exact desired set,
+adds and/or removes). Both still require the provider's browser re-consent;
+`--no-wait` prints a URL + code so it can be approved on another device. Removal is
+gated per provider (some revoke the old grant automatically, some need manual
+revocation at the provider, GitHub can't narrow). See
+[Connect a service](/docs/cli/guides/connect-a-service).
+
 ### Option B: Add from catalog with custom endpoint URL
 
 For services like OpenClaw where the user provides their own instance URL:
