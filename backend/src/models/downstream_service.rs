@@ -110,6 +110,17 @@ pub struct CredentialFieldSpec {
     pub secret: bool,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct AnonymousEndpointRule {
+    pub id: String,
+    #[serde(default = "default_anonymous_enabled")]
+    pub enabled: bool,
+    pub method: String,
+    pub path_pattern: String,
+    #[serde(default = "default_anonymous_daily_quota")]
+    pub daily_quota: u32,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SshServiceConfig {
     pub host: String,
@@ -312,6 +323,11 @@ pub struct DownstreamService {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_exchange_config: Option<TokenExchangeConfig>,
 
+    /// Admin-scoped no-auth public proxy rules. Only enabled rules expose
+    /// runtime access; disabled rules are drafts.
+    #[serde(default)]
+    pub anonymous_endpoints: Vec<AnonymousEndpointRule>,
+
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
@@ -351,6 +367,14 @@ fn default_identity_propagation_mode() -> String {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_anonymous_enabled() -> bool {
+    true
+}
+
+fn default_anonymous_daily_quota() -> u32 {
+    1_000
 }
 
 fn default_delegation_scope() -> String {
@@ -408,6 +432,7 @@ pub mod test_helpers {
             ws_frame_injections: Vec::new(),
             developer_app_ids: None,
             token_exchange_config: None,
+            anonymous_endpoints: Vec::new(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -514,6 +539,7 @@ mod tests {
             ws_frame_injections: Vec::new(),
             developer_app_ids: None,
             token_exchange_config: None,
+            anonymous_endpoints: Vec::new(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -581,6 +607,7 @@ mod tests {
             ws_frame_injections: Vec::new(),
             developer_app_ids: None,
             token_exchange_config: None,
+            anonymous_endpoints: Vec::new(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };

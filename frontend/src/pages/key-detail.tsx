@@ -1842,6 +1842,14 @@ export function KeyDetailPage() {
     (keyInfo.credential_type === "oauth2" ||
       catalogEntry?.provider_type === "oauth2" ||
       catalogEntry?.provider_type === "device_code");
+  const autoConnectedAuthLabel = keyInfo.auth_method === "none"
+    ? "None (no credentials required)"
+    : "Platform managed credential";
+  const autoConnectedDescription = keyInfo.source_app_name
+    ? `This service was auto-connected via ${keyInfo.source_app_name}. It is managed by the platform and cannot be modified.`
+    : keyInfo.auth_method === "none"
+      ? "This service requires no authentication and was auto-connected from the catalog. It is managed by the platform and cannot be modified."
+      : "This service uses a platform-managed credential and was auto-connected from the catalog. It cannot be modified.";
 
   // Append-only scope editing on a healthy connection (NyxID#917 follow-up):
   // re-authorize with additional scopes via the same reconnect dialog (it
@@ -1977,11 +1985,7 @@ export function KeyDetailPage() {
           <Card>
             <CardHeader>
               <CardTitle className="text-[15px]">Service Details</CardTitle>
-              <CardDescription>
-                {keyInfo.source_app_name
-                  ? `This service was auto-connected via ${keyInfo.source_app_name}. It is managed by the platform and cannot be modified.`
-                  : "This service requires no authentication and was auto-connected from the catalog. It is managed by the platform and cannot be modified."}
-              </CardDescription>
+              <CardDescription>{autoConnectedDescription}</CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
               <div className="grid grid-cols-2 gap-4 text-[12px]">
@@ -2003,7 +2007,7 @@ export function KeyDetailPage() {
                   <span className="text-xs font-medium text-muted-foreground">
                     Auth Method
                   </span>
-                  <p className="text-xs">None (no credentials required)</p>
+                  <p className="text-xs">{autoConnectedAuthLabel}</p>
                 </div>
                 <div>
                   <span className="text-xs font-medium text-muted-foreground">

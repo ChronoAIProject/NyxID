@@ -205,6 +205,41 @@ fn identity_config_from_downstream_service(
     }
 }
 
+fn is_public_internal_master_credential_service(service: &DownstreamService) -> bool {
+    service.visibility == "public"
+        && service.service_category == "internal"
+        && service.auth_method != "none"
+        && service.auth_method != "token_exchange"
+        && !service.requires_user_credential
+        && service.service_type == "http"
+        && service.is_active
+        && !service.credential_encrypted.is_empty()
+        && service.provider_config_id.is_none()
+}
+
+fn is_auto_provisionable_catalog_service(
+    service: &DownstreamService,
+    has_provider_requirement: bool,
+) -> bool {
+    let is_truly_no_auth = service.is_active
+        && service.auth_method == "none"
+        && !service.requires_user_credential
+        && (service.service_category == "connection" || service.service_category == "internal")
+        && service.service_type == "http"
+        && !has_provider_requirement;
+
+    is_truly_no_auth
+        || (!has_provider_requirement && is_public_internal_master_credential_service(service))
+}
+
+fn auto_provision_auth_snapshot(service: &DownstreamService) -> (&str, &str) {
+    if is_public_internal_master_credential_service(service) {
+        (service.auth_method.as_str(), service.auth_key_name.as_str())
+    } else {
+        ("none", "")
+    }
+}
+
 /// SSH-specific parameters for custom SSH service creation.
 pub struct SshCreateParams<'a> {
     pub host: &'a str,
@@ -1127,6 +1162,7 @@ pub async fn create_key(
             ws_frame_injections: Vec::new(),
             developer_app_ids: None,
             token_exchange_config: None,
+            anonymous_endpoints: Vec::new(),
             created_at: now,
             updated_at: now,
         };
@@ -1405,15 +1441,19 @@ async fn cleanup_auto_provision_endpoint(db: &mongodb::Database, user_id: &str, 
     }
 }
 
-/// Auto-provision UserEndpoint + UserService for truly no-auth catalog services.
+/// Auto-provision UserEndpoint + UserService for catalog services that are
+/// callable without a user-owned credential.
 /// Called lazily on list_keys. Idempotent: skips services already provisioned.
 ///
-/// "Truly no-auth" means: `auth_method == "none"` on the DownstreamService AND
-/// no `ServiceProviderRequirement` exists (which would indicate master-credential
-/// injection). Internal services with SPRs use master credentials and are NOT no-auth.
+/// Eligible platform-managed services are:
+/// - Truly no-auth services: `auth_method == "none"` on the DownstreamService
+///   AND no `ServiceProviderRequirement` exists.
+/// - Public internal services with a catalog master credential:
+///   `visibility == "public"`, `service_category == "internal"`,
+///   `auth_method != "none"`, and no per-user credential requirement.
 ///
 /// Visibility rules:
-/// - Public services: auto-provision for all users.
+/// - Public eligible services: auto-provision for all users.
 /// - Private services with `developer_app_ids`: only auto-provision if the user
 ///   has an active consent for at least one of those OAuth clients (developer apps).
 ///   The matched app ID is stored as `source_app_id` on the UserService.
@@ -1440,15 +1480,24 @@ pub async fn auto_provision_no_auth_services(
     // fully independent of the provisioning pipeline below.
     reconcile_stale_auto_provisions(db, user_id).await;
 
-    // Find all active services with auth_method "none" and no user credential requirement
+    // Find all active catalog services that could be user-callable without a
+    // user-owned credential. The finer auth/provider-requirement predicate is
+    // applied in memory below.
     let candidates: Vec<DownstreamService> = db
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
         .find(doc! {
             "is_active": true,
-            "auth_method": "none",
             "requires_user_credential": false,
             "service_category": { "$in": ["connection", "internal"] },
             "service_type": "http",
+            "$or": [
+                { "auth_method": "none" },
+                {
+                    "visibility": "public",
+                    "service_category": "internal",
+                    "auth_method": { "$ne": "none" },
+                },
+            ],
         })
         .await?
         .try_collect()
@@ -1469,18 +1518,17 @@ pub async fn auto_provision_no_auth_services(
     let has_spr: std::collections::HashSet<&str> =
         sprs.iter().map(|r| r.service_id.as_str()).collect();
 
-    // Filter to truly no-auth services (no SPR = no credential injection needed)
-    let no_auth_services: Vec<&DownstreamService> = candidates
+    let provisionable_services: Vec<&DownstreamService> = candidates
         .iter()
-        .filter(|s| !has_spr.contains(s.id.as_str()))
+        .filter(|s| is_auto_provisionable_catalog_service(s, has_spr.contains(s.id.as_str())))
         .collect();
 
-    if no_auth_services.is_empty() {
+    if provisionable_services.is_empty() {
         return Ok(());
     }
 
     // Collect all developer_app_ids from private services to batch-check consents
-    let all_app_ids: Vec<&str> = no_auth_services
+    let all_app_ids: Vec<&str> = provisionable_services
         .iter()
         .filter(|s| s.visibility == "private")
         .filter_map(|s| s.developer_app_ids.as_ref())
@@ -1499,7 +1547,7 @@ pub async fn auto_provision_no_auth_services(
     // - Public: always eligible, no app context
     // - Private with developer_app_ids: eligible only if user consented to >= 1 app
     // - Private without developer_app_ids: never eligible
-    let eligible: Vec<(&DownstreamService, Option<&str>)> = no_auth_services
+    let eligible: Vec<(&DownstreamService, Option<&str>)> = provisionable_services
         .iter()
         .filter_map(|svc| {
             if svc.visibility != "private" {
@@ -1588,6 +1636,7 @@ pub async fn auto_provision_no_auth_services(
 
         let source_id = auto_provision_source_id(user_id, &svc.id);
         let catalog_identity = identity_config_from_downstream_service(svc);
+        let (auth_method, auth_key_name) = auto_provision_auth_snapshot(svc);
         // Auto-provision is always personal (node_id = None), so the actor
         // and the effective owner are the same.
         match user_service_service::create_user_service(
@@ -1596,9 +1645,9 @@ pub async fn auto_provision_no_auth_services(
             user_id,
             &unique_slug,
             &endpoint.id,
-            None, // no api key for no-auth services
-            "none",
-            "",
+            None, // platform-managed services do not have a user API key
+            auth_method,
+            auth_key_name,
             Some(&svc.id),
             None,
             0,
@@ -1685,13 +1734,13 @@ pub async fn load_valid_app_consents(
 /// Delete stale auto-provisioned UserServices that the user is no longer
 /// eligible for. Fully self-contained: loads the user's active
 /// auto-provisioned services, their catalog entries, SPRs, and consents,
-/// then applies the complete "truly no-auth" eligibility predicate.
+/// then applies the complete auto-provision eligibility predicate.
 ///
 /// A service is stale if its catalog entry:
 /// - No longer exists or is inactive
-/// - No longer satisfies the "truly no-auth" predicate (auth_method changed,
-///   gained an SPR, changed to SSH, changed category, now requires user
-///   credential, etc.)
+/// - No longer satisfies the auto-provision predicate (auth_method changed,
+///   gained an SPR for a no-auth row, changed to SSH, changed category, now
+///   requires user credential, etc.)
 /// - Is now private without `developer_app_ids`
 /// - Is now private with `developer_app_ids` but the user has no valid consent
 async fn reconcile_stale_auto_provisions(db: &mongodb::Database, user_id: &str) {
@@ -1756,7 +1805,7 @@ async fn reconcile_stale_auto_provisions(db: &mongodb::Database, user_id: &str) 
             }
         };
 
-    // Load SPRs for the catalog entries to check the "truly no-auth" predicate
+    // Load SPRs for the catalog entries to check the auto-provision predicate.
     let spr_set: std::collections::HashSet<String> = if catalog_ids.is_empty() {
         std::collections::HashSet::new()
     } else {
@@ -1800,7 +1849,7 @@ async fn reconcile_stale_auto_provisions(db: &mongodb::Database, user_id: &str) 
 
     // Determine which auto-provisioned services are now stale.
     // A service is valid only if its catalog entry still satisfies the full
-    // "truly no-auth" predicate AND the visibility/consent rules.
+    // auto-provision predicate AND the visibility/consent rules.
     let stale: Vec<&crate::models::user_service::UserService> = auto_services
         .iter()
         .filter(|us| {
@@ -1812,17 +1861,13 @@ async fn reconcile_stale_auto_provisions(db: &mongodb::Database, user_id: &str) 
             match catalog {
                 None => true, // catalog entry deleted
                 Some(ds) => {
-                    // Re-check the full "truly no-auth" predicate
-                    let is_truly_no_auth = ds.is_active
-                        && ds.auth_method == "none"
-                        && !ds.requires_user_credential
-                        && (ds.service_category == "connection"
-                            || ds.service_category == "internal")
-                        && ds.service_type == "http"
-                        && !spr_set.contains(&ds.id);
-
-                    if !is_truly_no_auth {
+                    if !is_auto_provisionable_catalog_service(ds, spr_set.contains(&ds.id)) {
                         return true; // catalog changed -- stale
+                    }
+
+                    let (auth_method, auth_key_name) = auto_provision_auth_snapshot(ds);
+                    if us.auth_method != auth_method || us.auth_key_name != auth_key_name {
+                        return true; // auth snapshot changed -- recreate
                     }
 
                     // Check visibility/consent rules
@@ -3278,6 +3323,7 @@ mod tests {
             ws_frame_injections: Vec::new(),
             developer_app_ids: None,
             token_exchange_config: None,
+            anonymous_endpoints: Vec::new(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -7002,6 +7048,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn auto_provision_creates_services_for_public_internal_master_credential_catalog() {
+        let Some(db) = connect_test_database("uks_auto_provision_master_credential").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let mut catalog = sample_catalog_service();
+        catalog.id = uuid::Uuid::new_v4().to_string();
+        catalog.slug = format!("public-internal-master-{}", uuid::Uuid::new_v4());
+        catalog.auth_method = "bearer".to_string();
+        catalog.auth_key_name = "Authorization".to_string();
+        catalog.requires_user_credential = false;
+        catalog.visibility = "public".to_string();
+        catalog.service_category = "internal".to_string();
+        catalog.credential_encrypted = vec![1, 2, 3];
+
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+
+        auto_provision_no_auth_services(&db, &user_id)
+            .await
+            .unwrap();
+
+        let services: Vec<UserService> = db
+            .collection::<UserService>(USER_SERVICES)
+            .find(doc! { "user_id": &user_id, "catalog_service_id": &catalog.id })
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+
+        assert_eq!(services.len(), 1);
+        assert_eq!(services[0].source.as_deref(), Some(AUTO_PROVISION_SOURCE));
+        assert!(services[0].api_key_id.is_none());
+        assert_eq!(services[0].auth_method, "bearer");
+        assert_eq!(services[0].auth_key_name, "Authorization");
+    }
+
+    #[tokio::test]
     async fn auto_provision_is_idempotent() {
         let Some(db) = connect_test_database("uks_auto_provision_idem").await else {
             eprintln!("skipping: no MongoDB");
@@ -8133,6 +8222,51 @@ mod tests {
             count, 0,
             "service should be deleted after auth_method changed"
         );
+    }
+
+    #[tokio::test]
+    async fn auto_provision_keeps_public_internal_master_credential_catalog() {
+        let Some(db) = connect_test_database("uks_reconcile_keeps_master_credential").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let mut catalog = sample_catalog_service();
+        catalog.id = uuid::Uuid::new_v4().to_string();
+        catalog.slug = format!("keep-master-{}", uuid::Uuid::new_v4());
+        catalog.auth_method = "header".to_string();
+        catalog.auth_key_name = "X-Platform-Key".to_string();
+        catalog.requires_user_credential = false;
+        catalog.visibility = "public".to_string();
+        catalog.service_category = "internal".to_string();
+        catalog.credential_encrypted = vec![1, 2, 3];
+
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+
+        auto_provision_no_auth_services(&db, &user_id)
+            .await
+            .unwrap();
+        auto_provision_no_auth_services(&db, &user_id)
+            .await
+            .unwrap();
+
+        let services: Vec<UserService> = db
+            .collection::<UserService>(USER_SERVICES)
+            .find(doc! { "user_id": &user_id, "catalog_service_id": &catalog.id })
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+
+        assert_eq!(services.len(), 1);
+        assert_eq!(services[0].auth_method, "header");
+        assert_eq!(services[0].auth_key_name, "X-Platform-Key");
+        assert!(services[0].api_key_id.is_none());
     }
 
     // ── create and list: full round-trip with catalog ────────────────

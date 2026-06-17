@@ -8,6 +8,7 @@ use mongodb::options::{ClientOptions, IndexOptions};
 use mongodb::{Client, Database, IndexModel};
 
 use crate::config::AppConfig;
+use crate::models::anonymous_endpoint_usage::COLLECTION_NAME as ANONYMOUS_ENDPOINT_USAGE;
 use crate::models::device_code::COLLECTION_NAME as DEVICE_CODES;
 use crate::models::device_onboard_credential::COLLECTION_NAME as DEVICE_ONBOARD_CREDENTIALS;
 use crate::models::downstream_service::{
@@ -270,6 +271,24 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .build(),
         )
         .await?;
+    services
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {
+                    "slug": 1,
+                    "is_active": 1,
+                    "service_type": 1,
+                    "anonymous_endpoints.enabled": 1,
+                    "anonymous_endpoints.method": 1,
+                })
+                .options(
+                    IndexOptions::builder()
+                        .name("anonymous_endpoint_lookup".to_string())
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
 
     services
         .create_index(
@@ -310,6 +329,34 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         .create_index(
             IndexModel::builder()
                 .keys(doc! { "api_key_id": 1, "created_at": -1 })
+                .build(),
+        )
+        .await?;
+
+    let anonymous_usage = db.collection::<mongodb::bson::Document>(ANONYMOUS_ENDPOINT_USAGE);
+    anonymous_usage
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "service_id": 1, "rule_id": 1, "day": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("anonymous_usage_service_rule_day_unique".to_string())
+                        .unique(true)
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    anonymous_usage
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "updated_at": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("anonymous_usage_day_ttl".to_string())
+                        .expire_after(Duration::from_secs(90 * 24 * 60 * 60))
+                        .build(),
+                )
                 .build(),
         )
         .await?;
@@ -1519,6 +1566,113 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         .await?;
     telemetry_erasure_jobs
         .create_index(IndexModel::builder().keys(doc! { "user_id": 1 }).build())
+        .await?;
+
+    // ── oracle_pools ──
+    let oracle_pools = db.collection::<Document>(crate::models::oracle_pool::COLLECTION_NAME);
+    oracle_pools
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "slug": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    oracle_pools
+        .create_index(IndexModel::builder().keys(doc! { "user_id": 1 }).build())
+        .await?;
+
+    // ── oracle_tasks ──
+    // `pool_id + status + created_at` matches the atomic FIFO claim
+    // (oldest queued task per pool) and the pool status counters.
+    let oracle_tasks = db.collection::<Document>(crate::models::oracle_task::COLLECTION_NAME);
+    oracle_tasks
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "pool_id": 1, "status": 1, "created_at": 1 })
+                .build(),
+        )
+        .await?;
+    oracle_tasks
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "submitter_user_id": 1, "created_at": -1 })
+                .build(),
+        )
+        .await?;
+    oracle_tasks
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "conversation_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .partial_filter_expression(doc! {
+                            "conversation_id": { "$exists": true }
+                        })
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    // Pool + submitter-scoped idempotency: a retried submit with the same
+    // `client_ref` must hit the duplicate-key error instead of enqueueing
+    // a second task, while allowing the same client_ref in another pool.
+    oracle_tasks
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "pool_id": 1, "submitter_user_id": 1, "client_ref": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .unique(true)
+                        .partial_filter_expression(doc! {
+                            "client_ref": { "$exists": true }
+                        })
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    // TTL retention: `expires_at` is set when a task reaches a terminal
+    // status (created_at + ORACLE_TASK_RETENTION_DAYS). Queued/dispatched
+    // tasks have no `expires_at` and are never expired by MongoDB.
+    oracle_tasks
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "expires_at": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(Duration::from_secs(0))
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+
+    // ── oracle_sessions ──
+    let oracle_sessions = db.collection::<Document>(crate::models::oracle_session::COLLECTION_NAME);
+    oracle_sessions
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "pool_id": 1, "updated_at": -1 })
+                .build(),
+        )
+        .await?;
+    oracle_sessions
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "owner_user_id": 1, "updated_at": -1 })
+                .build(),
+        )
+        .await?;
+
+    // ── oracle_workers ──
+    let oracle_workers = db.collection::<Document>(crate::models::oracle_worker::COLLECTION_NAME);
+    oracle_workers
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "pool_id": 1, "last_seen_at": -1 })
+                .build(),
+        )
         .await?;
 
     backfill_downstream_service_types(db).await?;
@@ -2949,6 +3103,7 @@ mod tests {
             ws_frame_injections: Vec::new(),
             developer_app_ids: None,
             token_exchange_config: None,
+            anonymous_endpoints: Vec::new(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

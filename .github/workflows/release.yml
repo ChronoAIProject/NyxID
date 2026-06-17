@@ -145,7 +145,13 @@ jobs:
         run: |
           ${{ matrix.packages_install }}
       - name: Build artifacts
+        shell: bash
         run: |
+          if [[ ",${{ join(matrix.targets, ',') }}," == *",aarch64-unknown-linux-gnu,"* ]]; then
+            export CC=clang
+            export CXX=clang++
+          fi
+
           # Actually do builds and make zips and whatnot
           dist build ${{ needs.plan.outputs.tag-flag }} --print=linkage --output-format=json ${{ matrix.dist_args }} > dist-manifest.json
           echo "dist ran successfully"

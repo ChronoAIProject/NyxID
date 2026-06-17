@@ -158,6 +158,7 @@ fn command_names(command: &Commands) -> (&'static str, &'static str) {
         Commands::Device { .. } => ("device", "subcommand"),
         Commands::NodeCredential { .. } => ("node_credential", "subcommand"),
         Commands::Proxy { .. } => ("proxy", "subcommand"),
+        Commands::Public { .. } => ("public", "subcommand"),
         Commands::Ssh(_) => ("ssh", "subcommand"),
         Commands::Openclaw { .. } => ("openclaw", "subcommand"),
         Commands::Mcp { .. } => ("mcp", "subcommand"),
@@ -174,6 +175,7 @@ fn command_names(command: &Commands) -> (&'static str, &'static str) {
         Commands::ChannelEvent { .. } => ("channel_event", "subcommand"),
         Commands::Admin { .. } => ("admin", "subcommand"),
         Commands::Telemetry { .. } => ("telemetry", "subcommand"),
+        Commands::Oracle { .. } => ("oracle", "subcommand"),
         Commands::Repo(_) => ("repo", "repo"),
         Commands::Pairing { .. } => ("pairing", "subcommand"),
         Commands::Info => ("repo", "info"),
@@ -223,6 +225,7 @@ async fn run(cli: Cli) -> Result<()> {
 
         // C8-C10: Proxy
         Commands::Proxy { command } => commands::proxy::run(command).await,
+        Commands::Public { command } => commands::public::run(command).await,
 
         Commands::Ssh(ssh) => commands::ssh::run(ssh).await,
         Commands::Openclaw { command } => commands::openclaw::run(command).await,
@@ -265,6 +268,8 @@ async fn run(cli: Cli) -> Result<()> {
 
         // Telemetry (consent editor; also docs/TELEMETRY.md §3)
         Commands::Telemetry { command } => commands::telemetry::run(command, None).await,
+
+        Commands::Oracle { command } => commands::oracle::run(command).await,
 
         // Project links
         Commands::Repo(args) => commands::repo::run_repo(args).await,

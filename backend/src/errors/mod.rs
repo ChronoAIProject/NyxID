@@ -298,6 +298,41 @@ pub enum AppError {
 
     #[error("Invite code has already been redeemed")]
     InviteCodeAlreadyRedeemed,
+
+    #[error("Anonymous endpoint incompatible with service identity exposure: {0}")]
+    AnonymousIncompatibleService(String),
+    #[error("Oracle pool not found: {0}")]
+    OraclePoolNotFound(String),
+
+    #[error("Oracle pool slug is already taken: {0}")]
+    OraclePoolSlugTaken(String),
+
+    #[error("Oracle pool is inactive: {0}")]
+    OraclePoolInactive(String),
+
+    #[error("Oracle worker token invalid")]
+    OracleWorkerTokenInvalid,
+
+    #[error("Oracle pool queue is full: {0}")]
+    OracleQueueFull(String),
+
+    #[error("Oracle quota exceeded: {0}")]
+    OracleQuotaExceeded(String),
+
+    #[error("Oracle task not found: {0}")]
+    OracleTaskNotFound(String),
+
+    #[error("Oracle session not found: {0}")]
+    OracleSessionNotFound(String),
+
+    #[error("Oracle session is closed: {0}")]
+    OracleSessionClosed(String),
+
+    #[error("Oracle payload too large: {0}")]
+    OraclePayloadTooLarge(String),
+
+    #[error("Oracle extract disabled: {0}")]
+    OracleExtractDisabled(String),
 }
 
 impl AppError {
@@ -386,6 +421,18 @@ impl AppError {
             | Self::InviteCodeExhausted
             | Self::InviteCodeDeactivated
             | Self::InviteCodeAlreadyRedeemed => StatusCode::BAD_REQUEST,
+            Self::AnonymousIncompatibleService(_) => StatusCode::BAD_REQUEST,
+            Self::OraclePoolNotFound(_) => StatusCode::NOT_FOUND,
+            Self::OraclePoolSlugTaken(_) => StatusCode::CONFLICT,
+            Self::OraclePoolInactive(_) => StatusCode::SERVICE_UNAVAILABLE,
+            Self::OracleWorkerTokenInvalid => StatusCode::UNAUTHORIZED,
+            Self::OracleQueueFull(_) => StatusCode::TOO_MANY_REQUESTS,
+            Self::OracleQuotaExceeded(_) => StatusCode::TOO_MANY_REQUESTS,
+            Self::OracleTaskNotFound(_) => StatusCode::NOT_FOUND,
+            Self::OracleSessionNotFound(_) => StatusCode::NOT_FOUND,
+            Self::OracleSessionClosed(_) => StatusCode::CONFLICT,
+            Self::OraclePayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
+            Self::OracleExtractDisabled(_) => StatusCode::FORBIDDEN,
             Self::Internal(_) | Self::DatabaseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -482,6 +529,18 @@ impl AppError {
             Self::InviteCodeExhausted => 8201,
             Self::InviteCodeDeactivated => 8202,
             Self::InviteCodeAlreadyRedeemed => 8203,
+            Self::AnonymousIncompatibleService(_) => 11100,
+            Self::OraclePoolNotFound(_) => 11000,
+            Self::OraclePoolSlugTaken(_) => 11001,
+            Self::OraclePoolInactive(_) => 11002,
+            Self::OracleWorkerTokenInvalid => 11003,
+            Self::OracleQueueFull(_) => 11004,
+            Self::OracleQuotaExceeded(_) => 11005,
+            Self::OracleTaskNotFound(_) => 11006,
+            Self::OracleSessionNotFound(_) => 11007,
+            Self::OracleSessionClosed(_) => 11008,
+            Self::OraclePayloadTooLarge(_) => 11009,
+            Self::OracleExtractDisabled(_) => 11010,
         }
     }
 
@@ -610,6 +669,18 @@ impl AppError {
             Self::InviteCodeExhausted => "invite_code_exhausted",
             Self::InviteCodeDeactivated => "invite_code_deactivated",
             Self::InviteCodeAlreadyRedeemed => "invite_code_already_redeemed",
+            Self::AnonymousIncompatibleService(_) => "anonymous_incompatible_service",
+            Self::OraclePoolNotFound(_) => "oracle_pool_not_found",
+            Self::OraclePoolSlugTaken(_) => "oracle_pool_slug_taken",
+            Self::OraclePoolInactive(_) => "oracle_pool_inactive",
+            Self::OracleWorkerTokenInvalid => "oracle_worker_token_invalid",
+            Self::OracleQueueFull(_) => "oracle_queue_full",
+            Self::OracleQuotaExceeded(_) => "oracle_quota_exceeded",
+            Self::OracleTaskNotFound(_) => "oracle_task_not_found",
+            Self::OracleSessionNotFound(_) => "oracle_session_not_found",
+            Self::OracleSessionClosed(_) => "oracle_session_closed",
+            Self::OraclePayloadTooLarge(_) => "oracle_payload_too_large",
+            Self::OracleExtractDisabled(_) => "oracle_extract_disabled",
         }
     }
 }
@@ -1030,6 +1101,17 @@ mod tests {
             AppError::InviteCodeExhausted.error_code(),
             AppError::InviteCodeDeactivated.error_code(),
             AppError::InviteCodeAlreadyRedeemed.error_code(),
+            AppError::OraclePoolNotFound("".into()).error_code(),
+            AppError::OraclePoolSlugTaken("".into()).error_code(),
+            AppError::OraclePoolInactive("".into()).error_code(),
+            AppError::OracleWorkerTokenInvalid.error_code(),
+            AppError::OracleQueueFull("".into()).error_code(),
+            AppError::OracleQuotaExceeded("".into()).error_code(),
+            AppError::OracleTaskNotFound("".into()).error_code(),
+            AppError::OracleSessionNotFound("".into()).error_code(),
+            AppError::OracleSessionClosed("".into()).error_code(),
+            AppError::OraclePayloadTooLarge("".into()).error_code(),
+            AppError::OracleExtractDisabled("".into()).error_code(),
         ];
         let unique: std::collections::HashSet<u32> = codes.iter().copied().collect();
         assert_eq!(
@@ -1315,6 +1397,85 @@ mod tests {
         assert_eq!(
             format!("{}", AppError::InviteCodeAlreadyRedeemed),
             "Invite code has already been redeemed"
+        );
+    }
+
+    #[test]
+    fn oracle_error_block() {
+        // Oracle relay errors occupy the 11000-11099 block.
+        assert_eq!(AppError::OraclePoolNotFound("".into()).error_code(), 11000);
+        assert_eq!(AppError::OraclePoolSlugTaken("".into()).error_code(), 11001);
+        assert_eq!(AppError::OraclePoolInactive("".into()).error_code(), 11002);
+        assert_eq!(AppError::OracleWorkerTokenInvalid.error_code(), 11003);
+        assert_eq!(AppError::OracleQueueFull("".into()).error_code(), 11004);
+        assert_eq!(AppError::OracleQuotaExceeded("".into()).error_code(), 11005);
+        assert_eq!(AppError::OracleTaskNotFound("".into()).error_code(), 11006);
+        assert_eq!(
+            AppError::OracleSessionNotFound("".into()).error_code(),
+            11007
+        );
+        assert_eq!(AppError::OracleSessionClosed("".into()).error_code(), 11008);
+        assert_eq!(
+            AppError::OraclePayloadTooLarge("".into()).error_code(),
+            11009
+        );
+        assert_eq!(
+            AppError::OracleExtractDisabled("".into()).error_code(),
+            11010
+        );
+
+        assert_eq!(
+            AppError::OraclePoolNotFound("".into()).status_code(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            AppError::OraclePoolSlugTaken("".into()).status_code(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            AppError::OraclePoolInactive("".into()).status_code(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            AppError::OracleWorkerTokenInvalid.status_code(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            AppError::OracleQueueFull("".into()).status_code(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(
+            AppError::OracleQuotaExceeded("".into()).status_code(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(
+            AppError::OracleSessionClosed("".into()).status_code(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            AppError::OraclePayloadTooLarge("".into()).status_code(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+        assert_eq!(
+            AppError::OracleExtractDisabled("".into()).status_code(),
+            StatusCode::FORBIDDEN
+        );
+
+        assert_eq!(
+            AppError::OracleWorkerTokenInvalid.error_key(),
+            "oracle_worker_token_invalid"
+        );
+        assert_eq!(
+            AppError::OracleQueueFull("".into()).error_key(),
+            "oracle_queue_full"
+        );
+        assert_eq!(
+            AppError::OracleSessionClosed("".into()).error_key(),
+            "oracle_session_closed"
+        );
+        assert_eq!(
+            AppError::OracleExtractDisabled("".into()).error_key(),
+            "oracle_extract_disabled"
         );
     }
 

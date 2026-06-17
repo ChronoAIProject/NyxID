@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::fs;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -172,25 +173,144 @@ async fn update_cli(args: &UpdateArgs) -> Result<Option<PathBuf>> {
 async fn update_cli_from_source() -> Result<()> {
     eprintln!("Updating NyxID CLI from source...");
 
-    let status = tokio::process::Command::new("cargo")
-        .args([
-            "install",
-            "--git",
-            REPO_URL,
-            "nyxid-cli",
-            "--force",
-            "--locked",
-        ])
-        .status()
+    let mut command = tokio::process::Command::new("cargo");
+    command.args([
+        "install",
+        "--git",
+        REPO_URL,
+        "nyxid-cli",
+        "--force",
+        "--locked",
+    ]);
+
+    if let Some(cc) = source_build_cc_override()? {
+        eprintln!(
+            "Using CC={cc} for Linux arm64 source build to avoid the aws-lc-sys GCC compiler guard."
+        );
+        command.env("CC", cc);
+    }
+
+    let output = command
+        .output()
         .await
         .context("Failed to run cargo install. Is cargo available?")?;
 
-    if !status.success() {
-        anyhow::bail!("cargo install failed with exit code {}", status);
+    std::io::stdout()
+        .write_all(&output.stdout)
+        .context("Failed to write cargo stdout")?;
+    std::io::stderr()
+        .write_all(&output.stderr)
+        .context("Failed to write cargo stderr")?;
+
+    if !output.status.success() {
+        if source_build_output_mentions_aws_lc_gcc_guard(&output.stdout, &output.stderr) {
+            anyhow::bail!("{}", source_build_clang_help());
+        }
+        anyhow::bail!("cargo install failed with exit code {}", output.status);
     }
 
     eprintln!("CLI updated from source.");
     Ok(())
+}
+
+fn source_build_cc_override() -> Result<Option<&'static str>> {
+    if !cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+        return Ok(None);
+    }
+
+    if let Ok(cc) = std::env::var("CC")
+        && !cc.trim().is_empty()
+    {
+        let cc = cc.trim();
+        if compiler_is_affected_gcc(cc) {
+            anyhow::bail!("{}", source_build_clang_help());
+        }
+        return Ok(None);
+    }
+
+    if command_exists("clang") {
+        return Ok(Some("clang"));
+    }
+
+    for compiler in ["gcc", "cc"] {
+        if command_exists(compiler) && compiler_is_affected_gcc(compiler) {
+            anyhow::bail!("{}", source_build_clang_help());
+        }
+    }
+
+    eprintln!(
+        "Warning: clang was not found. If aws-lc-sys fails with the gcc#95189 memcmp compiler-bug guard, install clang and retry with CC=clang."
+    );
+    Ok(None)
+}
+
+fn command_exists(command: &str) -> bool {
+    std::process::Command::new(command)
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+fn compiler_is_affected_gcc(command: &str) -> bool {
+    if compiler_is_clang(command) {
+        return false;
+    }
+
+    compiler_major_version(command).is_some_and(|major| major == 9)
+}
+
+fn compiler_is_clang(command: &str) -> bool {
+    command.contains("clang")
+        || compiler_version_output(command, &["--version"])
+            .is_some_and(|version| version.to_ascii_lowercase().contains("clang"))
+}
+
+fn compiler_major_version(command: &str) -> Option<u32> {
+    let version = compiler_version_output(command, &["-dumpfullversion", "-dumpversion"])?;
+    parse_compiler_major_version(&version)
+}
+
+fn compiler_version_output(command: &str, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new(command)
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout).ok()
+}
+
+fn parse_compiler_major_version(version: &str) -> Option<u32> {
+    version
+        .lines()
+        .next()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())?
+        .split('.')
+        .next()?
+        .parse()
+        .ok()
+}
+
+fn source_build_output_mentions_aws_lc_gcc_guard(stdout: &[u8], stderr: &[u8]) -> bool {
+    let mut output = String::with_capacity(stdout.len() + stderr.len() + 1);
+    output.push_str(&String::from_utf8_lossy(stdout));
+    output.push('\n');
+    output.push_str(&String::from_utf8_lossy(stderr));
+    let output = output.to_ascii_lowercase();
+
+    output.contains("aws-lc-sys")
+        && (output.contains("gcc#95189")
+            || output.contains("memcmp")
+            || output.contains("compiler-bug")
+            || output.contains("compiler bug"))
+}
+
+fn source_build_clang_help() -> String {
+    format!(
+        "Linux arm64 source builds can fail while compiling aws-lc-sys with affected GCC 9.x versions (gcc#95189). Install clang and retry, or run `CC=clang cargo install --git {REPO_URL} nyxid-cli --force --locked`."
+    )
 }
 
 async fn update_skills(base_url: &Option<String>) -> Result<()> {

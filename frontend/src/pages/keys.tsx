@@ -150,6 +150,9 @@ function KeyCardContent({
       ? "Node Deleted"
       : displayStatus.charAt(0).toUpperCase() + displayStatus.slice(1);
   const showReconnect = onReconnect && isReconnectableKey(keyInfo, source);
+  const autoAuthLabel = keyInfo.auth_method === "none"
+    ? "No auth required"
+    : "Platform managed";
 
   return (
     <Card
@@ -227,7 +230,7 @@ function KeyCardContent({
             )}
             <span className="truncate">
               {keyInfo.auto_connected
-                ? "No auth required"
+                ? autoAuthLabel
                 : isSsh
                   ? hasSshCertificateAuth
                     ? "certificate"
@@ -317,7 +320,9 @@ function ServiceTableRow({
     : keyInfo.endpoint_url;
 
   const authLabel = keyInfo.auto_connected
-    ? "No auth"
+    ? keyInfo.auth_method === "none"
+      ? "No auth"
+      : "Platform managed"
     : isSsh
       ? hasSshCertificateAuth
         ? "certificate"

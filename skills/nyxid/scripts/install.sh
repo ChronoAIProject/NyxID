@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SECURITY MANIFEST:
 # Environment variables accessed: HOME, SHELL, PATH, CARGO_HOME, XDG_CONFIG_HOME,
-#   XDG_DATA_HOME, NYXID_INSTALL_ROOT, NYXID_ACTIVE_SYMLINK
+#   XDG_DATA_HOME, NYXID_INSTALL_ROOT, NYXID_ACTIVE_SYMLINK, CC
 # External endpoints called: github.com (prebuilt installer), sh.rustup.rs
 #   (fallback Rust installer), github.com (fallback cargo install)
 # Local files read: shell RC files (~/.zshrc, ~/.bashrc, etc.)
@@ -127,6 +127,89 @@ install_prebuilt() {
   return 1
 }
 
+is_linux_arm64() {
+  case "$(uname -s):$(uname -m)" in
+    Linux:aarch64 | Linux:arm64)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+compiler_is_clang() {
+  local compiler="$1"
+  case "$compiler" in
+    *clang*)
+      return 0
+      ;;
+  esac
+
+  "$compiler" --version 2>/dev/null | grep -qi 'clang'
+}
+
+compiler_major_version() {
+  local compiler="$1" version
+  version="$("$compiler" -dumpfullversion -dumpversion 2>/dev/null | head -n 1 || true)"
+  case "$version" in
+    [0-9]*)
+      printf '%s\n' "${version%%.*}"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+compiler_is_affected_gcc() {
+  local compiler="$1" major
+  if compiler_is_clang "$compiler"; then
+    return 1
+  fi
+
+  major="$(compiler_major_version "$compiler" || true)"
+  [ -n "$major" ] && [ "$major" -eq 9 ]
+}
+
+source_build_clang_help() {
+  printf 'Linux arm64 source builds can fail while compiling aws-lc-sys with affected GCC 9.x versions (gcc#95189). Install clang and retry, or run: CC=clang cargo install --git %s nyxid-cli --force --locked\n' "$REPO"
+}
+
+configure_source_build_compiler() {
+  local compiler
+  if ! is_linux_arm64; then
+    return 0
+  fi
+
+  if [ -n "${CC:-}" ]; then
+    if compiler_is_affected_gcc "$CC"; then
+      fail "$(source_build_clang_help)"
+    fi
+    return 0
+  fi
+
+  if command -v clang >/dev/null 2>&1; then
+    export CC=clang
+    info "Using CC=clang for Linux arm64 source build to avoid the aws-lc-sys GCC compiler guard."
+    return 0
+  fi
+
+  for compiler in gcc cc; do
+    if command -v "$compiler" >/dev/null 2>&1 && compiler_is_affected_gcc "$compiler"; then
+      fail "$(source_build_clang_help)"
+    fi
+  done
+
+  warn "clang was not found. If aws-lc-sys fails with the gcc#95189 memcmp compiler-bug guard, install clang and retry with CC=clang."
+}
+
+cargo_log_mentions_aws_lc_gcc_guard() {
+  local cargo_log="$1"
+  grep -Eiq 'aws-lc-sys' "$cargo_log" \
+    && grep -Eiq 'gcc#95189|memcmp|compiler[- ]bug' "$cargo_log"
+}
+
 detect_nyxid_version() {
   "$ACTIVE_NYXID" --version 2>/dev/null \
     | grep -Eo 'v?[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?' \
@@ -161,6 +244,7 @@ migrate_prebuilt_to_versioned_layout() {
 }
 
 install_from_source() {
+  local cargo_log cargo_status
   info "Falling back to source install. This requires Rust and may take several minutes."
 
   if command -v cargo &>/dev/null; then
@@ -182,7 +266,20 @@ install_from_source() {
     fail "cargo still not found after setup. Please add $CARGO_BIN to your PATH manually."
   fi
 
-  cargo install --git "$REPO" nyxid-cli --force --locked
+  configure_source_build_compiler
+
+  cargo_log="$(mktemp)"
+  if cargo install --git "$REPO" nyxid-cli --force --locked 2>&1 | tee "$cargo_log"; then
+    rm -f "$cargo_log"
+  else
+    cargo_status=$?
+    if cargo_log_mentions_aws_lc_gcc_guard "$cargo_log"; then
+      rm -f "$cargo_log"
+      fail "$(source_build_clang_help)"
+    fi
+    rm -f "$cargo_log"
+    fail "cargo install failed with exit code $cargo_status"
+  fi
 
   if [ ! -x "$CARGO_BIN/nyxid" ]; then
     fail "cargo install completed but $CARGO_BIN/nyxid was not found"

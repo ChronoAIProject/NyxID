@@ -44,7 +44,7 @@ Install the NyxID CLI (one-time):
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/scripts/install.sh)"
 ```
 
-The installer downloads an attested prebuilt release binary (verified against the GitHub release workflow's Sigstore attestation), installs it into a versioned layout under `~/.local/share/nyxid/versions/`, links `~/.local/bin/nyxid` to the active version, and configures your shell PATH. No Rust toolchain required. The installer falls back to a Cargo source build only on platforms with no published binary. Open a new terminal afterwards, then log in:
+The installer downloads an attested prebuilt release binary (verified against the GitHub release workflow's Sigstore attestation), installs it into a versioned layout under `~/.local/share/nyxid/versions/`, links `~/.local/bin/nyxid` to the active version, and configures your shell PATH. No Rust toolchain is required on published targets: macOS x64/arm64 and Linux x64/arm64. Linux arm64 binaries target the Ubuntu 20.04 / `glibc 2.31` baseline. The installer falls back to a Cargo source build only on platforms with no compatible published binary; on Linux arm64 source fallback it uses `CC=clang` when available and otherwise tells the user to install `clang` if it detects the `aws-lc-sys` GCC compiler guard. Open a new terminal afterwards, then log in:
 
 ```bash
 nyxid login --base-url https://nyx-api.chrono-ai.fun

@@ -220,6 +220,9 @@ For development, Mailpit is provided via Docker Compose (SMTP on `localhost:1025
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PROXY_MAX_BODY_SIZE` | `104857600` | Maximum request body size for proxy routes in bytes (100 MB) |
+| `PUBLIC_PROXY_MAX_BODY_SIZE` | `1048576` | Maximum request body size for anonymous public proxy and public MCP routes in bytes (1 MB). |
+| `PUBLIC_PROXY_RATE_LIMIT_PER_MINUTE` | `60` | Dedicated per-IP rate limit for `/public/s/{slug}/{path}` anonymous proxy requests. Honors `TRUSTED_PROXY_IPS` before trusting forwarded client IP headers. |
+| `PUBLIC_MCP_RATE_LIMIT_PER_MINUTE` | `30` | Dedicated per-IP rate limit for `POST /public/mcp` anonymous MCP discovery requests. Honors `TRUSTED_PROXY_IPS` before trusting forwarded client IP headers. |
 | `PROXY_STREAM_IDLE_TIMEOUT_SECS` | `60` | Terminate a streamed proxy response if no chunk arrives within N seconds |
 | `WS_PASSTHROUGH_MAX_CONNECTIONS` | `200` | Maximum concurrent WebSocket passthrough connections |
 
@@ -247,6 +250,14 @@ For development, Mailpit is provided via Docker Compose (SMTP on `localhost:1025
 | `CHANNEL_RELAY_CALLBACK_TIMEOUT_SECS` | `30` | HTTP timeout for agent callback requests |
 | `CHANNEL_RELAY_MAX_BOTS_PER_USER` | `5` | Maximum bots per user across all platforms |
 | `CHANNEL_RELAY_MESSAGE_TTL_DAYS` | `30` | TTL for `channel_messages` auto-cleanup |
+
+## Oracle Relay
+
+See [ORACLE_RELAY.md](ORACLE_RELAY.md) for the full design.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ORACLE_TASK_RETENTION_DAYS` | `30` | Days to retain terminal oracle tasks (prompt + response bodies) before MongoDB TTL expiry. Queued/dispatched tasks are never auto-expired. |
 
 ## Logging
 

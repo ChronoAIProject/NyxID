@@ -379,6 +379,33 @@ pub fn create_per_pubkey_rate_limiter() -> SharedPerPubkeyRateLimiter {
     Arc::new(PerPubkeyRateLimiter::new())
 }
 
+pub fn enforce_public_ip_rate_limit(
+    limiter: &SharedPerIpRateLimiter,
+    headers: &HeaderMap,
+    peer: Option<SocketAddr>,
+    trusted_proxies: &[IpAddr],
+    path: &str,
+) -> Result<Option<IpAddr>, AppError> {
+    let Some(client_ip) = resolve_client_ip_for_rate_limit(headers, peer, trusted_proxies) else {
+        tracing::warn!(
+            path = %path,
+            "Skipping public per-IP throttle: client IP unresolved; per-IP rate limiting is disabled for this request (daily quota remains the backstop)"
+        );
+        return Ok(None);
+    };
+
+    if !limiter.check(client_ip) {
+        tracing::warn!(
+            path = %path,
+            ip = %client_ip,
+            "Public per-IP rate limit exceeded"
+        );
+        return Err(AppError::RateLimited);
+    }
+
+    Ok(Some(client_ip))
+}
+
 /// Resolve the client IP for per-IP rate-limit keying behind a
 /// configurable trusted-proxy allowlist.
 ///

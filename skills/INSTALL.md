@@ -26,6 +26,7 @@ The commands below assume a Unix-like shell with:
 - `curl`
 - `git` — only if you use the sparse-checkout fetch in Step 2
 - `cargo` — only if the installer falls back to a source build (rare; most platforms have a prebuilt release)
+- `clang` — recommended for Linux arm64 source builds; it avoids the known `aws-lc-sys` GCC compiler guard on affected GCC versions
 
 Windows is supported via WSL only.
 
@@ -53,7 +54,7 @@ Every Nyx skill calls the `nyxid` CLI under the hood, so install it first.
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/scripts/install.sh)"
 ```
 
-This downloads a prebuilt binary and verifies its Sigstore attestation before installing it under `~/.local/share/nyxid/versions/<version>/`, then links `~/.local/bin/nyxid` to the active version. It falls back to a Cargo source build only on platforms with no published binary.
+This downloads a prebuilt binary and verifies its Sigstore attestation before installing it under `~/.local/share/nyxid/versions/<version>/`, then links `~/.local/bin/nyxid` to the active version. Published targets are macOS x64/arm64 and Linux x64/arm64; Linux arm64 binaries target the Ubuntu 20.04 / `glibc 2.31` baseline. The installer falls back to a Cargo source build only on platforms with no compatible published binary. On Linux arm64 source fallback, the installer uses `CC=clang` when `clang` is available and otherwise tells the user to install `clang` if it detects the `aws-lc-sys` GCC compiler guard.
 
 The installer adds `~/.local/bin` to the user's shell `PATH` by editing their shell rc file, but that change only takes effect on next shell load. If `nyxid` is not found in the current session, export it:
 

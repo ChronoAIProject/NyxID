@@ -6,6 +6,7 @@ import { useAuthStore } from "@/stores/auth-store";
 import { useCompleteOnboarding } from "@/hooks/use-onboarding";
 import { AddKeyDialog } from "@/components/dashboard/add-key-dialog";
 import { Button, ButtonIcon } from "@/components/ui/button";
+import { NyxidLogo } from "@/components/brand/nyxid-logo";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -60,17 +61,13 @@ export function OnboardingTakeover() {
     <div className="flex min-h-dvh flex-col bg-background">
       {/* Top bar */}
       <div className="flex shrink-0 items-center justify-between px-6 py-4 sm:px-10">
-        <img
-          src="/nyxid-coloured-logo.svg"
-          alt="NyxID"
-          className="h-6 w-auto"
-        />
+        <NyxidLogo className="h-7 w-auto" />
         <div className="flex items-center gap-2">
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <button
                 type="button"
-                className="flex h-8 w-8 items-center justify-center rounded-lg border border-white/[0.08] text-text-tertiary transition-colors duration-300 hover:border-white/[0.15] hover:text-muted-foreground focus-visible:outline-none"
+                className="flex h-8 w-8 items-center justify-center rounded-lg border border-hairline text-text-tertiary transition-colors duration-300 hover:border-hairline-strong hover:text-muted-foreground focus-visible:outline-none"
                 aria-label="User menu"
               >
                 <User className="h-[14px] w-[14px]" />
@@ -99,7 +96,7 @@ export function OnboardingTakeover() {
             href="https://github.com/ChronoAIProject"
             target="_blank"
             rel="noopener noreferrer"
-            className="flex h-8 w-8 items-center justify-center rounded-lg border border-white/[0.08] text-text-tertiary transition-colors duration-300 hover:border-white/[0.15] hover:text-muted-foreground"
+            className="flex h-8 w-8 items-center justify-center rounded-lg border border-hairline text-text-tertiary transition-colors duration-300 hover:border-hairline-strong hover:text-muted-foreground"
             aria-label="GitHub"
           >
             <Github className="h-[14px] w-[14px]" />

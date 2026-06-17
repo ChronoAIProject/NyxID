@@ -19,13 +19,13 @@ Use the same `X.Y.Z` version as `cli/Cargo.toml`. Do not reuse a published tag f
 The `Release` workflow runs cargo-dist and publishes the `nyxid-cli` package for:
 
 - `x86_64-unknown-linux-gnu` on `ubuntu-24.04`
-- `aarch64-unknown-linux-gnu` on `ubuntu-24.04-arm`
+- `aarch64-unknown-linux-gnu` on `ubuntu-24.04-arm` inside an Ubuntu 20.04-based arm64 container, with cargo-dist metadata set to `glibc 2.31`
 - `x86_64-apple-darwin` on `macos-latest`
 - `aarch64-apple-darwin` on `macos-latest`
 
 Windows is not yet a release target. `pty-process`, `nix`, and parts of `rustix` used by the SSH/PTY paths in `cli/src/node/ws_client.rs` are Unix-only and aren't yet `cfg(unix)`-gated. Until that audit lands, Windows users should run `nyxid` under WSL — see [docs/WINDOWS_SETUP.md](WINDOWS_SETUP.md).
 
-Linux release runners install `libdbus-1-dev` and `pkg-config` because the CLI uses the keyring crate's Secret Service backend on Linux. The wizard bundle is already committed under `cli/src/wizard/assets/`, so release builds do not need Node.
+Linux release runners install `libdbus-1-dev` and `pkg-config` because the CLI uses the keyring crate's Secret Service backend on Linux. The Linux arm64 GNU artifact is built in the Ubuntu 20.04 container so stock Jetson-class Ubuntu 20.04 hosts with `glibc 2.31` are inside the advertised ABI baseline. That arm64 release job also installs `clang` and exports `CC=clang` / `CXX=clang++` for the artifact build so C dependencies such as `aws-lc-sys` do not use the Ubuntu 20.04 GCC 9.x compiler path. The wizard bundle is already committed under `cli/src/wizard/assets/`, so release builds do not need Node.
 
 cargo-dist publishes:
 
@@ -70,11 +70,13 @@ https://github.com/ChronoAIProject/NyxID/.github/workflows/release.yml@refs/tags
 8. On Windows, keeps the legacy `self-replace` in-place swap because native symlinks require Developer Mode or elevated privileges.
 9. Re-execs the newly-installed versioned binary with `nyxid update --skills-only` so the new binary owns skill updates.
 
-If no prebuilt asset exists for the host target, the updater clearly falls back to:
+If no compatible prebuilt asset exists for the host target, the updater clearly falls back to:
 
 ```bash
 cargo install --git https://github.com/ChronoAIProject/NyxID nyxid-cli --force --locked
 ```
+
+On Linux arm64 source fallback, the updater uses `CC=clang` when `clang` is available. If an affected GCC is configured, or if Cargo output shows the `aws-lc-sys` `gcc#95189` compiler guard, the updater tells the user to install `clang` and retry with `CC=clang`.
 
 Verification failures never fall back to source automatically. They fail closed unless the user explicitly passes `--insecure-skip-verify`.
 

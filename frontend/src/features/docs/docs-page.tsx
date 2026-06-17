@@ -277,10 +277,10 @@ export function DocsPage() {
     >
       {status === "loading" && (
         <div className="max-w-3xl animate-pulse space-y-4" aria-busy="true">
-          <div className="h-9 w-2/3 rounded bg-white/[0.06]" />
-          <div className="h-4 w-full rounded bg-white/[0.04]" />
-          <div className="h-4 w-5/6 rounded bg-white/[0.04]" />
-          <div className="h-4 w-4/6 rounded bg-white/[0.04]" />
+          <div className="h-9 w-2/3 rounded bg-overlay-strong" />
+          <div className="h-4 w-full rounded bg-overlay" />
+          <div className="h-4 w-5/6 rounded bg-overlay" />
+          <div className="h-4 w-4/6 rounded bg-overlay" />
         </div>
       )}
       {status === "missing" && (

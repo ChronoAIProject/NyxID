@@ -287,6 +287,7 @@ pub fn service_to_response_with_viewer(
             s.default_request_headers,
         ),
         ws_frame_injections: s.ws_frame_injections,
+        anonymous_endpoints: s.anonymous_endpoints,
         developer_app_ids: s.developer_app_ids,
         created_by: s.created_by,
         created_at: s.created_at.to_rfc3339(),

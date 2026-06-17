@@ -11,8 +11,10 @@ Run the install script, then make sure the binary is on your `PATH`:
 
 ```bash
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/scripts/install.sh)"
-source ~/.cargo/env 2>/dev/null || export PATH="$HOME/.cargo/bin:$PATH"
+export PATH="$HOME/.local/bin:$PATH"
 ```
+
+The installer uses attested prebuilt binaries for macOS x64/arm64 and Linux x64/arm64. Linux arm64 binaries target Ubuntu 20.04 / `glibc 2.31`, so Jetson-class Ubuntu 20.04 hosts use the prebuilt path instead of compiling locally.
 
 ## Verify
 
@@ -45,6 +47,8 @@ If you are working on NyxID itself rather than just using it, build the CLI from
 cargo install --path cli
 nyxid --help
 ```
+
+On Linux arm64, install `clang` first or set `CC=clang` for source builds. The CLI dependency graph includes `aws-lc-sys`, which can reject affected GCC versions with the `gcc#95189` compiler guard.
 
 ## Next
 

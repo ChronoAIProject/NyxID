@@ -1,0 +1,16 @@
+{
+  "name": "nyxid-oracle-cdp-worker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "NyxID Oracle worker that drives your real logged-in Chrome over CDP (no userscript).",
+  "bin": { "nyxid-oracle-cdp-worker": "worker.mjs" },
+  "scripts": {
+    "start": "node worker.mjs",
+    "check": "node --check worker.mjs"
+  },
+  "engines": { "node": ">=18" },
+  "dependencies": {
+    "playwright-core": "^1.49.0"
+  }
+}

@@ -2,6 +2,9 @@ import { useEffect, useState, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 import { Search, Menu, X, Bot, LayoutDashboard, Terminal, type LucideIcon } from "lucide-react";
 import { useAuthStore } from "@/stores/auth-store";
+import { useApplyTheme } from "@/hooks/use-theme";
+import { ThemeToggle } from "@/components/dashboard/theme-toggle";
+import { NyxidLogo } from "@/components/brand/nyxid-logo";
 import {
   DOCS_TABS,
   DOCS_SHARED,
@@ -60,12 +63,12 @@ function SurfaceSwitcher({
             onClick={onNavigate}
             className={`flex items-center gap-3 rounded-md px-3 py-2 text-[13px] transition-colors ${
               active
-                ? "bg-white/[0.06] font-medium text-foreground"
-                : "text-muted-foreground hover:bg-white/[0.03] hover:text-foreground"
+                ? "bg-overlay-strong font-medium text-foreground"
+                : "text-muted-foreground hover:bg-overlay hover:text-foreground"
             }`}
           >
             <Icon
-              className={`h-4 w-4 shrink-0 ${active ? "text-nyx-secondary-400" : ""}`}
+              className={`h-4 w-4 shrink-0 ${active ? "text-nyx-700 dark:text-nyx-secondary-400" : ""}`}
               aria-hidden
             />
             {tab.label}
@@ -103,8 +106,8 @@ function SidebarGroups({
                     onClick={onNavigate}
                     className={`block rounded-md px-3 py-1.5 text-sm transition-colors ${
                       active
-                        ? "bg-white/[0.06] font-medium text-foreground"
-                        : "text-muted-foreground hover:bg-white/[0.03] hover:text-foreground"
+                        ? "bg-overlay-strong font-medium text-foreground"
+                        : "text-muted-foreground hover:bg-overlay hover:text-foreground"
                     }`}
                   >
                     {page.title}
@@ -157,6 +160,7 @@ export function DocsLayout({
   readonly hideNav?: boolean;
   readonly children: ReactNode;
 }) {
+  useApplyTheme();
   const isAuthed = useAuthStore((s) => s.isAuthenticated);
   const [searchOpen, setSearchOpen] = useState(false);
   const [mobileNav, setMobileNav] = useState(false);
@@ -191,7 +195,7 @@ export function DocsLayout({
           )}
 
           <a href="/" className="flex shrink-0 items-center">
-            <img src="/nyxid-wordmark.svg" alt="NyxID" className="h-7 w-auto" />
+            <NyxidLogo className="h-7 w-auto" />
           </a>
           <span className="text-text-tertiary" aria-hidden>
             /
@@ -207,7 +211,7 @@ export function DocsLayout({
             <button
               type="button"
               onClick={() => setSearchOpen(true)}
-              className="flex items-center gap-2 rounded-lg border border-border px-3 py-1.5 text-sm text-muted-foreground transition-colors hover:border-white/[0.15] hover:text-foreground"
+              className="flex items-center gap-2 rounded-lg border border-border px-3 py-1.5 text-sm text-muted-foreground transition-colors hover:border-hairline-strong hover:text-foreground"
             >
               <Search className="h-3.5 w-3.5" />
               <span className="hidden sm:inline">Search</span>
@@ -215,6 +219,7 @@ export function DocsLayout({
                 /
               </kbd>
             </button>
+            <ThemeToggle />
             <a
               href={GITHUB_URL}
               target="_blank"
@@ -264,7 +269,7 @@ export function DocsLayout({
                           aria-current={active ? "location" : undefined}
                           className={`-ml-px block border-l pl-3 text-sm transition-colors ${
                             active
-                              ? "border-nyx-secondary-400 font-medium text-foreground"
+                              ? "border-nyx-700 font-medium text-foreground dark:border-nyx-secondary-400"
                               : "border-transparent text-muted-foreground hover:border-border hover:text-foreground"
                           }`}
                         >

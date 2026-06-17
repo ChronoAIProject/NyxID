@@ -6,8 +6,11 @@ export type { DefaultRequestHeader } from "@/schemas/default-request-headers";
 
 export interface KeyInfo {
   readonly id: string;
+  readonly name?: string;
   readonly label: string;
   readonly slug: string;
+  readonly description?: string | null;
+  readonly service_category?: string;
   readonly endpoint_url: string;
   readonly endpoint_id: string;
   readonly api_key_id?: string | null;
@@ -29,6 +32,17 @@ export interface KeyInfo {
   readonly node_priority: number;
   readonly node_status?: string | null;
   readonly node_last_heartbeat_at?: string | null;
+  readonly connected?: boolean;
+  readonly requires_connection?: boolean;
+  readonly has_node_binding?: boolean;
+  readonly proxy_url?: string;
+  readonly proxy_url_slug?: string;
+  readonly docs_url?: string | null;
+  readonly openapi_url?: string | null;
+  readonly asyncapi_url?: string | null;
+  readonly streaming_supported?: boolean;
+  readonly websocket_supported?: boolean;
+  readonly source?: "catalog" | "custom";
   readonly is_active: boolean;
   readonly custom_user_agent?: string | null;
   /**

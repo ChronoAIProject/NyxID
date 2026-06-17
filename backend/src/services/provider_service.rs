@@ -418,10 +418,14 @@ pub async fn seed_default_providers(
             revocation_url: Some("https://api.x.com/2/oauth2/revoke".to_string()),
             // Write access is intentional: NyxID is a credential broker, so delegated
             // clients commonly need to post on behalf of users. Admins can customise
-            // scopes per deployment.
+            // scopes per deployment. `media.write` is included so delegated clients can
+            // attach images/video to posts via `POST /2/media/upload`; without it that
+            // endpoint returns 403 and there is currently no scope input in the CLI pair
+            // wizard to add it after the fact.
             default_scopes: Some(vec![
                 "tweet.read".to_string(),
                 "tweet.write".to_string(),
+                "media.write".to_string(),
                 "users.read".to_string(),
                 "offline.access".to_string(),
             ]),
@@ -474,6 +478,28 @@ pub async fn seed_default_providers(
         tracing::info!(
             slug = "twitter",
             "Migrated existing Twitter provider to credential_mode=user, token_endpoint_auth_method=client_secret_basic"
+        );
+    }
+
+    // Migration: ensure the existing Twitter provider's default_scopes include `media.write`.
+    // The seed already lists it, but the seed only runs for a not-yet-existing provider, so an
+    // already-seeded provider (from before media.write was added) never gets it — and the CLI
+    // pair wizard exposes no scope input to add it after connecting. Without media.write,
+    // `POST /2/media/upload` returns 403. `$ne` makes this a no-op once present; `$addToSet`
+    // appends without disturbing existing scopes.
+    let twitter_media_write_migration = collection
+        .update_one(
+            doc! { "slug": "twitter", "default_scopes": { "$ne": "media.write" } },
+            doc! {
+                "$addToSet": { "default_scopes": "media.write" },
+                "$set": { "updated_at": bson::DateTime::from_chrono(Utc::now()) },
+            },
+        )
+        .await?;
+    if twitter_media_write_migration.modified_count > 0 {
+        tracing::info!(
+            slug = "twitter",
+            "Migrated existing Twitter provider default_scopes to include media.write"
         );
     }
 
@@ -2721,6 +2747,7 @@ pub async fn seed_default_services(
             ws_frame_injections: Vec::new(),
             developer_app_ids: None,
             token_exchange_config,
+            anonymous_endpoints: Vec::new(),
             created_at: now,
             updated_at: now,
         };

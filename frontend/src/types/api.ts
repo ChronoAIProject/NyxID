@@ -210,6 +210,7 @@ export interface DownstreamService {
   readonly forward_access_token?: boolean;
   readonly inject_delegation_token?: boolean;
   readonly delegation_token_scope?: string;
+  readonly anonymous_endpoints?: readonly AnonymousEndpointRule[];
   // Rich metadata for AI agent discovery
   readonly homepage_url?: string | null;
   readonly repository_url?: string | null;
@@ -253,6 +254,25 @@ export interface DefaultRequestHeader {
   readonly value: string;
   readonly overridable: boolean;
   readonly sensitive: boolean;
+}
+
+export interface AnonymousEndpointRule {
+  readonly id: string;
+  readonly enabled: boolean;
+  readonly method:
+    | "GET"
+    | "POST"
+    | "PUT"
+    | "PATCH"
+    | "DELETE"
+    | "HEAD"
+    | "OPTIONS";
+  readonly path_pattern: string;
+  readonly daily_quota: number;
+}
+
+export interface AnonymousEndpointListResponse {
+  readonly endpoints: readonly AnonymousEndpointRule[];
 }
 
 export type WsFrameTrigger =
@@ -318,6 +338,7 @@ export type CreateServicePayload =
       /// Also accepted as an override for other auth types.
       readonly auth_key_name?: string;
       readonly service_category?: string;
+      readonly anonymous_endpoints?: readonly AnonymousEndpointRule[];
     }
   | {
       readonly name: string;
@@ -355,15 +376,14 @@ export type UpdateServicePayload =
       readonly examples_url?: string;
       readonly recommended_skills?: readonly string[];
       readonly developer_app_ids?: readonly string[];
+      readonly anonymous_endpoints?: readonly AnonymousEndpointRule[];
       /**
        * NyxID#356 tri-state update semantics:
        * - `undefined` (omit) leaves the existing value unchanged
        * - `null` clears the list
        * - array replaces with a validated list
        */
-      readonly default_request_headers?:
-        | null
-        | readonly DefaultRequestHeader[];
+      readonly default_request_headers?: null | readonly DefaultRequestHeader[];
       readonly ws_frame_injections?: readonly WsFrameInjection[];
     }
   | {
@@ -517,7 +537,11 @@ export interface ProviderConfig {
   readonly slug: string;
   readonly name: string;
   readonly description: string | null;
-  readonly provider_type: "oauth2" | "api_key" | "device_code" | "telegram_widget";
+  readonly provider_type:
+    | "oauth2"
+    | "api_key"
+    | "device_code"
+    | "telegram_widget";
   readonly has_oauth_config: boolean;
   readonly credential_mode: CredentialMode;
   readonly default_scopes: readonly string[] | null;

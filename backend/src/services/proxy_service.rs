@@ -32,6 +32,8 @@ use crate::services::{
 };
 use nyxid_cloud_auth::aws_sigv4::{self, AwsCredentials};
 
+const AUTO_PROVISION_SOURCE: &str = "auto_provision";
+
 /// Default User-Agent injected at the proxy boundary when neither the
 /// caller nor the resolved service supplies one. Resolved at compile
 /// time from the backend crate's `Cargo.toml` version (same source as
@@ -1400,12 +1402,47 @@ async fn lookup_user_service(
     }
 }
 
+fn is_public_internal_master_credential_service(service: &DownstreamService) -> bool {
+    service.visibility == "public"
+        && service.service_category == "internal"
+        && service.auth_method != "none"
+        && service.auth_method != "token_exchange"
+        && !service.requires_user_credential
+        && service.service_type == "http"
+        && service.is_active
+        && !service.credential_encrypted.is_empty()
+        && service.provider_config_id.is_none()
+}
+
+fn is_auto_provisionable_catalog_service(
+    service: &DownstreamService,
+    has_provider_requirement: bool,
+) -> bool {
+    let is_truly_no_auth = service.is_active
+        && service.auth_method == "none"
+        && !service.requires_user_credential
+        && (service.service_category == "connection" || service.service_category == "internal")
+        && service.service_type == "http"
+        && !has_provider_requirement;
+
+    is_truly_no_auth
+        || (!has_provider_requirement && is_public_internal_master_credential_service(service))
+}
+
+fn auto_provision_auth_snapshot(service: &DownstreamService) -> (&str, &str) {
+    if is_public_internal_master_credential_service(service) {
+        (service.auth_method.as_str(), service.auth_key_name.as_str())
+    } else {
+        ("none", "")
+    }
+}
+
 /// Verify that an auto-provisioned UserService is still eligible.
 ///
 /// Called at proxy time for services with `source == "auto_provision"`.
-/// Rechecks the full "truly no-auth" predicate on the catalog entry and,
-/// for private services, verifies the user still has a valid consent for
-/// one of its `developer_app_ids`.
+/// Rechecks the full auto-provision predicate on the catalog entry and, for
+/// private services, verifies the user still has a valid consent for one of
+/// its `developer_app_ids`.
 ///
 /// Returns `Ok(())` if the service is still eligible or is not auto-provisioned.
 /// Returns `Err(NotFound)` if the service should no longer be accessible.
@@ -1419,7 +1456,7 @@ async fn verify_auto_provision_eligibility(
     };
 
     // Only check auto-provisioned services
-    if user_service.source.as_deref() != Some("auto_provision") {
+    if user_service.source.as_deref() != Some(AUTO_PROVISION_SOURCE) {
         return Ok(());
     }
 
@@ -1450,24 +1487,18 @@ async fn verify_auto_provision_eligibility(
         }
     };
 
-    // Re-check the full "truly no-auth" predicate
-    if !ds.is_active
-        || ds.auth_method != "none"
-        || ds.requires_user_credential
-        || (ds.service_category != "connection" && ds.service_category != "internal")
-        || ds.service_type != "http"
-    {
+    let spr_count = db
+        .collection::<ServiceProviderRequirement>(SERVICE_PROVIDER_REQUIREMENTS)
+        .count_documents(doc! { "service_id": catalog_id })
+        .await?;
+    if !is_auto_provisionable_catalog_service(&ds, spr_count > 0) {
         return Err(AppError::NotFound(
             "Service is no longer available".to_string(),
         ));
     }
 
-    // Check for SPR (master credential injection makes it not truly no-auth)
-    let spr_count = db
-        .collection::<ServiceProviderRequirement>(SERVICE_PROVIDER_REQUIREMENTS)
-        .count_documents(doc! { "service_id": catalog_id })
-        .await?;
-    if spr_count > 0 {
+    let (auth_method, auth_key_name) = auto_provision_auth_snapshot(&ds);
+    if user_service.auth_method != auth_method || user_service.auth_key_name != auth_key_name {
         return Err(AppError::NotFound(
             "Service is no longer available".to_string(),
         ));
@@ -1564,6 +1595,47 @@ async fn finish_resolution(
                 // No-auth services have no api_key and therefore no
                 // multi-connection scope; the connection_id concept
                 // doesn't apply.
+                connection_id: None,
+            },
+            node_id: user_service.node_id.clone(),
+            user_service_id: user_service.id.clone(),
+            has_server_credential: true,
+            org_routing,
+        });
+    }
+
+    if user_service.source.as_deref() == Some(AUTO_PROVISION_SOURCE)
+        && user_service.api_key_id.is_none()
+    {
+        let catalog_service = load_catalog_service_for_user_service(db, &user_service).await?;
+        if !is_public_internal_master_credential_service(&catalog_service) {
+            return Err(AppError::NotFound(
+                "Service is no longer available".to_string(),
+            ));
+        }
+
+        let decrypted_bytes = Zeroizing::new(
+            encryption_keys
+                .decrypt(&catalog_service.credential_encrypted)
+                .await?,
+        );
+        let credential = String::from_utf8((*decrypted_bytes).clone()).map_err(|e| {
+            tracing::error!("Credential UTF-8 decode failed: {e}");
+            AppError::Internal("Failed to decode credential".to_string())
+        })?;
+        let now = chrono::Utc::now();
+        let minimal_service = build_minimal_downstream_service(&user_service, &endpoint, now, None);
+
+        return Ok(UserServiceResolution {
+            target: ProxyTarget {
+                base_url: endpoint.url.clone(),
+                auth_method: user_service.auth_method.clone(),
+                auth_key_name: user_service.auth_key_name.clone(),
+                credential,
+                service: minimal_service,
+                catalog_default_headers: catalog_default_headers.clone(),
+                user_service_default_headers: user_service_default_headers.clone(),
+                ws_frame_injections: effective_ws_frame_injections.clone(),
                 connection_id: None,
             },
             node_id: user_service.node_id.clone(),
@@ -1681,6 +1753,31 @@ async fn finish_resolution(
         has_server_credential: true,
         org_routing,
     })
+}
+
+async fn load_catalog_service_for_user_service(
+    db: &mongodb::Database,
+    user_service: &crate::models::user_service::UserService,
+) -> AppResult<DownstreamService> {
+    let catalog_id = user_service.catalog_service_id.as_deref().ok_or_else(|| {
+        tracing::error!(
+            user_service_id = %user_service.id,
+            "Auto-provisioned platform service missing catalog_service_id"
+        );
+        AppError::Internal("Data integrity error: catalog service missing".to_string())
+    })?;
+
+    db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find_one(doc! { "_id": catalog_id })
+        .await?
+        .ok_or_else(|| {
+            tracing::error!(
+                user_service_id = %user_service.id,
+                catalog_service_id = %catalog_id,
+                "UserService references missing catalog DownstreamService"
+            );
+            AppError::Internal("Data integrity error: catalog service not found".to_string())
+        })
 }
 
 /// Load the catalog `DownstreamService.default_request_headers` associated
@@ -2019,6 +2116,12 @@ fn build_minimal_downstream_service(
     now: chrono::DateTime<chrono::Utc>,
     token_exchange_config: Option<crate::models::downstream_service::TokenExchangeConfig>,
 ) -> DownstreamService {
+    let platform_managed_catalog_service = user_service.source.as_deref()
+        == Some(AUTO_PROVISION_SOURCE)
+        && user_service.api_key_id.is_none()
+        && user_service.auth_method != "none"
+        && user_service.catalog_service_id.is_some();
+
     DownstreamService {
         id: user_service
             .catalog_service_id
@@ -2039,8 +2142,12 @@ fn build_minimal_downstream_service(
         streaming_supported: true,
         ssh_config: None,
         oauth_client_id: None,
-        service_category: "connection".to_string(),
-        requires_user_credential: true,
+        service_category: if platform_managed_catalog_service {
+            "internal".to_string()
+        } else {
+            "connection".to_string()
+        },
+        requires_user_credential: !platform_managed_catalog_service,
         is_active: true,
         created_by: "system".to_string(),
         identity_propagation_mode: user_service.identity_propagation_mode.clone(),
@@ -2066,6 +2173,7 @@ fn build_minimal_downstream_service(
         ws_frame_injections: user_service.ws_frame_injections.clone(),
         developer_app_ids: None,
         token_exchange_config,
+        anonymous_endpoints: Vec::new(),
         created_at: now,
         updated_at: now,
     }
@@ -3119,6 +3227,7 @@ mod tests {
                 ws_frame_injections: Vec::new(),
                 developer_app_ids: None,
                 token_exchange_config: None,
+                anonymous_endpoints: Vec::new(),
                 created_at: now,
                 updated_at: now,
             },
@@ -3945,6 +4054,7 @@ mod tests {
                 ws_frame_injections: Vec::new(),
                 developer_app_ids: None,
                 token_exchange_config: Some(make_lark_token_exchange_config()),
+                anonymous_endpoints: Vec::new(),
                 created_at: now,
                 updated_at: now,
             },
@@ -4266,6 +4376,7 @@ mod tests {
                 ws_frame_injections: Vec::new(),
                 developer_app_ids: None,
                 token_exchange_config: None,
+                anonymous_endpoints: Vec::new(),
                 created_at: now,
                 updated_at: now,
             },
@@ -4483,6 +4594,7 @@ mod tests {
                 ws_frame_injections: Vec::new(),
                 developer_app_ids: None,
                 token_exchange_config: None,
+                anonymous_endpoints: Vec::new(),
                 created_at: now,
                 updated_at: now,
             },
@@ -4720,6 +4832,7 @@ mod tests {
             ws_frame_injections: vec![],
             developer_app_ids: None,
             token_exchange_config: None,
+            anonymous_endpoints: Vec::new(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

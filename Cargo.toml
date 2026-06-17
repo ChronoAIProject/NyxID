@@ -43,12 +43,16 @@ install-updater = false
 
 [workspace.metadata.dist.github-custom-runners]
 aarch64-apple-darwin = "macos-latest"
-aarch64-unknown-linux-gnu = "ubuntu-24.04-arm"
+aarch64-unknown-linux-gnu = { runner = "ubuntu-24.04-arm", container = { image = "buildpack-deps:focal", host = "aarch64-unknown-linux-gnu", package-manager = "apt" } }
 x86_64-apple-darwin = "macos-latest"
 x86_64-unknown-linux-gnu = "ubuntu-24.04"
 global = "ubuntu-24.04"
 
+[workspace.metadata.dist.min-glibc-version]
+aarch64-unknown-linux-gnu = "2.31"
+
 [workspace.metadata.dist.dependencies.apt]
+clang = { version = "*", targets = ["aarch64-unknown-linux-gnu"] }
 libdbus-1-dev = "*"
 pkg-config = "*"
 

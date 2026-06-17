@@ -1,4 +1,5 @@
 pub mod agent_service_binding;
+pub mod anonymous_endpoint_usage;
 pub mod api_key;
 pub mod approval_grant;
 pub mod approval_request;
@@ -30,6 +31,10 @@ pub mod nullable_field;
 pub mod oauth_broker_binding;
 pub mod oauth_client;
 pub mod oauth_state;
+pub mod oracle_pool;
+pub mod oracle_session;
+pub mod oracle_task;
+pub mod oracle_worker;
 pub mod org_invite;
 pub mod org_membership;
 pub mod org_role_scope;

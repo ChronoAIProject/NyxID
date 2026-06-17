@@ -16,7 +16,7 @@ export function DocsIndexPage() {
   return (
     <DocsLayout activeTab="ai" hideNav>
       <div className="py-6">
-        <p className="font-mono text-xs tracking-widest text-nyx-secondary-400 uppercase">NyxID Documentation</p>
+        <p className="font-mono text-xs tracking-widest text-nyx-700 dark:text-nyx-secondary-400 uppercase">NyxID Documentation</p>
         <h1 className="mt-3 max-w-3xl font-display text-4xl font-bold leading-tight tracking-tight text-foreground md:text-5xl">
           Broker credentials. Never expose keys.
         </h1>
@@ -34,21 +34,21 @@ export function DocsIndexPage() {
                 key={tab.id}
                 to="/docs/$"
                 params={{ _splat: first }}
-                className="group rounded-2xl border border-border bg-card p-5 transition-colors hover:border-white/[0.15]"
+                className="group rounded-2xl border border-border bg-card p-5 transition-colors hover:border-hairline-strong"
               >
                 <div className="flex items-center justify-between">
-                  <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-border bg-white/[0.03]">
-                    <Icon className="h-5 w-5 text-nyx-secondary-400" aria-hidden />
+                  <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-border bg-overlay">
+                    <Icon className="h-5 w-5 text-nyx-700 dark:text-nyx-secondary-400" aria-hidden />
                   </div>
                   {i === 0 && (
-                    <span className="rounded-full bg-nyx-500/15 px-2 py-0.5 text-[10px] font-medium text-nyx-secondary-400">
+                    <span className="rounded-full bg-nyx-100 px-2 py-0.5 text-[10px] font-medium text-nyx-700 dark:bg-nyx-500/15 dark:text-nyx-secondary-400">
                       Start here
                     </span>
                   )}
                 </div>
                 <h2 className="mt-4 font-display text-xl font-semibold tracking-tight text-foreground">{tab.label}</h2>
                 <p className="mt-2 text-sm leading-relaxed text-muted-foreground">{tab.blurb}</p>
-                <span className="mt-4 inline-flex items-center gap-1 text-sm font-medium text-nyx-secondary-400">
+                <span className="mt-4 inline-flex items-center gap-1 text-sm font-medium text-nyx-700 dark:text-nyx-secondary-400">
                   Get started
                   <ArrowRight className="h-3.5 w-3.5 transition-transform group-hover:translate-x-0.5" />
                 </span>
@@ -65,7 +65,7 @@ export function DocsIndexPage() {
                 key={p.slug}
                 to="/docs/$"
                 params={{ _splat: p.slug }}
-                className="rounded-lg border border-border px-4 py-2.5 text-sm text-muted-foreground transition-colors hover:border-white/[0.15] hover:text-foreground"
+                className="rounded-lg border border-border px-4 py-2.5 text-sm text-muted-foreground transition-colors hover:border-hairline-strong hover:text-foreground"
               >
                 {p.title}
               </Link>

@@ -118,8 +118,8 @@ function NavItem({
         "transition-[padding,gap,background-color,color] duration-300 ease-in-out",
         collapsed ? "justify-center px-0 gap-0" : "gap-3 px-3",
         active
-          ? "bg-white/[0.06] font-medium text-foreground"
-          : "text-muted-foreground hover:bg-white/[0.03] hover:text-foreground",
+          ? "bg-overlay-strong font-medium text-foreground"
+          : "text-muted-foreground hover:bg-overlay hover:text-foreground",
       )}
     >
       <item.icon
@@ -293,7 +293,7 @@ export function Sidebar({
           <Popover>
             <PopoverTrigger asChild>
               <button
-                className="flex h-[28px] w-[28px] items-center justify-center rounded-[6px] border border-white/[0.08] bg-white/[0.04] text-text-tertiary transition-colors duration-200 hover:border-white/[0.15] hover:text-foreground"
+                className="flex h-[28px] w-[28px] items-center justify-center rounded-[6px] border border-hairline bg-overlay-strong text-text-tertiary transition-colors duration-200 hover:border-hairline-strong hover:text-foreground"
                 title="Sidebar control"
               >
                 {isCollapsed ? (
@@ -392,7 +392,7 @@ function SidebarModeOption({
       type="button"
       onClick={onClick}
       className={cn(
-        "flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-[13px] transition-colors duration-200 hover:bg-white/[0.04]",
+        "flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-[13px] transition-colors duration-200 hover:bg-overlay-strong",
         active ? "text-foreground" : "text-muted-foreground hover:text-foreground",
       )}
     >

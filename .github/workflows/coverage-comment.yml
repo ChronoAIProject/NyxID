@@ -1,0 +1,83 @@
+# ---------------------------------------------------------------------------
+# Coverage PR comment poster (fork-safe).
+#
+# Posting / updating a PR comment needs a write-scoped GITHUB_TOKEN. Workflows
+# triggered by `pull_request` from a fork get a READ-ONLY token -- the
+# `permissions:` block is capped, not honored -- so an in-line post in ci.yml
+# 403s ("Resource not accessible by integration") on every fork PR.
+#
+# The fork-safe pattern: ci.yml (running with the read-only fork token) only
+# BUILDS the comment body and uploads it as the `pr-coverage-comment` artifact.
+# This workflow runs on `workflow_run`, which ALWAYS executes the default-branch
+# version with the base repo's token, and only downloads that prebuilt artifact
+# -- it never checks out or runs any PR/fork code, so the write token is never
+# exposed to untrusted code.
+#
+# Refs:
+# - https://securitylab.github.com/resources/github-actions-preventing-pwn-requests/
+# - https://docs.github.com/actions/using-workflows/events-that-trigger-workflows#workflow_run
+# ---------------------------------------------------------------------------
+name: Coverage PR Comment
+
+on:
+  workflow_run:
+    # Must match the `name:` of ci.yml.
+    workflows: ["CI"]
+    types: [completed]
+
+# Least privilege: read the triggering run's artifacts, write the PR comment.
+permissions:
+  contents: read
+  actions: read
+  pull-requests: write
+
+jobs:
+  comment:
+    name: Coverage PR Comment
+    # Only PR-triggered CI runs carry a coverage payload + PR number. Skips
+    # push / workflow_call (release-gate) runs.
+    if: github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download prebuilt coverage comment
+        id: download
+        uses: actions/download-artifact@v4
+        with:
+          name: pr-coverage-comment
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: payload
+        # A docs-only PR (or a CI run that died before the payload job) has no
+        # artifact -- that's expected, not a failure.
+        continue-on-error: true
+
+      - name: Post or update PR comment
+        if: steps.download.outcome == 'success'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('payload/coverage-comment.md', 'utf8');
+            const prNumber = parseInt(
+              fs.readFileSync('payload/pr-number.txt', 'utf8').trim(),
+              10,
+            );
+            if (!Number.isInteger(prNumber) || prNumber <= 0) {
+              core.info('No valid PR number in payload; skipping comment.');
+              return;
+            }
+            const marker = '<!-- nyxid-coverage-report -->';
+            const { owner, repo } = context.repo;
+            const { data: comments } = await github.rest.issues.listComments({
+              owner, repo, issue_number: prNumber, per_page: 100,
+            });
+            const existing = comments.find((c) => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner, repo, comment_id: existing.id, body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: prNumber, body,
+              });
+            }

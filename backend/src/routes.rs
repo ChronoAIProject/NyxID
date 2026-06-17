@@ -34,7 +34,10 @@ fn oauth_public_cors() -> CorsLayer {
 /// The caller must attach separate CORS layers to each before merging.
 /// Public OAuth endpoints allow any origin (per RFC 9207) while private
 /// API endpoints restrict origin to FRONTEND_URL.
-pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<AppState>) {
+pub fn build_router(
+    proxy_max_body_size: usize,
+    public_proxy_max_body_size: usize,
+) -> (Router<AppState>, Router<AppState>) {
     let mfa_routes = Router::new()
         .route("/setup", post(handlers::mfa::setup))
         .route("/confirm", post(handlers::mfa::confirm))
@@ -143,6 +146,16 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
         .route(
             "/{service_id}/discover-endpoints",
             post(handlers::endpoints::discover_endpoints),
+        )
+        .route(
+            "/{service_id}/anonymous-endpoints",
+            get(handlers::admin_anonymous_endpoints::list_anonymous_endpoints)
+                .post(handlers::admin_anonymous_endpoints::create_anonymous_endpoint),
+        )
+        .route(
+            "/{service_id}/anonymous-endpoints/{rule_id}",
+            put(handlers::admin_anonymous_endpoints::update_anonymous_endpoint)
+                .delete(handlers::admin_anonymous_endpoints::delete_anonymous_endpoint),
         )
         .route(
             "/{service_id}/requirements",
@@ -819,6 +832,17 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
         )
         .layer(RequestBodyLimitLayer::new(proxy_max_body_size));
 
+    let public_passthrough_routes = Router::new()
+        .route(
+            "/public/s/{slug}/{*path}",
+            axum::routing::any(handlers::public_proxy::public_proxy_request),
+        )
+        .route(
+            "/public/s/{slug}",
+            axum::routing::any(handlers::public_proxy::public_proxy_request_root),
+        )
+        .layer(RequestBodyLimitLayer::new(public_proxy_max_body_size));
+
     // LLM gateway routes get a moderate limit (10 MB for LLM payloads).
     let llm_routes = llm_routes.layer(RequestBodyLimitLayer::new(10 * 1024 * 1024));
 
@@ -861,10 +885,61 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
         .nest("/channel-events", channel_event_routes)
         .merge(proxy_passthrough_routes);
 
+    // Oracle relay consumer routes: submit tasks to browser worker pools
+    // and poll results. Open to users AND agent API keys (blocks delegated
+    // tokens via the shared layer below). Submits can carry a PDF
+    // attachment as base64, so this router gets a 16 MiB body cap instead
+    // of the app-wide 1 MiB.
+    let oracle_consumer_routes = Router::new()
+        .route(
+            "/pools",
+            get(handlers::oracle_pools::list_pools).post(handlers::oracle_pools::create_pool),
+        )
+        .route(
+            "/pools/{id_or_slug}",
+            get(handlers::oracle_pools::get_pool).patch(handlers::oracle_pools::update_pool),
+        )
+        .route(
+            "/pools/{id_or_slug}/rotate-token",
+            post(handlers::oracle_pools::rotate_token),
+        )
+        .route(
+            "/pools/{id_or_slug}/tasks",
+            post(handlers::oracle_tasks::submit_task),
+        )
+        .route(
+            "/pools/{id_or_slug}/attach",
+            post(handlers::oracle_tasks::attach_conversation),
+        )
+        .route(
+            "/pools/{id_or_slug}/extract",
+            post(handlers::oracle_tasks::extract_url),
+        )
+        .route(
+            "/pools/{id_or_slug}/status",
+            get(handlers::oracle_tasks::pool_status),
+        )
+        .route("/tasks/{task_id}", get(handlers::oracle_tasks::get_task))
+        .route(
+            "/tasks/{task_id}/cancel",
+            post(handlers::oracle_tasks::cancel_task),
+        )
+        .route("/sessions", get(handlers::oracle_tasks::list_sessions))
+        .route(
+            "/sessions/{conversation_id}",
+            get(handlers::oracle_tasks::get_session),
+        )
+        .route(
+            "/sessions/{conversation_id}/close",
+            post(handlers::oracle_tasks::close_session),
+        )
+        .layer(DefaultBodyLimit::max(16 * 1024 * 1024));
+
     // Routes accessible by both users and service accounts (block delegated tokens)
     let api_v1_shared = Router::new()
         .nest("/connections", connection_routes)
         .nest("/providers", provider_routes)
+        .nest("/oracle", oracle_consumer_routes)
         .layer(middleware::from_fn(reject_delegated_tokens));
 
     // Routes that BLOCK service account tokens (human-only endpoints)
@@ -998,11 +1073,30 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
         )
         .nest("/api/v1/integrations", integration_routes)
         .nest("/api/v1/node-agent", node_agent_routes)
+        // Oracle worker routes -- authenticated by the pool worker token
+        // (`nyx_owk_...`) inside each handler, NOT by the JWT middleware,
+        // so they mount alongside node-agent rather than inside api_v1.
+        // Results can carry multi-MB extracted answers: 16 MiB body cap.
+        .nest(
+            "/api/v1/oracle/worker",
+            Router::new()
+                .route("/task", get(handlers::oracle_worker::poll_task))
+                .route("/ack", post(handlers::oracle_worker::ack))
+                .route("/result", post(handlers::oracle_worker::submit_result))
+                .route(
+                    "/transcript",
+                    post(handlers::oracle_worker::submit_transcript),
+                )
+                .route("/pin-conv-url", post(handlers::oracle_worker::pin_conv_url))
+                .layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
+        )
         .nest("/api/v1", api_v1)
+        .merge(public_passthrough_routes)
         // WebSocket endpoint for node agents. Auth happens in-message (not middleware).
         // Rate limiting: global per-IP rate limiter covers HTTP upgrade requests.
         // Connection limiting: NodeWsManager enforces max concurrent connections.
         .route("/api/v1/nodes/ws", get(handlers::node_ws::ws_handler))
+        .route("/public/mcp", post(handlers::public_mcp::public_mcp_post))
         .route(
             "/mcp",
             post(handlers::mcp_transport::mcp_post)

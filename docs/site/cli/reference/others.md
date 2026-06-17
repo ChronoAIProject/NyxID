@@ -28,7 +28,8 @@ nyxid update --from-source       # compile + install via cargo (unsupported targ
 ```
 
 - The updater retains the **3** most recent prebuilt versions so `--rollback` can revert a bad upgrade instantly.
-- `--from-source` runs `cargo install --path cli`; use it on targets without a prebuilt binary, or as a contributor.
+- `--from-source` runs `cargo install --git https://github.com/ChronoAIProject/NyxID nyxid-cli --force --locked`; use it on targets without a compatible prebuilt binary, or as a contributor.
+- On Linux arm64 source builds, the updater uses `CC=clang` when `clang` is available and otherwise reports the `CC=clang` workaround if it detects the `aws-lc-sys` `gcc#95189` compiler guard.
 - `--insecure-skip-verify` continues even if attestation verification fails — avoid it unless you understand the risk.
 - `--base-url` selects the NyxID instance to fetch skill content from (defaults to your saved login URL).
 

@@ -2,6 +2,8 @@ import { useNavigate } from "@tanstack/react-router";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { ShieldAlert } from "lucide-react";
+import { useApplyTheme } from "@/hooks/use-theme";
+import { NyxidLogo } from "@/components/brand/nyxid-logo";
 
 const ERROR_LABELS: Record<string, string> = {
   invalid_request: "Invalid Request",
@@ -15,6 +17,7 @@ const ERROR_LABELS: Record<string, string> = {
 };
 
 export function OAuthErrorPage() {
+  useApplyTheme();
   const navigate = useNavigate();
   const search = new URLSearchParams(window.location.search);
   const code = search.get("code") ?? "unknown_error";
@@ -34,7 +37,7 @@ export function OAuthErrorPage() {
     >
       <div className="flex w-full max-w-[460px] flex-col items-center gap-8">
         <div className="flex items-center">
-          <img src="/nyxid-wordmark.svg" alt="NyxID" className="h-9 w-auto" />
+          <NyxidLogo className="h-9 w-auto" />
         </div>
 
         <Card className="w-full">

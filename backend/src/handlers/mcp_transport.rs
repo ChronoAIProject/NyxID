@@ -17,7 +17,8 @@ use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::{self, AuthMethod};
 use crate::services::{
     approval_service, audit_service, mcp_service, notification_service, operation_descriptor,
-    proxy_service, ssh_service, user_service_service,
+    oracle_pool_service, oracle_session_service, oracle_task_service, proxy_service, ssh_service,
+    user_service_service,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
@@ -1119,6 +1120,24 @@ async fn handle_tools_call(
             }
             return handle_mcp_ssh_list(state, auth, request.id.clone()).await;
         }
+        "nyx__oracle_pools" => {
+            return handle_oracle_pools(state, auth, request.id.clone()).await;
+        }
+        "nyx__oracle_ask" => {
+            return handle_oracle_ask(state, auth, &arguments, request.id.clone()).await;
+        }
+        "nyx__oracle_result" => {
+            return handle_oracle_result(state, auth, &arguments, request.id.clone()).await;
+        }
+        "nyx__oracle_attach" => {
+            return handle_oracle_attach(state, auth, &arguments, request.id.clone()).await;
+        }
+        "nyx__oracle_extract" => {
+            return handle_oracle_extract(state, auth, &arguments, request.id.clone()).await;
+        }
+        "nyx__oracle_session" => {
+            return handle_oracle_session(state, auth, &arguments, request.id.clone()).await;
+        }
         _ => {}
     }
 
@@ -1812,6 +1831,353 @@ async fn handle_meta_connect(
             };
             tool_result(request_id, &msg, true)
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Oracle meta-tool dispatch helpers
+// ---------------------------------------------------------------------------
+
+fn oracle_submitter(auth: &McpAuthContext) -> oracle_task_service::SubmitterIdentity {
+    oracle_task_service::SubmitterIdentity {
+        user_id: auth.user_id.clone(),
+        api_key_id: auth.api_key_id.clone(),
+        api_key_name: auth.api_key_name.clone(),
+    }
+}
+
+fn required_arg<'a>(arguments: &'a serde_json::Value, name: &str) -> Result<&'a str, &'static str> {
+    arguments
+        .get(name)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .ok_or("required")
+}
+
+fn optional_string_arg(arguments: &serde_json::Value, name: &str) -> Option<String> {
+    arguments
+        .get(name)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(ToString::to_string)
+}
+
+fn wait_seconds(
+    arguments: &serde_json::Value,
+    default_secs: u64,
+    min_secs: u64,
+    max_secs: u64,
+) -> u64 {
+    arguments
+        .get("wait_seconds")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(default_secs)
+        .clamp(min_secs, max_secs)
+}
+
+async fn poll_oracle_task(
+    db: &mongodb::Database,
+    actor: &str,
+    task_id: &str,
+    wait_secs: u64,
+) -> crate::errors::AppResult<(crate::models::oracle_task::OracleTask, u64)> {
+    let started = tokio::time::Instant::now();
+    loop {
+        let (task, position) =
+            oracle_task_service::get_task_for_consumer(db, actor, task_id).await?;
+        if task.status.is_terminal() || started.elapsed() >= Duration::from_secs(wait_secs) {
+            return Ok((task, position));
+        }
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    }
+}
+
+fn render_oracle_task_result(
+    task: &crate::models::oracle_task::OracleTask,
+    queue_position: u64,
+    pending_message: &str,
+) -> (String, bool) {
+    match task.status {
+        crate::models::oracle_task::OracleTaskStatus::Completed => {
+            let mut text = task.response.clone().unwrap_or_default();
+            if text.is_empty() {
+                text = format!("Task {} completed with an empty response.", task.id);
+            }
+            (text, false)
+        }
+        crate::models::oracle_task::OracleTaskStatus::Failed => (
+            format!(
+                "Task {} failed: {}",
+                task.id,
+                task.failure_reason
+                    .as_deref()
+                    .unwrap_or("worker did not provide a failure reason")
+            ),
+            true,
+        ),
+        crate::models::oracle_task::OracleTaskStatus::Cancelled => {
+            (format!("Task {} was cancelled.", task.id), true)
+        }
+        crate::models::oracle_task::OracleTaskStatus::Queued
+        | crate::models::oracle_task::OracleTaskStatus::Dispatched => {
+            let mut details = format!(
+                "{pending_message} (status {}, queue_position {}).",
+                task.status.as_str(),
+                queue_position
+            );
+            if let Some(phase) = &task.phase {
+                details.push_str(&format!(" Phase: {phase}."));
+            }
+            if let Some(conversation_id) = &task.conversation_id {
+                details.push_str(&format!(" conversation_id: {conversation_id}."));
+            }
+            (details, false)
+        }
+    }
+}
+
+async fn handle_oracle_pools(
+    state: &AppState,
+    auth: &McpAuthContext,
+    request_id: Option<serde_json::Value>,
+) -> Response {
+    match oracle_pool_service::list_visible_pools(&state.db, &auth.user_id).await {
+        Ok(pools) => {
+            let mut pool_lines = Vec::new();
+            for pool in pools {
+                if oracle_pool_service::ensure_can_submit(&state.db, &auth.user_id, &pool)
+                    .await
+                    .is_err()
+                {
+                    continue;
+                }
+                pool_lines.push(format!(
+                    "- {} ({}) visibility={} id={}",
+                    pool.slug,
+                    pool.name,
+                    pool.visibility.as_str(),
+                    pool.id
+                ));
+            }
+            let mut lines = vec![format!(
+                "{} oracle pool(s) available for submission:",
+                pool_lines.len()
+            )];
+            if pool_lines.is_empty() {
+                lines.push("No active oracle pools are available for submission.".to_string());
+            } else {
+                lines.extend(pool_lines);
+            }
+            tool_result(request_id, &lines.join("\n"), false)
+        }
+        Err(e) => tool_result(request_id, &format!("Error: {e}"), true),
+    }
+}
+
+async fn handle_oracle_ask(
+    state: &AppState,
+    auth: &McpAuthContext,
+    arguments: &serde_json::Value,
+    request_id: Option<serde_json::Value>,
+) -> Response {
+    let pool_ref = match required_arg(arguments, "pool") {
+        Ok(v) => v,
+        Err(_) => return tool_result(request_id, "\"pool\" is required", true),
+    };
+    let prompt = match required_arg(arguments, "prompt") {
+        Ok(v) => v,
+        Err(_) => return tool_result(request_id, "\"prompt\" is required", true),
+    };
+    let wait_secs = wait_seconds(arguments, 120, 5, 300);
+
+    let result = async {
+        let pool = oracle_pool_service::get_pool(&state.db, pool_ref).await?;
+        oracle_pool_service::ensure_can_submit(&state.db, &auth.user_id, &pool).await?;
+        let outcome = oracle_task_service::submit_task(
+            &state.db,
+            &pool,
+            &oracle_submitter(auth),
+            oracle_task_service::SubmitTaskInput {
+                prompt: prompt.to_string(),
+                model_label: optional_string_arg(arguments, "model"),
+                project_url: optional_string_arg(arguments, "project_url"),
+                conversation_id: optional_string_arg(arguments, "conversation_id"),
+                ..Default::default()
+            },
+        )
+        .await?;
+        poll_oracle_task(&state.db, &auth.user_id, &outcome.task.id, wait_secs).await
+    }
+    .await;
+
+    match result {
+        Ok((task, position)) => {
+            let (text, is_error) = render_oracle_task_result(
+                &task,
+                position,
+                &format!(
+                    "Task {} still processing. Call nyx__oracle_result with this task_id",
+                    task.id
+                ),
+            );
+            tool_result(request_id, &text, is_error)
+        }
+        Err(e) => tool_result(request_id, &format!("Error: {e}"), true),
+    }
+}
+
+async fn handle_oracle_result(
+    state: &AppState,
+    auth: &McpAuthContext,
+    arguments: &serde_json::Value,
+    request_id: Option<serde_json::Value>,
+) -> Response {
+    let task_id = match required_arg(arguments, "task_id") {
+        Ok(v) => v,
+        Err(_) => return tool_result(request_id, "\"task_id\" is required", true),
+    };
+    let wait_secs = wait_seconds(arguments, 60, 0, 300);
+
+    match poll_oracle_task(&state.db, &auth.user_id, task_id, wait_secs).await {
+        Ok((task, position)) => {
+            let (text, is_error) = render_oracle_task_result(
+                &task,
+                position,
+                &format!(
+                    "Task {} still processing. Call nyx__oracle_result with this task_id",
+                    task.id
+                ),
+            );
+            tool_result(request_id, &text, is_error)
+        }
+        Err(e) => tool_result(request_id, &format!("Error: {e}"), true),
+    }
+}
+
+async fn handle_oracle_attach(
+    state: &AppState,
+    auth: &McpAuthContext,
+    arguments: &serde_json::Value,
+    request_id: Option<serde_json::Value>,
+) -> Response {
+    let pool_ref = match required_arg(arguments, "pool") {
+        Ok(v) => v,
+        Err(_) => return tool_result(request_id, "\"pool\" is required", true),
+    };
+    let chatgpt_url = match required_arg(arguments, "chatgpt_url") {
+        Ok(v) => v,
+        Err(_) => return tool_result(request_id, "\"chatgpt_url\" is required", true),
+    };
+
+    let result = async {
+        let pool = oracle_pool_service::get_pool(&state.db, pool_ref).await?;
+        oracle_pool_service::ensure_can_submit(&state.db, &auth.user_id, &pool).await?;
+        oracle_task_service::attach_conversation(
+            &state.db,
+            &pool,
+            &oracle_submitter(auth),
+            chatgpt_url,
+            None,
+        )
+        .await
+    }
+    .await;
+
+    match result {
+        Ok((session, task)) => {
+            let text = format!(
+                "Attached conversation.\nconversation_id: {}\nscrape_task_id: {}\nPoll nyx__oracle_result with the scrape task_id, then call nyx__oracle_session with the conversation_id.",
+                session.id, task.id
+            );
+            tool_result(request_id, &text, false)
+        }
+        Err(e) => tool_result(request_id, &format!("Error: {e}"), true),
+    }
+}
+
+async fn handle_oracle_extract(
+    state: &AppState,
+    auth: &McpAuthContext,
+    arguments: &serde_json::Value,
+    request_id: Option<serde_json::Value>,
+) -> Response {
+    let pool_ref = match required_arg(arguments, "pool") {
+        Ok(v) => v,
+        Err(_) => return tool_result(request_id, "\"pool\" is required", true),
+    };
+    let url = match required_arg(arguments, "url") {
+        Ok(v) => v,
+        Err(_) => return tool_result(request_id, "\"url\" is required", true),
+    };
+    let wait_secs = wait_seconds(arguments, 120, 5, 300);
+
+    let result = async {
+        let pool = oracle_pool_service::get_pool(&state.db, pool_ref).await?;
+        oracle_pool_service::ensure_can_submit(&state.db, &auth.user_id, &pool).await?;
+        let task = oracle_task_service::extract_url(
+            &state.db,
+            &pool,
+            &oracle_submitter(auth),
+            url,
+            optional_string_arg(arguments, "model"),
+        )
+        .await?;
+        poll_oracle_task(&state.db, &auth.user_id, &task.id, wait_secs).await
+    }
+    .await;
+
+    match result {
+        Ok((task, position)) => {
+            let (text, is_error) = render_oracle_task_result(
+                &task,
+                position,
+                &format!(
+                    "Task {} still processing. Call nyx__oracle_result with this task_id",
+                    task.id
+                ),
+            );
+            tool_result(request_id, &text, is_error)
+        }
+        Err(e) => tool_result(request_id, &format!("Error: {e}"), true),
+    }
+}
+
+async fn handle_oracle_session(
+    state: &AppState,
+    auth: &McpAuthContext,
+    arguments: &serde_json::Value,
+    request_id: Option<serde_json::Value>,
+) -> Response {
+    let conversation_id = match required_arg(arguments, "conversation_id") {
+        Ok(v) => v,
+        Err(_) => return tool_result(request_id, "\"conversation_id\" is required", true),
+    };
+
+    match oracle_session_service::list_session_tasks(&state.db, &auth.user_id, conversation_id)
+        .await
+    {
+        Ok((session, tasks)) => {
+            let mut lines = vec![format!(
+                "conversation_id: {}\npool_id: {}\nturn_count: {}",
+                session.id, session.pool_id, session.turn_count
+            )];
+            for task in tasks {
+                if !task.prompt.trim().is_empty() {
+                    lines.push(format!("Q: {}", task.prompt));
+                }
+                if let Some(response) = task.response.as_deref().filter(|r| !r.trim().is_empty()) {
+                    lines.push(format!("A: {response}"));
+                } else if !task.status.is_terminal() {
+                    lines.push(format!("A: [{}]", task.status.as_str()));
+                } else if let Some(reason) = task.failure_reason.as_deref() {
+                    lines.push(format!("A: [{}: {}]", task.status.as_str(), reason));
+                }
+            }
+            tool_result(request_id, &lines.join("\n\n"), false)
+        }
+        Err(e) => tool_result(request_id, &format!("Error: {e}"), true),
     }
 }
 

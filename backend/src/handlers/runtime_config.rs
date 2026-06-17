@@ -112,7 +112,10 @@ mod tests {
             Some("https://release.example.test/releases.json".to_string());
         state.config.jwt_relay_reply_ttl_secs = 1800;
 
-        let (_, private_api) = crate::routes::build_router(1024 * 1024);
+        let (_, private_api) = crate::routes::build_router(
+            1024 * 1024,
+            crate::services::anonymous_endpoint_service::DEFAULT_PUBLIC_PROXY_MAX_BODY_SIZE,
+        );
         let response = private_api
             .with_state(state)
             .oneshot(

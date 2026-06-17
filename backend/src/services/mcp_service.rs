@@ -15,6 +15,7 @@ use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService}
 use crate::models::user_service_connection::{
     COLLECTION_NAME as CONNECTIONS, UserServiceConnection,
 };
+use crate::services::anonymous_endpoint_service;
 use crate::services::content_type::{
     is_binary_content_type, is_json_content_type, normalize_content_type, schema_is_binary,
 };
@@ -1143,6 +1144,150 @@ pub fn generate_tool_definitions(
         }),
     });
 
+    tools.push(McpToolDefinition {
+        name: "nyx__oracle_pools".to_string(),
+        description: "List oracle pools this MCP caller can submit work to. Use this before \
+            nyx__oracle_ask, nyx__oracle_attach, or nyx__oracle_extract when you need to \
+            choose a browser LLM pool."
+            .to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "required": []
+        }),
+    });
+
+    tools.push(McpToolDefinition {
+        name: "nyx__oracle_ask".to_string(),
+        description: "Ask a browser-backed LLM through a NyxID oracle pool. Use this for \
+            natural-language research, reasoning, or continuing an existing oracle \
+            conversation; returns the answer if it finishes before wait_seconds, otherwise \
+            returns a task_id for nyx__oracle_result."
+            .to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "pool": {
+                    "type": "string",
+                    "description": "Oracle pool slug or ID to submit to"
+                },
+                "prompt": {
+                    "type": "string",
+                    "description": "Prompt to send to the oracle worker"
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Optional model label hint for the worker"
+                },
+                "project_url": {
+                    "type": "string",
+                    "description": "Optional ChatGPT Project URL override for this task"
+                },
+                "conversation_id": {
+                    "type": "string",
+                    "description": "Optional oracle conversation ID to continue"
+                },
+                "wait_seconds": {
+                    "type": "integer",
+                    "description": "How long to poll for completion before returning a task_id (default 120, range 5-300)",
+                    "default": 120
+                }
+            },
+            "required": ["pool", "prompt"]
+        }),
+    });
+
+    tools.push(McpToolDefinition {
+        name: "nyx__oracle_result".to_string(),
+        description: "Poll an oracle task by task_id. Use this after nyx__oracle_ask or \
+            nyx__oracle_extract returns a still-processing task, or to check failure and \
+            cancellation status."
+            .to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "string",
+                    "description": "Oracle task ID returned by nyx__oracle_ask, nyx__oracle_extract, or nyx__oracle_attach"
+                },
+                "wait_seconds": {
+                    "type": "integer",
+                    "description": "How long to poll for completion (default 60, range 0-300)",
+                    "default": 60
+                }
+            },
+            "required": ["task_id"]
+        }),
+    });
+
+    tools.push(McpToolDefinition {
+        name: "nyx__oracle_attach".to_string(),
+        description: "Import an existing ChatGPT conversation into NyxID as an oracle \
+            session. Use this when the user gives a ChatGPT conversation URL and wants the \
+            agent to continue or inspect it through NyxID."
+            .to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "pool": {
+                    "type": "string",
+                    "description": "Oracle pool slug or ID whose worker should scrape the conversation"
+                },
+                "chatgpt_url": {
+                    "type": "string",
+                    "description": "Existing ChatGPT conversation URL to import"
+                }
+            },
+            "required": ["pool", "chatgpt_url"]
+        }),
+    });
+
+    tools.push(McpToolDefinition {
+        name: "nyx__oracle_extract".to_string(),
+        description: "Ask an oracle worker to read a web page and extract its content. Use \
+            this for pages that need a browser-backed LLM or authenticated browser context; \
+            returns content if it finishes before wait_seconds, otherwise returns a task_id \
+            for nyx__oracle_result."
+            .to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "pool": {
+                    "type": "string",
+                    "description": "Oracle pool slug or ID to submit the extraction task to"
+                },
+                "url": {
+                    "type": "string",
+                    "description": "HTTP or HTTPS URL to read"
+                },
+                "wait_seconds": {
+                    "type": "integer",
+                    "description": "How long to poll for completion before returning a task_id (default 120, range 5-300)",
+                    "default": 120
+                }
+            },
+            "required": ["pool", "url"]
+        }),
+    });
+
+    tools.push(McpToolDefinition {
+        name: "nyx__oracle_session".to_string(),
+        description: "Read an oracle conversation transcript by conversation_id. Use this \
+            after nyx__oracle_attach has imported a conversation, or to inspect prior turns \
+            in an oracle session."
+            .to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "conversation_id": {
+                    "type": "string",
+                    "description": "Oracle conversation ID to read"
+                }
+            },
+            "required": ["conversation_id"]
+        }),
+    });
+
     // -- Per-service tools (filtered by activated set) --
     for service in services {
         let included = match activated_service_ids {
@@ -1173,6 +1318,144 @@ pub fn generate_tool_definitions(
     }
 
     tools
+}
+
+pub async fn load_public_tools(db: &mongodb::Database) -> AppResult<Vec<McpToolService>> {
+    let services: Vec<DownstreamService> = db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find(doc! {
+            "is_active": true,
+            "service_type": "http",
+            "anonymous_endpoints": { "$elemMatch": { "enabled": true } },
+        })
+        .await?
+        .try_collect()
+        .await?;
+
+    let mut public_services = Vec::new();
+    for svc in services {
+        if anonymous_endpoint_service::validate_anonymous_service_runtime_safety(&svc).is_err() {
+            continue;
+        }
+
+        let endpoints: Vec<McpToolEndpoint> = svc
+            .anonymous_endpoints
+            .iter()
+            .filter(|rule| rule.enabled)
+            .map(|rule| McpToolEndpoint {
+                endpoint_id: rule.id.clone(),
+                name: public_endpoint_tool_name(&rule.method, &rule.path_pattern),
+                description: Some(format!(
+                    "{} {} via public NyxID proxy",
+                    rule.method, rule.path_pattern
+                )),
+                method: rule.method.clone(),
+                path: rule.path_pattern.clone(),
+                parameters: None,
+                request_body_schema: Some(public_request_body_schema()),
+                request_content_type: Some("application/json".to_string()),
+                request_body_required: false,
+                response_description: None,
+            })
+            .collect();
+
+        if endpoints.is_empty() {
+            continue;
+        }
+
+        public_services.push(McpToolService {
+            service_id: svc.id.clone(),
+            service_name: svc.name.clone(),
+            service_slug: format!("public__{}", sanitize_tool_segment(&svc.slug)),
+            description: svc.description.clone(),
+            service_category: "public".to_string(),
+            endpoints,
+            source: McpToolSource::Platform {
+                downstream_service_id: svc.id,
+            },
+            is_generic_proxy: false,
+        });
+    }
+
+    Ok(public_services)
+}
+
+pub fn generate_public_tool_definitions(services: &[McpToolService]) -> Vec<McpToolDefinition> {
+    services
+        .iter()
+        .flat_map(|service| {
+            service.endpoints.iter().map(move |endpoint| {
+                let description = endpoint
+                    .description
+                    .clone()
+                    .unwrap_or_else(|| format!("{} {}", endpoint.method, endpoint.path));
+                McpToolDefinition {
+                    name: format!("{}__{}", service.service_slug, endpoint.name),
+                    description: format!("[{}] {}", service.service_name, description),
+                    input_schema: public_proxy_input_schema(endpoint),
+                }
+            })
+        })
+        .collect()
+}
+
+fn public_proxy_input_schema(endpoint: &McpToolEndpoint) -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": format!("Request path matching {}", endpoint.path)
+            },
+            "query": {
+                "type": "object",
+                "additionalProperties": { "type": "string" },
+                "description": "Optional query string parameters"
+            },
+            "body": public_request_body_schema()
+        },
+        "required": []
+    })
+}
+
+fn public_request_body_schema() -> serde_json::Value {
+    serde_json::json!({
+        "description": "Optional JSON request body for public proxy execution"
+    })
+}
+
+fn public_endpoint_tool_name(method: &str, path_pattern: &str) -> String {
+    let path = path_pattern
+        .trim_matches('/')
+        .strip_suffix("/**")
+        .unwrap_or_else(|| path_pattern.trim_matches('/'));
+    let path = if path.is_empty() { "root" } else { path };
+    format!(
+        "{}_{}",
+        method.to_ascii_lowercase(),
+        sanitize_tool_segment(path)
+    )
+}
+
+fn sanitize_tool_segment(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut last_was_underscore = false;
+    for ch in value.chars() {
+        let valid = ch.is_ascii_alphanumeric();
+        if valid {
+            out.push(ch.to_ascii_lowercase());
+            last_was_underscore = false;
+        } else if !last_was_underscore {
+            out.push('_');
+            last_was_underscore = true;
+        }
+    }
+    let trimmed = out.trim_matches('_').to_string();
+    if trimmed.is_empty() {
+        "root".to_string()
+    } else {
+        trimmed
+    }
 }
 
 /// Build a JSON Schema `inputSchema` from endpoint parameters and body schema.
@@ -2967,8 +3250,8 @@ mod tests {
         let empty_set = HashSet::new();
         let tools = generate_tool_definitions(&services, Some(&empty_set));
 
-        // Should only have the 6 meta-tools (4 core + 2 SSH)
-        assert_eq!(tools.len(), 6);
+        // Should only have the 12 meta-tools (4 core + 2 SSH + 6 oracle)
+        assert_eq!(tools.len(), 12);
         assert!(tools.iter().all(|t| t.name.starts_with("nyx__")));
     }
 
@@ -2993,8 +3276,8 @@ mod tests {
         activated.insert("svc-1".to_string());
         let tools = generate_tool_definitions(&services, Some(&activated));
 
-        // 6 meta-tools + 1 weather tool (news excluded)
-        assert_eq!(tools.len(), 7);
+        // 12 meta-tools + 1 weather tool (news excluded)
+        assert_eq!(tools.len(), 13);
         assert!(tools.iter().any(|t| t.name == "weather__get_forecast"));
         assert!(!tools.iter().any(|t| t.name == "news__headlines"));
     }
@@ -3018,10 +3301,40 @@ mod tests {
 
         let tools = generate_tool_definitions(&services, None);
 
-        // 6 meta-tools + 2 service tools
-        assert_eq!(tools.len(), 8);
+        // 12 meta-tools + 2 service tools
+        assert_eq!(tools.len(), 14);
         assert!(tools.iter().any(|t| t.name == "weather__get_forecast"));
         assert!(tools.iter().any(|t| t.name == "news__headlines"));
+    }
+
+    #[test]
+    fn generate_tool_definitions_includes_oracle_meta_tools() {
+        let tools = generate_tool_definitions(&[], None);
+
+        let required_for = |name: &str| -> Vec<String> {
+            tools
+                .iter()
+                .find(|t| t.name == name)
+                .unwrap_or_else(|| panic!("missing tool {name}"))
+                .input_schema
+                .get("required")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|v| v.as_str().map(ToString::to_string))
+                .collect()
+        };
+
+        assert_eq!(required_for("nyx__oracle_pools"), Vec::<String>::new());
+        assert_eq!(required_for("nyx__oracle_ask"), vec!["pool", "prompt"]);
+        assert_eq!(required_for("nyx__oracle_result"), vec!["task_id"]);
+        assert_eq!(
+            required_for("nyx__oracle_attach"),
+            vec!["pool", "chatgpt_url"]
+        );
+        assert_eq!(required_for("nyx__oracle_extract"), vec!["pool", "url"]);
+        assert_eq!(required_for("nyx__oracle_session"), vec!["conversation_id"]);
     }
 
     #[test]
@@ -4794,5 +5107,167 @@ mod tests {
             has_server_credential: true,
         };
         assert!(user.is_user_service());
+    }
+
+    mod public_tools {
+        use crate::models::downstream_service::{
+            AnonymousEndpointRule, COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
+        };
+        use crate::services::mcp_service;
+        use crate::test_utils::connect_test_database;
+        use chrono::Utc;
+        use uuid::Uuid;
+
+        /// Build a runtime-safe (`identity_propagation_mode="none"`, no token
+        /// forwarding/delegation) catalog service whose anonymous endpoints are
+        /// supplied by the caller.
+        fn safe_service(slug: &str, rules: Vec<AnonymousEndpointRule>) -> DownstreamService {
+            DownstreamService {
+                id: Uuid::new_v4().to_string(),
+                name: format!("Service {slug}"),
+                slug: slug.to_string(),
+                description: None,
+                base_url: "https://example.test".to_string(),
+                service_type: "http".to_string(),
+                visibility: "public".to_string(),
+                auth_method: "none".to_string(),
+                auth_key_name: String::new(),
+                credential_encrypted: vec![],
+                auth_type: None,
+                openapi_spec_url: None,
+                asyncapi_spec_url: None,
+                streaming_supported: false,
+                ssh_config: None,
+                oauth_client_id: None,
+                service_category: "internal".to_string(),
+                requires_user_credential: false,
+                is_active: true,
+                created_by: "admin".to_string(),
+                identity_propagation_mode: "none".to_string(),
+                identity_include_user_id: false,
+                identity_include_email: false,
+                identity_include_name: false,
+                identity_jwt_audience: None,
+                forward_access_token: false,
+                inject_delegation_token: false,
+                delegation_token_scope: "llm:proxy".to_string(),
+                provider_config_id: None,
+                homepage_url: None,
+                repository_url: None,
+                issues_url: None,
+                capabilities: None,
+                auth_notes: None,
+                known_limitations: None,
+                required_permissions: None,
+                examples_url: None,
+                recommended_skills: None,
+                custom_user_agent: None,
+                default_request_headers: None,
+                ws_frame_injections: Vec::new(),
+                developer_app_ids: None,
+                token_exchange_config: None,
+                anonymous_endpoints: rules,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            }
+        }
+
+        fn rule(enabled: bool, method: &str, pattern: &str) -> AnonymousEndpointRule {
+            AnonymousEndpointRule {
+                id: Uuid::new_v4().to_string(),
+                enabled,
+                method: method.to_string(),
+                path_pattern: pattern.to_string(),
+                daily_quota: 100,
+            }
+        }
+
+        /// `load_public_tools` exposes only enabled rules of runtime-safe
+        /// services; identity-propagating services and disabled rules are
+        /// filtered out. `generate_public_tool_definitions` then projects the
+        /// safe rule into a `public__...` tool with a sanitized name and a
+        /// structured input schema.
+        #[tokio::test]
+        async fn load_and_generate_filters_unsafe_and_disabled() {
+            let Some(db) = connect_test_database("mcp_public_tools_filter").await else {
+                return;
+            };
+
+            // (1) Safe service with one enabled + one disabled rule.
+            let safe = safe_service(
+                "safe-svc",
+                vec![
+                    rule(true, "GET", "/public/**"),
+                    rule(false, "POST", "/draft/**"),
+                ],
+            );
+            // (2) Identity-propagating service (enabled rule) -> excluded.
+            let mut unsafe_svc = safe_service("identity-svc", vec![rule(true, "GET", "/x/**")]);
+            unsafe_svc.identity_propagation_mode = "headers".to_string();
+            unsafe_svc.forward_access_token = true;
+            // (3) Safe service with only a disabled rule -> excluded entirely.
+            let disabled_only = safe_service("disabled-svc", vec![rule(false, "GET", "/y/**")]);
+
+            db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+                .insert_many([safe.clone(), unsafe_svc, disabled_only])
+                .await
+                .expect("insert services");
+
+            let services = mcp_service::load_public_tools(&db)
+                .await
+                .expect("load public tools");
+
+            // Only the safe service is present, and only its enabled rule.
+            assert_eq!(services.len(), 1);
+            assert_eq!(services[0].service_slug, "public__safe_svc");
+            assert_eq!(services[0].endpoints.len(), 1);
+            assert_eq!(services[0].endpoints[0].method, "GET");
+            assert_eq!(services[0].endpoints[0].path, "/public/**");
+
+            let tools = mcp_service::generate_public_tool_definitions(&services);
+            assert_eq!(tools.len(), 1);
+            let tool = &tools[0];
+
+            // Name is sanitized: only [a-z0-9_], public__ prefixed, no wildcard
+            // characters leak through.
+            assert!(tool.name.starts_with("public__safe_svc__"));
+            assert!(
+                tool.name
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
+                "tool name must be sanitized: {}",
+                tool.name
+            );
+            assert!(!tool.name.contains('*'));
+            assert!(!tool.name.contains('/'));
+
+            // Input schema is a structured object exposing path/query/body.
+            let schema = &tool.input_schema;
+            assert_eq!(schema["type"], "object");
+            assert!(schema["properties"]["path"].is_object());
+            assert!(schema["properties"]["query"].is_object());
+            assert!(schema["properties"].get("body").is_some());
+        }
+
+        /// A service with no enabled anonymous rules yields no public tools at
+        /// all (defense in depth: the `$elemMatch` filter and the per-rule
+        /// enabled filter both exclude it).
+        #[tokio::test]
+        async fn service_without_enabled_rules_yields_no_tools() {
+            let Some(db) = connect_test_database("mcp_public_tools_none").await else {
+                return;
+            };
+            let disabled_only = safe_service("only-disabled", vec![rule(false, "GET", "/z/**")]);
+            db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+                .insert_one(&disabled_only)
+                .await
+                .expect("insert service");
+
+            let services = mcp_service::load_public_tools(&db)
+                .await
+                .expect("load public tools");
+            assert!(services.is_empty());
+            assert!(mcp_service::generate_public_tool_definitions(&services).is_empty());
+        }
     }
 }

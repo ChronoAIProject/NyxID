@@ -553,7 +553,11 @@ pub async fn create_user_service(
         ));
     }
 
-    if api_key_id.is_none() && auth_method != "none" {
+    let platform_managed_catalog_service = api_key_id.is_none()
+        && auth_method != "none"
+        && catalog_service_id.is_some()
+        && source == Some("auto_provision");
+    if api_key_id.is_none() && auth_method != "none" && !platform_managed_catalog_service {
         return Err(AppError::ValidationError(
             "Services without an API key must use auth_method 'none'".to_string(),
         ));
@@ -1725,6 +1729,7 @@ mod tests {
             ws_frame_injections: Vec::new(),
             developer_app_ids: None,
             token_exchange_config: None,
+            anonymous_endpoints: Vec::new(),
             created_at: now,
             updated_at: now,
         }

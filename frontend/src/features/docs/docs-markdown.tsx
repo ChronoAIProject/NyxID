@@ -75,14 +75,14 @@ export function DocMarkdown({
             href={href}
             target={external ? "_blank" : undefined}
             rel={external ? "noopener noreferrer" : undefined}
-            className="text-nyx-secondary-400 underline decoration-nyx-secondary-400/40 underline-offset-4 transition-colors hover:text-nyx-secondary-300 hover:decoration-nyx-secondary-300"
+            className="text-nyx-700 underline decoration-nyx-700/40 underline-offset-4 transition-colors hover:text-nyx-600 hover:decoration-nyx-600 dark:text-nyx-secondary-400 dark:decoration-nyx-secondary-400/40 dark:hover:text-nyx-secondary-300 dark:hover:decoration-nyx-secondary-300"
           >
             {children}
           </a>
         );
       },
       ul: ({ children }) => (
-        <ul className="mb-4 list-disc space-y-1.5 pl-6 leading-relaxed text-muted-foreground marker:text-nyx-secondary-400">{children}</ul>
+        <ul className="mb-4 list-disc space-y-1.5 pl-6 leading-relaxed text-muted-foreground marker:text-nyx-700 dark:marker:text-nyx-secondary-400">{children}</ul>
       ),
       ol: ({ children }) => (
         <ol className="mb-4 list-decimal space-y-1.5 pl-6 leading-relaxed text-muted-foreground marker:font-mono marker:text-text-tertiary">{children}</ol>
@@ -92,7 +92,7 @@ export function DocMarkdown({
       em: ({ children }) => <em className="text-foreground italic">{children}</em>,
       hr: () => <hr className="border-border my-8" />,
       blockquote: ({ children }) => (
-        <blockquote className="border-nyx-secondary-400/50 my-5 border-l-2 pl-4 text-muted-foreground italic">{children}</blockquote>
+        <blockquote className="border-nyx-700/60 dark:border-nyx-secondary-400/50 my-5 border-l-2 pl-4 text-muted-foreground italic">{children}</blockquote>
       ),
       table: ({ children }) => (
         <div className="border-border bg-card my-5 overflow-x-auto rounded-xl border">

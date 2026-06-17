@@ -100,13 +100,15 @@ async fn probe_test_mongo_client() -> Option<mongodb::Client> {
         let Ok(mut options) = mongodb::options::ClientOptions::parse(&uri).await else {
             continue;
         };
-        // The TCP pre-check already confirmed a listener, so a healthy mongod is
-        // selected well within these bounds; they only cap the rare case where a
-        // port accepts TCP but never answers (down from 10s/5s, which the dead
-        // 27018 probe used to pay in full on every CI test).
-        options.server_selection_timeout = Some(Duration::from_secs(2));
-        options.connect_timeout = Some(Duration::from_secs(2));
-        options.max_pool_size = Some(1);
+        // The TCP pre-check guards against dead-port stalls in milliseconds, so
+        // these generous driver timeouts only bound the real-mongod-present
+        // case. Under cargo llvm-cov, argon2 plus instrumentation can starve the
+        // driver's heartbeat monitor long enough to otherwise trigger
+        // ConnectionPoolCleared("server monitor timeout") flakes, observed on
+        // reset_password_happy_path.
+        options.server_selection_timeout = Some(Duration::from_secs(30));
+        options.connect_timeout = Some(Duration::from_secs(20));
+        options.max_pool_size = Some(4);
         let Ok(client) = mongodb::Client::with_options(options) else {
             continue;
         };
@@ -231,6 +233,12 @@ pub(crate) fn test_app_config() -> AppConfig {
         ssh_connect_timeout_secs: 10,
         ssh_max_tunnel_duration_secs: 3600,
         ws_passthrough_max_connections: 200,
+        public_proxy_max_body_size:
+            crate::services::anonymous_endpoint_service::DEFAULT_PUBLIC_PROXY_MAX_BODY_SIZE,
+        public_proxy_rate_limit_per_minute:
+            crate::services::anonymous_endpoint_service::DEFAULT_PUBLIC_PROXY_RATE_LIMIT_PER_MINUTE,
+        public_mcp_rate_limit_per_minute:
+            crate::services::anonymous_endpoint_service::DEFAULT_PUBLIC_MCP_RATE_LIMIT_PER_MINUTE,
         channel_relay_callback_timeout_secs: 30,
         channel_relay_max_bots_per_user: 5,
         channel_relay_message_ttl_days: 30,
@@ -240,6 +248,7 @@ pub(crate) fn test_app_config() -> AppConfig {
         channel_event_rate_limit_burst: 200,
         channel_event_dedup_capacity: 32_768,
         channel_event_dedup_ttl_secs: 300,
+        oracle_task_retention_days: 30,
         cloud_response_cache_ttl_secs: 0,
         cloud_response_cache_max_entry_bytes: 1024 * 1024,
         cloud_response_cache_max_entries: 256,
@@ -370,6 +379,14 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         per_agent_limiter: Arc::new(crate::mw::rate_limit::PerAgentRateLimiter::new()),
         device_code_pubkey_limiter: crate::mw::rate_limit::create_per_pubkey_rate_limiter(),
         device_code_ip_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(5, 60),
+        public_proxy_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(
+            config.public_proxy_rate_limit_per_minute,
+            60,
+        ),
+        public_mcp_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(
+            config.public_mcp_rate_limit_per_minute,
+            60,
+        ),
         // Production default from backend/src/main.rs — 5 claims per
         // 60s per IP; mirror here so claim-rate-limit tests see the
         // same shape.

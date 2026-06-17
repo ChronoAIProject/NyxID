@@ -344,6 +344,12 @@ mod tests {
             ssh_connect_timeout_secs: 10,
             ssh_max_tunnel_duration_secs: 3600,
             ws_passthrough_max_connections: 200,
+            public_proxy_max_body_size:
+                crate::services::anonymous_endpoint_service::DEFAULT_PUBLIC_PROXY_MAX_BODY_SIZE,
+            public_proxy_rate_limit_per_minute:
+                crate::services::anonymous_endpoint_service::DEFAULT_PUBLIC_PROXY_RATE_LIMIT_PER_MINUTE,
+            public_mcp_rate_limit_per_minute:
+                crate::services::anonymous_endpoint_service::DEFAULT_PUBLIC_MCP_RATE_LIMIT_PER_MINUTE,
             channel_relay_callback_timeout_secs: 30,
             channel_relay_max_bots_per_user: 5,
             channel_relay_message_ttl_days: 30,
@@ -353,6 +359,7 @@ mod tests {
             channel_event_rate_limit_burst: 200,
             channel_event_dedup_capacity: 32_768,
             channel_event_dedup_ttl_secs: 300,
+            oracle_task_retention_days: 30,
             cloud_response_cache_ttl_secs: 0,
             cloud_response_cache_max_entry_bytes: 1024 * 1024,
             cloud_response_cache_max_entries: 256,

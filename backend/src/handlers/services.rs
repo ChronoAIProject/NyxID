@@ -13,8 +13,8 @@ use crate::AppState;
 use crate::crypto::token::{generate_random_token, hash_token};
 use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{
-    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, ServiceCapabilities,
-    TokenExchangeConfig,
+    AnonymousEndpointRule, COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
+    ServiceCapabilities, TokenExchangeConfig,
 };
 use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
 use crate::models::ssh_auth_mode::SshAuthMode;
@@ -22,7 +22,8 @@ use crate::models::ws_frame_injection::WsFrameInjection;
 use crate::mw::auth::AuthUser;
 use crate::services::url_validation::{validate_base_url, validate_optional_spec_url};
 use crate::services::{
-    api_docs_service, audit_service, oauth_client_service, ssh_service, user_service_service,
+    anonymous_endpoint_service, api_docs_service, audit_service, oauth_client_service, ssh_service,
+    user_service_service,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
@@ -81,6 +82,9 @@ pub struct CreateServiceRequest {
     /// WebSocket frame-auth injection rules. Orthogonal to HTTP auth_method.
     #[serde(default)]
     pub ws_frame_injections: Vec<WsFrameInjection>,
+    /// Admin-scoped no-auth public proxy rules.
+    #[serde(default)]
+    pub anonymous_endpoints: Vec<AnonymousEndpointRule>,
 }
 
 impl std::fmt::Debug for CreateServiceRequest {
@@ -186,6 +190,7 @@ pub struct ServiceResponse {
     /// WebSocket frame-auth injection rules. Values never contain resolved
     /// credentials; templates may include the literal `${credential}` marker.
     pub ws_frame_injections: Vec<WsFrameInjection>,
+    pub anonymous_endpoints: Vec<AnonymousEndpointRule>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub developer_app_ids: Option<Vec<String>>,
     pub created_by: String,
@@ -281,6 +286,10 @@ pub struct UpdateServiceRequest {
     /// existing value unchanged; an empty array clears the rules.
     #[serde(default)]
     pub ws_frame_injections: Option<Vec<WsFrameInjection>>,
+    /// Replace all anonymous endpoint rules. Prefer the dedicated
+    /// `/anonymous-endpoints` endpoints for single-rule edits.
+    #[serde(default)]
+    pub anonymous_endpoints: Option<Vec<AnonymousEndpointRule>>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -963,6 +972,7 @@ pub async fn create_service(
         None => None,
     };
     crate::services::ws_frame_injector::validate_rules(&body.ws_frame_injections)?;
+    anonymous_endpoint_service::validate_rule_list(&body.anonymous_endpoints)?;
 
     let new_service = DownstreamService {
         id: id.clone(),
@@ -1008,9 +1018,11 @@ pub async fn create_service(
         ws_frame_injections: body.ws_frame_injections.clone(),
         developer_app_ids: body.developer_app_ids.clone(),
         token_exchange_config,
+        anonymous_endpoints: body.anonymous_endpoints.clone(),
         created_at: now,
         updated_at: now,
     };
+    anonymous_endpoint_service::validate_anonymous_service_runtime_safety(&new_service)?;
 
     state
         .db
@@ -1674,6 +1686,25 @@ pub async fn update_service(
                 .map_err(|e| AppError::Internal(format!("BSON serialization error: {e}")))?,
         );
     }
+
+    let mut next_anonymous_rules: Option<Vec<AnonymousEndpointRule>> = None;
+    if let Some(ref rules) = body.anonymous_endpoints {
+        anonymous_endpoint_service::validate_rule_list(rules)?;
+        next_anonymous_rules = Some(rules.clone());
+        set_doc.insert(
+            "anonymous_endpoints",
+            bson::to_bson(rules)
+                .map_err(|e| AppError::Internal(format!("BSON serialization error: {e}")))?,
+        );
+    }
+
+    anonymous_endpoint_service::validate_service_update_anonymous_compatibility(
+        &service,
+        body.identity_propagation_mode.as_deref(),
+        body.forward_access_token,
+        body.inject_delegation_token,
+        next_anonymous_rules.as_deref(),
+    )?;
 
     if set_doc.is_empty() {
         return Err(AppError::ValidationError(

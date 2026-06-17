@@ -3,6 +3,8 @@ import { Link } from "@tanstack/react-router";
 import { ArrowLeft } from "lucide-react";
 
 import { useLogoHref } from "@/hooks/use-logo-href";
+import { useApplyTheme } from "@/hooks/use-theme";
+import { NyxidLogo } from "@/components/brand/nyxid-logo";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -33,6 +35,7 @@ function stripFrontMatter(md: string): { content: string; effectiveDate: string 
 }
 
 export function LegalDocumentPage({ title, mdPath, docKey }: Props) {
+  useApplyTheme();
   const logoHref = useLogoHref();
   const [content, setContent] = useState<string>("");
   const [effectiveDate, setEffectiveDate] = useState<string | null>(null);
@@ -73,7 +76,7 @@ export function LegalDocumentPage({ title, mdPath, docKey }: Props) {
       <div className="w-full max-w-[680px] space-y-8">
         <div className="flex flex-col items-center gap-4">
           <Link to={logoHref} className="flex items-center transition-opacity hover:opacity-80">
-            <img src="/nyxid-wordmark.svg" alt="NyxID" className="h-8 w-auto" />
+            <NyxidLogo className="h-8 w-auto" />
           </Link>
           <h1 className="text-2xl font-bold text-foreground">{title}</h1>
           {effectiveDate && (
