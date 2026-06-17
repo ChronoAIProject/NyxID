@@ -68,6 +68,7 @@ pub mod proxy_service;
 pub mod push_service;
 pub mod rbac_helpers;
 pub mod rci_audit_service;
+pub mod relay_scheduler;
 pub mod role_service;
 pub mod service_account_service;
 pub mod service_endpoint_service;

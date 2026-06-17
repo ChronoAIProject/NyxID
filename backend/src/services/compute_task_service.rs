@@ -13,7 +13,7 @@ use crate::models::compute_task::{
 use crate::models::compute_worker::{
     COLLECTION_NAME as COMPUTE_WORKERS, ComputeWorker, worker_doc_id,
 };
-use crate::services::compute_pool_service;
+use crate::services::{compute_pool_service, relay_scheduler};
 
 pub const WORKER_RECENT_SECS: i64 = 120;
 const MAX_KIND_LEN: usize = 64;
@@ -128,11 +128,7 @@ fn validate_json_size(label: &str, value: &serde_json::Value, max_bytes: usize) 
 }
 
 fn truncate_chars(value: &str, max: usize) -> String {
-    if value.chars().count() <= max {
-        value.to_string()
-    } else {
-        value.chars().take(max).collect()
-    }
+    relay_scheduler::truncate_chars(value, max)
 }
 
 fn validate_worker_label(label: &str) -> AppResult<()> {
@@ -150,18 +146,7 @@ fn validate_worker_label(label: &str) -> AppResult<()> {
 }
 
 fn normalize_models(models: &[String]) -> Vec<String> {
-    let mut out = Vec::new();
-    for model in models.iter().take(MAX_MODELS) {
-        let model = model.trim();
-        if model.is_empty() {
-            continue;
-        }
-        let model = truncate_chars(model, MAX_MODEL_NAME_LEN);
-        if !out.contains(&model) {
-            out.push(model);
-        }
-    }
-    out
+    relay_scheduler::normalize_labels(models, MAX_MODELS, MAX_MODEL_NAME_LEN)
 }
 
 async fn count_tasks(db: &mongodb::Database, filter: Document) -> AppResult<u64> {
@@ -277,21 +262,16 @@ async fn queue_position(db: &mongodb::Database, task: &ComputeTask) -> AppResult
     if task.status != ComputeTaskStatus::Queued {
         return Ok(0);
     }
-    let ahead = count_tasks(
-        db,
-        doc! {
-            "pool_id": &task.pool_id,
-            "status": "queued",
-            "$or": [
-                { "priority": { "$gt": task.priority } },
-                {
-                    "priority": task.priority,
-                    "created_at": { "$lt": bson::DateTime::from_chrono(task.created_at) },
-                },
-            ],
-        },
-    )
-    .await?;
+    let mut filter = doc! {
+        "pool_id": &task.pool_id,
+        "status": "queued",
+    };
+    filter.extend(relay_scheduler::queue_position_ahead_filter(
+        relay_scheduler::QueueOrdering::PriorityFifo,
+        task.priority,
+        task.created_at,
+    ));
+    let ahead = count_tasks(db, filter).await?;
     Ok(ahead + 1)
 }
 
@@ -462,9 +442,10 @@ fn task_filter_for_worker(pool: &ComputePool, worker: &WorkerCapabilities) -> Do
         "status": "queued",
     };
     let models = normalize_models(&worker.models);
-    let accepts_any_model = models.iter().any(|model| model == "*");
-    if pool.scheduling_policy == ComputeSchedulingPolicy::ModelFit && !accepts_any_model {
-        filter.insert("model", doc! { "$in": models });
+    if pool.scheduling_policy == ComputeSchedulingPolicy::ModelFit
+        && let Some(model_filter) = relay_scheduler::required_label_filter(&models)
+    {
+        filter.insert("model", model_filter);
     }
     filter
 }
@@ -528,7 +509,9 @@ pub async fn claim_task(
         )
         .with_options(
             FindOneAndUpdateOptions::builder()
-                .sort(doc! { "priority": -1, "created_at": 1 })
+                .sort(relay_scheduler::claim_sort(
+                    relay_scheduler::QueueOrdering::PriorityFifo,
+                ))
                 .return_document(ReturnDocument::After)
                 .build(),
         )
