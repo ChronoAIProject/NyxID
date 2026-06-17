@@ -92,6 +92,11 @@ pub struct WizardPrefill {
     /// it, skips the catalog grid, and renders the scope picker seeded from the
     /// connection's current granted scopes.
     pub reconnect_key_id: Option<String>,
+    /// Declarative desired scope set for manage-scopes mode (`--set`). When
+    /// present, the wizard pre-seeds the picker with exactly these scopes
+    /// instead of the connection's current grant, so an AI agent can drive the
+    /// whole change from one CLI command (NyxID#917 follow-up).
+    pub scope_override: Option<Vec<String>>,
 }
 
 /// CLI-supplied prefill for rotation flows (`api-key rotate`,

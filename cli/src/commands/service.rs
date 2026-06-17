@@ -335,6 +335,9 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                     // `service add` always creates a new connection; the
                     // manage-scopes (re-auth existing) path is `service scopes`.
                     reconnect_key_id: None,
+                    // Add-flow scopes are carried via `additional_scopes`
+                    // (the `--scope` flag), not the manage-scopes override.
+                    scope_override: None,
                 };
                 return crate::wizard::run_ai_key_wizard(&auth, prefill, no_wait).await;
             }
@@ -1070,7 +1073,12 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             Ok(())
         }
 
-        ServiceCommands::Scopes { id, no_wait, auth } => {
+        ServiceCommands::Scopes {
+            id,
+            set_scopes,
+            no_wait,
+            auth,
+        } => {
             // Resolve the existing connection (by id or slug) and confirm it's
             // a manageable OAuth connection before launching the wizard.
             let mut api = ApiClient::from_auth_checked(&auth).await?;
@@ -1129,10 +1137,30 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 );
             }
 
+            // Normalize --set inputs the same way `service add --scope` does:
+            // split each entry on comma/whitespace and dedupe. An empty result
+            // (flag not passed) leaves the picker seeded from the current grant.
+            let mut seen = std::collections::HashSet::new();
+            let desired: Vec<String> = set_scopes
+                .iter()
+                .flat_map(|raw| {
+                    raw.split(|c: char| c == ',' || c.is_whitespace())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                })
+                .filter(|s| seen.insert(s.clone()))
+                .collect();
+
             let prefill = crate::wizard::WizardPrefill {
                 slug,
                 label,
                 reconnect_key_id: Some(key_id),
+                scope_override: if desired.is_empty() {
+                    None
+                } else {
+                    Some(desired)
+                },
                 ..Default::default()
             };
             return crate::wizard::run_ai_key_wizard(&auth, prefill, no_wait).await;

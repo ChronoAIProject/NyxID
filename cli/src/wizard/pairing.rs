@@ -836,6 +836,12 @@ pub fn prefill_ai_key(p: &WizardPrefill) -> Value {
     if let Some(v) = &p.reconnect_key_id {
         obj.insert("reconnect_key_id".into(), Value::String(v.clone()));
     }
+    if let Some(scopes) = &p.scope_override {
+        obj.insert(
+            "scope_override".into(),
+            Value::Array(scopes.iter().map(|s| Value::String(s.clone())).collect()),
+        );
+    }
     Value::Object(obj)
 }
 

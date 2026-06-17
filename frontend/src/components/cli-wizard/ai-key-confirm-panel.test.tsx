@@ -990,3 +990,103 @@ describe("AiKeyConfirm — manage-scopes (NyxID#917 codex follow-up)", () => {
     expect([...(props.scopeOverride ?? [])]).toEqual([]);
   });
 });
+
+// NyxID#917 follow-up — manage-scopes mode: `nyxid service scopes <slug> --set`
+// sends prefill.reconnect_key_id + prefill.scope_override. The panel must fetch
+// the connection, render the picker seeded with EXACTLY the --set scopes, and
+// hand them to OAuthFlow as scopeOverride + reconnectKeyId.
+describe("AiKeyConfirm — manage-scopes mode (issue #917 CLI --set)", () => {
+  const twitterEntry = {
+    slug: "api-twitter",
+    name: "Twitter / X API",
+    base_url: "https://api.twitter.com",
+    auth_method: "bearer",
+    provider_type: "oauth2",
+    provider_config_id: "prov-twitter",
+    credential_mode: "user",
+    service_type: "rest",
+    requires_credential: true,
+    requires_gateway_url: false,
+    default_scopes: ["tweet.read", "tweet.write", "users.read", "offline.access"],
+    scope_catalog: [
+      { scope: "tweet.read", label: "Read posts", description: "Read posts." },
+      { scope: "media.write", label: "Upload media", description: "Upload media.", sensitive: true },
+    ],
+    scope_removal: "auto",
+  };
+  const existingKey = {
+    id: "svc-1",
+    slug: "api-twitter",
+    label: "X Demo",
+    status: "active",
+    catalog_service_slug: "api-twitter",
+    granted_scopes: ["tweet.read", "tweet.write", "users.read", "offline.access"],
+    last_authorized_at: "2026-06-16T00:00:00Z",
+  };
+
+  beforeEach(() => {
+    mockGet.mockReset();
+    mockPost.mockReset();
+    mockOAuthFlow.mockReset();
+    mockGet.mockImplementation(async (path: string) => {
+      if (path === "/keys/svc-1") return existingKey;
+      if (path === "/catalog/api-twitter") return twitterEntry;
+      throw new Error(`unexpected GET ${path}`);
+    });
+    baseProps.onSuccess = vi.fn();
+  });
+
+  it("seeds the picker from --set scope_override and hands it to OAuthFlow", async () => {
+    const user = userEvent.setup();
+    render(
+      <AiKeyConfirm
+        {...baseProps}
+        prefill={{
+          reconnect_key_id: "svc-1",
+          scope_override: ["tweet.read", "media.write"],
+        }}
+      />,
+      { wrapper: createWrapper() },
+    );
+
+    const reauth = await screen.findByRole("button", {
+      name: /Re-authorize with these permissions/i,
+    });
+    // Exactly the --set scopes are pre-selected — NOT the connection's 4
+    // current scopes.
+    expect(
+      screen.getByRole("button", { name: /Read posts/i }),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(
+      screen.getByRole("button", { name: /Upload media/i }),
+    ).toHaveAttribute("aria-pressed", "true");
+
+    await user.click(reauth);
+    expect(mockOAuthFlow).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providerId: "prov-twitter",
+        reconnectKeyId: "svc-1",
+        scopeOverride: ["tweet.read", "media.write"],
+        baselineAuthorizedAt: "2026-06-16T00:00:00Z",
+      }),
+    );
+  });
+
+  it("without --set, seeds from the connection's current grant", async () => {
+    render(
+      <AiKeyConfirm {...baseProps} prefill={{ reconnect_key_id: "svc-1" }} />,
+      { wrapper: createWrapper() },
+    );
+    await screen.findByRole("button", {
+      name: /Re-authorize with these permissions/i,
+    });
+    // Connection's granted "Read posts" is selected; "Upload media" (not
+    // granted) is not.
+    expect(
+      screen.getByRole("button", { name: /Read posts/i }),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(
+      screen.getByRole("button", { name: /Upload media/i }),
+    ).toHaveAttribute("aria-pressed", "false");
+  });
+});

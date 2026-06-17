@@ -242,6 +242,7 @@ export function AiKeyConfirm({
     return (
       <ManageScopesPanel
         keyId={prefill.reconnect_key_id}
+        initialScopeOverride={prefill.scope_override ?? null}
         pairingId={pairingId}
         onSuccess={onSuccess}
       />
@@ -343,10 +344,14 @@ interface ExistingKeyShape {
  */
 function ManageScopesPanel({
   keyId,
+  initialScopeOverride,
   pairingId,
   onSuccess,
 }: {
   readonly keyId: string;
+  /** Declarative desired set from `service scopes --set`. When provided, the
+   *  picker is pre-seeded with exactly these scopes (NyxID#917). */
+  readonly initialScopeOverride?: readonly string[] | null;
   readonly pairingId: string;
   readonly onSuccess: (result: AiKeyPairingSuccess) => void;
 }) {
@@ -386,11 +391,20 @@ function ManageScopesPanel({
   // `scopeOverride={undefined}` until either (a) the user actually edits
   // the picker or (b) we know the real current grant — otherwise legacy
   // keys would silently re-auth with zero scopes.
-  const seedScopes = granted.length > 0 ? granted : defaultScopes;
+  // A CLI-declared desired set (`service scopes --set`) takes precedence as
+  // both the picker seed and the sent override, so an agent drives the whole
+  // change from one command (NyxID#917). Empty/absent falls back to the grant.
+  const cliSet =
+    initialScopeOverride && initialScopeOverride.length > 0
+      ? initialScopeOverride
+      : null;
+  const seedScopes = cliSet ?? (granted.length > 0 ? granted : defaultScopes);
   const [override, setOverride] = useState<readonly string[] | null>(null);
   const selectedScopes = override ?? seedScopes;
   const scopeOverride =
-    override !== null ? override : granted.length > 0 ? granted : undefined;
+    override !== null
+      ? override
+      : (cliSet ?? (granted.length > 0 ? granted : undefined));
   const setSelectedScopes = setOverride;
 
   const [authFlowActive, setAuthFlowActive] = useState(false);

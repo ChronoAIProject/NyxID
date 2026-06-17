@@ -191,6 +191,12 @@ export interface AiKeyPrefill {
    * and submitting re-auths the SAME connection (reuses its connection_id).
    */
   readonly reconnect_key_id?: string;
+  /**
+   * Declarative desired scope set for manage-scopes mode (`--set`). When
+   * present, the wizard pre-seeds the picker with exactly these scopes instead
+   * of the connection's current grant (NyxID#917 follow-up).
+   */
+  readonly scope_override?: readonly string[];
 }
 
 /** Prefill for `nyxid service-account create`. Each field maps to
