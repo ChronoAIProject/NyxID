@@ -463,6 +463,22 @@ mod tests {
         (status, json)
     }
 
+    async fn get_json(server: &TestServer, path: &str, token: Option<&str>) -> (StatusCode, Value) {
+        let mut request = server.client.get(format!("{}{}", server.base_url, path));
+        if let Some(token) = token {
+            request = request.bearer_auth(token);
+        }
+        let response = request.send().await.expect("send request");
+        let status = response.status();
+        let text = response.text().await.expect("response text");
+        let json = if text.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_str(&text).expect("json response")
+        };
+        (status, json)
+    }
+
     async fn create_api_key(state: &AppState, user_id: &str) -> String {
         crate::services::key_service::create_api_key(
             &state.db,
@@ -782,5 +798,219 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(json["error"], "internal_error");
+    }
+
+    #[tokio::test]
+    async fn e2e_full_happy_path_request_approve_poll_refresh() {
+        let Some(state) = setup_state("auth_device_e2e_happy").await else {
+            return;
+        };
+        crate::services::role_service::seed_system_roles(&state.db)
+            .await
+            .expect("seed roles");
+        let user_id = Uuid::new_v4().to_string();
+        insert_user(&state, &user_id).await;
+        let approving_jwt = access_token(&state, &user_id);
+        let server = spawn_test_server(state.clone()).await;
+
+        let (status, request_json) = post_json(
+            &server,
+            "/api/v1/auth/device/request",
+            None,
+            serde_json::json!({
+                "client_label": "wsl-calvin",
+                "client_user_agent": "nyxid-cli/0.8.0"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            request_json["device_code"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("nyx_adc_"))
+        );
+        assert!(
+            request_json["user_code"]
+                .as_str()
+                .is_some_and(|value| value.len() == 9 && value.contains('-'))
+        );
+
+        let (status, approve_json) = post_json(
+            &server,
+            "/api/v1/auth/device/approve",
+            Some(&approving_jwt),
+            serde_json::json!({ "user_code": request_json["user_code"].as_str().unwrap() }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(approve_json, serde_json::json!({ "ok": true }));
+
+        let (status, poll_json) = post_json(
+            &server,
+            "/api/v1/auth/device/poll",
+            None,
+            serde_json::json!({ "device_code": request_json["device_code"].as_str().unwrap() }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            poll_json["access_token"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty())
+        );
+        assert!(
+            poll_json["refresh_token"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty())
+        );
+        assert_eq!(poll_json["token_type"], "Bearer");
+        assert_eq!(poll_json["expires_in"], 900);
+
+        let access_token = poll_json["access_token"].as_str().unwrap();
+        let (status, me_json) = get_json(&server, "/api/v1/users/me", Some(access_token)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(me_json["id"], user_id);
+        assert_eq!(me_json["email"], format!("{user_id}@example.com"));
+        assert_eq!(me_json["display_name"], "Test User");
+
+        let refresh_token = poll_json["refresh_token"].as_str().unwrap();
+        let (status, refresh_json) = post_json(
+            &server,
+            "/api/v1/auth/refresh",
+            None,
+            serde_json::json!({ "refresh_token": refresh_token }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            refresh_json["access_token"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty() && value != access_token)
+        );
+        assert!(
+            refresh_json["refresh_token"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty() && value != refresh_token)
+        );
+        assert_eq!(refresh_json["expires_in"], 900);
+
+        let (status, refreshed_me_json) = get_json(
+            &server,
+            "/api/v1/users/me",
+            Some(refresh_json["access_token"].as_str().unwrap()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(refreshed_me_json["id"], user_id);
+    }
+
+    #[tokio::test]
+    async fn e2e_concurrent_poll_after_approve_only_one_winner() {
+        let Some(state) = setup_state("auth_device_e2e_concurrent_poll").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        insert_user(&state, &user_id).await;
+        let approving_jwt = access_token(&state, &user_id);
+        let server = spawn_test_server(state).await;
+
+        let (status, request_json) = post_json(
+            &server,
+            "/api/v1/auth/device/request",
+            None,
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, _) = post_json(
+            &server,
+            "/api/v1/auth/device/approve",
+            Some(&approving_jwt),
+            serde_json::json!({ "user_code": request_json["user_code"].as_str().unwrap() }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let body =
+            serde_json::json!({ "device_code": request_json["device_code"].as_str().unwrap() });
+        let first = post_json(&server, "/api/v1/auth/device/poll", None, body.clone());
+        let second = post_json(&server, "/api/v1/auth/device/poll", None, body);
+        let (first, second) = tokio::join!(first, second);
+
+        let ok_count = [first.0, second.0]
+            .into_iter()
+            .filter(|status| *status == StatusCode::OK)
+            .count();
+        let already_delivered = [first, second]
+            .into_iter()
+            .filter(|(status, json)| {
+                *status == StatusCode::GONE && json["error_code"].as_u64() == Some(11205)
+            })
+            .count();
+        assert_eq!(ok_count, 1);
+        assert_eq!(already_delivered, 1);
+    }
+
+    #[tokio::test]
+    async fn e2e_spoofed_xff_does_not_bypass_request_rate_limit() {
+        let Some(state) = setup_state("auth_device_e2e_spoof_xff").await else {
+            return;
+        };
+        let server = spawn_test_server(state).await;
+        let mut last = (StatusCode::OK, Value::Null);
+        for i in 0..6 {
+            let spoofed = format!("198.51.100.{i}");
+            last = post_request(
+                &server,
+                "/api/v1/auth/device/request",
+                &[("x-forwarded-for", spoofed.as_str())],
+                serde_json::json!({}),
+            )
+            .await;
+        }
+
+        assert_eq!(last.0, StatusCode::TOO_MANY_REQUESTS);
+        assert_error(&last.1, "auth_device_rate_limited", 11206);
+    }
+
+    #[tokio::test]
+    async fn e2e_api_key_auth_rejected_on_approve_and_preview() {
+        let Some(state) = setup_state("auth_device_e2e_api_key_reject").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        insert_user(&state, &user_id).await;
+        let api_key = create_api_key(&state, &user_id).await;
+        let server = spawn_test_server(state).await;
+
+        let (approve_status, approve_json) = post_json(
+            &server,
+            "/api/v1/auth/device/approve",
+            Some(&api_key),
+            serde_json::json!({ "user_code": "ABCD-EFGH" }),
+        )
+        .await;
+        assert_ne!(approve_status, StatusCode::OK);
+        assert!(matches!(
+            approve_status,
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+        ));
+
+        let (preview_status, preview_json) = post_json(
+            &server,
+            "/api/v1/auth/device/preview",
+            Some(&api_key),
+            serde_json::json!({ "user_code": "ABCD-EFGH" }),
+        )
+        .await;
+        assert_ne!(preview_status, StatusCode::OK);
+        assert!(matches!(
+            preview_status,
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+        ));
+
+        assert_ne!(approve_json, serde_json::json!({ "ok": true }));
+        assert_ne!(preview_json["status"], "pending");
     }
 }

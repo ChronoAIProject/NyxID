@@ -252,6 +252,22 @@ Generic async task relay that lets any NyxID user/agent call a browser-driven LL
 
 Key files: `models/oracle_{pool,task,session,worker}.rs`, `services/oracle_{pool,task,session}_service.rs`, `handlers/oracle_{pools,tasks,worker}.rs`, `cli/src/commands/oracle.rs`, `integrations/oracle/nyxid_oracle.user.js`.
 
+### 12. Auth Device-Code Login
+
+First-party RFC 8628-style login for headless CLI environments. `nyxid login --device` starts an unauthenticated browser-assisted login, displays a short `user_code`, and lets an already logged-in human approve the code in the web UI so the waiting CLI receives normal first-party access and refresh tokens without collecting a password in the terminal.
+
+- **Storage**: `auth_device_codes` collection. It stores HMACs of both the opaque `device_code` and display `user_code`, a `pending` / `approved` / `denied` / `expired` / `delivered` status state machine, sanitized client context, encrypted delivery tokens, and timestamps. Raw codes and token plaintext are never persisted.
+- **Worker token**: N/A. This is not a worker-pool flow; the CLI receives an opaque `device_code` secret with the `nyx_adc_` prefix and polls with that value until the human approves or the code expires.
+- **Routes**:
+  - `POST /api/v1/auth/device/request` -- public router, no auth; mints `device_code`, `user_code`, and verification URLs.
+  - `POST /api/v1/auth/device/poll` -- public router, no auth; polls by opaque `device_code` and returns the one-time token pair when approved.
+  - `POST /api/v1/auth/device/approve` -- human-only router, JWT-authenticated session user; rejects API keys, service accounts, and delegated tokens before handler execution.
+  - `POST /api/v1/auth/device/preview` -- human-only router, JWT-authenticated session user; returns anti-phishing context for a `user_code` without changing state.
+- **Error codes**: auth-device login uses the existing 11200-11207 block in the node/proxy conventions section above; do not duplicate that table elsewhere.
+- **Atomic delivery**: polling uses a MongoDB `find_one_and_update(...).return_document(Before)` claim from `approved` to `delivered`. The returned pre-update document contains the encrypted delivery tokens for exactly one poller; concurrent or later pollers see `delivered` and receive `AuthDeviceCodeAlreadyDelivered` (11205).
+- **Rate limiters**: `auth_device_request_limiter`, `auth_device_poll_limiter`, `auth_device_approve_limiter`, `auth_device_approve_per_user_limiter`, and `auth_device_preview_limiter`.
+- **CLI**: `nyxid login --device` forces device-code login. Plain `nyxid login` auto-falls back to device-code login when browser launch is unavailable unless `NYXID_LOGIN_NO_DEVICE_FALLBACK=1` is set.
+
 ## File Structure
 
 ```
@@ -302,6 +318,10 @@ sdk/                     # OAuth SDK monorepo (TypeScript, @nyxids/* npm namespa
 
 All API routes under `/api/v1`:
 - `/auth` -- register, login, logout, refresh, verify-email, forgot/reset-password
+- `/auth/device/request` -- public auth device-code login start; mints `device_code`, `user_code`, and verification URLs
+- `/auth/device/poll` -- public auth device-code login poll; exchanges an approved opaque `device_code` for a token pair
+- `/auth/device/approve` -- human-only auth device-code approval; JWT-authenticated user approves a `user_code`
+- `/auth/device/preview` -- human-only auth device-code anti-phishing lookup for a `user_code`
 - `/users` -- get/update current user
 - `/auth/mfa` -- setup, confirm, verify (login), disable (nested under `/auth` in `backend/src/routes.rs`; `setup` is idempotent against unverified factors per NyxID#506)
 - `/api-keys` -- CRUD + rotate. `ApiKey` model has scope fields: `allowed_service_ids`, `allowed_node_ids`, `allow_all_services`, `allow_all_nodes` (absorbed from deleted AgentGroup model). Also has agent isolation fields: `rate_limit_per_second`, `rate_limit_burst`, `platform`
@@ -506,6 +526,7 @@ source "$HOME/.cargo/env" 2>/dev/null  # Ensure cargo is available
 cargo build -p nyxid-cli                # Build CLI binary
 cargo install --path cli                # Install CLI as `nyxid`
 nyxid --help                            # Verify installation
+nyxid login --device                    # Headless browser-assisted login; set NYXID_LOGIN_NO_DEVICE_FALLBACK=1 to disable automatic fallback from plain `nyxid login`
 # End users install prebuilt release binaries; cargo install is for dev.
 
 # Backend (from project root)
