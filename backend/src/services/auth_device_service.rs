@@ -1025,6 +1025,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn approve_loser_of_concurrent_race_leaves_no_usable_session() {
+        // Two approvers race the same pending row. Exactly one wins the atomic
+        // update; the loser either short-circuits before minting (sees a
+        // non-pending row) or mints and then hits `updated.is_none()` and must
+        // revoke its just-minted session. Either way the invariant that must
+        // hold is: no usable (non-revoked) session exists beyond the winner's,
+        // and that session is the one recorded on the approved row.
+        let Some(db) = connect_test_database("auth_device_approve_race_rollback").await else {
+            return;
+        };
+        crate::db::ensure_indexes(&db)
+            .await
+            .expect("ensure indexes");
+        let config = test_app_config();
+        let jwt_keys = cached_test_jwt_keys();
+        let encryption_keys = test_encryption_keys();
+        let user_id = Uuid::new_v4().to_string();
+        seed_user(&db, &user_id).await;
+        let row = seed_row(
+            &db,
+            AuthDeviceCodeStatus::Pending,
+            Utc::now() + Duration::minutes(10),
+        )
+        .await;
+
+        let approve_input = || ApproveInput {
+            user_id: user_id.clone(),
+            user_code: "ABCD-1234".to_string(),
+            approver_ip: None,
+            approver_user_agent: None,
+        };
+        let (left, right) = tokio::join!(
+            approve(
+                &db,
+                &config,
+                &jwt_keys,
+                &encryption_keys,
+                TEST_HMAC_KEY,
+                approve_input(),
+            ),
+            approve(
+                &db,
+                &config,
+                &jwt_keys,
+                &encryption_keys,
+                TEST_HMAC_KEY,
+                approve_input(),
+            )
+        );
+
+        let ok_count = [&left, &right].iter().filter(|r| r.is_ok()).count();
+        let already_delivered_count = [&left, &right]
+            .iter()
+            .filter(|r| matches!(r, Err(AppError::AuthDeviceCodeAlreadyDelivered)))
+            .count();
+        assert_eq!(ok_count, 1, "left={left:?} right={right:?}");
+        assert_eq!(already_delivered_count, 1, "left={left:?} right={right:?}");
+
+        let approved = row_by_id(&db, &row.id).await;
+        assert_eq!(approved.status, AuthDeviceCodeStatus::Approved);
+        let winner_session = approved
+            .approved_session_id
+            .clone()
+            .expect("approved session id");
+
+        // No orphaned usable session: exactly one non-revoked session, and it is
+        // the winner's. Any session the loser minted before the failed update
+        // must have been revoked by the rollback path.
+        let live_sessions = db
+            .collection::<bson::Document>(SESSIONS)
+            .count_documents(doc! { "revoked": false })
+            .await
+            .expect("live session count");
+        assert_eq!(live_sessions, 1, "exactly one usable session must survive");
+        let winner_revoked = db
+            .collection::<crate::models::session::Session>(SESSIONS)
+            .find_one(doc! { "_id": &winner_session })
+            .await
+            .expect("winner session query")
+            .expect("winner session row")
+            .revoked;
+        assert!(!winner_revoked, "the delivered session must remain usable");
+    }
+
+    #[tokio::test]
     async fn decrypt_tokens_roundtrips_encrypted_jwt_bytes() {
         let encryption_keys = test_encryption_keys();
         let access = "eyJ.access.jwt";
