@@ -80,6 +80,52 @@ impl PerIpRateLimiter {
 /// Shared per-IP rate limiter type for use as an Extension.
 pub type SharedPerIpRateLimiter = Arc<PerIpRateLimiter>;
 
+/// Per-string-key limiter for cases where the security principal is not an IP
+/// address, e.g. human user IDs. Uses the same fixed-window semantics as
+/// `PerIpRateLimiter`.
+#[derive(Clone)]
+pub struct PerKeyRateLimiter {
+    state: Arc<Mutex<HashMap<String, (u32, Instant)>>>,
+    max_requests: u32,
+    window_secs: u64,
+}
+
+impl PerKeyRateLimiter {
+    pub fn new(max_requests: u32, window_secs: u64) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(HashMap::new())),
+            max_requests,
+            window_secs,
+        }
+    }
+
+    pub fn check(&self, key: &str) -> bool {
+        let now = Instant::now();
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = state.entry(key.to_string()).or_insert((0, now));
+
+        if now.duration_since(entry.1).as_secs() >= self.window_secs {
+            entry.0 = 0;
+            entry.1 = now;
+        }
+
+        if entry.0 >= self.max_requests {
+            return false;
+        }
+
+        entry.0 += 1;
+        true
+    }
+
+    pub fn cleanup(&self) {
+        let now = Instant::now();
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.retain(|_, (_, start)| now.duration_since(*start).as_secs() < self.window_secs * 2);
+    }
+}
+
+pub type SharedPerKeyRateLimiter = Arc<PerKeyRateLimiter>;
+
 /// Per-agent rate limiter keyed by API key ID.
 /// Each agent gets its own token bucket keyed by API key ID.
 /// `rate_limit_per_second` controls refill rate and `burst` controls capacity.
@@ -372,6 +418,11 @@ pub fn create_rate_limiter(per_second: u64, burst: u32) -> SharedRateLimiter {
 /// Create a per-IP rate limiter.
 pub fn create_per_ip_rate_limiter(max_requests: u32, window_secs: u64) -> SharedPerIpRateLimiter {
     Arc::new(PerIpRateLimiter::new(max_requests, window_secs))
+}
+
+/// Create a per-string-key rate limiter.
+pub fn create_per_key_rate_limiter(max_requests: u32, window_secs: u64) -> SharedPerKeyRateLimiter {
+    Arc::new(PerKeyRateLimiter::new(max_requests, window_secs))
 }
 
 /// Create a per-pubkey limiter for device authorization endpoints.
