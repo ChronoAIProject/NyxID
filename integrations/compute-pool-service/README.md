@@ -47,6 +47,12 @@ the store with Postgres, Redis, MongoDB, or another managed queue backend.
 NyxID-level metering and quota decisions should count proxied calls to this
 service the same way they would count any other registered service.
 
+The reference service has one consumer API token. Anyone who can call the
+service can read or cancel a task if they know its task id. Use NyxID service
+ownership, agent API-key scopes, and org policy to control who can call the
+service; add per-consumer task ownership in a production backend if multiple
+tenants share one service token.
+
 ## Start The Service
 
 Generate two independent tokens:
@@ -129,6 +135,13 @@ node integrations/compute-pool-service/worker.mjs \
 Use `--model '*'` only for workers that should accept any submitted model.
 Workers with no advertised model do not claim model-routed work.
 
+The worker heartbeats with `/worker/ack` while the local request is running.
+A transient ack failure is retried; after `--max-ack-failures` consecutive
+failures (default 3), the worker aborts the local request and reports failure.
+Set `COMPUTE_POOL_TASK_TIMEOUT_SECS` high enough to cover normal ack outages
+for your deployment. The default lease is 2 hours and each successful ack
+refreshes it.
+
 If the local backend needs a token, keep it on the worker host:
 
 ```bash
@@ -165,6 +178,8 @@ The OpenAPI spec for the consumer API is in `openapi.yaml`.
 ## Current Limitations
 
 - Local JSON store only; not multi-process safe.
+- The JSON store is serialized inside one process and uses per-write tmp
+  files, but it is still a smoke-test backend rather than durable storage.
 - One task per worker process at a time.
 - No built-in Slurm adapter yet.
 - No NyxID catalog seed yet; add as a custom service for now.

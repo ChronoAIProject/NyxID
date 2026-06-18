@@ -15,6 +15,7 @@ const backendToken = args["backend-token-env"] ? process.env[args["backend-token
 const models = arrayArg(args.model);
 const pollIntervalMs = seconds(args["poll-interval-secs"], 5) * 1000;
 const ackIntervalMs = seconds(args["ack-interval-secs"], 30) * 1000;
+const maxAckFailures = positiveInt(args["max-ack-failures"], 3);
 const requestTimeoutMs = seconds(args["request-timeout-secs"], 14_400) * 1000;
 
 console.error(`compute worker ${worker} polling ${serviceUrl}`);
@@ -54,18 +55,29 @@ for (;;) {
 
 async function executeWithHeartbeats(task) {
   const controller = new AbortController();
-  const local = executeLocal(task, controller.signal);
+  const local = executeLocal(task, controller.signal).then(
+    (value) => ({ value }),
+    (err) => ({ failed: err }),
+  );
   let done = false;
+  let ackFailures = 0;
   const heartbeats = (async () => {
     while (!done) {
       await sleep(ackIntervalMs);
       if (done) return { cancelled: false };
-      const ack = await postJson(`${serviceUrl}/worker/ack`, {
-        task_id: task.task_id,
-        worker,
-        phase: "running",
-        capabilities: capabilities(1),
-      });
+      const ack = await postAck(task);
+      if (ack.failed) {
+        ackFailures += 1;
+        console.error(
+          `ack failed for task ${task.task_id} (${ackFailures}/${maxAckFailures}): ${ack.error}`,
+        );
+        if (ackFailures >= maxAckFailures) {
+          controller.abort();
+          return { failed: new Error(`ack failed ${ackFailures} times; local request aborted`) };
+        }
+        continue;
+      }
+      ackFailures = 0;
       if (ack.status === "cancelled") {
         controller.abort();
         return { cancelled: true };
@@ -75,12 +87,26 @@ async function executeWithHeartbeats(task) {
   })();
 
   const winner = await Promise.race([
-    local.then((value) => ({ value })),
+    local,
     heartbeats,
   ]);
   done = true;
+  if (winner.failed) throw winner.failed;
   if (winner.cancelled) return winner;
   return winner;
+}
+
+async function postAck(task) {
+  try {
+    return await postJson(`${serviceUrl}/worker/ack`, {
+      task_id: task.task_id,
+      worker,
+      phase: "running",
+      capabilities: capabilities(1),
+    });
+  } catch (err) {
+    return { failed: true, error: err?.message ?? String(err) };
+  }
 }
 
 async function executeLocal(task, signal) {
@@ -164,6 +190,11 @@ function required(value, name) {
 }
 
 function seconds(value, fallback) {
+  const parsed = Number.parseInt(value ?? "", 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function positiveInt(value, fallback) {
   const parsed = Number.parseInt(value ?? "", 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }

@@ -37,6 +37,8 @@ if (!DEV_INSECURE && (!API_TOKEN || !WORKER_TOKEN)) {
 }
 
 let store = await loadStore();
+let saveChain = Promise.resolve();
+let saveSeq = 0;
 
 const server = createServer(async (req, res) => {
   try {
@@ -401,9 +403,12 @@ async function loadStore() {
 }
 
 async function saveStore() {
-  const tmp = `${STORE_PATH}.tmp`;
-  await writeFile(tmp, `${JSON.stringify(store, null, 2)}\n`, { mode: 0o600 });
-  await rename(tmp, STORE_PATH);
+  saveChain = saveChain.catch(() => {}).then(async () => {
+    const tmp = `${STORE_PATH}.${process.pid}.${saveSeq += 1}.tmp`;
+    await writeFile(tmp, `${JSON.stringify(store, null, 2)}\n`, { mode: 0o600 });
+    await rename(tmp, STORE_PATH);
+  });
+  return saveChain;
 }
 
 async function expireTerminalTasks() {

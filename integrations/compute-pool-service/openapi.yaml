@@ -4,7 +4,7 @@ info:
   version: 0.1.0
   description: Standalone worker-pull compute queue service managed by NyxID as a custom service.
 servers:
-  - url: http://localhost:8787
+  - url: http://127.0.0.1:8787
 security:
   - bearerAuth: []
 paths:
@@ -73,6 +73,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Task"
+        "409":
+          description: Task is already completed or failed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 components:
   securitySchemes:
     bearerAuth:
@@ -199,3 +205,10 @@ components:
         last_seen_at:
           type: string
           format: date-time
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+        status:
+          type: string
