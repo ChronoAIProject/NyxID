@@ -115,6 +115,15 @@ Add new entries here when introducing additional vendored URN types.
   - 9506 `DeviceCodeRateLimited`
   - 9507 `DeviceCodeLocked`
   - 9508 `DeviceCodeSlowDown`
+- Error codes 11200-11207 are reserved for auth-device login:
+  - 11200 `AuthDeviceCodeNotFound`
+  - 11201 `AuthDeviceCodeExpired`
+  - 11202 `AuthDeviceCodePending`
+  - 11203 `AuthDeviceCodeSlowDown`
+  - 11204 `AuthDeviceCodeDenied`
+  - 11205 `AuthDeviceCodeAlreadyDelivered`
+  - 11206 `AuthDeviceCodeRateLimited`
+  - 11207 `AuthDeviceUserCodeInvalid`
 - `NodeStatus` is an enum (`Online`/`Offline`/`Draining`) -- not a bare string
 - WS writer channels are bounded (capacity: 256); `try_send` treats full buffers as node offline (H4)
 - WebSocket auth-frame injection rules live on `DownstreamService.ws_frame_injections` and `UserService.ws_frame_injections`; they are additive and separate from HTTP `auth_method` injection. `WsFrameDirection` is the trigger direction, so a `downstream` rule matches frames from the service and injects the configured response back toward that service. Direct and node-routed WS paths emit metadata-only `ws_frame_auth_injected` audit events; never log injected payloads or credentials.
