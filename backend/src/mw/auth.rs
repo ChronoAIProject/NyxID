@@ -818,6 +818,38 @@ pub async fn reject_service_account_tokens(
     Ok(next.run(request).await)
 }
 
+/// Middleware that rejects API-key credentials from human-only endpoints.
+pub async fn reject_api_key_tokens(
+    request: axum::http::Request<axum::body::Body>,
+    next: Next,
+) -> Result<impl IntoResponse, AppError> {
+    if is_api_key_request(&request) {
+        return Err(AppError::Forbidden(
+            "API keys cannot access this endpoint".to_string(),
+        ));
+    }
+    Ok(next.run(request).await)
+}
+
+fn is_api_key_request(request: &axum::http::Request<axum::body::Body>) -> bool {
+    if request.headers().get("x-api-key").is_some() {
+        return true;
+    }
+
+    request
+        .headers()
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(|token| {
+            token.starts_with("nyx_")
+                || token.starts_with("nyxid_")
+                || token.starts_with("nyxid_ag_")
+                || token.starts_with("nyxid_sk_")
+        })
+        .unwrap_or(false)
+}
+
 /// Check if the request bears a service account token.
 fn is_service_account_request(request: &axum::http::Request<axum::body::Body>) -> bool {
     // Check Authorization header

@@ -94,6 +94,16 @@ pub struct AppState {
     pub device_code_pubkey_limiter: mw::rate_limit::SharedPerPubkeyRateLimiter,
     /// Per-IP limiter for `/api/v1/devices/code/*`.
     pub device_code_ip_limiter: mw::rate_limit::SharedPerIpRateLimiter,
+    /// Per-IP limiter for `POST /api/v1/auth/device/request` (5/min).
+    pub auth_device_request_limiter: mw::rate_limit::SharedPerIpRateLimiter,
+    /// Per-IP limiter for `POST /api/v1/auth/device/poll` (60/min).
+    pub auth_device_poll_limiter: mw::rate_limit::SharedPerIpRateLimiter,
+    /// Per-IP limiter for `POST /api/v1/auth/device/approve` (10/min).
+    pub auth_device_approve_limiter: mw::rate_limit::SharedPerIpRateLimiter,
+    /// Per-user limiter for `POST /api/v1/auth/device/approve` (10/5min).
+    pub auth_device_approve_per_user_limiter: mw::rate_limit::SharedPerKeyRateLimiter,
+    /// Per-IP limiter for `POST /api/v1/auth/device/preview` (30/min).
+    pub auth_device_preview_limiter: mw::rate_limit::SharedPerIpRateLimiter,
     /// Per-IP rate limiter for `POST /cli-pairings/claim`. Tighter than
     /// the global rate limiter (5 attempts per 60s per IP) so brute
     /// forcing the 8-char pairing code is infeasible even from a
@@ -486,6 +496,11 @@ async fn main() {
         per_agent_limiter: Arc::new(mw::rate_limit::PerAgentRateLimiter::new()),
         device_code_pubkey_limiter: mw::rate_limit::create_per_pubkey_rate_limiter(),
         device_code_ip_limiter: mw::rate_limit::create_per_ip_rate_limiter(5, 60),
+        auth_device_request_limiter: mw::rate_limit::create_per_ip_rate_limiter(5, 60),
+        auth_device_poll_limiter: mw::rate_limit::create_per_ip_rate_limiter(60, 60),
+        auth_device_approve_limiter: mw::rate_limit::create_per_ip_rate_limiter(10, 60),
+        auth_device_approve_per_user_limiter: mw::rate_limit::create_per_key_rate_limiter(10, 300),
+        auth_device_preview_limiter: mw::rate_limit::create_per_ip_rate_limiter(30, 60),
         // 5 claim attempts per 60 seconds per IP; window-based, not token
         // bucket, because we want a hard cap on guesses per unit time.
         cli_pairing_claim_limiter: mw::rate_limit::create_per_ip_rate_limiter(5, 60),
@@ -590,6 +605,47 @@ async fn main() {
         loop {
             interval.tick().await;
             cleanup_device_code_ip_limiter.cleanup();
+        }
+    });
+    let cleanup_auth_device_request_limiter = state.auth_device_request_limiter.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            cleanup_auth_device_request_limiter.cleanup();
+        }
+    });
+    let cleanup_auth_device_poll_limiter = state.auth_device_poll_limiter.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            cleanup_auth_device_poll_limiter.cleanup();
+        }
+    });
+    let cleanup_auth_device_approve_limiter = state.auth_device_approve_limiter.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            cleanup_auth_device_approve_limiter.cleanup();
+        }
+    });
+    let cleanup_auth_device_approve_per_user_limiter =
+        state.auth_device_approve_per_user_limiter.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            cleanup_auth_device_approve_per_user_limiter.cleanup();
+        }
+    });
+    let cleanup_auth_device_preview_limiter = state.auth_device_preview_limiter.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            cleanup_auth_device_preview_limiter.cleanup();
         }
     });
 

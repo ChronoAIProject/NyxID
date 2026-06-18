@@ -379,6 +379,13 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         per_agent_limiter: Arc::new(crate::mw::rate_limit::PerAgentRateLimiter::new()),
         device_code_pubkey_limiter: crate::mw::rate_limit::create_per_pubkey_rate_limiter(),
         device_code_ip_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(5, 60),
+        auth_device_request_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(5, 60),
+        auth_device_poll_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(60, 60),
+        auth_device_approve_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(10, 60),
+        auth_device_approve_per_user_limiter: crate::mw::rate_limit::create_per_key_rate_limiter(
+            10, 300,
+        ),
+        auth_device_preview_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(30, 60),
         public_proxy_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(
             config.public_proxy_rate_limit_per_minute,
             60,
