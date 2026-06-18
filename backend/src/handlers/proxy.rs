@@ -6487,6 +6487,68 @@ mod proxy_resolution_integration_tests {
     }
 
     #[tokio::test]
+    async fn direct_pool_member_slug_does_not_retry_pool_on_transport_failure() {
+        let Some(db) = connect_test_database("proxy_pool_member_slug_no_retry").await else {
+            eprintln!("skipping proxy integration test: no local MongoDB available");
+            return;
+        };
+
+        let (healthy_base_url, server) = start_downstream().await;
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind unused port for failing member");
+        let failing_base_url = format!(
+            "http://{}",
+            listener.local_addr().expect("unused listener addr")
+        );
+        drop(listener);
+
+        let user_id = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_one(test_user(&user_id, UserType::Person))
+            .await
+            .unwrap();
+
+        let failing =
+            insert_user_service(&db, &user_id, "pool-member-a", &failing_base_url, None).await;
+        let healthy =
+            insert_user_service(&db, &user_id, "pool-member-b", &healthy_base_url, None).await;
+        let pool_slug = format!("pool-{}", &Uuid::new_v4().to_string()[..8]);
+        db.collection::<UserService>(USER_SERVICES)
+            .update_one(
+                doc! { "_id": &failing.id },
+                doc! { "$set": { "pool_slug": &pool_slug } },
+            )
+            .await
+            .expect("set failing pool slug");
+        db.collection::<UserService>(USER_SERVICES)
+            .update_one(
+                doc! { "_id": &healthy.id },
+                doc! { "$set": { "pool_slug": &pool_slug } },
+            )
+            .await
+            .expect("set healthy pool slug");
+
+        let state = test_app_state(db.clone());
+        let mut resolved_slug = String::new();
+        let err = proxy_request_by_slug_inner(
+            &state,
+            &access_token_auth(&user_id),
+            &failing.slug,
+            "status",
+            proxy_request("/proxy/s/pool-member-a/status"),
+            &mut resolved_slug,
+        )
+        .await
+        .expect_err("concrete member slug should not fail over to another pool member");
+
+        assert_eq!(resolved_slug, failing.slug);
+        assert!(matches!(err, AppError::Internal(message) if message == "Proxy request failed"));
+
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn org_member_proxy_through_org_node_audits_owner_user_id() {
         let Some(db) = connect_test_database("proxy_org_node").await else {
             eprintln!("skipping proxy integration test: no local MongoDB available");
