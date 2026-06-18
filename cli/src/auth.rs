@@ -2051,10 +2051,7 @@ mod tests {
             "GITLAB_CI",
             "NYXID_LOGIN_NO_DEVICE_FALLBACK",
         ];
-        let prev: Vec<_> = ci_keys
-            .iter()
-            .map(|k| (*k, std::env::var_os(k)))
-            .collect();
+        let prev: Vec<_> = ci_keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
         unsafe {
             for k in &ci_keys {
                 std::env::remove_var(k);
