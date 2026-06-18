@@ -165,6 +165,22 @@ pub(crate) fn validate_slug(slug: &str) -> AppResult<()> {
     Ok(())
 }
 
+fn normalize_optional_slug(value: Option<&str>, field_name: &str) -> AppResult<Option<String>> {
+    let Some(raw) = value else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    validate_slug(trimmed).map_err(|_| {
+        AppError::ValidationError(format!(
+            "{field_name} must be 1-80 characters and contain only lowercase letters, digits, and hyphens"
+        ))
+    })?;
+    Ok(Some(trimmed.to_string()))
+}
+
 fn validate_auth_method(method: &str) -> AppResult<()> {
     if !VALID_AUTH_METHODS.contains(&method) {
         return Err(AppError::ValidationError(format!(
@@ -350,6 +366,26 @@ pub async fn find_by_slug(
         .collection::<UserService>(COLLECTION_NAME)
         .find_one(doc! { "user_id": user_id, "slug": slug, "is_active": true })
         .await?)
+}
+
+/// Find all active user services that belong to a shared pool slug.
+pub async fn find_pool_members_by_slug(
+    db: &mongodb::Database,
+    user_id: &str,
+    pool_slug: &str,
+) -> AppResult<Vec<UserService>> {
+    let services: Vec<UserService> = db
+        .collection::<UserService>(COLLECTION_NAME)
+        .find(doc! {
+            "user_id": user_id,
+            "pool_slug": pool_slug,
+            "is_active": true,
+        })
+        .sort(doc! { "created_at": 1, "_id": 1 })
+        .await?
+        .try_collect()
+        .await?;
+    Ok(services)
 }
 
 /// Resolve a user-service identifier by UUID or slug for a specific owner.
@@ -611,6 +647,7 @@ pub async fn create_user_service(
         id: Uuid::new_v4().to_string(),
         user_id: user_id.to_string(),
         slug: slug.to_string(),
+        pool_slug: None,
         endpoint_id: endpoint_id.to_string(),
         api_key_id: api_key_id.map(|s| s.to_string()),
         auth_method: auth_method.to_string(),
@@ -672,6 +709,7 @@ pub async fn update_user_service(
     >,
     ws_frame_injections: Option<&[WsFrameInjection]>,
     admin_only: Option<bool>,
+    pool_slug: Option<&str>,
 ) -> AppResult<()> {
     let current = get_user_service(db, user_id, service_id).await?;
     let mut set_doc = doc! {
@@ -762,6 +800,21 @@ pub async fn update_user_service(
     }
     if let Some(admin_only) = admin_only {
         set_doc.insert("admin_only", admin_only);
+    }
+    if let Some(pool_slug) = pool_slug {
+        match normalize_optional_slug(Some(pool_slug), "pool_slug")? {
+            Some(normalized) => {
+                if normalized == current.slug {
+                    return Err(AppError::ValidationError(
+                        "pool_slug must differ from this service's member slug".to_string(),
+                    ));
+                }
+                set_doc.insert("pool_slug", normalized);
+            }
+            None => {
+                set_doc.insert("pool_slug", bson::Bson::Null);
+            }
+        }
     }
     if let Some(id_config) = identity {
         let id_config = normalize_identity_config(id_config)?;
@@ -1540,6 +1593,7 @@ pub async fn deactivate_user_service(
         None,
         None,
         None,
+        None,
     )
     .await?;
 
@@ -2084,6 +2138,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .expect_err("switching to header without auth_key_name should fail");
@@ -2132,6 +2187,7 @@ mod tests {
             None,
             None,
             Some(&rules),
+            None,
             None,
         )
         .await
@@ -2194,6 +2250,7 @@ mod tests {
             None,
             Some(&too_many),
             None,
+            None,
         )
         .await
         .expect_err("more than four rules should be rejected");
@@ -2221,6 +2278,7 @@ mod tests {
             None,
             Some(&overlong_rules),
             None,
+            None,
         )
         .await
         .expect_err("overlong templates should be rejected");
@@ -2229,6 +2287,69 @@ mod tests {
             AppError::ValidationError(message)
                 if message.contains("template must not exceed 4096 bytes")
         ));
+    }
+
+    #[tokio::test]
+    async fn update_user_service_sets_and_clears_pool_slug() {
+        let Some(db) = connect_test_database("user_service_pool_slug").await else {
+            eprintln!("skipping user_service_service integration test: no local MongoDB available");
+            return;
+        };
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        let service =
+            test_user_service(&service_id, &user_id, "worker-a", "endpoint-1", None, None);
+        db.collection::<UserService>(COLLECTION_NAME)
+            .insert_one(&service)
+            .await
+            .unwrap();
+
+        update_user_service(
+            &db,
+            &user_id,
+            &user_id,
+            &service_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("gpu-pool"),
+        )
+        .await
+        .unwrap();
+
+        let updated = get_user_service(&db, &user_id, &service_id).await.unwrap();
+        assert_eq!(updated.pool_slug.as_deref(), Some("gpu-pool"));
+
+        update_user_service(
+            &db,
+            &user_id,
+            &user_id,
+            &service_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(""),
+        )
+        .await
+        .unwrap();
+
+        let updated = get_user_service(&db, &user_id, &service_id).await.unwrap();
+        assert!(updated.pool_slug.is_none());
     }
 
     #[test]

@@ -1077,6 +1077,7 @@ async fn preflight_proxy_deny_before_resolution(
     } else {
         proxy_service::find_approval_resolution_hint(
             &state.db,
+            state.node_ws_manager.as_ref(),
             &approval_owner_user_id,
             slug,
             catalog_service_id,

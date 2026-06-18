@@ -115,11 +115,10 @@ pub async fn resolve_ssh_auth_context(
     service_id: &str,
     catalog_slug: &str,
 ) -> AppResult<ResolvedSshAuthContext> {
-    let effective_owner = crate::services::proxy_service::find_effective_service_owner(
+    let effective_owner = crate::services::proxy_service::find_effective_catalog_service_owner(
         db,
         actor_user_id,
-        None,
-        Some(service_id),
+        service_id,
     )
     .await?;
     let owner_user_id = effective_owner.as_deref().unwrap_or(actor_user_id);

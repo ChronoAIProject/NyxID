@@ -14,6 +14,9 @@ pub struct UserService {
     pub user_id: String,
     /// Proxy path slug (e.g., "llm-openai", "my-custom-api")
     pub slug: String,
+    /// Optional stable proxy slug shared by interchangeable services.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_slug: Option<String>,
     /// FK to UserEndpoint
     pub endpoint_id: String,
     /// FK to UserApiKey (None for no-auth auto-connected services)
@@ -135,6 +138,7 @@ mod tests {
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             slug: "llm-openai".to_string(),
+            pool_slug: Some("llm-pool".to_string()),
             endpoint_id: uuid::Uuid::new_v4().to_string(),
             api_key_id: Some(uuid::Uuid::new_v4().to_string()),
             auth_method: "bearer".to_string(),
@@ -168,6 +172,7 @@ mod tests {
         let restored: UserService = bson::from_document(doc).expect("deserialize");
         assert_eq!(svc.id, restored.id);
         assert_eq!(svc.slug, restored.slug);
+        assert_eq!(restored.pool_slug.as_deref(), Some("llm-pool"));
         assert_eq!(svc.node_priority, restored.node_priority);
         assert_eq!(restored.service_type, "http");
         assert_eq!(restored.identity_propagation_mode, "headers");
@@ -183,6 +188,7 @@ mod tests {
             id: "id".to_string(),
             user_id: "uid".to_string(),
             slug: "test".to_string(),
+            pool_slug: None,
             endpoint_id: "ep".to_string(),
             api_key_id: Some("ak".to_string()),
             auth_method: "header".to_string(),
@@ -232,6 +238,7 @@ mod tests {
             id: "id".to_string(),
             user_id: "uid".to_string(),
             slug: "test".to_string(),
+            pool_slug: None,
             endpoint_id: "ep".to_string(),
             api_key_id: None,
             auth_method: "none".to_string(),
@@ -288,6 +295,7 @@ mod tests {
             id: "id".to_string(),
             user_id: "uid".to_string(),
             slug: "auto-svc".to_string(),
+            pool_slug: None,
             endpoint_id: "ep".to_string(),
             api_key_id: None,
             auth_method: "none".to_string(),
