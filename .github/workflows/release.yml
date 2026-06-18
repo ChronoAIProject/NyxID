@@ -142,7 +142,17 @@ jobs:
           path: target/distrib/
           merge-multiple: true
       - name: Install dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
+          # cargo-dist 0.30.0 emits `apt-get install …` without `-y`, which
+          # aborts in the aarch64-linux buildpack-deps:focal container because
+          # stdin is non-interactive. Pre-configure apt to assume yes; no-op on
+          # macOS targets and unprivileged host runners (no write access to
+          # /etc/apt/apt.conf.d).
+          if [ -d /etc/apt/apt.conf.d ] && [ -w /etc/apt/apt.conf.d ]; then
+            echo 'APT::Get::Assume-Yes "true";' > /etc/apt/apt.conf.d/99-noninteractive
+          fi
           ${{ matrix.packages_install }}
       - name: Build artifacts
         shell: bash
