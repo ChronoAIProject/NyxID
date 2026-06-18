@@ -315,4 +315,13 @@ mod tests {
         let info = Cli::parse_from(["nyxid", "info"]);
         assert!(extract_profile(&info.command).is_none());
     }
+
+    #[test]
+    fn login_device_and_password_conflict() {
+        let err = match Cli::try_parse_from(["nyxid", "login", "--password", "--device"]) {
+            Ok(_) => panic!("--device and --password must conflict"),
+            Err(err) => err,
+        };
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
 }

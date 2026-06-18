@@ -14,6 +14,8 @@
 
 use std::process::Command;
 
+pub type BrowserError = std::io::Error;
+
 /// True when running inside Windows Subsystem for Linux (WSL 1 or 2).
 ///
 /// Checks the interop env vars first — `WSL_INTEROP` / `WSL_DISTRO_NAME`
@@ -38,7 +40,7 @@ pub fn is_wsl() -> bool {
 /// Native platforms go straight through `open::that`. Under WSL we use
 /// [`open_browser_wsl`] so the URL actually reaches a Windows browser
 /// instead of silently failing on a missing `wslview`.
-pub fn open_browser(url: &str) -> std::io::Result<()> {
+pub fn open_browser(url: &str) -> Result<(), BrowserError> {
     if is_wsl() {
         open_browser_wsl(url)
     } else {
@@ -48,7 +50,7 @@ pub fn open_browser(url: &str) -> std::io::Result<()> {
 
 /// WSL bridge: try each Windows-side opener until one launches the URL,
 /// then fall back to the `open` crate's generic UNIX chain.
-fn open_browser_wsl(url: &str) -> std::io::Result<()> {
+fn open_browser_wsl(url: &str) -> Result<(), BrowserError> {
     let mut last_err: Option<std::io::Error> = None;
     for mut cmd in wsl_open_commands(url) {
         match cmd.status() {

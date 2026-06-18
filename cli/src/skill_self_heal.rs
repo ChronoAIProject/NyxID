@@ -271,6 +271,7 @@ mod tests {
             crate::cli::LoginArgs {
                 base_url: String::new(),
                 password: false,
+                device: false,
                 email: None,
                 profile: None
             }
@@ -282,6 +283,7 @@ mod tests {
         assert!(!should_run(&Commands::Login(crate::cli::LoginArgs {
             base_url: String::new(),
             password: false,
+            device: false,
             email: None,
             profile: None
         })));

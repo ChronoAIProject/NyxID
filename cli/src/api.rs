@@ -1,10 +1,58 @@
 use anyhow::{Context, Result, bail};
 use reqwest::Client;
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 
 /// User-Agent string sent on all CLI HTTP requests.
 pub const CLI_USER_AGENT: &str = concat!("nyxid-cli/", env!("CARGO_PKG_VERSION"));
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AuthDeviceRequestBody {
+    pub client_label: Option<String>,
+    pub client_user_agent: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct AuthDeviceRequestResponse {
+    pub device_code: String,
+    pub user_code: String,
+    pub verification_uri: String,
+    pub verification_uri_complete: String,
+    pub expires_in: u64,
+    pub interval: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AuthDevicePollBody {
+    pub device_code: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct AuthDevicePollResponse {
+    pub access_token: String,
+    pub refresh_token: String,
+    pub token_type: String,
+    pub expires_in: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct ErrorEnvelope {
+    pub error: String,
+    pub error_code: i64,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthDeviceRequestOutcome {
+    Created(AuthDeviceRequestResponse),
+    NotSupported,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthDevicePollOutcome {
+    Delivered(AuthDevicePollResponse),
+    Error(ErrorEnvelope),
+}
 
 pub fn build_cli_http_client(profile: Option<&str>) -> Result<Client> {
     // Attach `X-NyxID-Client: cli` + `X-NyxID-Client-Version` ONLY when
@@ -69,6 +117,71 @@ pub fn build_cli_http_client(profile: Option<&str>) -> Result<Client> {
     }
 
     builder.build().context("Failed to build HTTP client")
+}
+
+pub async fn auth_device_request(
+    base_url: &str,
+    body: &AuthDeviceRequestBody,
+    profile: Option<&str>,
+) -> Result<AuthDeviceRequestOutcome> {
+    let base = format!("{}/api/v1", base_url.trim_end_matches('/'));
+    let url = format!("{base}/auth/device/request");
+    let client = build_cli_http_client(profile)?;
+
+    let resp = client
+        .post(&url)
+        .json(body)
+        .send()
+        .await
+        .context("POST /auth/device/request failed")?;
+
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(AuthDeviceRequestOutcome::NotSupported);
+    }
+
+    if resp.status().is_success() {
+        let body = resp
+            .json::<AuthDeviceRequestResponse>()
+            .await
+            .context("Failed to parse response from /auth/device/request")?;
+        return Ok(AuthDeviceRequestOutcome::Created(body));
+    }
+
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    bail!("/auth/device/request failed (HTTP {status}): {body}");
+}
+
+pub async fn auth_device_poll(
+    base_url: &str,
+    body: &AuthDevicePollBody,
+    profile: Option<&str>,
+) -> Result<AuthDevicePollOutcome> {
+    let base = format!("{}/api/v1", base_url.trim_end_matches('/'));
+    let url = format!("{base}/auth/device/poll");
+    let client = build_cli_http_client(profile)?;
+
+    let resp = client
+        .post(&url)
+        .json(body)
+        .send()
+        .await
+        .context("POST /auth/device/poll failed")?;
+
+    if resp.status().is_success() {
+        let body = resp
+            .json::<AuthDevicePollResponse>()
+            .await
+            .context("Failed to parse response from /auth/device/poll")?;
+        return Ok(AuthDevicePollOutcome::Delivered(body));
+    }
+
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    match serde_json::from_str::<ErrorEnvelope>(&body) {
+        Ok(error) => Ok(AuthDevicePollOutcome::Error(error)),
+        Err(_) => bail!("/auth/device/poll failed (HTTP {status}): {body}"),
+    }
 }
 
 pub struct ApiClient {
