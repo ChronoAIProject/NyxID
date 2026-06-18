@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use mongodb::bson::doc;
@@ -38,6 +39,10 @@ const AUTO_PROVISION_SOURCE: &str = "auto_provision";
 
 static POOL_ROUND_ROBIN: std::sync::LazyLock<DashMap<String, AtomicUsize>> =
     std::sync::LazyLock::new(DashMap::new);
+static POOL_DIRECT_UNHEALTHY_UNTIL: std::sync::LazyLock<DashMap<String, Instant>> =
+    std::sync::LazyLock::new(DashMap::new);
+
+const DIRECT_POOL_MEMBER_UNHEALTHY_SECS: u64 = 30;
 
 #[derive(Clone, Copy)]
 enum PoolSelectionMode {
@@ -685,6 +690,7 @@ pub struct UserServiceResolution {
     pub target: ProxyTarget,
     pub node_id: Option<String>,
     pub user_service_id: String,
+    pub pool_slug: Option<String>,
     pub has_server_credential: bool,
     /// Set when the resolved UserService was reached via org membership
     /// (the actor has no personal copy). `None` means personal credentials.
@@ -744,6 +750,15 @@ async fn select_pool_member(
     let mut candidates = Vec::new();
     for member in members {
         let Some(node_id) = member.node_id.as_deref().filter(|nid| !nid.is_empty()) else {
+            if is_direct_pool_member_unhealthy(owner_id, pool_slug, &member.id) {
+                tracing::warn!(
+                    owner_id = %owner_id,
+                    pool_slug = %pool_slug,
+                    user_service_id = %member.id,
+                    "Skipping service-pool member because its direct endpoint is in unhealthy cooldown"
+                );
+                continue;
+            }
             candidates.push(member);
             continue;
         };
@@ -774,6 +789,42 @@ async fn select_pool_member(
         PoolSelectionMode::Advance => counter.fetch_add(1, Ordering::Relaxed),
     };
     Ok(candidates.into_iter().nth(idx % len))
+}
+
+fn direct_pool_health_key(owner_id: &str, pool_slug: &str, user_service_id: &str) -> String {
+    format!("{owner_id}:{pool_slug}:{user_service_id}")
+}
+
+fn is_direct_pool_member_unhealthy(owner_id: &str, pool_slug: &str, user_service_id: &str) -> bool {
+    let key = direct_pool_health_key(owner_id, pool_slug, user_service_id);
+    let now = Instant::now();
+    let expired = match POOL_DIRECT_UNHEALTHY_UNTIL.get(&key) {
+        Some(until) if *until > now => return true,
+        Some(_) => true,
+        None => false,
+    };
+    if expired {
+        POOL_DIRECT_UNHEALTHY_UNTIL.remove(&key);
+    }
+    false
+}
+
+pub(crate) fn mark_direct_pool_member_unhealthy(
+    owner_id: &str,
+    pool_slug: &str,
+    user_service_id: &str,
+) {
+    POOL_DIRECT_UNHEALTHY_UNTIL.insert(
+        direct_pool_health_key(owner_id, pool_slug, user_service_id),
+        Instant::now() + Duration::from_secs(DIRECT_POOL_MEMBER_UNHEALTHY_SECS),
+    );
+    tracing::warn!(
+        owner_id = %owner_id,
+        pool_slug = %pool_slug,
+        user_service_id = %user_service_id,
+        unhealthy_secs = DIRECT_POOL_MEMBER_UNHEALTHY_SECS,
+        "Marking direct service-pool member unhealthy after proxy transport failure"
+    );
 }
 
 /// Resolve proxy target from the new UserService model.
@@ -1818,6 +1869,7 @@ async fn finish_resolution(
             },
             node_id: user_service.node_id.clone(),
             user_service_id: user_service.id.clone(),
+            pool_slug: user_service.pool_slug.clone(),
             has_server_credential: true,
             org_routing,
         });
@@ -1859,6 +1911,7 @@ async fn finish_resolution(
             },
             node_id: user_service.node_id.clone(),
             user_service_id: user_service.id.clone(),
+            pool_slug: user_service.pool_slug.clone(),
             has_server_credential: true,
             org_routing,
         });
@@ -1925,6 +1978,7 @@ async fn finish_resolution(
             },
             node_id: user_service.node_id.clone(),
             user_service_id: user_service.id.clone(),
+            pool_slug: user_service.pool_slug.clone(),
             has_server_credential,
             org_routing,
         });
@@ -1969,6 +2023,7 @@ async fn finish_resolution(
         },
         node_id: user_service.node_id.clone(),
         user_service_id: user_service.id.clone(),
+        pool_slug: user_service.pool_slug.clone(),
         has_server_credential: true,
         org_routing,
     })
@@ -3222,6 +3277,85 @@ mod tests {
             .await
             .unwrap()
             .expect("viable pool member");
+            assert_eq!(resolved.user_service_id, service_b_id);
+            assert_eq!(resolved.target.base_url, "https://worker-b.example.test");
+        }
+    }
+
+    #[tokio::test]
+    async fn user_service_pool_slug_skips_unhealthy_direct_members() {
+        let Some(db) = connect_test_database("proxy_pool_skip_direct").await else {
+            eprintln!("skipping proxy pool integration test: no local MongoDB available");
+            return;
+        };
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let endpoint_a_id = uuid::Uuid::new_v4().to_string();
+        let endpoint_b_id = uuid::Uuid::new_v4().to_string();
+        let service_a_id = uuid::Uuid::new_v4().to_string();
+        let service_b_id = uuid::Uuid::new_v4().to_string();
+        let pool_slug = format!("pool-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_many([
+                test_user_endpoint(
+                    &endpoint_a_id,
+                    &user_id,
+                    "Worker A",
+                    "https://worker-a.example.test",
+                    None,
+                    None,
+                ),
+                test_user_endpoint(
+                    &endpoint_b_id,
+                    &user_id,
+                    "Worker B",
+                    "https://worker-b.example.test",
+                    None,
+                    None,
+                ),
+            ])
+            .await
+            .unwrap();
+
+        let mut unhealthy_member = test_user_service(
+            &service_a_id,
+            &user_id,
+            "worker-a",
+            &endpoint_a_id,
+            None,
+            None,
+        );
+        unhealthy_member.pool_slug = Some(pool_slug.clone());
+        let mut healthy_member = test_user_service(
+            &service_b_id,
+            &user_id,
+            "worker-b",
+            &endpoint_b_id,
+            None,
+            None,
+        );
+        healthy_member.pool_slug = Some(pool_slug.clone());
+        db.collection::<crate::models::user_service::UserService>(USER_SERVICES)
+            .insert_many([unhealthy_member, healthy_member])
+            .await
+            .unwrap();
+
+        mark_direct_pool_member_unhealthy(&user_id, &pool_slug, &service_a_id);
+
+        let node_manager = Arc::new(NodeWsManager::new(30, 100));
+        for _ in 0..3 {
+            let resolved = resolve_proxy_target_from_user_service(
+                &db,
+                &test_encryption_keys(),
+                &node_manager,
+                &user_id,
+                Some(&pool_slug),
+                None,
+            )
+            .await
+            .unwrap()
+            .expect("healthy pool member");
             assert_eq!(resolved.user_service_id, service_b_id);
             assert_eq!(resolved.target.base_url, "https://worker-b.example.test");
         }

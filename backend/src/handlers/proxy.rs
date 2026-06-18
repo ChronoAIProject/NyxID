@@ -213,6 +213,9 @@ struct PreResolved {
     node_id: Option<String>,
     /// The UserService ID for API key scope checks.
     user_service_id: Option<String>,
+    /// The pool slug used to select this service, when it was chosen as a
+    /// member of an interchangeable direct-service pool.
+    pool_slug: Option<String>,
     has_server_credential: bool,
     /// The user_id that owns the resolved UserService. For personal
     /// resolutions this is the actor; for org-routed resolutions this is
@@ -531,6 +534,7 @@ async fn proxy_request_inner(
                     target: resolved.target,
                     node_id: resolved.node_id,
                     user_service_id: Some(resolved.user_service_id),
+                    pool_slug: resolved.pool_slug,
                     has_server_credential: resolved.has_server_credential,
                     effective_owner_id: resolved
                         .org_routing
@@ -585,6 +589,7 @@ async fn proxy_request_inner(
                 target: resolved.target,
                 node_id: resolved.node_id,
                 user_service_id: Some(resolved.user_service_id),
+                pool_slug: resolved.pool_slug,
                 has_server_credential: resolved.has_server_credential,
                 effective_owner_id: resolved
                     .org_routing
@@ -738,6 +743,7 @@ async fn proxy_request_by_slug_inner(
                     target: resolved.target,
                     node_id: resolved.node_id,
                     user_service_id: Some(resolved.user_service_id),
+                    pool_slug: resolved.pool_slug,
                     has_server_credential: resolved.has_server_credential,
                     effective_owner_id: resolved
                         .org_routing
@@ -792,6 +798,7 @@ async fn proxy_request_by_slug_inner(
                 target: resolved.target,
                 node_id: resolved.node_id,
                 user_service_id: Some(resolved.user_service_id),
+                pool_slug: resolved.pool_slug,
                 has_server_credential: resolved.has_server_credential,
                 effective_owner_id: resolved
                     .org_routing
@@ -1183,6 +1190,8 @@ async fn execute_proxy_inner(
         target,
         has_server_credential,
         resolved_user_service_id,
+        resolved_pool_slug,
+        resolved_effective_owner_id,
         node_routing_required,
     ) = if let Some(mut pre) = pre_resolved {
         effective_owner_for_approval = Some(pre.effective_owner_id.clone());
@@ -1306,6 +1315,8 @@ async fn execute_proxy_inner(
             pre.target,
             pre.has_server_credential,
             pre.user_service_id,
+            pre.pool_slug,
+            Some(pre.effective_owner_id),
             required,
         )
     } else {
@@ -1343,7 +1354,17 @@ async fn execute_proxy_inner(
         // that failed before a target was resolved (disconnected service,
         // missing credential, etc.). See ChronoAIProject/NyxID#423.
         audit_personal_routing(state, auth_user, None, service_id);
-        resolved
+        let (node_route, target, has_server_credential, user_service_id, node_routing_required) =
+            resolved;
+        (
+            node_route,
+            target,
+            has_server_credential,
+            user_service_id,
+            None,
+            None,
+            node_routing_required,
+        )
     };
 
     // Record the resolved service slug so the outer wrapper can attach it
@@ -2234,7 +2255,7 @@ async fn execute_proxy_inner(
     }
 
     // Reuse the shared reqwest::Client from AppState for connection pooling.
-    let downstream_response = proxy_service::forward_request(
+    let downstream_response = match proxy_service::forward_request(
         &state.http_client,
         &target,
         reqwest_method,
@@ -2248,7 +2269,26 @@ async fn execute_proxy_inner(
         &state.token_exchange_cache,
         &state.cloud_response_cache,
     )
-    .await?;
+    .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            if matches!(&error, AppError::Internal(message) if message == "Proxy request failed")
+                && let (Some(owner_id), Some(pool_slug), Some(user_service_id)) = (
+                    resolved_effective_owner_id.as_deref(),
+                    resolved_pool_slug.as_deref(),
+                    resolved_user_service_id.as_deref(),
+                )
+            {
+                proxy_service::mark_direct_pool_member_unhealthy(
+                    owner_id,
+                    pool_slug,
+                    user_service_id,
+                );
+            }
+            return Err(error);
+        }
+    };
 
     // Convert reqwest Response back to axum Response
     let status = StatusCode::from_u16(downstream_response.status().as_u16())
