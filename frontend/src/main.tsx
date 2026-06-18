@@ -21,7 +21,8 @@ sessionStorage.removeItem("nyxid_chunk_reload");
 // visitors so `CliPairPage` can redirect to `/login` with a
 // `return_to` carrying `?code=...` intact. Routing to bare
 // `/login` from here would drop the query string and strand the
-// pairing.
+// pairing. `/login/device` follows the same pattern for CLI
+// device-code login and preserves `?user_code=...`.
 function isPublicPath(path: string): boolean {
   return (
     path === "/" ||
@@ -37,7 +38,8 @@ function isPublicPath(path: string): boolean {
     path.startsWith("/error") ||
     path.startsWith("/oauth-consent") ||
     path === "/cli-auth" ||
-    path === "/cli/pair"
+    path === "/cli/pair" ||
+    path === "/login/device"
   );
 }
 

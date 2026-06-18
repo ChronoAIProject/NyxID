@@ -1456,6 +1456,19 @@ const MOCK_HANDLERS: MockHandler[] = [
 
   // Public config
   (p) => p === "/public/config" ? MOCK_PUBLIC_CONFIG : undefined,
+
+  // Auth device-code login (issue #971 T5 frozen contract)
+  (p) =>
+    p === "/auth/device/preview"
+      ? {
+          client_label: "wsl-calvin",
+          client_user_agent: "nyxid-cli/0.8.0",
+          initiated_at: "2026-06-18T11:32:14Z",
+          expires_at: "2026-06-18T11:42:14Z",
+          status: "pending",
+        }
+      : undefined,
+  (p) => (p === "/auth/device/approve" ? { ok: true } : undefined),
 ];
 
 let _mockLatched: boolean | null = null;
