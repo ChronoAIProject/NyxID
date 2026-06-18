@@ -41,11 +41,15 @@ nyxid login --base-url https://nyx-api.chrono-ai.fun
 nyxid login --base-url http://localhost:3001
 ```
 
-For headless or CI environments, use password login with an environment variable:
+For headless environments (SSH, container, WSL with no `$DISPLAY`), `nyxid login` auto-falls back to the **device-code flow**. You can also force it explicitly:
 
 ```bash
-nyxid login --base-url https://nyx-api.chrono-ai.fun --password --password-env NYXID_PASSWORD
+nyxid login --device --base-url https://nyx-api.chrono-ai.fun
 ```
+
+The CLI prints a one-time code and a URL; open the URL on any signed-in browser (phone, another machine), paste the code, approve, and the CLI completes.
+
+For non-interactive CI use a pre-issued API key (`nyxid api-key create --platform <agent>`) instead of an interactive login — `nyxid login` short-circuits in CI environments with a hint to do exactly that.
 
 Confirm the session is working:
 

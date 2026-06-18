@@ -230,13 +230,7 @@ const cliPairRoute = createRoute({
 const loginDeviceRoute = createRoute({
   path: "/login/device",
   getParentRoute: () => rootRoute,
-  validateSearch: (
-    search: Record<string, unknown>,
-  ): { readonly user_code?: string } => ({
-    ...(typeof search.user_code === "string"
-      ? { user_code: search.user_code }
-      : {}),
-  }),
+  validateSearch: (): Record<string, never> => ({}),
   component: LoginDevicePage,
 });
 

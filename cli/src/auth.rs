@@ -1005,11 +1005,26 @@ async fn run_device_code_login_with_api(
 
     eprintln!("! First copy your one-time code: {}", challenge.user_code);
     eprintln!();
-    eprintln!("Then open: {}", challenge.verification_uri_complete);
     eprintln!(
-        "  or visit {} and enter the code above.",
+        "Then open {} and enter the code above.",
         challenge.verification_uri
     );
+
+    let interactive = std::io::IsTerminal::is_terminal(&std::io::stdin())
+        && std::io::IsTerminal::is_terminal(&std::io::stderr());
+    if interactive {
+        eprint!("\nOpen in your browser? [Y/n] ");
+        std::io::stderr().flush().ok();
+        let mut answer = String::new();
+        if std::io::stdin().read_line(&mut answer).is_ok() {
+            let a = answer.trim().to_ascii_lowercase();
+            if a.is_empty() || a == "y" || a == "yes" {
+                if let Err(e) = crate::browser::open_browser(&challenge.verification_uri) {
+                    eprintln!("Could not open browser: {e}. Paste the URL above manually.");
+                }
+            }
+        }
+    }
 
     poll_device_code_login(
         base_url,

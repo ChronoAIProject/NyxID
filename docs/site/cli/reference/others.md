@@ -48,7 +48,9 @@ nyxid ai-setup status                        # show which tools have skills inst
 Bootstrap and tear down the locally stored session. Day-to-day login lives in [Authenticate](/docs/cli/getting-started/authenticate).
 
 ```bash
-nyxid login --base-url <BASE_URL>        # browser sign-in (add --password for email/password)
+nyxid login --base-url <BASE_URL>        # browser sign-in; auto-falls back to device-code when headless
+nyxid login --device --base-url <BASE_URL>  # force RFC 8628 device-code flow (no local browser needed)
+nyxid login --password --email <addr>    # email + password (only if EMAIL_AUTH_ENABLED)
 nyxid logout                             # clear the stored session
 nyxid register --base-url <URL> --email <addr> --invite-code <CODE>
 nyxid verify-email --token <TOKEN>       # confirm a new account

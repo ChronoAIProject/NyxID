@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
-import { Link, useNavigate, useSearch } from "@tanstack/react-router";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Link, useNavigate } from "@tanstack/react-router";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -28,37 +28,57 @@ import {
 import { useAuthStore } from "@/stores/auth-store";
 
 const VALID_CODE_LENGTH = 9;
+const CLICK_THROTTLE_MS = 750;
 
 export function LoginDevicePage() {
   const navigate = useNavigate();
-  const search = useSearch({ strict: false }) as { user_code?: string };
   const { isAuthenticated, isLoading } = useAuthStore();
-  const initialCode =
-    typeof search.user_code === "string"
-      ? formatAuthDeviceUserCodeInput(search.user_code)
-      : "";
-  const [userCode, setUserCode] = useState(initialCode);
+  const [userCode, setUserCode] = useState("");
   const [approved, setApproved] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const lastClickAtRef = useRef(0);
   const normalizedCode = useMemo(() => {
     const parsed = userCodeSchema.safeParse(userCode);
     return parsed.success ? parsed.data : null;
   }, [userCode]);
-  const preview = usePreviewAuthDevice(normalizedCode);
+  const preview = usePreviewAuthDevice();
   const approve = useApproveAuthDevice();
+  const step: "enter-code" | "review" | "approved" = approved
+    ? "approved"
+    : preview.data
+      ? "review"
+      : "enter-code";
 
   useEffect(() => {
     if (isLoading || isAuthenticated) return;
-    const next = `/login/device?user_code=${encodeURIComponent(userCode)}`;
-    void navigate({ to: "/login", search: { return_to: next } });
-  }, [isAuthenticated, isLoading, navigate, userCode]);
+    void navigate({ to: "/login", search: { return_to: "/login/device" } });
+  }, [isAuthenticated, isLoading, navigate]);
+
+  function withinCooldown(): boolean {
+    const now = Date.now();
+    if (now - lastClickAtRef.current < CLICK_THROTTLE_MS) return true;
+    lastClickAtRef.current = now;
+    return false;
+  }
+
+  function resetToEnterCode() {
+    preview.reset();
+    approve.reset();
+    setSubmitError(null);
+  }
+
+  async function handleContinue() {
+    if (!normalizedCode || preview.isPending || withinCooldown()) return;
+    setSubmitError(null);
+    try {
+      await preview.mutateAsync(normalizedCode);
+    } catch (error) {
+      setSubmitError(friendlyAuthDeviceErrorMessage(error));
+    }
+  }
 
   async function handleApprove() {
-    if (!normalizedCode) {
-      setSubmitError("Enter the 8-character code from your terminal.");
-      return;
-    }
-
+    if (!normalizedCode || approve.isPending || withinCooldown()) return;
     setSubmitError(null);
     try {
       await approve.mutateAsync(normalizedCode);
@@ -123,9 +143,13 @@ export function LoginDevicePage() {
                 maxLength={VALID_CODE_LENGTH}
                 placeholder="ABCD-EFGH"
                 value={userCode}
+                disabled={
+                  step === "review" || preview.isPending || approve.isPending
+                }
                 onChange={(event) => {
                   setSubmitError(null);
                   setApproved(false);
+                  resetToEnterCode();
                   setUserCode(
                     formatAuthDeviceUserCodeInput(event.target.value),
                   );
@@ -134,26 +158,26 @@ export function LoginDevicePage() {
             </div>
 
             {submitError ? <ErrorBanner message={submitError} /> : null}
-            {!normalizedCode && userCode.length > 0 ? (
+            {!normalizedCode && userCode.replace("-", "").length === 8 ? (
               <ErrorBanner message="Enter an 8-character code using A-H, J-K, M-N, P-T, and V-Z." />
             ) : null}
             {preview.isError ? (
               <ErrorBanner
                 message={friendlyAuthDeviceErrorMessage(preview.error)}
-                onRetry={() => void preview.refetch()}
               />
             ) : null}
 
             <WarningBanner />
 
-            <PreviewPanel
-              isLoading={preview.isFetching}
-              clientLabel={preview.data?.client_label ?? null}
-              clientUserAgent={preview.data?.client_user_agent ?? null}
-              initiatedAt={preview.data?.initiated_at ?? null}
-              expiresAt={preview.data?.expires_at ?? null}
-              status={preview.data?.status ?? null}
-            />
+            {step === "review" && preview.data ? (
+              <PreviewPanel
+                clientLabel={preview.data.client_label}
+                clientUserAgent={preview.data.client_user_agent}
+                initiatedAt={preview.data.initiated_at}
+                expiresAt={preview.data.expires_at}
+                status={preview.data.status}
+              />
+            ) : null}
 
             <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
               <Button
@@ -163,18 +187,33 @@ export function LoginDevicePage() {
               >
                 Cancel
               </Button>
-              <Button
-                type="button"
-                variant="primary"
-                disabled={!normalizedCode || preview.isError}
-                isLoading={approve.isPending}
-                onClick={() => void handleApprove()}
-              >
-                <ButtonIcon variant="primary">
-                  <ShieldCheck />
-                </ButtonIcon>
-                Sign in to a CLI on that device
-              </Button>
+              {step === "enter-code" ? (
+                <Button
+                  type="button"
+                  variant="primary"
+                  disabled={!normalizedCode || preview.isPending}
+                  isLoading={preview.isPending}
+                  onClick={() => void handleContinue()}
+                >
+                  <ButtonIcon variant="primary">
+                    <ShieldCheck />
+                  </ButtonIcon>
+                  Continue
+                </Button>
+              ) : (
+                <Button
+                  type="button"
+                  variant="primary"
+                  disabled={approve.isPending}
+                  isLoading={approve.isPending}
+                  onClick={() => void handleApprove()}
+                >
+                  <ButtonIcon variant="primary">
+                    <ShieldCheck />
+                  </ButtonIcon>
+                  Approve
+                </Button>
+              )}
             </div>
           </CardContent>
         </Card>
@@ -206,36 +245,18 @@ function WarningBanner() {
 }
 
 function PreviewPanel({
-  isLoading,
   clientLabel,
   clientUserAgent,
   initiatedAt,
   expiresAt,
   status,
 }: {
-  readonly isLoading: boolean;
   readonly clientLabel: string | null;
   readonly clientUserAgent: string | null;
   readonly initiatedAt: string | null;
   readonly expiresAt: string | null;
-  readonly status: string | null;
+  readonly status: string;
 }) {
-  if (isLoading) {
-    return (
-      <div className="rounded-xl border border-border/50 bg-white/[0.02] p-4">
-        <Skeleton className="h-20 w-full" />
-      </div>
-    );
-  }
-
-  if (!status) {
-    return (
-      <div className="rounded-xl border border-border/50 bg-white/[0.02] px-4 py-3 text-[12px] text-muted-foreground">
-        Enter the code from your terminal to preview the login request.
-      </div>
-    );
-  }
-
   return (
     <div className="rounded-xl border border-border/50 bg-white/[0.02]">
       <div className="border-b border-border/50 px-4 py-2.5">

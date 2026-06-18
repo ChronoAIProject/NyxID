@@ -1,4 +1,4 @@
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import {
   approveBodySchema,
@@ -8,19 +8,17 @@ import {
   type PreviewAuthDeviceResponse,
 } from "@/schemas/auth-device";
 
-export function usePreviewAuthDevice(userCode: string | null) {
-  return useQuery({
-    queryKey: ["auth-device-preview", userCode],
-    queryFn: async (): Promise<PreviewAuthDeviceResponse | null> => {
-      if (!userCode) return null;
+export function usePreviewAuthDevice() {
+  return useMutation({
+    mutationFn: async (
+      userCode: string,
+    ): Promise<PreviewAuthDeviceResponse> => {
       const response = await api.post<PreviewAuthDeviceResponse>(
         "/auth/device/preview",
         { user_code: userCode },
       );
       return previewResponseSchema.parse(response);
     },
-    enabled: !!userCode,
-    retry: false,
   });
 }
 

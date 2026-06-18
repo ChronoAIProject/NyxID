@@ -238,7 +238,6 @@ pub async fn approve_auth_device(
 #[tracing::instrument(skip_all, fields(client_ip_hash, route = "preview"))]
 pub async fn preview_auth_device(
     State(state): State<AppState>,
-    user: AuthUser,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(body): Json<AuthDevicePreviewBody>,
@@ -261,7 +260,6 @@ pub async fn preview_auth_device(
 
     tracing::info!(
         client_ip_hash = %client_ip_hash,
-        user_id = %user.user_id,
         status_code = 200_u16,
         "auth_device.handler.preview"
     );
@@ -603,28 +601,41 @@ mod tests {
         ));
     }
 
+    // Covers the public mount of /auth/device/preview: an anonymous caller must
+    // succeed and receive the sanitized anti-phishing payload (client_label,
+    // UA, timestamps, status). Approve stays human-only — see the test above.
     #[tokio::test]
-    async fn auth_device_preview_rejects_api_key_auth() {
-        let Some(state) = setup_state("auth_device_api_key_preview").await else {
+    async fn auth_device_preview_accepts_anonymous_caller() {
+        let Some(state) = setup_state("auth_device_preview_anon").await else {
             return;
         };
-        let user_id = Uuid::new_v4().to_string();
-        insert_user(&state, &user_id).await;
-        let api_key = create_api_key(&state, &user_id).await;
+        let initiated = auth_device_service::initiate(
+            &state.db,
+            state.auth_device_hmac_key.as_slice(),
+            InitiateInput {
+                client_label: Some("kitchen-rpi".to_string()),
+                client_user_agent: Some("nyxid-cli/0.7.1".to_string()),
+                client_ip: Some("127.0.0.1".to_string()),
+            },
+        )
+        .await
+        .expect("initiate");
         let server = spawn_test_server(state).await;
 
-        let (status, _) = post_json(
+        let (status, json) = post_json(
             &server,
             "/api/v1/auth/device/preview",
-            Some(&api_key),
-            serde_json::json!({ "user_code": "ABCD-EFGH" }),
+            None,
+            serde_json::json!({ "user_code": initiated.user_code }),
         )
         .await;
-        assert_ne!(status, StatusCode::OK);
-        assert!(matches!(
-            status,
-            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
-        ));
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["client_label"], "kitchen-rpi");
+        assert_eq!(json["client_user_agent"], "nyxid-cli/0.7.1");
+        assert_eq!(json["status"], "pending");
+        assert!(json["initiated_at"].is_string());
+        assert!(json["expires_at"].is_string());
     }
 
     #[tokio::test]
@@ -975,7 +986,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn e2e_api_key_auth_rejected_on_approve_and_preview() {
+    async fn e2e_api_key_auth_rejected_on_approve() {
         let Some(state) = setup_state("auth_device_e2e_api_key_reject").await else {
             return;
         };
@@ -996,21 +1007,6 @@ mod tests {
             approve_status,
             StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
         ));
-
-        let (preview_status, preview_json) = post_json(
-            &server,
-            "/api/v1/auth/device/preview",
-            Some(&api_key),
-            serde_json::json!({ "user_code": "ABCD-EFGH" }),
-        )
-        .await;
-        assert_ne!(preview_status, StatusCode::OK);
-        assert!(matches!(
-            preview_status,
-            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
-        ));
-
         assert_ne!(approve_json, serde_json::json!({ "ok": true }));
-        assert_ne!(preview_json["status"], "pending");
     }
 }

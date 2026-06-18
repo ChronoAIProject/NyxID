@@ -854,7 +854,8 @@ pub fn build_router(
         .route("/poll", post(handlers::devices::poll_device_code));
     let auth_device_public_routes = Router::new()
         .route("/request", post(handlers::auth_device::request_auth_device))
-        .route("/poll", post(handlers::auth_device::poll_auth_device));
+        .route("/poll", post(handlers::auth_device::poll_auth_device))
+        .route("/preview", post(handlers::auth_device::preview_auth_device));
     let device_onboard_public_routes =
         Router::new().route("/redeem", post(handlers::devices::redeem_onboard_device));
 
@@ -961,10 +962,6 @@ pub fn build_router(
         .route(
             "/auth/device/approve",
             post(handlers::auth_device::approve_auth_device),
-        )
-        .route(
-            "/auth/device/preview",
-            post(handlers::auth_device::preview_auth_device),
         )
         .route("/devices/onboard", post(handlers::devices::onboard_device))
         .route(

@@ -16,6 +16,16 @@ nyxid login --base-url <BASE_URL>
 - **Hosted:** `https://nyx-api.chrono-ai.fun`
 - **Self-host:** `http://localhost:3001` (the API runs on 3001; the web console is on 3000)
 
+### Headless / SSH / no browser
+
+If `nyxid login` can't open a browser (SSH session, container, WSL without `$DISPLAY`), it auto-falls back to the **device-code flow**: the CLI prints a one-time code + a URL, you open the URL on any signed-in browser (phone, laptop), type the code, approve, and the CLI completes. You can also force the flow explicitly:
+
+```bash
+nyxid login --device --base-url <BASE_URL>
+```
+
+Set `NYXID_LOGIN_NO_DEVICE_FALLBACK=1` to opt out of the auto-fallback (you'll get the old "hang on browser callback" behavior instead). For non-interactive CI use, generate an API key with `nyxid api-key create` and authenticate via the `nyxid_ag_…` token — `nyxid login` itself short-circuits with an api-key hint when it detects `CI` / `GITHUB_ACTIONS` / `BUILDKITE` / `CIRCLECI` / `JENKINS_URL` / `GITLAB_CI`.
+
 ## Check your session
 
 ```bash

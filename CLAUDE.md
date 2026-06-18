@@ -262,11 +262,13 @@ First-party RFC 8628-style login for headless CLI environments. `nyxid login --d
   - `POST /api/v1/auth/device/request` -- public router, no auth; mints `device_code`, `user_code`, and verification URLs.
   - `POST /api/v1/auth/device/poll` -- public router, no auth; polls by opaque `device_code` and returns the one-time token pair when approved.
   - `POST /api/v1/auth/device/approve` -- human-only router, JWT-authenticated session user; rejects API keys, service accounts, and delegated tokens before handler execution.
-  - `POST /api/v1/auth/device/preview` -- human-only router, JWT-authenticated session user; returns anti-phishing context for a `user_code` without changing state.
+  - `POST /api/v1/auth/device/preview` -- public router, no auth; returns non-sensitive anti-phishing context (`client_label`, `client_user_agent`, timestamps, status) for a `user_code` without changing state. All fields are device-supplied at `/request` time so there is nothing to leak. The verification page itself gates entry on JWT auth and only calls this endpoint after the user has signed in (matching GitHub's terminal -> URL -> login -> code flow); the endpoint stays public as defense-in-depth simplification and to leave room for future surfaces (e.g. anonymous preview before login) without backend changes. Rate-limited per IP by `auth_device_preview_limiter`.
 - **Error codes**: auth-device login uses the existing 11200-11207 block in the node/proxy conventions section above; do not duplicate that table elsewhere.
 - **Atomic delivery**: polling uses a MongoDB `find_one_and_update(...).return_document(Before)` claim from `approved` to `delivered`. The returned pre-update document contains the encrypted delivery tokens for exactly one poller; concurrent or later pollers see `delivered` and receive `AuthDeviceCodeAlreadyDelivered` (11205).
 - **Rate limiters**: `auth_device_request_limiter`, `auth_device_poll_limiter`, `auth_device_approve_limiter`, `auth_device_approve_per_user_limiter`, and `auth_device_preview_limiter`.
-- **CLI**: `nyxid login --device` forces device-code login. Plain `nyxid login` auto-falls back to device-code login when browser launch is unavailable unless `NYXID_LOGIN_NO_DEVICE_FALLBACK=1` is set.
+- **CLI output**: prints `user_code` plus the bare `verification_uri` (never `verification_uri_complete`, which would put the code in the URL and defeat manual-entry anti-phishing). On stdin+stderr TTYs, prompts `Open in your browser? [Y/n]` and `crate::browser::open_browser`s the URL on Enter; falls through with a "paste it manually" hint if the open fails. Non-TTY (CI / piped) skips the prompt and starts polling immediately.
+- **CLI dispatch**: `nyxid login --device` forces device-code login. Plain `nyxid login` auto-falls back to device-code login when browser launch is unavailable unless `NYXID_LOGIN_NO_DEVICE_FALLBACK=1` is set.
+- **Verification page UX** (`/login/device`): auth-gated at entry — unauthenticated visitors are redirected to `/login?return_to=/login/device` (matches GH's terminal → URL → login → code → terminal order). Empty code input on arrival; the `?user_code=` query param is stripped by the router's `validateSearch` and ignored. Two explicit clicks: **Continue** calls `/preview` (anti-phishing block renders), then **Approve** calls `/approve`. No API call fires on typing, focus, mount, or reconnect. Both buttons throttled to ≥ 750 ms between clicks and disabled while their mutation is pending. The input is also disabled during pending preview/approve.
 - **Out of scope**: Mobile approval (deep-link from `/login/device` to the existing approval app) is out of scope for v1; tracked in a follow-up issue if needed.
 
 ## File Structure
@@ -322,7 +324,7 @@ All API routes under `/api/v1`:
 - `/auth/device/request` -- public auth device-code login start; mints `device_code`, `user_code`, and verification URLs
 - `/auth/device/poll` -- public auth device-code login poll; exchanges an approved opaque `device_code` for a token pair
 - `/auth/device/approve` -- human-only auth device-code approval; JWT-authenticated user approves a `user_code`
-- `/auth/device/preview` -- human-only auth device-code anti-phishing lookup for a `user_code`
+- `/auth/device/preview` -- public auth device-code anti-phishing lookup for a `user_code` (no auth, rate-limited per IP)
 - `/users` -- get/update current user
 - `/auth/mfa` -- setup, confirm, verify (login), disable (nested under `/auth` in `backend/src/routes.rs`; `setup` is idempotent against unverified factors per NyxID#506)
 - `/api-keys` -- CRUD + rotate. `ApiKey` model has scope fields: `allowed_service_ids`, `allowed_node_ids`, `allow_all_services`, `allow_all_nodes` (absorbed from deleted AgentGroup model). Also has agent isolation fields: `rate_limit_per_second`, `rate_limit_burst`, `platform`
