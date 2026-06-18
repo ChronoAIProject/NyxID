@@ -1273,6 +1273,13 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     user_services
         .create_index(
             IndexModel::builder()
+                .keys(doc! { "user_id": 1, "pool_slug": 1, "is_active": 1 })
+                .build(),
+        )
+        .await?;
+    user_services
+        .create_index(
+            IndexModel::builder()
                 .keys(doc! { "user_id": 1, "catalog_service_id": 1 })
                 .options(IndexOptions::builder().sparse(true).build())
                 .build(),
@@ -2550,6 +2557,7 @@ async fn migrate_provider_tokens(db: &Database) -> Result<(), Box<dyn std::error
             id: service_id,
             user_id: token.user_id.clone(),
             slug,
+            pool_slug: None,
             endpoint_id: endpoint_id.clone(),
             api_key_id: Some(api_key_id.clone()),
             auth_method,
@@ -2779,6 +2787,7 @@ async fn migrate_service_connections(db: &Database) -> Result<(), Box<dyn std::e
             id: service_id,
             user_id: conn.user_id.clone(),
             slug,
+            pool_slug: None,
             endpoint_id: endpoint_id.clone(),
             api_key_id: Some(api_key_id.clone()),
             auth_method: service.auth_method.clone(),
@@ -3034,6 +3043,7 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
             id: service_id,
             user_id: binding.user_id.clone(),
             slug,
+            pool_slug: None,
             endpoint_id: endpoint_id.clone(),
             api_key_id: Some(api_key_id.clone()),
             auth_method: service.auth_method.clone(),

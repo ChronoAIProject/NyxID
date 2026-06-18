@@ -676,6 +676,7 @@ mod tests {
             id: id.to_string(),
             user_id: user_id.to_string(),
             slug: "test".to_string(),
+            pool_slug: None,
             endpoint_id: "ep-1".to_string(),
             api_key_id: None,
             auth_method: "none".to_string(),

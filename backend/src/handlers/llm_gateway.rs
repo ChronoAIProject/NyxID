@@ -164,6 +164,7 @@ pub async fn llm_proxy_request(
     // alternative is rewiring the resolver to return the org context.
     let owner_for_approval = proxy_service::find_effective_service_owner(
         &state.db,
+        state.node_ws_manager.as_ref(),
         &user_id_str,
         None,
         Some(&service_id),
@@ -1133,6 +1134,7 @@ async fn preflight_llm_deny_before_resolution(
     let approval_owner_user_id = auth_user.effective_approval_owner_user_id();
     let hint = proxy_service::find_approval_resolution_hint(
         &state.db,
+        state.node_ws_manager.as_ref(),
         &approval_owner_user_id,
         None,
         Some(service_id),

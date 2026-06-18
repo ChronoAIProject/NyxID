@@ -1,5 +1,8 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
+use dashmap::DashMap;
 use mongodb::bson::doc;
 use reqwest::Client;
 use url::form_urlencoded;
@@ -27,12 +30,30 @@ use crate::services::delegation_service::DelegatedCredential;
 use crate::services::node_ws_manager::NodeWsManager;
 use crate::services::provider_token_exchange_service::{self, TokenExchangeCache};
 use crate::services::{
-    agent_binding_service, gcp_sa_service, user_api_key_service, user_service_service,
-    user_token_service,
+    agent_binding_service, gcp_sa_service, node_routing_service, user_api_key_service,
+    user_service_service, user_token_service,
 };
 use nyxid_cloud_auth::aws_sigv4::{self, AwsCredentials};
 
 const AUTO_PROVISION_SOURCE: &str = "auto_provision";
+
+static POOL_ROUND_ROBIN: std::sync::LazyLock<DashMap<String, AtomicUsize>> =
+    std::sync::LazyLock::new(DashMap::new);
+static POOL_DIRECT_UNHEALTHY_UNTIL: std::sync::LazyLock<DashMap<String, Instant>> =
+    std::sync::LazyLock::new(DashMap::new);
+
+const DIRECT_POOL_MEMBER_UNHEALTHY_SECS: u64 = 30;
+
+#[derive(Clone, Copy)]
+enum PoolSelectionMode {
+    Peek,
+    Advance,
+}
+
+struct RouteSelectedUserService {
+    service: UserService,
+    selected_pool_slug: Option<String>,
+}
 
 /// Default User-Agent injected at the proxy boundary when neither the
 /// caller nor the resolved service supplies one. Resolved at compile
@@ -674,6 +695,8 @@ pub struct UserServiceResolution {
     pub target: ProxyTarget,
     pub node_id: Option<String>,
     pub user_service_id: String,
+    pub effective_owner_id: String,
+    pub pool_slug: Option<String>,
     pub has_server_credential: bool,
     /// Set when the resolved UserService was reached via org membership
     /// (the actor has no personal copy). `None` means personal credentials.
@@ -702,6 +725,265 @@ fn admin_only_allows_role(
     !user_service.admin_only || role.can_admin()
 }
 
+async fn select_user_service_for_route(
+    db: &mongodb::Database,
+    owner_id: &str,
+    slug: Option<&str>,
+    catalog_service_id: Option<&str>,
+    node_ws_manager: &NodeWsManager,
+    mode: PoolSelectionMode,
+) -> AppResult<Option<RouteSelectedUserService>> {
+    let direct = lookup_user_service(db, owner_id, slug, catalog_service_id).await?;
+    if direct.is_some() || catalog_service_id.is_some() {
+        return Ok(direct.map(|service| RouteSelectedUserService {
+            service,
+            selected_pool_slug: None,
+        }));
+    }
+
+    let Some(pool_slug) = slug else {
+        return Ok(None);
+    };
+    let members = user_service_service::find_pool_members_by_slug(db, owner_id, pool_slug).await?;
+    Ok(
+        select_pool_member(owner_id, pool_slug, members, db, node_ws_manager, mode)
+            .await?
+            .map(|service| RouteSelectedUserService {
+                service,
+                selected_pool_slug: Some(pool_slug.to_string()),
+            }),
+    )
+}
+
+async fn select_pool_member(
+    owner_id: &str,
+    pool_slug: &str,
+    members: Vec<UserService>,
+    db: &mongodb::Database,
+    node_ws_manager: &NodeWsManager,
+    mode: PoolSelectionMode,
+) -> AppResult<Option<UserService>> {
+    let mut candidates = Vec::new();
+    for member in members {
+        let Some(node_id) = member.node_id.as_deref().filter(|nid| !nid.is_empty()) else {
+            if is_direct_pool_member_unhealthy(owner_id, pool_slug, &member.id) {
+                tracing::warn!(
+                    owner_id = %owner_id,
+                    pool_slug = %pool_slug,
+                    user_service_id = %member.id,
+                    "Skipping service-pool member because its direct endpoint is in unhealthy cooldown"
+                );
+                continue;
+            }
+            candidates.push(member);
+            continue;
+        };
+        if node_routing_service::is_node_id_viable(db, node_id, node_ws_manager).await? {
+            candidates.push(member);
+        } else {
+            tracing::warn!(
+                owner_id = %owner_id,
+                pool_slug = %pool_slug,
+                user_service_id = %member.id,
+                node_id = %node_id,
+                "Skipping service-pool member because its configured node is not viable"
+            );
+        }
+    }
+
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+
+    let counter_key = format!("{owner_id}:{pool_slug}");
+    let len = candidates.len();
+    let counter = POOL_ROUND_ROBIN
+        .entry(counter_key)
+        .or_insert_with(|| AtomicUsize::new(0));
+    let idx = match mode {
+        PoolSelectionMode::Peek => counter.load(Ordering::Relaxed),
+        PoolSelectionMode::Advance => counter.fetch_add(1, Ordering::Relaxed),
+    };
+    Ok(candidates.into_iter().nth(idx % len))
+}
+
+fn is_direct_pool_member(member: &UserService) -> bool {
+    member.node_id.as_deref().is_none_or(|nid| nid.is_empty())
+}
+
+fn select_direct_pool_member(
+    owner_id: &str,
+    pool_slug: &str,
+    members: Vec<UserService>,
+    excluded_user_service_ids: &[String],
+    mode: PoolSelectionMode,
+) -> Option<UserService> {
+    let candidates: Vec<UserService> = members
+        .into_iter()
+        .filter(is_direct_pool_member)
+        .filter(|member| !excluded_user_service_ids.contains(&member.id))
+        .filter(|member| {
+            let unhealthy = is_direct_pool_member_unhealthy(owner_id, pool_slug, &member.id);
+            if unhealthy {
+                tracing::warn!(
+                    owner_id = %owner_id,
+                    pool_slug = %pool_slug,
+                    user_service_id = %member.id,
+                    "Skipping service-pool member because its direct endpoint is in unhealthy cooldown"
+                );
+            }
+            !unhealthy
+        })
+        .collect();
+
+    if candidates.is_empty() {
+        return None;
+    }
+
+    let counter_key = format!("{owner_id}:{pool_slug}");
+    let len = candidates.len();
+    let counter = POOL_ROUND_ROBIN
+        .entry(counter_key)
+        .or_insert_with(|| AtomicUsize::new(0));
+    let idx = match mode {
+        PoolSelectionMode::Peek => counter.load(Ordering::Relaxed),
+        PoolSelectionMode::Advance => counter.fetch_add(1, Ordering::Relaxed),
+    };
+    candidates.into_iter().nth(idx % len)
+}
+
+pub async fn direct_pool_member_count(
+    db: &mongodb::Database,
+    owner_id: &str,
+    pool_slug: &str,
+) -> AppResult<usize> {
+    let members = user_service_service::find_pool_members_by_slug(db, owner_id, pool_slug).await?;
+    Ok(members
+        .iter()
+        .filter(|member| is_direct_pool_member(member))
+        .count())
+}
+
+pub async fn resolve_direct_pool_member_for_owner(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    actor_user_id: &str,
+    owner_id: &str,
+    pool_slug: &str,
+    excluded_user_service_ids: &[String],
+) -> AppResult<Option<UserServiceResolution>> {
+    let members = user_service_service::find_pool_members_by_slug(db, owner_id, pool_slug).await?;
+    let access =
+        crate::services::org_service::resolve_owner_access(db, actor_user_id, owner_id).await?;
+    let direct_member_count = members
+        .iter()
+        .filter(|member| is_direct_pool_member(member))
+        .count();
+    let mut excluded_user_service_ids = excluded_user_service_ids.to_vec();
+
+    for _ in 0..direct_member_count {
+        let Some(user_service) = select_direct_pool_member(
+            owner_id,
+            pool_slug,
+            members.clone(),
+            &excluded_user_service_ids,
+            PoolSelectionMode::Advance,
+        ) else {
+            return Ok(None);
+        };
+        excluded_user_service_ids.push(user_service.id.clone());
+
+        let allowed = match &access {
+            crate::services::org_service::OwnerAccess::Direct => true,
+            crate::services::org_service::OwnerAccess::AsOrgAdmin { .. } => {
+                access.allows_resource(&user_service.id)
+            }
+            crate::services::org_service::OwnerAccess::AsOrgMember { role, .. } => {
+                role.can_proxy()
+                    && admin_only_allows_role(&user_service, *role)
+                    && access.allows_resource(&user_service.id)
+            }
+            crate::services::org_service::OwnerAccess::Forbidden => false,
+        };
+        if !allowed {
+            continue;
+        }
+
+        let org_routing = if owner_id != actor_user_id {
+            let (org_user_id, membership_id) = match &access {
+                crate::services::org_service::OwnerAccess::AsOrgAdmin {
+                    org_user_id,
+                    membership_id,
+                    ..
+                }
+                | crate::services::org_service::OwnerAccess::AsOrgMember {
+                    org_user_id,
+                    membership_id,
+                    ..
+                } => (org_user_id.clone(), membership_id.clone()),
+                _ => return Ok(None),
+            };
+            Some(OrgRouting {
+                org_user_id,
+                member_user_id: actor_user_id.to_string(),
+                membership_id,
+            })
+        } else {
+            None
+        };
+
+        return Ok(Some(
+            finish_resolution(
+                db,
+                encryption_keys,
+                owner_id,
+                user_service,
+                Some(pool_slug.to_string()),
+                org_routing,
+            )
+            .await?,
+        ));
+    }
+
+    Ok(None)
+}
+
+fn direct_pool_health_key(owner_id: &str, pool_slug: &str, user_service_id: &str) -> String {
+    format!("{owner_id}:{pool_slug}:{user_service_id}")
+}
+
+fn is_direct_pool_member_unhealthy(owner_id: &str, pool_slug: &str, user_service_id: &str) -> bool {
+    let key = direct_pool_health_key(owner_id, pool_slug, user_service_id);
+    let now = Instant::now();
+    let expired = match POOL_DIRECT_UNHEALTHY_UNTIL.get(&key) {
+        Some(until) if *until > now => return true,
+        Some(_) => true,
+        None => false,
+    };
+    if expired {
+        POOL_DIRECT_UNHEALTHY_UNTIL.remove(&key);
+    }
+    false
+}
+
+pub(crate) fn mark_direct_pool_member_unhealthy(
+    owner_id: &str,
+    pool_slug: &str,
+    user_service_id: &str,
+) {
+    POOL_DIRECT_UNHEALTHY_UNTIL.insert(
+        direct_pool_health_key(owner_id, pool_slug, user_service_id),
+        Instant::now() + Duration::from_secs(DIRECT_POOL_MEMBER_UNHEALTHY_SECS),
+    );
+    tracing::warn!(
+        owner_id = %owner_id,
+        pool_slug = %pool_slug,
+        user_service_id = %user_service_id,
+        unhealthy_secs = DIRECT_POOL_MEMBER_UNHEALTHY_SECS,
+        "Marking direct service-pool member unhealthy after proxy transport failure"
+    );
+}
+
 /// Resolve proxy target from the new UserService model.
 ///
 /// Resolution order (critical -- see ChronoAIProject/NyxID#209 Codex review):
@@ -722,16 +1004,32 @@ fn admin_only_allows_role(
 pub async fn resolve_proxy_target_from_user_service(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
-    _node_ws_manager: &Arc<NodeWsManager>,
+    node_ws_manager: &Arc<NodeWsManager>,
     user_id: &str,
     slug: Option<&str>,
     catalog_service_id: Option<&str>,
 ) -> AppResult<Option<UserServiceResolution>> {
     // 1. Personal lookup (short-circuit for the common case).
-    let personal = lookup_user_service(db, user_id, slug, catalog_service_id).await?;
+    let personal = select_user_service_for_route(
+        db,
+        user_id,
+        slug,
+        catalog_service_id,
+        node_ws_manager,
+        PoolSelectionMode::Advance,
+    )
+    .await?;
     if let Some(us) = personal {
         return Ok(Some(
-            finish_resolution(db, encryption_keys, user_id, us, None).await?,
+            finish_resolution(
+                db,
+                encryption_keys,
+                user_id,
+                us.service,
+                us.selected_pool_slug,
+                None,
+            )
+            .await?,
         ));
     }
 
@@ -765,8 +1063,15 @@ pub async fn resolve_proxy_target_from_user_service(
     //    has already moved primary_org_id to the front.
     let mut role_denied = false;
     for membership in &memberships {
-        let org_us =
-            lookup_user_service(db, &membership.org_user_id, slug, catalog_service_id).await?;
+        let org_us = select_user_service_for_route(
+            db,
+            &membership.org_user_id,
+            slug,
+            catalog_service_id,
+            node_ws_manager,
+            PoolSelectionMode::Advance,
+        )
+        .await?;
         let Some(org_us) = org_us else {
             continue;
         };
@@ -783,12 +1088,12 @@ pub async fn resolve_proxy_target_from_user_service(
             continue;
         }
 
-        if !admin_only_allows_role(&org_us, membership.role) {
+        if !admin_only_allows_role(&org_us.service, membership.role) {
             role_denied = true;
             tracing::debug!(
                 user_id = %user_id,
                 org_user_id = %membership.org_user_id,
-                user_service_id = %org_us.id,
+                user_service_id = %org_us.service.id,
                 role = ?membership.role,
                 "Org membership role blocked by admin_only service policy"
             );
@@ -800,12 +1105,15 @@ pub async fn resolve_proxy_target_from_user_service(
         let effective_scope =
             crate::services::org_role_scope_service::effective_scope_for_membership(db, membership)
                 .await?;
-        if !crate::services::org_role_scope_service::scope_allows(&effective_scope, &org_us.id) {
+        if !crate::services::org_role_scope_service::scope_allows(
+            &effective_scope,
+            &org_us.service.id,
+        ) {
             role_denied = true;
             tracing::debug!(
                 user_id = %user_id,
                 org_user_id = %membership.org_user_id,
-                user_service_id = %org_us.id,
+                user_service_id = %org_us.service.id,
                 "User not in effective service scope for this org membership"
             );
             continue;
@@ -821,7 +1129,8 @@ pub async fn resolve_proxy_target_from_user_service(
                 db,
                 encryption_keys,
                 &membership.org_user_id,
-                org_us,
+                org_us.service,
+                org_us.selected_pool_slug,
                 Some(routing),
             )
             .await?,
@@ -1012,10 +1321,12 @@ pub async fn guard_slug_against_viewer_orgs(
         // admins customized the slug or soft-disabled the row.
         let mut us_or: Vec<mongodb::bson::Document> = Vec::with_capacity(3);
         us_or.push(doc! { "slug": &downstream.slug });
+        us_or.push(doc! { "pool_slug": &downstream.slug });
         if let Some(route_slug) = slug
             && route_slug != downstream.slug
         {
             us_or.push(doc! { "slug": route_slug });
+            us_or.push(doc! { "pool_slug": route_slug });
         }
         us_or.push(doc! { "catalog_service_id": &downstream.id });
         let us_query = doc! {
@@ -1184,7 +1495,7 @@ pub async fn resolve_proxy_target_by_user_service_id(
 
     let owner_id = svc.user_id.clone();
     Ok(Some(
-        finish_resolution(db, encryption_keys, &owner_id, svc, org_routing).await?,
+        finish_resolution(db, encryption_keys, &owner_id, svc, None, org_routing).await?,
     ))
 }
 
@@ -1205,13 +1516,23 @@ pub async fn resolve_proxy_target_by_user_service_id(
 /// Does NOT decrypt credentials or load endpoints. Pure ownership lookup.
 pub async fn find_effective_service_owner(
     db: &mongodb::Database,
+    node_ws_manager: &NodeWsManager,
     actor_user_id: &str,
     slug: Option<&str>,
     catalog_service_id: Option<&str>,
 ) -> AppResult<Option<String>> {
     // 1. Personal lookup (short-circuit).
-    if let Some(svc) = lookup_user_service(db, actor_user_id, slug, catalog_service_id).await? {
-        return Ok(Some(svc.user_id));
+    if let Some(svc) = select_user_service_for_route(
+        db,
+        actor_user_id,
+        slug,
+        catalog_service_id,
+        node_ws_manager,
+        PoolSelectionMode::Peek,
+    )
+    .await?
+    {
+        return Ok(Some(svc.service.user_id));
     }
 
     // 2. Legacy personal guard. Same invariant as the proxy resolver:
@@ -1244,12 +1565,87 @@ pub async fn find_effective_service_owner(
             Err(e) => return Err(e),
         };
     for membership in memberships {
+        let Some(org_us) = select_user_service_for_route(
+            db,
+            &membership.org_user_id,
+            slug,
+            catalog_service_id,
+            node_ws_manager,
+            PoolSelectionMode::Peek,
+        )
+        .await?
+        else {
+            continue;
+        };
+        // Mirror the proxy resolver's role + scope filters.
+        if !membership.role.can_proxy() {
+            continue;
+        }
+        if !admin_only_allows_role(&org_us.service, membership.role) {
+            continue;
+        }
+        let effective_scope =
+            crate::services::org_role_scope_service::effective_scope_for_membership(
+                db,
+                &membership,
+            )
+            .await?;
+        if !crate::services::org_role_scope_service::scope_allows(
+            &effective_scope,
+            &org_us.service.id,
+        ) {
+            continue;
+        }
+        return Ok(Some(org_us.service.user_id));
+    }
+
+    Ok(None)
+}
+
+/// Catalog-id-only owner lookup for call sites that do not route by slug.
+///
+/// This preserves the same personal/legacy/org precedence as
+/// `find_effective_service_owner`, without needing pool health state. Pools
+/// are addressed by slug, so catalog-id callers still resolve the single
+/// matching `UserService` row.
+pub async fn find_effective_catalog_service_owner(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+    catalog_service_id: &str,
+) -> AppResult<Option<String>> {
+    find_effective_service_owner_without_pool(db, actor_user_id, None, Some(catalog_service_id))
+        .await
+}
+
+async fn find_effective_service_owner_without_pool(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+    slug: Option<&str>,
+    catalog_service_id: Option<&str>,
+) -> AppResult<Option<String>> {
+    if let Some(svc) = lookup_user_service(db, actor_user_id, slug, catalog_service_id).await? {
+        return Ok(Some(svc.user_id));
+    }
+
+    if user_has_legacy_personal_connection(db, actor_user_id, slug, catalog_service_id).await? {
+        return Ok(Some(actor_user_id.to_string()));
+    }
+
+    let memberships =
+        match crate::services::org_service::find_active_memberships_with_timeout(db, actor_user_id)
+            .await
+        {
+            Ok(rows) => rows,
+            Err(crate::errors::AppError::OrgQueryTimeout) => return Ok(None),
+            Err(crate::errors::AppError::NotFound(_)) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+    for membership in memberships {
         let Some(org_us) =
             lookup_user_service(db, &membership.org_user_id, slug, catalog_service_id).await?
         else {
             continue;
         };
-        // Mirror the proxy resolver's role + scope filters.
         if !membership.role.can_proxy() {
             continue;
         }
@@ -1275,12 +1671,22 @@ pub async fn find_effective_service_owner(
 /// approval deny preflight. It does not decrypt credentials or load endpoints.
 pub async fn find_approval_resolution_hint(
     db: &mongodb::Database,
+    node_ws_manager: &NodeWsManager,
     actor_user_id: &str,
     slug: Option<&str>,
     catalog_service_id: Option<&str>,
 ) -> AppResult<Option<ApprovalResolutionHint>> {
-    if let Some(svc) = lookup_user_service(db, actor_user_id, slug, catalog_service_id).await? {
-        return Ok(Some(approval_hint_from_user_service(&svc)));
+    if let Some(svc) = select_user_service_for_route(
+        db,
+        actor_user_id,
+        slug,
+        catalog_service_id,
+        node_ws_manager,
+        PoolSelectionMode::Peek,
+    )
+    .await?
+    {
+        return Ok(Some(approval_hint_from_user_service(&svc.service)));
     }
 
     if user_has_legacy_personal_connection(db, actor_user_id, slug, catalog_service_id).await? {
@@ -1298,15 +1704,22 @@ pub async fn find_approval_resolution_hint(
         };
 
     for membership in memberships {
-        let Some(org_us) =
-            lookup_user_service(db, &membership.org_user_id, slug, catalog_service_id).await?
+        let Some(org_us) = select_user_service_for_route(
+            db,
+            &membership.org_user_id,
+            slug,
+            catalog_service_id,
+            node_ws_manager,
+            PoolSelectionMode::Peek,
+        )
+        .await?
         else {
             continue;
         };
         if !membership.role.can_proxy() {
             continue;
         }
-        if !admin_only_allows_role(&org_us, membership.role) {
+        if !admin_only_allows_role(&org_us.service, membership.role) {
             continue;
         }
         let effective_scope =
@@ -1315,8 +1728,11 @@ pub async fn find_approval_resolution_hint(
                 &membership,
             )
             .await?;
-        if crate::services::org_role_scope_service::scope_allows(&effective_scope, &org_us.id) {
-            return Ok(Some(approval_hint_from_user_service(&org_us)));
+        if crate::services::org_role_scope_service::scope_allows(
+            &effective_scope,
+            &org_us.service.id,
+        ) {
+            return Ok(Some(approval_hint_from_user_service(&org_us.service)));
         }
     }
 
@@ -1566,6 +1982,7 @@ async fn finish_resolution(
     encryption_keys: &EncryptionKeys,
     effective_owner_id: &str,
     user_service: crate::models::user_service::UserService,
+    selected_pool_slug: Option<String>,
     org_routing: Option<OrgRouting>,
 ) -> AppResult<UserServiceResolution> {
     // For auto-provisioned services, verify the catalog entry is still eligible
@@ -1628,6 +2045,8 @@ async fn finish_resolution(
             },
             node_id: user_service.node_id.clone(),
             user_service_id: user_service.id.clone(),
+            effective_owner_id: effective_owner_id.to_string(),
+            pool_slug: selected_pool_slug,
             has_server_credential: true,
             org_routing,
         });
@@ -1669,6 +2088,8 @@ async fn finish_resolution(
             },
             node_id: user_service.node_id.clone(),
             user_service_id: user_service.id.clone(),
+            effective_owner_id: effective_owner_id.to_string(),
+            pool_slug: selected_pool_slug,
             has_server_credential: true,
             org_routing,
         });
@@ -1735,6 +2156,8 @@ async fn finish_resolution(
             },
             node_id: user_service.node_id.clone(),
             user_service_id: user_service.id.clone(),
+            effective_owner_id: effective_owner_id.to_string(),
+            pool_slug: selected_pool_slug,
             has_server_credential,
             org_routing,
         });
@@ -1779,6 +2202,8 @@ async fn finish_resolution(
         },
         node_id: user_service.node_id.clone(),
         user_service_id: user_service.id.clone(),
+        effective_owner_id: effective_owner_id.to_string(),
+        pool_slug: selected_pool_slug,
         has_server_credential: true,
         org_routing,
     })
@@ -2866,6 +3291,257 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn user_service_pool_slug_round_robins_members() {
+        let Some(db) = connect_test_database("proxy_pool_rr").await else {
+            eprintln!("skipping proxy pool integration test: no local MongoDB available");
+            return;
+        };
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let endpoint_a_id = uuid::Uuid::new_v4().to_string();
+        let endpoint_b_id = uuid::Uuid::new_v4().to_string();
+        let service_a_id = uuid::Uuid::new_v4().to_string();
+        let service_b_id = uuid::Uuid::new_v4().to_string();
+        let pool_slug = format!("pool-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_many([
+                test_user_endpoint(
+                    &endpoint_a_id,
+                    &user_id,
+                    "Worker A",
+                    "https://worker-a.example.test",
+                    None,
+                    None,
+                ),
+                test_user_endpoint(
+                    &endpoint_b_id,
+                    &user_id,
+                    "Worker B",
+                    "https://worker-b.example.test",
+                    None,
+                    None,
+                ),
+            ])
+            .await
+            .unwrap();
+
+        let mut worker_a = test_user_service(
+            &service_a_id,
+            &user_id,
+            "worker-a",
+            &endpoint_a_id,
+            None,
+            None,
+        );
+        worker_a.pool_slug = Some(pool_slug.clone());
+        let mut worker_b = test_user_service(
+            &service_b_id,
+            &user_id,
+            "worker-b",
+            &endpoint_b_id,
+            None,
+            None,
+        );
+        worker_b.pool_slug = Some(pool_slug.clone());
+        db.collection::<crate::models::user_service::UserService>(USER_SERVICES)
+            .insert_many([worker_a, worker_b])
+            .await
+            .unwrap();
+
+        let node_manager = Arc::new(NodeWsManager::new(30, 100));
+        let first = resolve_proxy_target_from_user_service(
+            &db,
+            &test_encryption_keys(),
+            &node_manager,
+            &user_id,
+            Some(&pool_slug),
+            None,
+        )
+        .await
+        .unwrap()
+        .expect("first pool member");
+        let second = resolve_proxy_target_from_user_service(
+            &db,
+            &test_encryption_keys(),
+            &node_manager,
+            &user_id,
+            Some(&pool_slug),
+            None,
+        )
+        .await
+        .unwrap()
+        .expect("second pool member");
+
+        assert_ne!(first.user_service_id, second.user_service_id);
+        let selected = std::collections::HashSet::from([
+            first.target.service.slug.as_str(),
+            second.target.service.slug.as_str(),
+        ]);
+        assert_eq!(
+            selected,
+            std::collections::HashSet::from(["worker-a", "worker-b"])
+        );
+    }
+
+    #[tokio::test]
+    async fn user_service_pool_slug_skips_non_viable_node_members() {
+        let Some(db) = connect_test_database("proxy_pool_skip_node").await else {
+            eprintln!("skipping proxy pool integration test: no local MongoDB available");
+            return;
+        };
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let endpoint_a_id = uuid::Uuid::new_v4().to_string();
+        let endpoint_b_id = uuid::Uuid::new_v4().to_string();
+        let service_a_id = uuid::Uuid::new_v4().to_string();
+        let service_b_id = uuid::Uuid::new_v4().to_string();
+        let offline_node_id = uuid::Uuid::new_v4().to_string();
+        let pool_slug = format!("pool-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_many([
+                test_user_endpoint(
+                    &endpoint_a_id,
+                    &user_id,
+                    "Worker A",
+                    "https://worker-a.example.test",
+                    None,
+                    None,
+                ),
+                test_user_endpoint(
+                    &endpoint_b_id,
+                    &user_id,
+                    "Worker B",
+                    "https://worker-b.example.test",
+                    None,
+                    None,
+                ),
+            ])
+            .await
+            .unwrap();
+
+        let mut offline_member = test_user_service(
+            &service_a_id,
+            &user_id,
+            "worker-a",
+            &endpoint_a_id,
+            None,
+            Some(&offline_node_id),
+        );
+        offline_member.pool_slug = Some(pool_slug.clone());
+        let mut direct_member = test_user_service(
+            &service_b_id,
+            &user_id,
+            "worker-b",
+            &endpoint_b_id,
+            None,
+            None,
+        );
+        direct_member.pool_slug = Some(pool_slug.clone());
+        db.collection::<crate::models::user_service::UserService>(USER_SERVICES)
+            .insert_many([offline_member, direct_member])
+            .await
+            .unwrap();
+
+        let node_manager = Arc::new(NodeWsManager::new(30, 100));
+        for _ in 0..3 {
+            let resolved = resolve_proxy_target_from_user_service(
+                &db,
+                &test_encryption_keys(),
+                &node_manager,
+                &user_id,
+                Some(&pool_slug),
+                None,
+            )
+            .await
+            .unwrap()
+            .expect("viable pool member");
+            assert_eq!(resolved.user_service_id, service_b_id);
+            assert_eq!(resolved.target.base_url, "https://worker-b.example.test");
+        }
+    }
+
+    #[tokio::test]
+    async fn user_service_pool_slug_skips_unhealthy_direct_members() {
+        let Some(db) = connect_test_database("proxy_pool_skip_direct").await else {
+            eprintln!("skipping proxy pool integration test: no local MongoDB available");
+            return;
+        };
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let endpoint_a_id = uuid::Uuid::new_v4().to_string();
+        let endpoint_b_id = uuid::Uuid::new_v4().to_string();
+        let service_a_id = uuid::Uuid::new_v4().to_string();
+        let service_b_id = uuid::Uuid::new_v4().to_string();
+        let pool_slug = format!("pool-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_many([
+                test_user_endpoint(
+                    &endpoint_a_id,
+                    &user_id,
+                    "Worker A",
+                    "https://worker-a.example.test",
+                    None,
+                    None,
+                ),
+                test_user_endpoint(
+                    &endpoint_b_id,
+                    &user_id,
+                    "Worker B",
+                    "https://worker-b.example.test",
+                    None,
+                    None,
+                ),
+            ])
+            .await
+            .unwrap();
+
+        let mut unhealthy_member = test_user_service(
+            &service_a_id,
+            &user_id,
+            "worker-a",
+            &endpoint_a_id,
+            None,
+            None,
+        );
+        unhealthy_member.pool_slug = Some(pool_slug.clone());
+        let mut healthy_member = test_user_service(
+            &service_b_id,
+            &user_id,
+            "worker-b",
+            &endpoint_b_id,
+            None,
+            None,
+        );
+        healthy_member.pool_slug = Some(pool_slug.clone());
+        db.collection::<crate::models::user_service::UserService>(USER_SERVICES)
+            .insert_many([unhealthy_member, healthy_member])
+            .await
+            .unwrap();
+
+        mark_direct_pool_member_unhealthy(&user_id, &pool_slug, &service_a_id);
+
+        let node_manager = Arc::new(NodeWsManager::new(30, 100));
+        for _ in 0..3 {
+            let resolved = resolve_proxy_target_from_user_service(
+                &db,
+                &test_encryption_keys(),
+                &node_manager,
+                &user_id,
+                Some(&pool_slug),
+                None,
+            )
+            .await
+            .unwrap()
+            .expect("healthy pool member");
+            assert_eq!(resolved.user_service_id, service_b_id);
+            assert_eq!(resolved.target.base_url, "https://worker-b.example.test");
+        }
+    }
+
+    #[tokio::test]
     async fn org_inherited_role_scope_allows_and_denies_proxy_targets() {
         let Some(db) = connect_test_database("proxy_org_role_scope").await else {
             eprintln!("skipping proxy org role-scope integration test: no local MongoDB available");
@@ -3080,13 +3756,25 @@ mod tests {
         };
         assert!(matches!(denied_via_id, AppError::OrgRoleInsufficient(_)));
 
-        let member_owner = find_effective_service_owner(&db, &member_id, Some("admin-svc"), None)
-            .await
-            .expect("member owner lookup should not error");
+        let member_owner = find_effective_service_owner(
+            &db,
+            node_manager.as_ref(),
+            &member_id,
+            Some("admin-svc"),
+            None,
+        )
+        .await
+        .expect("member owner lookup should not error");
         assert!(member_owner.is_none());
-        let member_hint = find_approval_resolution_hint(&db, &member_id, Some("admin-svc"), None)
-            .await
-            .expect("member approval hint should not error");
+        let member_hint = find_approval_resolution_hint(
+            &db,
+            node_manager.as_ref(),
+            &member_id,
+            Some("admin-svc"),
+            None,
+        )
+        .await
+        .expect("member approval hint should not error");
         assert!(member_hint.is_none());
 
         let resolved = resolve_proxy_target_from_user_service(
@@ -4350,6 +5038,7 @@ mod tests {
             id: "us-1".to_string(),
             user_id: "user-1".to_string(),
             slug: "api-lark-bot".to_string(),
+            pool_slug: None,
             endpoint_id: "ep-1".to_string(),
             api_key_id: Some("ak-1".to_string()),
             auth_method: "token_exchange".to_string(),

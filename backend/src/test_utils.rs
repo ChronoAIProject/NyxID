@@ -688,6 +688,7 @@ pub(crate) fn test_user_service(
         id: service_id.to_string(),
         user_id: user_id.to_string(),
         slug: slug.to_string(),
+        pool_slug: None,
         endpoint_id: endpoint_id.to_string(),
         api_key_id: None,
         auth_method: "none".to_string(),

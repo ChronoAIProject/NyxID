@@ -727,6 +727,7 @@ mod tests {
             id: Uuid::new_v4().to_string(),
             user_id: user_id.to_string(),
             slug: slug.to_string(),
+            pool_slug: None,
             endpoint_id: Uuid::new_v4().to_string(),
             api_key_id: None,
             auth_method: "bearer".to_string(),
