@@ -446,6 +446,9 @@ pub struct LoginArgs {
     /// Use email/password login instead of opening the browser
     #[arg(long)]
     pub password: bool,
+    /// Use RFC 8628 device-code login instead of opening the browser
+    #[arg(long, conflicts_with = "password")]
+    pub device: bool,
     /// Email address (only used with --password)
     #[arg(long)]
     pub email: Option<String>,
