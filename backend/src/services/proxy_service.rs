@@ -690,6 +690,7 @@ pub struct UserServiceResolution {
     pub target: ProxyTarget,
     pub node_id: Option<String>,
     pub user_service_id: String,
+    pub effective_owner_id: String,
     pub pool_slug: Option<String>,
     pub has_server_credential: bool,
     /// Set when the resolved UserService was reached via org membership
@@ -789,6 +790,139 @@ async fn select_pool_member(
         PoolSelectionMode::Advance => counter.fetch_add(1, Ordering::Relaxed),
     };
     Ok(candidates.into_iter().nth(idx % len))
+}
+
+fn is_direct_pool_member(member: &UserService) -> bool {
+    member.node_id.as_deref().is_none_or(|nid| nid.is_empty())
+}
+
+fn select_direct_pool_member(
+    owner_id: &str,
+    pool_slug: &str,
+    members: Vec<UserService>,
+    excluded_user_service_ids: &[String],
+    mode: PoolSelectionMode,
+) -> Option<UserService> {
+    let candidates: Vec<UserService> = members
+        .into_iter()
+        .filter(is_direct_pool_member)
+        .filter(|member| !excluded_user_service_ids.contains(&member.id))
+        .filter(|member| {
+            let unhealthy = is_direct_pool_member_unhealthy(owner_id, pool_slug, &member.id);
+            if unhealthy {
+                tracing::warn!(
+                    owner_id = %owner_id,
+                    pool_slug = %pool_slug,
+                    user_service_id = %member.id,
+                    "Skipping service-pool member because its direct endpoint is in unhealthy cooldown"
+                );
+            }
+            !unhealthy
+        })
+        .collect();
+
+    if candidates.is_empty() {
+        return None;
+    }
+
+    let counter_key = format!("{owner_id}:{pool_slug}");
+    let len = candidates.len();
+    let counter = POOL_ROUND_ROBIN
+        .entry(counter_key)
+        .or_insert_with(|| AtomicUsize::new(0));
+    let idx = match mode {
+        PoolSelectionMode::Peek => counter.load(Ordering::Relaxed),
+        PoolSelectionMode::Advance => counter.fetch_add(1, Ordering::Relaxed),
+    };
+    candidates.into_iter().nth(idx % len)
+}
+
+pub async fn direct_pool_member_count(
+    db: &mongodb::Database,
+    owner_id: &str,
+    pool_slug: &str,
+) -> AppResult<usize> {
+    let members = user_service_service::find_pool_members_by_slug(db, owner_id, pool_slug).await?;
+    Ok(members
+        .iter()
+        .filter(|member| is_direct_pool_member(member))
+        .count())
+}
+
+pub async fn resolve_direct_pool_member_for_owner(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    actor_user_id: &str,
+    owner_id: &str,
+    pool_slug: &str,
+    excluded_user_service_ids: &[String],
+) -> AppResult<Option<UserServiceResolution>> {
+    let members = user_service_service::find_pool_members_by_slug(db, owner_id, pool_slug).await?;
+    let access =
+        crate::services::org_service::resolve_owner_access(db, actor_user_id, owner_id).await?;
+    let direct_member_count = members
+        .iter()
+        .filter(|member| is_direct_pool_member(member))
+        .count();
+    let mut excluded_user_service_ids = excluded_user_service_ids.to_vec();
+
+    for _ in 0..direct_member_count {
+        let Some(user_service) = select_direct_pool_member(
+            owner_id,
+            pool_slug,
+            members.clone(),
+            &excluded_user_service_ids,
+            PoolSelectionMode::Advance,
+        ) else {
+            return Ok(None);
+        };
+        excluded_user_service_ids.push(user_service.id.clone());
+
+        let allowed = match &access {
+            crate::services::org_service::OwnerAccess::Direct => true,
+            crate::services::org_service::OwnerAccess::AsOrgAdmin { .. } => {
+                access.allows_resource(&user_service.id)
+            }
+            crate::services::org_service::OwnerAccess::AsOrgMember { role, .. } => {
+                role.can_proxy()
+                    && admin_only_allows_role(&user_service, *role)
+                    && access.allows_resource(&user_service.id)
+            }
+            crate::services::org_service::OwnerAccess::Forbidden => false,
+        };
+        if !allowed {
+            continue;
+        }
+
+        let org_routing = if owner_id != actor_user_id {
+            let (org_user_id, membership_id) = match &access {
+                crate::services::org_service::OwnerAccess::AsOrgAdmin {
+                    org_user_id,
+                    membership_id,
+                    ..
+                }
+                | crate::services::org_service::OwnerAccess::AsOrgMember {
+                    org_user_id,
+                    membership_id,
+                    ..
+                } => (org_user_id.clone(), membership_id.clone()),
+                _ => return Ok(None),
+            };
+            Some(OrgRouting {
+                org_user_id,
+                member_user_id: actor_user_id.to_string(),
+                membership_id,
+            })
+        } else {
+            None
+        };
+
+        return Ok(Some(
+            finish_resolution(db, encryption_keys, owner_id, user_service, org_routing).await?,
+        ));
+    }
+
+    Ok(None)
 }
 
 fn direct_pool_health_key(owner_id: &str, pool_slug: &str, user_service_id: &str) -> String {
@@ -1869,6 +2003,7 @@ async fn finish_resolution(
             },
             node_id: user_service.node_id.clone(),
             user_service_id: user_service.id.clone(),
+            effective_owner_id: effective_owner_id.to_string(),
             pool_slug: user_service.pool_slug.clone(),
             has_server_credential: true,
             org_routing,
@@ -1911,6 +2046,7 @@ async fn finish_resolution(
             },
             node_id: user_service.node_id.clone(),
             user_service_id: user_service.id.clone(),
+            effective_owner_id: effective_owner_id.to_string(),
             pool_slug: user_service.pool_slug.clone(),
             has_server_credential: true,
             org_routing,
@@ -1978,6 +2114,7 @@ async fn finish_resolution(
             },
             node_id: user_service.node_id.clone(),
             user_service_id: user_service.id.clone(),
+            effective_owner_id: effective_owner_id.to_string(),
             pool_slug: user_service.pool_slug.clone(),
             has_server_credential,
             org_routing,
@@ -2023,6 +2160,7 @@ async fn finish_resolution(
         },
         node_id: user_service.node_id.clone(),
         user_service_id: user_service.id.clone(),
+        effective_owner_id: effective_owner_id.to_string(),
         pool_slug: user_service.pool_slug.clone(),
         has_server_credential: true,
         org_routing,
