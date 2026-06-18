@@ -267,6 +267,7 @@ First-party RFC 8628-style login for headless CLI environments. `nyxid login --d
 - **Atomic delivery**: polling uses a MongoDB `find_one_and_update(...).return_document(Before)` claim from `approved` to `delivered`. The returned pre-update document contains the encrypted delivery tokens for exactly one poller; concurrent or later pollers see `delivered` and receive `AuthDeviceCodeAlreadyDelivered` (11205).
 - **Rate limiters**: `auth_device_request_limiter`, `auth_device_poll_limiter`, `auth_device_approve_limiter`, `auth_device_approve_per_user_limiter`, and `auth_device_preview_limiter`.
 - **CLI**: `nyxid login --device` forces device-code login. Plain `nyxid login` auto-falls back to device-code login when browser launch is unavailable unless `NYXID_LOGIN_NO_DEVICE_FALLBACK=1` is set.
+- **Out of scope**: Mobile approval (deep-link from `/login/device` to the existing approval app) is out of scope for v1; tracked in a follow-up issue if needed.
 
 ## File Structure
 
