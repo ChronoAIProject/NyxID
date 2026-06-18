@@ -394,6 +394,9 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         // Tests don't exercise pairing-code HMAC verification; a
         // zero-filled key is deterministic and never touches prod data.
         cli_pairing_hmac_key: Arc::new(zeroize::Zeroizing::new([0u8; 32])),
+        // Tests don't exercise auth-device HMAC verification through AppState yet;
+        // service-level tests pass their own explicit HMAC key.
+        auth_device_hmac_key: Arc::new(zeroize::Zeroizing::new([1u8; 32])),
         per_channel_event_limiter: Arc::new(crate::mw::rate_limit::PerChannelEventLimiter::new(
             config.channel_event_rate_limit_per_second,
             config.channel_event_rate_limit_burst,

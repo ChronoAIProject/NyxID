@@ -6,6 +6,7 @@ pub mod api_docs_service;
 pub mod approval_policy;
 pub mod approval_service;
 pub mod audit_service;
+pub mod auth_device_service;
 pub mod auth_service;
 pub mod cae_webhook_service;
 pub mod catalog_service;
