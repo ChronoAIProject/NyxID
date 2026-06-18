@@ -1018,10 +1018,10 @@ async fn run_device_code_login_with_api(
         let mut answer = String::new();
         if std::io::stdin().read_line(&mut answer).is_ok() {
             let a = answer.trim().to_ascii_lowercase();
-            if a.is_empty() || a == "y" || a == "yes" {
-                if let Err(e) = crate::browser::open_browser(&challenge.verification_uri) {
-                    eprintln!("Could not open browser: {e}. Paste the URL above manually.");
-                }
+            if (a.is_empty() || a == "y" || a == "yes")
+                && let Err(e) = crate::browser::open_browser(&challenge.verification_uri)
+            {
+                eprintln!("Could not open browser: {e}. Paste the URL above manually.");
             }
         }
     }
@@ -2035,7 +2035,32 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn browser_open_failure_falls_back_to_device_flow() {
+        // Must clear CI env vars so the dispatcher reaches the browser branch
+        // — on GitHub Actions runners CI=true is preset.
+        let _guard = crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let ci_keys = [
+            "CI",
+            "GITHUB_ACTIONS",
+            "BUILDKITE",
+            "CIRCLECI",
+            "JENKINS_URL",
+            "GITLAB_CI",
+            "NYXID_LOGIN_NO_DEVICE_FALLBACK",
+        ];
+        let prev: Vec<_> = ci_keys
+            .iter()
+            .map(|k| (*k, std::env::var_os(k)))
+            .collect();
+        unsafe {
+            for k in &ci_keys {
+                std::env::remove_var(k);
+            }
+        }
+
         let strategies = MockLoginStrategies {
             browser_result: Mutex::new(Some(Err(BrowserLoginError::CannotOpenBrowser(
                 std::io::Error::new(std::io::ErrorKind::NotFound, "browser"),
@@ -2043,10 +2068,18 @@ mod tests {
             ..Default::default()
         };
 
-        run_login_with_strategies(login_args(), &strategies)
-            .await
-            .expect("fallback succeeds");
+        let result = run_login_with_strategies(login_args(), &strategies).await;
 
+        unsafe {
+            for (k, v) in &prev {
+                match v {
+                    Some(val) => std::env::set_var(k, val),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+
+        result.expect("fallback succeeds");
         assert_eq!(strategies.browser_calls.load(Ordering::SeqCst), 1);
         assert_eq!(strategies.device_calls.load(Ordering::SeqCst), 1);
     }
