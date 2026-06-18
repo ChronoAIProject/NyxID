@@ -18,6 +18,11 @@ export const CliAuthPage = lazy(() =>
 export const CliPairPage = lazy(() =>
   import("@/pages/cli-pair").then((m) => ({ default: m.CliPairPage })),
 );
+export const LoginDevicePage = lazy(() =>
+  import("@/pages/login-device").then((m) => ({
+    default: m.LoginDevicePage,
+  })),
+);
 export const DashboardPage = lazy(() =>
   import("@/pages/dashboard").then((m) => ({ default: m.DashboardPage })),
 );
