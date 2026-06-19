@@ -1,6 +1,8 @@
-use std::io::Write;
+use std::future::Future;
+use std::io::{IsTerminal, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
+use std::pin::Pin;
 
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
@@ -8,7 +10,10 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{Duration, Utc};
 use serde::Deserialize;
 
-use crate::api::{CLI_USER_AGENT, build_cli_http_client};
+use crate::api::{
+    AuthDevicePollBody, AuthDevicePollOutcome, AuthDeviceRequestBody, AuthDeviceRequestOutcome,
+    CLI_USER_AGENT, build_cli_http_client,
+};
 use crate::cli::{AuthArgs, LoginArgs};
 
 /// Default NyxID base URL used when prompting for re-login on a session that
@@ -33,6 +38,13 @@ const REFRESH_TOKEN_FILE_NAME: &str = "refresh_token";
 const BASE_URL_FILE_NAME: &str = "base_url";
 const USER_ID_FILE_NAME: &str = "user_id";
 const CALLBACK_TIMEOUT_SECS: u64 = 120;
+
+const AUTH_DEVICE_CODE_EXPIRED: i64 = 11201;
+const AUTH_DEVICE_CODE_PENDING: i64 = 11202;
+const AUTH_DEVICE_CODE_SLOW_DOWN: i64 = 11203;
+const AUTH_DEVICE_CODE_DENIED: i64 = 11204;
+const AUTH_DEVICE_CODE_ALREADY_DELIVERED: i64 = 11205;
+const AUTH_DEVICE_CODE_RATE_LIMITED: i64 = 11206;
 
 /// Extract the `sub` claim (NyxID user UUID) from a JWT access token.
 /// Decodes the payload section only; does not verify the signature, since
@@ -501,6 +513,7 @@ async fn handle_dead_session(auth: &AuthArgs, reason: DeadSessionReason) -> Resu
     run_login(LoginArgs {
         base_url,
         password: false,
+        device: false,
         email: None,
         profile: auth.profile.clone(),
     })
@@ -517,11 +530,101 @@ async fn handle_dead_session(auth: &AuthArgs, reason: DeadSessionReason) -> Resu
 // ---- Login ----
 
 pub async fn run_login(args: LoginArgs) -> Result<()> {
+    let strategies = RealLoginStrategies;
+    run_login_with_strategies(args, &strategies).await
+}
+
+trait LoginStrategies {
+    fn run_password_login<'a>(
+        &'a self,
+        base_url: &'a str,
+        email: Option<&'a str>,
+        profile: Option<&'a str>,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+
+    fn run_device_code_login<'a>(
+        &'a self,
+        base_url: &'a str,
+        profile: Option<&'a str>,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+
+    fn run_browser_login<'a>(
+        &'a self,
+        base_url: &'a str,
+        profile: Option<&'a str>,
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<(), BrowserLoginError>> + Send + 'a>>;
+}
+
+struct RealLoginStrategies;
+
+impl LoginStrategies for RealLoginStrategies {
+    fn run_password_login<'a>(
+        &'a self,
+        base_url: &'a str,
+        email: Option<&'a str>,
+        profile: Option<&'a str>,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+        Box::pin(run_password_login(base_url, email, profile))
+    }
+
+    fn run_device_code_login<'a>(
+        &'a self,
+        base_url: &'a str,
+        profile: Option<&'a str>,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+        Box::pin(run_device_code_login(base_url, profile))
+    }
+
+    fn run_browser_login<'a>(
+        &'a self,
+        base_url: &'a str,
+        profile: Option<&'a str>,
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<(), BrowserLoginError>> + Send + 'a>> {
+        Box::pin(run_browser_login(base_url, profile))
+    }
+}
+
+async fn run_login_with_strategies(
+    args: LoginArgs,
+    strategies: &impl LoginStrategies,
+) -> Result<()> {
     let profile = args.profile.as_deref();
     if args.password {
-        return run_password_login(&args.base_url, args.email.as_deref(), profile).await;
+        return strategies
+            .run_password_login(&args.base_url, args.email.as_deref(), profile)
+            .await;
     }
-    run_browser_login(&args.base_url, profile).await
+    if args.device {
+        return strategies
+            .run_device_code_login(&args.base_url, profile)
+            .await;
+    }
+
+    if std::env::var_os("NYXID_LOGIN_NO_DEVICE_FALLBACK").is_none() {
+        if is_ci_environment() {
+            bail!(
+                "Detected CI environment (CI / GITHUB_ACTIONS / BUILDKITE / CIRCLECI / \
+                 JENKINS_URL / GITLAB_CI set). Use `nyxid api-key create` and \
+                 `NYXID_API_KEY` instead of interactive login."
+            );
+        }
+        if !crate::wizard::is_wizard_eligible() && stderr_is_tty() {
+            return strategies
+                .run_device_code_login(&args.base_url, profile)
+                .await;
+        }
+    }
+
+    match strategies.run_browser_login(&args.base_url, profile).await {
+        Ok(()) => Ok(()),
+        Err(BrowserLoginError::CannotOpenBrowser(_)) => {
+            eprintln!("Couldn't open a browser. Falling back to device-code login.");
+            strategies
+                .run_device_code_login(&args.base_url, profile)
+                .await
+        }
+        Err(e) => Err(e.into()),
+    }
 }
 
 // ---- Logout ----
@@ -555,17 +658,62 @@ pub async fn run_logout(base_url: &str, profile: Option<&str>) -> Result<()> {
 
 // ---- Browser login (ported from login_cli.rs) ----
 
-async fn run_browser_login(base_url: &str, profile: Option<&str>) -> Result<()> {
+#[derive(Debug)]
+pub enum BrowserLoginError {
+    CannotOpenBrowser(std::io::Error),
+    CallbackTimedOut,
+    CallbackIo(anyhow::Error),
+    Other(anyhow::Error),
+}
+
+impl std::fmt::Display for BrowserLoginError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CannotOpenBrowser(e) => write!(f, "couldn't open browser: {e}"),
+            Self::CallbackTimedOut => {
+                write!(
+                    f,
+                    "Login timed out after {CALLBACK_TIMEOUT_SECS}s. Please try again."
+                )
+            }
+            Self::CallbackIo(e) => write!(f, "{e}"),
+            Self::Other(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for BrowserLoginError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::CannotOpenBrowser(e) => Some(e),
+            Self::CallbackTimedOut => None,
+            Self::CallbackIo(e) | Self::Other(e) => e.source(),
+        }
+    }
+}
+
+async fn run_browser_login(
+    base_url: &str,
+    profile: Option<&str>,
+) -> std::result::Result<(), BrowserLoginError> {
     let base_url = base_url.trim_end_matches('/');
 
-    let frontend_url = fetch_frontend_url(base_url, profile).await?;
+    let frontend_url = fetch_frontend_url(base_url, profile)
+        .await
+        .map_err(BrowserLoginError::Other)?;
 
-    let listener =
-        TcpListener::bind("127.0.0.1:0").context("Failed to bind local callback server")?;
-    let port = listener.local_addr()?.port();
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .context("Failed to bind local callback server")
+        .map_err(BrowserLoginError::CallbackIo)?;
+    let port = listener
+        .local_addr()
+        .context("Failed to read local callback server address")
+        .map_err(BrowserLoginError::CallbackIo)?
+        .port();
 
     let state = generate_state();
-    let auth_url = build_cli_auth_url(&frontend_url, port, &state)?;
+    let auth_url =
+        build_cli_auth_url(&frontend_url, port, &state).map_err(BrowserLoginError::Other)?;
 
     eprintln!("Opening browser to log in...");
     eprintln!();
@@ -576,15 +724,19 @@ async fn run_browser_login(base_url: &str, profile: Option<&str>) -> Result<()> 
     eprintln!("(e.g. \"invite code required\" for new social sign-ups).");
     eprintln!();
 
-    let _ = crate::browser::open_browser(&auth_url);
+    if let Err(e) = crate::browser::open_browser(&auth_url) {
+        drop(listener);
+        return Err(BrowserLoginError::CannotOpenBrowser(e));
+    }
 
     let callback = wait_for_callback(listener, &state).await?;
     save_tokens_for(
         profile,
         &callback.access_token,
         callback.refresh_token.as_deref(),
-    )?;
-    save_base_url_for(profile, base_url)?;
+    )
+    .map_err(BrowserLoginError::Other)?;
+    save_base_url_for(profile, base_url).map_err(BrowserLoginError::Other)?;
 
     // Telemetry: identify the now-authenticated user. `save_tokens_for`
     // above derived + persisted `user_id` from the JWT; we read it
@@ -597,7 +749,8 @@ async fn run_browser_login(base_url: &str, profile: Option<&str>) -> Result<()> 
     }
 
     eprintln!("Logged in successfully.");
-    eprintln!("Token saved to {}", token_file_path_for(profile)?.display());
+    let token_path = token_file_path_for(profile).map_err(BrowserLoginError::Other)?;
+    eprintln!("Token saved to {}", token_path.display());
 
     Ok(())
 }
@@ -607,12 +760,17 @@ struct CallbackTokens {
     refresh_token: Option<String>,
 }
 
-async fn wait_for_callback(listener: TcpListener, expected_state: &str) -> Result<CallbackTokens> {
+async fn wait_for_callback(
+    listener: TcpListener,
+    expected_state: &str,
+) -> std::result::Result<CallbackTokens, BrowserLoginError> {
     listener
         .set_nonblocking(true)
-        .context("Failed to set listener to non-blocking")?;
-    let listener =
-        tokio::net::TcpListener::from_std(listener).context("Failed to create async listener")?;
+        .context("Failed to set listener to non-blocking")
+        .map_err(BrowserLoginError::CallbackIo)?;
+    let listener = tokio::net::TcpListener::from_std(listener)
+        .context("Failed to create async listener")
+        .map_err(BrowserLoginError::CallbackIo)?;
 
     let timeout = tokio::time::sleep(std::time::Duration::from_secs(CALLBACK_TIMEOUT_SECS));
     tokio::pin!(timeout);
@@ -620,10 +778,13 @@ async fn wait_for_callback(listener: TcpListener, expected_state: &str) -> Resul
     loop {
         tokio::select! {
             accept = listener.accept() => {
-                let (mut stream, _) = accept.context("Failed to accept connection")?;
+                let (mut stream, _) = accept
+                    .context("Failed to accept connection")
+                    .map_err(BrowserLoginError::CallbackIo)?;
                 let mut buf = vec![0u8; 8192];
                 let n = tokio::io::AsyncReadExt::read(&mut stream, &mut buf).await
-                    .context("Failed to read request")?;
+                    .context("Failed to read request")
+                    .map_err(BrowserLoginError::CallbackIo)?;
                 let request = String::from_utf8_lossy(&buf[..n]);
 
                 if let Some(tokens) = parse_callback_request(&request, expected_state) {
@@ -639,7 +800,7 @@ async fn wait_for_callback(listener: TcpListener, expected_state: &str) -> Resul
                 let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, response.as_bytes()).await;
             }
             () = &mut timeout => {
-                bail!("Login timed out after {CALLBACK_TIMEOUT_SECS}s. Please try again.");
+                return Err(BrowserLoginError::CallbackTimedOut);
             }
         }
     }
@@ -737,6 +898,250 @@ pub async fn fetch_frontend_url(base_url: &str, profile: Option<&str>) -> Result
     Ok(config.frontend_url.trim_end_matches('/').to_string())
 }
 
+// ---- Device-code login ----
+
+trait AuthDeviceApi {
+    fn request<'a>(
+        &'a self,
+        base_url: &'a str,
+        body: &'a AuthDeviceRequestBody,
+        profile: Option<&'a str>,
+    ) -> Pin<Box<dyn Future<Output = Result<AuthDeviceRequestOutcome>> + Send + 'a>>;
+
+    fn poll<'a>(
+        &'a self,
+        base_url: &'a str,
+        body: &'a AuthDevicePollBody,
+        profile: Option<&'a str>,
+    ) -> Pin<Box<dyn Future<Output = Result<AuthDevicePollOutcome>> + Send + 'a>>;
+}
+
+struct RealAuthDeviceApi;
+
+impl AuthDeviceApi for RealAuthDeviceApi {
+    fn request<'a>(
+        &'a self,
+        base_url: &'a str,
+        body: &'a AuthDeviceRequestBody,
+        profile: Option<&'a str>,
+    ) -> Pin<Box<dyn Future<Output = Result<AuthDeviceRequestOutcome>> + Send + 'a>> {
+        Box::pin(crate::api::auth_device_request(base_url, body, profile))
+    }
+
+    fn poll<'a>(
+        &'a self,
+        base_url: &'a str,
+        body: &'a AuthDevicePollBody,
+        profile: Option<&'a str>,
+    ) -> Pin<Box<dyn Future<Output = Result<AuthDevicePollOutcome>> + Send + 'a>> {
+        Box::pin(crate::api::auth_device_poll(base_url, body, profile))
+    }
+}
+
+trait LoginSleeper {
+    fn sleep<'a>(&'a self, seconds: u64) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
+}
+
+struct TokioLoginSleeper;
+
+impl LoginSleeper for TokioLoginSleeper {
+    fn sleep<'a>(&'a self, seconds: u64) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(tokio::time::sleep(std::time::Duration::from_secs(seconds)))
+    }
+}
+
+trait DeviceBrowserFallback {
+    fn run_browser_login<'a>(
+        &'a self,
+        base_url: &'a str,
+        profile: Option<&'a str>,
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<(), BrowserLoginError>> + Send + 'a>>;
+}
+
+struct RealDeviceBrowserFallback;
+
+impl DeviceBrowserFallback for RealDeviceBrowserFallback {
+    fn run_browser_login<'a>(
+        &'a self,
+        base_url: &'a str,
+        profile: Option<&'a str>,
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<(), BrowserLoginError>> + Send + 'a>> {
+        Box::pin(run_browser_login(base_url, profile))
+    }
+}
+
+async fn run_device_code_login(base_url: &str, profile: Option<&str>) -> Result<()> {
+    let api = RealAuthDeviceApi;
+    let sleeper = TokioLoginSleeper;
+    let browser = RealDeviceBrowserFallback;
+    run_device_code_login_with_api(base_url, profile, &api, &sleeper, &browser).await
+}
+
+async fn run_device_code_login_with_api(
+    base_url: &str,
+    profile: Option<&str>,
+    api: &impl AuthDeviceApi,
+    sleeper: &impl LoginSleeper,
+    browser: &impl DeviceBrowserFallback,
+) -> Result<()> {
+    let base_url = base_url.trim_end_matches('/');
+    let request = AuthDeviceRequestBody {
+        client_label: client_label(),
+        client_user_agent: Some(CLI_USER_AGENT.to_string()),
+    };
+
+    let challenge = match api.request(base_url, &request, profile).await? {
+        AuthDeviceRequestOutcome::Created(challenge) => challenge,
+        AuthDeviceRequestOutcome::NotSupported => {
+            eprintln!(
+                "This NyxID backend doesn't support device-code login. Falling back to browser login."
+            );
+            return browser
+                .run_browser_login(base_url, profile)
+                .await
+                .map_err(Into::into);
+        }
+    };
+
+    eprintln!("! First copy your one-time code: {}", challenge.user_code);
+    eprintln!();
+    eprintln!(
+        "Then open {} and enter the code above.",
+        challenge.verification_uri
+    );
+
+    let interactive = std::io::IsTerminal::is_terminal(&std::io::stdin())
+        && std::io::IsTerminal::is_terminal(&std::io::stderr());
+    if interactive {
+        eprint!("\nOpen in your browser? [Y/n] ");
+        std::io::stderr().flush().ok();
+        let mut answer = String::new();
+        if std::io::stdin().read_line(&mut answer).is_ok() {
+            let a = answer.trim().to_ascii_lowercase();
+            if (a.is_empty() || a == "y" || a == "yes")
+                && let Err(e) = crate::browser::open_browser(&challenge.verification_uri)
+            {
+                eprintln!("Could not open browser: {e}. Paste the URL above manually.");
+            }
+        }
+    }
+
+    poll_device_code_login(
+        base_url,
+        profile,
+        api,
+        sleeper,
+        challenge.device_code,
+        challenge.interval,
+    )
+    .await
+}
+
+async fn poll_device_code_login(
+    base_url: &str,
+    profile: Option<&str>,
+    api: &impl AuthDeviceApi,
+    sleeper: &impl LoginSleeper,
+    device_code: String,
+    initial_interval: u64,
+) -> Result<()> {
+    let mut interval = initial_interval.max(1);
+
+    loop {
+        sleeper.sleep(interval).await;
+        let body = AuthDevicePollBody {
+            device_code: device_code.clone(),
+        };
+
+        match api.poll(base_url, &body, profile).await? {
+            AuthDevicePollOutcome::Delivered(tokens) => {
+                save_tokens_for(profile, &tokens.access_token, Some(&tokens.refresh_token))?;
+                save_base_url_for(profile, base_url)?;
+
+                if let Some(user_id) = read_saved_user_id_for(profile)
+                    && let Some(mut client) = crate::telemetry::TelemetryClient::init(profile)
+                {
+                    client.identify(&user_id).await;
+                }
+
+                eprintln!("Signed in.");
+                return Ok(());
+            }
+            AuthDevicePollOutcome::Error(error) => {
+                interval = handle_device_poll_error(error.error_code, &error.message, interval)?;
+            }
+        }
+    }
+}
+
+fn handle_device_poll_error(error_code: i64, message: &str, interval: u64) -> Result<u64> {
+    match error_code {
+        AUTH_DEVICE_CODE_PENDING => Ok(interval),
+        AUTH_DEVICE_CODE_SLOW_DOWN => Ok(interval + 5),
+        AUTH_DEVICE_CODE_EXPIRED => bail!("Login timed out - run `nyxid login --device` again."),
+        AUTH_DEVICE_CODE_DENIED => bail!("Login denied."),
+        AUTH_DEVICE_CODE_ALREADY_DELIVERED => {
+            bail!("This code was already used. Run `nyxid login --device` again.")
+        }
+        AUTH_DEVICE_CODE_RATE_LIMITED => bail!("Too many attempts. Try again in a few minutes."),
+        _ => bail!("{message}"),
+    }
+}
+
+fn client_label() -> Option<String> {
+    hostname_from_env()
+        .or_else(hostname_from_command)
+        .map(|s| sanitize_client_label(&s))
+        .filter(|s| !s.is_empty())
+}
+
+fn hostname_from_env() -> Option<String> {
+    std::env::var("HOSTNAME")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            std::env::var("COMPUTERNAME")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+        })
+}
+
+fn hostname_from_command() -> Option<String> {
+    let output = std::process::Command::new("hostname").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout)
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+}
+
+fn sanitize_client_label(value: &str) -> String {
+    value
+        .trim()
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(64)
+        .collect()
+}
+
+pub(crate) fn is_ci_environment() -> bool {
+    [
+        "CI",
+        "GITHUB_ACTIONS",
+        "BUILDKITE",
+        "CIRCLECI",
+        "JENKINS_URL",
+        "GITLAB_CI",
+    ]
+    .iter()
+    .any(|key| std::env::var_os(key).is_some())
+}
+
+fn stderr_is_tty() -> bool {
+    std::io::stderr().is_terminal()
+}
+
 // ---- Password login (ported from login_cli.rs) ----
 
 #[derive(Deserialize)]
@@ -819,11 +1224,23 @@ async fn run_password_login(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_cli_auth_url, callback_success_html, jwt_sub_from_token, parse_callback_request,
-        refresh_token_file_path_for, token_dir_for_profile, token_file_path_for,
-        validate_profile_name,
+        AUTH_DEVICE_CODE_ALREADY_DELIVERED, AUTH_DEVICE_CODE_DENIED, AUTH_DEVICE_CODE_EXPIRED,
+        AUTH_DEVICE_CODE_PENDING, AUTH_DEVICE_CODE_RATE_LIMITED, AUTH_DEVICE_CODE_SLOW_DOWN,
+        AuthDeviceApi, BrowserLoginError, DeviceBrowserFallback, LoginSleeper, LoginStrategies,
+        build_cli_auth_url, callback_success_html, handle_device_poll_error, is_ci_environment,
+        jwt_sub_from_token, parse_callback_request, poll_device_code_login,
+        refresh_token_file_path_for, run_login_with_strategies, token_dir_for_profile,
+        token_file_path_for, validate_profile_name,
     };
-    use crate::api::CLI_USER_AGENT;
+    use crate::api::{
+        AuthDevicePollBody, AuthDevicePollOutcome, AuthDevicePollResponse, AuthDeviceRequestBody,
+        AuthDeviceRequestOutcome, CLI_USER_AGENT, ErrorEnvelope,
+    };
+    use anyhow::{Result, bail};
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     // ---- Profile validation ----
 
@@ -954,6 +1371,85 @@ mod tests {
             params.get("client_ua").map(|v| v.as_ref()),
             Some(CLI_USER_AGENT)
         );
+    }
+
+    #[test]
+    fn device_poll_error_mapping_matches_contract() {
+        assert_eq!(
+            handle_device_poll_error(AUTH_DEVICE_CODE_PENDING, "pending", 5).expect("pending"),
+            5
+        );
+        assert_eq!(
+            handle_device_poll_error(AUTH_DEVICE_CODE_SLOW_DOWN, "slow", 5).expect("slow"),
+            10
+        );
+
+        let expired = handle_device_poll_error(AUTH_DEVICE_CODE_EXPIRED, "expired", 5).unwrap_err();
+        assert!(
+            expired.to_string().contains("Login timed out"),
+            "unexpected: {expired}"
+        );
+        let denied = handle_device_poll_error(AUTH_DEVICE_CODE_DENIED, "denied", 5).unwrap_err();
+        assert_eq!(denied.to_string(), "Login denied.");
+        let used =
+            handle_device_poll_error(AUTH_DEVICE_CODE_ALREADY_DELIVERED, "used", 5).unwrap_err();
+        assert!(
+            used.to_string().contains("already used"),
+            "unexpected: {used}"
+        );
+        let limited =
+            handle_device_poll_error(AUTH_DEVICE_CODE_RATE_LIMITED, "limited", 5).unwrap_err();
+        assert!(
+            limited.to_string().contains("Too many attempts"),
+            "unexpected: {limited}"
+        );
+        let not_found =
+            handle_device_poll_error(11200, "device code not found from server", 5).unwrap_err();
+        assert_eq!(not_found.to_string(), "device code not found from server");
+        let invalid =
+            handle_device_poll_error(11207, "user code invalid from server", 5).unwrap_err();
+        assert_eq!(invalid.to_string(), "user code invalid from server");
+        let unknown = handle_device_poll_error(11999, "server message", 5).unwrap_err();
+        assert_eq!(unknown.to_string(), "server message");
+    }
+
+    #[test]
+    fn is_ci_environment_detects_standard_ci_vars() {
+        let _guard = crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let keys = [
+            "CI",
+            "GITHUB_ACTIONS",
+            "BUILDKITE",
+            "CIRCLECI",
+            "JENKINS_URL",
+            "GITLAB_CI",
+        ];
+        let previous: Vec<_> = keys
+            .iter()
+            .map(|key| (*key, std::env::var_os(key)))
+            .collect();
+        unsafe {
+            for key in keys {
+                std::env::remove_var(key);
+            }
+        }
+        assert!(!is_ci_environment());
+
+        unsafe {
+            std::env::set_var("CI", "1");
+        }
+        assert!(is_ci_environment());
+
+        unsafe {
+            for (key, value) in previous {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
     }
 
     // ---- JWT sub extraction ----
@@ -1286,5 +1782,354 @@ mod tests {
             "unexpected message: {msg}"
         );
         assert!(msg.contains("nyxid login"), "should point at login: {msg}");
+    }
+
+    #[derive(Clone)]
+    struct MockDeviceApi {
+        request: AuthDeviceRequestOutcome,
+        polls: Arc<Mutex<Vec<AuthDevicePollOutcome>>>,
+    }
+
+    impl MockDeviceApi {
+        fn with_polls(polls: Vec<AuthDevicePollOutcome>) -> Self {
+            Self {
+                request: AuthDeviceRequestOutcome::Created(crate::api::AuthDeviceRequestResponse {
+                    device_code: "nyx_adc_test".to_string(),
+                    user_code: "ADCB-EFGH".to_string(),
+                    verification_uri: "https://nyx.example/login/device".to_string(),
+                    verification_uri_complete:
+                        "https://nyx.example/login/device?user_code=ADCB-EFGH".to_string(),
+                    expires_in: 600,
+                    interval: 5,
+                }),
+                polls: Arc::new(Mutex::new(polls)),
+            }
+        }
+    }
+
+    impl AuthDeviceApi for MockDeviceApi {
+        fn request<'a>(
+            &'a self,
+            _base_url: &'a str,
+            _body: &'a AuthDeviceRequestBody,
+            _profile: Option<&'a str>,
+        ) -> Pin<Box<dyn Future<Output = Result<AuthDeviceRequestOutcome>> + Send + 'a>> {
+            let outcome = self.request.clone();
+            Box::pin(async move { Ok(outcome) })
+        }
+
+        fn poll<'a>(
+            &'a self,
+            _base_url: &'a str,
+            _body: &'a AuthDevicePollBody,
+            _profile: Option<&'a str>,
+        ) -> Pin<Box<dyn Future<Output = Result<AuthDevicePollOutcome>> + Send + 'a>> {
+            let polls = self.polls.clone();
+            Box::pin(async move {
+                let mut polls = polls.lock().unwrap_or_else(|e| e.into_inner());
+                if polls.is_empty() {
+                    bail!("unexpected extra poll")
+                }
+                Ok(polls.remove(0))
+            })
+        }
+    }
+
+    struct RecordingSleeper {
+        intervals: Arc<Mutex<Vec<u64>>>,
+    }
+
+    impl RecordingSleeper {
+        fn new() -> Self {
+            Self {
+                intervals: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn intervals(&self) -> Vec<u64> {
+            self.intervals
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+        }
+    }
+
+    impl LoginSleeper for RecordingSleeper {
+        fn sleep<'a>(&'a self, seconds: u64) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+            let intervals = self.intervals.clone();
+            Box::pin(async move {
+                intervals
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(seconds);
+            })
+        }
+    }
+
+    fn poll_error(code: i64) -> AuthDevicePollOutcome {
+        AuthDevicePollOutcome::Error(ErrorEnvelope {
+            error: "contract_error".to_string(),
+            error_code: code,
+            message: format!("message for {code}"),
+        })
+    }
+
+    fn delivered_tokens() -> AuthDevicePollOutcome {
+        AuthDevicePollOutcome::Delivered(AuthDevicePollResponse {
+            access_token: build_jwt(&serde_json::json!({
+                "sub": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+                "exp": 9999999999i64,
+            })),
+            refresh_token: "refresh-token".to_string(),
+            token_type: "Bearer".to_string(),
+            expires_in: 900,
+        })
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn device_poll_loop_handles_pending_slow_down_then_success_and_profile_storage() {
+        let _home = PreflightHome::set();
+        let api = MockDeviceApi::with_polls(vec![
+            poll_error(AUTH_DEVICE_CODE_PENDING),
+            poll_error(AUTH_DEVICE_CODE_SLOW_DOWN),
+            delivered_tokens(),
+        ]);
+        let sleeper = RecordingSleeper::new();
+
+        poll_device_code_login(
+            "https://nyx-api.example",
+            Some("alt"),
+            &api,
+            &sleeper,
+            "nyx_adc_test".to_string(),
+            5,
+        )
+        .await
+        .expect("device login");
+
+        assert_eq!(sleeper.intervals(), vec![5, 5, 10]);
+        assert!(
+            super::token_file_path_for(Some("alt"))
+                .expect("token path")
+                .to_string_lossy()
+                .contains(".nyxid/profiles/alt/access_token")
+        );
+        assert!(super::read_saved_token_for(Some("alt")).is_some());
+        assert_eq!(
+            super::read_saved_refresh_token_for(Some("alt")).as_deref(),
+            Some("refresh-token")
+        );
+        assert_eq!(
+            super::read_saved_base_url_for(Some("alt")).as_deref(),
+            Some("https://nyx-api.example")
+        );
+    }
+
+    struct MockDeviceBrowser {
+        calls: AtomicUsize,
+    }
+
+    impl MockDeviceBrowser {
+        fn new() -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl DeviceBrowserFallback for MockDeviceBrowser {
+        fn run_browser_login<'a>(
+            &'a self,
+            _base_url: &'a str,
+            _profile: Option<&'a str>,
+        ) -> Pin<Box<dyn Future<Output = std::result::Result<(), BrowserLoginError>> + Send + 'a>>
+        {
+            Box::pin(async move {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn device_request_404_falls_back_to_browser_flow() {
+        let api = MockDeviceApi {
+            request: AuthDeviceRequestOutcome::NotSupported,
+            polls: Arc::new(Mutex::new(Vec::new())),
+        };
+        let sleeper = RecordingSleeper::new();
+        let browser = MockDeviceBrowser::new();
+
+        super::run_device_code_login_with_api(
+            "https://nyx-api.example",
+            None,
+            &api,
+            &sleeper,
+            &browser,
+        )
+        .await
+        .expect("browser fallback");
+
+        assert_eq!(browser.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(sleeper.intervals(), Vec::<u64>::new());
+    }
+
+    #[derive(Default)]
+    struct MockLoginStrategies {
+        browser_result: Mutex<Option<std::result::Result<(), BrowserLoginError>>>,
+        password_calls: AtomicUsize,
+        device_calls: AtomicUsize,
+        browser_calls: AtomicUsize,
+    }
+
+    impl LoginStrategies for MockLoginStrategies {
+        fn run_password_login<'a>(
+            &'a self,
+            _base_url: &'a str,
+            _email: Option<&'a str>,
+            _profile: Option<&'a str>,
+        ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+            Box::pin(async move {
+                self.password_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+        }
+
+        fn run_device_code_login<'a>(
+            &'a self,
+            _base_url: &'a str,
+            _profile: Option<&'a str>,
+        ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+            Box::pin(async move {
+                self.device_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+        }
+
+        fn run_browser_login<'a>(
+            &'a self,
+            _base_url: &'a str,
+            _profile: Option<&'a str>,
+        ) -> Pin<Box<dyn Future<Output = std::result::Result<(), BrowserLoginError>> + Send + 'a>>
+        {
+            Box::pin(async move {
+                self.browser_calls.fetch_add(1, Ordering::SeqCst);
+                self.browser_result
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .take()
+                    .unwrap_or(Ok(()))
+            })
+        }
+    }
+
+    fn login_args() -> crate::cli::LoginArgs {
+        crate::cli::LoginArgs {
+            base_url: "https://nyx-api.example".to_string(),
+            password: false,
+            device: false,
+            email: None,
+            profile: None,
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn browser_open_failure_falls_back_to_device_flow() {
+        // Must clear CI env vars so the dispatcher reaches the browser branch
+        // — on GitHub Actions runners CI=true is preset.
+        let _guard = crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let ci_keys = [
+            "CI",
+            "GITHUB_ACTIONS",
+            "BUILDKITE",
+            "CIRCLECI",
+            "JENKINS_URL",
+            "GITLAB_CI",
+            "NYXID_LOGIN_NO_DEVICE_FALLBACK",
+        ];
+        let prev: Vec<_> = ci_keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
+        unsafe {
+            for k in &ci_keys {
+                std::env::remove_var(k);
+            }
+        }
+
+        let strategies = MockLoginStrategies {
+            browser_result: Mutex::new(Some(Err(BrowserLoginError::CannotOpenBrowser(
+                std::io::Error::new(std::io::ErrorKind::NotFound, "browser"),
+            )))),
+            ..Default::default()
+        };
+
+        let result = run_login_with_strategies(login_args(), &strategies).await;
+
+        unsafe {
+            for (k, v) in &prev {
+                match v {
+                    Some(val) => std::env::set_var(k, val),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+
+        result.expect("fallback succeeds");
+        assert_eq!(strategies.browser_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(strategies.device_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn explicit_device_flag_skips_browser_flow() {
+        let strategies = MockLoginStrategies::default();
+        let mut args = login_args();
+        args.device = true;
+
+        run_login_with_strategies(args, &strategies)
+            .await
+            .expect("device login");
+
+        assert_eq!(strategies.browser_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(strategies.device_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn ci_short_circuit_fires_before_network_or_browser() {
+        let _guard = crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prev_ci = std::env::var_os("CI");
+        let prev_disable = std::env::var_os("NYXID_LOGIN_NO_DEVICE_FALLBACK");
+        unsafe {
+            std::env::set_var("CI", "1");
+            std::env::remove_var("NYXID_LOGIN_NO_DEVICE_FALLBACK");
+        }
+
+        let strategies = MockLoginStrategies::default();
+        let err = run_login_with_strategies(login_args(), &strategies)
+            .await
+            .expect_err("CI should fail");
+        let msg = err.to_string();
+        assert!(msg.contains("Detected CI environment"), "unexpected: {msg}");
+        assert!(
+            msg.contains("nyxid api-key create"),
+            "missing api-key hint: {msg}"
+        );
+        assert_eq!(strategies.browser_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(strategies.device_calls.load(Ordering::SeqCst), 0);
+
+        unsafe {
+            match prev_ci {
+                Some(value) => std::env::set_var("CI", value),
+                None => std::env::remove_var("CI"),
+            }
+            match prev_disable {
+                Some(value) => std::env::set_var("NYXID_LOGIN_NO_DEVICE_FALLBACK", value),
+                None => std::env::remove_var("NYXID_LOGIN_NO_DEVICE_FALLBACK"),
+            }
+        }
     }
 }

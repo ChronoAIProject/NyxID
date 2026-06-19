@@ -7,7 +7,7 @@ import { DOCS_TABS, DOCS_SHARED } from "./manifest";
 export function DocsIndexPage() {
   useEffect(() => {
     const prev = document.title;
-    document.title = "NyxID Documentation";
+    document.title = "nyxid - docs";
     return () => {
       document.title = prev;
     };

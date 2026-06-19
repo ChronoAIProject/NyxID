@@ -99,16 +99,39 @@ nyxid --help
 
 **First-time setup:**
 
+> **Who runs what?** There are two identities in this section:
+>
+> 1. **You, the human.** You authenticate **once** with `nyxid login`, which writes your session to `~/.nyxid/`. Browser SSO on desktop, device-code on headless boxes — either way you complete the flow in a signed-in browser.
+> 2. **Your agent.** A separate identity, represented by a scoped API key (`nyxid_ag_…`) you mint **from your authenticated session**. The agent reads it from `NYXID_API_KEY` and uses it for every proxy call.
+>
+> **Agents must never run `nyxid login` themselves.** Device-code requires a human to approve a code in a browser; an autonomous agent has nothing to "approve" on its own. If an agent attempts `nyxid login` in CI it short-circuits with an api-key hint; in an interactive shell it would block forever. The correct agent action is to read the pre-issued `NYXID_API_KEY` from its environment.
+
+Step 1 — **you** authenticate:
+
 ```bash
-# Login via browser SSO (opens browser, stores token at ~/.nyxid/access_token)
-# --base-url is saved to ~/.nyxid/base_url -- all subsequent commands use it automatically
+# Desktop with a browser (opens browser, stores token at ~/.nyxid/access_token).
+# --base-url is saved to ~/.nyxid/base_url, so subsequent commands don't need it.
 nyxid login --base-url http://localhost:3001
 
-# Or use password login (for headless/AI-agent environments)
-nyxid login --base-url http://localhost:3001 --password --password-env NYXID_PASSWORD
+# Headless / SSH / no $DISPLAY: bare `nyxid login` auto-falls-back to
+# device-code, or force it explicitly. The CLI prints a one-time code +
+# verification URL; you approve in any signed-in browser (phone, laptop).
+nyxid login --base-url http://localhost:3001 --device
 
-# Check connection (no --base-url needed after login)
+# Sanity check the session.
 nyxid status
+```
+
+Step 2 — **you** mint a key for the agent and hand it over:
+
+```bash
+# Issue a scoped key (rate-limited and audit-attributed under this agent's name).
+nyxid api-key create --name my-agent --platform claude-code
+# -> prints `nyxid_ag_…` ONCE. Copy it now; it cannot be retrieved later.
+
+# Put it in the agent's environment. The agent uses NYXID_API_KEY for
+# every NyxID call. It should not have access to ~/.nyxid/ files.
+export NYXID_API_KEY=nyxid_ag_...
 ```
 
 > **Note:** After `nyxid login --base-url <URL>`, the URL is persisted at `~/.nyxid/base_url`. You do not need to pass `--base-url` on subsequent commands.
@@ -1103,6 +1126,11 @@ Users add services and manage credentials from the AI Services page: http://loca
 ## 10b. Device-Code Grant (headless device provisioning)
 
 **Goal:** Provision a fresh headless device, such as an ESP32 camera, with NyxID credentials after a human approves the code shown by the device.
+
+> Three distinct "device-code" features exist in NyxID — pick the right one:
+> 1. **Provider device-code OAuth** (section 10) — connect a user's downstream OAuth provider credential.
+> 2. **Auth device-code login** (`nyxid login --device`, endpoints under `/api/v1/auth/device/*`) — RFC 8628 flow that lets the CLI authenticate a user on a headless box (WSL / SSH / no `$DISPLAY`).
+> 3. **Device-code grant** (this section, endpoints under `/api/v1/devices/code/*`) — provision a headless IoT device with its own scoped NyxID API key, node id, and one-time refresh token.
 
 This is not the provider device-code OAuth flow above. Provider device-code connects a user's downstream OAuth provider credential. Device-code grant gives the device its own NyxID API key, node id, and one-time refresh token.
 

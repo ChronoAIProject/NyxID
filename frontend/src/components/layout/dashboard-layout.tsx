@@ -12,7 +12,6 @@ import { useAuthStore } from "@/stores/auth-store";
 import { useLogout } from "@/hooks/use-auth";
 import { useShouldShowOnboarding } from "@/hooks/use-onboarding";
 import { useApplyTheme } from "@/hooks/use-theme";
-import { NyxidIcon } from "@/components/brand/nyxid-icon";
 import { NyxidLogo } from "@/components/brand/nyxid-logo";
 import { OnboardingTakeover } from "@/components/dashboard/onboarding-takeover";
 import { ThemeToggle } from "@/components/dashboard/theme-toggle";
@@ -60,11 +59,16 @@ export function DashboardLayout() {
   const [mobileNavState, setMobileNavState] = useState<"closed" | "open" | "closing">("closed");
   const [rightPanel, setRightPanel] = useState<React.ReactNode>(null);
   const [breadcrumbLabel, setBreadcrumbLabel] = useState<string | null>(null);
+  const pathname = useRouterState({ select: (s) => s.location.pathname });
 
   // Applies the resolved theme class to <html> on mount, reverts to dark on
   // unmount. Must run before the onboarding early-returns below to satisfy
   // rules-of-hooks.
   useApplyTheme();
+
+  useEffect(() => {
+    document.title = `nyxid - ${sectionTitleFor(pathname)}`;
+  }, [pathname]);
 
   const closeMobileNav = useCallback(() => setMobileNavState("closing"), []);
 
@@ -132,6 +136,27 @@ export function DashboardLayout() {
     </BreadcrumbLabelContext.Provider>
     </RightPanelContext.Provider>
   );
+}
+
+const SECTION_TITLES: Record<string, string> = {
+  dashboard: "dashboard",
+  keys: "ai services",
+  orgs: "org",
+  nodes: "nodes",
+  "channel-bots": "channel bots",
+  settings: "settings",
+  guide: "guide",
+  approvals: "approvals",
+  developer: "developer apps",
+  "ai-setup": "ai setup",
+  "integration-guide": "integration guide",
+  admin: "admin",
+  "design-system": "design system",
+};
+
+function sectionTitleFor(pathname: string): string {
+  const first = pathname.split("/").filter(Boolean)[0] ?? "";
+  return SECTION_TITLES[first] ?? "dashboard";
 }
 
 const SIDEBAR_ITEMS: Record<string, string> = {
@@ -276,18 +301,17 @@ function TopBar({
           </button>
         ) : (
           <Link to="/dashboard" className="pl-2">
-            <NyxidIcon />
+            <NyxidLogo className="h-6 w-auto" />
           </Link>
         )}
       </div>
 
-      {/* Desktop: logo zone — matches sidebar width */}
+      {/* Desktop: logo zone — fits the full brand mark; breadcrumb starts after */}
       <Link
         to="/dashboard"
-        className="hidden md:flex items-center shrink-0 justify-center w-[52px] transition-[width] duration-300 ease-in-out"
-        style={{ width: "var(--sidebar-width, 52px)", justifyContent: "start", paddingLeft: "16px" }}
+        className="hidden md:flex items-center shrink-0 pl-4 pr-2"
       >
-        <NyxidIcon className="h-5 w-5 shrink-0" />
+        <NyxidLogo className="h-5 w-auto" />
       </Link>
 
       {/* Content zone */}

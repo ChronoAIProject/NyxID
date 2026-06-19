@@ -53,11 +53,13 @@ nyxid login --base-url https://auth.example.com
 
 The CLI starts a temporary localhost server, opens the browser to `/cli-auth`, and waits for the redirect callback with the access token. The token is saved to `~/.nyxid/access_token` with `0600` permissions.
 
-For headless environments (CI, Docker), use `--password` to enter email and password directly:
+For headless interactive environments (SSH, Docker shell, WSL with no `$DISPLAY`), the bare `nyxid login` auto-falls back to the device-code flow, or you can force it:
 
 ```bash
-nyxid login --base-url https://auth.example.com --password
+nyxid login --base-url https://auth.example.com --device
 ```
+
+The CLI prints a one-time code and a URL — open the URL on any signed-in browser (phone, another machine), type the code, approve, and the CLI completes. For unattended CI/CD use an API key (Option B below) instead — `nyxid login` short-circuits in CI environments with a hint to do exactly that. `--password` is still available for legacy scripted setups where neither device-code nor an API key fits.
 
 ### Option B: API Key
 

@@ -9,6 +9,16 @@ This page gets an AI agent connected to NyxID. By the end you will have the `nyx
 If this is your first time ever adding a service, consider completing the Web UI flow first so you have at least one working connection before wiring up MCP. See the web console at `https://nyx.chrono-ai.fun`.
 :::
 
+:::warning Two identities, never confuse them
+
+There are two NyxID identities involved here, and only the human can move between them:
+
+- **You** — the human running these steps. You authenticate **once** via `nyxid login` (browser or device-code). Your session is what authorizes everything else; the CLI saves it to `~/.nyxid/`.
+- **The agent** — a separate, scoped identity (`nyxid_ag_…` API key) that **you mint for the agent** with `nyxid api-key create`. The agent reads it from `NYXID_API_KEY` in its environment and uses it for proxy requests.
+
+**Agents must never run `nyxid login`.** Device-code login requires a human to approve a code in a signed-in browser — there is nothing for an autonomous agent to "approve" on its own end. If your agent tries `nyxid login`, it will block on the approval step (interactive TTYs) or short-circuit with an api-key hint (CI / GITHUB_ACTIONS / BUILDKITE / etc.). Either way the correct action for the agent is to read its pre-issued API key from `NYXID_API_KEY` — which you set for it below.
+:::
+
 ## Install the CLI
 
 The `nyxid` CLI is a Rust binary. Install the Rust toolchain if you don't have it:
@@ -29,9 +39,9 @@ nyxid --help    # verify
 End users install prebuilt release binaries from the releases page. `cargo install` is the development path; both produce the same binary.
 :::
 
-## Authenticate
+## Authenticate (you, the human)
 
-Log in once. The `--base-url` is saved to `~/.nyxid/base_url`; all subsequent commands pick it up automatically.
+Log in once. The `--base-url` is saved to `~/.nyxid/base_url`; all subsequent commands pick it up automatically. This is **your** session, not the agent's.
 
 ```bash
 # Hosted deployment
@@ -41,11 +51,15 @@ nyxid login --base-url https://nyx-api.chrono-ai.fun
 nyxid login --base-url http://localhost:3001
 ```
 
-For headless or CI environments, use password login with an environment variable:
+For headless environments (SSH, container, WSL with no `$DISPLAY`), `nyxid login` auto-falls back to the **device-code flow**. You can also force it explicitly:
 
 ```bash
-nyxid login --base-url https://nyx-api.chrono-ai.fun --password --password-env NYXID_PASSWORD
+nyxid login --device --base-url https://nyx-api.chrono-ai.fun
 ```
+
+The CLI prints a one-time code and a URL; open the URL on any signed-in browser (phone, another machine), paste the code, approve, and the CLI completes.
+
+For non-interactive CI use a pre-issued API key (`nyxid api-key create --platform <agent>`) instead of an interactive login — `nyxid login` short-circuits in CI environments with a hint to do exactly that.
 
 Confirm the session is working:
 
@@ -53,9 +67,9 @@ Confirm the session is working:
 nyxid status
 ```
 
-## Create an Agent Key
+## Create an Agent Key (for the agent to use)
 
-An Agent Key is a scoped NyxID API key your agent uses to authenticate. It carries its own rate limit and service scope, keeping agent traffic separated in the audit log.
+This is the second identity — a scoped NyxID API key the agent reads from `NYXID_API_KEY`. You mint it from your authenticated session above. It carries its own rate limit, service scope, and audit attribution so the agent's traffic is fully separated from yours.
 
 ```bash
 nyxid api-key create --name "my-agent" --platform claude-code --scopes "proxy"

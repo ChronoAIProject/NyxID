@@ -60,6 +60,7 @@ import {
   AdminInviteCodesPage,
   CliAuthPage,
   CliPairPage,
+  LoginDevicePage,
   SshTerminalPage,
   KeysPage,
   KeyDetailPage,
@@ -224,6 +225,13 @@ const cliPairRoute = createRoute({
   path: "/cli/pair",
   getParentRoute: () => rootRoute,
   component: CliPairPage,
+});
+
+const loginDeviceRoute = createRoute({
+  path: "/login/device",
+  getParentRoute: () => rootRoute,
+  validateSearch: (): Record<string, never> => ({}),
+  component: LoginDevicePage,
 });
 
 const sshTerminalRoute = createRoute({
@@ -730,6 +738,7 @@ const routeTree = rootRoute.addChildren([
   docsDetailRoute,
   cliAuthRoute,
   cliPairRoute,
+  loginDeviceRoute,
   sshTerminalRoute,
   designSystemRoute,
   dashboardLayout.addChildren([

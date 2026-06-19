@@ -236,6 +236,30 @@ pub enum AppError {
     #[error("Device code poll interval must slow down")]
     DeviceCodeSlowDown,
 
+    #[error("Auth device code not found")]
+    AuthDeviceCodeNotFound,
+
+    #[error("Auth device code expired")]
+    AuthDeviceCodeExpired,
+
+    #[error("Authorization pending")]
+    AuthDeviceCodePending,
+
+    #[error("Auth device code poll interval must slow down")]
+    AuthDeviceCodeSlowDown,
+
+    #[error("Auth device code denied")]
+    AuthDeviceCodeDenied,
+
+    #[error("Auth device code already delivered")]
+    AuthDeviceCodeAlreadyDelivered,
+
+    #[error("Auth device code rate limited")]
+    AuthDeviceCodeRateLimited,
+
+    #[error("Auth device user code invalid")]
+    AuthDeviceUserCodeInvalid,
+
     #[error("Channel bot not found: {0}")]
     ChannelBotNotFound(String),
 
@@ -400,6 +424,14 @@ impl AppError {
             Self::DeviceCodeRateLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::DeviceCodeLocked => StatusCode::TOO_MANY_REQUESTS,
             Self::DeviceCodeSlowDown => StatusCode::TOO_MANY_REQUESTS,
+            Self::AuthDeviceCodeNotFound => StatusCode::NOT_FOUND,
+            Self::AuthDeviceCodeExpired => StatusCode::GONE,
+            Self::AuthDeviceCodePending => StatusCode::BAD_REQUEST,
+            Self::AuthDeviceCodeSlowDown => StatusCode::TOO_MANY_REQUESTS,
+            Self::AuthDeviceCodeDenied => StatusCode::FORBIDDEN,
+            Self::AuthDeviceCodeAlreadyDelivered => StatusCode::GONE,
+            Self::AuthDeviceCodeRateLimited => StatusCode::TOO_MANY_REQUESTS,
+            Self::AuthDeviceUserCodeInvalid => StatusCode::BAD_REQUEST,
             Self::ChannelBotNotFound(_) => StatusCode::NOT_FOUND,
             Self::ChannelBotInactive(_) => StatusCode::BAD_REQUEST,
             Self::ChannelBotLimitReached(_) => StatusCode::TOO_MANY_REQUESTS,
@@ -508,6 +540,14 @@ impl AppError {
             Self::DeviceCodeRateLimited => 9506,
             Self::DeviceCodeLocked => 9507,
             Self::DeviceCodeSlowDown => 9508,
+            Self::AuthDeviceCodeNotFound => 11200,
+            Self::AuthDeviceCodeExpired => 11201,
+            Self::AuthDeviceCodePending => 11202,
+            Self::AuthDeviceCodeSlowDown => 11203,
+            Self::AuthDeviceCodeDenied => 11204,
+            Self::AuthDeviceCodeAlreadyDelivered => 11205,
+            Self::AuthDeviceCodeRateLimited => 11206,
+            Self::AuthDeviceUserCodeInvalid => 11207,
             Self::ChannelBotNotFound(_) => 10000,
             Self::ChannelBotInactive(_) => 10001,
             Self::ChannelBotLimitReached(_) => 10002,
@@ -648,6 +688,14 @@ impl AppError {
             Self::DeviceCodeRateLimited => "device_code_rate_limited",
             Self::DeviceCodeLocked => "device_code_locked",
             Self::DeviceCodeSlowDown => "device_code_slow_down",
+            Self::AuthDeviceCodeNotFound => "auth_device_code_not_found",
+            Self::AuthDeviceCodeExpired => "auth_device_expired_token",
+            Self::AuthDeviceCodePending => "auth_device_authorization_pending",
+            Self::AuthDeviceCodeSlowDown => "auth_device_slow_down",
+            Self::AuthDeviceCodeDenied => "auth_device_access_denied",
+            Self::AuthDeviceCodeAlreadyDelivered => "auth_device_already_delivered",
+            Self::AuthDeviceCodeRateLimited => "auth_device_rate_limited",
+            Self::AuthDeviceUserCodeInvalid => "auth_device_user_code_invalid",
             Self::ChannelBotNotFound(_) => "channel_bot_not_found",
             Self::ChannelBotInactive(_) => "channel_bot_inactive",
             Self::ChannelBotLimitReached(_) => "channel_bot_limit_reached",
@@ -1091,6 +1139,14 @@ mod tests {
             AppError::DeviceCodeRateLimited.error_code(),
             AppError::DeviceCodeLocked.error_code(),
             AppError::DeviceCodeSlowDown.error_code(),
+            AppError::AuthDeviceCodeNotFound.error_code(),
+            AppError::AuthDeviceCodeExpired.error_code(),
+            AppError::AuthDeviceCodePending.error_code(),
+            AppError::AuthDeviceCodeSlowDown.error_code(),
+            AppError::AuthDeviceCodeDenied.error_code(),
+            AppError::AuthDeviceCodeAlreadyDelivered.error_code(),
+            AppError::AuthDeviceCodeRateLimited.error_code(),
+            AppError::AuthDeviceUserCodeInvalid.error_code(),
             AppError::ChannelBotNotFound("".into()).error_code(),
             AppError::ChannelBotInactive("".into()).error_code(),
             AppError::ChannelBotLimitReached("".into()).error_code(),
@@ -1477,6 +1533,66 @@ mod tests {
             AppError::OracleExtractDisabled("".into()).error_key(),
             "oracle_extract_disabled"
         );
+    }
+
+    #[test]
+    fn auth_device_error_contract() {
+        let cases = vec![
+            (
+                AppError::AuthDeviceCodeNotFound,
+                11200,
+                "auth_device_code_not_found",
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                AppError::AuthDeviceCodeExpired,
+                11201,
+                "auth_device_expired_token",
+                StatusCode::GONE,
+            ),
+            (
+                AppError::AuthDeviceCodePending,
+                11202,
+                "auth_device_authorization_pending",
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                AppError::AuthDeviceCodeSlowDown,
+                11203,
+                "auth_device_slow_down",
+                StatusCode::TOO_MANY_REQUESTS,
+            ),
+            (
+                AppError::AuthDeviceCodeDenied,
+                11204,
+                "auth_device_access_denied",
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                AppError::AuthDeviceCodeAlreadyDelivered,
+                11205,
+                "auth_device_already_delivered",
+                StatusCode::GONE,
+            ),
+            (
+                AppError::AuthDeviceCodeRateLimited,
+                11206,
+                "auth_device_rate_limited",
+                StatusCode::TOO_MANY_REQUESTS,
+            ),
+            (
+                AppError::AuthDeviceUserCodeInvalid,
+                11207,
+                "auth_device_user_code_invalid",
+                StatusCode::BAD_REQUEST,
+            ),
+        ];
+
+        for (error, expected_code, expected_key, expected_status) in cases {
+            assert_eq!(error.error_code(), expected_code);
+            assert_eq!(error.error_key(), expected_key);
+            assert_eq!(error.into_response().status(), expected_status);
+        }
     }
 
     #[tokio::test]

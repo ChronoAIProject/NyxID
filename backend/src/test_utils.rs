@@ -379,6 +379,13 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         per_agent_limiter: Arc::new(crate::mw::rate_limit::PerAgentRateLimiter::new()),
         device_code_pubkey_limiter: crate::mw::rate_limit::create_per_pubkey_rate_limiter(),
         device_code_ip_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(5, 60),
+        auth_device_request_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(5, 60),
+        auth_device_poll_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(60, 60),
+        auth_device_approve_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(10, 60),
+        auth_device_approve_per_user_limiter: crate::mw::rate_limit::create_per_key_rate_limiter(
+            10, 300,
+        ),
+        auth_device_preview_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(30, 60),
         public_proxy_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(
             config.public_proxy_rate_limit_per_minute,
             60,
@@ -394,6 +401,9 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         // Tests don't exercise pairing-code HMAC verification; a
         // zero-filled key is deterministic and never touches prod data.
         cli_pairing_hmac_key: Arc::new(zeroize::Zeroizing::new([0u8; 32])),
+        // Tests don't exercise auth-device HMAC verification through AppState yet;
+        // service-level tests pass their own explicit HMAC key.
+        auth_device_hmac_key: Arc::new(zeroize::Zeroizing::new([1u8; 32])),
         per_channel_event_limiter: Arc::new(crate::mw::rate_limit::PerChannelEventLimiter::new(
             config.channel_event_rate_limit_per_second,
             config.channel_event_rate_limit_burst,

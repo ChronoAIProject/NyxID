@@ -9,7 +9,9 @@ use tower_http::limit::RequestBodyLimitLayer;
 
 use crate::AppState;
 use crate::handlers;
-use crate::mw::auth::{reject_delegated_tokens, reject_service_account_tokens};
+use crate::mw::auth::{
+    reject_api_key_tokens, reject_delegated_tokens, reject_service_account_tokens,
+};
 
 /// Per RFC 9207 / OAuth 2.0 for Browser-Based Apps, the token endpoint,
 /// userinfo endpoint, and discovery documents MUST be accessible from any
@@ -850,6 +852,10 @@ pub fn build_router(
     let device_code_public_routes = Router::new()
         .route("/request", post(handlers::devices::request_device_code))
         .route("/poll", post(handlers::devices::poll_device_code));
+    let auth_device_public_routes = Router::new()
+        .route("/request", post(handlers::auth_device::request_auth_device))
+        .route("/poll", post(handlers::auth_device::poll_auth_device))
+        .route("/preview", post(handlers::auth_device::preview_auth_device));
     let device_onboard_public_routes =
         Router::new().route("/redeem", post(handlers::devices::redeem_onboard_device));
 
@@ -858,6 +864,7 @@ pub fn build_router(
             "/runtime-config",
             get(handlers::runtime_config::get_runtime_config),
         )
+        .nest("/auth/device", auth_device_public_routes)
         .nest("/devices/code", device_code_public_routes)
         .nest("/devices/onboard", device_onboard_public_routes);
 
@@ -952,6 +959,10 @@ pub fn build_router(
             "/devices/code/approve",
             post(handlers::devices::approve_device_code),
         )
+        .route(
+            "/auth/device/approve",
+            post(handlers::auth_device::approve_auth_device),
+        )
         .route("/devices/onboard", post(handlers::devices::onboard_device))
         .route(
             "/devices/onboard/{bootstrap_id}",
@@ -1003,6 +1014,7 @@ pub fn build_router(
         )
         .route("/public/config", get(handlers::health::public_config))
         .layer(middleware::from_fn(reject_delegated_tokens))
+        .layer(middleware::from_fn(reject_api_key_tokens))
         .layer(middleware::from_fn(reject_service_account_tokens));
 
     let api_v1 = api_v1_public

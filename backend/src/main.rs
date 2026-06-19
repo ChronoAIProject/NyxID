@@ -51,6 +51,7 @@ fn install_rustls_crypto_provider() {
 use crate::db::DbHandle;
 use config::AppConfig;
 use crypto::aes::EncryptionKeys;
+use crypto::hmac_keys::derive_hmac_key;
 use crypto::jwks::JwksCache;
 use crypto::jwt::JwtKeys;
 use crypto::key_provider::KeyProvider;
@@ -93,6 +94,16 @@ pub struct AppState {
     pub device_code_pubkey_limiter: mw::rate_limit::SharedPerPubkeyRateLimiter,
     /// Per-IP limiter for `/api/v1/devices/code/*`.
     pub device_code_ip_limiter: mw::rate_limit::SharedPerIpRateLimiter,
+    /// Per-IP limiter for `POST /api/v1/auth/device/request` (5/min).
+    pub auth_device_request_limiter: mw::rate_limit::SharedPerIpRateLimiter,
+    /// Per-IP limiter for `POST /api/v1/auth/device/poll` (60/min).
+    pub auth_device_poll_limiter: mw::rate_limit::SharedPerIpRateLimiter,
+    /// Per-IP limiter for `POST /api/v1/auth/device/approve` (10/min).
+    pub auth_device_approve_limiter: mw::rate_limit::SharedPerIpRateLimiter,
+    /// Per-user limiter for `POST /api/v1/auth/device/approve` (10/5min).
+    pub auth_device_approve_per_user_limiter: mw::rate_limit::SharedPerKeyRateLimiter,
+    /// Per-IP limiter for `POST /api/v1/auth/device/preview` (30/min).
+    pub auth_device_preview_limiter: mw::rate_limit::SharedPerIpRateLimiter,
     /// Per-IP rate limiter for `POST /cli-pairings/claim`. Tighter than
     /// the global rate limiter (5 attempts per 60s per IP) so brute
     /// forcing the 8-char pairing code is infeasible even from a
@@ -114,6 +125,9 @@ pub struct AppState {
     /// (or `CLI_PAIRING_HMAC_KEY` when set); see
     /// `derive_cli_pairing_hmac_key` in `main.rs`.
     pub cli_pairing_hmac_key: std::sync::Arc<zeroize::Zeroizing<[u8; 32]>>,
+    /// Server-side HMAC key used to derive auth-device login code hashes.
+    /// Domain-separated from CLI pairing with the `auth-device` label.
+    pub auth_device_hmac_key: std::sync::Arc<zeroize::Zeroizing<[u8; 32]>>,
     /// Per-channel rate limiter keyed by conversation_id, for the HTTP Event
     /// Gateway (NyxID#221). Distinct from `per_agent_limiter`.
     pub per_channel_event_limiter: mw::rate_limit::SharedPerChannelEventLimiter,
@@ -457,6 +471,10 @@ async fn main() {
         config.encryption_key.as_deref(),
         Some(&jwt_private_key_pem),
     ));
+    let auth_device_hmac_key = Arc::new(derive_auth_device_hmac_key(
+        config.encryption_key.as_deref(),
+        Some(&jwt_private_key_pem),
+    ));
     // JWT private key bytes carry no secret beyond what's
     // already in JwtKeys; drop them immediately after derivation.
     drop(jwt_private_key_pem);
@@ -478,6 +496,11 @@ async fn main() {
         per_agent_limiter: Arc::new(mw::rate_limit::PerAgentRateLimiter::new()),
         device_code_pubkey_limiter: mw::rate_limit::create_per_pubkey_rate_limiter(),
         device_code_ip_limiter: mw::rate_limit::create_per_ip_rate_limiter(5, 60),
+        auth_device_request_limiter: mw::rate_limit::create_per_ip_rate_limiter(5, 60),
+        auth_device_poll_limiter: mw::rate_limit::create_per_ip_rate_limiter(60, 60),
+        auth_device_approve_limiter: mw::rate_limit::create_per_ip_rate_limiter(10, 60),
+        auth_device_approve_per_user_limiter: mw::rate_limit::create_per_key_rate_limiter(10, 300),
+        auth_device_preview_limiter: mw::rate_limit::create_per_ip_rate_limiter(30, 60),
         // 5 claim attempts per 60 seconds per IP; window-based, not token
         // bucket, because we want a hard cap on guesses per unit time.
         cli_pairing_claim_limiter: mw::rate_limit::create_per_ip_rate_limiter(5, 60),
@@ -490,6 +513,7 @@ async fn main() {
             60,
         ),
         cli_pairing_hmac_key,
+        auth_device_hmac_key,
         per_channel_event_limiter,
         per_message_edit_limiter,
         event_dedup_cache,
@@ -581,6 +605,47 @@ async fn main() {
         loop {
             interval.tick().await;
             cleanup_device_code_ip_limiter.cleanup();
+        }
+    });
+    let cleanup_auth_device_request_limiter = state.auth_device_request_limiter.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            cleanup_auth_device_request_limiter.cleanup();
+        }
+    });
+    let cleanup_auth_device_poll_limiter = state.auth_device_poll_limiter.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            cleanup_auth_device_poll_limiter.cleanup();
+        }
+    });
+    let cleanup_auth_device_approve_limiter = state.auth_device_approve_limiter.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            cleanup_auth_device_approve_limiter.cleanup();
+        }
+    });
+    let cleanup_auth_device_approve_per_user_limiter =
+        state.auth_device_approve_per_user_limiter.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            cleanup_auth_device_approve_per_user_limiter.cleanup();
+        }
+    });
+    let cleanup_auth_device_preview_limiter = state.auth_device_preview_limiter.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            cleanup_auth_device_preview_limiter.cleanup();
         }
     });
 
@@ -913,10 +978,6 @@ fn derive_cli_pairing_hmac_key(
     encryption_key: Option<&str>,
     jwt_private_key_pem: Option<&[u8]>,
 ) -> zeroize::Zeroizing<[u8; 32]> {
-    use hmac::{Hmac, Mac};
-    use sha2::Sha256;
-    type HmacSha256 = Hmac<Sha256>;
-
     // 1. Explicit env override takes precedence. A set-but-empty
     //    value is treated as unset (dotenv / docker-compose often
     //    emit empty strings for unused vars).
@@ -942,18 +1003,13 @@ fn derive_cli_pairing_hmac_key(
     //    and is the natural shared-secret in single-region
     //    deployments. Domain-separate the output so we can't
     //    accidentally collide with any future HMAC use.
-    if let Some(hex_key) = encryption_key
-        && let Ok(master) = hex::decode(hex_key.trim())
-        && master.len() == 32
-    {
-        let mut mac =
-            HmacSha256::new_from_slice(&master).expect("HMAC-SHA256 accepts any key length");
-        mac.update(b"nyxid:cli-pairing-code-hmac-v1");
-        let digest = mac.finalize().into_bytes();
-        let mut out = [0u8; 32];
-        out.copy_from_slice(&digest);
+    if let Some(master) = decode_hmac_seed(encryption_key) {
         tracing::info!("cli-pairing HMAC key derived from ENCRYPTION_KEY");
-        return zeroize::Zeroizing::new(out);
+        return derive_hmac_key(
+            "cli-pairing",
+            Some(&master),
+            jwt_private_key_pem.unwrap_or_default(),
+        );
     }
 
     // 3. Universal JWT-private-key fallback. Lets KMS
@@ -967,18 +1023,13 @@ fn derive_cli_pairing_hmac_key(
     if let Some(pem) = jwt_private_key_pem
         && !pem.is_empty()
     {
-        let mut mac = HmacSha256::new_from_slice(pem).expect("HMAC-SHA256 accepts any key length");
-        mac.update(b"nyxid:cli-pairing-code-hmac-v1:jwt");
-        let digest = mac.finalize().into_bytes();
-        let mut out = [0u8; 32];
-        out.copy_from_slice(&digest);
         tracing::info!(
             "cli-pairing HMAC key derived from JWT private key \
              (neither CLI_PAIRING_HMAC_KEY nor ENCRYPTION_KEY is \
              set). Set CLI_PAIRING_HMAC_KEY explicitly if you need \
              to rotate it independently of the JWT signing key."
         );
-        return zeroize::Zeroizing::new(out);
+        return derive_hmac_key("cli-pairing", None, pem);
     }
 
     // 4. Defensive stop. Unreachable in practice because the JWT
@@ -992,6 +1043,39 @@ fn derive_cli_pairing_hmac_key(
          Set CLI_PAIRING_HMAC_KEY to a 64-hex-char value \
          (`openssl rand -hex 32`) — see docs/ENV.md."
     );
+}
+
+fn derive_auth_device_hmac_key(
+    encryption_key: Option<&str>,
+    jwt_private_key_pem: Option<&[u8]>,
+) -> zeroize::Zeroizing<[u8; 32]> {
+    let jwt_private_key_pem = jwt_private_key_pem.unwrap_or_default();
+    if let Some(master) = decode_hmac_seed(encryption_key) {
+        tracing::info!("auth-device HMAC key derived from ENCRYPTION_KEY");
+        return derive_hmac_key("auth-device", Some(&master), jwt_private_key_pem);
+    }
+
+    if !jwt_private_key_pem.is_empty() {
+        tracing::info!("auth-device HMAC key derived from JWT private key");
+        return derive_hmac_key("auth-device", None, jwt_private_key_pem);
+    }
+
+    panic!(
+        "auth-device HMAC key has no source: ENCRYPTION_KEY and the JWT private key \
+         are both missing."
+    );
+}
+
+fn decode_hmac_seed(encryption_key: Option<&str>) -> Option<zeroize::Zeroizing<Vec<u8>>> {
+    let hex_key = encryption_key?;
+    let Ok(master) = hex::decode(hex_key.trim()) else {
+        return None;
+    };
+    if master.len() == 32 {
+        Some(zeroize::Zeroizing::new(master))
+    } else {
+        None
+    }
 }
 
 /// Run the --promote-admin CLI command, then return.

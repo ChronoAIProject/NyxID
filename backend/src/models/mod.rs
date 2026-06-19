@@ -4,6 +4,7 @@ pub mod api_key;
 pub mod approval_grant;
 pub mod approval_request;
 pub mod audit_log;
+pub mod auth_device_code;
 pub mod authorization_code;
 pub mod bson_bytes;
 pub mod bson_datetime;

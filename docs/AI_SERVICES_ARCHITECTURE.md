@@ -216,7 +216,7 @@ graph LR
 ```mermaid
 graph TB
     subgraph "nyxid CLI (user operations)"
-        LOGIN["nyxid login<br/>Browser SSO"]
+        LOGIN["nyxid login<br/>Browser SSO / --device / --password"]
         CATALOG["nyxid catalog list/show<br/>Browse services"]
         SERVICE["nyxid service add/list/show/delete<br/>Manage AI services"]
         APIKEY["nyxid api-key create/list/rotate/delete<br/>Manage API keys with scope"]
