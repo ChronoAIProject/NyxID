@@ -99,23 +99,39 @@ nyxid --help
 
 **First-time setup:**
 
+> **Who runs what?** There are two identities in this section:
+>
+> 1. **You, the human.** You authenticate **once** with `nyxid login`, which writes your session to `~/.nyxid/`. Browser SSO on desktop, device-code on headless boxes — either way you complete the flow in a signed-in browser.
+> 2. **Your agent.** A separate identity, represented by a scoped API key (`nyxid_ag_…`) you mint **from your authenticated session**. The agent reads it from `NYXID_API_KEY` and uses it for every proxy call.
+>
+> **Agents must never run `nyxid login` themselves.** Device-code requires a human to approve a code in a browser; an autonomous agent has nothing to "approve" on its own. If an agent attempts `nyxid login` in CI it short-circuits with an api-key hint; in an interactive shell it would block forever. The correct agent action is to read the pre-issued `NYXID_API_KEY` from its environment.
+
+Step 1 — **you** authenticate:
+
 ```bash
-# Login via browser SSO (opens browser, stores token at ~/.nyxid/access_token)
-# --base-url is saved to ~/.nyxid/base_url -- all subsequent commands use it automatically
+# Desktop with a browser (opens browser, stores token at ~/.nyxid/access_token).
+# --base-url is saved to ~/.nyxid/base_url, so subsequent commands don't need it.
 nyxid login --base-url http://localhost:3001
 
-# Headless / SSH / no $DISPLAY -- bare `nyxid login` auto-falls-back to
-# device-code, or force it explicitly:
+# Headless / SSH / no $DISPLAY: bare `nyxid login` auto-falls-back to
+# device-code, or force it explicitly. The CLI prints a one-time code +
+# verification URL; you approve in any signed-in browser (phone, laptop).
 nyxid login --base-url http://localhost:3001 --device
 
-# For unattended CI / agent runtimes, skip interactive login entirely and
-# issue a scoped API key instead. `nyxid login` will short-circuit and tell
-# you to do this when it detects CI / GITHUB_ACTIONS / BUILDKITE / etc.
-nyxid api-key create --name my-agent --platform claude-code
-export NYXID_API_KEY=nyxid_ag_...
-
-# Check connection (no --base-url needed after login)
+# Sanity check the session.
 nyxid status
+```
+
+Step 2 — **you** mint a key for the agent and hand it over:
+
+```bash
+# Issue a scoped key (rate-limited and audit-attributed under this agent's name).
+nyxid api-key create --name my-agent --platform claude-code
+# -> prints `nyxid_ag_…` ONCE. Copy it now; it cannot be retrieved later.
+
+# Put it in the agent's environment. The agent uses NYXID_API_KEY for
+# every NyxID call. It should not have access to ~/.nyxid/ files.
+export NYXID_API_KEY=nyxid_ag_...
 ```
 
 > **Note:** After `nyxid login --base-url <URL>`, the URL is persisted at `~/.nyxid/base_url`. You do not need to pass `--base-url` on subsequent commands.
