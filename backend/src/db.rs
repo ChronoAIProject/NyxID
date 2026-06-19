@@ -1680,6 +1680,21 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .build(),
         )
         .await?;
+    // Session→worker affinity: the FIFO claim filters queued tasks by
+    // `required_worker_label` (null for fresh, the owning account for
+    // follow-ups) before sorting by `created_at`.
+    oracle_tasks
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {
+                    "pool_id": 1,
+                    "status": 1,
+                    "required_worker_label": 1,
+                    "created_at": 1,
+                })
+                .build(),
+        )
+        .await?;
     oracle_tasks
         .create_index(
             IndexModel::builder()

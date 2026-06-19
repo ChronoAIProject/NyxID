@@ -501,6 +501,7 @@ mod tests {
             pdf_name: Some("a.pdf".to_string()),
             conversation_id: Some("conv_1".to_string()),
             is_followup: false,
+            required_worker_label: None,
             client_ref: None,
             status: OracleTaskStatus::Queued,
             phase: None,

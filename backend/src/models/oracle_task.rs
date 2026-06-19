@@ -84,6 +84,12 @@ pub struct OracleTask {
     /// True when this task continues an existing conversation.
     #[serde(default)]
     pub is_followup: bool,
+    /// When set, only the worker with this label may claim the task.
+    /// Copied from the owning session for follow-ups so multi-turn lands
+    /// back on the account that created the conversation in a
+    /// multi-account pool. `None` = fresh task, claimable by any worker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_worker_label: Option<String>,
     /// Optional submitter-scoped idempotency key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_ref: Option<String>,
@@ -152,6 +158,7 @@ mod tests {
             pdf_name: None,
             conversation_id: None,
             is_followup: false,
+            required_worker_label: None,
             client_ref: None,
             status: OracleTaskStatus::Queued,
             phase: None,
