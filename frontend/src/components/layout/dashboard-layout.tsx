@@ -12,7 +12,6 @@ import { useAuthStore } from "@/stores/auth-store";
 import { useLogout } from "@/hooks/use-auth";
 import { useShouldShowOnboarding } from "@/hooks/use-onboarding";
 import { useApplyTheme } from "@/hooks/use-theme";
-import { NyxidIcon } from "@/components/brand/nyxid-icon";
 import { NyxidLogo } from "@/components/brand/nyxid-logo";
 import { OnboardingTakeover } from "@/components/dashboard/onboarding-takeover";
 import { ThemeToggle } from "@/components/dashboard/theme-toggle";
@@ -276,18 +275,17 @@ function TopBar({
           </button>
         ) : (
           <Link to="/dashboard" className="pl-2">
-            <NyxidIcon />
+            <NyxidLogo className="h-6 w-auto" />
           </Link>
         )}
       </div>
 
-      {/* Desktop: logo zone — matches sidebar width */}
+      {/* Desktop: logo zone — fits the full brand mark; breadcrumb starts after */}
       <Link
         to="/dashboard"
-        className="hidden md:flex items-center shrink-0 justify-center w-[52px] transition-[width] duration-300 ease-in-out"
-        style={{ width: "var(--sidebar-width, 52px)", justifyContent: "start", paddingLeft: "16px" }}
+        className="hidden md:flex items-center shrink-0 pl-4 pr-2"
       >
-        <NyxidIcon className="h-5 w-5 shrink-0" />
+        <NyxidLogo className="h-5 w-auto" />
       </Link>
 
       {/* Content zone */}
