@@ -213,9 +213,6 @@ struct PreResolved {
     node_id: Option<String>,
     /// The UserService ID for API key scope checks.
     user_service_id: Option<String>,
-    /// The pool slug used to select this service, when it was chosen as a
-    /// member of an interchangeable direct-service pool.
-    pool_slug: Option<String>,
     has_server_credential: bool,
     /// The user_id that owns the resolved UserService. For personal
     /// resolutions this is the actor; for org-routed resolutions this is
@@ -534,9 +531,12 @@ async fn proxy_request_inner(
                     target: resolved.target,
                     node_id: resolved.node_id,
                     user_service_id: Some(resolved.user_service_id),
-                    pool_slug: resolved.pool_slug,
                     has_server_credential: resolved.has_server_credential,
-                    effective_owner_id: resolved.effective_owner_id,
+                    effective_owner_id: resolved
+                        .org_routing
+                        .as_ref()
+                        .map(|r| r.org_user_id.clone())
+                        .unwrap_or_else(|| user_id_str.clone()),
                 }),
                 resolved_slug,
             )
@@ -585,9 +585,12 @@ async fn proxy_request_inner(
                 target: resolved.target,
                 node_id: resolved.node_id,
                 user_service_id: Some(resolved.user_service_id),
-                pool_slug: resolved.pool_slug,
                 has_server_credential: resolved.has_server_credential,
-                effective_owner_id: resolved.effective_owner_id,
+                effective_owner_id: resolved
+                    .org_routing
+                    .as_ref()
+                    .map(|r| r.org_user_id.clone())
+                    .unwrap_or_else(|| user_id_str.clone()),
             }),
             resolved_slug,
         )
@@ -735,9 +738,12 @@ async fn proxy_request_by_slug_inner(
                     target: resolved.target,
                     node_id: resolved.node_id,
                     user_service_id: Some(resolved.user_service_id),
-                    pool_slug: resolved.pool_slug,
                     has_server_credential: resolved.has_server_credential,
-                    effective_owner_id: resolved.effective_owner_id,
+                    effective_owner_id: resolved
+                        .org_routing
+                        .as_ref()
+                        .map(|r| r.org_user_id.clone())
+                        .unwrap_or_else(|| user_id_str.clone()),
                 }),
                 resolved_slug,
             )
@@ -786,9 +792,12 @@ async fn proxy_request_by_slug_inner(
                 target: resolved.target,
                 node_id: resolved.node_id,
                 user_service_id: Some(resolved.user_service_id),
-                pool_slug: resolved.pool_slug,
                 has_server_credential: resolved.has_server_credential,
-                effective_owner_id: resolved.effective_owner_id,
+                effective_owner_id: resolved
+                    .org_routing
+                    .as_ref()
+                    .map(|r| r.org_user_id.clone())
+                    .unwrap_or_else(|| user_id_str.clone()),
             }),
             resolved_slug,
         )
@@ -860,270 +869,6 @@ async fn execute_proxy(
         resolved_slug,
     )
     .await
-}
-
-async fn build_identity_headers_for_target(
-    state: &AppState,
-    user_id_str: &str,
-    auth_user: &AuthUser,
-    target: &proxy_service::ProxyTarget,
-    service_id: &str,
-) -> AppResult<Vec<(String, String)>> {
-    let mut identity_headers = Vec::new();
-
-    if target.service.identity_propagation_mode != "none" {
-        let user = state
-            .db
-            .collection::<User>(USERS)
-            .find_one(doc! { "_id": user_id_str })
-            .await?;
-
-        if let Some(ref user) = user {
-            if matches!(
-                target.service.identity_propagation_mode.as_str(),
-                "headers" | "both"
-            ) {
-                identity_headers = identity_service::build_identity_headers(user, &target.service);
-            }
-
-            if matches!(
-                target.service.identity_propagation_mode.as_str(),
-                "jwt" | "both"
-            ) {
-                match identity_service::generate_identity_assertion(
-                    &state.jwt_keys,
-                    &state.config,
-                    user,
-                    &target.service,
-                    &state.db,
-                )
-                .await
-                {
-                    Ok(assertion) => {
-                        identity_headers.push(("X-NyxID-Identity-Token".to_string(), assertion));
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            service_id = %service_id,
-                            error = %e,
-                            "Failed to generate identity assertion"
-                        );
-                    }
-                }
-            }
-        }
-
-        match crate::services::rbac_helpers::resolve_user_rbac(&state.db, user_id_str).await {
-            Ok(rbac) => {
-                if !rbac.role_slugs.is_empty() {
-                    identity_headers
-                        .push(("X-NyxID-User-Roles".to_string(), rbac.role_slugs.join(",")));
-                }
-                if !rbac.permissions.is_empty() {
-                    identity_headers.push((
-                        "X-NyxID-User-Permissions".to_string(),
-                        rbac.permissions.join(","),
-                    ));
-                }
-                if !rbac.group_slugs.is_empty() {
-                    identity_headers.push((
-                        "X-NyxID-User-Groups".to_string(),
-                        rbac.group_slugs.join(","),
-                    ));
-                }
-            }
-            Err(e) => {
-                tracing::warn!(
-                    user_id = %user_id_str,
-                    error = %e,
-                    "Failed to resolve RBAC for identity headers"
-                );
-            }
-        }
-    }
-
-    if target.service.inject_delegation_token {
-        let user_uuid = auth_user.user_id;
-
-        match crate::crypto::jwt::generate_delegated_access_token(
-            &state.jwt_keys,
-            &state.config,
-            &user_uuid,
-            &target.service.delegation_token_scope,
-            &target.service.slug,
-            crate::crypto::jwt::MCP_DELEGATION_TOKEN_TTL_SECS,
-        ) {
-            Ok(delegation_token) => {
-                identity_headers.push(("X-NyxID-Delegation-Token".to_string(), delegation_token));
-            }
-            Err(e) => {
-                tracing::warn!(
-                    service_id = %service_id,
-                    error = %e,
-                    "Failed to generate delegation token for proxy"
-                );
-            }
-        }
-    }
-
-    Ok(identity_headers)
-}
-
-struct DirectProxySendContext<'a> {
-    reqwest_method: reqwest::Method,
-    path: &'a str,
-    query: Option<&'a str>,
-    reqwest_headers: reqwest::header::HeaderMap,
-    body: Option<bytes::Bytes>,
-    delegated: Vec<delegation_service::DelegatedCredential>,
-    caller_token: Option<&'a str>,
-}
-
-struct DirectProxyRetrySuccess {
-    response: reqwest::Response,
-    target: proxy_service::ProxyTarget,
-    service_id: String,
-}
-
-async fn send_direct_proxy_request(
-    state: &AppState,
-    target: &proxy_service::ProxyTarget,
-    identity_headers: Vec<(String, String)>,
-    context: &DirectProxySendContext<'_>,
-) -> AppResult<reqwest::Response> {
-    proxy_service::forward_request(
-        &state.http_client,
-        target,
-        context.reqwest_method.clone(),
-        context.path,
-        context.query,
-        context.reqwest_headers.clone(),
-        proxy_service::ProxyBody::Buffered(context.body.clone()),
-        identity_headers,
-        context.delegated.clone(),
-        context.caller_token,
-        &state.token_exchange_cache,
-        &state.cloud_response_cache,
-    )
-    .await
-}
-
-fn is_direct_transport_failure(error: &AppError) -> bool {
-    matches!(error, AppError::Internal(message) if message == "Proxy request failed")
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn retry_direct_pool_member_after_transport_failure(
-    state: &AppState,
-    auth_user: &AuthUser,
-    user_id_str: &str,
-    owner_id: &str,
-    pool_slug: &str,
-    failed_user_service_id: &str,
-    method_str: &str,
-    service_id: &str,
-    context: &DirectProxySendContext<'_>,
-) -> AppResult<Option<DirectProxyRetrySuccess>> {
-    let direct_member_count =
-        proxy_service::direct_pool_member_count(&state.db, owner_id, pool_slug).await?;
-    if direct_member_count <= 1 {
-        return Ok(None);
-    }
-
-    let max_retries = direct_member_count.saturating_sub(1);
-    let mut excluded_user_service_ids = vec![failed_user_service_id.to_string()];
-    for _ in 0..max_retries {
-        let Some(mut resolved) = proxy_service::resolve_direct_pool_member_for_owner(
-            &state.db,
-            &state.encryption_keys,
-            user_id_str,
-            owner_id,
-            pool_slug,
-            &excluded_user_service_ids,
-        )
-        .await?
-        else {
-            break;
-        };
-
-        excluded_user_service_ids.push(resolved.user_service_id.clone());
-
-        if !auth_user.allow_all_services
-            && !auth_user
-                .allowed_service_ids
-                .contains(&resolved.user_service_id)
-        {
-            tracing::debug!(
-                owner_id = %owner_id,
-                pool_slug = %pool_slug,
-                user_service_id = %resolved.user_service_id,
-                "Skipping direct service-pool retry candidate outside API key service scope"
-            );
-            continue;
-        }
-
-        if let Some(ak_id) = &auth_user.api_key_id
-            && let Some(override_cred) = proxy_service::resolve_agent_credential_override(
-                &state.db,
-                &state.encryption_keys,
-                user_id_str,
-                ak_id,
-                &resolved.user_service_id,
-            )
-            .await?
-        {
-            resolved.target.credential = override_cred;
-        }
-
-        let retry_service_id = resolved.target.service.id.clone();
-        let identity_headers = build_identity_headers_for_target(
-            state,
-            user_id_str,
-            auth_user,
-            &resolved.target,
-            &retry_service_id,
-        )
-        .await?;
-
-        tracing::warn!(
-            owner_id = %owner_id,
-            pool_slug = %pool_slug,
-            from_user_service_id = %failed_user_service_id,
-            to_user_service_id = %resolved.user_service_id,
-            "Retrying direct service-pool request on another member after transport failure"
-        );
-
-        match send_direct_proxy_request(state, &resolved.target, identity_headers, context).await {
-            Ok(response) => {
-                tracing::warn!(
-                    owner_id = %owner_id,
-                    pool_slug = %pool_slug,
-                    from_user_service_id = %failed_user_service_id,
-                    to_user_service_id = %resolved.user_service_id,
-                    retry_service_id = %retry_service_id,
-                    method = %method_str,
-                    route_service_id = %service_id,
-                    "Direct service-pool retry succeeded on another member"
-                );
-                return Ok(Some(DirectProxyRetrySuccess {
-                    response,
-                    target: resolved.target,
-                    service_id: retry_service_id,
-                }));
-            }
-            Err(error) if is_direct_transport_failure(&error) => {
-                proxy_service::mark_direct_pool_member_unhealthy(
-                    owner_id,
-                    pool_slug,
-                    &resolved.user_service_id,
-                );
-                continue;
-            }
-            Err(error) => return Err(error),
-        }
-    }
-
-    Ok(None)
 }
 
 /// Resolve proxy target and node routing via the old DownstreamService path.
@@ -1332,7 +1077,6 @@ async fn preflight_proxy_deny_before_resolution(
     } else {
         proxy_service::find_approval_resolution_hint(
             &state.db,
-            state.node_ws_manager.as_ref(),
             &approval_owner_user_id,
             slug,
             catalog_service_id,
@@ -1438,8 +1182,6 @@ async fn execute_proxy_inner(
         target,
         has_server_credential,
         resolved_user_service_id,
-        resolved_pool_slug,
-        resolved_effective_owner_id,
         node_routing_required,
     ) = if let Some(mut pre) = pre_resolved {
         effective_owner_for_approval = Some(pre.effective_owner_id.clone());
@@ -1563,8 +1305,6 @@ async fn execute_proxy_inner(
             pre.target,
             pre.has_server_credential,
             pre.user_service_id,
-            pre.pool_slug,
-            Some(pre.effective_owner_id),
             required,
         )
     } else {
@@ -1602,17 +1342,7 @@ async fn execute_proxy_inner(
         // that failed before a target was resolved (disconnected service,
         // missing credential, etc.). See ChronoAIProject/NyxID#423.
         audit_personal_routing(state, auth_user, None, service_id);
-        let (node_route, target, has_server_credential, user_service_id, node_routing_required) =
-            resolved;
-        (
-            node_route,
-            target,
-            has_server_credential,
-            user_service_id,
-            None,
-            None,
-            node_routing_required,
-        )
+        resolved
     };
 
     // Record the resolved service slug so the outer wrapper can attach it
@@ -1829,9 +1559,102 @@ async fn execute_proxy_inner(
 
     // Build identity headers before the node/direct split so both proxy paths
     // preserve the same downstream identity and delegation context.
-    let identity_headers =
-        build_identity_headers_for_target(state, &user_id_str, auth_user, &target, service_id)
+    let mut identity_headers = Vec::new();
+
+    if target.service.identity_propagation_mode != "none" {
+        let user = state
+            .db
+            .collection::<User>(USERS)
+            .find_one(doc! { "_id": &user_id_str })
             .await?;
+
+        if let Some(ref user) = user {
+            if matches!(
+                target.service.identity_propagation_mode.as_str(),
+                "headers" | "both"
+            ) {
+                identity_headers = identity_service::build_identity_headers(user, &target.service);
+            }
+
+            if matches!(
+                target.service.identity_propagation_mode.as_str(),
+                "jwt" | "both"
+            ) {
+                match identity_service::generate_identity_assertion(
+                    &state.jwt_keys,
+                    &state.config,
+                    user,
+                    &target.service,
+                    &state.db,
+                )
+                .await
+                {
+                    Ok(assertion) => {
+                        identity_headers.push(("X-NyxID-Identity-Token".to_string(), assertion));
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            service_id = %service_id,
+                            error = %e,
+                            "Failed to generate identity assertion"
+                        );
+                    }
+                }
+            }
+        }
+
+        match crate::services::rbac_helpers::resolve_user_rbac(&state.db, &user_id_str).await {
+            Ok(rbac) => {
+                if !rbac.role_slugs.is_empty() {
+                    identity_headers
+                        .push(("X-NyxID-User-Roles".to_string(), rbac.role_slugs.join(",")));
+                }
+                if !rbac.permissions.is_empty() {
+                    identity_headers.push((
+                        "X-NyxID-User-Permissions".to_string(),
+                        rbac.permissions.join(","),
+                    ));
+                }
+                if !rbac.group_slugs.is_empty() {
+                    identity_headers.push((
+                        "X-NyxID-User-Groups".to_string(),
+                        rbac.group_slugs.join(","),
+                    ));
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    user_id = %user_id_str,
+                    error = %e,
+                    "Failed to resolve RBAC for identity headers"
+                );
+            }
+        }
+    }
+
+    if target.service.inject_delegation_token {
+        let user_uuid = auth_user.user_id;
+
+        match crate::crypto::jwt::generate_delegated_access_token(
+            &state.jwt_keys,
+            &state.config,
+            &user_uuid,
+            &target.service.delegation_token_scope,
+            &target.service.slug,
+            crate::crypto::jwt::MCP_DELEGATION_TOKEN_TTL_SECS,
+        ) {
+            Ok(delegation_token) => {
+                identity_headers.push(("X-NyxID-Delegation-Token".to_string(), delegation_token));
+            }
+            Err(e) => {
+                tracing::warn!(
+                    service_id = %service_id,
+                    error = %e,
+                    "Failed to generate delegation token for proxy"
+                );
+            }
+        }
+    }
 
     // === WebSocket Passthrough ===
     // If this is a WS upgrade request, branch into the WS path now that
@@ -2409,62 +2232,22 @@ async fn execute_proxy_inner(
         return Ok(response);
     }
 
-    let direct_context = DirectProxySendContext {
+    // Reuse the shared reqwest::Client from AppState for connection pooling.
+    let downstream_response = proxy_service::forward_request(
+        &state.http_client,
+        &target,
         reqwest_method,
         path,
-        query: query.as_deref(),
+        query.as_deref(),
         reqwest_headers,
-        body,
+        proxy_service::ProxyBody::Buffered(body),
+        identity_headers,
         delegated,
-        caller_token: caller_token.as_deref(),
-    };
-
-    let mut response_target = target;
-    let mut response_service_id = service_id.to_string();
-
-    // Reuse the shared reqwest::Client from AppState for connection pooling.
-    let downstream_response =
-        match send_direct_proxy_request(state, &response_target, identity_headers, &direct_context)
-            .await
-        {
-            Ok(response) => response,
-            Err(error) => {
-                if is_direct_transport_failure(&error)
-                    && let (Some(owner_id), Some(pool_slug), Some(user_service_id)) = (
-                        resolved_effective_owner_id.as_deref(),
-                        resolved_pool_slug.as_deref(),
-                        resolved_user_service_id.as_deref(),
-                    )
-                {
-                    proxy_service::mark_direct_pool_member_unhealthy(
-                        owner_id,
-                        pool_slug,
-                        user_service_id,
-                    );
-                    if let Some(retry) = retry_direct_pool_member_after_transport_failure(
-                        state,
-                        auth_user,
-                        &user_id_str,
-                        owner_id,
-                        pool_slug,
-                        user_service_id,
-                        &method_str,
-                        service_id,
-                        &direct_context,
-                    )
-                    .await?
-                    {
-                        response_target = retry.target;
-                        response_service_id = retry.service_id;
-                        retry.response
-                    } else {
-                        return Err(error);
-                    }
-                } else {
-                    return Err(error);
-                }
-            }
-        };
+        caller_token.as_deref(),
+        &state.token_exchange_cache,
+        &state.cloud_response_cache,
+    )
+    .await?;
 
     // Convert reqwest Response back to axum Response
     let status = StatusCode::from_u16(downstream_response.status().as_u16())
@@ -2476,18 +2259,21 @@ async fn execute_proxy_inner(
         .and_then(|v| v.to_str().ok())
         .is_some_and(|ct| ct.contains("text/event-stream"));
     let should_stream = should_stream_response(&downstream_response, status, is_sse);
-    let usage_context = response_target.service.slug.starts_with("llm-").then(|| {
-        llm_usage_service::UsageAuditContext {
-            db: state.db.clone(),
-            user_id: user_id_str.clone(),
-            provider_slug: None,
-            service_id: Some(response_service_id.clone()),
-            model: None,
-            path: path.to_string(),
-            api_key_id: auth_user.api_key_id.clone(),
-            api_key_name: auth_user.api_key_name.clone(),
-        }
-    });
+    let usage_context =
+        target
+            .service
+            .slug
+            .starts_with("llm-")
+            .then(|| llm_usage_service::UsageAuditContext {
+                db: state.db.clone(),
+                user_id: user_id_str.clone(),
+                provider_slug: None,
+                service_id: Some(service_id.to_string()),
+                model: None,
+                path: path.to_string(),
+                api_key_id: auth_user.api_key_id.clone(),
+                api_key_name: auth_user.api_key_name.clone(),
+            });
 
     let mut response_builder = Response::builder().status(status);
 
@@ -2677,19 +2463,19 @@ async fn execute_proxy_inner(
         auth_user,
         "proxy_request",
         Some(serde_json::json!({
-            "service_id": response_service_id,
+            "service_id": service_id,
             "method": method.as_str(),
             "path": path,
             "response_status": status.as_u16(),
             "acting_client_id": &auth_user.acting_client_id,
-            "connection_id": response_target.connection_id.as_deref(),
+            "connection_id": target.connection_id.as_deref(),
         })),
     );
 
     apply_agent_attribution_headers(
         &mut response,
         auth_user.api_key_id.as_deref(),
-        response_target.connection_id.as_deref(),
+        target.connection_id.as_deref(),
     );
 
     Ok(response)
@@ -6403,148 +6189,6 @@ mod proxy_resolution_integration_tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(resolved_slug, service.slug);
-        server.abort();
-    }
-
-    #[tokio::test]
-    async fn direct_pool_proxy_retries_unhealthy_member_on_transport_failure() {
-        let Some(db) = connect_test_database("proxy_pool_direct_retry").await else {
-            eprintln!("skipping proxy integration test: no local MongoDB available");
-            return;
-        };
-
-        let (healthy_base_url, server) = start_downstream().await;
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind unused port for failing member");
-        let failing_base_url = format!(
-            "http://{}",
-            listener.local_addr().expect("unused listener addr")
-        );
-        drop(listener);
-
-        let user_id = Uuid::new_v4().to_string();
-        db.collection::<crate::models::user::User>(USERS)
-            .insert_one(test_user(&user_id, UserType::Person))
-            .await
-            .unwrap();
-
-        let mut failing =
-            insert_user_service(&db, &user_id, "pool-worker-a", &failing_base_url, None).await;
-        let mut healthy =
-            insert_user_service(&db, &user_id, "pool-worker-b", &healthy_base_url, None).await;
-        let pool_slug = format!("pool-{}", &Uuid::new_v4().to_string()[..8]);
-        failing.pool_slug = Some(pool_slug.clone());
-        healthy.pool_slug = Some(pool_slug.clone());
-        db.collection::<UserService>(USER_SERVICES)
-            .update_one(
-                doc! { "_id": &failing.id },
-                doc! { "$set": { "pool_slug": &pool_slug } },
-            )
-            .await
-            .expect("set failing pool slug");
-        db.collection::<UserService>(USER_SERVICES)
-            .update_one(
-                doc! { "_id": &healthy.id },
-                doc! { "$set": { "pool_slug": &pool_slug } },
-            )
-            .await
-            .expect("set healthy pool slug");
-
-        let state = test_app_state(db.clone());
-        let mut resolved_slug = String::new();
-        let response = proxy_request_by_slug_inner(
-            &state,
-            &access_token_auth(&user_id),
-            &pool_slug,
-            "status",
-            proxy_request(&format!("/proxy/s/{pool_slug}/status")),
-            &mut resolved_slug,
-        )
-        .await
-        .expect("pool request should fail over to healthy direct member");
-
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(resolved_slug, failing.slug);
-        let body = to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("read response body");
-        assert_eq!(&body[..], b"ok:/status");
-
-        let next = proxy_request_by_slug_inner(
-            &state,
-            &access_token_auth(&user_id),
-            &pool_slug,
-            "status",
-            proxy_request(&format!("/proxy/s/{pool_slug}/status")),
-            &mut String::new(),
-        )
-        .await
-        .expect("subsequent pool request should skip unhealthy direct member");
-        assert_eq!(next.status(), StatusCode::OK);
-
-        server.abort();
-    }
-
-    #[tokio::test]
-    async fn direct_pool_member_slug_does_not_retry_pool_on_transport_failure() {
-        let Some(db) = connect_test_database("proxy_pool_member_slug_no_retry").await else {
-            eprintln!("skipping proxy integration test: no local MongoDB available");
-            return;
-        };
-
-        let (healthy_base_url, server) = start_downstream().await;
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind unused port for failing member");
-        let failing_base_url = format!(
-            "http://{}",
-            listener.local_addr().expect("unused listener addr")
-        );
-        drop(listener);
-
-        let user_id = Uuid::new_v4().to_string();
-        db.collection::<crate::models::user::User>(USERS)
-            .insert_one(test_user(&user_id, UserType::Person))
-            .await
-            .unwrap();
-
-        let failing =
-            insert_user_service(&db, &user_id, "pool-member-a", &failing_base_url, None).await;
-        let healthy =
-            insert_user_service(&db, &user_id, "pool-member-b", &healthy_base_url, None).await;
-        let pool_slug = format!("pool-{}", &Uuid::new_v4().to_string()[..8]);
-        db.collection::<UserService>(USER_SERVICES)
-            .update_one(
-                doc! { "_id": &failing.id },
-                doc! { "$set": { "pool_slug": &pool_slug } },
-            )
-            .await
-            .expect("set failing pool slug");
-        db.collection::<UserService>(USER_SERVICES)
-            .update_one(
-                doc! { "_id": &healthy.id },
-                doc! { "$set": { "pool_slug": &pool_slug } },
-            )
-            .await
-            .expect("set healthy pool slug");
-
-        let state = test_app_state(db.clone());
-        let mut resolved_slug = String::new();
-        let err = proxy_request_by_slug_inner(
-            &state,
-            &access_token_auth(&user_id),
-            &failing.slug,
-            "status",
-            proxy_request("/proxy/s/pool-member-a/status"),
-            &mut resolved_slug,
-        )
-        .await
-        .expect_err("concrete member slug should not fail over to another pool member");
-
-        assert_eq!(resolved_slug, failing.slug);
-        assert!(matches!(err, AppError::Internal(message) if message == "Proxy request failed"));
-
         server.abort();
     }
 

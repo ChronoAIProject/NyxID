@@ -390,8 +390,6 @@ pub struct KeyResponse {
     pub label: String,
     pub slug: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub pool_slug: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub service_category: String,
     pub endpoint_url: String,
@@ -542,9 +540,6 @@ pub struct UpdateKeyRequest {
     pub auth_key_name: Option<String>,
     /// Node ID for routing ("" to clear, Some(id) to set)
     pub node_id: Option<String>,
-    /// Stable proxy slug for a round-robin pool of interchangeable services.
-    /// Set to "" to remove this service from its pool.
-    pub pool_slug: Option<String>,
     /// Credential to store on the server (bearer token / api key / basic
     /// auth string / etc.) for this service. When set alongside a
     /// credential-bearing `auth_method`, provisions a `UserApiKey` if the
@@ -1767,7 +1762,6 @@ pub async fn update_key(
     if body.auth_method.is_some()
         || body.auth_key_name.is_some()
         || body.node_id.is_some()
-        || body.pool_slug.is_some()
         || body.is_active.is_some()
         || body.admin_only.is_some()
         || body.custom_user_agent.is_some()
@@ -1833,7 +1827,6 @@ pub async fn update_key(
             body.default_request_headers.as_ref(),
             None,
             body.admin_only,
-            body.pool_slug.as_deref(),
         )
         .await?;
     }
@@ -2090,7 +2083,6 @@ fn key_response_from_result(result: &unified_key_service::CreateKeyResult) -> Ke
         name: label.clone(),
         label,
         slug: result.service.slug.clone(),
-        pool_slug: result.service.pool_slug.clone(),
         description: None,
         service_category: source.clone(),
         endpoint_url: result.endpoint.url.clone(),
@@ -2211,7 +2203,6 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
             .unwrap_or_else(|| view.label.clone()),
         label: view.label,
         slug: view.slug,
-        pool_slug: view.pool_slug,
         description: None,
         service_category: source.clone(),
         endpoint_url: view.endpoint_url,
@@ -2597,7 +2588,6 @@ mod tests {
             auth_method: None,
             auth_key_name: None,
             node_id: None,
-            pool_slug: None,
             credential: None,
             is_active: None,
             admin_only: None,
@@ -4344,7 +4334,6 @@ mod tests {
         assert!(req.auth_method.is_none());
         assert!(req.credential.is_none());
         assert!(req.node_id.is_none());
-        assert!(req.pool_slug.is_none());
         assert!(req.is_active.is_none());
     }
 

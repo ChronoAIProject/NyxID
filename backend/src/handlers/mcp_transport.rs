@@ -2273,7 +2273,6 @@ async fn handle_mcp_ssh_exec(
     let approval_owner_user_id = auth.effective_approval_owner_user_id();
     let service_owner_user_id = match proxy_service::find_effective_service_owner(
         &state.db,
-        state.node_ws_manager.as_ref(),
         &approval_owner_user_id,
         None,
         Some(&service_id),

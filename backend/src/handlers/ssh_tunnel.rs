@@ -943,10 +943,11 @@ pub(crate) async fn authorize_ssh_access_for_operation(
     // The service creator and public catalog services (visibility != "private")
     // keep their existing access. NotFound (rather than Forbidden) avoids
     // leaking the existence of a private service the caller cannot see.
-    let effective_owner = crate::services::proxy_service::find_effective_catalog_service_owner(
+    let effective_owner = crate::services::proxy_service::find_effective_service_owner(
         &state.db,
         &approval_owner_user_id,
-        service_id,
+        None,
+        Some(service_id),
     )
     .await?;
     let owner_for_resolution = match effective_owner.as_deref() {

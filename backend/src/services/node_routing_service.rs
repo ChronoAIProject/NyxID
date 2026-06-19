@@ -195,10 +195,11 @@ async fn effective_service_owner_id(
     actor_user_id: &str,
     service_id: &str,
 ) -> AppResult<String> {
-    let effective_owner = crate::services::proxy_service::find_effective_catalog_service_owner(
+    let effective_owner = crate::services::proxy_service::find_effective_service_owner(
         db,
         actor_user_id,
-        service_id,
+        None,
+        Some(service_id),
     )
     .await?;
 

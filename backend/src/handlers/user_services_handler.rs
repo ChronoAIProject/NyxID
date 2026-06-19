@@ -56,9 +56,6 @@ pub struct UpdateUserServiceRequest {
     /// "" to clear, Some(id) to set, None to leave unchanged
     pub node_id: Option<String>,
     pub node_priority: Option<i32>,
-    /// Stable proxy slug for a round-robin pool of interchangeable services.
-    /// Set to "" to remove this service from its pool.
-    pub pool_slug: Option<String>,
     pub is_active: Option<bool>,
     pub admin_only: Option<bool>,
     /// Identity propagation mode: "none" | "headers" | "jwt" | "both"
@@ -96,8 +93,6 @@ pub struct UpdateUserServiceRequest {
 pub struct UserServiceResponse {
     pub id: String,
     pub slug: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pool_slug: Option<String>,
     pub endpoint_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key_id: Option<String>,
@@ -334,7 +329,6 @@ pub async fn update_user_service(
         body.default_request_headers.as_ref(),
         body.ws_frame_injections.as_deref(),
         body.admin_only,
-        body.pool_slug.as_deref(),
     )
     .await?;
 
@@ -493,7 +487,6 @@ fn user_service_with_source_response(item: UserServiceWithSource) -> UserService
     UserServiceResponse {
         id: svc.id,
         slug: svc.slug,
-        pool_slug: svc.pool_slug,
         endpoint_id: svc.endpoint_id,
         api_key_id: svc.api_key_id,
         auth_method: svc.auth_method,

@@ -915,7 +915,6 @@ mod tests {
             id: "svc-1".to_string(),
             user_id: "user-1".to_string(),
             slug: "openai".to_string(),
-            pool_slug: None,
             endpoint_id: "ep-1".to_string(),
             api_key_id: Some("ak-1".to_string()),
             auth_method: "bearer".to_string(),
