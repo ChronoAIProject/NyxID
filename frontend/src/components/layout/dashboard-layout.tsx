@@ -59,11 +59,16 @@ export function DashboardLayout() {
   const [mobileNavState, setMobileNavState] = useState<"closed" | "open" | "closing">("closed");
   const [rightPanel, setRightPanel] = useState<React.ReactNode>(null);
   const [breadcrumbLabel, setBreadcrumbLabel] = useState<string | null>(null);
+  const pathname = useRouterState({ select: (s) => s.location.pathname });
 
   // Applies the resolved theme class to <html> on mount, reverts to dark on
   // unmount. Must run before the onboarding early-returns below to satisfy
   // rules-of-hooks.
   useApplyTheme();
+
+  useEffect(() => {
+    document.title = `nyxid - ${sectionTitleFor(pathname)}`;
+  }, [pathname]);
 
   const closeMobileNav = useCallback(() => setMobileNavState("closing"), []);
 
@@ -131,6 +136,27 @@ export function DashboardLayout() {
     </BreadcrumbLabelContext.Provider>
     </RightPanelContext.Provider>
   );
+}
+
+const SECTION_TITLES: Record<string, string> = {
+  dashboard: "dashboard",
+  keys: "ai services",
+  orgs: "org",
+  nodes: "nodes",
+  "channel-bots": "channel bots",
+  settings: "settings",
+  guide: "guide",
+  approvals: "approvals",
+  developer: "developer apps",
+  "ai-setup": "ai setup",
+  "integration-guide": "integration guide",
+  admin: "admin",
+  "design-system": "design system",
+};
+
+function sectionTitleFor(pathname: string): string {
+  const first = pathname.split("/").filter(Boolean)[0] ?? "";
+  return SECTION_TITLES[first] ?? "dashboard";
 }
 
 const SIDEBAR_ITEMS: Record<string, string> = {

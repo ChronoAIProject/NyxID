@@ -196,7 +196,8 @@ export function DocsPage() {
   // Tags we create are removed on unmount; tags we only edit are restored.
   useEffect(() => {
     if (status !== "ok" || !doc) return;
-    const fullTitle = `${doc.title || known?.title || "Docs"} · NyxID Docs`;
+    const fullTitle = "nyxid - docs";
+    const ogTitle = `${doc.title || known?.title || "Docs"} · NyxID Docs`;
     const description = doc.description;
     const url = `${window.location.origin}/docs/${slug}`;
 
@@ -248,7 +249,7 @@ export function DocsPage() {
       url,
     );
     upsert('meta[property="og:type"]', ogMeta("og:type"), "content", "article");
-    upsert('meta[property="og:title"]', ogMeta("og:title"), "content", fullTitle);
+    upsert('meta[property="og:title"]', ogMeta("og:title"), "content", ogTitle);
     upsert('meta[property="og:description"]', ogMeta("og:description"), "content", description);
     upsert('meta[property="og:url"]', ogMeta("og:url"), "content", url);
     upsert('meta[name="twitter:card"]', meta("twitter:card"), "content", "summary");
