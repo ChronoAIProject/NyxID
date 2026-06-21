@@ -1,14 +1,18 @@
 # Compute Pool Service
 
-This integration is a reference external service for shared GPU / Mac / lab
-compute. The queue and worker protocol live outside NyxID core. NyxID
-manages the service as a normal user/org service: auth, agent API keys,
-credential injection, node routing, proxying, and audit metadata stay in
-NyxID; compute-specific task state stays in this service.
+This integration defines a small external compute-service contract and includes
+a smoke-test worker-pull implementation for shared GPU / Mac / lab compute.
+The queue and worker protocol live outside NyxID core. NyxID manages the
+service as a normal user/org service: auth, agent API keys, credential
+injection, node routing, proxying, and audit metadata stay in NyxID;
+compute-specific task state stays in the external service.
 
-This is not a NyxID service-pool framework. Cross-service counting, quotas,
-metering, and load balancing should be handled by a future generic NyxID
-service-pool design rather than by a compute-specific core API.
+This is not a production scheduler and is not a NyxID service-pool framework.
+Production idle-machine pools should implement the same consumer API on top of
+a scheduler such as HTCondor, Slurm, Ray, Kueue, or an equivalent internal
+backend. Cross-service counting, quotas, metering, and load balancing should be
+handled by a future generic NyxID service-pool design rather than by a
+compute-specific core API.
 
 This integration does not require a NyxID org model change. To share it with
 company members, create the NyxID service under the existing org owner and
@@ -21,12 +25,28 @@ agent / org user
   -> NyxID proxy / service governance
   -> optional NyxID Credential Node
   -> compute-pool-service
-  -> trusted GPU/Mac/Slurm workers
+  -> trusted GPU/Mac workers
   -> local OpenAI-compatible backend
 ```
 
 NyxID core does not store compute tasks, worker tokens, local backend URLs,
-or local backend credentials.
+or local backend credentials. For an HTCondor-backed production path, see
+`../compute-condor-adapter/`.
+
+## External Service Contract
+
+NyxID only needs a stable consumer-facing API:
+
+- `POST /v1/tasks`
+- `GET /v1/tasks/{task_id}`
+- `POST /v1/tasks/{task_id}/cancel`
+- `GET /v1/status`
+
+This directory implements that contract with a local JSON store and
+worker-pull protocol. A production adapter can implement the same contract by
+translating requests into `condor_submit` / `condor_q` / `condor_rm`, Slurm
+jobs, Ray jobs, Kubernetes jobs, or another scheduler. Agents should call the
+contract through NyxID; they should not depend on the backend scheduler.
 
 ## Security Boundary
 
@@ -181,7 +201,9 @@ The OpenAPI spec for the consumer API is in `openapi.yaml`.
 - The JSON store is serialized inside one process and uses per-write tmp
   files, but it is still a smoke-test backend rather than durable storage.
 - One task per worker process at a time.
-- No built-in Slurm adapter yet.
+- No built-in HTCondor, Slurm, Ray, or Kueue backend in this implementation.
+  See `../compute-condor-adapter/` for the HTCondor adapter contract and
+  rollout shape.
 - No NyxID catalog seed yet; add as a custom service for now.
 - No NyxID-level service pool yet. This service exposes `/v1/status` as a
   capacity signal, but generic service-instance load balancing, org/agent
