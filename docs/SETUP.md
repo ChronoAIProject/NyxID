@@ -1,10 +1,18 @@
-# NyxID Self-Host Setup
+# Self-host a NyxID Backend (Optional)
 
-Step-by-step manual setup for running NyxID on your own machine, plus troubleshooting, uninstall/reinstall, and post-install AI-agent wiring.
+Step-by-step manual setup for running the NyxID backend on your own machine, plus troubleshooting, uninstall/reinstall, and post-install AI-agent wiring. This is the Docker server path, not the default `nyxid` CLI install.
+
+Just need the client? Install the CLI instead:
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/scripts/install.sh)"
+```
+
+Running your own backend? Continue with this self-host guide.
 
 > **On Windows?** Install [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) (`wsl --install`), enable Docker Desktop's WSL integration (**Settings → Resources → WSL Integration**), then run this setup from your Ubuntu shell. The full one-time setup is in [docs/WINDOWS_SETUP.md](WINDOWS_SETUP.md).
 
-For the one-paragraph overview and the AI-assisted setup prompt (drive the whole flow from Claude Code / Cursor), see the [README Getting Started](../README.md#1-install-nyxid).
+For the one-paragraph overview, default CLI install path, and AI-assisted self-host prompt (drive the backend flow from Claude Code / Cursor), see the [README Getting Started](../README.md#1-install-nyxid).
 
 Once NyxID is running, head to a [Quickstart](quickstarts/) — n8n, per-agent keys, node proxy, or MCP wrapping — for end-to-end recipes.
 
@@ -13,7 +21,7 @@ Once NyxID is running, head to a [Quickstart](quickstarts/) — n8n, per-agent k
 ## Prerequisites
 
 - **A bash shell** — required. macOS Terminal, any Linux shell, or [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) on Windows. Steps 1 and 2 use bash heredocs (`<< 'CHECK'`, `<< 'INSTALL'`) and POSIX tools (`openssl`, `xargs`, `grep -E`).
-- [Docker](https://docs.docker.com/get-docker/) — required for the server stack (backend, frontend, MongoDB). ~2 GB disk for images on first pull.
+- [Docker](https://docs.docker.com/get-docker/) — required for this optional server stack (backend, frontend, MongoDB). ~2 GB disk for images on first pull.
 - [Rust / Cargo](https://www.rust-lang.org/tools/install) — **optional fallback only** for unsupported CLI platforms. The normal CLI installer downloads a prebuilt binary and does not need Rust.
 
 Total disk footprint: ~2 GB for the server, plus a small prebuilt CLI binary if you install it. Source fallback builds can still use ~1.5 GB and take several minutes.
@@ -141,9 +149,9 @@ To stop NyxID: `docker compose -f docker-compose.yml -f docker-compose.prod.yml 
 
 ---
 
-## Optional: Install the `nyxid` CLI
+## Install or verify the `nyxid` CLI
 
-The server stack above is fully usable from the web console — the CLI (Command Line Interface) is only needed if you want to script credential setup, manage credential nodes, or drive NyxID from your terminal. Skip this section if you'd rather stay in the browser.
+The `nyxid` CLI (Command Line Interface) is the default client install for NyxID. If you already installed it before self-hosting, use this section to verify it and log into your local backend. The server stack above is also usable from the web console, so you can skip CLI login if you'd rather stay in the browser.
 
 The installer downloads an attested prebuilt release binary in seconds, installs it into a versioned layout under `~/.local/share/nyxid/versions`, and links `~/.local/bin/nyxid` to the active version. It does not require Rust or a Node toolchain on published targets: macOS x64/arm64 and Linux x64/arm64. Linux arm64 release binaries target the Ubuntu 20.04 / `glibc 2.31` baseline.
 

@@ -1,6 +1,6 @@
 # Nyx Skills — Install Manifest (for AI agents)
 
-You (the AI agent — Claude Code, Cursor, Codex, OpenClaw, etc.) have been asked to install **Nyx skills** on the user's machine. Follow the steps below, then hand control back to the user for the final login.
+You (the AI agent — Claude Code, Cursor, Codex, OpenClaw, etc.) have been asked to install **Nyx skills** or **NyxID** on the user's machine. Default to the lightweight `nyxid` CLI plus skill files. Do not install or start the Docker backend unless the user explicitly asks to self-host a NyxID backend.
 
 This file is the canonical install entry point for any Nyx skill. It is intentionally short — the bulk of each skill's behavior lives in its own `SKILL.md` and `references/`.
 
@@ -10,6 +10,8 @@ This file is the canonical install entry point for any Nyx skill. It is intentio
 
 Before running anything, observe these constraints:
 
+- **Default to the `nyxid` CLI installer.** "Install NyxID" means install the CLI client unless the user explicitly asks to run their own backend/server.
+- **Do not run Docker, `docker compose`, or backend setup from `docs/SETUP.md`** unless the user explicitly asks to self-host.
 - **Do not run `nyxid login`.** The user picks the NyxID instance and enters credentials themselves.
 - **Do not ask the user for NyxID credentials, API keys, tokens, or invite codes.** The CLI handles credential entry interactively when the user runs it.
 - **Do not print secrets, environment variables, or credential files** at any point during install.
