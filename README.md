@@ -108,25 +108,33 @@ Other tools solve parts of this — NyxID combines credential injection, NAT tra
 
 ## Getting Started
 
-NyxID is used in two phases — install once, then pick a workflow. The install gives you a NyxID instance and an Agent Key; the workflow shows what to build with them.
+NyxID is used in two phases — install the `nyxid` CLI client, then pick a workflow. The CLI logs into either the hosted service or a self-hosted backend and can create the Agent Key your workflow needs.
 
 ### 1. Install NyxID
 
-Choose hosted (we run it for you) or self-host (Docker on your machine).
+The default "install NyxID" path installs the lightweight `nyxid` CLI. It is user-scoped, needs no Docker, and does not start a backend server.
+
+Just need the client? Install the CLI. Running your own backend? Self-host with Docker.
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/scripts/install.sh)"
+```
+
+After the CLI is installed, choose where it should log in:
 
 | | Hosted | Self-host |
 |---|---|---|
-| **What it is** | We run NyxID for you in the cloud | You run NyxID on your own machine |
-| **Best for** | Getting started quickly, no setup | Full control, private networks, offline use |
+| **What it is** | We run the NyxID backend for you in the cloud | You run the NyxID backend on your own machine |
+| **Best for** | Getting started quickly, no server setup | Full control, private networks, offline use |
 | **Status** | Early access (invite code below) | Open — anyone can run it |
 
-> **Driving NyxID from an AI coding agent?** Hand it this single line at any point — it installs the `nyxid` CLI plus the Nyx skill files for the agent to drive:
+> **Driving NyxID from an AI coding agent?** Hand it this single line at any point — it tells the agent to install the `nyxid` CLI plus the Nyx skill files:
 >
 > ```
 > Install nyx skills from https://github.com/ChronoAIProject/NyxID/blob/main/skills/INSTALL.md
 > ```
 >
-> The agent reads [`skills/INSTALL.md`](skills/INSTALL.md) end-to-end. You'll still need a hosted account or a self-host stack (below) for the agent to log into.
+> The agent reads [`skills/INSTALL.md`](skills/INSTALL.md) end-to-end. It should use the CLI installer by default and only run the Docker backend setup if you explicitly ask to self-host.
 
 #### Hosted (Recommended)
 
@@ -142,23 +150,23 @@ The full click-through flow is in **[Add your first AI Service](docs/connecting-
 
 #### Self-Host
 
-Run NyxID on your own machine. This sets up three Docker containers (database, backend, frontend) — takes about 2 minutes.
+Run your own NyxID backend on your machine. This is the optional server-side path and sets up three Docker containers (database, backend, frontend) — takes about 2 minutes.
 
-**Prerequisites:** [Docker](https://docs.docker.com/get-docker/) and a bash shell. macOS and Linux already have one — Windows users, see [docs/WINDOWS_SETUP.md](docs/WINDOWS_SETUP.md) before going further. The `nyxid` CLI is optional. Full prereqs and disk budgets are in [SETUP.md](docs/SETUP.md).
+**Prerequisites:** [Docker](https://docs.docker.com/get-docker/) and a bash shell. macOS and Linux already have one — Windows users, see [docs/WINDOWS_SETUP.md](docs/WINDOWS_SETUP.md) before going further. Docker is required only for this backend path. Full prereqs and disk budgets are in [SETUP.md](docs/SETUP.md).
 
 ##### AI-Assisted (Recommended)
 
-If you have Claude Code, Cursor, or any AI coding assistant open, paste the prompt below into it and it will drive the entire self-host flow for you — preflight, clone, env generation, Docker stack, health check, optional CLI install, login, first credential, and MCP config.
+If you have Claude Code, Cursor, or any AI coding assistant open, paste the prompt below into it only when you explicitly want a self-hosted backend. It will drive the entire self-host flow for you — preflight, clone, env generation, Docker stack, health check, CLI login, first credential, and MCP config.
 
 <details>
 <summary><strong>Click to expand the full AI-assisted self-host prompt</strong></summary>
 
-> I want to self-host NyxID on this machine (the repo is https://github.com/ChronoAIProject/NyxID). Walk me through the full setup interactively. If anything fails or I'd prefer to follow the manual steps myself, the full step-by-step with troubleshooting is at https://github.com/ChronoAIProject/NyxID/blob/main/docs/SETUP.md. If I'm on Windows, confirm I'm running from a WSL Ubuntu shell (not native PowerShell or CMD) before proceeding — see https://github.com/ChronoAIProject/NyxID/blob/main/docs/WINDOWS_SETUP.md.
+> I want to self-host the NyxID backend on this machine (the repo is https://github.com/ChronoAIProject/NyxID). This is the Docker server path, not the default CLI install. Walk me through the full setup interactively. If anything fails or I'd prefer to follow the manual steps myself, the full step-by-step with troubleshooting is at https://github.com/ChronoAIProject/NyxID/blob/main/docs/SETUP.md. If I'm on Windows, confirm I'm running from a WSL Ubuntu shell (not native PowerShell or CMD) before proceeding — see https://github.com/ChronoAIProject/NyxID/blob/main/docs/WINDOWS_SETUP.md.
 > 1. Confirm Docker is installed and running before touching anything (check `git`, `docker`, `openssl`, `curl`, `docker compose` v2, and `docker info`).
 > 2. **Before cloning or generating anything, check whether NyxID install STATE is present** — look for a `./NyxID/.env.dev` file OR any Docker volume matching `nyx*_mongodb_data` (run `docker volume ls --format '{{.Name}}' | grep -E 'nyx.*_mongodb_data$'` — this catches the default `nyxid_mongodb_data` plus any variant from a renamed checkout). A bare `./NyxID` directory alone does NOT count as "installed" — `uninstall.sh` leaves the source tree in place, so the directory can exist with no state. **If install state is present, stop and tell me the quickstart is a first-time-only install.** Ask whether I want to (a) uninstall first — if `./NyxID` exists, run `cd NyxID && ./scripts/uninstall.sh --yes && cd ..`; if only the stale Docker volume is orphaned (checkout was manually deleted earlier), run `docker volume ls --format '{{.Name}}' | grep -E 'nyx.*_mongodb_data$' | xargs -r docker volume rm` directly. Either path wipes the volume, containers, and (for the script path) `.env.dev`/keys — destroys all NyxID accounts and encrypted credentials. Or (b) keep my existing install and stop here — I can verify it's still running with `curl -sf http://localhost:3001/health`. Do not proceed to step 3 until I answer.
 > 3. If `./NyxID` already exists (post-uninstall reinstall), `cd` into it; otherwise clone the repo into the current directory and `cd` in. Generate `.env.dev` with a fresh `ENCRYPTION_KEY` and `MONGO_ROOT_PASSWORD` (set `ENVIRONMENT=development`, `INVITE_CODE_REQUIRED=false`, `AUTO_VERIFY_EMAIL=true`, and `EMAIL_AUTH_ENABLED=true` so I don't get stuck on email verification or a locked-down signup page), symlink it to `.env.production`, create the PKCS#1 JWT signing keys under `keys/` (with a LibreSSL fallback using `-pubout` if `-RSAPublicKey_out` isn't supported), then pull images and start the stack with `docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.production up -d`. Wait up to 90 seconds for `http://localhost:3001/health` to return 200 — if it times out, tell me to run `docker logs nyxid-backend`. If the logs show `SCRAM failure: Authentication failed`, that means the MongoDB volume has a stale password from a previous install — tell me to run `./scripts/uninstall.sh --yes` (or, if the checkout is gone, `docker volume ls --format '{{.Name}}' | grep -E 'nyx.*_mongodb_data$' | xargs -r docker volume rm` to remove any nyx-flavored orphan volume) and retry. Show me the generated `ENCRYPTION_KEY` so I can back it up.
 > 4. Tell me to open http://localhost:3000 and register my account (no email verification needed — accounts are auto-verified in dev mode), and wait until I confirm I've done that.
-> 5. **Ask me whether I want to install the `nyxid` CLI plus the Nyx skill** so you can drive NyxID from the terminal afterwards. Explain that it's optional, that the installer downloads a roughly 10 MB prebuilt binary plus a small set of skill files (no Rust toolchain required), installs the CLI into a versioned layout with rollback support, and that only unsupported OS/arch combinations fall back to a Rust source build. If I say yes, follow the install manifest at https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/INSTALL.md end-to-end (it installs the CLI under `~/.local/share/nyxid/`, drops the skill into your skill directory, and tells you to `export PATH="$HOME/.local/bin:$PATH"` if needed); verify with `nyxid doctor`, log me in with `nyxid login --base-url http://localhost:3001`, add my OpenAI key with `nyxid service add llm-openai --credential-env OPENAI_API_KEY`, then verify with `nyxid proxy request <slug> models` using the slug the previous `service add` command printed under `Slug:` (typically `llm-openai`, but suffixed if I already had a service with that slug). If I say no, walk me through adding the same OpenAI credential in the web console instead.
+> 5. Ensure the `nyxid` CLI is available. If it is not installed, ask me whether I want to install the `nyxid` CLI plus the Nyx skill so you can drive NyxID from the terminal afterwards. Explain that the installer downloads a roughly 10 MB prebuilt binary plus a small set of skill files (no Rust toolchain required), installs the CLI into a versioned layout with rollback support, and that only unsupported OS/arch combinations fall back to a Rust source build. If I say yes, follow the install manifest at https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/INSTALL.md end-to-end (it installs the CLI under `~/.local/share/nyxid/`, drops the skill into your skill directory, and tells you to `export PATH="$HOME/.local/bin:$PATH"` if needed). Then verify with `nyxid doctor`, log me in with `nyxid login --base-url http://localhost:3001`, add my OpenAI key with `nyxid service add llm-openai --credential-env OPENAI_API_KEY`, and verify with `nyxid proxy request <slug> models` using the slug the previous `service add` command printed under `Slug:` (typically `llm-openai`, but suffixed if I already had a service with that slug). If I do not want the CLI, walk me through adding the same OpenAI credential in the web console instead.
 > 6. Finish by connecting my AI tool to NyxID's MCP endpoint at `http://localhost:3001/mcp`. For Claude Code: `claude mcp add --transport http --scope user nyxid http://localhost:3001/mcp`. For Codex: `codex mcp add nyxid --url http://localhost:3001/mcp`. For Cursor: open `Settings` > `MCP` in the web console and click `Install to Cursor`.
 
 </details>
@@ -167,14 +175,14 @@ If you have Claude Code, Cursor, or any AI coding assistant open, paste the prom
 
 ##### Manual Setup
 
-Prefer to run each step yourself, or need the full troubleshooting guide? Follow **[docs/SETUP.md](docs/SETUP.md)** (macOS, Linux, or Windows via WSL).
+Prefer to run the optional backend setup yourself, or need the full troubleshooting guide? Follow **[docs/SETUP.md](docs/SETUP.md)** (macOS, Linux, or Windows via WSL).
 
 It covers:
 
 - System preflight check — [Step 1](docs/SETUP.md#step-1-of-3--check-your-system)
 - One paste-block install — [Step 2](docs/SETUP.md#step-2-of-3--install-and-start)
 - Register your account — [Step 3](docs/SETUP.md#step-3-of-3--register-and-connect)
-- Optional [CLI install](docs/SETUP.md#optional-install-the-nyxid-cli)
+- [CLI install or verification](docs/SETUP.md#install-or-verify-the-nyxid-cli)
 - [Uninstall & reinstall](docs/SETUP.md#uninstall--reinstall), [orphan volume recovery](docs/SETUP.md#recovering-an-orphan-volume), and [SCRAM failure](docs/SETUP.md#stuck-on-scram-failure) troubleshooting
 
 Once NyxID is running and you've registered at `http://localhost:3000`, continue to [2. Pick a workflow](#2-pick-a-workflow).
@@ -204,7 +212,7 @@ With NyxID running and an Agent Key in hand, pick the workflow that matches what
 |-------|------|-------------|
 | Quickstarts | [docs/quickstarts/](docs/quickstarts/) | End-to-end recipes — n8n, per-agent keys, node proxy, MCP wrapping |
 | Connecting AI Services | [docs/connecting-services/](docs/connecting-services/) | Add your first (or Nth) AI Service — Web UI / CLI / AI-driven / Direct API |
-| Setup | [docs/SETUP.md](docs/SETUP.md) | Step-by-step self-host + troubleshooting (macOS, Linux, Windows via WSL) |
+| Setup | [docs/SETUP.md](docs/SETUP.md) | Optional self-hosted backend + troubleshooting (macOS, Linux, Windows via WSL) |
 | Deployment | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Start here for production setup |
 | AI Agent Playbook | [docs/AI_AGENT_PLAYBOOK.md](docs/AI_AGENT_PLAYBOOK.md) | Start here for agent integration |
 | Architecture | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System design and data flows |

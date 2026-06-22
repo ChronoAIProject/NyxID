@@ -38,7 +38,7 @@ For the full API reference, error codes, and advanced topics (SSH, MCP, OAuth cl
 
 ## Setup
 
-Install the NyxID CLI (one-time):
+Install the NyxID CLI (one-time). This is the default "install NyxID" path; do not run the Docker backend setup unless the user explicitly asks to self-host:
 
 ```bash
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/scripts/install.sh)"
