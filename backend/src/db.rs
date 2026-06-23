@@ -23,6 +23,7 @@ use crate::models::oauth_broker_binding::{
 };
 use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
 use crate::models::pushed_authorization_request::COLLECTION_NAME as PAR_COLLECTION;
+use crate::models::service_pool::COLLECTION_NAME as SERVICE_POOLS;
 use crate::models::ssh_auth_mode::SshAuthMode;
 use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
 use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
@@ -309,6 +310,36 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
             .build(),
     )
     .await?;
+
+    // ── service_pools ──
+    let service_pools = db.collection::<mongodb::bson::Document>(SERVICE_POOLS);
+    service_pools
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "user_id": 1, "slug": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .unique(true)
+                        .partial_filter_expression(doc! { "is_active": true })
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    service_pools
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "user_id": 1, "is_active": 1, "created_at": -1 })
+                .build(),
+        )
+        .await?;
+    service_pools
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "members.user_service_id": 1 })
+                .build(),
+        )
+        .await?;
 
     // ── audit_log ──
     let audit = db.collection::<mongodb::bson::Document>("audit_log");

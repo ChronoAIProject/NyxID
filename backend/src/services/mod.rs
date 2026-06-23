@@ -71,6 +71,7 @@ pub mod role_service;
 pub mod scope_catalog;
 pub mod service_account_service;
 pub mod service_endpoint_service;
+pub mod service_pool_service;
 pub mod social_auth_service;
 pub mod social_token_exchange_service;
 pub mod sse_parser;

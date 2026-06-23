@@ -357,6 +357,18 @@ pub enum AppError {
 
     #[error("Oracle extract disabled: {0}")]
     OracleExtractDisabled(String),
+
+    #[error("Service pool not found: {0}")]
+    ServicePoolNotFound(String),
+
+    #[error("Service pool slug is already taken: {0}")]
+    ServicePoolSlugTaken(String),
+
+    #[error("Invalid service pool member: {0}")]
+    ServicePoolMemberInvalid(String),
+
+    #[error("Service pool has no viable member: {0}")]
+    ServicePoolNoViableMember(String),
 }
 
 impl AppError {
@@ -465,6 +477,10 @@ impl AppError {
             Self::OracleSessionClosed(_) => StatusCode::CONFLICT,
             Self::OraclePayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             Self::OracleExtractDisabled(_) => StatusCode::FORBIDDEN,
+            Self::ServicePoolNotFound(_) => StatusCode::NOT_FOUND,
+            Self::ServicePoolSlugTaken(_) => StatusCode::CONFLICT,
+            Self::ServicePoolMemberInvalid(_) => StatusCode::BAD_REQUEST,
+            Self::ServicePoolNoViableMember(_) => StatusCode::BAD_GATEWAY,
             Self::Internal(_) | Self::DatabaseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -581,6 +597,10 @@ impl AppError {
             Self::OracleSessionClosed(_) => 11008,
             Self::OraclePayloadTooLarge(_) => 11009,
             Self::OracleExtractDisabled(_) => 11010,
+            Self::ServicePoolNotFound(_) => 11300,
+            Self::ServicePoolSlugTaken(_) => 11301,
+            Self::ServicePoolMemberInvalid(_) => 11302,
+            Self::ServicePoolNoViableMember(_) => 11303,
         }
     }
 
@@ -729,6 +749,10 @@ impl AppError {
             Self::OracleSessionClosed(_) => "oracle_session_closed",
             Self::OraclePayloadTooLarge(_) => "oracle_payload_too_large",
             Self::OracleExtractDisabled(_) => "oracle_extract_disabled",
+            Self::ServicePoolNotFound(_) => "service_pool_not_found",
+            Self::ServicePoolSlugTaken(_) => "service_pool_slug_taken",
+            Self::ServicePoolMemberInvalid(_) => "service_pool_member_invalid",
+            Self::ServicePoolNoViableMember(_) => "service_pool_no_viable_member",
         }
     }
 }

@@ -214,12 +214,79 @@ struct PreResolved {
     /// The UserService ID for API key scope checks.
     user_service_id: Option<String>,
     has_server_credential: bool,
+    pool: Option<PoolAuditContext>,
     /// The user_id that owns the resolved UserService. For personal
     /// resolutions this is the actor; for org-routed resolutions this is
     /// the org's user_id. Used to scope NodeServiceBinding fallback
     /// lookups so the failover list reflects the org's bindings, not
     /// just the calling member's personal bindings.
     effective_owner_id: String,
+}
+
+#[derive(Clone, Debug)]
+struct PoolAuditContext {
+    pool_id: String,
+    pool_slug: String,
+    selected_user_service_id: String,
+    strategy: String,
+}
+
+impl From<&crate::services::service_pool_service::PoolSelection> for PoolAuditContext {
+    fn from(selection: &crate::services::service_pool_service::PoolSelection) -> Self {
+        Self {
+            pool_id: selection.pool_id.clone(),
+            pool_slug: selection.pool_slug.clone(),
+            selected_user_service_id: selection.member_user_service_id.clone(),
+            strategy: selection.strategy.as_str().to_string(),
+        }
+    }
+}
+
+fn pre_resolved_from_user_service_resolution(
+    resolution: proxy_service::UserServiceResolution,
+    fallback_owner_id: &str,
+) -> PreResolved {
+    let effective_owner_id = resolution
+        .org_routing
+        .as_ref()
+        .map(|r| r.org_user_id.clone())
+        .unwrap_or_else(|| fallback_owner_id.to_string());
+    let pool = resolution
+        .pool_selection
+        .as_ref()
+        .map(PoolAuditContext::from);
+    PreResolved {
+        target: resolution.target,
+        node_id: resolution.node_id,
+        user_service_id: Some(resolution.user_service_id),
+        has_server_credential: resolution.has_server_credential,
+        pool,
+        effective_owner_id,
+    }
+}
+
+fn add_pool_audit_context(value: &mut serde_json::Value, pool: Option<&PoolAuditContext>) {
+    let Some(pool) = pool else {
+        return;
+    };
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "service_pool_id".to_string(),
+            serde_json::Value::String(pool.pool_id.clone()),
+        );
+        object.insert(
+            "service_pool_slug".to_string(),
+            serde_json::Value::String(pool.pool_slug.clone()),
+        );
+        object.insert(
+            "service_pool_strategy".to_string(),
+            serde_json::Value::String(pool.strategy.clone()),
+        );
+        object.insert(
+            "service_pool_selected_user_service_id".to_string(),
+            serde_json::Value::String(pool.selected_user_service_id.clone()),
+        );
+    }
 }
 
 /// Emit a single audit entry recording that this proxy call was routed via
@@ -231,21 +298,24 @@ fn audit_org_routing(
     routing: &proxy_service::OrgRouting,
     user_service_id: &str,
     service_id: &str,
+    pool: Option<&PoolAuditContext>,
 ) {
+    let mut event_data = serde_json::json!({
+        "routed_via": "org",
+        "service_id": service_id,
+        "user_service_id": user_service_id,
+        // Org-routed audits use org_user_id; node-routed audits use owner_user_id.
+        // Owner-centric audit queries must check both fields.
+        "org_user_id": routing.org_user_id,
+        "member_user_id": routing.member_user_id,
+        "membership_id": routing.membership_id,
+    });
+    add_pool_audit_context(&mut event_data, pool);
     audit_service::log_for_user(
         state.db.clone(),
         auth_user,
         "proxy_routed_via_org",
-        Some(serde_json::json!({
-            "routed_via": "org",
-            "service_id": service_id,
-            "user_service_id": user_service_id,
-            // Org-routed audits use org_user_id; node-routed audits use owner_user_id.
-            // Owner-centric audit queries must check both fields.
-            "org_user_id": routing.org_user_id,
-            "member_user_id": routing.member_user_id,
-            "membership_id": routing.membership_id,
-        })),
+        Some(event_data),
     );
 }
 
@@ -265,16 +335,19 @@ fn audit_personal_routing(
     auth_user: &AuthUser,
     user_service_id: Option<&str>,
     service_id: &str,
+    pool: Option<&PoolAuditContext>,
 ) {
+    let mut event_data = serde_json::json!({
+        "routed_via": "personal",
+        "service_id": service_id,
+        "user_service_id": user_service_id,
+    });
+    add_pool_audit_context(&mut event_data, pool);
     audit_service::log_for_user(
         state.db.clone(),
         auth_user,
         "proxy_routed_via_personal",
-        Some(serde_json::json!({
-            "routed_via": "personal",
-            "service_id": service_id,
-            "user_service_id": user_service_id,
-        })),
+        Some(event_data),
     );
 }
 
@@ -505,20 +578,24 @@ async fn proxy_request_inner(
         .await?
         {
             let effective_service_id = resolved.target.service.id.clone();
-            if let Some(routing) = &resolved.org_routing {
+            let org_routing = resolved.org_routing.clone();
+            let pre = pre_resolved_from_user_service_resolution(resolved, &user_id_str);
+            if let Some(routing) = &org_routing {
                 audit_org_routing(
                     state,
                     auth_user,
                     routing,
-                    &resolved.user_service_id,
+                    pre.user_service_id.as_deref().unwrap_or(""),
                     &effective_service_id,
+                    pre.pool.as_ref(),
                 );
             } else {
                 audit_personal_routing(
                     state,
                     auth_user,
-                    Some(&resolved.user_service_id),
+                    pre.user_service_id.as_deref(),
                     &effective_service_id,
+                    pre.pool.as_ref(),
                 );
             }
             return execute_proxy_inner(
@@ -527,17 +604,7 @@ async fn proxy_request_inner(
                 &effective_service_id,
                 path,
                 request,
-                Some(PreResolved {
-                    target: resolved.target,
-                    node_id: resolved.node_id,
-                    user_service_id: Some(resolved.user_service_id),
-                    has_server_credential: resolved.has_server_credential,
-                    effective_owner_id: resolved
-                        .org_routing
-                        .as_ref()
-                        .map(|r| r.org_user_id.clone())
-                        .unwrap_or_else(|| user_id_str.clone()),
-                }),
+                Some(pre),
                 resolved_slug,
             )
             .await;
@@ -559,20 +626,24 @@ async fn proxy_request_inner(
     .await?
     {
         let effective_service_id = resolved.target.service.id.clone();
-        if let Some(routing) = &resolved.org_routing {
+        let org_routing = resolved.org_routing.clone();
+        let pre = pre_resolved_from_user_service_resolution(resolved, &user_id_str);
+        if let Some(routing) = &org_routing {
             audit_org_routing(
                 state,
                 auth_user,
                 routing,
-                &resolved.user_service_id,
+                pre.user_service_id.as_deref().unwrap_or(""),
                 &effective_service_id,
+                pre.pool.as_ref(),
             );
         } else {
             audit_personal_routing(
                 state,
                 auth_user,
-                Some(&resolved.user_service_id),
+                pre.user_service_id.as_deref(),
                 &effective_service_id,
+                pre.pool.as_ref(),
             );
         }
         return execute_proxy_inner(
@@ -581,17 +652,7 @@ async fn proxy_request_inner(
             &effective_service_id,
             path,
             request,
-            Some(PreResolved {
-                target: resolved.target,
-                node_id: resolved.node_id,
-                user_service_id: Some(resolved.user_service_id),
-                has_server_credential: resolved.has_server_credential,
-                effective_owner_id: resolved
-                    .org_routing
-                    .as_ref()
-                    .map(|r| r.org_user_id.clone())
-                    .unwrap_or_else(|| user_id_str.clone()),
-            }),
+            Some(pre),
             resolved_slug,
         )
         .await;
@@ -712,20 +773,24 @@ async fn proxy_request_by_slug_inner(
         .await?
         {
             let effective_service_id = resolved.target.service.id.clone();
-            if let Some(routing) = &resolved.org_routing {
+            let org_routing = resolved.org_routing.clone();
+            let pre = pre_resolved_from_user_service_resolution(resolved, &user_id_str);
+            if let Some(routing) = &org_routing {
                 audit_org_routing(
                     state,
                     auth_user,
                     routing,
-                    &resolved.user_service_id,
+                    pre.user_service_id.as_deref().unwrap_or(""),
                     &effective_service_id,
+                    pre.pool.as_ref(),
                 );
             } else {
                 audit_personal_routing(
                     state,
                     auth_user,
-                    Some(&resolved.user_service_id),
+                    pre.user_service_id.as_deref(),
                     &effective_service_id,
+                    pre.pool.as_ref(),
                 );
             }
             return execute_proxy_inner(
@@ -734,17 +799,7 @@ async fn proxy_request_by_slug_inner(
                 &effective_service_id,
                 path,
                 request,
-                Some(PreResolved {
-                    target: resolved.target,
-                    node_id: resolved.node_id,
-                    user_service_id: Some(resolved.user_service_id),
-                    has_server_credential: resolved.has_server_credential,
-                    effective_owner_id: resolved
-                        .org_routing
-                        .as_ref()
-                        .map(|r| r.org_user_id.clone())
-                        .unwrap_or_else(|| user_id_str.clone()),
-                }),
+                Some(pre),
                 resolved_slug,
             )
             .await;
@@ -766,20 +821,24 @@ async fn proxy_request_by_slug_inner(
     .await?
     {
         let effective_service_id = resolved.target.service.id.clone();
-        if let Some(routing) = &resolved.org_routing {
+        let org_routing = resolved.org_routing.clone();
+        let pre = pre_resolved_from_user_service_resolution(resolved, &user_id_str);
+        if let Some(routing) = &org_routing {
             audit_org_routing(
                 state,
                 auth_user,
                 routing,
-                &resolved.user_service_id,
+                pre.user_service_id.as_deref().unwrap_or(""),
                 &effective_service_id,
+                pre.pool.as_ref(),
             );
         } else {
             audit_personal_routing(
                 state,
                 auth_user,
-                Some(&resolved.user_service_id),
+                pre.user_service_id.as_deref(),
                 &effective_service_id,
+                pre.pool.as_ref(),
             );
         }
         return execute_proxy_inner(
@@ -788,17 +847,7 @@ async fn proxy_request_by_slug_inner(
             &effective_service_id,
             path,
             request,
-            Some(PreResolved {
-                target: resolved.target,
-                node_id: resolved.node_id,
-                user_service_id: Some(resolved.user_service_id),
-                has_server_credential: resolved.has_server_credential,
-                effective_owner_id: resolved
-                    .org_routing
-                    .as_ref()
-                    .map(|r| r.org_user_id.clone())
-                    .unwrap_or_else(|| user_id_str.clone()),
-            }),
+            Some(pre),
             resolved_slug,
         )
         .await;
@@ -1341,7 +1390,7 @@ async fn execute_proxy_inner(
         // so we never record a "routed via personal" entry for a request
         // that failed before a target was resolved (disconnected service,
         // missing credential, etc.). See ChronoAIProject/NyxID#423.
-        audit_personal_routing(state, auth_user, None, service_id);
+        audit_personal_routing(state, auth_user, None, service_id, None);
         resolved
     };
 

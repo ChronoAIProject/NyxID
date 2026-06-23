@@ -675,6 +675,7 @@ pub struct UserServiceResolution {
     pub node_id: Option<String>,
     pub user_service_id: String,
     pub has_server_credential: bool,
+    pub pool_selection: Option<crate::services::service_pool_service::PoolSelection>,
     /// Set when the resolved UserService was reached via org membership
     /// (the actor has no personal copy). `None` means personal credentials.
     pub org_routing: Option<OrgRouting>,
@@ -741,6 +742,22 @@ pub async fn resolve_proxy_target_from_user_service(
         ));
     }
 
+    if let Some(slug) = slug
+        && let Some((pool_us, selection)) =
+            crate::services::service_pool_service::resolve_member(db, user_id, slug).await?
+    {
+        tracing::info!(
+            service_pool_id = %selection.pool_id,
+            service_pool_slug = %selection.pool_slug,
+            chosen_user_service_id = %selection.member_user_service_id,
+            strategy = selection.strategy.as_str(),
+            "Resolved service pool member"
+        );
+        let mut resolution = finish_resolution(db, encryption_keys, user_id, pool_us, None).await?;
+        resolution.pool_selection = Some(selection);
+        return Ok(Some(resolution));
+    }
+
     // 2. Legacy personal guard. Preserves the invariant that pre-migration
     //    personal connections beat org-shared credentials. See function doc.
     if user_has_legacy_personal_connection(db, user_id, slug, catalog_service_id).await? {
@@ -773,12 +790,25 @@ pub async fn resolve_proxy_target_from_user_service(
     for membership in &memberships {
         let org_us =
             lookup_user_service(db, &membership.org_user_id, slug, catalog_service_id).await?;
-        let Some(org_us) = org_us else {
-            continue;
-        };
 
         // Role check: Viewer cannot proxy.
         if !membership.role.can_proxy() {
+            let pool_matches = if org_us.is_none()
+                && let Some(slug) = slug
+            {
+                crate::services::service_pool_service::find_pool_by_slug(
+                    db,
+                    &membership.org_user_id,
+                    slug,
+                )
+                .await?
+                .is_some()
+            } else {
+                false
+            };
+            if org_us.is_none() && !pool_matches {
+                continue;
+            }
             role_denied = true;
             tracing::debug!(
                 user_id = %user_id,
@@ -788,6 +818,35 @@ pub async fn resolve_proxy_target_from_user_service(
             );
             continue;
         }
+
+        let (org_us, pool_selection) = match org_us {
+            Some(org_us) => (org_us, None),
+            None => {
+                let Some(slug) = slug else {
+                    continue;
+                };
+                let Some((pool_us, selection)) =
+                    crate::services::service_pool_service::resolve_member(
+                        db,
+                        &membership.org_user_id,
+                        slug,
+                    )
+                    .await?
+                else {
+                    continue;
+                };
+                tracing::info!(
+                    service_pool_id = %selection.pool_id,
+                    service_pool_slug = %selection.pool_slug,
+                    chosen_user_service_id = %selection.member_user_service_id,
+                    strategy = selection.strategy.as_str(),
+                    org_user_id = %membership.org_user_id,
+                    member_user_id = %user_id,
+                    "Resolved org service pool member"
+                );
+                (pool_us, Some(selection))
+            }
+        };
 
         if !admin_only_allows_role(&org_us, membership.role) {
             role_denied = true;
@@ -822,16 +881,16 @@ pub async fn resolve_proxy_target_from_user_service(
             member_user_id: user_id.to_string(),
             membership_id: membership.id.clone(),
         };
-        return Ok(Some(
-            finish_resolution(
-                db,
-                encryption_keys,
-                &membership.org_user_id,
-                org_us,
-                Some(routing),
-            )
-            .await?,
-        ));
+        let mut resolution = finish_resolution(
+            db,
+            encryption_keys,
+            &membership.org_user_id,
+            org_us,
+            Some(routing),
+        )
+        .await?;
+        resolution.pool_selection = pool_selection;
+        return Ok(Some(resolution));
     }
 
     // No org service matched. If at least one was found but blocked by role
@@ -1635,6 +1694,7 @@ async fn finish_resolution(
             node_id: user_service.node_id.clone(),
             user_service_id: user_service.id.clone(),
             has_server_credential: true,
+            pool_selection: None,
             org_routing,
         });
     }
@@ -1676,6 +1736,7 @@ async fn finish_resolution(
             node_id: user_service.node_id.clone(),
             user_service_id: user_service.id.clone(),
             has_server_credential: true,
+            pool_selection: None,
             org_routing,
         });
     }
@@ -1742,6 +1803,7 @@ async fn finish_resolution(
             node_id: user_service.node_id.clone(),
             user_service_id: user_service.id.clone(),
             has_server_credential,
+            pool_selection: None,
             org_routing,
         });
     }
@@ -1786,6 +1848,7 @@ async fn finish_resolution(
         node_id: user_service.node_id.clone(),
         user_service_id: user_service.id.clone(),
         has_server_credential: true,
+        pool_selection: None,
         org_routing,
     })
 }

@@ -672,6 +672,28 @@ pub fn build_router(
                 .delete(handlers::user_services_handler::delete_user_service),
         );
 
+    let service_pool_routes = Router::new()
+        .route(
+            "/",
+            get(handlers::service_pools_handler::list_pools)
+                .post(handlers::service_pools_handler::create_pool),
+        )
+        .route(
+            "/{pool_id}",
+            get(handlers::service_pools_handler::get_pool)
+                .put(handlers::service_pools_handler::update_pool)
+                .delete(handlers::service_pools_handler::delete_pool),
+        )
+        .route(
+            "/{pool_id}/members",
+            put(handlers::service_pools_handler::set_members)
+                .post(handlers::service_pools_handler::add_member),
+        )
+        .route(
+            "/{pool_id}/members/{user_service_id}",
+            delete(handlers::service_pools_handler::remove_member),
+        );
+
     // Org management routes (creation, members, invites). All routes
     // authenticate as a regular session/user; admin-vs-member checks happen
     // inside the handlers based on org_memberships rather than a global flag.
@@ -999,6 +1021,7 @@ pub fn build_router(
         .nest("/endpoints", user_endpoint_routes)
         .nest("/api-keys/external", external_api_key_routes)
         .nest("/user-services", user_service_routes)
+        .nest("/service-pools", service_pool_routes)
         .nest("/orgs", org_routes)
         .route(
             "/users/me/primary-org",
