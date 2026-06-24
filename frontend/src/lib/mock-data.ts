@@ -1218,6 +1218,66 @@ const MOCK_USER_GROUPS_MAP: Record<string, { groups: unknown[] }> = {
   [MOCK_ADMIN_USERS[3]!.id]: { groups: [MOCK_GROUPS[0], MOCK_GROUPS[1]] },
 };
 
+const MOCK_BILLING_WALLET = {
+  owner_id: MOCK_USER.id,
+  charging_enabled: false,
+  lago_configured: true,
+  wallet_configured: false,
+  status: "not_configured",
+  balance_credits: null,
+  reserved_credits: null,
+  pending_lago_debits: null,
+  available_credits: null,
+  source: "usage_meter",
+  invoices: [],
+};
+
+const MOCK_BILLING_USAGE = {
+  owner_id: MOCK_USER.id,
+  period: "30d",
+  rows: [
+    {
+      service_slug: "llm-openai",
+      service_id: "svc-openai",
+      metric: "tokens",
+      lago_metric_code: "resale_tokens",
+      layer: "resale",
+      quantity: 18500,
+      requests: 0,
+      bytes: 0,
+      events: 14,
+      lago_acked: true,
+      estimated_credits_micros: 9250000,
+    },
+    {
+      service_slug: "gcp-billing",
+      service_id: "svc-gcp-billing",
+      metric: "requests",
+      lago_metric_code: "platform_requests",
+      layer: "platform",
+      quantity: 96,
+      requests: 96,
+      bytes: 0,
+      events: 96,
+      lago_acked: false,
+      estimated_credits_micros: null,
+    },
+  ],
+  totals: {
+    quantity: 18596,
+    requests: 96,
+    bytes: 0,
+    events: 110,
+    estimated_credits_micros: 9250000,
+  },
+  billing: {
+    charging_enabled: false,
+    lago_configured: true,
+    source: "usage_meter",
+    rates_are_approximate: true,
+  },
+};
+
 // ── Helper: find by ID in an array ──
 function findById<T extends { id: string }>(items: readonly T[], id: string): T | undefined {
   return items.find((item) => item.id === id);
@@ -1237,6 +1297,11 @@ const MOCK_HANDLERS: MockHandler[] = [
 
   // API keys usage (must be before generic /api-keys patterns)
   (p) => p.match(/^\/api-keys\/usage/) ? { usage: MOCK_API_KEY_USAGE_LIST, since: "2026-05-01T00:00:00Z", days: 7 } : undefined,
+
+  // Billing
+  (p) => p === "/billing/wallet" ? MOCK_BILLING_WALLET : undefined,
+  (p) => p.match(/^\/usage/) ? MOCK_BILLING_USAGE : undefined,
+  (p) => p.match(/^\/billing\/usage/) ? MOCK_BILLING_USAGE : undefined,
 
   // API keys external
   (p) => p.match(/^\/api-keys\/external$/) ? { keys: MOCK_EXTERNAL_API_KEYS } : undefined,

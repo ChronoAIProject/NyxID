@@ -63,6 +63,11 @@ pub enum Commands {
         #[command(subcommand)]
         command: PoolCommands,
     },
+    /// Show billing usage and wallet status
+    Billing {
+        #[command(subcommand)]
+        command: BillingCommands,
+    },
     /// Manage connected provider tokens
     Provider {
         #[command(subcommand)]
@@ -209,6 +214,23 @@ pub enum ProviderCommands {
             help = "Organization to act on (UUID, slug, or display name)"
         )]
         org: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum BillingCommands {
+    /// Show billing wallet and credit status
+    Wallet {
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Show per-service billing usage
+    Usage {
+        /// Usage period: 24h, 7d, 30d, 90d, or all
+        #[arg(long, default_value = "30d")]
+        period: String,
         #[command(flatten)]
         auth: AuthArgs,
     },

@@ -63,6 +63,7 @@ import {
   LoginDevicePage,
   SshTerminalPage,
   KeysPage,
+  BillingPage,
   KeyDetailPage,
   ChannelBotsPage,
   ChannelBotDetailPage,
@@ -574,6 +575,12 @@ const keysRoute = createRoute({
   component: KeysPage,
 });
 
+const billingRoute = createRoute({
+  path: "/billing",
+  getParentRoute: () => dashboardLayout,
+  component: BillingPage,
+});
+
 const keyDetailRoute = createRoute({
   path: "/keys/$keyId",
   getParentRoute: () => dashboardLayout,
@@ -772,6 +779,7 @@ const routeTree = rootRoute.addChildren([
     approvalHistoryRoute,
     approvalGrantsRoute,
     keysRoute,
+    billingRoute,
     keyDetailRoute,
     apiKeyDetailRoute,
     nodesRoute,

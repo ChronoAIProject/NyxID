@@ -203,6 +203,9 @@ export const SshTerminalPage = lazy(() =>
 export const KeysPage = lazy(() =>
   import("@/pages/keys").then((m) => ({ default: m.KeysPage })),
 );
+export const BillingPage = lazy(() =>
+  import("@/pages/billing").then((m) => ({ default: m.BillingPage })),
+);
 export const KeyDetailPage = lazy(() =>
   import("@/pages/key-detail").then((m) => ({ default: m.KeyDetailPage })),
 );

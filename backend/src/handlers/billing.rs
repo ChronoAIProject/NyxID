@@ -61,6 +61,51 @@ pub struct BillingReadOnlyBlock {
     pub rates_are_approximate: bool,
 }
 
+#[derive(Debug, Serialize, ToSchema)]
+pub struct BillingWalletResponse {
+    pub owner_id: String,
+    pub charging_enabled: bool,
+    pub lago_configured: bool,
+    pub wallet_configured: bool,
+    pub status: String,
+    pub balance_credits: Option<i64>,
+    pub reserved_credits: Option<i64>,
+    pub pending_lago_debits: Option<i64>,
+    pub available_credits: Option<i64>,
+    pub source: String,
+    pub invoices: Vec<BillingInvoiceSummary>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct BillingInvoiceSummary {
+    pub id: String,
+    pub status: String,
+    pub amount_credits_micros: Option<i64>,
+    pub currency: Option<String>,
+    pub hosted_url: Option<String>,
+    pub issued_at: Option<String>,
+    pub due_at: Option<String>,
+}
+
+pub async fn get_wallet(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+) -> AppResult<Json<BillingWalletResponse>> {
+    Ok(Json(BillingWalletResponse {
+        owner_id: auth_user.user_id.to_string(),
+        charging_enabled: state.billing.billing_enabled(),
+        lago_configured: state.billing.lago_configured(),
+        wallet_configured: false,
+        status: "not_configured".to_string(),
+        balance_credits: None,
+        reserved_credits: None,
+        pending_lago_debits: None,
+        available_credits: None,
+        source: "usage_meter".to_string(),
+        invoices: Vec::new(),
+    }))
+}
+
 pub async fn get_usage(
     State(state): State<AppState>,
     auth_user: AuthUser,
