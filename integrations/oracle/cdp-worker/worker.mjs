@@ -63,6 +63,27 @@ if (!BASE_URL || !TOKEN) {
   process.exit(1);
 }
 
+// Refuse to put the long-lived worker token on the wire in cleartext. Allow
+// https:// anywhere; allow http:// only for loopback (local dev). This is the
+// one credential-to-network risk that isn't intrinsic to the relay design.
+{
+  let u;
+  try {
+    u = new URL(BASE_URL);
+  } catch {
+    console.error(`Invalid NYXID_BASE_URL: ${BASE_URL}`);
+    process.exit(1);
+  }
+  const loopback = ["localhost", "127.0.0.1", "::1", "[::1]"].includes(u.hostname);
+  if (u.protocol !== "https:" && !(u.protocol === "http:" && loopback)) {
+    console.error(
+      `Refusing to send the worker token over ${u.protocol}//${u.hostname} — ` +
+        "use https:// (http:// is allowed only for localhost)."
+    );
+    process.exit(1);
+  }
+}
+
 const API = `${BASE_URL}/api/v1/oracle/worker`;
 
 function log(msg) {
