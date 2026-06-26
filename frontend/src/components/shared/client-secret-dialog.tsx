@@ -82,6 +82,11 @@ export function ClientSecretDialog({
               </Button>
             </div>
           </div>
+          <p className="text-xs text-muted-foreground">
+            <strong>Lost it?</strong> If you don&apos;t copy this now,
+            you&apos;ll need to rotate the credential to get a new one. (Old
+            value stops working immediately on rotate.)
+          </p>
         </div>
         <DialogFooter>
           <Button variant="primary" type="button" onClick={() => onOpenChange(false)}>
