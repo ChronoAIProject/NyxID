@@ -208,6 +208,83 @@ describe("ApprovalHistoryPage", () => {
     expect(within(table).getByText("Destructive")).toBeInTheDocument();
   });
 
+  it("synthesizes a human label from method + resource when no description or summary is supplied", () => {
+    fixtures.requests = [
+      makeRequest({
+        id: "r-synth",
+        service_name: "NyxID",
+        service_slug: "nyxid",
+        action_description: null,
+        operation_summary: "",
+        http_method: "DELETE",
+        resource: "/api/v1/sessions/abc",
+        status: "approved",
+      }),
+    ];
+    fixtures.total = 1;
+
+    render(<ApprovalHistoryPage />);
+
+    const table = screen.getByRole("table");
+    // Primary affordance is the synthesized human label, not the raw form.
+    expect(within(table).getByText("Revoke a session")).toBeInTheDocument();
+    // ...and the raw method/resource is retained as secondary detail because
+    // no action_description was supplied.
+    expect(
+      within(table).getByText("DELETE /api/v1/sessions/abc"),
+    ).toBeInTheDocument();
+  });
+
+  it("drops the raw method/resource secondary line when an action_description is present", () => {
+    fixtures.requests = [
+      makeRequest({
+        id: "r-drop",
+        service_name: "NyxID",
+        service_slug: "nyxid",
+        action_description: "Expire a user session",
+        operation_summary: "",
+        http_method: "DELETE",
+        resource: "/api/v1/sessions/abc",
+        status: "approved",
+      }),
+    ];
+    fixtures.total = 1;
+
+    render(<ApprovalHistoryPage />);
+
+    const table = screen.getByRole("table");
+    expect(
+      within(table).getByText("Expire a user session"),
+    ).toBeInTheDocument();
+    // The raw `METHOD /resource` form is redundant noise once a human
+    // action_description is present, so it must not render.
+    expect(
+      within(table).queryByText("DELETE /api/v1/sessions/abc"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("falls back to a neutral placeholder when nothing describes the request", () => {
+    fixtures.requests = [
+      makeRequest({
+        id: "r-empty",
+        service_name: "NyxID",
+        service_slug: "nyxid",
+        action_description: null,
+        operation_summary: "",
+        http_method: null,
+        resource: null,
+        verb: null,
+        status: "approved",
+      }),
+    ];
+    fixtures.total = 1;
+
+    render(<ApprovalHistoryPage />);
+
+    const table = screen.getByRole("table");
+    expect(within(table).getByText("Proxy request")).toBeInTheDocument();
+  });
+
   it("changing the status filter re-queries the hook with that status and resets to page 1", async () => {
     const user = userEvent.setup();
     fixtures.requests = [makeRequest()];
