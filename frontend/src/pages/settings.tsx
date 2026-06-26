@@ -206,6 +206,25 @@ function ProfileTab() {
             className="opacity-50"
             aria-readonly="true"
           />
+          {!user?.email_verified && (
+            <Button
+              type="button"
+              variant="link"
+              size="sm"
+              className="h-auto p-0 text-[12px]"
+              onClick={() => {
+                // TODO: backend endpoint POST /api/v1/auth/verify-email/resend is not yet
+                // implemented. Do NOT invent the URL — once it lands, wire it here as:
+                //   await api.post<void>("/auth/verify-email/resend");
+                //   toast.success("Verification email sent");
+                toast.info(
+                  "Email resend is not yet available on this server.",
+                );
+              }}
+            >
+              Resend verification email
+            </Button>
+          )}
         </div>
       </CardContent>
       <CardFooter>
@@ -664,6 +683,12 @@ function McpTab() {
 
   return (
     <div className="space-y-6">
+      <div>
+        <h3 className="text-lg font-medium">MCP (Model Context Protocol)</h3>
+        <p className="text-[12px] text-muted-foreground">
+          Install NyxID as an MCP server in your client of choice.
+        </p>
+      </div>
       <Card>
         <CardHeader>
           <CardTitle>Install to Cursor</CardTitle>
@@ -809,7 +834,7 @@ function SessionsTab() {
       <CardHeader>
         <CardTitle>Active Sessions</CardTitle>
         <CardDescription>
-          Manage your active sessions across devices.
+          View your active sessions across devices.
         </CardDescription>
       </CardHeader>
       <CardContent>
