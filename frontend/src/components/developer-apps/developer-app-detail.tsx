@@ -79,6 +79,7 @@ export function DeveloperAppDetail({
 
   const [editOpen, setEditOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [rotateOpen, setRotateOpen] = useState(false);
   const [name, setName] = useState("");
   const [redirectUrisText, setRedirectUrisText] = useState("");
   const [editScopes, setEditScopes] = useState<readonly string[]>([]);
@@ -129,6 +130,7 @@ export function DeveloperAppDetail({
     try {
       const result = await rotateMutation.mutateAsync(app.id);
       setRotatedSecret(result.client_secret);
+      setRotateOpen(false);
       setSecretOpen(true);
       toast.success("Client secret rotated");
     } catch (error) {
@@ -190,7 +192,7 @@ export function DeveloperAppDetail({
             {app.client_type === "confidential" && (
               <Button
                 variant="outline"
-                onClick={() => void handleRotateSecret()}
+                onClick={() => setRotateOpen(true)}
               >
                 Rotate Secret
               </Button>
@@ -394,6 +396,31 @@ export function DeveloperAppDetail({
               isLoading={deleteMutation.isPending}
             >
               Deactivate
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={rotateOpen} onOpenChange={setRotateOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Rotate client secret?</DialogTitle>
+            <DialogDescription>
+              Your old client secret will stop working immediately. Every
+              deployment using it will fail to authenticate until you update
+              them with the new secret.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setRotateOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              variant="primary"
+              onClick={() => void handleRotateSecret()}
+              isLoading={rotateMutation.isPending}
+            >
+              Rotate Secret
             </Button>
           </DialogFooter>
         </DialogContent>
