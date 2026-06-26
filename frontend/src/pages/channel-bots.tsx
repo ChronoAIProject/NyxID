@@ -1029,8 +1029,8 @@ function DeviceChannelsSection({
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead title="NyxID conversation _id — path parameter for POST /api/v1/channel-events/{id}">
-                      ID
+                    <TableHead title="NyxID identifier for this channel — used in the event-gateway URL (POST /api/v1/channel-events/{id})">
+                      Channel ID
                     </TableHead>
                     <TableHead>Channel Name</TableHead>
                     <TableHead>Type</TableHead>

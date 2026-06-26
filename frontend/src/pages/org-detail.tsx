@@ -533,7 +533,7 @@ export function OrgDetailPage() {
                     <Table>
                       <TableHeader>
                         <TableRow>
-                          <TableHead>Nonce</TableHead>
+                          <TableHead>Invite code</TableHead>
                           <TableHead>Role</TableHead>
                           <TableHead>Status</TableHead>
                           <TableHead>Used by</TableHead>
