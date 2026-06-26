@@ -17,6 +17,7 @@ import { CallbackUrlCard } from "@/components/dashboard/api-key-detail/callback-
 import { RateLimitCard } from "@/components/dashboard/api-key-detail/rate-limit-card";
 import { BindingsCard } from "@/components/dashboard/api-key-detail/bindings-card";
 import { UsageStatsCard } from "@/components/dashboard/api-key-detail/usage-stats-card";
+import { VerifyKeyCard } from "@/components/dashboard/api-key-detail/verify-key-card";
 import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
 
 export function ApiKeyDetailPage() {
@@ -120,6 +121,7 @@ export function ApiKeyDetailPage() {
           allowAllServices={apiKey.allow_all_services}
           apiKeySource={apiKey.credential_source}
         />
+        <VerifyKeyCard apiKey={apiKey} />
         <UsageStatsCard keyId={apiKey.id} />
       </div>
 

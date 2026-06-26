@@ -60,9 +60,6 @@ export const DevicesOnboardPage = lazy(() =>
     default: m.DevicesOnboardPage,
   })),
 );
-export const GuidePage = lazy(() =>
-  import("@/pages/guide").then((m) => ({ default: m.GuidePage })),
-);
 export const ProvidersLayout = lazy(() =>
   import("@/pages/providers-layout").then((m) => ({
     default: m.ProvidersLayout,
