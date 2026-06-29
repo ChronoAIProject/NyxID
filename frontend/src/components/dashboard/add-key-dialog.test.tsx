@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { CatalogEntry, KeyInfo } from "@/types/keys";
 import { ApiError } from "@/lib/api-client";
+import { SPEC_CATALOG_SLUGS } from "@/components/service-icons";
 import { AddKeyDialog } from "./add-key-dialog";
 
 const {
@@ -475,5 +476,89 @@ describe("AddKeyDialog — reconnect path", () => {
     second.unmount();
 
     expect(mockApiDelete).not.toHaveBeenCalled();
+  });
+});
+
+// Build a minimal catalog entry suitable for CatalogGrid rendering. The
+// dialog only reads `slug`, `name`, `description`, `base_url`,
+// `service_type`, `requires_gateway_url`, and `provider_type` from each entry
+// when rendering the tile; everything else can be cast through `unknown` so
+// we don't duplicate the full `CatalogEntry` shape just for icon assertions.
+function minCatalogEntry(
+  slug: string,
+  name = slug,
+): CatalogEntry {
+  return {
+    slug,
+    name,
+    description: null,
+    base_url: "https://example.invalid",
+    auth_method: "bearer",
+    auth_key_name: "Authorization",
+    provider_config_id: null,
+    provider_type: null,
+    requires_gateway_url: false,
+    credential_mode: null,
+    api_key_instructions: null,
+    api_key_url: null,
+    icon_url: null,
+    documentation_url: null,
+    service_type: "http",
+    ssh_host: null,
+    ssh_port: null,
+    ssh_ca_public_key: null,
+    ssh_allowed_principals: null,
+    ssh_certificate_ttl_minutes: null,
+    authorization_url: null,
+    token_url: null,
+    device_code_url: null,
+    default_scopes: null,
+    supports_pkce: null,
+    device_code_format: null,
+    oauth_client_id: null,
+    client_id_param_name: null,
+    requires_credential: true,
+  } as unknown as CatalogEntry;
+}
+
+describe("AddKeyDialog — catalog service icons", () => {
+  it("renders a dedicated brand icon for every seeded catalog slug (no fallback)", () => {
+    catalog.entries = SPEC_CATALOG_SLUGS.map((slug) =>
+      minCatalogEntry(slug),
+    ) as unknown as typeof catalog.entries;
+    render(<AddKeyDialog open onOpenChange={vi.fn()} />);
+
+    // Each seeded slug must render its own dedicated `<svg data-slug=…>`.
+    // Assert `tagName === "svg"` so the test fails if `data-slug` ever moves
+    // off the SVG onto a wrapper span (Codex review nit).
+    for (const slug of SPEC_CATALOG_SLUGS) {
+      const matched = document.querySelector(`[data-slug="${slug}"]`);
+      expect(matched, `expected [data-slug="${slug}"] in DOM`).not.toBeNull();
+      expect(
+        matched?.tagName.toLowerCase(),
+        `expected data-slug="${slug}" on an <svg>, not a wrapper`,
+      ).toBe("svg");
+    }
+
+    // And no tile should fall back to the generic Globe / `data-fallback`.
+    const fallbacks = document.querySelectorAll('[data-fallback="true"]');
+    expect(fallbacks).toHaveLength(0);
+  });
+
+  it("renders the generic fallback (Globe) for an unknown slug, without tagging it with data-slug", () => {
+    const unknownSlug = "xyz-not-real";
+    catalog.entries = [
+      minCatalogEntry(unknownSlug, "Fake Unknown Service"),
+    ] as unknown as typeof catalog.entries;
+    render(<AddKeyDialog open onOpenChange={vi.fn()} />);
+
+    // Unknown slug → FallbackIcon → exactly one `<svg data-fallback="true">`
+    // node (tighter than `toBeGreaterThan(0)`; Codex review nit).
+    const fallbacks = document.querySelectorAll('[data-fallback="true"]');
+    expect(fallbacks).toHaveLength(1);
+
+    // Crucially, the fallback must NOT pretend to be a per-slug icon: the
+    // `data-slug="xyz-not-real"` selector must miss entirely.
+    expect(document.querySelector(`[data-slug="${unknownSlug}"]`)).toBeNull();
   });
 });

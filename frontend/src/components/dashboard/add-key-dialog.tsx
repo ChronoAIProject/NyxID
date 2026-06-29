@@ -49,6 +49,7 @@ import {
   Terminal,
 } from "lucide-react";
 import { toast } from "sonner";
+import { ServiceIcon } from "@/components/service-icons";
 import type { CatalogEntry, KeyInfo } from "@/types/keys";
 import type { DeviceCodePollResponse } from "@/types/api";
 
@@ -364,6 +365,7 @@ function CatalogGrid({
             onClick={() => onSelect(entry)}
             className="flex min-h-[7.5rem] flex-col items-start gap-1.5 rounded-lg border border-border p-4 text-left transition-colors duration-300 hover:border-white/[0.15] hover:bg-accent/40"
           >
+            <ServiceIcon slug={entry.slug} className="h-5 w-5 text-muted-foreground" />
             <span className="line-clamp-1 w-full text-[12px] font-medium">
               {entry.name}
             </span>
