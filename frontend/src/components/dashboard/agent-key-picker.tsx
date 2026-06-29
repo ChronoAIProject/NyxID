@@ -55,25 +55,33 @@ export function AgentKeyPicker({ onSelect }: AgentKeyPickerProps) {
     [apiKeys],
   );
 
-  const [selectedId, setSelectedId] = useState<string | null>(() =>
-    localStorage.getItem(LS_KEY),
-  );
+  // The user's explicit pick. `null` means "no explicit pick yet, use the
+  // default derivation below." Avoids an effect-driven `setSelectedId`
+  // cascade after `useApiKeys()` resolves (React Compiler flagged the
+  // synchronous setState-in-effect pattern as a cascading render).
+  const [userOverride, setUserOverride] = useState<string | null>(null);
 
-  // Resolve the initial selection once keys have loaded: prefer the
-  // previously-picked id if it still exists, otherwise fall back to the
-  // first active key. Falls through to `null` (rendering the zero-keys
-  // affordance) when there are no keys yet.
-  useEffect(() => {
-    if (!activeKeys.length) return;
-    const stored = localStorage.getItem(LS_KEY);
-    const valid = stored && activeKeys.some((k) => k.id === stored);
-    const next = valid ? stored : activeKeys[0].id;
-    setSelectedId(next);
-  }, [activeKeys]);
+  // Effective selection: prefer the user's explicit pick, then the
+  // localStorage default if it still matches a live key, then the first
+  // active key. `null` only when there are zero keys (zero-state branch
+  // renders the "Create your first Agent Key →" affordance).
+  const selectedId = useMemo<string | null>(() => {
+    const first = activeKeys[0];
+    if (!first) return null;
+    if (userOverride && activeKeys.some((k) => k.id === userOverride)) {
+      return userOverride;
+    }
+    const stored =
+      typeof window !== "undefined" ? localStorage.getItem(LS_KEY) : null;
+    if (stored && activeKeys.some((k) => k.id === stored)) {
+      return stored;
+    }
+    return first.id;
+  }, [activeKeys, userOverride]);
 
   // Persist the picked id and notify the caller whenever it changes.
-  // We synthesize a `preview` string (key_prefix + redaction marker) here
-  // so call sites never have to reach into the raw `key_prefix` field.
+  // `preview = key_prefix + ••••••••` so call sites never reach into the
+  // raw `key_prefix` field and the redaction is visually explicit.
   useEffect(() => {
     if (!selectedId) {
       onSelect?.(null);
@@ -110,7 +118,7 @@ export function AgentKeyPicker({ onSelect }: AgentKeyPickerProps) {
   }
 
   return (
-    <Select value={selectedId ?? undefined} onValueChange={setSelectedId}>
+    <Select value={selectedId ?? undefined} onValueChange={setUserOverride}>
       <SelectTrigger className="w-full max-w-sm">
         <SelectValue placeholder="Select an Agent Key" />
       </SelectTrigger>
