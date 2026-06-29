@@ -34,6 +34,7 @@ import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { useNodes } from "@/hooks/use-nodes";
 import { ViewToggle, useViewMode, type ViewMode } from "@/components/shared/view-toggle";
+import { ServiceIcon } from "@/components/service-icons";
 import { AddKeyDialog } from "@/components/dashboard/add-key-dialog";
 import { ApiKeyTable } from "@/components/dashboard/api-key-table";
 import { ApiKeyCreateDialog } from "@/components/dashboard/api-key-create-dialog";
@@ -166,15 +167,23 @@ function KeyCardContent({
       aria-disabled={isBlocked ? true : undefined}
     >
       <CardContent className="flex h-full min-h-[140px] flex-col gap-3 p-4">
-        <div className="min-w-0">
-          <p className="truncate text-[12px] font-medium text-foreground">
-            {keyInfo.label}
-          </p>
-          {keyInfo.catalog_service_name && (
-            <p className="truncate text-xs text-muted-foreground">
-              {keyInfo.catalog_service_name}
-            </p>
+        <div className="flex items-start gap-3 min-w-0">
+          {keyInfo.catalog_service_slug && (
+            <ServiceIcon
+              slug={keyInfo.catalog_service_slug}
+              className="h-6 w-6 shrink-0 text-muted-foreground mt-0.5"
+            />
           )}
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-[12px] font-medium text-foreground">
+              {keyInfo.label}
+            </p>
+            {keyInfo.catalog_service_name && (
+              <p className="truncate text-xs text-muted-foreground">
+                {keyInfo.catalog_service_name}
+              </p>
+            )}
+          </div>
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
           {isOrgInherited && (
@@ -341,10 +350,20 @@ function ServiceTableRow({
       onClick={() => void navigate({ to: "/keys/$keyId", params: { keyId: keyInfo.id } })}
     >
       <TableCell className="h-[60px]">
+        <div className="flex items-center gap-2.5 min-w-0">
+          {keyInfo.catalog_service_slug && (
+            <ServiceIcon
+              slug={keyInfo.catalog_service_slug}
+              className="h-5 w-5 shrink-0 text-muted-foreground"
+            />
+          )}
+          <div className="min-w-0 flex-1">
         <p className="truncate font-medium text-foreground">{keyInfo.label}</p>
         <p className="truncate text-[11px] text-text-tertiary mt-0.5">
           {keyInfo.catalog_service_name ?? " "}
         </p>
+          </div>
+        </div>
       </TableCell>
 
       <TableCell className="h-[60px]">
