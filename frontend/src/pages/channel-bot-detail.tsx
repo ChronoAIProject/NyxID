@@ -23,8 +23,10 @@ import {
   type UpdateChannelBotFormData,
 } from "@/schemas/channels";
 import { ApiError } from "@/lib/api-client";
-import { formatDate, formatRelativeTime } from "@/lib/utils";
+import { cn, formatDate, formatRelativeTime } from "@/lib/utils";
+import { useRuntimeConfig } from "@/hooks/use-runtime-config";
 import { PageHeader } from "@/components/shared/page-header";
+import { CopyableUrlCallout } from "@/components/shared/copyable-url-callout";
 import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { DetailSection } from "@/components/shared/detail-section";
@@ -65,18 +67,22 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
+  Check,
+  Circle,
   ExternalLink,
+  Loader2,
   MessageSquare,
   MoreVertical,
   ShieldCheck,
   Trash2,
 } from "lucide-react";
-import { ArticleIcon, RoadBarrierIcon } from "@/components/icons/empty-state";
+import { ArticleIcon } from "@/components/icons/empty-state";
 import { AddCtaButton } from "@/components/shared/add-cta-button";
 import { toast } from "sonner";
 import type {
   ChannelBotDetail,
   ChannelConversationItem,
+  ChannelPlatform,
 } from "@/types/channels";
 import {
   conversationTypeLabel,
@@ -805,6 +811,164 @@ function EditVerificationSection({
   );
 }
 
+/**
+ * Per-platform deep link to the docs page that explains where to paste a
+ * webhook URL. Returned URLs are shown via `CopyableUrlCallout`'s
+ * "Learn more →" affordance.
+ */
+function platformWebhookDocsHref(platform: ChannelPlatform): string | undefined {
+  switch (platform) {
+    case "telegram":
+      return "https://core.telegram.org/bots/api#setwebhook";
+    case "discord":
+      return "https://discord.com/developers/docs/topics/gateway";
+    case "lark":
+    case "feishu":
+      return "https://open.feishu.cn/document/server-docs/event-subscription-guide/configure-callback-request-address-in-the-event-subscription-config";
+    default:
+      return undefined;
+  }
+}
+
+type ChecklistStatus = "done" | "todo" | "waiting" | "optional";
+
+interface ChecklistRow {
+  readonly status: ChecklistStatus;
+  readonly label: string;
+  readonly hint?: string;
+}
+
+function ChecklistItem({ row }: { readonly row: ChecklistRow }) {
+  const icon =
+    row.status === "done" ? (
+      <Check className="h-3.5 w-3.5 text-success" aria-hidden />
+    ) : row.status === "waiting" ? (
+      <Loader2
+        className="h-3.5 w-3.5 animate-spin text-muted-foreground"
+        aria-hidden
+      />
+    ) : row.status === "todo" ? (
+      <Circle className="h-3.5 w-3.5 text-warning" aria-hidden />
+    ) : (
+      <Circle className="h-3.5 w-3.5 text-muted-foreground/50" aria-hidden />
+    );
+
+  return (
+    <li className="flex items-start gap-2">
+      <span className="mt-0.5 shrink-0">{icon}</span>
+      <span className="flex flex-col gap-0.5">
+        <span
+          className={cn(
+            "text-[12px]",
+            row.status === "done"
+              ? "text-muted-foreground line-through"
+              : "text-foreground",
+          )}
+        >
+          {row.label}
+        </span>
+        {row.hint ? (
+          <span className="text-[11px] text-muted-foreground">{row.hint}</span>
+        ) : null}
+      </span>
+    </li>
+  );
+}
+
+/**
+ * Replaces the passive `pending_webhook` banner with an active setup
+ * checklist: webhook URL up top via `CopyableUrlCallout`, then row-per-
+ * requirement status. The bot moves to Active automatically on the next
+ * verified inbound, so the final row is a `waiting` row that resolves
+ * itself once the platform delivers a message.
+ *
+ * Wave B item B.1.
+ */
+function WebhookSetupChecklist({ bot }: { readonly bot: ChannelBotDetail }) {
+  const { data: runtimeConfig } = useRuntimeConfig();
+  // `runtimeConfig.api_base_url` is the authoritative public base for the
+  // backend (set in the deploy env). Falls back to the current window
+  // origin during the brief moment the runtime-config query is loading,
+  // which is also the right default for single-origin local dev where
+  // BACKEND_URL is unset.
+  const apiBase = runtimeConfig?.api_base_url ?? window.location.origin;
+  const webhookUrl = `${apiBase}/api/v1/webhooks/channel/${bot.platform}/${bot.id}`;
+  const isLark = bot.platform === "lark" || bot.platform === "feishu";
+
+  const rows: ChecklistRow[] = [];
+
+  if (isLark) {
+    rows.push({
+      status: bot.lark_verification_token_configured ? "done" : "todo",
+      label: "Verification token",
+      hint: bot.lark_verification_token_configured
+        ? "Configured."
+        : "Paste it under Edit Verification below — found in your Lark/Feishu console under Event Subscriptions → Security.",
+    });
+    rows.push({
+      status: bot.lark_encrypt_key_configured ? "done" : "optional",
+      label: "Encrypt key",
+      hint: bot.lark_encrypt_key_configured
+        ? "Configured."
+        : "Optional — only required when Encrypt is enabled in the Lark/Feishu console.",
+    });
+    rows.push({
+      status: bot.app_secret_configured ? "done" : "todo",
+      label: "App ID + App Secret",
+      hint: bot.app_secret_configured
+        ? "Credentials configured."
+        : "Set under Edit Verification below — needed for NyxID to call the Lark/Feishu APIs and post replies.",
+    });
+    if (bot.permission_setup_url) {
+      rows.push({
+        status: "todo",
+        label: "Bot permissions",
+        hint: "Bulk-enable the recommended scopes in the Permissions section below.",
+      });
+    }
+  } else {
+    rows.push({
+      status: "done",
+      label: "Verification",
+      hint: `Handled automatically by the ${platformLabel(bot.platform)} webhook secret.`,
+    });
+  }
+
+  rows.push({
+    status: "waiting",
+    label: "Inbound test",
+    hint: `Send a test message to the bot in ${platformLabel(bot.platform)}. Once a verified inbound arrives, this bot moves to Active automatically.`,
+  });
+
+  return (
+    <div className="space-y-4 rounded-xl border border-amber-500/30 bg-amber-500/10 p-6">
+      <div className="space-y-1">
+        <p className="text-[13px] font-medium text-foreground">
+          Finish webhook setup
+        </p>
+        <p className="text-[12px] text-muted-foreground">
+          Register the URL below in {platformLabel(bot.platform)} and complete
+          the checklist. The bot moves to Active automatically once{" "}
+          {platformLabel(bot.platform)} delivers a verified inbound message.
+        </p>
+      </div>
+
+      <CopyableUrlCallout
+        label="Webhook URL"
+        url={webhookUrl}
+        description={`Paste this into ${platformLabel(bot.platform)}'s Event Subscriptions / webhook settings.`}
+        docsHref={platformWebhookDocsHref(bot.platform)}
+      />
+
+      <ul className="space-y-2 pt-1">
+        {rows.map((row) => (
+          <ChecklistItem key={row.label} row={row} />
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 export function ChannelBotDetailPage() {
   const { botId } = useParams({ strict: false }) as { botId: string };
   const navigate = useNavigate();
@@ -918,21 +1082,7 @@ export function ChannelBotDetailPage() {
         }
       />
 
-      {bot.status === "pending_webhook" && (
-        <div className="flex flex-col items-center gap-3 rounded-xl border border-amber-500/30 bg-amber-500/10 p-6 text-center">
-          <RoadBarrierIcon className="h-48 w-48 text-muted-foreground" />
-          <p className="text-[12px] font-medium text-foreground">
-            Pending webhook verification
-          </p>
-          <p className="mt-1 text-[12px] text-muted-foreground">
-            {bot.platform === "lark" || bot.platform === "feishu"
-              ? bot.lark_verification_token_configured
-                ? "Once Lark/Feishu delivers a verified inbound message, this bot will automatically move to Active."
-                : "Set the Verification Token below, and set Encrypt Key too if it is enabled in the Lark/Feishu console. After the next verified inbound message, this bot will automatically move to Active."
-              : `Once ${platformLabel(bot.platform)} delivers a verified inbound message, this bot will automatically move to Active.`}
-          </p>
-        </div>
-      )}
+      {bot.status === "pending_webhook" && <WebhookSetupChecklist bot={bot} />}
 
       {/* Bot Information */}
       <DetailSection title="Bot Information">
