@@ -87,7 +87,7 @@ export function MfaVerifyForm({ returnTo }: MfaVerifyFormProps) {
           <ShieldCheck className="h-6 w-6 text-primary" aria-hidden="true" />
         </div>
         <h1 className="text-[28px] font-normal tracking-tight">
-          Two-factor authentication
+          MFA verification
         </h1>
         <p className="text-[12px] text-muted-foreground">
           Enter the 6-digit code from your authenticator app
