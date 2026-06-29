@@ -100,12 +100,13 @@ export function TwitterGlyph(props: GlyphProps) {
  * Google G monochrome mark. (Simple Icons: google)
  */
 export function GoogleGlyph(props: GlyphProps) {
-  // viewBox tightened from "0 0 24 24" to "1 1 22 22" to crop the natural
-  // 1-unit padding the Simple Icons mark carries on all sides — makes the
-  // G read at the same visual weight as edge-to-edge glyphs (Lark, etc.)
-  // when both are rendered in the same `h-5 w-5` box.
+  // The Simple Icons "google" path fills its 0..24 viewBox edge-to-edge
+  // (path bounds x:[0.31, 23.69], y:[0, 24]). Do not crop or scale — any
+  // adjustment clips the outer curves. The G's visual weight is tuned via
+  // the consumer's wrapper (e.g., shrinking sibling badges in composites)
+  // rather than via the SVG itself.
   return (
-    <svg viewBox="1 1 22 22" fill="currentColor" aria-hidden="true" {...props}>
+    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" {...props}>
       <path d="M12.48 10.92v3.28h7.84c-.24 1.84-.853 3.187-1.787 4.133-1.147 1.147-2.933 2.4-6.053 2.4-4.827 0-8.6-3.893-8.6-8.72s3.773-8.72 8.6-8.72c2.6 0 4.507 1.027 5.907 2.347l2.307-2.307C18.747 1.44 16.133 0 12.48 0 5.867 0 .307 5.387.307 12s5.56 12 12.173 12c3.573 0 6.267-1.173 8.373-3.36 2.16-2.16 2.84-5.213 2.84-7.667 0-.76-.053-1.467-.173-2.053H12.48z" />
     </svg>
   );
