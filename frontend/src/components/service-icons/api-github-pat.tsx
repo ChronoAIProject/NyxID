@@ -1,9 +1,9 @@
-// Composite glyph for the GitHub (PAT) catalog tile: GitHub Octocat + Lucide
-// `KeyRound` badge in NyxID accent purple. The accent (second tone) lives on
-// the Lucide badge wrapper; the primary brand glyph stays `currentColor`
-// only.
+// GitHub PAT catalog tile: GitHub Octocat + Lucide `KeyRound` badge (the
+// "key" hint differentiates the API-key variant from the plain OAuth GitHub
+// service `api-github.tsx`). See `CompositeBadgeWrapper` in `_shared.tsx` for
+// the visual layering rules.
 import { KeyRound } from "lucide-react";
-import { GithubGlyph } from "./_shared";
+import { CompositeBadgeWrapper, GithubGlyph } from "./_shared";
 
 export default function ApiGithubPatIcon({
   className,
@@ -11,16 +11,11 @@ export default function ApiGithubPatIcon({
   className?: string;
 }) {
   return (
-    <span
-      className={`relative inline-flex h-5 w-5 items-center justify-center ${
-        className ?? ""
-      }`}
+    <CompositeBadgeWrapper
+      className={className}
+      badge={<KeyRound className="h-3.5 w-3.5" strokeWidth={2.5} />}
     >
       <GithubGlyph data-slug="api-github-pat" className="h-5 w-5" />
-      <KeyRound
-        aria-hidden="true"
-        className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 text-nyx-secondary-400 bg-card/95 rounded-sm p-px"
-      />
-    </span>
+    </CompositeBadgeWrapper>
   );
 }

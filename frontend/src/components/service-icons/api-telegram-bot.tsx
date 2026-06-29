@@ -11,7 +11,7 @@ export default function ApiTelegramBotIcon({
   return (
     <CompositeBadgeWrapper
       className={className}
-      badge={<Bot className="h-2.5 w-2.5" strokeWidth={2.5} />}
+      badge={<Bot className="h-3.5 w-3.5" strokeWidth={2.5} />}
     >
       <TelegramGlyph data-slug="api-telegram-bot" className="h-5 w-5" />
     </CompositeBadgeWrapper>

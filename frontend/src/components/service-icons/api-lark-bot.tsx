@@ -15,7 +15,7 @@ export default function ApiLarkBotIcon({
   return (
     <CompositeBadgeWrapper
       className={className}
-      badge={<Bot className="h-2.5 w-2.5" strokeWidth={2.5} />}
+      badge={<Bot className="h-3.5 w-3.5" strokeWidth={2.5} />}
     >
       <span className="inline-flex h-5 w-5 items-center justify-center rounded-md bg-foreground text-background">
         <LarkFamilyGlyph data-slug="api-lark-bot" className="h-3.5 w-3.5" />

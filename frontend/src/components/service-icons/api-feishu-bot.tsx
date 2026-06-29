@@ -12,7 +12,7 @@ export default function ApiFeishuBotIcon({
   return (
     <CompositeBadgeWrapper
       className={className}
-      badge={<Bot className="h-2.5 w-2.5" strokeWidth={2.5} />}
+      badge={<Bot className="h-3.5 w-3.5" strokeWidth={2.5} />}
     >
       <LarkFamilyGlyph data-slug="api-feishu-bot" className="h-5 w-5" />
     </CompositeBadgeWrapper>

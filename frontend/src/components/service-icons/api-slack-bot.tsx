@@ -11,7 +11,7 @@ export default function ApiSlackBotIcon({
   return (
     <CompositeBadgeWrapper
       className={className}
-      badge={<Bot className="h-2.5 w-2.5" strokeWidth={2.5} />}
+      badge={<Bot className="h-3.5 w-3.5" strokeWidth={2.5} />}
     >
       <SlackGlyph data-slug="api-slack-bot" className="h-5 w-5" />
     </CompositeBadgeWrapper>

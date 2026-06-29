@@ -1,5 +1,6 @@
-// Pure brand glyph for the OpenClaw catalog tile. Hand-built 4-toe + 1-pad
-// "claw" silhouette (single-tone only).
+// OpenClaw catalog tile. Hand-built 3-talon claw silhouette (lives in
+// `_shared.tsx`); reads literally as the product's name. No Simple Icons
+// entry — OpenClaw has no public canonical brand mark.
 import { OpenClawGlyph } from "./_shared";
 
 export default function LlmOpenClawIcon({

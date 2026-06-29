@@ -208,17 +208,24 @@ export function RedditGlyph(props: GlyphProps) {
 
 /**
  * Lark / Feishu share the same parent brand (international vs. China-region
- * variants of the same product). This shared bird-silhouette glyph is used by
- * both `api-lark.tsx` and `api-feishu.tsx`; per-slug differentiation lives at
- * the wrapper level (Lark renders inside a filled rounded chip with inverted
- * color, Feishu renders plain), not in the glyph itself. Simple Icons has no
- * entry for either at the time of writing — hand-built as an origami-style
- * angular bird with spread wings + a clear head + a tail.
+ * variants of the same product). This shared two-panel origami-bird glyph
+ * approximates Lark's official mark — an upper triangular wing panel pointing
+ * up-right and a lower swooping body/wing panel. Per-slug differentiation
+ * lives at the wrapper level: Lark renders inside a filled rounded chip with
+ * inverted color, Feishu renders plain `currentColor` on transparent.
  */
 export function LarkFamilyGlyph(props: GlyphProps) {
+  // Path data lifted from the user-supplied Lark brand SVG (`viewBox="0 0 792
+  // 792"`). The background frame (white rounded square) is dropped because
+  // the per-slug chip wrapper provides its own background; the three colored
+  // panels (upper wing, lower body, accent) are merged into a single
+  // `currentColor` silhouette here, and the viewBox is cropped to the
+  // bird's bounding box so it fills the chip without dead margin.
   return (
-    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" {...props}>
-      <path d="M12 3 L21 12 L16 17 L17 21 L7 21 L8 17 L3 12 Z" />
+    <svg viewBox="80 130 660 540" fill="currentColor" aria-hidden="true" {...props}>
+      <path d="M423.075867,410.677734 C415.744812,398.010834 408.757996,385.129547 401.024048,372.713654 C364.628082,314.284393 321.334015,261.391510 270.727295,214.787643 C248.109116,193.958496 223.566727,175.217773 199.869446,155.563187 C197.579849,153.664200 194.587845,152.249771 195.716263,148.465775 C196.920410,144.427872 200.280441,144.764893 203.488174,144.765289 C292.963928,144.776016 382.439758,144.824509 471.915405,144.718201 C484.221069,144.703568 493.629883,149.569427 501.132721,159.136398 C533.640015,200.586929 556.618713,246.732040 569.629150,298.312439 C533.666138,310.514313 503.289673,330.491913 477.096375,357.345367 C459.431030,375.455902 441.105896,392.922882 423.075867,410.677734 Z" />
+      <path d="M422.830688,410.940979 C441.105896,392.922882 459.431030,375.455902 477.096375,357.345367 C503.289673,330.491913 533.666138,310.514313 569.702515,298.715515 C580.198547,296.204865 590.355896,293.571594 600.645630,291.646088 C607.830872,290.301514 615.179077,289.508179 622.486084,289.187988 C658.613342,287.604736 693.312744,293.690247 726.160522,309.210541 C727.006897,309.610504 727.779114,310.167572 728.486572,310.591797 C721.357727,319.227142 714.146179,327.480194 707.472229,336.147247 C693.437988,354.372803 684.670654,375.585999 674.255493,395.854858 C664.208557,415.407074 654.319397,435.040466 644.235168,454.573242 C642.501099,457.931915 640.138306,460.965942 637.753174,464.651062 C637.353271,465.501129 637.266113,465.850037 637.178955,466.198975 C637.144836,466.101532 636.873535,466.197357 636.418274,466.883179 C636.234314,467.473175 636.050354,468.063171 636.095703,468.046875 C634.338562,469.671326 632.340759,471.098724 630.823547,472.925354 C606.515503,502.192047 575.273743,518.862732 537.765747,523.886047 C515.541626,526.862549 493.767212,524.121155 472.241058,518.067810 C427.652893,505.529175 384.314484,489.700134 341.877197,469.465759 C371.294128,453.300354 398.227325,434.038086 422.830688,410.940979 Z" />
+      <path d="M636.112793,468.058197 C633.715088,472.205719 631.564819,476.520996 628.883423,480.476196 C566.403625,572.638000 480.475006,628.906128 370.287048,645.529480 C276.822723,659.629700 189.911423,639.837524 110.412666,588.346252 C100.677971,582.041016 95.101463,573.316772 94.325127,561.051025 C94.781334,559.023499 94.988503,557.707825 94.988693,556.392212 C95.001305,471.848450 95.001999,387.304718 94.956757,302.760986 C94.955917,301.187042 94.391716,299.613464 94.090363,298.039703 C96.664818,292.874542 99.409256,292.618652 103.908760,297.033661 C118.990723,311.832458 133.654266,327.092285 149.266510,341.309784 C205.874664,392.860687 268.921021,434.931610 338.013672,467.929260 C339.056030,468.427094 340.173340,468.768005 341.877197,469.465759 C384.314484,489.700134 427.652893,505.529175 472.241058,518.067810 C493.767212,524.121155 515.541626,526.862549 537.765747,523.886047 C575.273743,518.862732 606.515503,502.192047 630.823547,472.925354 C632.340759,471.098724 634.338562,469.671326 636.112793,468.058197 Z" />
     </svg>
   );
 }
@@ -247,16 +254,24 @@ export function AwsGlyph(props: GlyphProps) {
 }
 
 /**
- * OpenClaw mark. Hand-built: three tapered, fanned talons converging at the
- * top — reads as a literal "claw" (the product's name) rather than the
- * earlier paw print, which was being mistaken for a generic pet icon.
+ * OpenClaw mark. Hand-built: friendly bot mascot (round head with two short
+ * antennas + two eye holes, on a small body). Matches OpenClaw / LobeHub's
+ * MoltBot-style mark referenced in the design feedback. Eye holes are cut
+ * out via `fillRule="evenodd"` so the silhouette reads as a face even at
+ * 14–20 px.
  */
 export function OpenClawGlyph(props: GlyphProps) {
   return (
     <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" {...props}>
-      <path d="M7 3 Q8 12 6 21 Q4 19 4 14 Q4 8 7 3 Z" />
-      <path d="M12 2 Q13 12 13 22 L11 22 Q11 12 12 2 Z" />
-      <path d="M17 3 Q16 12 18 21 Q20 19 20 14 Q20 8 17 3 Z" />
+      <circle cx="8" cy="2.5" r="1.4" />
+      <circle cx="16" cy="2.5" r="1.4" />
+      <rect x="7.3" y="3.5" width="1.4" height="3.5" />
+      <rect x="15.3" y="3.5" width="1.4" height="3.5" />
+      <path
+        fillRule="evenodd"
+        clipRule="evenodd"
+        d="M12 6 C16.5 6 20 9.5 20 14 C20 18.5 16.5 22 12 22 C7.5 22 4 18.5 4 14 C4 9.5 7.5 6 12 6 Z M9.5 13 m-1.6 0 a1.6 1.6 0 1 0 3.2 0 a1.6 1.6 0 1 0 -3.2 0 Z M14.5 13 m-1.6 0 a1.6 1.6 0 1 0 3.2 0 a1.6 1.6 0 1 0 -3.2 0 Z"
+      />
     </svg>
   );
 }
@@ -289,7 +304,7 @@ export function CompositeBadgeWrapper({
       {children}
       <span
         aria-hidden="true"
-        className="absolute -bottom-1 -right-1 inline-flex h-4 w-4 items-center justify-center rounded-md bg-muted ring-2 ring-background"
+        className="absolute -bottom-1.5 -right-1.5 inline-flex h-3.5 w-3.5 items-center justify-center rounded-md bg-muted ring-2 ring-background"
       >
         {badge}
       </span>
