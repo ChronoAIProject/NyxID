@@ -20,6 +20,7 @@ import { formatRelativeTime } from "@/lib/utils";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { PageHeader } from "@/components/shared/page-header";
 import { CopyableField } from "@/components/shared/copyable-field";
+import { AddCtaButton } from "@/components/shared/add-cta-button";
 import { OrgScopeSelect } from "@/components/shared/org-scope-select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
@@ -50,7 +51,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Plus, Trash2 } from "lucide-react";
+import { Trash2 } from "lucide-react";
 import { WifiRouterIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
 import { NodeStatusBadge } from "@/components/shared/node-status-badge";
@@ -128,15 +129,9 @@ function RegisterNodeDialog() {
       onOpenChange={(o) => (o ? setOpen(true) : handleClose())}
     >
       <DialogTrigger asChild>
-        <button
-          type="button"
-          className="flex h-8 items-center gap-2 rounded-lg border border-white/[0.08] px-3 text-[12px] text-text-tertiary transition-all duration-300 hover:border-white/[0.15] hover:text-muted-foreground"
-        >
-          <span className="flex h-[22px] w-[22px] items-center justify-center rounded-[6px] border border-white/[0.08] bg-white/[0.04]">
-            <Plus className="h-3 w-3" />
-          </span>
-          Register Node
-        </button>
+        <span>
+          <AddCtaButton label="Register Node" onClick={() => setOpen(true)} />
+        </span>
       </DialogTrigger>
       <DialogContent>
         {createdToken ? (

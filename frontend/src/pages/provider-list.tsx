@@ -16,6 +16,7 @@ import { ApiError } from "@/lib/api-client";
 import { formatDate } from "@/lib/utils";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
+import { AddCtaButton } from "@/components/shared/add-cta-button";
 import {
   Card,
   CardContent,
@@ -31,7 +32,7 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
+  
 } from "@/components/ui/dialog";
 import {
   Form,
@@ -51,7 +52,7 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
-import { Plus, Plug } from "lucide-react";
+import { Plug } from "lucide-react";
 import { DishAntennaIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
 
@@ -134,18 +135,8 @@ export function ProviderListPage() {
             providers.
           </p>
         </div>
+        <AddCtaButton label="Add Provider" onClick={() => setCreateOpen(true)} />
         <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-          <DialogTrigger asChild>
-            <button
-              type="button"
-              className="flex h-8 items-center gap-2 rounded-lg border border-white/[0.08] px-3 text-[12px] text-text-tertiary transition-all duration-300 hover:border-white/[0.15] hover:text-muted-foreground"
-            >
-              <span className="flex h-[22px] w-[22px] items-center justify-center rounded-[6px] border border-white/[0.08] bg-white/[0.04]">
-                <Plus className="h-3 w-3" />
-              </span>
-              Add Provider
-            </button>
-          </DialogTrigger>
           <DialogContent>
             <DialogHeader>
               <DialogTitle>Add Provider</DialogTitle>

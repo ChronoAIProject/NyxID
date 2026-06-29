@@ -7,6 +7,7 @@ import {
 } from "@/hooks/use-developer-apps";
 import { parseRedirectUris } from "@/lib/oauth";
 import { ErrorBanner } from "@/components/shared/error-banner";
+import { AddCtaButton } from "@/components/shared/add-cta-button";
 import { Badge } from "@/components/ui/badge";
 import { Button, ButtonIcon } from "@/components/ui/button";
 import {
@@ -23,7 +24,7 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
+  
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import {
@@ -38,7 +39,7 @@ import { Switch } from "@/components/ui/switch";
 import { Checkbox } from "@/components/ui/checkbox";
 import { ClientSecretDialog } from "@/components/shared/client-secret-dialog";
 import { ApiError } from "@/lib/api-client";
-import { Code, ExternalLink, Plus, Shield, ShieldCheck } from "lucide-react";
+import { Code, ExternalLink, Shield, ShieldCheck } from "lucide-react";
 import { WebsiteLayoutIcon } from "@/components/icons/empty-state";
 
 const OIDC_SCOPES = [
@@ -185,18 +186,8 @@ export function DeveloperAppsPage() {
               Show inactive
             </label>
           </div>
+          <AddCtaButton label="New Application" onClick={() => setCreateOpen(true)} />
           <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-            <DialogTrigger asChild>
-              <button
-                type="button"
-                className="flex h-8 items-center gap-2 rounded-lg border border-white/[0.08] px-3 text-[12px] text-text-tertiary transition-all duration-300 hover:border-white/[0.15] hover:text-muted-foreground"
-              >
-                <span className="flex h-[18px] w-[18px] items-center justify-center rounded-[4px] border border-white/[0.08] bg-white/[0.04]">
-                  <Plus className="h-3 w-3" />
-                </span>
-                New Application
-              </button>
-            </DialogTrigger>
             <DialogContent>
               <DialogHeader>
                 <DialogTitle>Create Developer App</DialogTitle>
