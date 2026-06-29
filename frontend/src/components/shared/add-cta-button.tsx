@@ -7,14 +7,15 @@ interface AddCtaButtonProps {
   readonly disabled?: boolean;
   readonly icon?: React.ComponentType<{ className?: string }>;
   /**
-   * "primary" → the goal-completing CTA on this page (e.g., "Add Service"
-   * on /keys, "Create Agent Key" on the agent-keys tab). Renders as a
-   * full primary button using the shared `<Button variant="primary">`.
+   * "primary" (default) → the goal-completing CTA on this page. Renders
+   * as a full primary button using the shared `<Button variant="primary">`
+   * — same component AiSetupCard, ApprovalsCard, etc. use, so visual
+   * hierarchy stays consistent across the app.
    *
-   * "subtle" (default) → secondary additions on pages that aren't the
-   * user's main goal (e.g., "Add Route" on a channel-bot detail page).
-   * Renders as the original ghost-styled chip so it doesn't compete with
-   * the page's primary affordance.
+   * "subtle" → secondary additions that explicitly should NOT compete
+   * with another CTA on the same surface (e.g., a "+" affordance below
+   * a list when the page's main CTA lives elsewhere). Renders as the
+   * original ghost-styled chip.
    */
   readonly variant?: "primary" | "subtle";
 }
@@ -24,7 +25,7 @@ export function AddCtaButton({
   onClick,
   disabled = false,
   icon: Icon = Plus,
-  variant = "subtle",
+  variant = "primary",
 }: AddCtaButtonProps) {
   if (variant === "primary") {
     return (
