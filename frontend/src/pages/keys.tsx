@@ -556,7 +556,7 @@ function ServicesEmptyState({ onAdd }: { readonly onAdd: () => void }) {
           AI agents can call it through NyxID without ever seeing the raw key.
         </p>
       </div>
-      <AddCtaButton label="Add Service" onClick={onAdd} />
+      <AddCtaButton label="Add Service" onClick={onAdd} variant="primary" />
     </div>
   );
 }
@@ -754,12 +754,12 @@ function AddButton({
   readonly onCreateKey: () => void;
 }) {
   if (tab === "services") {
-    return <AddCtaButton label="Add Service" onClick={onAddService} />;
+    return <AddCtaButton label="Add Service" onClick={onAddService} variant="primary" />;
   }
   if (tab === "pools") {
-    return <AddCtaButton label="Create Pool" onClick={onCreatePool} />;
+    return <AddCtaButton label="Create Pool" onClick={onCreatePool} variant="primary" />;
   }
-  return <AddCtaButton label="Create API Key" onClick={onCreateKey} />;
+  return <AddCtaButton label="Create API Key" onClick={onCreateKey} variant="primary" />;
 }
 
 function AutoConnectedToggle({

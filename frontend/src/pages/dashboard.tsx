@@ -405,23 +405,26 @@ function OnboardingChecklist({
                           variant={
                             i === firstIncompleteIndex ? "primary" : "outline"
                           }
-                          size="sm"
                           className={cn(
-                            "mt-3 w-full justify-center",
-                            i === firstIncompleteIndex && "shadow-md shadow-nyx-500/15",
+                            "mt-3 w-full",
                             i === firstIncompleteIndex &&
                               verifyKeyLoading &&
                               "opacity-60 pointer-events-none",
                           )}
                           tabIndex={-1}
                         >
-                          {i === firstIncompleteIndex && verifyKeyLoading && (
-                            <Loader2 className="h-3 w-3 animate-spin mr-1.5" />
-                          )}
+                          <ButtonIcon
+                            variant={
+                              i === firstIncompleteIndex ? "primary" : "default"
+                            }
+                          >
+                            {i === firstIncompleteIndex && verifyKeyLoading ? (
+                              <Loader2 className="h-3 w-3 animate-spin" />
+                            ) : (
+                              <ArrowRight className="h-3 w-3" />
+                            )}
+                          </ButtonIcon>
                           {step.cta}
-                          {!(i === firstIncompleteIndex && verifyKeyLoading) && (
-                            <ArrowRight className="h-3 w-3 ml-1.5" />
-                          )}
                         </Button>
                       )}
                     </div>
@@ -473,24 +476,26 @@ function OnboardingChecklist({
                         variant={
                           i === firstIncompleteIndex ? "primary" : "outline"
                         }
-                        size="sm"
                         className={cn(
-                          "mt-auto pt-3 w-full justify-center",
-                          i === firstIncompleteIndex && "shadow-md shadow-nyx-500/15",
+                          "mt-auto w-full",
                           i === firstIncompleteIndex &&
                             verifyKeyLoading &&
                             "opacity-60 pointer-events-none",
-                          i !== firstIncompleteIndex && "group-hover:gap-2",
                         )}
                         tabIndex={-1}
                       >
-                        {i === firstIncompleteIndex && verifyKeyLoading && (
-                          <Loader2 className="h-3 w-3 animate-spin mr-1.5" />
-                        )}
+                        <ButtonIcon
+                          variant={
+                            i === firstIncompleteIndex ? "primary" : "default"
+                          }
+                        >
+                          {i === firstIncompleteIndex && verifyKeyLoading ? (
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                          ) : (
+                            <ArrowRight className="h-3 w-3" />
+                          )}
+                        </ButtonIcon>
                         {step.cta}
-                        {!(i === firstIncompleteIndex && verifyKeyLoading) && (
-                          <ArrowRight className="h-3 w-3 ml-1.5" />
-                        )}
                       </Button>
                     )}
                   </div>
