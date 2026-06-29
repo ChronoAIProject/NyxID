@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { ViewToggle, useViewMode } from "@/components/shared/view-toggle";
 import { useForm } from "react-hook-form";
@@ -51,7 +51,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Trash2 } from "lucide-react";
+import { Trash2, Loader2 } from "lucide-react";
 import { WifiRouterIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
 import { NodeStatusBadge } from "@/components/shared/node-status-badge";
@@ -78,7 +78,16 @@ function canManageNode(
   return adminOrgIds.has(node.owner.id);
 }
 
-function RegisterNodeDialog() {
+function RegisterNodeDialog({
+  onRegistered,
+}: {
+  /**
+   * Fired once the registration-token mutation has succeeded. NodesPage
+   * uses this to start a 60s polling window for the new node so the user
+   * is auto-navigated to its detail page as soon as it checks in.
+   */
+  readonly onRegistered?: () => void;
+}) {
   const [open, setOpen] = useState(false);
   const [createdToken, setCreatedToken] = useState<{
     readonly token: string;
@@ -108,6 +117,9 @@ function RegisterNodeDialog() {
         expires_at: result.expires_at,
       });
       toast.success("Registration token created");
+      // Wake up NodesPage's polling window so the empty list refetches
+      // every ~3s for 60s, auto-navigating once the node registers.
+      onRegistered?.();
     } catch (error) {
       if (error instanceof ApiError) {
         form.setError("root", { message: error.message });
@@ -245,7 +257,22 @@ function RegisterNodeDialog() {
 
 export function NodesPage() {
   const navigate = useNavigate();
-  const { data: nodes, isLoading, error, refetch } = useNodes();
+  // Set to true when `RegisterNodeDialog` mint succeeds; stays true for
+  // up to 60s (enforced by the timeout effect below) so the empty node
+  // list polls every 3s for the newcomer. Cleared early when:
+  //   - the first node appears (the auto-navigate effect below), OR
+  //   - the 60s window elapses, OR
+  //   - the component unmounts (the setTimeout is cleaned up).
+  const [pollingActive, setPollingActive] = useState(false);
+  // Track the node ids visible the last time the user was NOT polling, so
+  // the auto-navigate effect can ignore pre-existing nodes and only jump
+  // to a freshly-registered one. Captured once when the polling window opens.
+  const [knownNodeIdsAtPollStart, setKnownNodeIdsAtPollStart] = useState<
+    ReadonlySet<string>
+  >(() => new Set());
+  const { data: nodes, isLoading, error, refetch } = useNodes({
+    pollIntervalMs: pollingActive ? 3000 : 0,
+  });
   const { data: orgs } = useOrgs();
   const currentUserId = useAuthStore((state) => state.user?.id ?? null);
   const deleteMutation = useDeleteNode();
@@ -259,6 +286,37 @@ export function NodesPage() {
       .filter((org) => org.your_role === "admin")
       .map((org) => org.id),
   );
+
+  // 60s safety timer: never leave polling on indefinitely if no node ever
+  // checks in (user may have run the wrong command, or the node may have
+  // failed to start). Cleared early if a node appears (effect below) or on
+  // unmount.
+  useEffect(() => {
+    if (!pollingActive) return;
+    const timeoutId = window.setTimeout(() => {
+      setPollingActive(false);
+    }, 60_000);
+    return () => window.clearTimeout(timeoutId);
+  }, [pollingActive]);
+
+  // Auto-navigate to the first freshly-registered node during the polling
+  // window so the user lands on the confirmation page the moment the node
+  // checks in. Filters out pre-existing nodes via `knownNodeIdsAtPollStart`.
+  useEffect(() => {
+    if (!pollingActive || !nodes || nodes.length === 0) return;
+    const freshNode = nodes.find((n) => !knownNodeIdsAtPollStart.has(n.id));
+    if (!freshNode) return;
+    setPollingActive(false);
+    void navigate({
+      to: "/nodes/$nodeId",
+      params: { nodeId: freshNode.id },
+    });
+  }, [pollingActive, nodes, knownNodeIdsAtPollStart, navigate]);
+
+  function handleRegistered() {
+    setKnownNodeIdsAtPollStart(new Set((nodes ?? []).map((n) => n.id)));
+    setPollingActive(true);
+  }
 
   async function handleDelete() {
     if (!deleteTarget) return;
@@ -282,7 +340,7 @@ export function NodesPage() {
         actions={
           <div className="flex items-center gap-3">
             <ViewToggle viewMode={viewMode} onViewModeChange={setViewMode} />
-            <RegisterNodeDialog />
+            <RegisterNodeDialog onRegistered={handleRegistered} />
           </div>
         }
       />
@@ -299,10 +357,24 @@ export function NodesPage() {
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <WifiRouterIcon className="h-64 w-64 text-muted-foreground" />
           <div className="max-w-md space-y-1">
-            <p className="text-[12px] font-medium text-muted-foreground">No Credential Nodes</p>
-            <p className="text-[12px] text-muted-foreground">
-              Create a registration token to get started.
-            </p>
+            {pollingActive ? (
+              <>
+                <div className="flex items-center justify-center gap-2">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+                  <p className="text-[12px] font-medium text-foreground">Waiting for your node to connect…</p>
+                </div>
+                <p className="text-[12px] text-muted-foreground">
+                  Run the registration command on the node. We&apos;ll take you to its page automatically.
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="text-[12px] font-medium text-foreground">No Credential Nodes</p>
+                <p className="text-[12px] text-muted-foreground">
+                  Create a registration token to get started.
+                </p>
+              </>
+            )}
           </div>
         </div>
       ) : (

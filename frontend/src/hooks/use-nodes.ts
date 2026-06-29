@@ -41,13 +41,21 @@ export function useMyNodeBindings() {
   });
 }
 
-export function useNodes() {
+export function useNodes(params: { readonly pollIntervalMs?: number } = {}) {
   return useQuery({
     queryKey: ["nodes"],
     queryFn: async (): Promise<readonly NodeInfo[]> => {
       const res = await api.get<NodeListResponse>("/nodes");
       return res.nodes;
     },
+    // `refetchInterval` only takes effect when set to a positive number.
+    // The Nodes page sets this to 3000 for ~60s after minting a
+    // registration token so the empty list polls for the new node, then
+    // clears it once the node appears (or the 60s window elapses).
+    // Defaults to undefined (= no polling) for all other callers.
+    refetchInterval: params.pollIntervalMs && params.pollIntervalMs > 0
+      ? params.pollIntervalMs
+      : undefined,
   });
 }
 

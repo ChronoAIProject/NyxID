@@ -31,6 +31,10 @@ import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
 import { SshServiceInstructions } from "@/components/dashboard/ssh-service-instructions";
 import { RoutingSection } from "@/components/dashboard/routing-section";
 import { AddKeyDialog } from "@/components/dashboard/add-key-dialog";
+import {
+  AgentKeyPicker,
+  type PickedAgentKey,
+} from "@/components/dashboard/agent-key-picker";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button, ButtonIcon } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -1217,6 +1221,17 @@ function ApiUsageSection({
         });
   const method = requestBody ? "POST" : "GET";
 
+  // Picked Agent Key drives the placeholder shown in the `X-API-Key:`
+  // curl example. Null while keys load OR when the user has zero Agent
+  // Keys — in the zero-keys case the picker itself renders the "Create
+  // your first Agent Key →" affordance, and we keep `nyx_...` as the
+  // example placeholder. `key_prefix` is the server-issued preview and is
+  // never the raw secret; we append `••••••••` so the redaction is
+  // explicit in the rendered output (same convention as the Agent Keys
+  // table).
+  const [pickedKey, setPickedKey] = useState<PickedAgentKey | null>(null);
+  const apiKeyHeaderValue = pickedKey?.preview ?? "nyx_...";
+
   const authNote =
     authMethod === "none"
       ? "This service requires no upstream credentials, but you still need to authenticate with NyxID."
@@ -1235,7 +1250,7 @@ function ApiUsageSection({
     ? buildCurlExample({
         method,
         url: exampleUrl,
-        authHeader: "X-API-Key: nyx_...",
+        authHeader: `X-API-Key: ${apiKeyHeaderValue}`,
         body: requestBody,
       })
     : null;
@@ -1329,7 +1344,7 @@ function ApiUsageSection({
               <li>
                 <span className="font-medium text-foreground">API Key:</span>{" "}
                 <code className="rounded bg-background px-1">
-                  X-API-Key: nyx_...
+                  X-API-Key: {apiKeyHeaderValue}
                 </code>{" "}
                 header (create one in the{" "}
                 <Link
@@ -1351,6 +1366,7 @@ function ApiUsageSection({
               </li>
             </ul>
           </div>
+          <AgentKeyPicker onSelect={setPickedKey} />
         </div>
 
         {apiKeyExample && (
