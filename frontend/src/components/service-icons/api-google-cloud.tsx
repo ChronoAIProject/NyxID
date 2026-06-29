@@ -13,9 +13,9 @@ export default function ApiGoogleCloudIcon({
   return (
     <CompositeBadgeWrapper
       className={className}
-      badge={<Cloud className="h-3.5 w-3.5" strokeWidth={2.5} />}
+      badge={<Cloud className="h-2.5 w-2.5" strokeWidth={2.5} />}
     >
-      <GoogleGlyph data-slug="api-google-cloud" className="h-5 w-5" />
+      <GoogleGlyph data-slug="api-google-cloud" className="h-full w-full" />
     </CompositeBadgeWrapper>
   );
 }
