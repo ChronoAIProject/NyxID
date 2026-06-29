@@ -76,18 +76,12 @@ export function VerifyKeyCard({
     readonly ProbeResult[]
   >([]);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  // Track whether we've already dispatched the success event for this
-  // card instance, so re-running the test doesn't re-fire it (the flag is
-  // also persisted via localStorage on the dashboard side).
+  const [overrideSlug, setOverrideSlug] = useState<string | null>(null);
   const firedSuccessRef = useRef(false);
-  // Track whether the loading-start event has been dispatched but no
-  // matching loading-end yet, so unmount mid-flight still cleans up.
   const loadingStartDispatchedRef = useRef(false);
 
   const { data: userServices } = useUserServices();
 
-  // Cleanup: if this card unmounts while a test is in flight, emit the
-  // loading-end event so the dashboard's spinner doesn't get stuck.
   useEffect(() => {
     return () => {
       if (loadingStartDispatchedRef.current) {
@@ -97,33 +91,47 @@ export function VerifyKeyCard({
     };
   }, []);
 
-  const allowedSlug = useMemo<string | null>(() => {
+  // Build the candidate list of slugs the user can probe against. For a key
+  // with blanket access, all the user's connected services are candidates;
+  // otherwise only those listed in the key's scope. The dropdown defaults
+  // to the first candidate but the user can choose any.
+  const candidateSlugs = useMemo<
+    readonly { slug: string; label: string }[]
+  >(() => {
+    const activeUserServices = (userServices ?? []).filter(
+      (s) => s.is_active !== false,
+    );
     if (apiKey.allow_all_services) {
-      // The key has blanket access; pick the user's first configured
-      // service slug so the allowed probe actually hits something real.
-      const first = userServices?.find((s) => s.is_active !== false);
-      return first?.slug ?? null;
+      return activeUserServices.map((s) => ({
+        slug: s.slug,
+        label: s.slug,
+      }));
     }
-    const firstAllowed: AllowedServiceInfo | undefined =
-      apiKey.allowed_services?.[0];
-    return firstAllowed?.slug ?? null;
+    const allowedSet = new Set(
+      (apiKey.allowed_services ?? []).map(
+        (a: AllowedServiceInfo) => a.slug,
+      ),
+    );
+    return activeUserServices
+      .filter((s) => allowedSet.has(s.slug))
+      .map((s) => ({ slug: s.slug, label: s.slug }));
   }, [
     apiKey.allow_all_services,
     apiKey.allowed_services,
     userServices,
   ]);
 
-  const allowedLabel = useMemo<string>(() => {
-    if (apiKey.allow_all_services) {
-      const first = userServices?.find((s) => s.is_active !== false);
-      return first?.slug ?? "(no service)";
+  const allowedSlug: string | null = useMemo(() => {
+    if (overrideSlug && candidateSlugs.some((c) => c.slug === overrideSlug)) {
+      return overrideSlug;
     }
-    return (
-      apiKey.allowed_services?.[0]?.label ??
-      apiKey.allowed_services?.[0]?.slug ??
-      "(no service)"
-    );
-  }, [apiKey.allow_all_services, apiKey.allowed_services, userServices]);
+    return candidateSlugs[0]?.slug ?? null;
+  }, [overrideSlug, candidateSlugs]);
+
+  const allowedLabel = useMemo<string>(() => {
+    const match = candidateSlugs.find((c) => c.slug === allowedSlug);
+    return match?.label ?? allowedSlug ?? "(no service)";
+  }, [candidateSlugs, allowedSlug]);
 
   const deniedSlug = DENIED_SLUG_SENTINEL;
   const deniedLabel = "denied sentinel";
@@ -210,11 +218,20 @@ export function VerifyKeyCard({
       const failing = nextResults.filter((r) => !r.ok);
       const explanations = failing.map((r) => {
         if (r.expected === "allowed") {
-          return `allowed slug "${r.slug}" returned ${r.status ?? "no response"} (expected 2xx)`;
+          if (r.status === 401 || r.status === 403) {
+            return `Allowed service "${r.slug}" returned ${r.status}. This usually means either (a) the agent key isn't actually scoped to this slug, or (b) the service is connected but its downstream credentials aren't configured yet. Open the service from /keys to check, or pick a different service above.`;
+          }
+          if (r.status === 404) {
+            return `Allowed service "${r.slug}" returned 404 — the slug isn't registered as a user-service for this account.`;
+          }
+          if (r.status === null) {
+            return `Allowed probe to "${r.slug}" timed out or was blocked by the browser.`;
+          }
+          return `Allowed service "${r.slug}" returned ${r.status} (expected 2xx).`;
         }
-        return `denied slug "${r.slug}" returned ${r.status ?? "no response"} (expected 4xx)`;
+        return `Denied probe returned ${r.status ?? "no response"} (expected 4xx). The gateway may be misconfigured — flag this.`;
       });
-      setErrorMessage(explanations.join("; "));
+      setErrorMessage(explanations.join(" "));
     }
 
     if (loadingStartDispatchedRef.current) {
@@ -258,6 +275,35 @@ export function VerifyKeyCard({
             store this paste — it&apos;s only used for this test.
           </p>
         </div>
+
+        {candidateSlugs.length > 1 && (
+          <div className="space-y-1.5">
+            <label
+              htmlFor="verify-key-slug-picker"
+              className="text-[11px] font-medium text-foreground"
+            >
+              Test against
+            </label>
+            <select
+              id="verify-key-slug-picker"
+              value={allowedSlug ?? ""}
+              onChange={(e) => setOverrideSlug(e.target.value)}
+              disabled={status === "pending"}
+              className="w-full rounded-md border border-input bg-background px-3 py-2 text-[12px] focus:outline-none focus:ring-2 focus:ring-ring"
+            >
+              {candidateSlugs.map((c) => (
+                <option key={c.slug} value={c.slug}>
+                  {c.label} ({c.slug})
+                </option>
+              ))}
+            </select>
+            <p className="text-[11px] leading-relaxed text-muted-foreground">
+              Pick a service whose downstream credential is fully configured.
+              The test will probe this slug (should return 2xx) and a
+              deliberately-invalid slug (should return 4xx).
+            </p>
+          </div>
+        )}
 
         <div className="flex items-center gap-2">
           <Button

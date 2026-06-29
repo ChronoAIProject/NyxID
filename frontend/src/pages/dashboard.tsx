@@ -7,7 +7,7 @@ import { useNodes } from "@/hooks/use-nodes";
 import { useProxyOnboarding } from "@/hooks/use-proxy-onboarding";
 import { useRightPanel } from "@/components/layout/dashboard-layout";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Button, ButtonIcon, buttonVariants } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import {
   ArrowRight,
   ArrowUpRight,
@@ -396,31 +396,33 @@ function OnboardingChecklist({
                         {step.description}
                       </p>
                       {step.done ? (
-                        <span className="mt-2 inline-flex items-center gap-1.5 text-[11px] font-medium text-success/70">
-                          <Check className="h-3 w-3" />
+                        <span className="mt-2 inline-flex items-center gap-1.5 text-[12px] font-medium text-success/70">
+                          <Check className="h-3.5 w-3.5" />
                           Completed
                         </span>
                       ) : (
-                        <span
+                        <Button
+                          variant={
+                            i === firstIncompleteIndex ? "primary" : "outline"
+                          }
+                          size="sm"
                           className={cn(
-                            "mt-2 inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[11px] font-semibold transition-all duration-200",
-                            i === firstIncompleteIndex
-                              ? buttonVariants({ variant: "primary" })
-                              : buttonVariants({ variant: "outline" }),
-                            "!h-auto !min-h-0 !px-2.5 !py-1 !text-[11px]",
+                            "mt-3 w-full justify-center",
+                            i === firstIncompleteIndex && "shadow-md shadow-nyx-500/15",
                             i === firstIncompleteIndex &&
                               verifyKeyLoading &&
                               "opacity-60 pointer-events-none",
                           )}
+                          tabIndex={-1}
                         >
                           {i === firstIncompleteIndex && verifyKeyLoading && (
-                            <Loader2 className="h-3 w-3 animate-spin" />
+                            <Loader2 className="h-3 w-3 animate-spin mr-1.5" />
                           )}
                           {step.cta}
                           {!(i === firstIncompleteIndex && verifyKeyLoading) && (
-                            <ArrowRight className="h-3 w-3" />
+                            <ArrowRight className="h-3 w-3 ml-1.5" />
                           )}
-                        </span>
+                        </Button>
                       )}
                     </div>
                   </Link>
@@ -462,32 +464,34 @@ function OnboardingChecklist({
                     </p>
                     <p className={cn("text-[11px] mt-1 leading-relaxed", step.done ? "text-muted-foreground/50" : "text-muted-foreground")}>{step.description}</p>
                     {step.done ? (
-                      <span className="mt-3 inline-flex items-center gap-1.5 text-[11px] font-medium text-success/70">
-                        <Check className="h-3 w-3" />
+                      <span className="mt-3 inline-flex items-center gap-1.5 text-[12px] font-medium text-success/70">
+                        <Check className="h-3.5 w-3.5" />
                         Completed
                       </span>
                     ) : (
-                      <span
+                      <Button
+                        variant={
+                          i === firstIncompleteIndex ? "primary" : "outline"
+                        }
+                        size="sm"
                         className={cn(
-                          "mt-3 inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[11px] font-semibold transition-all duration-200",
-                          i === firstIncompleteIndex
-                            ? buttonVariants({ variant: "primary" })
-                            : buttonVariants({ variant: "outline" }),
-                          "!h-auto !min-h-0 !px-2.5 !py-1 !text-[11px]",
+                          "mt-auto pt-3 w-full justify-center",
+                          i === firstIncompleteIndex && "shadow-md shadow-nyx-500/15",
                           i === firstIncompleteIndex &&
                             verifyKeyLoading &&
                             "opacity-60 pointer-events-none",
                           i !== firstIncompleteIndex && "group-hover:gap-2",
                         )}
+                        tabIndex={-1}
                       >
                         {i === firstIncompleteIndex && verifyKeyLoading && (
-                          <Loader2 className="h-3 w-3 animate-spin" />
+                          <Loader2 className="h-3 w-3 animate-spin mr-1.5" />
                         )}
                         {step.cta}
                         {!(i === firstIncompleteIndex && verifyKeyLoading) && (
-                          <ArrowRight className="h-3 w-3" />
+                          <ArrowRight className="h-3 w-3 ml-1.5" />
                         )}
-                      </span>
+                      </Button>
                     )}
                   </div>
                 </Link>
