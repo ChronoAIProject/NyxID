@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type { LlmStatusResponse } from "@/types/api";
 import {
   Card,
@@ -8,6 +9,10 @@ import {
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { CopyableField } from "@/components/shared/copyable-field";
+import {
+  AgentKeyPicker,
+  type PickedAgentKey,
+} from "@/components/dashboard/agent-key-picker";
 
 interface GatewayInfoCardProps {
   readonly llmStatus: LlmStatusResponse;
@@ -20,8 +25,17 @@ export function GatewayInfoCard({ llmStatus }: GatewayInfoCardProps) {
 
   const gatewayUrl = llmStatus.gateway_url || window.location.origin + "/api/v1/llm";
 
+  // Mirrors LlmReadyBadge: null while keys load OR when the user has zero
+  // Agent Keys. The picker renders the "Create your first Agent Key →"
+  // affordance in the zero-keys case.
+  const [pickedKey, setPickedKey] = useState<PickedAgentKey | null>(null);
+
+  // `key_prefix` is the server-issued preview (never the raw secret). We
+  // append `••••••••` so the redaction is visually explicit.
+  const tokenPreview = pickedKey?.preview ?? "YOUR_NYXID_TOKEN";
+
   const exampleCurl = `curl ${gatewayUrl}/chat/completions \\
-  -H "Authorization: Bearer YOUR_NYXID_TOKEN" \\
+  -H "Authorization: Bearer ${tokenPreview}" \\
   -H "Content-Type: application/json" \\
   -d '{
     "model": "gpt-4o",
@@ -90,6 +104,13 @@ export function GatewayInfoCard({ llmStatus }: GatewayInfoCardProps) {
         )}
 
         <div>
+          <p className="mb-2 text-xs font-medium text-muted-foreground">
+            Agent Key
+          </p>
+          <AgentKeyPicker onSelect={setPickedKey} />
+        </div>
+
+        <div>
           <p className="mb-1 text-xs font-medium text-muted-foreground">
             Example Request
           </p>
@@ -97,8 +118,9 @@ export function GatewayInfoCard({ llmStatus }: GatewayInfoCardProps) {
             {exampleCurl}
           </pre>
           <p className="mt-1 text-[10px] text-muted-foreground">
-            Replace YOUR_NYXID_TOKEN with your NyxID access token from the
-            login response.
+            {pickedKey
+              ? "Using the picked Agent Key preview. Copy the full key from the Agent Keys tab to run this."
+              : "Create an Agent Key in the Agent Keys tab, then pick it above to see a ready-to-run example."}
           </p>
         </div>
       </CardContent>
