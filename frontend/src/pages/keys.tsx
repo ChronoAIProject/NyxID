@@ -20,12 +20,9 @@ import {
 } from "@/components/ui/table";
 import {
   Globe,
-  KeyRound,
   KeySquare,
   Server,
-  Router,
   Terminal,
-  Zap,
   RefreshCw,
   Shield,
 } from "lucide-react";
@@ -202,6 +199,20 @@ function KeyCardContent({
             {displayStatusLabel}
           </Badge>
           {isSsh && <Badge variant="secondary">SSH</Badge>}
+          {/* Auth-method pill — moved to top so it aligns across cards */}
+          <Badge variant="secondary">
+            {keyInfo.auto_connected
+              ? autoAuthLabel
+              : isSsh
+                ? hasSshCertificateAuth
+                  ? "certificate"
+                  : "ssh tunnel"
+                : keyInfo.credential_type}
+          </Badge>
+          {/* Routing pill — moved to top so it aligns across cards */}
+          <Badge variant="secondary">
+            {nodeName ? `→ ${nodeName}` : "Direct"}
+          </Badge>
           {keyInfo.auto_connected && (
             <Badge variant="secondary">
               {keyInfo.source_app_name
@@ -227,7 +238,7 @@ function KeyCardContent({
           </Button>
         )}
 
-        <div className="mt-auto grid grid-cols-2 gap-x-4 gap-y-3 text-xs text-muted-foreground">
+        <div className="mt-auto space-y-1.5 text-xs text-muted-foreground">
           <div className="flex min-w-0 items-center gap-1.5">
             {isSsh ? (
               <Terminal className="h-3 w-3 shrink-0" />
@@ -236,32 +247,10 @@ function KeyCardContent({
             )}
             <span className="truncate">{displayUrl}</span>
           </div>
-          <div className="flex min-w-0 items-center justify-end gap-1.5">
-            {keyInfo.auto_connected ? (
-              <Zap className="h-3 w-3 shrink-0" />
-            ) : (
-              <KeyRound className="h-3 w-3 shrink-0" />
-            )}
-            <span className="truncate">
-              {keyInfo.auto_connected
-                ? autoAuthLabel
-                : isSsh
-                  ? hasSshCertificateAuth
-                    ? "certificate"
-                    : "ssh tunnel"
-                  : keyInfo.credential_type}
-            </span>
-          </div>
           <div className="flex min-w-0 items-center gap-1.5">
             <Server className="h-3 w-3 shrink-0" />
             <span className="truncate">
               {isSsh ? keyInfo.slug : `/proxy/s/${keyInfo.slug}`}
-            </span>
-          </div>
-          <div className="flex min-w-0 items-center justify-end gap-1.5">
-            <Router className="h-3 w-3 shrink-0" />
-            <span className="truncate">
-              {nodeName ? `→ ${nodeName}` : "Direct"}
             </span>
           </div>
         </div>
