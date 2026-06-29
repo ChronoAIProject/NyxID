@@ -4,6 +4,7 @@ import { useKeys } from "@/hooks/use-keys";
 import { useUserServices } from "@/hooks/use-user-services";
 import { PageHeader } from "@/components/shared/page-header";
 import { AddCtaButton } from "@/components/shared/add-cta-button";
+import { TeachingEmptyState } from "@/components/shared/teaching-empty-state";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
 import { Button, ButtonIcon } from "@/components/ui/button";
@@ -555,17 +556,12 @@ function groupKeysBySource(
 
 function ServicesEmptyState({ onAdd }: { readonly onAdd: () => void }) {
   return (
-    <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
-      <MagicKeyIcon className="h-48 w-48 text-muted-foreground/40" />
-      <div className="space-y-1.5 max-w-md">
-        <p className="text-[15px] font-semibold text-foreground">No AI services yet</p>
-        <p className="text-[12px] text-muted-foreground leading-relaxed">
-          Connect a downstream service (OpenAI, GitHub, Anthropic, etc.) so your
-          AI agents can call it through NyxID without ever seeing the raw key.
-        </p>
-      </div>
-      <AddCtaButton label="Add your first service" onClick={onAdd} />
-    </div>
+    <TeachingEmptyState
+      icon={MagicKeyIcon}
+      title="No AI services yet"
+      description="Connect a downstream service (OpenAI, GitHub, Anthropic, etc.) so your AI agents can call it through NyxID without ever seeing the raw key."
+      primaryCta={{ label: "Add your first service", onClick: onAdd }}
+    />
   );
 }
 
