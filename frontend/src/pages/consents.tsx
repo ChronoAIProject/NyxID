@@ -135,10 +135,10 @@ function AuthorizedAppsTab({ viewMode }: { readonly viewMode: ViewMode }) {
   if (consents.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
-        <SmartLockIcon className="h-64 w-64 text-muted-foreground/30" />
+        <SmartLockIcon className="h-64 w-64 text-muted-foreground" />
         <div className="space-y-1">
-          <p className="text-[12px] font-medium text-muted-foreground/30">No Authorized Apps</p>
-          <p className="text-xs text-muted-foreground/30">
+          <p className="text-[12px] font-medium text-muted-foreground">No Authorized Apps</p>
+          <p className="text-xs text-muted-foreground">
             No applications have been authorized.
           </p>
         </div>
@@ -377,10 +377,10 @@ function AuthorizationsTab({ viewMode }: { readonly viewMode: ViewMode }) {
   if (bindings.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
-        <BiometricLockIcon className="h-64 w-64 text-muted-foreground/30" />
+        <BiometricLockIcon className="h-64 w-64 text-muted-foreground" />
         <div className="space-y-1">
-          <p className="text-[12px] font-medium text-muted-foreground/30">No Authorizations</p>
-          <p className="text-xs text-muted-foreground/30">
+          <p className="text-[12px] font-medium text-muted-foreground">No Authorizations</p>
+          <p className="text-xs text-muted-foreground">
             No broker authorizations issued. Apps that hold server-side credentials on your behalf will appear here.
           </p>
         </div>

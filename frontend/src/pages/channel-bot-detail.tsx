@@ -204,8 +204,8 @@ function ConversationsSection({
         </div>
       ) : !conversations || conversations.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
-          <ArticleIcon className="h-48 w-48 text-muted-foreground/30" />
-          <p className="text-[12px] text-muted-foreground/30">
+          <ArticleIcon className="h-48 w-48 text-muted-foreground" />
+          <p className="text-[12px] text-muted-foreground">
             No conversation routes configured. Add a route to start relaying
             messages to an AI agent.
           </p>
@@ -920,11 +920,11 @@ export function ChannelBotDetailPage() {
 
       {bot.status === "pending_webhook" && (
         <div className="flex flex-col items-center gap-3 rounded-xl border border-amber-500/30 bg-amber-500/10 p-6 text-center">
-          <RoadBarrierIcon className="h-48 w-48 text-muted-foreground/30" />
+          <RoadBarrierIcon className="h-48 w-48 text-muted-foreground" />
           <p className="text-[12px] font-medium text-foreground">
             Pending webhook verification
           </p>
-          <p className="mt-1 text-[12px] text-muted-foreground/30">
+          <p className="mt-1 text-[12px] text-muted-foreground">
             {bot.platform === "lark" || bot.platform === "feishu"
               ? bot.lark_verification_token_configured
                 ? "Once Lark/Feishu delivers a verified inbound message, this bot will automatically move to Active."

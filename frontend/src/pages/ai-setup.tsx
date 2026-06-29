@@ -74,8 +74,8 @@ function CodeBlock({
 function EmptyState() {
   return (
     <div className="flex flex-col items-center gap-1 py-12">
-      <BrainIcon className="h-48 w-48 text-muted-foreground/30" />
-      <p className="text-[12px] text-muted-foreground/30">
+      <BrainIcon className="h-48 w-48 text-muted-foreground" />
+      <p className="text-[12px] text-muted-foreground">
         Create an OAuth client first to generate AI setup configs.
       </p>
     </div>

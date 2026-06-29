@@ -35,10 +35,10 @@ function OrgsLoading() {
 function OrgsEmptyState({ onCreate }: { readonly onCreate: () => void }) {
   return (
     <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
-      <HierarchyIcon className="h-64 w-64 text-muted-foreground/30" />
+      <HierarchyIcon className="h-64 w-64 text-muted-foreground" />
       <div className="space-y-1">
-        <p className="text-[12px] font-medium text-muted-foreground/30">No organizations yet</p>
-        <p className="text-xs text-muted-foreground/30">
+        <p className="text-[12px] font-medium text-muted-foreground">No organizations yet</p>
+        <p className="text-xs text-muted-foreground">
           Create an organization to share services and credentials with
           teammates.
         </p>

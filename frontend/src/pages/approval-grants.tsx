@@ -78,10 +78,10 @@ export function ApprovalGrantsPage() {
         <ErrorBanner message="Failed to load grants. Please try again." onRetry={refetch} />
       ) : grants.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
-          <SmartLockIcon className="h-64 w-64 text-muted-foreground/30" />
+          <SmartLockIcon className="h-64 w-64 text-muted-foreground" />
           <div className="max-w-md space-y-1">
-            <p className="text-[12px] font-medium text-muted-foreground/30">No Active Grants</p>
-            <p className="text-[12px] text-muted-foreground/30">
+            <p className="text-[12px] font-medium text-muted-foreground">No Active Grants</p>
+            <p className="text-[12px] text-muted-foreground">
               Services using per-request approval do not create grants. Only
               services set to time-based grant mode will appear here.
             </p>

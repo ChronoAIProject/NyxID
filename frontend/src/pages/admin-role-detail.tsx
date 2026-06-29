@@ -226,8 +226,8 @@ export function AdminRoleDetailPage() {
       <DetailSection title="Permissions">
         {role.permissions.length === 0 ? (
           <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
-            <SmartRemoteIcon className="h-48 w-48 text-muted-foreground/30" />
-            <p className="text-[12px] text-muted-foreground/30">No permissions assigned.</p>
+            <SmartRemoteIcon className="h-48 w-48 text-muted-foreground" />
+            <p className="text-[12px] text-muted-foreground">No permissions assigned.</p>
           </div>
         ) : (
           <div className="flex flex-wrap gap-2 px-4 py-3">

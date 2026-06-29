@@ -279,18 +279,18 @@ export function AdminInviteCodesPage() {
             </div>
           ) : error ? (
             <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
-              <MysteryBoxIcon className="h-64 w-64 text-muted-foreground/30" />
+              <MysteryBoxIcon className="h-64 w-64 text-muted-foreground" />
               <div className="space-y-1">
-                <p className="text-[12px] font-medium text-muted-foreground/30">Failed to load invite codes</p>
-                <p className="text-xs text-muted-foreground/30">Please try again later.</p>
+                <p className="text-[12px] font-medium text-muted-foreground">Failed to load invite codes</p>
+                <p className="text-xs text-muted-foreground">Please try again later.</p>
               </div>
             </div>
           ) : inviteCodes.length === 0 ? (
             <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
-              <MysteryBoxIcon className="h-64 w-64 text-muted-foreground/30" />
+              <MysteryBoxIcon className="h-64 w-64 text-muted-foreground" />
               <div className="space-y-1">
-                <p className="text-[12px] font-medium text-muted-foreground/30">No invite codes found</p>
-                <p className="text-xs text-muted-foreground/30">Create one to allow a new user to register.</p>
+                <p className="text-[12px] font-medium text-muted-foreground">No invite codes found</p>
+                <p className="text-xs text-muted-foreground">Create one to allow a new user to register.</p>
               </div>
             </div>
           ) : (
@@ -497,10 +497,10 @@ export function AdminInviteCodesPage() {
             </div>
           ) : error ? (
             <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
-              <MysteryBoxIcon className="h-64 w-64 text-muted-foreground/30" />
+              <MysteryBoxIcon className="h-64 w-64 text-muted-foreground" />
               <div className="space-y-1">
-                <p className="text-[12px] font-medium text-muted-foreground/30">Failed to load invite codes</p>
-                <p className="text-xs text-muted-foreground/30">Please try again later.</p>
+                <p className="text-[12px] font-medium text-muted-foreground">Failed to load invite codes</p>
+                <p className="text-xs text-muted-foreground">Please try again later.</p>
               </div>
             </div>
           ) : (
@@ -961,10 +961,10 @@ function InviteCodesByUserView({
   if (redemptions.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
-        <MysteryBoxIcon className="h-64 w-64 text-muted-foreground/30" />
+        <MysteryBoxIcon className="h-64 w-64 text-muted-foreground" />
         <div className="space-y-1">
-          <p className="text-[12px] font-medium text-muted-foreground/30">No redemptions found</p>
-          <p className="text-xs text-muted-foreground/30">Invite codes will appear here once they are redeemed by users.</p>
+          <p className="text-[12px] font-medium text-muted-foreground">No redemptions found</p>
+          <p className="text-xs text-muted-foreground">Invite codes will appear here once they are redeemed by users.</p>
         </div>
       </div>
     );

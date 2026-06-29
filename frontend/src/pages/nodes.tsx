@@ -297,10 +297,10 @@ export function NodesPage() {
         <ErrorBanner message="Failed to load nodes. Please try again." onRetry={refetch} />
       ) : !nodes || nodes.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
-          <WifiRouterIcon className="h-64 w-64 text-muted-foreground/30" />
+          <WifiRouterIcon className="h-64 w-64 text-muted-foreground" />
           <div className="max-w-md space-y-1">
-            <p className="text-[12px] font-medium text-muted-foreground/30">No Credential Nodes</p>
-            <p className="text-[12px] text-muted-foreground/30">
+            <p className="text-[12px] font-medium text-muted-foreground">No Credential Nodes</p>
+            <p className="text-[12px] text-muted-foreground">
               Create a registration token to get started.
             </p>
           </div>

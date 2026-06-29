@@ -236,10 +236,10 @@ export function ApprovalHistoryPage() {
         <ErrorBanner message="Failed to load approval history. Please try again." onRetry={refetch} />
       ) : requests.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
-          <SeoKeywordIcon className="h-64 w-64 text-muted-foreground/30" />
+          <SeoKeywordIcon className="h-64 w-64 text-muted-foreground" />
           <div className="max-w-md space-y-1">
-            <p className="text-[12px] font-medium text-muted-foreground/30">No Approval Requests</p>
-            <p className="text-[12px] text-muted-foreground/30">
+            <p className="text-[12px] font-medium text-muted-foreground">No Approval Requests</p>
+            <p className="text-[12px] text-muted-foreground">
               No approval requests match the current filter.
             </p>
           </div>

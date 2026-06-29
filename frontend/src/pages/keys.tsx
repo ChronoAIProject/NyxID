@@ -566,16 +566,16 @@ function groupKeysBySource(
 
 function ServicesEmptyState({ onAdd }: { readonly onAdd: () => void }) {
   return (
-    <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
-      <MagicKeyIcon className="h-64 w-64 text-muted-foreground/30" />
-      <div className="space-y-1">
-        <p className="text-[12px] font-medium text-muted-foreground/30">No AI services yet</p>
-        <p className="text-xs text-muted-foreground/30">
+    <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
+      <MagicKeyIcon className="h-48 w-48 text-muted-foreground/40" />
+      <div className="space-y-1.5 max-w-md">
+        <p className="text-[15px] font-semibold text-foreground">No AI services yet</p>
+        <p className="text-[12px] text-muted-foreground leading-relaxed">
           Connect a downstream service (OpenAI, GitHub, Anthropic, etc.) so your
           AI agents can call it through NyxID without ever seeing the raw key.
         </p>
       </div>
-      <AddCtaButton label="Add Service" onClick={onAdd} />
+      <AddCtaButton label="Add your first service" onClick={onAdd} />
     </div>
   );
 }

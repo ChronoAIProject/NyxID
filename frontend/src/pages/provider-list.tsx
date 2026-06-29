@@ -740,10 +740,10 @@ export function ProviderListPage() {
         </div>
       ) : !providers || providers.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
-          <DishAntennaIcon className="h-64 w-64 text-muted-foreground/30" />
+          <DishAntennaIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-[12px] font-medium text-muted-foreground/30">No Providers</p>
-            <p className="text-xs text-muted-foreground/30">
+            <p className="text-[12px] font-medium text-muted-foreground">No Providers</p>
+            <p className="text-xs text-muted-foreground">
               Add a provider to get started.
             </p>
           </div>

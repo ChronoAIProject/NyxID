@@ -351,10 +351,10 @@ export function OrgDetailPage() {
             <Skeleton className="h-40 w-full" />
           ) : !members || members.length === 0 ? (
             <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
-              <BenchesIcon className="h-64 w-64 text-muted-foreground/30" />
+              <BenchesIcon className="h-64 w-64 text-muted-foreground" />
               <div className="space-y-1">
-                <p className="text-[12px] font-medium text-muted-foreground/30">No Members</p>
-                <p className="text-xs text-muted-foreground/30">No members yet.</p>
+                <p className="text-[12px] font-medium text-muted-foreground">No Members</p>
+                <p className="text-xs text-muted-foreground">No members yet.</p>
               </div>
             </div>
           ) : (
@@ -482,8 +482,8 @@ export function OrgDetailPage() {
               ) : !invites || invites.length === 0 ? (
                 <Card>
                   <CardContent className="flex flex-col items-center justify-center gap-1 py-8 text-center">
-                    <MailSendingIcon className="h-48 w-48 text-muted-foreground/30" />
-                    <p className="text-[12px] text-muted-foreground/30">No pending invites.</p>
+                    <MailSendingIcon className="h-48 w-48 text-muted-foreground" />
+                    <p className="text-[12px] text-muted-foreground">No pending invites.</p>
                   </CardContent>
                 </Card>
               ) : (

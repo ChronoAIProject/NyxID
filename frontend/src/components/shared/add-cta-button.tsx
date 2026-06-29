@@ -31,11 +31,12 @@ export function AddCtaButton({
     return (
       <Button
         variant="primary"
+        size="lg"
         onClick={onClick}
         disabled={disabled}
       >
         <ButtonIcon variant="primary">
-          <Icon className="h-3 w-3" />
+          <Icon className="h-3.5 w-3.5" />
         </ButtonIcon>
         {label}
       </Button>

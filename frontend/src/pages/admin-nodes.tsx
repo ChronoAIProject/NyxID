@@ -184,18 +184,18 @@ export function AdminNodesPage() {
         </div>
       ) : error ? (
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
-          <MagicBoxIcon className="h-64 w-64 text-muted-foreground/30" />
+          <MagicBoxIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-[12px] font-medium text-muted-foreground/30">Failed to load nodes</p>
-            <p className="text-xs text-muted-foreground/30">Please try again later.</p>
+            <p className="text-[12px] font-medium text-muted-foreground">Failed to load nodes</p>
+            <p className="text-xs text-muted-foreground">Please try again later.</p>
           </div>
         </div>
       ) : nodes.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
-          <MagicBoxIcon className="h-64 w-64 text-muted-foreground/30" />
+          <MagicBoxIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-[12px] font-medium text-muted-foreground/30">No nodes found</p>
-            <p className="text-xs text-muted-foreground/30">
+            <p className="text-[12px] font-medium text-muted-foreground">No nodes found</p>
+            <p className="text-xs text-muted-foreground">
               {search || statusFilter
                 ? "No nodes match your filters."
                 : "No credential nodes registered."}

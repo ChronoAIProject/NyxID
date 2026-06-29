@@ -251,10 +251,10 @@ function BotsTable({
 function EmptyState() {
   return (
     <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
-      <RobotIcon className="h-64 w-64 text-muted-foreground/30" />
+      <RobotIcon className="h-64 w-64 text-muted-foreground" />
       <div className="space-y-1">
-        <p className="text-[12px] font-medium text-muted-foreground/30">No channel bots yet</p>
-        <p className="text-xs text-muted-foreground/30">
+        <p className="text-[12px] font-medium text-muted-foreground">No channel bots yet</p>
+        <p className="text-xs text-muted-foreground">
           Add a messaging platform bot to relay conversations to your AI agents.
         </p>
       </div>
@@ -988,10 +988,10 @@ function DeviceChannelsSection({
         <LoadingSkeleton />
       ) : devices.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
-          <SmartSpeakerIcon className="h-64 w-64 text-muted-foreground/30" />
+          <SmartSpeakerIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-[12px] font-medium text-muted-foreground/30">No device channels yet</p>
-            <p className="text-xs text-muted-foreground/30">
+            <p className="text-[12px] font-medium text-muted-foreground">No device channels yet</p>
+            <p className="text-xs text-muted-foreground">
               Create one to let devices push events into the channel relay
               pipeline.
             </p>

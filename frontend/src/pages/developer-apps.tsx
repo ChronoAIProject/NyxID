@@ -416,12 +416,12 @@ export function DeveloperAppsPage() {
 
         {!isLoading && visibleApps.length === 0 && (
           <div className="xl:col-span-2 flex flex-col items-center justify-center gap-1 py-12 text-center">
-            <WebsiteLayoutIcon className="h-64 w-64 text-muted-foreground/30" />
+            <WebsiteLayoutIcon className="h-64 w-64 text-muted-foreground" />
             <div className="space-y-1">
-              <p className="text-[12px] font-medium text-muted-foreground/30">
+              <p className="text-[12px] font-medium text-muted-foreground">
                 {apps.length === 0 ? "No Developer Apps" : "No Active Apps"}
               </p>
-              <p className="text-xs text-muted-foreground/30">
+              <p className="text-xs text-muted-foreground">
                 {apps.length === 0
                   ? "Create your first application."
                   : "Enable 'Show inactive' to view deactivated apps."}

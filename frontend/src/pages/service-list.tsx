@@ -547,10 +547,10 @@ export function ServiceListPage() {
         </div>
       ) : !services || services.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
-          <BrickWallIcon className="h-64 w-64 text-muted-foreground/30" />
+          <BrickWallIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-[12px] font-medium text-muted-foreground/30">No services yet</p>
-            <p className="text-xs text-muted-foreground/30">
+            <p className="text-[12px] font-medium text-muted-foreground">No services yet</p>
+            <p className="text-xs text-muted-foreground">
               Add a service to get started.
             </p>
           </div>

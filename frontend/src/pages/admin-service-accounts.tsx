@@ -190,18 +190,18 @@ export function AdminServiceAccountsPage() {
         </div>
       ) : error ? (
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
-          <RoboticArmIcon className="h-64 w-64 text-muted-foreground/30" />
+          <RoboticArmIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-[12px] font-medium text-muted-foreground/30">Failed to load service accounts</p>
-            <p className="text-xs text-muted-foreground/30">Please try again later.</p>
+            <p className="text-[12px] font-medium text-muted-foreground">Failed to load service accounts</p>
+            <p className="text-xs text-muted-foreground">Please try again later.</p>
           </div>
         </div>
       ) : accounts.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
-          <RoboticArmIcon className="h-64 w-64 text-muted-foreground/30" />
+          <RoboticArmIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-[12px] font-medium text-muted-foreground/30">No service accounts found</p>
-            <p className="text-xs text-muted-foreground/30">
+            <p className="text-[12px] font-medium text-muted-foreground">No service accounts found</p>
+            <p className="text-xs text-muted-foreground">
               {search
                 ? "No service accounts match your search."
                 : "There are no service accounts to display."}

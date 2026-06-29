@@ -168,18 +168,18 @@ export function AdminUsersPage() {
         </div>
       ) : error ? (
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
-          <BiometricIdentityIcon className="h-64 w-64 text-muted-foreground/30" />
+          <BiometricIdentityIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-[12px] font-medium text-muted-foreground/30">Failed to load users</p>
-            <p className="text-xs text-muted-foreground/30">Please try again later.</p>
+            <p className="text-[12px] font-medium text-muted-foreground">Failed to load users</p>
+            <p className="text-xs text-muted-foreground">Please try again later.</p>
           </div>
         </div>
       ) : users.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
-          <BiometricIdentityIcon className="h-64 w-64 text-muted-foreground/30" />
+          <BiometricIdentityIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-[12px] font-medium text-muted-foreground/30">No users found</p>
-            <p className="text-xs text-muted-foreground/30">
+            <p className="text-[12px] font-medium text-muted-foreground">No users found</p>
+            <p className="text-xs text-muted-foreground">
               {search ? "No users match your search." : "There are no users to display."}
             </p>
           </div>

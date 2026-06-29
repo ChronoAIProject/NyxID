@@ -142,18 +142,18 @@ export function AdminGroupsPage() {
         </div>
       ) : error ? (
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
-          <HierarchyIcon className="h-64 w-64 text-muted-foreground/30" />
+          <HierarchyIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-[12px] font-medium text-muted-foreground/30">Failed to load groups</p>
-            <p className="text-xs text-muted-foreground/30">Please try again later.</p>
+            <p className="text-[12px] font-medium text-muted-foreground">Failed to load groups</p>
+            <p className="text-xs text-muted-foreground">Please try again later.</p>
           </div>
         </div>
       ) : groups.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
-          <HierarchyIcon className="h-64 w-64 text-muted-foreground/30" />
+          <HierarchyIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-[12px] font-medium text-muted-foreground/30">No groups found</p>
-            <p className="text-xs text-muted-foreground/30">There are no groups to display.</p>
+            <p className="text-[12px] font-medium text-muted-foreground">No groups found</p>
+            <p className="text-xs text-muted-foreground">There are no groups to display.</p>
           </div>
         </div>
       ) : (

@@ -271,8 +271,8 @@ export function AdminGroupDetailPage() {
         )}
         {members.length === 0 ? (
           <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
-            <BenchesIcon className="h-48 w-48 text-muted-foreground/30" />
-            <p className="text-[12px] text-muted-foreground/30">No members in this group.</p>
+            <BenchesIcon className="h-48 w-48 text-muted-foreground" />
+            <p className="text-[12px] text-muted-foreground">No members in this group.</p>
           </div>
         ) : (
           <Table>
