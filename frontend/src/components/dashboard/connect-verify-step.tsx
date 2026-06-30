@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { Check, ExternalLink, Loader2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { CopyableField } from "@/components/shared/copyable-field";
@@ -10,36 +10,37 @@ import {
 } from "@/hooks/use-proxy-onboarding";
 import type { ApiKeyCreateResponse } from "@/types/api";
 
-/**
- * Slugs that almost always expose `/v1/models` on AI providers. Used to
- * decide whether (a) the bearer probe path should be `v1/models` or `/`
- * and (b) whether the OpenAI-env-var config snippet is worth showing.
- * Mismatched services still get the proxy-URL curl example, just not
- * the env-var snippet (which wouldn't work for non-OpenAI-shaped APIs).
- */
 const OPENAI_SHAPED_HINTS =
   /(openai|anthropic|claude|gemini|deepseek|groq|together|mistral|fireworks|perplexity|cohere|xai|grok)/i;
 
 const PROBE_TIMEOUT_MS = 8000;
 
+/**
+ * Phase machine — every transition is gated by an explicit user click
+ * (per Calvin's feedback: "the lift should be to ask them if they want
+ * to create a key for this ai service instead of doing it automatically.
+ * test comes after key is created"). No background activity ever runs
+ * without the user pulling a trigger first.
+ */
 type Phase =
-  | "minting"          // POST /api-keys in flight
-  | "mint_failed"      // backend rejected the auto-create
-  | "ready_to_probe"   // key minted, about to fire probe
-  | "probing"          // bearer-auth fetch in flight
-  | "success"          // probe returned 2xx/3xx — the aha
-  | "probe_failed"     // bearer auth landed but proxy returned 4xx/5xx
-  | "skipped";         // catalog says no creds AND not OpenAI-shaped — show key + config only
+  | "connected"       // initial — service is connected, ask if they want an Agent Key
+  | "minting"         // user clicked Create Agent Key, mint in flight
+  | "mint_failed"     // mint errored — show retry + skip
+  | "key_ready"       // mint succeeded — show key + offer to test
+  | "probing"         // user clicked Test — probe in flight
+  | "probe_success"   // probe returned 2xx — the actual end-to-end aha
+  | "probe_failed";   // probe returned 4xx/5xx/timeout — show diagnose hint + retry
 
 interface CreatedKey {
   readonly id: string;
   readonly slug: string;
   readonly serviceName: string;
   /**
-   * How the underlying credential got established. Drives whether we
-   * probe at all (typed creds + OAuth/device-code → probe; auth_method
-   * "none" with a ChatGPT-backed URL like Codex → skip because /v1/models
-   * doesn't exist on that backend).
+   * Drives whether the test button is even offered. Non-credential
+   * completions (device_code, oauth) typically have non-OpenAI-shape
+   * backends (Codex on chatgpt.com etc.) where re-probing /v1/models
+   * would false-fail against a working connection. We don't hide the
+   * test entirely — we just don't run it without an opt-in.
    */
   readonly completionMode: "credential" | "device_code" | "oauth" | "none";
 }
@@ -59,45 +60,34 @@ function proxyBaseUrl(slug: string): string {
   return `${window.location.origin}/api/v1/proxy/s/${slug}`;
 }
 
-function looksOpenAiShaped(slug: string): boolean {
-  return OPENAI_SHAPED_HINTS.test(slug);
+function canProbe(createdKey: CreatedKey): boolean {
+  // Only show the Test button when we have a probeable path AND the
+  // upstream actually expects bearer creds — for Codex/ChatGPT-backed
+  // services (auth_method=none + non-openai backend) the probe would
+  // 404 against a working connection.
+  return (
+    createdKey.completionMode === "credential" &&
+    probePathForSlug(createdKey.slug) !== ""
+  );
 }
 
 /**
- * Wave-aha-1 A4+ — the real post-connect aha moment.
+ * Wave-aha-1 A4+ (opt-in rework) — post-connect aha moment, but every
+ * step requires the user to pull a trigger:
  *
- * Connecting a service ≠ being able to use it. The user's actual goal
- * is "make my AI tool talk to {service} through NyxID." Three things
- * have to happen for that to work:
+ *   1. Service is connected → ask "Create an Agent Key for this?" with
+ *      [Create Agent Key] [Maybe later]. No background mint.
+ *   2. User clicks → mint runs visibly. If it fails, show the error
+ *      and offer retry — instead of leaving a spinner spinning forever.
+ *   3. Mint succeeds → show full key + proxy URL + (where applicable)
+ *      env-var snippet, with [Test connection] / [I'll wire it myself].
+ *   4. User clicks Test → bearer probe runs visibly. Success or precise
+ *      failure copy. Retry available either way.
  *
- *   1. NyxID stores the service credential (the form-submit step did
- *      this already by the time we render).
- *   2. The user has an Agent Key (`nyx_ag_…`) scoped to call that
- *      service through the proxy.
- *   3. The user has the proxy URL + the agent key wired into their
- *      AI tool's config.
- *
- * The old `/keys/{id}` flow left steps 2-3 entirely to the user.
- * This step does both inline:
- *
- *   - Auto-mints an Agent Key scoped to ONLY the just-connected
- *     service (least-privilege default), with the `proxy` scope so it
- *     can make proxy calls.
- *   - Shows the full secret ONCE in a CopyableField with a one-time
- *     warning ("save it now; we won't show it again"). The Agent Keys
- *     tab will show only the prefix afterwards.
- *   - Shows the proxy URL.
- *   - For OpenAI-shaped services, shows the OPENAI_API_KEY +
- *     OPENAI_BASE_URL env-var snippet (the lingua franca for Codex
- *     CLI, openai-python, Cursor, Continue.dev, etc.).
- *   - Fires a probe against the proxy USING THE NEW AGENT KEY AS
- *     BEARER — not the user's session cookie. That's the path the
- *     user's tool will actually take, so this is the real verification
- *     (the cookie probe in v1 of A4 didn't prove the bearer path
- *     worked).
- *
- * If anything fails, we degrade gracefully: minted key + URL still
- * shown, with a clear "couldn't probe automatically" explanation.
+ * The earlier auto-mint version hung silently when the mint request
+ * never reached the BE (no surfaced error, no user agency). This
+ * version makes failures impossible to miss because they always follow
+ * a deliberate click.
  */
 export function ConnectVerifyStep({
   createdKey,
@@ -106,25 +96,19 @@ export function ConnectVerifyStep({
   onViewDetails,
 }: ConnectVerifyStepProps) {
   const createApiKey = useCreateApiKey();
-  const [phase, setPhase] = useState<Phase>("minting");
+  const [phase, setPhase] = useState<Phase>("connected");
   const [agentKey, setAgentKey] = useState<ApiKeyCreateResponse | null>(null);
   const [mintError, setMintError] = useState<string | null>(null);
   const [httpStatus, setHttpStatus] = useState<number | null>(null);
   const [probeError, setProbeError] = useState<string | null>(null);
-  const mintedRef = useRef(false);
-  const probedRef = useRef(false);
-  const loadingDispatchedRef = useRef(false);
 
-  // Step 1: mint a scoped Agent Key for the just-connected service.
-  // Runs once on mount; the ref guard handles React strict-mode double-fire.
-  useEffect(() => {
-    if (mintedRef.current) return;
-    mintedRef.current = true;
+  const showProbeOption = canProbe(createdKey);
 
+  function triggerMint() {
+    setPhase("minting");
+    setMintError(null);
     createApiKey.mutate(
       {
-        // A short auto-name keeps the Agent Keys table tidy and the user
-        // can rename it on the detail page if they want a better label.
         name: `Key for ${createdKey.serviceName}`,
         scopes: ["proxy"],
         allow_all_services: false,
@@ -134,7 +118,7 @@ export function ConnectVerifyStep({
       {
         onSuccess: (key) => {
           setAgentKey(key);
-          setPhase("ready_to_probe");
+          setPhase("key_ready");
         },
         onError: (err) => {
           setMintError(err instanceof Error ? err.message : String(err));
@@ -142,114 +126,63 @@ export function ConnectVerifyStep({
         },
       },
     );
-    // createApiKey is a stable mutation handle; we intentionally don't
-    // re-mint when it changes. createdKey.id + serviceName drive the
-    // scoping + name and don't change for the life of this step.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [createdKey.id, createdKey.serviceName]);
+  }
 
-  // Step 2: once the key exists, fire the bearer-auth probe. For
-  // services that don't have a probeable path (Codex's chat backend,
-  // unknown custom endpoints) just go straight to "skipped" success.
-  useEffect(() => {
-    if (phase !== "ready_to_probe" || !agentKey) return;
-    if (probedRef.current) return;
-    probedRef.current = true;
-
-    const probePath = probePathForSlug(createdKey.slug);
-    // Skip the probe when:
-    //  - The catalog entry's auth_method is "none" (Codex etc.) — we
-    //    don't really know what path on that backend would respond,
-    //    and we don't want a false-negative 404 against a working
-    //    connection.
-    //  - The slug isn't OpenAI-shaped (`probePath === ""` means root,
-    //    which usually 404s on real APIs).
-    const shouldProbe =
-      createdKey.completionMode === "credential" && probePath !== "";
-
-    if (!shouldProbe) {
-      setPhase("skipped");
-      return;
-    }
+  async function triggerProbe() {
+    if (!agentKey) return;
+    setPhase("probing");
+    setProbeError(null);
+    setHttpStatus(null);
 
     window.dispatchEvent(new CustomEvent(VERIFY_KEY_LOADING_START_EVENT));
-    loadingDispatchedRef.current = true;
-    setPhase("probing");
 
+    const url = `${proxyBaseUrl(createdKey.slug)}/${probePathForSlug(createdKey.slug)}`;
     const controller = new AbortController();
     const timer = window.setTimeout(
       () => controller.abort(),
       PROBE_TIMEOUT_MS,
     );
 
-    const url = `${proxyBaseUrl(createdKey.slug)}/${probePath}`;
-    (async () => {
-      let status: number | null = null;
-      try {
-        const res = await fetch(url, {
-          method: "GET",
-          // Bearer = the just-minted Agent Key. credentials:"omit" so
-          // the test does NOT fall back to the user's session cookie —
-          // we want to prove the bearer path the user's TOOL will take.
-          credentials: "omit",
-          headers: {
-            Authorization: `Bearer ${agentKey.full_key}`,
-            "Content-Type": "application/json",
-          },
-          signal: controller.signal,
-        });
-        status = res.status;
-      } catch {
-        status = null;
-      } finally {
-        window.clearTimeout(timer);
-      }
-
-      setHttpStatus(status);
-
-      const ok = status !== null && status >= 200 && status < 400;
-      if (ok) {
-        setPhase("success");
-        // Dashboard checklist's "Make first proxy call" step listens for
-        // this — ticks it off without a separate navigation.
-        window.dispatchEvent(
-          new CustomEvent(FIRST_PROXY_CALL_SUCCEEDED_EVENT),
-        );
-      } else {
-        setPhase("probe_failed");
-        setProbeError(diagnose(status, isNodeRouted));
-      }
-
-      if (loadingDispatchedRef.current) {
-        window.dispatchEvent(new CustomEvent(VERIFY_KEY_LOADING_END_EVENT));
-        loadingDispatchedRef.current = false;
-      }
-    })();
-
-    return () => {
-      controller.abort();
+    let status: number | null = null;
+    try {
+      const res = await fetch(url, {
+        method: "GET",
+        // Bearer = the user's just-minted Agent Key. credentials:"omit"
+        // so we don't accidentally fall back to the session cookie —
+        // we want to prove the bearer path the user's TOOL will take.
+        credentials: "omit",
+        headers: {
+          Authorization: `Bearer ${agentKey.full_key}`,
+          "Content-Type": "application/json",
+        },
+        signal: controller.signal,
+      });
+      status = res.status;
+    } catch {
+      status = null;
+    } finally {
       window.clearTimeout(timer);
-      if (loadingDispatchedRef.current) {
-        window.dispatchEvent(new CustomEvent(VERIFY_KEY_LOADING_END_EVENT));
-        loadingDispatchedRef.current = false;
-      }
-    };
-  }, [phase, agentKey, createdKey.slug, createdKey.completionMode, isNodeRouted]);
+    }
 
-  const proxyUrl = proxyBaseUrl(createdKey.slug);
-  // Only suggest the OPENAI_API_KEY / OPENAI_BASE_URL env-var snippet
-  // when we've actually proven the OpenAI-compat path works (probe
-  // returned 2xx). Skipped or failed probes leave us guessing — and for
-  // services whose slug matches the OpenAI hint regex but whose backend
-  // ISN'T OpenAI-compat (e.g. `llm-openai-codex` → ChatGPT backend),
-  // showing the snippet would mislead the user into thinking they can
-  // wire NyxID into openai-python and it'd just work.
-  const showOpenAiEnvSnippet =
-    phase === "success" && looksOpenAiShaped(createdKey.slug);
+    window.dispatchEvent(new CustomEvent(VERIFY_KEY_LOADING_END_EVENT));
+    setHttpStatus(status);
+
+    const ok = status !== null && status >= 200 && status < 400;
+    if (ok) {
+      setPhase("probe_success");
+      window.dispatchEvent(
+        new CustomEvent(FIRST_PROXY_CALL_SUCCEEDED_EVENT),
+      );
+    } else {
+      setPhase("probe_failed");
+      setProbeError(diagnose(status, isNodeRouted));
+    }
+  }
 
   return (
     <div className="space-y-4 py-2">
-      <ResultPanel
+      {/* Top status banner — what just happened / what we're doing now */}
+      <StatusBanner
         phase={phase}
         serviceName={createdKey.serviceName}
         mintError={mintError}
@@ -257,89 +190,32 @@ export function ConnectVerifyStep({
         httpStatus={httpStatus}
       />
 
+      {/* Once minted, the Agent Key + URL panel stays visible from
+          key_ready through probe_success / probe_failed so the user can
+          copy it regardless of test outcome. */}
       {agentKey && (
-        <div className="space-y-3 rounded-xl border border-border/50 bg-card p-4">
-          <div className="space-y-1">
-            <p className="text-[12px] font-semibold text-foreground">
-              Your new Agent Key
-            </p>
-            <p className="text-[11px] text-muted-foreground">
-              Save this now. The full secret is only shown here once — only
-              the prefix is visible afterwards. Scoped to{" "}
-              <span className="font-medium text-foreground">
-                {createdKey.serviceName}
-              </span>{" "}
-              only, with the <code>proxy</code> scope.
-            </p>
-          </div>
-          <CopyableField label="Agent Key" value={agentKey.full_key} />
-
-          <div className="space-y-1 pt-1">
-            <p className="text-[12px] font-semibold text-foreground">
-              Proxy URL
-            </p>
-            <p className="text-[11px] text-muted-foreground">
-              Point your AI tool at this URL instead of the service&apos;s
-              direct API. NyxID brokers the call.
-            </p>
-          </div>
-          <CopyableField label="Base URL" value={proxyUrl} />
-
-          {showOpenAiEnvSnippet ? (
-            <>
-              <div className="space-y-1 pt-1">
-                <p className="text-[12px] font-semibold text-foreground">
-                  Wire it up
-                </p>
-                <p className="text-[11px] text-muted-foreground">
-                  Most OpenAI-compatible tools (openai-python, Cursor,
-                  Continue.dev, …) read these two env vars.
-                </p>
-              </div>
-              <CopyableField
-                label="Shell env"
-                value={`export OPENAI_API_KEY="${agentKey.full_key}"\nexport OPENAI_BASE_URL="${proxyUrl}/v1"`}
-              />
-            </>
-          ) : (
-            // Skipped/failed probe OR non-OpenAI-shape slug. We don't know
-            // for sure that the tool will accept openai-compat env vars
-            // (Codex's ChatGPT backend, custom endpoints, OAuth/device-
-            // code completions that haven't been smoke-tested). Be honest
-            // and tell the user to wire it per their tool's docs.
-            <div className="space-y-1 pt-1">
-              <p className="text-[12px] font-semibold text-foreground">
-                Wire it up
-              </p>
-              <p className="text-[11px] text-muted-foreground">
-                Paste the Agent Key + Base URL above into your tool&apos;s
-                provider configuration. Each tool wires this differently —
-                check its docs if you&apos;re unsure.
-              </p>
-            </div>
-          )}
-        </div>
+        <AgentKeyPanel
+          agentKey={agentKey}
+          createdKey={createdKey}
+          showOpenAiEnvSnippet={phase === "probe_success"}
+        />
       )}
 
-      <div className="flex flex-wrap items-center justify-end gap-2">
-        <Button variant="outline" onClick={onViewDetails}>
-          <ExternalLink className="mr-1.5 h-3.5 w-3.5" />
-          View details
-        </Button>
-        <Button
-          variant="primary"
-          size="lg"
-          onClick={onDone}
-          disabled={phase === "minting"}
-        >
-          Done
-        </Button>
-      </div>
+      {/* Action buttons — gate every transition behind an explicit click. */}
+      <Footer
+        phase={phase}
+        showProbeOption={showProbeOption}
+        onMint={triggerMint}
+        onProbe={triggerProbe}
+        onDone={onDone}
+        onViewDetails={onViewDetails}
+        hasKey={agentKey !== null}
+      />
     </div>
   );
 }
 
-function ResultPanel({
+function StatusBanner({
   phase,
   serviceName,
   mintError,
@@ -352,86 +228,257 @@ function ResultPanel({
   readonly probeError: string | null;
   readonly httpStatus: number | null;
 }) {
-  if (phase === "minting") {
-    return (
-      <Banner icon="spinner" tone="neutral" title="Setting up your Agent Key…">
-        We&apos;re creating a scoped Agent Key so your AI tools can call{" "}
-        {serviceName} through NyxID.
-      </Banner>
-    );
-  }
-
-  if (phase === "mint_failed") {
-    return (
-      <Banner icon="warn" tone="warn" title="Couldn’t auto-create an Agent Key">
-        <span>
-          {serviceName} is connected, but we couldn&apos;t mint an Agent Key
-          for you automatically.{" "}
-          {mintError ? `(${mintError})` : ""} You can create one manually
-          from <span className="font-medium">/keys → Agent Keys → Create</span>.
-        </span>
-      </Banner>
-    );
-  }
-
-  if (phase === "probing" || phase === "ready_to_probe") {
-    return (
-      <Banner
-        icon="spinner"
-        tone="neutral"
-        title="Testing the end-to-end path…"
-      >
-        Calling {serviceName} with the new Agent Key to prove your AI tool
-        can use it. This takes a couple of seconds.
-      </Banner>
-    );
-  }
-
-  if (phase === "success") {
-    return (
-      <Banner
-        icon="check"
-        tone="success"
-        title={`Your AI tool can now call ${serviceName} through NyxID`}
-      >
-        <span>
+  switch (phase) {
+    case "connected":
+      return (
+        <Banner
+          icon="check"
+          tone="success"
+          title={`${serviceName} connected`}
+        >
+          NyxID has stored your credentials. To let your AI tools use this
+          connection, you&apos;ll need an Agent Key scoped to this service.
+        </Banner>
+      );
+    case "minting":
+      return (
+        <Banner icon="spinner" tone="neutral" title="Creating your Agent Key…">
+          Minting a scoped key with the <code>proxy</code> scope and access
+          to {serviceName} only.
+        </Banner>
+      );
+    case "mint_failed":
+      return (
+        <Banner
+          icon="warn"
+          tone="warn"
+          title="Couldn’t create the Agent Key"
+        >
+          {mintError ??
+            "The server didn't accept the request."}{" "}
+          You can retry, or skip and create one later from{" "}
+          <span className="font-medium">/keys → Agent Keys → Create</span>.
+        </Banner>
+      );
+    case "key_ready":
+      return (
+        <Banner
+          icon="check"
+          tone="success"
+          title={`Agent Key created for ${serviceName}`}
+        >
+          Save the key now (it&apos;s only shown once). To prove the
+          end-to-end path works, run a test below — or skip and wire it
+          straight into your AI tool.
+        </Banner>
+      );
+    case "probing":
+      return (
+        <Banner
+          icon="spinner"
+          tone="neutral"
+          title="Testing the end-to-end path…"
+        >
+          Calling {serviceName} with the new Agent Key as bearer — the same
+          path your AI tool will take. This takes a couple of seconds.
+        </Banner>
+      );
+    case "probe_success":
+      return (
+        <Banner
+          icon="check"
+          tone="success"
+          title={`Your AI tool can now call ${serviceName} through NyxID`}
+        >
           End-to-end test succeeded
           {httpStatus !== null ? ` (HTTP ${String(httpStatus)})` : ""}.
-          Copy the Agent Key and Base URL below into your tool of choice —
-          you&apos;re done.
-        </span>
-      </Banner>
-    );
+          Copy the Agent Key + Base URL into your tool of choice — you&apos;re done.
+        </Banner>
+      );
+    case "probe_failed":
+      return (
+        <Banner
+          icon="warn"
+          tone="warn"
+          title="End-to-end test didn’t succeed"
+        >
+          <span>
+            {probeError ??
+              "The probe returned an unexpected response."}
+            {httpStatus !== null ? ` (HTTP ${String(httpStatus)})` : ""}
+            {" "}The Agent Key is still good — copy it above and use it from
+            your tool, or retry the test below.
+          </span>
+        </Banner>
+      );
   }
+}
 
-  if (phase === "skipped") {
-    return (
-      <Banner
-        icon="check"
-        tone="success"
-        title={`Agent Key minted — ready to use with ${serviceName}`}
-      >
-        We didn&apos;t run an automatic smoke test on this service (its
-        endpoint doesn&apos;t expose a standard health path we can probe
-        safely). Copy the Agent Key and Base URL below into your tool —
-        it&apos;s wired correctly.
-      </Banner>
-    );
-  }
-
-  // probe_failed
+function AgentKeyPanel({
+  agentKey,
+  createdKey,
+  showOpenAiEnvSnippet,
+}: {
+  readonly agentKey: ApiKeyCreateResponse;
+  readonly createdKey: CreatedKey;
+  readonly showOpenAiEnvSnippet: boolean;
+}) {
+  const proxyUrl = proxyBaseUrl(createdKey.slug);
   return (
-    <Banner
-      icon="warn"
-      tone="warn"
-      title={`Agent Key minted — but the end-to-end test didn’t succeed`}
-    >
-      <span>
-        {probeError ??
-          "The probe returned an unexpected response. Use the View details button to investigate."}
-        {httpStatus !== null ? ` (HTTP ${String(httpStatus)})` : ""}
-      </span>
-    </Banner>
+    <div className="space-y-3 rounded-xl border border-border/50 bg-card p-4">
+      <div className="space-y-1">
+        <p className="text-[12px] font-semibold text-foreground">
+          Your new Agent Key
+        </p>
+        <p className="text-[11px] text-muted-foreground">
+          Save this now. The full secret is only shown here once — only the
+          prefix is visible afterwards. Scoped to{" "}
+          <span className="font-medium text-foreground">
+            {createdKey.serviceName}
+          </span>{" "}
+          only, with the <code>proxy</code> scope.
+        </p>
+      </div>
+      <CopyableField label="Agent Key" value={agentKey.full_key} />
+
+      <div className="space-y-1 pt-1">
+        <p className="text-[12px] font-semibold text-foreground">Proxy URL</p>
+        <p className="text-[11px] text-muted-foreground">
+          Point your AI tool at this URL instead of the service&apos;s direct
+          API. NyxID brokers the call.
+        </p>
+      </div>
+      <CopyableField label="Base URL" value={proxyUrl} />
+
+      {showOpenAiEnvSnippet ? (
+        <>
+          <div className="space-y-1 pt-1">
+            <p className="text-[12px] font-semibold text-foreground">
+              Wire it up
+            </p>
+            <p className="text-[11px] text-muted-foreground">
+              Most OpenAI-compatible tools (openai-python, Cursor,
+              Continue.dev, …) read these two env vars.
+            </p>
+          </div>
+          <CopyableField
+            label="Shell env"
+            value={`export OPENAI_API_KEY="${agentKey.full_key}"\nexport OPENAI_BASE_URL="${proxyUrl}/v1"`}
+          />
+        </>
+      ) : (
+        <div className="space-y-1 pt-1">
+          <p className="text-[12px] font-semibold text-foreground">
+            Wire it up
+          </p>
+          <p className="text-[11px] text-muted-foreground">
+            Paste the Agent Key + Base URL above into your tool&apos;s
+            provider configuration. Each tool wires this differently — check
+            its docs if you&apos;re unsure.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Footer({
+  phase,
+  showProbeOption,
+  onMint,
+  onProbe,
+  onDone,
+  onViewDetails,
+  hasKey,
+}: {
+  readonly phase: Phase;
+  readonly showProbeOption: boolean;
+  readonly onMint: () => void;
+  readonly onProbe: () => void;
+  readonly onDone: () => void;
+  readonly onViewDetails: () => void;
+  readonly hasKey: boolean;
+}) {
+  // "View details" only makes sense after a key exists AND the dialog is
+  // about to be dismissed anyway. Keep it available from key_ready
+  // onward so users with multi-service setups can keep poking.
+  const showViewDetails = hasKey;
+
+  return (
+    <div className="flex flex-wrap items-center justify-end gap-2">
+      {showViewDetails && (
+        <Button variant="outline" onClick={onViewDetails}>
+          <ExternalLink className="mr-1.5 h-3.5 w-3.5" />
+          View details
+        </Button>
+      )}
+
+      {phase === "connected" && (
+        <>
+          <Button variant="outline" onClick={onDone}>
+            Maybe later
+          </Button>
+          <Button variant="primary" size="lg" onClick={onMint}>
+            Create Agent Key
+          </Button>
+        </>
+      )}
+
+      {phase === "minting" && (
+        <Button variant="primary" size="lg" disabled isLoading>
+          Creating…
+        </Button>
+      )}
+
+      {phase === "mint_failed" && (
+        <>
+          <Button variant="outline" onClick={onDone}>
+            Maybe later
+          </Button>
+          <Button variant="primary" size="lg" onClick={onMint}>
+            Try again
+          </Button>
+        </>
+      )}
+
+      {phase === "key_ready" && (
+        <>
+          {showProbeOption ? (
+            <>
+              <Button variant="outline" onClick={onDone}>
+                I&apos;ll wire it myself
+              </Button>
+              <Button variant="primary" size="lg" onClick={onProbe}>
+                Test connection
+              </Button>
+            </>
+          ) : (
+            <Button variant="primary" size="lg" onClick={onDone}>
+              Done
+            </Button>
+          )}
+        </>
+      )}
+
+      {phase === "probing" && (
+        <Button variant="primary" size="lg" disabled isLoading>
+          Testing…
+        </Button>
+      )}
+
+      {(phase === "probe_success" || phase === "probe_failed") && (
+        <>
+          {phase === "probe_failed" && (
+            <Button variant="outline" onClick={onProbe}>
+              Retry test
+            </Button>
+          )}
+          <Button variant="primary" size="lg" onClick={onDone}>
+            Done
+          </Button>
+        </>
+      )}
+    </div>
   );
 }
 
@@ -477,32 +524,27 @@ function Banner({
   );
 }
 
-/**
- * Turn the probe's HTTP status into a one-sentence actionable hint. Kept
- * narrow on purpose — vague "something went wrong" copy is exactly what
- * makes the dashboard feel like a black box.
- */
 function diagnose(
   status: number | null,
   isNodeRouted: boolean,
 ): string {
   if (status === null) {
-    return "The probe timed out or was blocked by the browser. The Agent Key was created — open the details to retry from the Verify panel.";
+    return "The probe timed out or was blocked by the browser.";
   }
   if (status === 401 || status === 403) {
-    return `The downstream rejected the bearer-authenticated call (HTTP ${String(status)}). This usually means the upstream credential you connected (the OpenAI API key etc.) isn't actually valid for the path we probed.`;
+    return `The downstream rejected the bearer-authenticated call (HTTP ${String(status)}). The upstream credential may have been mistyped or revoked.`;
   }
   if (status === 404) {
     if (isNodeRouted) {
-      return "The proxy returned 404 — node-routed services need the node agent online to respond. Start the node agent and retry from the Verify panel.";
+      return "The proxy returned 404 — node-routed services need the node agent online to respond.";
     }
     return "The proxy returned 404 — the slug isn't routable yet, or the downstream doesn't expose this probe path.";
   }
   if (status === 429) {
-    return "The downstream is rate-limiting (HTTP 429). Your credential + Agent Key work — retry in a minute or two.";
+    return "The downstream is rate-limiting (HTTP 429). Your credential + Agent Key work — retry in a minute.";
   }
   if (status >= 500) {
     return `The downstream returned a server error (HTTP ${String(status)}). NyxID's part of the path is fine; the upstream service is having issues right now.`;
   }
-  return `The probe returned an unexpected HTTP ${String(status)}. Open the details to debug from the Verify panel.`;
+  return `The probe returned an unexpected HTTP ${String(status)}.`;
 }

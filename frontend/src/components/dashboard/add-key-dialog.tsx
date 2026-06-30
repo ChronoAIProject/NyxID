@@ -2531,7 +2531,7 @@ export function AddKeyDialog({
       case "device_code":
         return `Authenticate with ${selectedEntry?.name ?? "the service"} using a device code.`;
       case "verify":
-        return "Testing the connection so you don't have to.";
+        return "Next step: create an Agent Key so your AI tools can use this.";
       default:
         return selectedEntry
           ? `Set up your ${selectedEntry.name} credentials.`
