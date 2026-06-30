@@ -29,6 +29,14 @@ interface CreatedKey {
 interface ConnectVerifyStepProps {
   readonly createdKey: CreatedKey;
   readonly isNodeRouted: boolean;
+  /**
+   * When false (catalog entries with `auth_method=none`, e.g.
+   * `llm-openai-codex` whose base_url is the ChatGPT backend), there's
+   * literally no credential to test, so the probe would either time out
+   * or come back with a misleading 4xx. Skip it and show a "no creds
+   * needed" success state instead.
+   */
+  readonly requiresCredential: boolean;
   readonly onDone: () => void;
   readonly onViewDetails: () => void;
 }
@@ -54,18 +62,29 @@ function probePathForSlug(slug: string): string {
 export function ConnectVerifyStep({
   createdKey,
   isNodeRouted,
+  requiresCredential,
   onDone,
   onViewDetails,
 }: ConnectVerifyStepProps) {
-  const [status, setStatus] = useState<VerifyStatus>("pending");
+  // Default to "success" with a no-creds note when there's nothing to
+  // test. Skipping the probe entirely is the only honest UX — running a
+  // probe against an `auth_method=none` service would either time out
+  // or land a 4xx from a path that doesn't exist on that backend, and
+  // the user would see misleading "Credential rejected" copy for a
+  // service that literally has no credential.
+  const [status, setStatus] = useState<VerifyStatus>(
+    requiresCredential ? "pending" : "success",
+  );
   const [httpStatus, setHttpStatus] = useState<number | null>(null);
   const [errorHint, setErrorHint] = useState<string | null>(null);
   const firedRef = useRef(false);
   const loadingDispatchedRef = useRef(false);
 
-  // Single-shot probe on mount. The guard avoids React-strict-mode
-  // double-fire and any other rerender re-triggering the call.
+  // Single-shot probe on mount, only for services with real credentials.
+  // The guard avoids React-strict-mode double-fire and any other
+  // rerender re-triggering the call.
   useEffect(() => {
+    if (!requiresCredential) return;
     if (firedRef.current) return;
     firedRef.current = true;
 
@@ -128,7 +147,7 @@ export function ConnectVerifyStep({
         loadingDispatchedRef.current = false;
       }
     };
-  }, [createdKey.slug, isNodeRouted]);
+  }, [createdKey.slug, isNodeRouted, requiresCredential]);
 
   return (
     <div className="space-y-5 py-2">
@@ -155,14 +174,16 @@ export function ConnectVerifyStep({
             </span>
             <div className="space-y-1">
               <p className="text-[13px] font-semibold text-foreground">
-                Verified — your {createdKey.serviceName} credential works
+                {requiresCredential
+                  ? `Verified — your ${createdKey.serviceName} credential works`
+                  : `${createdKey.serviceName} connected — ready to use`}
               </p>
               <p className="text-[12px] text-muted-foreground">
-                NyxID can now broker calls to {createdKey.serviceName} on
-                your behalf. Your AI agents and downstream tools can use
-                this connection without ever seeing the raw key.
+                {requiresCredential
+                  ? `NyxID can now broker calls to ${createdKey.serviceName} on your behalf. Your AI agents and downstream tools can use this connection without ever seeing the raw key.`
+                  : `${createdKey.serviceName} doesn't require credentials — NyxID can route calls to it immediately.`}
               </p>
-              {httpStatus !== null && (
+              {requiresCredential && httpStatus !== null && (
                 <p className="text-[11px] text-muted-foreground">
                   Probe returned HTTP {String(httpStatus)}.
                 </p>

@@ -2630,6 +2630,16 @@ export function AddKeyDialog({
           <ConnectVerifyStep
             createdKey={createdKey}
             isNodeRouted={Boolean(form.nodeId.trim())}
+            // Mirrors KeyForm's `requiresCredential` derivation (~line 586).
+            // Skips the probe entirely for `auth_method=none` services like
+            // `llm-openai-codex` where there's no credential to test —
+            // running a probe against the ChatGPT backend's `/v1/models`
+            // would land a misleading 4xx.
+            requiresCredential={
+              selectedEntry
+                ? (selectedEntry.auth_method ?? "bearer") !== "none"
+                : form.authMethod !== "none"
+            }
             onDone={() => {
               handleOpenChange(false);
             }}
