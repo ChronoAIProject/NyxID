@@ -5,7 +5,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuthStore } from "@/stores/auth-store";
 import { useConsentStore } from "@/stores/consent-store";
-import { useUser, useMfaDisable } from "@/hooks/use-auth";
+import { useUser, useMfaDisable, useRevokeSession } from "@/hooks/use-auth";
 import { api, ApiError } from "@/lib/api-client";
 import { disableTelemetry } from "@/lib/telemetry";
 import type { User, Session } from "@/types/api";
@@ -825,6 +825,28 @@ function SessionsTab() {
     },
   });
 
+  // The backend doesn't surface which row is the *current* session, so the
+  // dialog warning has to cover both cases generically. If the user revokes
+  // their own current session, the next API call 401s and the auth
+  // interceptor bounces them to /login. (Per Wave B B.3, GitHub-style
+  // trust parity — no special-case prevention here.)
+  const [revokeTarget, setRevokeTarget] = useState<Session | null>(null);
+  const revokeMutation = useRevokeSession();
+
+  async function handleRevoke() {
+    if (!revokeTarget) return;
+    try {
+      await revokeMutation.mutateAsync(revokeTarget.id);
+      toast.success("Session revoked");
+    } catch (err) {
+      toast.error(
+        err instanceof ApiError ? err.message : "Failed to revoke session",
+      );
+    } finally {
+      setRevokeTarget(null);
+    }
+  }
+
   if (isLoading) {
     return <Skeleton className="h-64 w-full" />;
   }
@@ -834,14 +856,14 @@ function SessionsTab() {
       <CardHeader>
         <CardTitle>Active Sessions</CardTitle>
         <CardDescription>
-          View your active sessions across devices.
+          Manage your active sessions across devices.
         </CardDescription>
       </CardHeader>
       <CardContent>
         {!sessions || sessions.length === 0 ? (
           <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
             <PowerButtonIcon className="h-48 w-48 text-muted-foreground" />
-            <p className="text-[12px] font-medium text-muted-foreground">No Active Sessions</p>
+            <p className="text-[12px] font-medium text-foreground">No Active Sessions</p>
             <p className="text-[12px] text-muted-foreground">
               Your active sessions across devices will appear here.
             </p>
@@ -853,9 +875,20 @@ function SessionsTab() {
             {sessions.map((session) => (
               <div
                 key={session.id}
-                className="rounded-xl border border-border/50 bg-card p-4"
+                className="relative rounded-xl border border-border/50 bg-card p-4"
               >
-                <div className="flex items-center gap-2">
+                <div className="absolute right-3 top-3">
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                    onClick={() => setRevokeTarget(session)}
+                    aria-label="Revoke session"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+                <div className="flex items-center gap-2 pr-10">
                   {getDeviceIcon(session.user_agent)}
                   <p className="min-w-0 flex-1 truncate text-[13px] font-bold">
                     {session.user_agent}
@@ -888,6 +921,7 @@ function SessionsTab() {
                   <TableHead>IP Address</TableHead>
                   <TableHead>Created</TableHead>
                   <TableHead>Expires</TableHead>
+                  <TableHead className="w-[80px] text-right">Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -910,6 +944,17 @@ function SessionsTab() {
                     <TableCell className="text-muted-foreground">
                       {formatDate(session.expires_at)}
                     </TableCell>
+                    <TableCell className="text-right">
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                        onClick={() => setRevokeTarget(session)}
+                        aria-label={`Revoke session on ${session.user_agent}`}
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </TableCell>
                   </TableRow>
                 ))}
               </TableBody>
@@ -918,6 +963,39 @@ function SessionsTab() {
           </>
         )}
       </CardContent>
+
+      <Dialog
+        open={revokeTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setRevokeTarget(null);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Revoke session?</DialogTitle>
+            <DialogDescription>
+              This will immediately invalidate the session on{" "}
+              <span className="font-medium">
+                {revokeTarget?.user_agent ?? "this device"}
+              </span>
+              . If this is your current session, you&apos;ll be logged out and
+              need to sign in again.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setRevokeTarget(null)}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => void handleRevoke()}
+              isLoading={revokeMutation.isPending}
+            >
+              Revoke
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Card>
   );
 }

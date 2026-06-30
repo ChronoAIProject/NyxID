@@ -48,7 +48,7 @@ describe("OAuthCallbackGuidance", () => {
 
     expect(screen.getByText("Loading callback URL...")).toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "Copy callback URL" }),
+      screen.queryByRole("button", { name: /Copy .+ callback URL/i }),
     ).not.toBeInTheDocument();
   });
 
@@ -68,11 +68,17 @@ describe("OAuthCallbackGuidance", () => {
       "https://nyx-api.chrono-ai.fun/api/v1/providers/callback";
     expect(screen.getByText(callbackUrl)).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Copy callback URL" }));
+    await user.click(
+      screen.getByRole("button", {
+        name: /Copy Twitter \/ X OAuth setup/i,
+      }),
+    );
 
     expect(mocks.copyToClipboard).toHaveBeenCalledWith(callbackUrl);
     await waitFor(() => {
-      expect(mocks.toastSuccess).toHaveBeenCalledWith("Callback URL copied");
+      expect(mocks.toastSuccess).toHaveBeenCalledWith(
+        "Twitter / X OAuth setup copied",
+      );
     });
   });
 
@@ -92,7 +98,7 @@ describe("OAuthCallbackGuidance", () => {
     ).toBeInTheDocument();
     expect(screen.queryByText(/VITE_BACKEND_URL/)).not.toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "Copy callback URL" }),
+      screen.queryByRole("button", { name: /Copy .+/ }),
     ).not.toBeInTheDocument();
   });
 
@@ -111,7 +117,7 @@ describe("OAuthCallbackGuidance", () => {
       "https://nyx-api.chrono-ai.fun/api/v1/providers/callback";
     expect(screen.getByText(callbackUrl)).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Copy callback URL" }),
+      screen.getByRole("button", { name: /Copy NyxID callback URL/i }),
     ).toBeInTheDocument();
     // Generic heading, not the Twitter-specific one.
     expect(screen.getByText("NyxID callback URL")).toBeInTheDocument();

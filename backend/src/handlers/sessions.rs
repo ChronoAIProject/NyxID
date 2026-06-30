@@ -1,13 +1,14 @@
-use axum::{Json, extract::State};
+use axum::{Json, extract::{Path, State}, http::StatusCode};
 use chrono::Utc;
 use futures::TryStreamExt;
 use mongodb::bson::{self, doc};
 use serde::Serialize;
 
 use crate::AppState;
-use crate::errors::AppResult;
+use crate::errors::{AppError, AppResult};
 use crate::models::session::{COLLECTION_NAME as SESSIONS, Session};
 use crate::mw::auth::AuthUser;
+use crate::services::{audit_service, token_service};
 
 // --- Response types ---
 
@@ -57,6 +58,52 @@ pub async fn list_sessions(
         .collect();
 
     Ok(Json(items))
+}
+
+/// DELETE /api/v1/sessions/{id}
+///
+/// Revoke one of the authenticated user's own sessions by id.
+///
+/// Self-revocation of the *current* session is intentionally allowed (trust
+/// parity with GitHub): the next request from that session will fail auth and
+/// funnel the client back to login, so no special-casing is required here.
+///
+/// - Other user's session -> 403 Forbidden
+/// - Non-existent session  -> 404 Not Found
+/// - Own session           -> 204 No Content
+pub async fn revoke_own_session(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(session_id): Path<String>,
+) -> AppResult<StatusCode> {
+    let user_id = auth_user.user_id.to_string();
+
+    let session = state
+        .db
+        .collection::<Session>(SESSIONS)
+        .find_one(doc! { "_id": &session_id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Session not found".to_string()))?;
+
+    if session.user_id != user_id {
+        return Err(AppError::Forbidden(
+            "Cannot revoke another user's session".to_string(),
+        ));
+    }
+
+    // Shared revoke path: marks the session revoked, nukes its refresh tokens,
+    // and cascades to in-memory MCP sessions for this user. Reused so that the
+    // DELETE endpoint stays in lock-step with `logout` and admin revocation.
+    token_service::revoke_session(&state.db, &session_id, Some(&state.mcp_sessions)).await?;
+
+    audit_service::log_for_user(
+        state.db.clone(),
+        &auth_user,
+        "user.session.revoked",
+        Some(serde_json::json!({ "session_id": &session_id })),
+    );
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[cfg(test)]
@@ -119,5 +166,112 @@ mod tests {
         assert_eq!(arr.len(), 2);
         assert_eq!(arr[0]["id"], "sess-a");
         assert_eq!(arr[1]["id"], "sess-b");
+    }
+
+    // ── revoke_own_session handler tests ───────────────────────────────────
+    //
+    // These tests need MongoDB and skip cleanly when no local mongod is
+    // available (see `test_utils::connect_test_database`). They exercise the
+    // three acceptance paths the PM called out:
+    //   1. own session   -> 204
+    //   2. other user    -> 403
+    //   3. not found     -> 404
+
+    use crate::services::token_service::create_session;
+    use crate::test_utils::{connect_test_database, test_app_state, test_auth_user};
+    use mongodb::bson::doc;
+    use uuid::Uuid;
+
+    async fn seed_session(db: &mongodb::Database, user_id: &str) -> String {
+        let issued = create_session(db, user_id, None, None)
+            .await
+            .expect("create_session in revoke test");
+        issued.session_id
+    }
+
+    #[tokio::test]
+    async fn revoke_own_session_returns_204() {
+        let Some(db) = connect_test_database("sessions_revoke_own").await else {
+            eprintln!("skipping revoke_own_session_returns_204: no local MongoDB available");
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let session_id = seed_session(&db, &user_id).await;
+        let state = test_app_state(db.clone());
+
+        let result = revoke_own_session(
+            State(state),
+            test_auth_user(&user_id),
+            Path(session_id.clone()),
+        )
+        .await
+        .expect("revoking own session should succeed");
+
+        assert_eq!(result, StatusCode::NO_CONTENT);
+
+        // Verify the session is actually marked revoked in the DB.
+        let stored = db
+            .collection::<Session>(SESSIONS)
+            .find_one(doc! { "_id": &session_id })
+            .await
+            .unwrap()
+            .expect("session still present after revoke");
+        assert!(stored.revoked);
+    }
+
+    #[tokio::test]
+    async fn revoke_other_user_session_returns_403() {
+        let Some(db) = connect_test_database("sessions_revoke_other").await else {
+            eprintln!("skipping revoke_other_user_session_returns_403: no local MongoDB available");
+            return;
+        };
+        let owner_id = Uuid::new_v4().to_string();
+        let intruder_id = Uuid::new_v4().to_string();
+        let session_id = seed_session(&db, &owner_id).await;
+        let state = test_app_state(db.clone());
+
+        let err = revoke_own_session(
+            State(state),
+            test_auth_user(&intruder_id),
+            Path(session_id.clone()),
+        )
+        .await
+        .expect_err("revoking another user's session must be forbidden");
+        assert!(
+            matches!(err, AppError::Forbidden(_)),
+            "expected 403 Forbidden, got {err:?}"
+        );
+
+        // The session must remain unrevoked: the authorization check must run
+        // before any mutation.
+        let stored = db
+            .collection::<Session>(SESSIONS)
+            .find_one(doc! { "_id": &session_id })
+            .await
+            .unwrap()
+            .expect("session still present");
+        assert!(!stored.revoked);
+    }
+
+    #[tokio::test]
+    async fn revoke_nonexistent_session_returns_404() {
+        let Some(db) = connect_test_database("sessions_revoke_404").await else {
+            eprintln!("skipping revoke_nonexistent_session_returns_404: no local MongoDB available");
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let state = test_app_state(db);
+
+        let err = revoke_own_session(
+            State(state),
+            test_auth_user(&user_id),
+            Path(Uuid::nil().to_string()),
+        )
+        .await
+        .expect_err("revoking a non-existent session must be not found");
+        assert!(
+            matches!(err, AppError::NotFound(_)),
+            "expected 404 Not Found, got {err:?}"
+        );
     }
 }

@@ -77,6 +77,15 @@ vi.mock("@/hooks/use-nodes", () => ({
   useNodes: () => ({ data: hooks.nodes }),
 }));
 
+// `AgentKeyPicker` calls `useApiKeys()` so its curl examples can render
+// the picked key's preview. The page tests don't exercise the picker —
+// stub the hook to return an empty list so the picker falls through to
+// the "Create your first Agent Key →" affordance and tests stay focused
+// on the page-level behavior.
+vi.mock("@/hooks/use-api-keys", () => ({
+  useApiKeys: () => ({ data: [], isLoading: false }),
+}));
+
 // `useBreadcrumbLabel` lives in the dashboard layout module, which pulls in
 // the whole sidebar/auth/command-palette graph. The page only needs the
 // breadcrumb side-effect, so stub it with a no-op.
