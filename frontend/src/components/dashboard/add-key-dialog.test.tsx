@@ -10,6 +10,7 @@ const {
   catalog,
   createKeyMutate,
   createKeyMutateAsync,
+  createApiKeyMutate,
   initiateOAuthMutateAsync,
   initiateDeviceCodeMutateAsync,
   pollDeviceCodeMutate,
@@ -21,6 +22,11 @@ const {
   catalog: { entries: [] as unknown[] },
   createKeyMutate: vi.fn(),
   createKeyMutateAsync: vi.fn(),
+  // Wave-aha-1 A4+ — the verify step auto-mints an Agent Key. The mock
+  // intentionally swallows the call without firing onSuccess so the
+  // dialog stays in the "minting" phase; the test only needs to assert
+  // the verify step renders, not that the mint succeeded.
+  createApiKeyMutate: vi.fn(),
   initiateOAuthMutateAsync: vi.fn(),
   initiateDeviceCodeMutateAsync: vi.fn(),
   pollDeviceCodeMutate: vi.fn(),
@@ -35,6 +41,13 @@ vi.mock("@/hooks/use-keys", () => ({
   useCreateKey: () => ({
     mutate: createKeyMutate,
     mutateAsync: createKeyMutateAsync,
+    isPending: false,
+  }),
+}));
+
+vi.mock("@/hooks/use-api-keys", () => ({
+  useCreateApiKey: () => ({
+    mutate: createApiKeyMutate,
     isPending: false,
   }),
 }));

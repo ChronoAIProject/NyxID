@@ -2688,7 +2688,6 @@ export function AddKeyDialog({
           <ConnectVerifyStep
             createdKey={createdKey}
             isNodeRouted={Boolean(form.nodeId.trim())}
-            completionMode={createdKey.completionMode}
             onDone={() => {
               handleOpenChange(false);
             }}
