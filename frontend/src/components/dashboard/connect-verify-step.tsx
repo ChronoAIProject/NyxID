@@ -237,7 +237,15 @@ export function ConnectVerifyStep({
   }, [phase, agentKey, createdKey.slug, createdKey.completionMode, isNodeRouted]);
 
   const proxyUrl = proxyBaseUrl(createdKey.slug);
-  const openAiShaped = looksOpenAiShaped(createdKey.slug);
+  // Only suggest the OPENAI_API_KEY / OPENAI_BASE_URL env-var snippet
+  // when we've actually proven the OpenAI-compat path works (probe
+  // returned 2xx). Skipped or failed probes leave us guessing — and for
+  // services whose slug matches the OpenAI hint regex but whose backend
+  // ISN'T OpenAI-compat (e.g. `llm-openai-codex` → ChatGPT backend),
+  // showing the snippet would mislead the user into thinking they can
+  // wire NyxID into openai-python and it'd just work.
+  const showOpenAiEnvSnippet =
+    phase === "success" && looksOpenAiShaped(createdKey.slug);
 
   return (
     <div className="space-y-4 py-2">
@@ -277,15 +285,15 @@ export function ConnectVerifyStep({
           </div>
           <CopyableField label="Base URL" value={proxyUrl} />
 
-          {openAiShaped && (
+          {showOpenAiEnvSnippet ? (
             <>
               <div className="space-y-1 pt-1">
                 <p className="text-[12px] font-semibold text-foreground">
                   Wire it up
                 </p>
                 <p className="text-[11px] text-muted-foreground">
-                  Most OpenAI-compatible tools (Codex CLI, openai-python,
-                  Cursor, Continue.dev, …) read these two env vars.
+                  Most OpenAI-compatible tools (openai-python, Cursor,
+                  Continue.dev, …) read these two env vars.
                 </p>
               </div>
               <CopyableField
@@ -293,6 +301,22 @@ export function ConnectVerifyStep({
                 value={`export OPENAI_API_KEY="${agentKey.full_key}"\nexport OPENAI_BASE_URL="${proxyUrl}/v1"`}
               />
             </>
+          ) : (
+            // Skipped/failed probe OR non-OpenAI-shape slug. We don't know
+            // for sure that the tool will accept openai-compat env vars
+            // (Codex's ChatGPT backend, custom endpoints, OAuth/device-
+            // code completions that haven't been smoke-tested). Be honest
+            // and tell the user to wire it per their tool's docs.
+            <div className="space-y-1 pt-1">
+              <p className="text-[12px] font-semibold text-foreground">
+                Wire it up
+              </p>
+              <p className="text-[11px] text-muted-foreground">
+                Paste the Agent Key + Base URL above into your tool&apos;s
+                provider configuration. Each tool wires this differently —
+                check its docs if you&apos;re unsure.
+              </p>
+            </div>
           )}
         </div>
       )}
