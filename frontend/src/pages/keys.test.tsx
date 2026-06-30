@@ -173,8 +173,16 @@ describe("KeysPage", () => {
     render(<KeysPage />);
 
     expect(screen.getByText("No AI services yet")).toBeInTheDocument();
-    const addButtons = screen.getAllByRole("button", { name: /add service/i });
-    expect(addButtons.length).toBeGreaterThan(0);
+    // Both buttons render when the list is empty: the empty-state CTA
+    // "Add your first service" (intentionally kept per the canon decision
+    // to leave empty-state copy alone) and the toolbar CTA "Connect
+    // Service" (canon verb for top-level CTAs).
+    expect(
+      screen.getByRole("button", { name: /add your first service/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /connect service/i }),
+    ).toBeInTheDocument();
   });
 
   it("renders a loading skeleton while keys are loading", () => {

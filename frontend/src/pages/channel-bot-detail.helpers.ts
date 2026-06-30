@@ -1,38 +1,35 @@
 import type { ChannelBotStatus, ChannelPlatform } from "@/types/channels";
+import { getStatusMeta } from "@/lib/status-contract";
 
+/**
+ * Reads from `STATUS_REGISTRY.channel_bot` so the variant + label for each
+ * status live in exactly one place. Falls back to "secondary"/raw key for
+ * unknown statuses so the UI never blows up if the backend ships a new
+ * value before the registry is updated. Wave B B.4 deferred migration,
+ * landed in Wave C C.1 alongside the canon sweep.
+ *
+ * Return type is intentionally narrower than the full `StatusVariant`
+ * because channel_bot statuses today never need `info`/`pending`/`outline`
+ * variants — keeping the contract tight stops consumers from accidentally
+ * widening the variant pool.
+ */
 export function statusBadgeVariant(
   status: ChannelBotStatus,
 ): "success" | "warning" | "destructive" | "secondary" {
-  switch (status) {
-    case "active":
-      return "success";
-    case "pending":
-    case "pending_webhook":
-      return "warning";
-    case "failed":
-      return "destructive";
-    case "invalid":
-      return "secondary";
+  const variant = getStatusMeta("channel_bot", status)?.variant;
+  switch (variant) {
+    case "success":
+    case "warning":
+    case "destructive":
+    case "secondary":
+      return variant;
     default:
       return "secondary";
   }
 }
 
 export function statusLabel(status: ChannelBotStatus): string {
-  switch (status) {
-    case "active":
-      return "Active";
-    case "pending":
-      return "Pending";
-    case "pending_webhook":
-      return "Pending Webhook";
-    case "failed":
-      return "Failed";
-    case "invalid":
-      return "Invalid";
-    default:
-      return status;
-  }
+  return getStatusMeta("channel_bot", status)?.label ?? status;
 }
 
 export function platformLabel(platform: ChannelPlatform): string {

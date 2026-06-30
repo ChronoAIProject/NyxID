@@ -18,11 +18,23 @@
  *
  * This helper returns the composed badge state so the detail page matches the
  * availability truth the proxy will act on.
+ *
+ * Wave B B.4 deferred migration (landed in Wave C C.1): the (label, variant)
+ * for each output state now resolves through
+ * `STATUS_REGISTRY.user_service_credential` in `@/lib/status-contract`, so
+ * changing the user-facing copy is a one-PR edit on the registry. The
+ * derivation logic (when to surface "Unavailable" vs "Active") stays here
+ * because it composes two backend signals — that's not a registry concern.
  */
-export type ServiceBadgeVariant =
-  | "success"
-  | "secondary"
-  | "destructive";
+import {
+  getStatusMeta,
+  type StatusVariant,
+} from "@/lib/status-contract";
+
+export type ServiceBadgeVariant = Extract<
+  StatusVariant,
+  "success" | "secondary" | "destructive"
+>;
 
 export interface ServiceBadgeInput {
   readonly isActive: boolean;
@@ -47,6 +59,20 @@ export interface ServiceBadgeOutput {
   readonly credentialBlocked: boolean;
 }
 
+function resolve(key: "active" | "inactive" | "unavailable"): {
+  readonly variant: ServiceBadgeVariant;
+  readonly label: string;
+} {
+  const meta = getStatusMeta("user_service_credential", key);
+  // The registry seeds these three keys, so the fallback only fires if
+  // someone accidentally drops them. Keep narrow fallback variants so the
+  // type contract stays tight — secondary is the safe neutral default.
+  return {
+    variant: (meta?.variant as ServiceBadgeVariant | undefined) ?? "secondary",
+    label: meta?.label ?? key,
+  };
+}
+
 export function deriveServiceBadge(
   input: ServiceBadgeInput,
 ): ServiceBadgeOutput {
@@ -56,10 +82,10 @@ export function deriveServiceBadge(
     hasCredential && credentialStatus !== "" && credentialStatus !== "active";
 
   if (!isActive) {
-    return { variant: "secondary", label: "Inactive", credentialBlocked };
+    return { ...resolve("inactive"), credentialBlocked };
   }
   if (credentialBlocked) {
-    return { variant: "secondary", label: "Unavailable", credentialBlocked };
+    return { ...resolve("unavailable"), credentialBlocked };
   }
-  return { variant: "success", label: "Active", credentialBlocked };
+  return { ...resolve("active"), credentialBlocked };
 }
