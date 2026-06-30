@@ -26,17 +26,28 @@ interface CreatedKey {
   readonly serviceName: string;
 }
 
+/**
+ * How the credential the user just connected got established. Drives both
+ * whether the probe should run and what the success copy says.
+ *
+ * - `credential`: user typed an API key / bearer token in the dialog. We
+ *   actually don't know if it works until we call the downstream → run
+ *   the probe + diagnose the result.
+ * - `device_code` / `oauth`: the upstream identity provider (OpenAI auth,
+ *   GitHub, etc.) already verified the user and issued an access token.
+ *   The handshake completing IS the verification — running a redundant
+ *   probe risks false-failure (e.g. `chatgpt.com/backend-api/codex/v1/
+ *   models` doesn't exist; the probe would 404 against a perfectly
+ *   working connection). Just acknowledge the auth landed.
+ * - `none`: catalog entry has `auth_method=none` AND no provider OAuth.
+ *   No credential exists; show "ready to use".
+ */
+type CompletionMode = "credential" | "device_code" | "oauth" | "none";
+
 interface ConnectVerifyStepProps {
   readonly createdKey: CreatedKey;
   readonly isNodeRouted: boolean;
-  /**
-   * When false (catalog entries with `auth_method=none`, e.g.
-   * `llm-openai-codex` whose base_url is the ChatGPT backend), there's
-   * literally no credential to test, so the probe would either time out
-   * or come back with a misleading 4xx. Skip it and show a "no creds
-   * needed" success state instead.
-   */
-  readonly requiresCredential: boolean;
+  readonly completionMode: CompletionMode;
   readonly onDone: () => void;
   readonly onViewDetails: () => void;
 }
@@ -62,18 +73,16 @@ function probePathForSlug(slug: string): string {
 export function ConnectVerifyStep({
   createdKey,
   isNodeRouted,
-  requiresCredential,
+  completionMode,
   onDone,
   onViewDetails,
 }: ConnectVerifyStepProps) {
-  // Default to "success" with a no-creds note when there's nothing to
-  // test. Skipping the probe entirely is the only honest UX — running a
-  // probe against an `auth_method=none` service would either time out
-  // or land a 4xx from a path that doesn't exist on that backend, and
-  // the user would see misleading "Credential rejected" copy for a
-  // service that literally has no credential.
+  // Only the "credential" path actually needs a live probe — for OAuth /
+  // device-code / no-auth completions the verification already happened
+  // upstream (or doesn't apply), so we open in success immediately.
+  const shouldProbe = completionMode === "credential";
   const [status, setStatus] = useState<VerifyStatus>(
-    requiresCredential ? "pending" : "success",
+    shouldProbe ? "pending" : "success",
   );
   const [httpStatus, setHttpStatus] = useState<number | null>(null);
   const [errorHint, setErrorHint] = useState<string | null>(null);
@@ -84,7 +93,7 @@ export function ConnectVerifyStep({
   // The guard avoids React-strict-mode double-fire and any other
   // rerender re-triggering the call.
   useEffect(() => {
-    if (!requiresCredential) return;
+    if (!shouldProbe) return;
     if (firedRef.current) return;
     firedRef.current = true;
 
@@ -147,7 +156,7 @@ export function ConnectVerifyStep({
         loadingDispatchedRef.current = false;
       }
     };
-  }, [createdKey.slug, isNodeRouted, requiresCredential]);
+  }, [createdKey.slug, isNodeRouted, shouldProbe]);
 
   return (
     <div className="space-y-5 py-2">
@@ -174,16 +183,12 @@ export function ConnectVerifyStep({
             </span>
             <div className="space-y-1">
               <p className="text-[13px] font-semibold text-foreground">
-                {requiresCredential
-                  ? `Verified — your ${createdKey.serviceName} credential works`
-                  : `${createdKey.serviceName} connected — ready to use`}
+                {successTitle(completionMode, createdKey.serviceName)}
               </p>
               <p className="text-[12px] text-muted-foreground">
-                {requiresCredential
-                  ? `NyxID can now broker calls to ${createdKey.serviceName} on your behalf. Your AI agents and downstream tools can use this connection without ever seeing the raw key.`
-                  : `${createdKey.serviceName} doesn't require credentials — NyxID can route calls to it immediately.`}
+                {successBody(completionMode, createdKey.serviceName)}
               </p>
-              {requiresCredential && httpStatus !== null && (
+              {completionMode === "credential" && httpStatus !== null && (
                 <p className="text-[11px] text-muted-foreground">
                   Probe returned HTTP {String(httpStatus)}.
                 </p>
@@ -226,6 +231,42 @@ export function ConnectVerifyStep({
       </div>
     </div>
   );
+}
+
+/**
+ * Per-completion-mode success copy. The point is that "we made a 200"
+ * isn't the only success signal — for OAuth and device-code flows, the
+ * UPSTREAM identity provider already verified the user (and issued an
+ * access token), so the handshake itself is the proof. Trying to
+ * re-probe a Codex/ChatGPT-backend endpoint at `/v1/models` would just
+ * 404 against a working connection — false failure.
+ */
+function successTitle(mode: CompletionMode, name: string): string {
+  switch (mode) {
+    case "credential":
+      return `Verified — your ${name} credential works`;
+    case "device_code":
+      return `Authenticated — ${name} is ready to use`;
+    case "oauth":
+      return `Authorized — ${name} is ready to use`;
+    case "none":
+    default:
+      return `${name} connected — ready to use`;
+  }
+}
+
+function successBody(mode: CompletionMode, name: string): string {
+  switch (mode) {
+    case "credential":
+      return `NyxID can now broker calls to ${name} on your behalf. Your AI agents and downstream tools can use this connection without ever seeing the raw key.`;
+    case "device_code":
+      return `You completed the device-code handshake with the ${name} provider. NyxID has stored the access token securely and can broker calls on your behalf — your agents talk to ${name} through NyxID without ever seeing the token.`;
+    case "oauth":
+      return `You completed the OAuth handshake with the ${name} provider. NyxID has stored the access token securely and can broker calls on your behalf — your agents talk to ${name} through NyxID without ever seeing the token.`;
+    case "none":
+    default:
+      return `${name} doesn't require credentials — NyxID can route calls to it immediately.`;
+  }
 }
 
 /**

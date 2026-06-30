@@ -74,6 +74,35 @@ interface CreatedKey {
   readonly id: string;
   readonly slug: string;
   readonly serviceName: string;
+  /**
+   * How the underlying credential got established. Drives the verify
+   * step's UX: probe for `credential`, acknowledge-only for the OAuth
+   * flows + `none` (a probe against a Codex/ChatGPT-backed endpoint
+   * would 404 against a perfectly working connection, which is worse
+   * than skipping).
+   */
+  readonly completionMode: "credential" | "device_code" | "oauth" | "none";
+}
+
+/**
+ * Pick the completion mode for a synchronous form-submit (the
+ * createKey.onSuccess handlers). `auth_method=none` services like
+ * `llm-openai-codex` get "none" so the verify step skips the probe;
+ * everything else is "credential" because the user typed a secret.
+ *
+ * OAuth + device_code completions don't go through this helper — they
+ * land in `handleAuthComplete` which sets the mode based on the wizard
+ * `step` directly (since the step type already encodes which flavor
+ * fired the completion).
+ */
+function pickCompletionMode(
+  selectedEntry: CatalogEntry | null,
+  formAuthMethod: string,
+): "credential" | "none" {
+  const effective = selectedEntry
+    ? (selectedEntry.auth_method ?? "bearer")
+    : formAuthMethod;
+  return effective === "none" ? "none" : "credential";
 }
 
 interface FormState {
@@ -2293,9 +2322,36 @@ export function AddKeyDialog({
   }
 
   function handleAuthComplete(keyId: string) {
-    toast.success("Service connected");
-    handleOpenChange(false);
-    void navigate({ to: "/keys/$keyId", params: { keyId } });
+    // Wave-aha-1 A4 — route OAuth + device-code completions through the
+    // same verify step the form-submit path uses, so the user gets a
+    // single coherent "this worked" moment regardless of which auth
+    // flavour they came through. The `completionMode` distinguishes
+    // OAuth/device-code (don't re-probe — the handshake IS the proof)
+    // from a typed credential (run the smoke test).
+    const completionMode: CreatedKey["completionMode"] =
+      step === "device_code"
+        ? "device_code"
+        : step === "oauth"
+          ? "oauth"
+          : "credential";
+    // For OAuth/device-code flows we don't always have the slug back —
+    // `ensureAuthKey` returns the just-created KeyInfo into authKey, so
+    // pull from there.
+    const slug =
+      authKey?.slug ??
+      selectedEntry?.slug ??
+      "";
+    setCreatedKey({
+      id: keyId,
+      slug,
+      serviceName:
+        selectedEntry?.name ??
+        authKey?.label ??
+        form.label.trim() ??
+        slug,
+      completionMode,
+    });
+    setStep("verify");
   }
 
   function handleFormSubmit() {
@@ -2351,6 +2407,7 @@ export function AddKeyDialog({
             form.label.trim() ??
             key.label ??
             key.slug,
+          completionMode: pickCompletionMode(selectedEntry, form.authMethod),
         });
         setStep("verify");
       },
@@ -2424,6 +2481,7 @@ export function AddKeyDialog({
             form.label.trim() ??
             key.label ??
             key.slug,
+          completionMode: pickCompletionMode(selectedEntry, form.authMethod),
         });
         setStep("verify");
       },
@@ -2630,16 +2688,7 @@ export function AddKeyDialog({
           <ConnectVerifyStep
             createdKey={createdKey}
             isNodeRouted={Boolean(form.nodeId.trim())}
-            // Mirrors KeyForm's `requiresCredential` derivation (~line 586).
-            // Skips the probe entirely for `auth_method=none` services like
-            // `llm-openai-codex` where there's no credential to test —
-            // running a probe against the ChatGPT backend's `/v1/models`
-            // would land a misleading 4xx.
-            requiresCredential={
-              selectedEntry
-                ? (selectedEntry.auth_method ?? "bearer") !== "none"
-                : form.authMethod !== "none"
-            }
+            completionMode={createdKey.completionMode}
             onDone={() => {
               handleOpenChange(false);
             }}
