@@ -1,10 +1,17 @@
 import type { ComponentType, ReactNode } from "react";
 import { Button } from "@/components/ui/button";
+import { AddCtaButton } from "@/components/shared/add-cta-button";
 import { cn } from "@/lib/utils";
 
 interface CtaActionable {
   readonly label: string;
   readonly onClick: () => void;
+  /**
+   * Lucide icon to prefix on the CTA button — defaults to `Plus` via
+   * `AddCtaButton`. Pass a different icon when the action isn't "create
+   * a new thing" (e.g. `Plug` for connect, `Download` for import).
+   */
+  readonly icon?: ComponentType<{ className?: string }>;
 }
 interface CtaLink {
   readonly label: string;
@@ -20,6 +27,14 @@ interface JumpStart {
 
 interface TeachingEmptyStateProps {
   readonly icon: ComponentType<{ readonly className?: string }>;
+  /**
+   * Override the default illustration sizing/contrast. Default matches the
+   * pre-primitive bespoke shapes Wave A patched (`h-48 w-48` at `/40`
+   * opacity) so converting a surface to the primitive doesn't shrink its
+   * hero illustration. Pass a smaller class set when the empty state lives
+   * inside a sub-card and the full-page illustration would crowd it out.
+   */
+  readonly iconClassName?: string;
   /** Bold one-liner. Foreground contrast — what the section IS / why it's empty. */
   readonly title: string;
   /** One-sentence why-care. Muted contrast — the value the user gets by filling it. */
@@ -36,6 +51,8 @@ interface TeachingEmptyStateProps {
   readonly className?: string;
 }
 
+const DEFAULT_ICON_CLASS = "h-48 w-48 text-muted-foreground/40";
+
 /**
  * Canonical empty-state structure for list pages. Wave A patched
  * contrast (`text-muted-foreground/30` → default muted) across ~26
@@ -46,9 +63,16 @@ interface TeachingEmptyStateProps {
  * Title uses `text-foreground` and description uses `text-muted-foreground`
  * — both readable contrasts, not the `/30` ghost-text that originally
  * made these surfaces look like decorative filler.
+ *
+ * Visual defaults intentionally match the pre-primitive bespoke shapes
+ * (`h-48 w-48` illustration at `/40`, `text-[15px]` title, `AddCtaButton`
+ * for actionable CTAs) so converting a surface to the primitive preserves
+ * its existing hierarchy. Pass `iconClassName` to opt into a smaller icon
+ * when the empty state lives inside a constrained sub-card.
  */
 export function TeachingEmptyState({
   icon: Icon,
+  iconClassName,
   title,
   description,
   primaryCta,
@@ -57,9 +81,15 @@ export function TeachingEmptyState({
 }: TeachingEmptyStateProps) {
   const ctaButton =
     "onClick" in primaryCta ? (
-      <Button variant="primary" size="lg" onClick={primaryCta.onClick}>
-        {primaryCta.label}
-      </Button>
+      // AddCtaButton renders <Button variant="primary" size="lg"> with a
+      // Plus-prefixed ButtonIcon — same brand treatment as the toolbar
+      // "Add"/"Connect" buttons across the app, so empty-state CTAs and
+      // populated-state CTAs look like siblings instead of strangers.
+      <AddCtaButton
+        label={primaryCta.label}
+        onClick={primaryCta.onClick}
+        icon={primaryCta.icon}
+      />
     ) : (
       <Button variant="primary" size="lg" asChild>
         <a href={primaryCta.href}>{primaryCta.label}</a>
@@ -71,16 +101,20 @@ export function TeachingEmptyState({
   return (
     <div
       className={cn(
-        "flex flex-col items-center justify-center gap-3 py-12 text-center",
+        "flex flex-col items-center justify-center gap-4 py-12 text-center",
         className,
       )}
     >
-      <Icon className="h-12 w-12 text-muted-foreground" />
-      <h3 className="text-[14px] font-semibold text-foreground">{title}</h3>
-      <p className="max-w-md text-[12px] text-muted-foreground">{description}</p>
-      <div className="mt-2">{ctaButton}</div>
+      <Icon className={cn(iconClassName ?? DEFAULT_ICON_CLASS)} />
+      <div className="space-y-1.5 max-w-md">
+        <p className="text-[15px] font-semibold text-foreground">{title}</p>
+        <p className="text-[12px] text-muted-foreground leading-relaxed">
+          {description}
+        </p>
+      </div>
+      {ctaButton}
       {jumpStarts.length > 0 ? (
-        <div className="mt-3 flex flex-wrap items-center justify-center gap-2">
+        <div className="mt-1 flex flex-wrap items-center justify-center gap-2">
           <span className="text-[11px] text-muted-foreground">Or start with:</span>
           {jumpStarts.map((j) => (
             <Button
