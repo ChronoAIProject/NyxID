@@ -466,6 +466,10 @@ export interface Session {
   readonly user_agent: string;
   readonly created_at: string;
   readonly expires_at: string;
+  /** True for exactly one row — the session whose access token authorized
+   *  this request. Lets the UI mark the "you are here" row + warn that
+   *  revoking it logs the user out. */
+  readonly is_current: boolean;
 }
 
 export interface AuditLogEntry {

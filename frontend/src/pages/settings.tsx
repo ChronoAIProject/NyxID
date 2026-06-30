@@ -73,6 +73,8 @@ import { PowerButtonIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
 import {
   getDeviceIcon,
+  humanizeUserAgent,
+  humanizeIpAddress,
   buildCursorDeeplink,
   buildClaudeCodeCommand,
   buildCursorConfig,
@@ -825,11 +827,11 @@ function SessionsTab() {
     },
   });
 
-  // The backend doesn't surface which row is the *current* session, so the
-  // dialog warning has to cover both cases generically. If the user revokes
-  // their own current session, the next API call 401s and the auth
-  // interceptor bounces them to /login. (Per Wave B B.3, GitHub-style
-  // trust parity — no special-case prevention here.)
+  // The backend now stamps `is_current=true` on the row this request came
+  // from, so the dialog copy + Current pill can vary per session. Revoking
+  // the current session still works — the next request 401s and the auth
+  // interceptor bounces to /login (GitHub-style trust parity). The dialog
+  // calls that out explicitly so it isn't a surprise.
   const [revokeTarget, setRevokeTarget] = useState<Session | null>(null);
   const revokeMutation = useRevokeSession();
 
@@ -837,7 +839,9 @@ function SessionsTab() {
     if (!revokeTarget) return;
     try {
       await revokeMutation.mutateAsync(revokeTarget.id);
-      toast.success("Session revoked");
+      toast.success(
+        revokeTarget.is_current ? "Session revoked. Signing you out…" : "Session revoked",
+      );
     } catch (err) {
       toast.error(
         err instanceof ApiError ? err.message : "Failed to revoke session",
@@ -872,44 +876,50 @@ function SessionsTab() {
           <>
           {/* Mobile card view */}
           <div className="flex flex-col gap-3 md:hidden">
-            {sessions.map((session) => (
-              <div
-                key={session.id}
-                className="relative rounded-xl border border-border/50 bg-card p-4"
-              >
-                <div className="absolute right-3 top-3">
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-7 w-7 text-muted-foreground hover:text-destructive"
-                    onClick={() => setRevokeTarget(session)}
-                    aria-label="Revoke session"
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </Button>
+            {sessions.map((session) => {
+              const deviceLabel = humanizeUserAgent(session.user_agent);
+              const ipLabel = humanizeIpAddress(session.ip_address);
+              return (
+                <div
+                  key={session.id}
+                  className={`relative rounded-xl border ${session.is_current ? "border-success/50 bg-success/[0.04]" : "border-border/50 bg-card"} p-4`}
+                >
+                  <div className="absolute right-3 top-3">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                      onClick={() => setRevokeTarget(session)}
+                      aria-label={session.is_current ? "Revoke current session and sign out" : `Revoke session on ${deviceLabel}`}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                  <div className="flex items-center gap-2 pr-10">
+                    {getDeviceIcon(session.user_agent)}
+                    <p className="min-w-0 flex-1 truncate text-[13px] font-bold">
+                      {deviceLabel}
+                    </p>
+                    {session.is_current && (
+                      <Badge variant="success" className="shrink-0">Current</Badge>
+                    )}
+                  </div>
+                  <div className="mt-3 space-y-1">
+                    <p className="text-[11px] text-muted-foreground">
+                      <span className="font-medium">IP Address:</span> {ipLabel}
+                    </p>
+                    <p className="text-[11px] text-muted-foreground">
+                      <span className="font-medium">Signed in:</span>{" "}
+                      {formatDate(session.created_at)}
+                    </p>
+                    <p className="text-[11px] text-muted-foreground">
+                      <span className="font-medium">Expires:</span>{" "}
+                      {formatDate(session.expires_at)}
+                    </p>
+                  </div>
                 </div>
-                <div className="flex items-center gap-2 pr-10">
-                  {getDeviceIcon(session.user_agent)}
-                  <p className="min-w-0 flex-1 truncate text-[13px] font-bold">
-                    {session.user_agent}
-                  </p>
-                </div>
-                <div className="mt-3 space-y-1">
-                  <p className="text-[11px] text-muted-foreground">
-                    <span className="font-medium">IP Address:</span>{" "}
-                    {session.ip_address}
-                  </p>
-                  <p className="text-[11px] text-muted-foreground">
-                    <span className="font-medium">Created:</span>{" "}
-                    {formatDate(session.created_at)}
-                  </p>
-                  <p className="text-[11px] text-muted-foreground">
-                    <span className="font-medium">Expires:</span>{" "}
-                    {formatDate(session.expires_at)}
-                  </p>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
 
           {/* Desktop table view */}
@@ -919,44 +929,50 @@ function SessionsTab() {
                 <TableRow>
                   <TableHead>Device</TableHead>
                   <TableHead>IP Address</TableHead>
-                  <TableHead>Created</TableHead>
+                  <TableHead>Signed in</TableHead>
                   <TableHead>Expires</TableHead>
                   <TableHead className="w-[80px] text-right">Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {sessions.map((session) => (
-                  <TableRow key={session.id}>
-                    <TableCell>
-                      <div className="flex items-center gap-2">
-                        {getDeviceIcon(session.user_agent)}
-                        <span className="max-w-[200px] truncate">
-                          {session.user_agent}
-                        </span>
-                      </div>
-                    </TableCell>
-                    <TableCell>
-                      {session.ip_address}
-                    </TableCell>
-                    <TableCell className="text-muted-foreground">
-                      {formatDate(session.created_at)}
-                    </TableCell>
-                    <TableCell className="text-muted-foreground">
-                      {formatDate(session.expires_at)}
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                        onClick={() => setRevokeTarget(session)}
-                        aria-label={`Revoke session on ${session.user_agent}`}
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
-                    </TableCell>
-                  </TableRow>
-                ))}
+                {sessions.map((session) => {
+                  const deviceLabel = humanizeUserAgent(session.user_agent);
+                  const ipLabel = humanizeIpAddress(session.ip_address);
+                  return (
+                    <TableRow
+                      key={session.id}
+                      className={session.is_current ? "bg-success/[0.04]" : undefined}
+                    >
+                      <TableCell>
+                        <div className="flex items-center gap-2">
+                          {getDeviceIcon(session.user_agent)}
+                          <span className="max-w-[260px] truncate">{deviceLabel}</span>
+                          {session.is_current && (
+                            <Badge variant="success" className="shrink-0">Current</Badge>
+                          )}
+                        </div>
+                      </TableCell>
+                      <TableCell>{ipLabel}</TableCell>
+                      <TableCell className="text-muted-foreground">
+                        {formatDate(session.created_at)}
+                      </TableCell>
+                      <TableCell className="text-muted-foreground">
+                        {formatDate(session.expires_at)}
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                          onClick={() => setRevokeTarget(session)}
+                          aria-label={session.is_current ? "Revoke current session and sign out" : `Revoke session on ${deviceLabel}`}
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
               </TableBody>
             </Table>
           </div>
@@ -972,14 +988,29 @@ function SessionsTab() {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Revoke session?</DialogTitle>
+            <DialogTitle>
+              {revokeTarget?.is_current ? "Sign out of this session?" : "Revoke session?"}
+            </DialogTitle>
             <DialogDescription>
-              This will immediately invalidate the session on{" "}
-              <span className="font-medium">
-                {revokeTarget?.user_agent ?? "this device"}
-              </span>
-              . If this is your current session, you&apos;ll be logged out and
-              need to sign in again.
+              {revokeTarget?.is_current ? (
+                <>
+                  This is the session you&apos;re currently using on{" "}
+                  <span className="font-medium">
+                    {humanizeUserAgent(revokeTarget?.user_agent)}
+                  </span>
+                  . Revoking it will sign you out immediately and you&apos;ll
+                  need to sign in again.
+                </>
+              ) : (
+                <>
+                  This will immediately invalidate the session on{" "}
+                  <span className="font-medium">
+                    {humanizeUserAgent(revokeTarget?.user_agent)}
+                  </span>
+                  . The person using it will be signed out next time they
+                  load a page.
+                </>
+              )}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
@@ -991,7 +1022,7 @@ function SessionsTab() {
               onClick={() => void handleRevoke()}
               isLoading={revokeMutation.isPending}
             >
-              Revoke
+              {revokeTarget?.is_current ? "Revoke and sign out" : "Revoke"}
             </Button>
           </DialogFooter>
         </DialogContent>

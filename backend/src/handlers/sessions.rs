@@ -19,6 +19,11 @@ pub struct SessionItem {
     pub user_agent: Option<String>,
     pub created_at: String,
     pub expires_at: String,
+    /// True for exactly one row — the session whose access token authorized
+    /// this request. Lets the UI mark the "you are here" row so users know
+    /// which session they're about to revoke. Always false for API-key /
+    /// service-account / delegated callers (they don't carry a session_id).
+    pub is_current: bool,
 }
 
 // --- Handlers ---
@@ -32,6 +37,11 @@ pub async fn list_sessions(
 ) -> AppResult<Json<Vec<SessionItem>>> {
     let user_id = auth_user.user_id.to_string();
     let now = bson::DateTime::from_chrono(Utc::now());
+    // Only first-party JWT callers carry a session_id; API-key /
+    // service-account / delegated callers will have None, so every row
+    // ends up is_current=false for them (correct — they have no
+    // "current session" to mark).
+    let current_session_id = auth_user.session_id.map(|u| u.to_string());
 
     let sessions: Vec<Session> = state
         .db
@@ -48,12 +58,18 @@ pub async fn list_sessions(
 
     let items: Vec<SessionItem> = sessions
         .into_iter()
-        .map(|s| SessionItem {
-            id: s.id,
-            ip_address: s.ip_address,
-            user_agent: s.user_agent,
-            created_at: s.created_at.to_rfc3339(),
-            expires_at: s.expires_at.to_rfc3339(),
+        .map(|s| {
+            let is_current = current_session_id
+                .as_deref()
+                .is_some_and(|cur| cur == s.id);
+            SessionItem {
+                id: s.id,
+                ip_address: s.ip_address,
+                user_agent: s.user_agent,
+                created_at: s.created_at.to_rfc3339(),
+                expires_at: s.expires_at.to_rfc3339(),
+                is_current,
+            }
         })
         .collect();
 
@@ -118,6 +134,7 @@ mod tests {
             user_agent: Some("Mozilla/5.0".to_string()),
             created_at: "2026-01-01T00:00:00+00:00".to_string(),
             expires_at: "2026-01-08T00:00:00+00:00".to_string(),
+            is_current: true,
         };
         let json = serde_json::to_value(&item).unwrap();
         assert_eq!(json["id"], "sess-1");
@@ -125,6 +142,7 @@ mod tests {
         assert_eq!(json["user_agent"], "Mozilla/5.0");
         assert_eq!(json["created_at"], "2026-01-01T00:00:00+00:00");
         assert_eq!(json["expires_at"], "2026-01-08T00:00:00+00:00");
+        assert_eq!(json["is_current"], true);
     }
 
     #[test]
@@ -135,12 +153,14 @@ mod tests {
             user_agent: None,
             created_at: "2026-01-01T00:00:00+00:00".to_string(),
             expires_at: "2026-01-08T00:00:00+00:00".to_string(),
+            is_current: false,
         };
         let json = serde_json::to_value(&item).unwrap();
         assert!(json["ip_address"].is_null());
         assert!(json["user_agent"].is_null());
         // Required fields still present
         assert_eq!(json["id"], "sess-2");
+        assert_eq!(json["is_current"], false);
     }
 
     #[test]
@@ -152,6 +172,7 @@ mod tests {
                 user_agent: None,
                 created_at: "2026-01-01T00:00:00+00:00".to_string(),
                 expires_at: "2026-01-08T00:00:00+00:00".to_string(),
+                is_current: false,
             },
             SessionItem {
                 id: "sess-b".to_string(),
@@ -159,6 +180,7 @@ mod tests {
                 user_agent: Some("curl/8.0".to_string()),
                 created_at: "2026-01-02T00:00:00+00:00".to_string(),
                 expires_at: "2026-01-09T00:00:00+00:00".to_string(),
+                is_current: true,
             },
         ];
         let json = serde_json::to_value(&items).unwrap();
