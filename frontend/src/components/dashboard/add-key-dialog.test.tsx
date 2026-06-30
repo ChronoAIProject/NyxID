@@ -214,7 +214,7 @@ describe("AddKeyDialog — custom endpoint path", () => {
       "https://my.endpoint/v1",
     );
 
-    await user.click(screen.getByRole("button", { name: "Create Service" }));
+    await user.click(screen.getByRole("button", { name: "Connect Service" }));
 
     await waitFor(() => expect(createKeyMutate).toHaveBeenCalledTimes(1));
     expect(createKeyMutate).toHaveBeenCalledWith(
@@ -258,7 +258,7 @@ describe("AddKeyDialog — custom endpoint path", () => {
     await typeInto(user, "add-key-label", "Broken");
     await typeInto(user, "add-key-credential", "sk-x");
     await typeInto(user, "add-key-endpoint", "not-a-url");
-    await user.click(screen.getByRole("button", { name: "Create Service" }));
+    await user.click(screen.getByRole("button", { name: "Connect Service" }));
 
     await waitFor(() =>
       expect(toastFns.error).toHaveBeenCalledWith("Endpoint URL is invalid"),
@@ -285,7 +285,7 @@ describe("AddKeyDialog — catalog template path", () => {
 
     // Only the credential needs entering — label/endpoint are prefilled.
     await typeInto(user, "add-key-credential", "sk-openai-key");
-    await user.click(screen.getByRole("button", { name: "Create Service" }));
+    await user.click(screen.getByRole("button", { name: "Connect Service" }));
 
     await waitFor(() => expect(createKeyMutate).toHaveBeenCalledTimes(1));
     // auth_method / auth_key_name are omitted because they equal the

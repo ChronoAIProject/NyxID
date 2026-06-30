@@ -897,7 +897,7 @@ function KeyForm({
             (requiresEndpoint && !form.endpointUrl.trim())
           }
         >
-          {isPending ? "Creating..." : "Create Service"}
+          {isPending ? "Connecting..." : "Connect Service"}
         </Button>
       </DialogFooter>
     </div>
@@ -1170,7 +1170,7 @@ function NodeSetupStep({
               !form.sshPrincipals.trim())
           }
         >
-          {isPending ? "Creating..." : "Create Service"}
+          {isPending ? "Connecting..." : "Connect Service"}
         </Button>
       </DialogFooter>
     </div>

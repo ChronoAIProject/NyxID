@@ -209,10 +209,24 @@ function KeyCardContent({
                   : "ssh tunnel"
                 : keyInfo.credential_type}
           </Badge>
-          {/* Routing pill — moved to top so it aligns across cards */}
-          <Badge variant="secondary">
-            {nodeName ? `→ ${nodeName}` : "Direct"}
-          </Badge>
+          {/* Routing pill — moved to top so it aligns across cards.
+              When routed via a node, the badge becomes a real Link so the
+              user can jump straight to the node detail page (deferred Wave B
+              cleanup, ships with C.1 canon sweep). */}
+          {nodeName && keyInfo.node_id ? (
+            <Link
+              to="/nodes/$nodeId"
+              params={{ nodeId: keyInfo.node_id }}
+              onClick={(e) => e.stopPropagation()}
+              className="inline-flex"
+            >
+              <Badge variant="secondary" className="cursor-pointer transition-colors hover:bg-muted/70">
+                → {nodeName}
+              </Badge>
+            </Link>
+          ) : (
+            <Badge variant="secondary">Direct</Badge>
+          )}
           {keyInfo.auto_connected && (
             <Badge variant="secondary">
               {keyInfo.source_app_name
@@ -370,7 +384,18 @@ function ServiceTableRow({
       </TableCell>
 
       <TableCell className="h-[60px] text-muted-foreground">
-        {nodeName ? `→ ${nodeName}` : "Direct"}
+        {nodeName && keyInfo.node_id ? (
+          <Link
+            to="/nodes/$nodeId"
+            params={{ nodeId: keyInfo.node_id }}
+            onClick={(e) => e.stopPropagation()}
+            className="text-foreground hover:underline"
+          >
+            → {nodeName}
+          </Link>
+        ) : (
+          "Direct"
+        )}
       </TableCell>
 
       <TableCell className="h-[60px]">
@@ -762,7 +787,7 @@ function AddButton({
   readonly onCreateKey: () => void;
 }) {
   if (tab === "services") {
-    return <AddCtaButton label="Add Service" onClick={onAddService} />;
+    return <AddCtaButton label="Connect Service" onClick={onAddService} />;
   }
   if (tab === "pools") {
     return <AddCtaButton label="Create Pool" onClick={onCreatePool} />;

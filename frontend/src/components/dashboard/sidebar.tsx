@@ -22,7 +22,6 @@ import {
   Radio,
   KeyRound,
   Bot,
-  Network,
   Ticket,
   PanelLeftClose,
   PanelLeft,
@@ -50,7 +49,7 @@ export const MAIN_NAV = [
   { to: "/devices/onboard", icon: QrCode, label: "Device Onboard" },
   { to: "/channel-bots", icon: Radio, label: "Channel Bots" },
   { to: "/settings", icon: Settings, label: "Settings" },
-  { to: "/settings/consents", icon: KeyRound, label: "Access & Auth" },
+  { to: "/settings/consents", icon: KeyRound, label: "Authorized Apps" },
   { to: "/docs", icon: BookOpen, label: "Docs" },
 ] as const;
 
@@ -63,7 +62,7 @@ export const APPROVALS_NAV = [
 export const DEVELOPER_NAV = [
   { to: "/developer/apps", icon: Code, label: "Developer Apps" },
   { to: "/ai-setup", icon: Sparkles, label: "AI Setup" },
-  { to: "/integration-guide", icon: BookMarked, label: "Integration" },
+  { to: "/integration-guide", icon: BookMarked, label: "Integration Guide" },
 ] as const;
 
 export const ADMIN_NAV = [
@@ -73,7 +72,7 @@ export const ADMIN_NAV = [
   { to: "/admin/service-accounts", icon: Bot, label: "Service Accounts" },
   { to: "/admin/roles", icon: ShieldCheck, label: "Roles" },
   { to: "/admin/groups", icon: Layers, label: "Groups" },
-  { to: "/admin/nodes", icon: Network, label: "Node Registry" },
+  { to: "/admin/nodes", icon: HardDrive, label: "Node Registry" },
   { to: "/services", icon: Server, label: "Services" },
   { to: "/providers", icon: Plug, label: "Providers" },
 ] as const;

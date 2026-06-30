@@ -2166,7 +2166,17 @@ export function KeyDetailPage() {
                     happens to be node-routed.
                   */}
                   <p className="text-xs">
-                    {nodeName ? `Via ${nodeName}` : "Direct"}
+                    {nodeName && keyInfo?.node_id ? (
+                      <Link
+                        to="/nodes/$nodeId"
+                        params={{ nodeId: keyInfo.node_id }}
+                        className="text-foreground hover:underline"
+                      >
+                        Via {nodeName}
+                      </Link>
+                    ) : (
+                      "Direct"
+                    )}
                   </p>
                 </div>
               </div>
