@@ -227,11 +227,20 @@ describe("AddKeyDialog — custom endpoint path", () => {
       },
       expect.anything(),
     );
-    expect(toastFns.success).toHaveBeenCalledWith("Key created");
-    expect(mockNavigate).toHaveBeenCalledWith({
-      to: "/keys/$keyId",
-      params: { keyId: "new-key-1" },
-    });
+    // Wave-aha-1 A4: success path now transitions to the inline `verify`
+    // step instead of toasting + navigating. The dialog stays open so
+    // the user sees their first 200 (or a precise failure diagnosis)
+    // right here. View-details / Done buttons handle the close + nav.
+    // Target the DialogTitle (heading) so the verify panel's failure copy
+    // ("…connected, but the test call didn't succeed") doesn't double-match
+    // when the test env can't reach the proxy.
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { name: /My Custom API connected/i }),
+      ).toBeInTheDocument(),
+    );
+    expect(toastFns.success).not.toHaveBeenCalledWith("Key created");
+    expect(mockNavigate).not.toHaveBeenCalled();
   });
 
   it("surfaces the API error message when key creation fails", async () => {
@@ -299,11 +308,16 @@ describe("AddKeyDialog — catalog template path", () => {
       },
       expect.anything(),
     );
-    expect(toastFns.success).toHaveBeenCalledWith("Key created");
-    expect(mockNavigate).toHaveBeenCalledWith({
-      to: "/keys/$keyId",
-      params: { keyId: "new-key-2" },
-    });
+    // Wave-aha-1 A4: dialog transitions to the verify step with the
+    // catalog-entry's display name ("OpenAI"). No premature toast,
+    // no premature navigate.
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { name: /OpenAI connected/i }),
+      ).toBeInTheDocument(),
+    );
+    expect(toastFns.success).not.toHaveBeenCalledWith("Key created");
+    expect(mockNavigate).not.toHaveBeenCalled();
   });
 });
 

@@ -50,6 +50,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { ServiceIcon } from "@/components/service-icons";
+import { ConnectVerifyStep } from "@/components/dashboard/connect-verify-step";
 import type { CatalogEntry, KeyInfo } from "@/types/keys";
 import type { DeviceCodePollResponse } from "@/types/api";
 
@@ -60,7 +61,20 @@ type WizardStep =
   | "node_setup"
   | "oauth_credentials"
   | "oauth"
-  | "device_code";
+  | "device_code"
+  /**
+   * Aha-moment step (wave-aha-1 A4): after POST /keys succeeds, the dialog
+   * stays open on this step and fires a single real broker call against
+   * the new service so the user sees their first 200 INSIDE the dialog
+   * instead of having to navigate to /keys/{id} → API Usage → Verify.
+   */
+  | "verify";
+
+interface CreatedKey {
+  readonly id: string;
+  readonly slug: string;
+  readonly serviceName: string;
+}
 
 interface FormState {
   readonly credential: string;
@@ -2071,6 +2085,10 @@ export function AddKeyDialog({
   // app-credentials.md` §6.1.
   const [byoOAuthClientId, setByoOAuthClientId] = useState<string | null>(null);
   const [byoOAuthClientSecret, setByoOAuthClientSecret] = useState<string | null>(null);
+  // Captured at POST /keys success so the new `verify` step (wave-aha-1
+  // A4) can fire its probe and the Done/View-details buttons know where
+  // to navigate. Stays null until a successful create.
+  const [createdKey, setCreatedKey] = useState<CreatedKey | null>(null);
   // Guards `prefillSlug` against running its auto-select more than
   // once per dialog open. Without this, re-renders would re-select
   // the catalog entry and snap the user back to the routing step
@@ -2085,6 +2103,7 @@ export function AddKeyDialog({
     setTargetOrgId(null);
     setByoOAuthClientId(null);
     setByoOAuthClientSecret(null);
+    setCreatedKey(null);
     appliedPrefillRef.current = null;
   }
 
@@ -2316,9 +2335,24 @@ export function AddKeyDialog({
 
     createKey.mutate(params, {
       onSuccess: (key) => {
-        toast.success("Key created");
-        handleOpenChange(false);
-        void navigate({ to: "/keys/$keyId", params: { keyId: key.id } });
+        // Wave-aha-1 A4: don't close + navigate immediately. Stash the new
+        // key + slug and transition to the inline `verify` step so the
+        // user sees their first 200 (or a precise diagnosis) right here
+        // instead of having to hunt for it on /keys/{id}.
+        setCreatedKey({
+          id: key.id,
+          slug: key.slug,
+          // Prefer the catalog entry's display name (e.g. "OpenAI"); fall
+          // through to the user-typed form label, the API response label,
+          // and finally the slug so we never end up with an "undefined
+          // connected" header.
+          serviceName:
+            selectedEntry?.name ??
+            form.label.trim() ??
+            key.label ??
+            key.slug,
+        });
+        setStep("verify");
       },
       onError: (err) => {
         const message =
@@ -2374,9 +2408,24 @@ export function AddKeyDialog({
 
     createKey.mutate(params, {
       onSuccess: (key) => {
-        toast.success("Service created");
-        handleOpenChange(false);
-        void navigate({ to: "/keys/$keyId", params: { keyId: key.id } });
+        // Wave-aha-1 A4: stay in the dialog and run the inline verify
+        // step. Node-routed services often won't return 200 until the
+        // node agent is online, so the verify step's failure copy
+        // explicitly calls that out below.
+        setCreatedKey({
+          id: key.id,
+          slug: key.slug,
+          // Prefer the catalog entry's display name (e.g. "OpenAI"); fall
+          // through to the user-typed form label, the API response label,
+          // and finally the slug so we never end up with an "undefined
+          // connected" header.
+          serviceName:
+            selectedEntry?.name ??
+            form.label.trim() ??
+            key.label ??
+            key.slug,
+        });
+        setStep("verify");
       },
       onError: (err) => {
         const message =
@@ -2400,6 +2449,8 @@ export function AddKeyDialog({
         return `${isReconnect ? "Reconnect" : "Connect"} to ${selectedEntry?.name ?? "Service"}`;
       case "device_code":
         return `${isReconnect ? "Reconnect" : "Connect"} to ${selectedEntry?.name ?? "Service"}`;
+      case "verify":
+        return `${createdKey?.serviceName ?? "Service"} connected`;
       default:
         return "Configure Service";
     }
@@ -2421,6 +2472,8 @@ export function AddKeyDialog({
         return `Authenticate with ${selectedEntry?.name ?? "the service"} via OAuth.`;
       case "device_code":
         return `Authenticate with ${selectedEntry?.name ?? "the service"} using a device code.`;
+      case "verify":
+        return "Testing the connection so you don't have to.";
       default:
         return selectedEntry
           ? `Set up your ${selectedEntry.name} credentials.`
@@ -2570,6 +2623,23 @@ export function AddKeyDialog({
                   )
             }
             onComplete={handleAuthComplete}
+          />
+        )}
+
+        {step === "verify" && createdKey && (
+          <ConnectVerifyStep
+            createdKey={createdKey}
+            isNodeRouted={Boolean(form.nodeId.trim())}
+            onDone={() => {
+              handleOpenChange(false);
+            }}
+            onViewDetails={() => {
+              handleOpenChange(false);
+              void navigate({
+                to: "/keys/$keyId",
+                params: { keyId: createdKey.id },
+              });
+            }}
           />
         )}
       </DialogContent>
