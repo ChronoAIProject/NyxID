@@ -386,6 +386,79 @@ describe("ConnectVerifyStep — probe (agent key INVALID: NyxID-layer rejection)
   });
 });
 
+describe("ConnectVerifyStep — known-untestable providers (Codex, OpenClaw, etc.)", () => {
+  const CODEX_KEY: CreatedKey = {
+    ...CREATED_KEY,
+    slug: "openai-codex",
+    catalogSlug: "openai-codex",
+    serviceName: "OpenAI Codex API",
+    completionMode: "device_code",
+  };
+
+  it("after mint, shows 'automatic testing isn't supported' hint + only a Done button", async () => {
+    createApiKeyMutate.mockImplementation((_params, opts) => {
+      opts?.onSuccess?.(MINTED_KEY);
+    });
+    const fetchSpy = vi.spyOn(window, "fetch");
+
+    const user = userEvent.setup();
+    render(
+      <ConnectVerifyStep
+        createdKey={CODEX_KEY}
+        isNodeRouted={false}
+        onDone={vi.fn()}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: /Create Agent Key/i }));
+
+    // Panel appears — user can still copy the key.
+    await waitFor(() =>
+      expect(screen.getByText(MINTED_KEY.full_key)).toBeInTheDocument(),
+    );
+    // Hint text explains WHY there's no Test button, name-checks the service.
+    expect(document.body.textContent ?? "").toMatch(
+      /Automatic testing isn't supported/i,
+    );
+    expect(document.body.textContent ?? "").toMatch(/OpenAI Codex API/);
+
+    // The Test Agent Key button MUST NOT render — a fake green from a
+    // probe we can't trust is worse than no probe at all.
+    expect(
+      screen.queryByRole("button", { name: /Test Agent Key/i }),
+    ).toBeNull();
+    // Single primary CTA — Done. No "I'll wire it myself" either.
+    expect(screen.getByRole("button", { name: /^Done$/i })).toBeEnabled();
+    expect(
+      screen.queryByRole("button", { name: /I'll wire it myself/i }),
+    ).toBeNull();
+
+    // Sanity: no probe fired.
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("Done from key_ready calls onDone on untestable providers", async () => {
+    createApiKeyMutate.mockImplementation((_params, opts) => {
+      opts?.onSuccess?.(MINTED_KEY);
+    });
+    const onDone = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <ConnectVerifyStep
+        createdKey={CODEX_KEY}
+        isNodeRouted={false}
+        onDone={onDone}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: /Create Agent Key/i }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /^Done$/i })).toBeEnabled(),
+    );
+    await user.click(screen.getByRole("button", { name: /^Done$/i }));
+
+    expect(onDone).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("ConnectVerifyStep — loading events + Done", () => {
   it("Test click dispatches loading start + end events regardless of probe outcome", async () => {
     vi.spyOn(window, "fetch").mockRejectedValue(new TypeError("network error"));

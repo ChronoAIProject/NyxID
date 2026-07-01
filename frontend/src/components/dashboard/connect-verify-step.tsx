@@ -9,7 +9,11 @@ import {
   VERIFY_KEY_LOADING_END_EVENT,
   VERIFY_KEY_LOADING_START_EVENT,
 } from "@/hooks/use-proxy-onboarding";
-import { probeAgentKey, type ProbeOutcome } from "@/lib/proxy-probe";
+import {
+  isKnownUntestable,
+  probeAgentKey,
+  type ProbeOutcome,
+} from "@/lib/proxy-probe";
 import type { ApiKeyCreateResponse } from "@/types/api";
 
 // Slug-shape hint used only to decide whether to render the
@@ -153,6 +157,13 @@ export function ConnectVerifyStep({
     }
   }
 
+  // Per-provider probe registry — some services (Codex chat-only,
+  // OpenClaw self-hosted, etc.) have no cheap GET endpoint we can
+  // reliably test. For those we hide the Test button entirely and
+  // hint at manual verification — a "green light" from a probe we
+  // don't trust is worse than no light at all.
+  const untestable = isKnownUntestable(createdKey.slug);
+
   return (
     <div className="space-y-4 py-2">
       <Body
@@ -161,9 +172,11 @@ export function ConnectVerifyStep({
         agentKey={agentKey}
         mintError={mintError}
         probe={probe}
+        untestable={untestable}
       />
       <Footer
         phase={phase}
+        untestable={untestable}
         onMint={triggerMint}
         onProbe={triggerProbe}
         onDone={onDone}
@@ -178,12 +191,14 @@ function Body({
   agentKey,
   mintError,
   probe,
+  untestable,
 }: {
   readonly phase: Phase;
   readonly createdKey: CreatedKey;
   readonly agentKey: ApiKeyCreateResponse | null;
   readonly mintError: string | null;
   readonly probe: ProbeOutcome | null;
+  readonly untestable: boolean;
 }) {
   if (phase === "connected") {
     return (
@@ -238,6 +253,19 @@ function Body({
           createdKey={createdKey}
           showOpenAiEnvSnippet={showOpenAiEnvSnippet}
         />
+      )}
+
+      {phase === "key_ready" && untestable && (
+        <InlineStatus
+          icon={<KeyRound className="h-4 w-4 text-muted-foreground" aria-hidden />}
+        >
+          Automatic testing isn't supported for{" "}
+          <span className="font-medium text-foreground">
+            {createdKey.serviceName}
+          </span>{" "}
+          — it doesn't expose a cheap status endpoint. Verify by running one
+          real call from your AI tool once you've wired the env vars above.
+        </InlineStatus>
       )}
 
       {phase === "probing" && (
@@ -352,16 +380,18 @@ type FooterAction = "onMint" | "onProbe" | "onDone";
 
 function Footer({
   phase,
+  untestable,
   onMint,
   onProbe,
   onDone,
 }: {
   readonly phase: Phase;
+  readonly untestable: boolean;
   readonly onMint: () => void;
   readonly onProbe: () => void;
   readonly onDone: () => void;
 }) {
-  const config = footerConfig(phase);
+  const config = footerConfig(phase, untestable);
   // Dispatch INVOKES the mapped handler. Do NOT refactor back to
   // `(a) => a === "onMint" ? onMint : …` — that returns the function
   // reference but never calls it (silent no-op click). This one bit
@@ -407,7 +437,7 @@ interface FooterConfig {
   readonly busy: boolean;
 }
 
-function footerConfig(phase: Phase): FooterConfig {
+function footerConfig(phase: Phase, untestable: boolean): FooterConfig {
   switch (phase) {
     case "connected":
       return {
@@ -434,6 +464,18 @@ function footerConfig(phase: Phase): FooterConfig {
         busy: false,
       };
     case "key_ready":
+      // Untestable providers (Codex, OpenClaw, Lark bot, etc.) skip
+      // the probe entirely — a "green" result we can't trust is worse
+      // than no result. Single Done CTA in that case.
+      if (untestable) {
+        return {
+          secondaryLabel: null,
+          secondary: "onDone",
+          primaryLabel: "Done",
+          primary: "onDone",
+          busy: false,
+        };
+      }
       return {
         secondaryLabel: "I'll wire it myself",
         secondary: "onDone",
