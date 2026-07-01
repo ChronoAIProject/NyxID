@@ -67,9 +67,17 @@ export function MistralGlyph(props: GlyphProps) {
  * Cohere entry at the time of writing.
  */
 export function CohereGlyph(props: GlyphProps) {
+  // Cohere brand mark — three-blob composition supplied by Calvin
+  // (600×600 canvas). The original SVG uses three brand colors
+  // (green / purple / coral); the app renders catalog icons
+  // monochrome via currentColor to match the rest of the tile grid,
+  // so all three shapes flatten to one tone. The composition still
+  // reads as a distinct mark at 20px.
   return (
-    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" {...props}>
-      <path d="M21 5 H10 C 5 5, 3 7, 3 12 C 3 17, 5 19, 10 19 H21 V16 H10 C 7 16, 6 14.5, 6 12 C 6 9.5, 7 8, 10 8 H21 Z" />
+    <svg viewBox="0 0 600 600" fill="currentColor" aria-hidden="true" {...props}>
+      <path d="M407.5 31c-72.3 0-144.7-0.1-217 0.2-10.9 0-22 1.2-32.7 3.6C76.3 52.7 22.4 128 32.3 210.8c6.7 56.4 36.1 97.5 86.9 122.9 28.6 14.3 59.4 19.2 91.1 18.7 28.6-0.4 55.7-7.3 81.9-18.4 54.8-23.1 109.8-45.5 164.2-69.4 20.8-9.1 41.1-20.1 60-32.7 28.9-19.2 44-47.1 46.1-82.2C566.3 85.7 515.3 31 451 31c-14.2 0-28.3 0-43.5 0z" />
+      <path d="M315.3 562.3c13.2 5.6 26.6 8.7 40.6 8.8 25.2 0.1 50.3 0.1 75.5 0 9.6 0 19.3 0 28.9-1 27-2.7 50.8-13.5 70.5-32 30.2-28.5 43.8-63.7 39.8-105.2-3.3-33.2-17.5-61-43.2-82.2-38.2-31.5-81.1-39-127.5-21.1-27.6 10.6-54.8 22.5-82.1 33.9-46.7 19.5-73.4 64.9-66.2 115.1 5.6 39.2 27.6 66.9 63.7 83.7z" />
+      <path d="M97 565.6c38.4 11 77.5-2 101-33.2 18.3-24.3 21.1-52.1 16.9-80.9-5.9-40.4-37.2-71.1-79-77-42-5.9-77.7 16.4-95 49.8-10.8 20.9-12.5 43.2-8.9 65.7 6 37.7 27.8 62.8 64.8 75.6z" />
     </svg>
   );
 }
