@@ -2532,7 +2532,7 @@ export function AddKeyDialog({
       case "device_code":
         return `Authenticate with ${selectedEntry?.name ?? "the service"} using a device code.`;
       case "verify":
-        return "Connected. Set up an Agent Key so your AI tools can use it.";
+        return "Connect your AI tools to this service through NyxID.";
       default:
         return selectedEntry
           ? `Set up your ${selectedEntry.name} credentials.`
@@ -2546,18 +2546,18 @@ export function AddKeyDialog({
         <DialogHeader>
           <DialogTitle>
             {step === "verify" && createdKey ? (
-              // Verify-step title stays stable across the internal phase
-              // machine — just the brand icon + quoted service name.
-              // Phase transitions (connected → minting → probe_success)
-              // are communicated by the inline status lines inside the
-              // body so "connected" doesn't get repeated as the state
-              // changes.
+              // Umbrella framing: the dialog is the "set up your service"
+              // journey; the individual phase progress lives in the step
+              // rows inside the body. Title reads as the action the
+              // journey accomplishes, with the service brand icon to
+              // anchor which service we're setting up.
               <span className="inline-flex items-center gap-2">
                 <ServiceIcon
                   slug={createdKey.catalogSlug}
                   className="h-5 w-5 shrink-0 text-muted-foreground"
                 />
                 <span>
+                  Set up{" "}
                   <span className="text-muted-foreground">&ldquo;</span>
                   {createdKey.serviceName}
                   <span className="text-muted-foreground">&rdquo;</span>
