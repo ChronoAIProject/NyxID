@@ -273,6 +273,7 @@ function CreateBotDialog({
    *  active. `null` defaults to personal. */
   readonly defaultOrgId: string | null;
 }) {
+  const navigate = useNavigate();
   const createBot = useCreateChannelBot();
   const {
     register,
@@ -330,6 +331,15 @@ function CreateBotDialog({
         );
         reset();
         onOpenChange(false);
+        // Auto-navigate to the detail page so the user actually FINDS the
+        // webhook URL + setup checklist (Wave B item B.1). Mirrors B.7's
+        // navigate-on-first-appear pattern for credential nodes — without
+        // this jump, the user lands back on the list with just a toast and
+        // has no clear path to the next step.
+        void navigate({
+          to: "/channel-bots/$botId",
+          params: { botId: result.id },
+        });
       },
       onError: (err) => {
         const message =

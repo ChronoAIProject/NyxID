@@ -3,6 +3,8 @@ import type { ReactElement } from "react";
 import { Monitor, Smartphone, Globe } from "lucide-react";
 import {
   getDeviceIcon,
+  humanizeUserAgent,
+  humanizeIpAddress,
   buildCursorDeeplink,
   buildClaudeCodeCommand,
   buildCursorConfig,
@@ -52,6 +54,61 @@ describe("getDeviceIcon", () => {
     const ua = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) Mobile";
     const element = getDeviceIcon(ua) as ReactElement;
     expect(element.type).toBe(Smartphone);
+  });
+});
+
+describe("humanizeUserAgent", () => {
+  it("turns a Chrome-on-Mac UA into 'Chrome X on macOS'", () => {
+    const ua =
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36";
+    expect(humanizeUserAgent(ua)).toBe("Chrome 149 on macOS");
+  });
+
+  it("recognises Safari on iPhone with the Version/X token", () => {
+    const ua =
+      "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
+    expect(humanizeUserAgent(ua)).toBe("Safari 17 on iOS");
+  });
+
+  it("recognises Firefox on Windows", () => {
+    expect(
+      humanizeUserAgent(
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0",
+      ),
+    ).toBe("Firefox 120 on Windows");
+  });
+
+  it("collapses curl into a short label", () => {
+    expect(humanizeUserAgent("curl/8.7.1")).toBe("curl (curl/8.7.1)");
+  });
+
+  it("returns 'Unknown device' for empty / nullish input", () => {
+    expect(humanizeUserAgent(undefined)).toBe("Unknown device");
+    expect(humanizeUserAgent(null)).toBe("Unknown device");
+    expect(humanizeUserAgent("  ")).toBe("Unknown device");
+  });
+
+  it("falls back to the truncated raw UA when no browser+OS match", () => {
+    const weird = "SomeRandomBrowser/1.0 (CustomOS)";
+    expect(humanizeUserAgent(weird)).toBe(weird);
+  });
+});
+
+describe("humanizeIpAddress", () => {
+  it("turns loopback addresses into 'Local network'", () => {
+    expect(humanizeIpAddress("127.0.0.1")).toBe("Local network");
+    expect(humanizeIpAddress("::1")).toBe("Local network");
+  });
+
+  it("passes through real IPv4 / IPv6 addresses unchanged", () => {
+    expect(humanizeIpAddress("203.0.113.42")).toBe("203.0.113.42");
+    expect(humanizeIpAddress("2001:db8::1")).toBe("2001:db8::1");
+  });
+
+  it("returns the em-dash placeholder for empty / nullish input", () => {
+    expect(humanizeIpAddress(undefined)).toBe("—");
+    expect(humanizeIpAddress(null)).toBe("—");
+    expect(humanizeIpAddress("  ")).toBe("—");
   });
 });
 

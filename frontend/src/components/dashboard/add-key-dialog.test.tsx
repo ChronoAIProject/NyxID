@@ -10,6 +10,7 @@ const {
   catalog,
   createKeyMutate,
   createKeyMutateAsync,
+  createApiKeyMutate,
   initiateOAuthMutateAsync,
   initiateDeviceCodeMutateAsync,
   pollDeviceCodeMutate,
@@ -21,6 +22,11 @@ const {
   catalog: { entries: [] as unknown[] },
   createKeyMutate: vi.fn(),
   createKeyMutateAsync: vi.fn(),
+  // Wave-aha-1 A4+ — the verify step auto-mints an Agent Key. The mock
+  // intentionally swallows the call without firing onSuccess so the
+  // dialog stays in the "minting" phase; the test only needs to assert
+  // the verify step renders, not that the mint succeeded.
+  createApiKeyMutate: vi.fn(),
   initiateOAuthMutateAsync: vi.fn(),
   initiateDeviceCodeMutateAsync: vi.fn(),
   pollDeviceCodeMutate: vi.fn(),
@@ -35,6 +41,13 @@ vi.mock("@/hooks/use-keys", () => ({
   useCreateKey: () => ({
     mutate: createKeyMutate,
     mutateAsync: createKeyMutateAsync,
+    isPending: false,
+  }),
+}));
+
+vi.mock("@/hooks/use-api-keys", () => ({
+  useCreateApiKey: () => ({
+    mutate: createApiKeyMutate,
     isPending: false,
   }),
 }));
@@ -214,7 +227,7 @@ describe("AddKeyDialog — custom endpoint path", () => {
       "https://my.endpoint/v1",
     );
 
-    await user.click(screen.getByRole("button", { name: "Create Service" }));
+    await user.click(screen.getByRole("button", { name: "Connect Service" }));
 
     await waitFor(() => expect(createKeyMutate).toHaveBeenCalledTimes(1));
     expect(createKeyMutate).toHaveBeenCalledWith(
@@ -227,11 +240,22 @@ describe("AddKeyDialog — custom endpoint path", () => {
       },
       expect.anything(),
     );
-    expect(toastFns.success).toHaveBeenCalledWith("Key created");
-    expect(mockNavigate).toHaveBeenCalledWith({
-      to: "/keys/$keyId",
-      params: { keyId: "new-key-1" },
-    });
+    // Wave-aha-1 A4: success path now transitions to the inline `verify`
+    // step instead of toasting + navigating. The dialog stays open so
+    // the user sees their first 200 (or a precise failure diagnosis)
+    // right here. View-details / Done buttons handle the close + nav.
+    // Verify-step DialogTitle: brand icon + quoted service name (no verb).
+    // "Connected" now lives in the DialogDescription + inline body copy,
+    // not the heading — so we just assert the service name appears.
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", {
+          name: (n) => /My Custom API/i.test(n),
+        }),
+      ).toBeInTheDocument(),
+    );
+    expect(toastFns.success).not.toHaveBeenCalledWith("Key created");
+    expect(mockNavigate).not.toHaveBeenCalled();
   });
 
   it("surfaces the API error message when key creation fails", async () => {
@@ -258,7 +282,7 @@ describe("AddKeyDialog — custom endpoint path", () => {
     await typeInto(user, "add-key-label", "Broken");
     await typeInto(user, "add-key-credential", "sk-x");
     await typeInto(user, "add-key-endpoint", "not-a-url");
-    await user.click(screen.getByRole("button", { name: "Create Service" }));
+    await user.click(screen.getByRole("button", { name: "Connect Service" }));
 
     await waitFor(() =>
       expect(toastFns.error).toHaveBeenCalledWith("Endpoint URL is invalid"),
@@ -285,7 +309,7 @@ describe("AddKeyDialog — catalog template path", () => {
 
     // Only the credential needs entering — label/endpoint are prefilled.
     await typeInto(user, "add-key-credential", "sk-openai-key");
-    await user.click(screen.getByRole("button", { name: "Create Service" }));
+    await user.click(screen.getByRole("button", { name: "Connect Service" }));
 
     await waitFor(() => expect(createKeyMutate).toHaveBeenCalledTimes(1));
     // auth_method / auth_key_name are omitted because they equal the
@@ -299,11 +323,18 @@ describe("AddKeyDialog — catalog template path", () => {
       },
       expect.anything(),
     );
-    expect(toastFns.success).toHaveBeenCalledWith("Key created");
-    expect(mockNavigate).toHaveBeenCalledWith({
-      to: "/keys/$keyId",
-      params: { keyId: "new-key-2" },
-    });
+    // Wave-aha-1 A4: dialog transitions to the verify step with the
+    // catalog-entry's display name ("OpenAI"). No premature toast,
+    // no premature navigate.
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", {
+          name: (n) => /OpenAI/i.test(n),
+        }),
+      ).toBeInTheDocument(),
+    );
+    expect(toastFns.success).not.toHaveBeenCalledWith("Key created");
+    expect(mockNavigate).not.toHaveBeenCalled();
   });
 });
 
@@ -520,6 +551,84 @@ function minCatalogEntry(
     requires_credential: true,
   } as unknown as CatalogEntry;
 }
+
+describe("AddKeyDialog → ConnectVerifyStep integration (end-to-end wiring)", () => {
+  // GLM #8 + Kimi — the intentionally-swallowed createApiKeyMutate
+  // in the other tests hides the real dialog → verify-step wiring.
+  // This test lets the mint fire onSuccess so we can assert the
+  // subsequent probe actually reaches window.fetch with the right
+  // slug + bearer. A regression that broke createdKey.slug threading
+  // (undefined slug → empty proxy URL) would fail here.
+  it("mint success wires the probe against the correct proxy slug", async () => {
+    createKeyMutate.mockImplementation((_params, opts) => {
+      // Backend returns id + slug — the slug is what threads into
+      // ConnectVerifyStep and drives the probe URL. If the field
+      // name ever drifts (e.g. `service_slug` vs `slug`), the probe
+      // URL below breaks.
+      // Prefixed service_slug — matches what the backend actually seeds
+      // (`llm-openai` from provider_service.rs) so the recipe registry
+      // fires and the probe URL below resolves correctly.
+      opts?.onSuccess?.({ id: "new-key-1", slug: "llm-openai" });
+    });
+    createApiKeyMutate.mockImplementation((_params, opts) => {
+      opts?.onSuccess?.({
+        id: "ak-1",
+        full_key: "nyxid_ag_integration_secret",
+        key_prefix: "nyxid_ag_",
+        scopes: ["proxy"],
+        allow_all_services: false,
+        allowed_service_ids: ["new-key-1"],
+      });
+    });
+    // Downstream response with the X-NyxID-Agent-Id header set —
+    // proves the probe actually hits the classifier's happy path.
+    const fetchSpy = vi.spyOn(window, "fetch").mockResolvedValue(
+      new Response("{}", {
+        status: 200,
+        headers: { "x-nyxid-agent-id": "ak-1" },
+      }),
+    );
+
+    const user = userEvent.setup();
+    render(<AddKeyDialog open onOpenChange={vi.fn()} />);
+
+    // Walk the catalog → routing → form path.
+    await user.click(screen.getByRole("button", { name: /OpenAI/i }));
+    await user.click(
+      screen.getByRole("button", { name: /Next: Enter Credentials/i }),
+    );
+    await typeInto(user, "add-key-credential", "sk-integration");
+    await user.click(screen.getByRole("button", { name: "Connect Service" }));
+
+    // Wait for the verify step to mount + user clicks Create Agent Key
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: /Create Agent Key/i }),
+      ).toBeInTheDocument(),
+    );
+    await user.click(screen.getByRole("button", { name: /Create Agent Key/i }));
+
+    // Panel appears with the minted secret; Test button available.
+    await waitFor(() =>
+      expect(
+        screen.getByText("nyxid_ag_integration_secret"),
+      ).toBeInTheDocument(),
+    );
+    await user.click(screen.getByRole("button", { name: /Test Agent Key/i }));
+
+    // The probe reached fetch — pin the exact URL derived from the
+    // OpenAI slug's registry recipe (/models — relative to the
+    // seeded base_url `.../v1`). If the wiring drops createdKey.slug,
+    // this test fails immediately.
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
+    const call = fetchSpy.mock.calls[0];
+    if (!call) throw new Error("probe fetch was not called");
+    expect(String(call[0])).toBe("/api/v1/proxy/s/llm-openai/models");
+    expect(call[1]?.headers).toMatchObject({
+      Authorization: "Bearer nyxid_ag_integration_secret",
+    });
+  });
+});
 
 describe("AddKeyDialog — catalog service icons", () => {
   it("renders a dedicated brand icon for every seeded catalog slug (no fallback)", () => {

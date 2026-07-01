@@ -172,7 +172,9 @@ pub fn build_router(
             delete(handlers::service_requirements::remove_requirement),
         );
 
-    let session_routes = Router::new().route("/", get(handlers::sessions::list_sessions));
+    let session_routes = Router::new()
+        .route("/", get(handlers::sessions::list_sessions))
+        .route("/{id}", delete(handlers::sessions::revoke_own_session));
 
     let mcp_routes = Router::new().route("/config", get(handlers::mcp::get_mcp_config));
 

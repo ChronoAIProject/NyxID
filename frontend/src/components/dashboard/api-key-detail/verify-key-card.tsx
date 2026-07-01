@@ -18,26 +18,15 @@ import {
   VERIFY_KEY_LOADING_END_EVENT,
   VERIFY_KEY_LOADING_START_EVENT,
 } from "@/hooks/use-proxy-onboarding";
+import { probeAgentKey, type ProbeOutcome } from "@/lib/proxy-probe";
 
 /**
- * Sentinel slug guaranteed never to match a real user service, so that
- * a scoped key with `allow_all_services=true` still sees a 4xx on the
- * denied-slug probe (the proxy returns 404 for an unknown slug, which
- * we accept as "scope enforced" for the denial case).
+ * Sentinel slug guaranteed never to match a real user service. Used for
+ * the "denied" probe — a scope-enforcing gateway should refuse the
+ * bearer with a NyxID-layer 403/404 (i.e. no X-NyxID-Agent-Id on the
+ * response), which is what we check for below.
  */
 const DENIED_SLUG_SENTINEL = "__nyxid_test_denied__";
-
-/**
- * Slugs that almost always expose `/v1/models` on AI providers. Used to
- * decide whether the probe path should be `v1/models` (OpenAI-shaped API)
- * or `` (treat the downstream's root path). Mismatched services still
- * produce a non-Okay status — what matters is that a 403 vs. 200 split
- * is observable.
- */
-const OPENAI_SHAPED_HINTS =
-  /(openai|anthropic|claude|gemini|deepseek|groq|together|mistral|fireworks|perplexity|cohere|xai|grok)/i;
-
-const PROBE_TIMEOUT_MS = 8000;
 
 type ResultStatus = "idle" | "pending" | "success" | "failure";
 
@@ -45,24 +34,8 @@ interface ProbeResult {
   readonly slug: string;
   readonly label: string;
   readonly expected: "allowed" | "denied";
-  readonly status: number | null;
+  readonly outcome: ProbeOutcome;
   readonly ok: boolean;
-}
-
-function probePathForSlug(slug: string): string {
-  return OPENAI_SHAPED_HINTS.test(slug) ? "v1/models" : "";
-}
-
-function isAllowedOutcome(s: number | null): boolean {
-  return s !== null && s >= 200 && s < 400;
-}
-
-function isDeniedOutcome(s: number | null): boolean {
-  // 4xx (incl. 403) and 5xx both count as "the scope held": either the
-  // gateway rejected the call outright (403) or the downstream returned a
-  // client error because the brokered path is unknown. We never treat a
-  // 2xx/3xx as a denial.
-  return s !== null && (s >= 400 || s >= 500);
 }
 
 export function VerifyKeyCard({
@@ -149,56 +122,28 @@ export function VerifyKeyCard({
       loadingStartDispatchedRef.current = true;
     }
 
-    const allowedUrl = `/api/v1/proxy/s/${encodeURIComponent(allowedSlug)}/${probePathForSlug(allowedSlug)}`;
-    const deniedUrl = `/api/v1/proxy/s/${encodeURIComponent(deniedSlug)}/`;
-
-    const headers = (): HeadersInit => ({
-      Authorization: `Bearer ${pastedKey.trim()}`,
-      // Some downstreams require a content type; harmless if unused.
-      "Content-Type": "application/json",
-    });
-
-    const fetchOpts = (): RequestInit & { signal?: AbortSignal } => ({
-      method: "GET",
-      headers: headers(),
-      // We do NOT want to follow the SPA's auth context — the test must
-      // use only the pasted key, so we omit credentials.
-      credentials: "omit",
-    });
-
-    async function probe(
-      url: string,
+    async function probeSide(
       expected: "allowed" | "denied",
       slug: string,
       label: string,
     ): Promise<ProbeResult> {
-      const controller = new AbortController();
-      const timer = setTimeout(
-        () => controller.abort(),
-        PROBE_TIMEOUT_MS,
-      );
-      let status: number | null = null;
-      try {
-        const res = await fetch(url, {
-          ...fetchOpts(),
-          signal: controller.signal,
-        });
-        status = res.status;
-      } catch {
-        status = null;
-      } finally {
-        clearTimeout(timer);
-      }
+      const outcome = await probeAgentKey(slug, {
+        bearerToken: pastedKey.trim(),
+      });
+      // Twin-probe verdict — "allowed" side must have the agent-id
+      // header (NyxID accepted the key + scope for this slug). "Denied"
+      // side must NOT have it (NyxID rejected either at scope or slug
+      // resolution — either is a valid enforcement outcome).
       const ok =
         expected === "allowed"
-          ? isAllowedOutcome(status)
-          : isDeniedOutcome(status);
-      return { slug, label, expected, status, ok };
+          ? outcome.agentKeyValid
+          : !outcome.agentKeyValid;
+      return { slug, label, expected, outcome, ok };
     }
 
     const [allowedRes, deniedRes] = await Promise.all([
-      probe(allowedUrl, "allowed", allowedSlug, allowedLabel),
-      probe(deniedUrl, "denied", deniedSlug, deniedLabel),
+      probeSide("allowed", allowedSlug, allowedLabel),
+      probeSide("denied", deniedSlug, deniedLabel),
     ]);
 
     const nextResults = [allowedRes, deniedRes];
@@ -218,18 +163,14 @@ export function VerifyKeyCard({
       const failing = nextResults.filter((r) => !r.ok);
       const explanations = failing.map((r) => {
         if (r.expected === "allowed") {
-          if (r.status === 401 || r.status === 403) {
-            return `Allowed service "${r.slug}" returned ${r.status}. This usually means either (a) the agent key isn't actually scoped to this slug, or (b) the service is connected but its downstream credentials aren't configured yet. Open the service from /keys to check, or pick a different service above.`;
-          }
-          if (r.status === 404) {
-            return `Allowed service "${r.slug}" returned 404 — the slug isn't registered as a user-service for this account.`;
-          }
-          if (r.status === null) {
-            return `Allowed probe to "${r.slug}" timed out or was blocked by the browser.`;
-          }
-          return `Allowed service "${r.slug}" returned ${r.status} (expected 2xx).`;
+          // The allowed probe failed => Agent Key or scope broken.
+          // Use the shared diagnostic (proxy-probe already classifies
+          // the NyxID-layer rejection: 401/403/404/network/etc.).
+          return `Allowed probe against "${r.slug}" failed. ${r.outcome.diagnostic}`;
         }
-        return `Denied probe returned ${r.status ?? "no response"} (expected 4xx). The gateway may be misconfigured — flag this.`;
+        // The denied probe should NOT have succeeded — if it did, the
+        // gateway isn't enforcing scope (real problem, flag it).
+        return `Denied probe against "${r.slug}" unexpectedly succeeded (HTTP ${String(r.outcome.httpStatus ?? "—")}). The gateway may be leaking access — flag this.`;
       });
       setErrorMessage(explanations.join(" "));
     }
@@ -342,7 +283,7 @@ export function VerifyKeyCard({
                     <X className="h-3.5 w-3.5 text-destructive" />
                   )}
                   <span className="font-mono text-foreground">
-                    {r.status ?? "—"}
+                    {r.outcome.httpStatus ?? "—"}
                   </span>
                   <span className="text-muted-foreground">{r.slug}</span>
                 </span>

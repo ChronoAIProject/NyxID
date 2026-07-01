@@ -4,6 +4,7 @@ import { useKeys } from "@/hooks/use-keys";
 import { useUserServices } from "@/hooks/use-user-services";
 import { PageHeader } from "@/components/shared/page-header";
 import { AddCtaButton } from "@/components/shared/add-cta-button";
+import { TeachingEmptyState } from "@/components/shared/teaching-empty-state";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
 import { Button, ButtonIcon } from "@/components/ui/button";
@@ -209,10 +210,24 @@ function KeyCardContent({
                   : "ssh tunnel"
                 : keyInfo.credential_type}
           </Badge>
-          {/* Routing pill — moved to top so it aligns across cards */}
-          <Badge variant="secondary">
-            {nodeName ? `→ ${nodeName}` : "Direct"}
-          </Badge>
+          {/* Routing pill — moved to top so it aligns across cards.
+              When routed via a node, the badge becomes a real Link so the
+              user can jump straight to the node detail page (deferred Wave B
+              cleanup, ships with C.1 canon sweep). */}
+          {nodeName && keyInfo.node_id ? (
+            <Link
+              to="/nodes/$nodeId"
+              params={{ nodeId: keyInfo.node_id }}
+              onClick={(e) => e.stopPropagation()}
+              className="inline-flex"
+            >
+              <Badge variant="secondary" className="cursor-pointer transition-colors hover:bg-muted/70">
+                → {nodeName}
+              </Badge>
+            </Link>
+          ) : (
+            <Badge variant="secondary">Direct</Badge>
+          )}
           {keyInfo.auto_connected && (
             <Badge variant="secondary">
               {keyInfo.source_app_name
@@ -370,7 +385,18 @@ function ServiceTableRow({
       </TableCell>
 
       <TableCell className="h-[60px] text-muted-foreground">
-        {nodeName ? `→ ${nodeName}` : "Direct"}
+        {nodeName && keyInfo.node_id ? (
+          <Link
+            to="/nodes/$nodeId"
+            params={{ nodeId: keyInfo.node_id }}
+            onClick={(e) => e.stopPropagation()}
+            className="text-foreground hover:underline"
+          >
+            → {nodeName}
+          </Link>
+        ) : (
+          "Direct"
+        )}
       </TableCell>
 
       <TableCell className="h-[60px]">
@@ -555,17 +581,12 @@ function groupKeysBySource(
 
 function ServicesEmptyState({ onAdd }: { readonly onAdd: () => void }) {
   return (
-    <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
-      <MagicKeyIcon className="h-48 w-48 text-muted-foreground/40" />
-      <div className="space-y-1.5 max-w-md">
-        <p className="text-[15px] font-semibold text-foreground">No AI services yet</p>
-        <p className="text-[12px] text-muted-foreground leading-relaxed">
-          Connect a downstream service (OpenAI, GitHub, Anthropic, etc.) so your
-          AI agents can call it through NyxID without ever seeing the raw key.
-        </p>
-      </div>
-      <AddCtaButton label="Add your first service" onClick={onAdd} />
-    </div>
+    <TeachingEmptyState
+      icon={MagicKeyIcon}
+      title="No AI services yet"
+      description="Connect a downstream service (OpenAI, GitHub, Anthropic, etc.) so your AI agents can call it through NyxID without ever seeing the raw key."
+      primaryCta={{ label: "Add your first service", onClick: onAdd }}
+    />
   );
 }
 
@@ -762,7 +783,7 @@ function AddButton({
   readonly onCreateKey: () => void;
 }) {
   if (tab === "services") {
-    return <AddCtaButton label="Add Service" onClick={onAddService} />;
+    return <AddCtaButton label="Connect Service" onClick={onAddService} />;
   }
   if (tab === "pools") {
     return <AddCtaButton label="Create Pool" onClick={onCreatePool} />;

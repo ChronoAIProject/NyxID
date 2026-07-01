@@ -1,5 +1,4 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { useNavigate } from "@tanstack/react-router";
 import { useCatalog, useCreateKey } from "@/hooks/use-keys";
 import { useNodes } from "@/hooks/use-nodes";
 import { useOrgs } from "@/hooks/use-orgs";
@@ -50,6 +49,10 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { ServiceIcon } from "@/components/service-icons";
+import {
+  ConnectVerifyStep,
+  type CreatedKey,
+} from "@/components/dashboard/connect-verify-step";
 import type { CatalogEntry, KeyInfo } from "@/types/keys";
 import type { DeviceCodePollResponse } from "@/types/api";
 
@@ -60,7 +63,35 @@ type WizardStep =
   | "node_setup"
   | "oauth_credentials"
   | "oauth"
-  | "device_code";
+  | "device_code"
+  /**
+   * Aha-moment step (wave-aha-1 A4): after POST /keys succeeds, the dialog
+   * stays open on this step and fires a single real broker call against
+   * the new service so the user sees their first 200 INSIDE the dialog
+   * instead of having to navigate to /keys/{id} → API Usage → Verify.
+   */
+  | "verify";
+
+/**
+ * Pick the completion mode for a synchronous form-submit (the
+ * createKey.onSuccess handlers). `auth_method=none` services like
+ * `llm-openai-codex` get "none" so the verify step skips the probe;
+ * everything else is "credential" because the user typed a secret.
+ *
+ * OAuth + device_code completions don't go through this helper — they
+ * land in `handleAuthComplete` which sets the mode based on the wizard
+ * `step` directly (since the step type already encodes which flavor
+ * fired the completion).
+ */
+function pickCompletionMode(
+  selectedEntry: CatalogEntry | null,
+  formAuthMethod: string,
+): "credential" | "none" {
+  const effective = selectedEntry
+    ? (selectedEntry.auth_method ?? "bearer")
+    : formAuthMethod;
+  return effective === "none" ? "none" : "credential";
+}
 
 interface FormState {
   readonly credential: string;
@@ -897,7 +928,7 @@ function KeyForm({
             (requiresEndpoint && !form.endpointUrl.trim())
           }
         >
-          {isPending ? "Creating..." : "Create Service"}
+          {isPending ? "Connecting..." : "Connect Service"}
         </Button>
       </DialogFooter>
     </div>
@@ -1170,7 +1201,7 @@ function NodeSetupStep({
               !form.sshPrincipals.trim())
           }
         >
-          {isPending ? "Creating..." : "Create Service"}
+          {isPending ? "Connecting..." : "Connect Service"}
         </Button>
       </DialogFooter>
     </div>
@@ -2051,7 +2082,6 @@ export function AddKeyDialog({
   readonly prefillSlug?: string;
   readonly reconnectKey?: KeyInfo | null;
 }) {
-  const navigate = useNavigate();
   const createKey = useCreateKey();
   const { data: catalogEntries } = useCatalog();
   const [step, setStep] = useState<WizardStep>("catalog");
@@ -2071,6 +2101,10 @@ export function AddKeyDialog({
   // app-credentials.md` §6.1.
   const [byoOAuthClientId, setByoOAuthClientId] = useState<string | null>(null);
   const [byoOAuthClientSecret, setByoOAuthClientSecret] = useState<string | null>(null);
+  // Captured at POST /keys success so the new `verify` step (wave-aha-1
+  // A4) can fire its probe and the Done/View-details buttons know where
+  // to navigate. Stays null until a successful create.
+  const [createdKey, setCreatedKey] = useState<CreatedKey | null>(null);
   // Guards `prefillSlug` against running its auto-select more than
   // once per dialog open. Without this, re-renders would re-select
   // the catalog entry and snap the user back to the routing step
@@ -2085,6 +2119,7 @@ export function AddKeyDialog({
     setTargetOrgId(null);
     setByoOAuthClientId(null);
     setByoOAuthClientSecret(null);
+    setCreatedKey(null);
     appliedPrefillRef.current = null;
   }
 
@@ -2274,9 +2309,46 @@ export function AddKeyDialog({
   }
 
   function handleAuthComplete(keyId: string) {
-    toast.success("Service connected");
-    handleOpenChange(false);
-    void navigate({ to: "/keys/$keyId", params: { keyId } });
+    // Wave-aha-1 A4 — route OAuth + device-code completions through the
+    // same verify step the form-submit path uses, so the user gets a
+    // single coherent "this worked" moment regardless of which auth
+    // flavour they came through. The `completionMode` distinguishes
+    // OAuth/device-code (don't re-probe — the handshake IS the proof)
+    // from a typed credential (run the smoke test).
+    const completionMode: CreatedKey["completionMode"] =
+      step === "device_code"
+        ? "device_code"
+        : step === "oauth"
+          ? "oauth"
+          : "credential";
+    // For OAuth/device-code flows we don't always have the slug back —
+    // `ensureAuthKey` returns the just-created KeyInfo into authKey, so
+    // pull from there.
+    const slug =
+      authKey?.slug ??
+      selectedEntry?.slug ??
+      "";
+    // `catalogSlug` drives the ServiceIcon brand-glyph lookup. Repeat
+    // connects get suffixed user_service slugs (`-2`, `-3`, …), so
+    // prefer the catalog entry's canonical slug and only fall back to
+    // the KeyInfo's `catalog_service_slug` when we don't have the
+    // catalog entry in scope.
+    const catalogSlug =
+      selectedEntry?.slug ??
+      authKey?.catalog_service_slug ??
+      slug;
+    setCreatedKey({
+      id: keyId,
+      slug,
+      catalogSlug,
+      serviceName:
+        selectedEntry?.name ??
+        authKey?.label ??
+        form.label.trim() ??
+        slug,
+      completionMode,
+    });
+    setStep("verify");
   }
 
   function handleFormSubmit() {
@@ -2316,9 +2388,29 @@ export function AddKeyDialog({
 
     createKey.mutate(params, {
       onSuccess: (key) => {
-        toast.success("Key created");
-        handleOpenChange(false);
-        void navigate({ to: "/keys/$keyId", params: { keyId: key.id } });
+        // Wave-aha-1 A4: don't close + navigate immediately. Stash the new
+        // key + slug and transition to the inline `verify` step so the
+        // user sees their first 200 (or a precise diagnosis) right here
+        // instead of having to hunt for it on /keys/{id}.
+        setCreatedKey({
+          id: key.id,
+          slug: key.slug,
+          catalogSlug:
+            selectedEntry?.slug ??
+            key.catalog_service_slug ??
+            key.slug,
+          // Prefer the catalog entry's display name (e.g. "OpenAI"); fall
+          // through to the user-typed form label, the API response label,
+          // and finally the slug so we never end up with an "undefined
+          // connected" header.
+          serviceName:
+            selectedEntry?.name ??
+            form.label.trim() ??
+            key.label ??
+            key.slug,
+          completionMode: pickCompletionMode(selectedEntry, form.authMethod),
+        });
+        setStep("verify");
       },
       onError: (err) => {
         const message =
@@ -2374,9 +2466,25 @@ export function AddKeyDialog({
 
     createKey.mutate(params, {
       onSuccess: (key) => {
-        toast.success("Service created");
-        handleOpenChange(false);
-        void navigate({ to: "/keys/$keyId", params: { keyId: key.id } });
+        // Wave-aha-1 A4: stay in the dialog and run the inline verify
+        // step. Node-routed services often won't return 200 until the
+        // node agent is online, so the verify step's failure copy
+        // explicitly calls that out below.
+        setCreatedKey({
+          id: key.id,
+          slug: key.slug,
+          catalogSlug:
+            selectedEntry?.slug ??
+            key.catalog_service_slug ??
+            key.slug,
+          serviceName:
+            selectedEntry?.name ??
+            form.label.trim() ??
+            key.label ??
+            key.slug,
+          completionMode: pickCompletionMode(selectedEntry, form.authMethod),
+        });
+        setStep("verify");
       },
       onError: (err) => {
         const message =
@@ -2400,6 +2508,8 @@ export function AddKeyDialog({
         return `${isReconnect ? "Reconnect" : "Connect"} to ${selectedEntry?.name ?? "Service"}`;
       case "device_code":
         return `${isReconnect ? "Reconnect" : "Connect"} to ${selectedEntry?.name ?? "Service"}`;
+      case "verify":
+        return `${createdKey?.serviceName ?? "Service"} connected`;
       default:
         return "Configure Service";
     }
@@ -2421,6 +2531,8 @@ export function AddKeyDialog({
         return `Authenticate with ${selectedEntry?.name ?? "the service"} via OAuth.`;
       case "device_code":
         return `Authenticate with ${selectedEntry?.name ?? "the service"} using a device code.`;
+      case "verify":
+        return "Connect your AI tools to this service through NyxID.";
       default:
         return selectedEntry
           ? `Set up your ${selectedEntry.name} credentials.`
@@ -2432,7 +2544,32 @@ export function AddKeyDialog({
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>{dialogTitle()}</DialogTitle>
+          <DialogTitle>
+            {step === "verify" && createdKey ? (
+              // Umbrella framing: the DialogTitle communicates the state
+              // (Service "<name>" connected) — that's the umbrella. The
+              // body then tells the user what's needed next (an Agent
+              // Key to let their AI tools actually use it).
+              //
+              // "Service" prefix is intentional per Calvin's ask — it
+              // labels the noun so the quoted name isn't dangling.
+              <span className="inline-flex items-center gap-2">
+                <ServiceIcon
+                  slug={createdKey.catalogSlug}
+                  className="h-5 w-5 shrink-0 text-muted-foreground"
+                />
+                <span>
+                  Service{" "}
+                  <span className="text-muted-foreground">&ldquo;</span>
+                  {createdKey.serviceName}
+                  <span className="text-muted-foreground">&rdquo;</span>{" "}
+                  connected
+                </span>
+              </span>
+            ) : (
+              dialogTitle()
+            )}
+          </DialogTitle>
           <DialogDescription>{dialogDescription()}</DialogDescription>
         </DialogHeader>
 
@@ -2570,6 +2707,16 @@ export function AddKeyDialog({
                   )
             }
             onComplete={handleAuthComplete}
+          />
+        )}
+
+        {step === "verify" && createdKey && (
+          <ConnectVerifyStep
+            createdKey={createdKey}
+            isNodeRouted={Boolean(form.nodeId.trim())}
+            onDone={() => {
+              handleOpenChange(false);
+            }}
           />
         )}
       </DialogContent>

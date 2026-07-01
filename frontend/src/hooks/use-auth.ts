@@ -108,3 +108,24 @@ export function useMfaDisable() {
     },
   });
 }
+
+/**
+ * Revoke one of the caller's own sessions by id. If the revoked session
+ * happens to be the current one, the next API request from this tab will
+ * 401 and the auth interceptor bounces the user back to /login — no
+ * special-casing needed here, this just refreshes the sessions list.
+ *
+ * Wave B item B.3.
+ */
+export function useRevokeSession() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (sessionId: string): Promise<void> => {
+      return api.delete<void>(`/sessions/${sessionId}`);
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["sessions"] });
+    },
+  });
+}

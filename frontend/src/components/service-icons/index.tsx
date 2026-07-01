@@ -25,6 +25,7 @@ import LlmCohereIcon from "./llm-cohere";
 import LlmDeepSeekIcon from "./llm-deepseek";
 import LlmOpenClawIcon from "./llm-openclaw";
 
+import ApiFirecrawlIcon from "./api-firecrawl";
 import ApiTwitterIcon from "./api-twitter";
 import ApiGoogleIcon from "./api-google";
 import ApiGoogleCloudIcon from "./api-google-cloud";
@@ -64,6 +65,7 @@ export const SPEC_CATALOG_SLUGS = [
   "llm-deepseek",
   "llm-openclaw",
 
+  "api-firecrawl",
   "api-twitter",
   "api-google",
   "api-google-cloud",
@@ -100,6 +102,7 @@ export const SERVICE_ICONS: Readonly<Record<string, IconComponent>> = {
   "llm-deepseek": LlmDeepSeekIcon,
   "llm-openclaw": LlmOpenClawIcon,
 
+  "api-firecrawl": ApiFirecrawlIcon,
   "api-twitter": ApiTwitterIcon,
   "api-google": ApiGoogleIcon,
   "api-google-cloud": ApiGoogleCloudIcon,

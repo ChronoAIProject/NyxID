@@ -167,14 +167,22 @@ describe("KeysPage", () => {
     expect(screen.getByText("/proxy/s/openai")).toBeInTheDocument();
   });
 
-  it("shows the empty state with an Add Service CTA when there are no services", async () => {
+  it("shows the empty state with an Add Your First Service CTA when there are no services", async () => {
     state.keys = [];
 
     render(<KeysPage />);
 
     expect(screen.getByText("No AI services yet")).toBeInTheDocument();
-    const addButtons = screen.getAllByRole("button", { name: /add service/i });
-    expect(addButtons.length).toBeGreaterThan(0);
+    // Both buttons render when the list is empty: the empty-state CTA
+    // "Add your first service" (intentionally kept per the canon decision
+    // to leave empty-state copy alone) and the toolbar CTA "Connect
+    // Service" (canon verb for top-level CTAs).
+    expect(
+      screen.getByRole("button", { name: /add your first service/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /connect service/i }),
+    ).toBeInTheDocument();
   });
 
   it("renders a loading skeleton while keys are loading", () => {
@@ -253,7 +261,7 @@ describe("KeysPage", () => {
     expect(screen.getByText("View-Only")).toBeInTheDocument();
   });
 
-  it("opens the Add Key dialog when the toolbar Add Service button is clicked", async () => {
+  it("opens the Add Key dialog when the toolbar Connect Service button is clicked", async () => {
     const user = userEvent.setup();
     state.keys = [makeKey()];
 
@@ -261,8 +269,8 @@ describe("KeysPage", () => {
 
     expect(screen.queryByTestId("add-key-dialog")).not.toBeInTheDocument();
 
-    // Toolbar Add Service button (the empty-state CTA isn't shown when keys exist).
-    await user.click(screen.getByRole("button", { name: /add service/i }));
+    // Toolbar Connect Service button (the empty-state CTA isn't shown when keys exist).
+    await user.click(screen.getByRole("button", { name: /connect service/i }));
 
     expect(screen.getByTestId("add-key-dialog")).toBeInTheDocument();
   });
@@ -368,7 +376,7 @@ describe("KeysPage", () => {
 
     expect(screen.getByTestId("api-key-table")).toBeInTheDocument();
     expect(screen.getByTestId("api-key-usage-dashboard")).toBeInTheDocument();
-    // The toolbar CTA on the nyxid tab is "Create API Key", not "Add Service".
+    // The toolbar CTA on the nyxid tab is "Create API Key", not "Connect Service".
     expect(
       screen.getByRole("button", { name: /create api key/i }),
     ).toBeInTheDocument();
