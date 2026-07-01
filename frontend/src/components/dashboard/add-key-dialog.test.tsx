@@ -565,7 +565,10 @@ describe("AddKeyDialog → ConnectVerifyStep integration (end-to-end wiring)", (
       // ConnectVerifyStep and drives the probe URL. If the field
       // name ever drifts (e.g. `service_slug` vs `slug`), the probe
       // URL below breaks.
-      opts?.onSuccess?.({ id: "new-key-1", slug: "openai" });
+      // Prefixed service_slug — matches what the backend actually seeds
+      // (`llm-openai` from provider_service.rs) so the recipe registry
+      // fires and the probe URL below resolves correctly.
+      opts?.onSuccess?.({ id: "new-key-1", slug: "llm-openai" });
     });
     createApiKeyMutate.mockImplementation((_params, opts) => {
       opts?.onSuccess?.({
@@ -619,7 +622,7 @@ describe("AddKeyDialog → ConnectVerifyStep integration (end-to-end wiring)", (
     await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
     const call = fetchSpy.mock.calls[0];
     if (!call) throw new Error("probe fetch was not called");
-    expect(String(call[0])).toBe("/api/v1/proxy/s/openai/v1/models");
+    expect(String(call[0])).toBe("/api/v1/proxy/s/llm-openai/v1/models");
     expect(call[1]?.headers).toMatchObject({
       Authorization: "Bearer nyxid_ag_integration_secret",
     });

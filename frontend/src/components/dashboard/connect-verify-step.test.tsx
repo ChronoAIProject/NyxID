@@ -41,8 +41,8 @@ vi.mock("sonner", () => ({ toast: toastFns }));
 
 const CREATED_KEY: CreatedKey = {
   id: "svc-1",
-  slug: "openai",
-  catalogSlug: "openai",
+  slug: "llm-openai",
+  catalogSlug: "llm-openai",
   serviceName: "OpenAI",
   completionMode: "credential",
 };
@@ -237,7 +237,7 @@ describe("ConnectVerifyStep — probe (downstream OK)", () => {
     const firstCall = fetchMock.mock.calls[0];
     if (!firstCall) throw new Error("fetch was not called");
     const [url, init] = firstCall;
-    expect(String(url)).toBe("/api/v1/proxy/s/openai/v1/models");
+    expect(String(url)).toBe("/api/v1/proxy/s/llm-openai/v1/models");
     expect(init).toMatchObject({
       method: "GET",
       credentials: "omit",
@@ -368,7 +368,7 @@ describe("ConnectVerifyStep — probe (agent key INVALID: NyxID-layer rejection)
     await waitFor(() =>
       expect(document.body.textContent ?? "").toMatch(/out-of-scope/i),
     );
-    expect(document.body.textContent ?? "").toMatch(/`openai`/);
+    expect(document.body.textContent ?? "").toMatch(/`llm-openai`/);
   });
 
   it("REGRESSION: Retry test click re-invokes the probe (Footer dispatch works across phase transitions)", async () => {
@@ -438,8 +438,8 @@ describe("ConnectVerifyStep — no Test button when we can't be highly confident
   // Registered untestable (Codex chat-only API, no cheap GET).
   const CODEX_KEY: CreatedKey = {
     ...CREATED_KEY,
-    slug: "openai-codex",
-    catalogSlug: "openai-codex",
+    slug: "llm-openai-codex",
+    catalogSlug: "llm-openai-codex",
     serviceName: "OpenAI Codex API",
     completionMode: "device_code",
   };

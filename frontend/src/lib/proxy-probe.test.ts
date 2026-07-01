@@ -35,60 +35,60 @@ function emptyHeaderResponse(status: number): Response {
   });
 }
 
-describe("probePathForSlug — registry-first", () => {
-  it("returns v1/models for openai-family slugs from registry", () => {
-    expect(probePathForSlug("openai")).toBe("v1/models");
-    expect(probePathForSlug("anthropic")).toBe("v1/models");
-    expect(probePathForSlug("deepseek")).toBe("v1/models");
-    expect(probePathForSlug("mistral")).toBe("v1/models");
-    expect(probePathForSlug("cohere")).toBe("v1/models");
-    expect(probePathForSlug("google-ai")).toBe("v1/models");
-  });
-
-  it("returns provider-specific paths for known non-LLM providers", () => {
-    expect(probePathForSlug("github")).toBe("user");
-    expect(probePathForSlug("github-pat")).toBe("user");
-    expect(probePathForSlug("telegram-bot")).toBe("getMe");
-    expect(probePathForSlug("discord-bot")).toBe("v10/users/@me");
-    expect(probePathForSlug("slack-bot")).toBe("api/auth.test");
-    expect(probePathForSlug("spotify")).toBe("v1/me");
-    expect(probePathForSlug("google")).toBe("oauth2/v1/userinfo");
-  });
-
-  it("returns '' for explicitly untestable providers (Codex, OpenClaw, Lark/Feishu bot)", () => {
-    // These slugs are in the registry as `null` — no cheap probe exists.
-    // probePathForSlug returns "" so a caller that ignores untestable
-    // still hits the root and gets the header-based fallback signal.
-    expect(probePathForSlug("openai-codex")).toBe("");
-    expect(probePathForSlug("openclaw")).toBe("");
-    expect(probePathForSlug("lark-bot")).toBe("");
-    expect(probePathForSlug("feishu-bot")).toBe("");
-    expect(probePathForSlug("firecrawl")).toBe("");
-  });
-
-  it("strips repeat-connect suffixes (`openai-2`, `github-3`)", () => {
-    expect(probePathForSlug("openai-2")).toBe("v1/models");
-    expect(probePathForSlug("openai-99")).toBe("v1/models");
-    expect(probePathForSlug("github-3")).toBe("user");
-    expect(probePathForSlug("telegram-bot-7")).toBe("getMe");
-    // Untestable base survives the suffix strip
-    expect(probePathForSlug("openai-codex-7")).toBe("");
-  });
-
-  it("strips `llm-` prefixes from wizard/catalog naming (`llm-openai-codex`)", () => {
-    expect(probePathForSlug("llm-openai-codex")).toBe("");
-    expect(probePathForSlug("llm-openai-codex-7")).toBe("");
+describe("probePathForSlug — registry uses seeded service_slug forms", () => {
+  // Registry keys match the backend's `service_slug` (with the
+  // `llm-` / `api-` / `aws-` prefix baked in). If these tests break
+  // with a "returns ''" failure, the prefix is missing from the
+  // registry entry — production runtime passes prefixed slugs.
+  it("returns v1/models for llm-* OpenAI-compatible providers", () => {
+    expect(probePathForSlug("llm-openai")).toBe("v1/models");
     expect(probePathForSlug("llm-anthropic")).toBe("v1/models");
+    expect(probePathForSlug("llm-deepseek")).toBe("v1/models");
+    expect(probePathForSlug("llm-mistral")).toBe("v1/models");
+    expect(probePathForSlug("llm-cohere")).toBe("v1/models");
+    expect(probePathForSlug("llm-google-ai")).toBe("v1/models");
   });
 
-  it("falls back to openai-family regex for unregistered custom slugs", () => {
-    // `perplexity` isn't in the registry but matches the family regex.
-    expect(probePathForSlug("perplexity")).toBe("v1/models");
-    expect(probePathForSlug("my-custom-groq-relay")).toBe("v1/models");
+  it("returns provider-specific paths for api-* known providers", () => {
+    expect(probePathForSlug("api-github")).toBe("user");
+    expect(probePathForSlug("api-github-pat")).toBe("user");
+    expect(probePathForSlug("api-telegram-bot")).toBe("getMe");
+    expect(probePathForSlug("api-discord-bot")).toBe("v10/users/@me");
+    expect(probePathForSlug("api-slack-bot")).toBe("api/auth.test");
+    expect(probePathForSlug("api-spotify")).toBe("v1/me");
+    expect(probePathForSlug("api-google")).toBe("oauth2/v1/userinfo");
+    expect(probePathForSlug("api-microsoft")).toBe("v1.0/me");
   });
 
-  it("returns '' for slugs with no known cheap probe endpoint", () => {
-    expect(probePathForSlug("some-random-custom-thing")).toBe("");
+  it("returns '' for explicitly untestable seeded slugs", () => {
+    // Registered as `null` — no probe endpoint we can rely on.
+    expect(probePathForSlug("llm-openai-codex")).toBe("");
+    expect(probePathForSlug("llm-openclaw")).toBe("");
+    expect(probePathForSlug("api-lark-bot")).toBe("");
+    expect(probePathForSlug("api-feishu-bot")).toBe("");
+    expect(probePathForSlug("api-firecrawl")).toBe("");
+    expect(probePathForSlug("api-tiktok")).toBe("");
+    expect(probePathForSlug("aws-cost-explorer")).toBe("");
+    expect(probePathForSlug("api-google-cloud")).toBe("");
+  });
+
+  it("strips repeat-connect `-N` suffix (llm-openai-2 → llm-openai)", () => {
+    expect(probePathForSlug("llm-openai-2")).toBe("v1/models");
+    expect(probePathForSlug("llm-anthropic-99")).toBe("v1/models");
+    expect(probePathForSlug("api-github-3")).toBe("user");
+    expect(probePathForSlug("api-telegram-bot-7")).toBe("getMe");
+    // Untestable base survives the suffix strip
+    expect(probePathForSlug("llm-openai-codex-7")).toBe("");
+    expect(probePathForSlug("api-firecrawl-2")).toBe("");
+  });
+
+  it("returns '' for unregistered custom slugs (no more openai-family fallback)", () => {
+    // The old code fell through to an openai-family regex for slugs
+    // that "looked openai-shaped". That created misleading probes on
+    // custom endpoints named `perplexity` or `groq`. Now we require
+    // an explicit registry entry.
+    expect(probePathForSlug("perplexity")).toBe("");
+    expect(probePathForSlug("my-custom-groq-relay")).toBe("");
     expect(probePathForSlug("acme-internal-api")).toBe("");
   });
 });
@@ -103,6 +103,7 @@ describe("PROBE_REGISTRY — table-driven coverage (typo trap)", () => {
       ([, recipe]) => recipe !== null,
     );
     // Sanity check — if the registry shrinks unexpectedly, we notice.
+    // 19 testable seeded slugs today (6 llm-* + 13 api-*).
     expect(testable.length).toBeGreaterThanOrEqual(19);
 
     for (const [slug, recipe] of testable) {
@@ -120,7 +121,10 @@ describe("PROBE_REGISTRY — table-driven coverage (typo trap)", () => {
     const untestable = Object.entries(PROBE_REGISTRY).filter(
       ([, recipe]) => recipe === null,
     );
-    expect(untestable.length).toBeGreaterThanOrEqual(5);
+    // 8 untestable seeded slugs (llm-openai-codex, llm-openclaw,
+    // api-firecrawl, api-tiktok, api-lark-bot, api-feishu-bot,
+    // aws-cost-explorer, api-google-cloud).
+    expect(untestable.length).toBeGreaterThanOrEqual(8);
 
     for (const [slug] of untestable) {
       expect(recipeForSlug(slug)).toBeNull();
@@ -131,40 +135,31 @@ describe("PROBE_REGISTRY — table-driven coverage (typo trap)", () => {
   });
 });
 
-describe("recipeForSlug — suffix/prefix strip edge cases", () => {
-  // Kimi + GLM both flagged that suffix stripping had thin coverage.
-  // These tests pin the exact behavior — the regex is
-  // `.replace(/-\d+$/, "")` (last digit-run only, digit-only).
-  it("does NOT strip letter-only suffixes (openai-abc → miss)", () => {
-    // `openai-abc` shouldn't be treated as `openai` — someone named a
-    // custom endpoint that way and we shouldn't guess.
-    expect(recipeForSlug("openai-abc")).toBeUndefined();
-    expect(probePathForSlug("openai-abc")).toBe("v1/models"); // regex fallback
-    expect(isTestable("openai-abc")).toBe(false); // no explicit recipe
+describe("recipeForSlug — suffix strip edge cases", () => {
+  it("does NOT strip letter-only suffixes (llm-openai-abc → miss)", () => {
+    expect(recipeForSlug("llm-openai-abc")).toBeUndefined();
+    expect(probePathForSlug("llm-openai-abc")).toBe("");
+    expect(isTestable("llm-openai-abc")).toBe(false);
   });
 
-  it("strips only the LAST digit-run for chained suffixes (openai-2-3 → openai-2)", () => {
-    // Regex is greedy on the trailing digits only. `openai-2-3` strips
-    // `-3`, leaves `openai-2`, which itself isn't in the registry so
-    // one more strip attempt fires internally (via the base-no-suffix
-    // path). Confirm the final resolution lands on `openai`.
-    expect(probePathForSlug("openai-2-3")).toBe("v1/models");
+  it("strips only the trailing digit-run (llm-openai-2-3 → llm-openai-2 → llm-openai)", () => {
+    // Regex is greedy on trailing digits only; each recipeForSlug
+    // call runs the strip once. `-2-3` becomes `-2`, then a second
+    // resolution (would need external loop) — the internal single
+    // pass strips just `-3` and lands on `llm-openai-2`, which IS in
+    // the registry key form only for the current wizard shape. We
+    // pin the CURRENT single-pass semantics: `-2-3` resolves to
+    // `llm-openai-2` which is not in registry → undefined.
+    // If NyxID's wizard ever emits deeper suffixes, extend the loop
+    // in recipeForSlug rather than compensating in tests.
+    expect(recipeForSlug("llm-openai-2-3")).toBeUndefined();
+    expect(probePathForSlug("llm-openai-2-3")).toBe("");
   });
 
-  it("does NOT strip digit+letter tails (openai-2abc → miss, then regex fallback)", () => {
-    // The regex requires the suffix to be pure digits.
-    expect(recipeForSlug("openai-2abc")).toBeUndefined();
-    // Regex fallback catches openai-family shape.
-    expect(probePathForSlug("openai-2abc")).toBe("v1/models");
-    expect(isTestable("openai-2abc")).toBe(false);
-  });
-
-  it("handles the compound `llm-<slug>-N` shape (llm-anthropic-2 → v1/models)", () => {
-    // NyxID's wizard emits `llm-anthropic-2` for the second anthropic
-    // connect. Suffix strip runs first (→ `llm-anthropic`), then llm-
-    // prefix strip (→ `anthropic`).
-    expect(probePathForSlug("llm-anthropic-2")).toBe("v1/models");
-    expect(recipeForSlug("llm-anthropic-2")).toEqual({ path: "v1/models" });
+  it("does NOT strip digit+letter tails (llm-openai-2abc → miss)", () => {
+    expect(recipeForSlug("llm-openai-2abc")).toBeUndefined();
+    expect(probePathForSlug("llm-openai-2abc")).toBe("");
+    expect(isTestable("llm-openai-2abc")).toBe(false);
   });
 
   it("empty and whitespace slugs are unknown, not untestable", () => {
@@ -174,48 +169,49 @@ describe("recipeForSlug — suffix/prefix strip edge cases", () => {
   });
 });
 
-describe("recipeForSlug + isKnownUntestable", () => {
-  it("recipeForSlug returns a recipe object for registered testable providers", () => {
-    expect(recipeForSlug("openai")).toEqual({ path: "v1/models" });
-    expect(recipeForSlug("telegram-bot")).toEqual({ path: "getMe" });
+describe("recipeForSlug + isKnownUntestable + isTestable — semantic truth table", () => {
+  it("recipeForSlug returns a recipe object for registered testable seeded slugs", () => {
+    expect(recipeForSlug("llm-openai")).toEqual({ path: "v1/models" });
+    expect(recipeForSlug("api-telegram-bot")).toEqual({ path: "getMe" });
+    expect(recipeForSlug("api-github-pat")).toEqual({ path: "user" });
   });
 
-  it("recipeForSlug returns null (not undefined) for registered UNTESTABLE providers", () => {
-    // The null-vs-undefined distinction matters for isKnownUntestable.
-    expect(recipeForSlug("openai-codex")).toBeNull();
-    expect(recipeForSlug("openclaw")).toBeNull();
+  it("recipeForSlug returns null (not undefined) for registered UNTESTABLE slugs", () => {
+    // null vs undefined distinguishes "we've seen this and can't
+    // probe it" from "we've never heard of this slug".
+    expect(recipeForSlug("llm-openai-codex")).toBeNull();
+    expect(recipeForSlug("llm-openclaw")).toBeNull();
+    expect(recipeForSlug("api-firecrawl")).toBeNull();
   });
 
   it("recipeForSlug returns undefined for unknown/custom slugs", () => {
     expect(recipeForSlug("acme-internal-api")).toBeUndefined();
+    expect(recipeForSlug("perplexity")).toBeUndefined();
   });
 
-  it("isTestable is TRUE only when we have an explicit ProbeRecipe (high confidence)", () => {
+  it("isTestable is TRUE only when an explicit ProbeRecipe exists (high confidence)", () => {
     // Registered testable → true
-    expect(isTestable("openai")).toBe(true);
-    expect(isTestable("anthropic")).toBe(true);
-    expect(isTestable("github")).toBe(true);
-    expect(isTestable("telegram-bot")).toBe(true);
-    expect(isTestable("openai-2")).toBe(true); // suffix-strip
-    expect(isTestable("llm-anthropic")).toBe(true); // llm-prefix strip
+    expect(isTestable("llm-openai")).toBe(true);
+    expect(isTestable("llm-anthropic")).toBe(true);
+    expect(isTestable("api-github")).toBe(true);
+    expect(isTestable("api-telegram-bot")).toBe(true);
+    expect(isTestable("llm-openai-2")).toBe(true); // suffix-strip
+    expect(isTestable("api-github-pat-3")).toBe(true); // suffix-strip
 
     // Registered null → false
-    expect(isTestable("openai-codex")).toBe(false);
+    expect(isTestable("llm-openai-codex")).toBe(false);
     expect(isTestable("llm-openai-codex-7")).toBe(false);
-    expect(isTestable("openclaw")).toBe(false);
-    expect(isTestable("lark-bot")).toBe(false);
+    expect(isTestable("llm-openclaw")).toBe(false);
+    expect(isTestable("api-firecrawl")).toBe(false);
+    expect(isTestable("api-lark-bot")).toBe(false);
 
     // Unregistered (custom endpoints) → false. The high-confidence
-    // rule requires an EXPLICIT recipe — falling through to the
-    // openai regex or root probe isn't enough to offer a Test
-    // button. Better to hide it than mislead the user.
+    // rule requires an EXPLICIT recipe — no more openai-family
+    // regex fallback since it produced misleading probes on custom
+    // endpoints that happened to include an LLM name.
     expect(isTestable("acme-internal-api")).toBe(false);
     expect(isTestable("my-custom-endpoint")).toBe(false);
-    // Even openai-family regex matches don't count if they're not
-    // registered explicitly — `perplexity` looks openai-shaped but
-    // has no seed recipe, so no Test button.
-    expect(isTestable("perplexity")).toBe(false);
-    expect(isTestable("groq")).toBe(false);
+    expect(isTestable("perplexity")).toBe(false); // unregistered
   });
 
   it("isTestable handles undefined/empty defensively", () => {
@@ -224,20 +220,22 @@ describe("recipeForSlug + isKnownUntestable", () => {
   });
 
   it("isKnownUntestable is TRUE only for slugs explicitly registered as null", () => {
-    // Codex + OpenClaw + Lark/Feishu bot are the known-untestable set.
-    expect(isKnownUntestable("openai-codex")).toBe(true);
+    // The 8 slugs registered as null across the whole catalog seed.
+    expect(isKnownUntestable("llm-openai-codex")).toBe(true);
     expect(isKnownUntestable("llm-openai-codex-7")).toBe(true);
-    expect(isKnownUntestable("openclaw")).toBe(true);
-    expect(isKnownUntestable("lark-bot")).toBe(true);
-    expect(isKnownUntestable("feishu-bot")).toBe(true);
-    expect(isKnownUntestable("firecrawl")).toBe(true);
+    expect(isKnownUntestable("llm-openclaw")).toBe(true);
+    expect(isKnownUntestable("api-lark-bot")).toBe(true);
+    expect(isKnownUntestable("api-feishu-bot")).toBe(true);
+    expect(isKnownUntestable("api-firecrawl")).toBe(true);
+    expect(isKnownUntestable("api-tiktok")).toBe(true);
+    expect(isKnownUntestable("aws-cost-explorer")).toBe(true);
+    expect(isKnownUntestable("api-google-cloud")).toBe(true);
 
-    // Anything with a recipe → testable
-    expect(isKnownUntestable("openai")).toBe(false);
-    expect(isKnownUntestable("telegram-bot")).toBe(false);
+    // Registered testable → false
+    expect(isKnownUntestable("llm-openai")).toBe(false);
+    expect(isKnownUntestable("api-telegram-bot")).toBe(false);
 
-    // Unknown/custom → assumed testable (falls through to root probe
-    // with header-based classifier as the safety net)
+    // Unknown/custom → false (undefined recipe, not null)
     expect(isKnownUntestable("acme-internal-api")).toBe(false);
     expect(isKnownUntestable("perplexity")).toBe(false);
   });
@@ -367,7 +365,7 @@ describe("probeAgentKey — fetch integration", () => {
       .fn<typeof fetch>()
       .mockResolvedValue(nyxidResponse(200));
 
-    await probeAgentKey("openai", {
+    await probeAgentKey("llm-openai", {
       bearerToken: "nyxid_ag_test",
       fetchImpl: fetchMock,
     });
@@ -376,7 +374,7 @@ describe("probeAgentKey — fetch integration", () => {
     const firstCall = fetchMock.mock.calls[0];
     if (!firstCall) throw new Error("fetch was not called");
     const [url, init] = firstCall;
-    expect(String(url)).toBe("/api/v1/proxy/s/openai/v1/models");
+    expect(String(url)).toBe("/api/v1/proxy/s/llm-openai/v1/models");
     expect(init).toMatchObject({
       method: "GET",
       credentials: "omit",
