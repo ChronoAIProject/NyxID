@@ -347,7 +347,7 @@ function diagnoseDownstream(
     case "auth_rejected":
       return `Your Agent Key works (proxied through NyxID). The downstream rejected the stored credential (HTTP ${String(httpStatus)}) — reconnect the service, or update the credential from /keys.`;
     case "not_found":
-      return `Your Agent Key works (proxied through NyxID). The downstream returned HTTP ${String(httpStatus)} on the probe path — this is normal for services without a cheap status endpoint, and does not mean the key is broken.`;
+      return `Your Agent Key works (proxied through NyxID). The downstream returned HTTP ${String(httpStatus)} on the probe path — this is normal for services without a suitable status endpoint, and does not mean the key is broken.`;
     case "server_error":
       return `Your Agent Key works (proxied through NyxID). The downstream is having issues (HTTP ${String(httpStatus)}). Retry in a minute.`;
     case "unexpected":

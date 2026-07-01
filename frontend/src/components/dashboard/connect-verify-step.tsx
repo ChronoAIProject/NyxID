@@ -263,7 +263,7 @@ function Body({
           <span className="font-medium text-foreground">
             {createdKey.serviceName}
           </span>{" "}
-          — we don't have a cheap status endpoint we can rely on for this
+          — we don't have a suitable status endpoint we can rely on for this
           service. Verify by running one real call from your AI tool once
           you've wired the env vars above.
         </InlineStatus>
