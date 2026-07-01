@@ -418,6 +418,13 @@ JWT_ACCESS_TTL_SECS=900             # 15 minutes
 JWT_REFRESH_TTL_SECS=604800         # 7 days
 JWT_RELAY_REPLY_TTL_SECS=1800       # 30 minutes (per-callback reply token TTL)
 JWT_RELAY_CALLBACK_TTL_SECS=300     # 5 minutes (callback authentication JWT TTL)
+JWT_RELAY_ACCESS_TTL_SECS=300       # 5 minutes (X-NyxID-User-Token relay access token TTL;
+                                    # first-party bearer shipped to a bot callback URL, kept
+                                    # short vs the 900s general access token. Relay access
+                                    # tokens are usable only on proxy/LLM surfaces — rejected
+                                    # elsewhere by reject_relay_tokens — inherit the agent key's
+                                    # service/node allowlist, and are invalidated when that agent
+                                    # key is revoked (ensure_relay_agent_key_active).)
 SA_TOKEN_TTL_SECS=3600              # 1 hour (service account tokens)
 ENVIRONMENT=development
 RATE_LIMIT_PER_SECOND=10

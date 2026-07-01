@@ -286,6 +286,18 @@ impl McpAuthContext {
             .unwrap_or_else(|| self.user_id.clone())
     }
 
+    /// Whether this auth is stateless for MCP session purposes: it must
+    /// re-present its credential on every request rather than relying on a
+    /// persisted MCP session. API keys are stateless, and so are relay tokens
+    /// (`X-NyxID-User-Token`): a relay token must NOT be able to mint a
+    /// long-lived Session that outlives its short TTL / agent-key revocation and
+    /// silently upgrades to `AuthMethod::Session` (allow-all, approval-bypassing)
+    /// on the session-fallback path. Forcing statelessness re-runs the relay
+    /// liveness check and allowlist inheritance on every call.
+    fn is_stateless(&self) -> bool {
+        self.is_api_key || self.auth_method == AuthMethod::Relay
+    }
+
     fn approval_requester_type(&self) -> Option<&'static str> {
         match &self.auth_method {
             AuthMethod::ApiKey => Some("api_key"),
@@ -395,6 +407,21 @@ async fn authenticate_mcp(
                     return Err(mcp_403_insufficient_scope());
                 }
 
+                // Relay tokens: verify the originating agent key is still active
+                // and resolve its service/node allowlist BEFORE `claims.sub` is
+                // moved below. This MCP path previously built its auth context
+                // without reading the relay scope claims, silently treating relay
+                // tokens as unrestricted (allow_all); route it through the same
+                // shared helper the HTTP middleware uses.
+                let relay_scope = if claims.relay == Some(true) {
+                    auth::ensure_relay_agent_key_active(&state.db, &claims)
+                        .await
+                        .map_err(|_| mcp_401(&state.config.base_url))?;
+                    Some(auth::relay_scope_from_claims(&claims))
+                } else {
+                    None
+                };
+
                 // Service account tokens have sa=true; verify against
                 // the service_accounts collection instead of users.
                 let (user_id, approval_owner_user_id) = if claims.sa == Some(true) {
@@ -416,6 +443,22 @@ async fn authenticate_mcp(
                 };
 
                 let mut ctx = McpAuthContext::user(user_id, auth_method);
+                if let Some((
+                    allow_all_services,
+                    allow_all_nodes,
+                    allowed_service_ids,
+                    allowed_node_ids,
+                    api_key_id,
+                    api_key_name,
+                )) = relay_scope
+                {
+                    ctx.allow_all_services = allow_all_services;
+                    ctx.allow_all_nodes = allow_all_nodes;
+                    ctx.allowed_service_ids = allowed_service_ids;
+                    ctx.allowed_node_ids = allowed_node_ids;
+                    ctx.api_key_id = api_key_id;
+                    ctx.api_key_name = api_key_name;
+                }
                 ctx.acting_client_id = claims.act.map(|a| a.sub);
                 ctx.approval_owner_user_id = approval_owner_user_id;
                 ctx.ip_address = request_ip.clone();
@@ -641,7 +684,7 @@ pub async fn mcp_post(State(state): State<AppState>, headers: HeaderMap, body: S
                 &state,
                 &user_id,
                 &request,
-                auth.is_api_key,
+                auth.is_stateless(),
                 auth.api_key_id.as_deref(),
                 auth.api_key_name.as_deref(),
                 auth.ip_address.as_deref(),
@@ -694,8 +737,9 @@ fn app_error_to_rpc(id: Option<serde_json::Value>, err: &crate::errors::AppError
 /// Resolve the MCP session for a request.
 ///
 /// For OAuth/JWT/session auth: session is required and validated against user_id.
-/// For API-key auth: session is optional. If the header is present it must be
-/// valid; if absent the request proceeds statelessly (returns `None`).
+/// For stateless auth (API keys and relay tokens): session is optional. If the
+/// header is present it must be valid; if absent the request proceeds
+/// statelessly (returns `None`), re-authenticating on every call.
 #[allow(clippy::result_large_err)]
 fn resolve_session(
     state: &AppState,
@@ -706,7 +750,7 @@ fn resolve_session(
 ) -> Result<Option<String>, Response> {
     let raw_sid = headers.get("mcp-session-id").and_then(|v| v.to_str().ok());
 
-    match (auth.is_api_key, raw_sid) {
+    match (auth.is_stateless(), raw_sid) {
         (true, None) => Ok(None),
         (true, Some(sid)) => {
             let sid = sid.to_string();
@@ -740,9 +784,10 @@ pub async fn mcp_get(State(state): State<AppState>, headers: HeaderMap) -> Respo
         return app_error_to_rpc(None, &e);
     }
 
-    // API-key requests without a session have nothing to stream: return empty
-    // keep-alive SSE rather than 400. Real clients use POST /mcp for each call.
-    if auth.is_api_key && headers.get("mcp-session-id").is_none() {
+    // Stateless (API-key / relay) requests without a session have nothing to
+    // stream: return empty keep-alive SSE rather than 400. Real clients use
+    // POST /mcp for each call.
+    if auth.is_stateless() && headers.get("mcp-session-id").is_none() {
         let stream = tokio_stream::empty::<Result<Event, Infallible>>();
         return Sse::new(stream)
             .keep_alive(
@@ -812,8 +857,9 @@ pub async fn mcp_delete(State(state): State<AppState>, headers: HeaderMap) -> Re
         return app_error_to_rpc(None, &e);
     }
 
-    // API-key request without a session: nothing to delete, return 204.
-    if auth.is_api_key && headers.get("mcp-session-id").is_none() {
+    // Stateless (API-key / relay) request without a session: nothing to delete,
+    // return 204.
+    if auth.is_stateless() && headers.get("mcp-session-id").is_none() {
         return StatusCode::NO_CONTENT.into_response();
     }
 
@@ -895,16 +941,19 @@ fn handle_initialize(
     state: &AppState,
     user_id: &str,
     request: &JsonRpcRequest,
-    is_api_key: bool,
+    stateless: bool,
     api_key_id: Option<&str>,
     api_key_name: Option<&str>,
     ip_address: Option<&str>,
     user_agent: Option<&str>,
     tele: &TelemetryContext,
 ) -> Response {
-    // API-key auth is stateless: each request authenticates independently,
-    // so no MCP session is created on initialize.
-    let session_id = if is_api_key {
+    // Stateless auth (API keys and relay tokens) authenticates independently on
+    // every request, so no MCP session is created on initialize. This is what
+    // stops a relay token from minting a Session it could later replay as
+    // AuthMethod::Session (allow-all, approval-bypassing) without re-presenting
+    // the relay JWT.
+    let session_id = if stateless {
         None
     } else {
         match state.mcp_sessions.create_with_proxy_access(user_id, true) {
@@ -2869,6 +2918,25 @@ mod tests {
         assert!(ctx.allow_all_services);
         assert!(ctx.allow_all_nodes);
         assert!(ctx.api_key_id.is_none());
+    }
+
+    #[test]
+    fn relay_auth_is_stateless_like_api_key() {
+        // Relay tokens must be stateless in MCP: no session is minted on
+        // initialize, so they cannot later be replayed as AuthMethod::Session.
+        let relay = McpAuthContext::user("user-1".to_string(), AuthMethod::Relay);
+        assert!(relay.is_stateless());
+
+        // Session/OAuth/plain-access auth is NOT stateless (uses MCP sessions).
+        let session = McpAuthContext::user("user-1".to_string(), AuthMethod::Session);
+        assert!(!session.is_stateless());
+        let access = McpAuthContext::user("user-1".to_string(), AuthMethod::AccessToken);
+        assert!(!access.is_stateless());
+
+        // API keys are stateless (existing behavior).
+        let mut api_key = McpAuthContext::user("user-1".to_string(), AuthMethod::ApiKey);
+        api_key.is_api_key = true;
+        assert!(api_key.is_stateless());
     }
 
     #[test]

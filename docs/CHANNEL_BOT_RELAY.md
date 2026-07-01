@@ -504,7 +504,7 @@ The payload normalizes messages into a common format so agents can handle all pl
 | `X-NyxID-Message-Id` | UUID of the `channel_message` record |
 | `X-NyxID-Timestamp` | ISO 8601 timestamp (for replay protection) |
 | `X-NyxID-Platform` | Platform identifier (`telegram`, `discord`, `lark`, `feishu`) |
-| `X-NyxID-User-Token` | Short-lived access token for the bot owner. The agent can use this as `Authorization: Bearer <token>` to call NyxID APIs (proxy, approvals, etc.) on behalf of the user. Scoped to `proxy read`. Absent if token generation fails. |
+| `X-NyxID-User-Token` | Short-lived access token for the bot owner (`JWT_RELAY_ACCESS_TTL_SECS`, default `300`s). The agent uses it as `Authorization: Bearer <token>` to call NyxID's **proxy / LLM gateway / MCP** (and approval *status* polling) on behalf of the user. It is a relay token: it is **rejected** on account, admin, key-management, session, channel-reply, and other non-proxy endpoints; it inherits the originating agent key's service/node allowlist; on MCP it is stateless (no session is minted, so it re-authenticates every call); and it stops working the moment that agent key is revoked/deactivated. To *reply* to a conversation, use the agent API key or the per-callback `reply_token`, not this token. Absent if token generation fails. |
 
 #### Callback Authentication (JWT)
 

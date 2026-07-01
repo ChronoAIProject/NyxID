@@ -375,7 +375,10 @@ pub fn generate_relay_access_token(
         sub: user_id.to_string(),
         iss: config.jwt_issuer.clone(),
         aud: config.base_url.clone(),
-        exp: now + config.jwt_access_ttl_secs,
+        // Relay access tokens are shipped to a client-controlled callback URL,
+        // so they use the dedicated (shorter) relay-access TTL rather than the
+        // general access-token TTL to bound the replay window on leak.
+        exp: now + config.jwt_relay_access_ttl_secs,
         iat: now,
         jti: Uuid::new_v4().to_string(),
         scope: scope.to_string(),
@@ -962,6 +965,7 @@ mod tests {
             jwt_access_ttl_secs: 900,
             jwt_relay_reply_ttl_secs: 1800,
             jwt_relay_callback_ttl_secs: 300,
+            jwt_relay_access_ttl_secs: 300,
             jwt_refresh_ttl_secs: 604800,
             release_integrity_manifest_url: None,
             credential_accept_dist_dir: "frontend/dist/credential-accept".to_string(),
@@ -1105,6 +1109,44 @@ mod tests {
 
         let claims = verify_token(&keys, &config, &token).unwrap();
         assert_eq!(claims.exp - claims.iat, 300);
+    }
+
+    #[test]
+    fn relay_access_token_uses_relay_ttl_not_access_ttl() {
+        let (keys, config) = test_keys_and_config();
+        let user_id = Uuid::new_v4();
+        let agent_scope = RelayAgentScope {
+            api_key_id: "key-123".to_string(),
+            api_key_name: "agent".to_string(),
+            allowed_service_ids: vec!["svc-1".to_string()],
+            allowed_node_ids: vec![],
+            allow_all_services: false,
+            allow_all_nodes: true,
+        };
+        let token = generate_relay_access_token(
+            &keys,
+            &config,
+            &user_id,
+            "openid profile email proxy",
+            None,
+            &agent_scope,
+        )
+        .unwrap();
+
+        let claims = verify_token(&keys, &config, &token).unwrap();
+        assert_eq!(claims.relay, Some(true));
+        assert_eq!(claims.token_type, "access");
+        assert_eq!(claims.relay_api_key_id.as_deref(), Some("key-123"));
+        assert_eq!(claims.relay_allow_all_services, Some(false));
+        assert_eq!(
+            claims.relay_allowed_service_ids.as_deref(),
+            Some(["svc-1".to_string()].as_slice())
+        );
+        // Relay tokens are shipped to a client-controlled callback URL, so they
+        // must use the dedicated (shorter) relay-access TTL, NOT the general
+        // access-token TTL. In the test config these differ (300 vs 900).
+        assert_eq!(claims.exp - claims.iat, config.jwt_relay_access_ttl_secs);
+        assert_ne!(claims.exp - claims.iat, config.jwt_access_ttl_secs);
     }
 
     #[test]

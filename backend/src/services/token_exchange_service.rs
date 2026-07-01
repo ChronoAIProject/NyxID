@@ -69,6 +69,25 @@ pub async fn exchange_token(
         ));
     }
 
+    // Reject relay tokens: a relay access token (`X-NyxID-User-Token`) is a
+    // short-lived credential shipped to a client-controlled callback URL. If it
+    // could be exchanged, a captured relay token would launder into a
+    // refreshable delegated token, decoupling the attacker's window from the
+    // relay token's short TTL -- the same indefinite-TTL-extension the delegated
+    // rejection above prevents.
+    if subject_claims.relay == Some(true) {
+        log_exchange_failure(
+            db,
+            Some(&subject_claims.sub),
+            client_id,
+            "relay_exchange_rejected",
+        );
+        return Err(AppError::BadRequest(
+            "Cannot exchange a relay token -- subject_token must be a direct first-party access token"
+                .to_string(),
+        ));
+    }
+
     let user_id_str = &subject_claims.sub;
 
     // Step 4: Verify user has consented to this client

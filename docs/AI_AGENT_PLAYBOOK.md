@@ -3230,7 +3230,7 @@ When a message arrives, NyxID POSTs a normalized payload to the agent's callback
 
 The payload includes both normalized fields and `raw_platform_data` (the full original webhook JSON from the platform). Most agents use the normalized fields; agents that need platform-specific features (Telegram inline keyboards, Discord embeds, Lark interactive cards) can read `raw_platform_data` directly.
 
-Headers: `X-NyxID-Signature` (HMAC-SHA256), `X-NyxID-Message-Id`, `X-NyxID-Timestamp`, `X-NyxID-Platform`, `X-NyxID-User-Token` (short-lived access token for the bot owner -- use as `Authorization: Bearer <token>` to call NyxID APIs on behalf of the user).
+Headers: `X-NyxID-Signature` (HMAC-SHA256), `X-NyxID-Message-Id`, `X-NyxID-Timestamp`, `X-NyxID-Platform`, `X-NyxID-User-Token` (short-lived relay access token for the bot owner, default 300s -- use as `Authorization: Bearer <token>` to call NyxID's proxy/LLM gateway on behalf of the user; it is rejected on non-proxy endpoints and is invalidated when the agent key is revoked).
 
 ### Agent Reply
 
