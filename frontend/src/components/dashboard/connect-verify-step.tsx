@@ -1,9 +1,7 @@
-import type { ReactNode } from "react";
 import { useState } from "react";
-import { Check, Loader2, X } from "lucide-react";
+import { AlertTriangle, Check, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { CopyableField } from "@/components/shared/copyable-field";
-import { ServiceIcon } from "@/components/service-icons";
 import { useCreateApiKey } from "@/hooks/use-api-keys";
 import {
   FIRST_PROXY_CALL_SUCCEEDED_EVENT,
@@ -19,37 +17,42 @@ const PROBE_TIMEOUT_MS = 8000;
 
 /**
  * Phase machine — every transition is gated by an explicit user click
- * (per Calvin's feedback: "the lift should be to ask them if they want
+ * per Calvin's feedback ("the lift should be to ask them if they want
  * to create a key for this ai service instead of doing it automatically.
- * test comes after key is created"). No background activity ever runs
- * without the user pulling a trigger first.
+ * test comes after key is created"). Nothing fires in the background.
  */
-type Phase =
-  | "connected"       // initial — service is connected, ask if they want an Agent Key
-  | "minting"         // user clicked Create Agent Key, mint in flight
-  | "mint_failed"     // mint errored — show retry + skip
-  | "key_ready"       // mint succeeded — show key + offer to test
-  | "probing"         // user clicked Test — probe in flight
+export type Phase =
+  | "connected"       // initial — dialog title says "…connected"
+  | "minting"         // Create clicked, POST in flight
+  | "mint_failed"     // mint errored — retry or skip
+  | "key_ready"       // mint succeeded — key/URL shown, offer to test
+  | "probing"         // Test clicked, bearer probe in flight
   | "probe_success"   // probe returned 2xx — the actual end-to-end aha
-  | "probe_failed";   // probe returned 4xx/5xx/timeout — show diagnose hint + retry
+  | "probe_failed";   // probe returned 4xx/5xx/timeout
 
 export interface CreatedKey {
   readonly id: string;
   /**
-   * The user's user_service slug — used for the proxy URL. Note this
-   * may differ from `catalogSlug`: users who connect the same catalog
-   * service twice get suffixed slugs (`llm-openai-codex-2`,
-   * `llm-openai-codex-3`, etc.) so proxy routes stay unique.
+   * The user's user_service slug — used for the proxy URL. Repeat
+   * connects of the same catalog entry get suffixed (`llm-openai-codex-2`,
+   * `-3`, …) so proxy routes stay unique. That's why we also keep
+   * `catalogSlug` around for icon lookup.
    */
   readonly slug: string;
   /**
-   * The original catalog slug (from `catalog_service_slug` on KeyInfo,
-   * or the selected catalog entry). Used for ServiceIcon lookup so the
-   * brand glyph resolves correctly even for `-2`/`-3` repeat connects.
-   * Falls back to `slug` when we don't have a catalog match.
+   * Original catalog slug (from the selected entry, or
+   * `KeyInfo.catalog_service_slug`). Drives `<ServiceIcon>` — repeat
+   * connects still get the correct brand glyph. Falls back to `slug`
+   * when we don't have a catalog match.
    */
   readonly catalogSlug: string;
   readonly serviceName: string;
+  /**
+   * How the underlying credential was established. Only used by
+   * `diagnose()` today (device_code / oauth flows imply the upstream
+   * already verified the user, so a 4xx from the downstream is more
+   * likely a path mismatch than a bad credential).
+   */
   readonly completionMode: "credential" | "device_code" | "oauth" | "none";
 }
 
@@ -68,40 +71,18 @@ function proxyBaseUrl(slug: string): string {
 }
 
 /**
- * Even for services where we know the openai-shaped probe path won't
- * return 200 (Codex's chat backend, custom endpoints), the test is
- * still useful — a 4xx from the DOWNSTREAM proves NyxID's bearer-auth
- * middleware accepted the Agent Key and forwarded the request. That's
- * the half of the path the user actually cares about (their tool talks
- * to NyxID, NyxID talks to the downstream). Diagnose copy explains
- * outcomes honestly per HTTP status. Calvin: "the modal needs to be
- * able to test the agent key" — so we always offer it.
- */
-function probePath(createdKey: CreatedKey): string {
-  const openAiProbe = probePathForSlug(createdKey.slug);
-  // Fall back to root path when the slug isn't openai-shaped. Some
-  // downstreams will 404, some will return a landing page, some will
-  // 401 — all of them prove the Agent Key was accepted by NyxID.
-  return openAiProbe || "";
-}
-
-/**
- * Wave-aha-1 A4+ (opt-in rework) — post-connect aha moment, but every
- * step requires the user to pull a trigger:
+ * Wave-aha-1 A4+ — post-connect aha flow. Every transition is gated
+ * behind an explicit user click; nothing background-fires.
  *
- *   1. Service is connected → ask "Create an Agent Key for this?" with
- *      [Create Agent Key] [Maybe later]. No background mint.
- *   2. User clicks → mint runs visibly. If it fails, show the error
- *      and offer retry — instead of leaving a spinner spinning forever.
- *   3. Mint succeeds → show full key + proxy URL + (where applicable)
- *      env-var snippet, with [Test connection] / [I'll wire it myself].
- *   4. User clicks Test → bearer probe runs visibly. Success or precise
- *      failure copy. Retry available either way.
- *
- * The earlier auto-mint version hung silently when the mint request
- * never reached the BE (no surfaced error, no user agency). This
- * version makes failures impossible to miss because they always follow
- * a deliberate click.
+ * Layout is intentionally minimal per Calvin's design feedback:
+ *   - DialogTitle carries the current phase (never repeats "connected"
+ *     after the initial state).
+ *   - DialogDescription (owned by the parent dialog) carries a one-line
+ *     "what next" hint per phase.
+ *   - This component renders ONLY the actionable body: an inline
+ *     spinner/error line for transient phases, and the AgentKeyPanel
+ *     from `key_ready` onward. No decorative banners duplicating the
+ *     title.
  */
 export function ConnectVerifyStep({
   createdKey,
@@ -109,6 +90,7 @@ export function ConnectVerifyStep({
   onDone,
 }: ConnectVerifyStepProps) {
   void isNodeRouted; // referenced only in the diagnose() helper below
+
   const createApiKey = useCreateApiKey();
   const [phase, setPhase] = useState<Phase>("connected");
   const [agentKey, setAgentKey] = useState<ApiKeyCreateResponse | null>(null);
@@ -148,7 +130,7 @@ export function ConnectVerifyStep({
 
     window.dispatchEvent(new CustomEvent(VERIFY_KEY_LOADING_START_EVENT));
 
-    const url = `${proxyBaseUrl(createdKey.slug)}/${probePath(createdKey)}`;
+    const url = `${proxyBaseUrl(createdKey.slug)}/${probePathForSlug(createdKey.slug)}`;
     const controller = new AbortController();
     const timer = window.setTimeout(
       () => controller.abort(),
@@ -159,9 +141,9 @@ export function ConnectVerifyStep({
     try {
       const res = await fetch(url, {
         method: "GET",
-        // Bearer = the user's just-minted Agent Key. credentials:"omit"
-        // so we don't accidentally fall back to the session cookie —
-        // we want to prove the bearer path the user's TOOL will take.
+        // Bearer = the just-minted Agent Key. credentials:"omit" so
+        // we don't accidentally fall back to the session cookie — we
+        // want to prove the exact path the user's TOOL will take.
         credentials: "omit",
         headers: {
           Authorization: `Bearer ${agentKey.full_key}`,
@@ -193,27 +175,14 @@ export function ConnectVerifyStep({
 
   return (
     <div className="space-y-4 py-2">
-      {/* Top status banner — what just happened / what we're doing now */}
-      <StatusBanner
+      <Body
         phase={phase}
         createdKey={createdKey}
+        agentKey={agentKey}
         mintError={mintError}
         probeError={probeError}
         httpStatus={httpStatus}
       />
-
-      {/* Once minted, the Agent Key + URL panel stays visible from
-          key_ready through probe_success / probe_failed so the user can
-          copy it regardless of test outcome. */}
-      {agentKey && (
-        <AgentKeyPanel
-          agentKey={agentKey}
-          createdKey={createdKey}
-          showOpenAiEnvSnippet={phase === "probe_success"}
-        />
-      )}
-
-      {/* Action buttons — gate every transition behind an explicit click. */}
       <Footer
         phase={phase}
         onMint={triggerMint}
@@ -224,118 +193,119 @@ export function ConnectVerifyStep({
   );
 }
 
-function StatusBanner({
+/**
+ * Phase body. Empty for `connected` (the DialogTitle + description are
+ * self-sufficient — no need for a decorative banner). Inline
+ * spinner/error lines for transient phases. AgentKeyPanel from
+ * `key_ready` onward is the actual output content.
+ */
+function Body({
   phase,
   createdKey,
+  agentKey,
   mintError,
   probeError,
   httpStatus,
 }: {
   readonly phase: Phase;
   readonly createdKey: CreatedKey;
+  readonly agentKey: ApiKeyCreateResponse | null;
   readonly mintError: string | null;
   readonly probeError: string | null;
   readonly httpStatus: number | null;
 }) {
-  const serviceName = createdKey.serviceName;
-  // Quoted + icon-prefixed service name — matches the DialogTitle styling
-  // so it's obvious that "OpenAI Codex API" is the THING that got
-  // connected, not part of the verb.
-  const quotedServiceTitle: ReactNode = (
-    <span className="inline-flex items-center gap-1.5">
-      <ServiceIcon
-        slug={createdKey.catalogSlug}
-        className="h-3.5 w-3.5 shrink-0 text-muted-foreground"
-      />
-      <span>
-        <span className="text-muted-foreground">&ldquo;</span>
-        {serviceName}
-        <span className="text-muted-foreground">&rdquo;</span>
-        {" "}connected
-      </span>
-    </span>
-  );
+  return (
+    <>
+      {phase === "minting" && (
+        <InlineStatus tone="neutral" icon={<Spinner />}>
+          Minting a scoped key with the <code>proxy</code> scope and
+          access to {createdKey.serviceName} only.
+        </InlineStatus>
+      )}
 
-  switch (phase) {
-    case "connected":
-      return (
-        <Banner icon="check" tone="success" title={quotedServiceTitle}>
-          NyxID has stored your credentials. To let your AI tools use this
-          connection, you&apos;ll need an Agent Key scoped to this service.
-        </Banner>
-      );
-    case "minting":
-      return (
-        <Banner icon="spinner" tone="neutral" title="Creating your Agent Key…">
-          Minting a scoped key with the <code>proxy</code> scope and access
-          to {serviceName} only.
-        </Banner>
-      );
-    case "mint_failed":
-      return (
-        <Banner
-          icon="warn"
+      {phase === "mint_failed" && (
+        <InlineStatus
           tone="warn"
-          title="Couldn’t create the Agent Key"
+          icon={<AlertTriangle className="h-4 w-4 text-warning" aria-hidden />}
         >
           {mintError ??
             "The server didn't accept the request."}{" "}
-          You can retry, or skip and create one later from{" "}
+          You can retry, or create one later at{" "}
           <span className="font-medium">/keys → Agent Keys → Create</span>.
-        </Banner>
-      );
-    case "key_ready":
-      return (
-        <Banner
-          icon="check"
-          tone="success"
-          title={`Agent Key created for ${serviceName}`}
-        >
-          Save the key now (it&apos;s only shown once). To prove the
-          end-to-end path works, run a test below — or skip and wire it
-          straight into your AI tool.
-        </Banner>
-      );
-    case "probing":
-      return (
-        <Banner
-          icon="spinner"
-          tone="neutral"
-          title="Testing the end-to-end path…"
-        >
-          Calling {serviceName} with the new Agent Key as bearer — the same
-          path your AI tool will take. This takes a couple of seconds.
-        </Banner>
-      );
-    case "probe_success":
-      return (
-        <Banner
-          icon="check"
-          tone="success"
-          title={`Your AI tool can now call ${serviceName} through NyxID`}
-        >
-          End-to-end test succeeded
-          {httpStatus !== null ? ` (HTTP ${String(httpStatus)})` : ""}.
-          Copy the Agent Key + Base URL into your tool of choice — you&apos;re done.
-        </Banner>
-      );
-    case "probe_failed":
-      return (
-        <Banner
-          icon="warn"
-          tone="warn"
-          title="End-to-end test didn’t succeed"
-        >
-          <span>
-            {probeError ??
-              "The probe returned an unexpected response."}
-            {httpStatus !== null ? ` (HTTP ${String(httpStatus)})` : ""}
-            {" "}The Agent Key is still good — copy it above and use it from
-            your tool, or retry the test below.
-          </span>
-        </Banner>
-      );
-  }
+        </InlineStatus>
+      )}
+
+      {agentKey && (
+        <>
+          <AgentKeyPanel
+            agentKey={agentKey}
+            createdKey={createdKey}
+            showOpenAiEnvSnippet={phase === "probe_success"}
+          />
+
+          {phase === "probing" && (
+            <InlineStatus tone="neutral" icon={<Spinner />}>
+              Calling {createdKey.serviceName} with the new Agent Key —
+              the same path your AI tool will take.
+            </InlineStatus>
+          )}
+
+          {phase === "probe_success" && (
+            <InlineStatus
+              tone="success"
+              icon={<Check className="h-4 w-4 text-success" aria-hidden />}
+            >
+              End-to-end test succeeded
+              {httpStatus !== null ? ` (HTTP ${String(httpStatus)})` : ""}.
+              Copy the Agent Key + Base URL above into your tool of choice.
+            </InlineStatus>
+          )}
+
+          {phase === "probe_failed" && (
+            <InlineStatus
+              tone="warn"
+              icon={<AlertTriangle className="h-4 w-4 text-warning" aria-hidden />}
+            >
+              {probeError ??
+                "The probe returned an unexpected response."}
+              {httpStatus !== null ? ` (HTTP ${String(httpStatus)})` : ""}
+              {" "}The Agent Key is still good — use it from your tool or
+              retry the test.
+            </InlineStatus>
+          )}
+        </>
+      )}
+    </>
+  );
+}
+
+function Spinner() {
+  return (
+    <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" aria-hidden />
+  );
+}
+
+function InlineStatus({
+  tone,
+  icon,
+  children,
+}: {
+  readonly tone: "neutral" | "success" | "warn";
+  readonly icon: React.ReactNode;
+  readonly children: React.ReactNode;
+}) {
+  const toneClass =
+    tone === "success"
+      ? "text-foreground"
+      : tone === "warn"
+        ? "text-foreground"
+        : "text-muted-foreground";
+  return (
+    <div className="flex items-start gap-2">
+      <span className="mt-0.5 shrink-0">{icon}</span>
+      <p className={`text-[12px] leading-relaxed ${toneClass}`}>{children}</p>
+    </div>
+  );
 }
 
 function AgentKeyPanel({
@@ -420,11 +390,9 @@ function Footer({
   readonly onDone: () => void;
 }) {
   // Uniform 2-button footer across every phase: [outline secondary]
-  // [primary]. Same size (`size="lg"`) on both so nothing jumps between
-  // transitions. Labels + actions change per phase; layout is constant.
-  // Secondary slot stays rendered but invisible when there's no
-  // meaningful alternative — keeps the primary button in the same
-  // horizontal position from phase to phase.
+  // [primary]. Same size (`size="lg"`) on both so the primary never
+  // shifts horizontally between transitions. Secondary slot renders
+  // invisible when a phase has only one meaningful action.
   const config = footerConfig(phase);
   const dispatch = (a: FooterAction) =>
     a === "onMint" ? onMint : a === "onProbe" ? onProbe : onDone;
@@ -462,10 +430,6 @@ interface FooterConfig {
   readonly busy: boolean;
 }
 
-/**
- * One place to see every label + action per phase. Data-driven layout
- * keeps the JSX compact and prevents subtle drift between phases.
- */
 function footerConfig(phase: Phase): FooterConfig {
   switch (phase) {
     case "connected":
@@ -518,8 +482,6 @@ function footerConfig(phase: Phase): FooterConfig {
       };
     case "probe_failed":
       return {
-        // Secondary retries the probe; primary dismisses. Users who
-        // don't want to retry can Done and troubleshoot from /keys.
         secondaryLabel: "Retry test",
         secondary: "onProbe",
         primaryLabel: "Done",
@@ -527,48 +489,6 @@ function footerConfig(phase: Phase): FooterConfig {
         busy: false,
       };
   }
-}
-
-function Banner({
-  icon,
-  tone,
-  title,
-  children,
-}: {
-  readonly icon: "spinner" | "check" | "warn";
-  readonly tone: "neutral" | "success" | "warn";
-  readonly title: ReactNode;
-  readonly children: ReactNode;
-}) {
-  const tonalRing =
-    tone === "success"
-      ? "bg-success/20"
-      : tone === "warn"
-        ? "bg-warning/20"
-        : "bg-muted";
-  const glyph =
-    icon === "spinner" ? (
-      <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" aria-hidden />
-    ) : icon === "check" ? (
-      <Check className="h-4 w-4 text-success" aria-hidden />
-    ) : (
-      <X className="h-4 w-4 text-warning" aria-hidden />
-    );
-  return (
-    <div className="rounded-xl border border-border/50 bg-card p-4">
-      <div className="flex items-start gap-3">
-        <span
-          className={`mt-0.5 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full ${tonalRing}`}
-        >
-          {glyph}
-        </span>
-        <div className="space-y-1">
-          <p className="text-[13px] font-semibold text-foreground">{title}</p>
-          <p className="text-[12px] text-muted-foreground">{children}</p>
-        </div>
-      </div>
-    </div>
-  );
 }
 
 function diagnose(
@@ -591,7 +511,7 @@ function diagnose(
     return "The downstream is rate-limiting (HTTP 429). Your credential + Agent Key work — retry in a minute.";
   }
   if (status >= 500) {
-    return `The downstream returned a server error (HTTP ${String(status)}). NyxID's part of the path is fine; the upstream service is having issues right now.`;
+    return `The downstream returned a server error (HTTP ${String(status)}). NyxID's part of the path is fine; the upstream is having issues.`;
   }
   return `The probe returned an unexpected HTTP ${String(status)}.`;
 }

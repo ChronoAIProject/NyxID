@@ -244,15 +244,13 @@ describe("AddKeyDialog — custom endpoint path", () => {
     // step instead of toasting + navigating. The dialog stays open so
     // the user sees their first 200 (or a precise failure diagnosis)
     // right here. View-details / Done buttons handle the close + nav.
-    // Target the DialogTitle (heading). The verify-step title now wraps
-    // the service name in curly quotes + an icon prefix, so the
-    // accessible name reads `"My Custom API" connected` — use a function
-    // matcher that tolerates whatever punctuation lands between the
-    // service name and the verb.
+    // Verify-step DialogTitle: brand icon + quoted service name (no verb).
+    // "Connected" now lives in the DialogDescription + inline body copy,
+    // not the heading — so we just assert the service name appears.
     await waitFor(() =>
       expect(
         screen.getByRole("heading", {
-          name: (n) => /My Custom API/i.test(n) && /connected/i.test(n),
+          name: (n) => /My Custom API/i.test(n),
         }),
       ).toBeInTheDocument(),
     );
@@ -331,7 +329,7 @@ describe("AddKeyDialog — catalog template path", () => {
     await waitFor(() =>
       expect(
         screen.getByRole("heading", {
-          name: (n) => /OpenAI/i.test(n) && /connected/i.test(n),
+          name: (n) => /OpenAI/i.test(n),
         }),
       ).toBeInTheDocument(),
     );

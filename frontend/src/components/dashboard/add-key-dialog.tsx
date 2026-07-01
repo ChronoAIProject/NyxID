@@ -2532,7 +2532,7 @@ export function AddKeyDialog({
       case "device_code":
         return `Authenticate with ${selectedEntry?.name ?? "the service"} using a device code.`;
       case "verify":
-        return "Next step: create an Agent Key so your AI tools can use this.";
+        return "Connected. Set up an Agent Key so your AI tools can use it.";
       default:
         return selectedEntry
           ? `Set up your ${selectedEntry.name} credentials.`
@@ -2546,10 +2546,12 @@ export function AddKeyDialog({
         <DialogHeader>
           <DialogTitle>
             {step === "verify" && createdKey ? (
-              // Verify-step title gets the catalog brand icon + a quoted
-              // service name so the user can see at a glance which thing
-              // just got connected — feedback was "OpenAI Codex API
-              // connected" reads ambiguously without that separation.
+              // Verify-step title stays stable across the internal phase
+              // machine — just the brand icon + quoted service name.
+              // Phase transitions (connected → minting → probe_success)
+              // are communicated by the inline status lines inside the
+              // body so "connected" doesn't get repeated as the state
+              // changes.
               <span className="inline-flex items-center gap-2">
                 <ServiceIcon
                   slug={createdKey.catalogSlug}
@@ -2559,7 +2561,6 @@ export function AddKeyDialog({
                   <span className="text-muted-foreground">&ldquo;</span>
                   {createdKey.serviceName}
                   <span className="text-muted-foreground">&rdquo;</span>
-                  {" "}connected
                 </span>
               </span>
             ) : (
