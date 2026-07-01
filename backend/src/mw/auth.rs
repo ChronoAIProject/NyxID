@@ -14,6 +14,7 @@ use crate::AppState;
 use crate::crypto::jwt;
 use crate::crypto::token::hash_token;
 use crate::errors::AppError;
+use crate::models::api_key::{ApiKey, COLLECTION_NAME as API_KEYS};
 use crate::models::service_account::{COLLECTION_NAME as SERVICE_ACCOUNTS, ServiceAccount};
 use crate::models::service_account_token::{COLLECTION_NAME as SA_TOKENS, ServiceAccountToken};
 use crate::models::session::{COLLECTION_NAME as SESSIONS, Session};
@@ -29,8 +30,11 @@ pub enum AuthMethod {
     Session,
     /// Bearer access token (JWT)
     AccessToken,
-    /// Channel relay callback token (JWT with `relay: true`).
-    /// Bypasses approval enforcement like Session.
+    /// Channel relay access token (JWT with `relay: true`), minted per inbound
+    /// bot message and shipped to the client callback URL as `X-NyxID-User-Token`.
+    /// Accepted only on proxy/LLM surfaces (rejected elsewhere by
+    /// `reject_relay_tokens`); inherits the originating agent key's service/node
+    /// allowlist and does NOT bypass approval enforcement (only `Session` does).
     Relay,
     /// X-API-Key header
     ApiKey,
@@ -542,6 +546,16 @@ impl FromRequestParts<AppState> for AuthUser {
                         AuthMethod::AccessToken
                     };
 
+                    // For relay tokens, verify the originating agent key is still
+                    // active. Relay tokens are stateless JWTs that leave NyxID's
+                    // trust boundary (shipped to a client callback URL); this DB
+                    // check is the revocation lever the relay branch previously
+                    // lacked, so deleting/deactivating the agent key immediately
+                    // kills its relay tokens (matching the ApiKey path).
+                    if auth_method == AuthMethod::Relay {
+                        ensure_relay_agent_key_active(&state.db, &claims).await?;
+                    }
+
                     // For relay tokens, inherit the agent key's scope restrictions.
                     // For regular access tokens, allow all (scope enforced at JWT level).
                     let (
@@ -552,14 +566,7 @@ impl FromRequestParts<AppState> for AuthUser {
                         api_key_id,
                         api_key_name,
                     ) = if auth_method == AuthMethod::Relay {
-                        (
-                            claims.relay_allow_all_services.unwrap_or(true),
-                            claims.relay_allow_all_nodes.unwrap_or(true),
-                            claims.relay_allowed_service_ids.clone().unwrap_or_default(),
-                            claims.relay_allowed_node_ids.clone().unwrap_or_default(),
-                            claims.relay_api_key_id.clone(),
-                            claims.relay_api_key_name.clone(),
-                        )
+                        relay_scope_from_claims(&claims)
                     } else {
                         (true, true, vec![], vec![], None, None)
                     };
@@ -740,6 +747,125 @@ impl FromRequestParts<AppState> for AuthUser {
             ))
         }
     }
+}
+
+/// Resolve the service/node scope a relay token grants from its embedded
+/// agent-key claims: `(allow_all_services, allow_all_nodes,
+/// allowed_service_ids, allowed_node_ids, api_key_id, api_key_name)`.
+///
+/// Shared by the `AuthUser` extractor and the MCP transport so both enforce the
+/// SAME agent-key allowlist. Previously the MCP path built its auth context
+/// without reading these claims, silently treating relay tokens as unrestricted
+/// (`allow_all_*` = true); routing both paths through this helper closes that
+/// divergence.
+pub fn relay_scope_from_claims(
+    claims: &crate::crypto::jwt::Claims,
+) -> (
+    bool,
+    bool,
+    Vec<String>,
+    Vec<String>,
+    Option<String>,
+    Option<String>,
+) {
+    (
+        claims.relay_allow_all_services.unwrap_or(true),
+        claims.relay_allow_all_nodes.unwrap_or(true),
+        claims.relay_allowed_service_ids.clone().unwrap_or_default(),
+        claims.relay_allowed_node_ids.clone().unwrap_or_default(),
+        claims.relay_api_key_id.clone(),
+        claims.relay_api_key_name.clone(),
+    )
+}
+
+/// Verify the agent API key a relay token was minted from is still active.
+///
+/// Relay tokens (`X-NyxID-User-Token`) are stateless JWTs delivered to a
+/// client-controlled callback URL and accepted as ordinary bearer auth on the
+/// proxy/LLM surfaces. Without this check the token stayed valid for its full
+/// TTL even after the agent key was deleted/deactivated (API keys are
+/// soft-deleted via `is_active = false`). Requiring a live agent key gives
+/// operators a real revocation lever and fails closed if the id is absent.
+pub async fn ensure_relay_agent_key_active(
+    db: &mongodb::Database,
+    claims: &crate::crypto::jwt::Claims,
+) -> Result<(), AppError> {
+    let api_key_id = claims.relay_api_key_id.as_deref().ok_or_else(|| {
+        AppError::Unauthorized("Relay token is missing its agent key binding".to_string())
+    })?;
+
+    let active = db
+        .collection::<ApiKey>(API_KEYS)
+        .find_one(doc! { "_id": api_key_id, "is_active": true })
+        .await
+        .map_err(|e| AppError::Internal(format!("Relay agent key lookup failed: {e}")))?
+        .is_some();
+
+    if !active {
+        return Err(AppError::Unauthorized(
+            "Relay token's agent key is inactive or revoked".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+/// Middleware that rejects relay access tokens from non-proxy endpoints.
+///
+/// Relay tokens (`X-NyxID-User-Token`, JWT with `relay: true`) exist so a bot
+/// callback recipient can proxy on behalf of the bot owner. They are a
+/// first-party bearer credential that crosses NyxID's trust boundary, so they
+/// must be usable ONLY on the delegated proxy/LLM surfaces. This middleware is
+/// applied to every other `/api/v1` route group so a leaked/replayed relay
+/// token cannot reach user, admin, key-management, or session endpoints.
+pub async fn reject_relay_tokens(
+    request: axum::http::Request<axum::body::Body>,
+    next: Next,
+) -> Result<impl IntoResponse, AppError> {
+    if is_relay_request(&request) {
+        return Err(AppError::Forbidden(
+            "Relay tokens cannot access this endpoint".to_string(),
+        ));
+    }
+    Ok(next.run(request).await)
+}
+
+/// Check if the request bears a relay token.
+fn is_relay_request(request: &axum::http::Request<axum::body::Body>) -> bool {
+    if let Some(auth_header) = request.headers().get("authorization")
+        && let Ok(auth_str) = auth_header.to_str()
+        && let Some(token) = auth_str.strip_prefix("Bearer ")
+        && is_jwt_relay(token)
+    {
+        return true;
+    }
+
+    false
+}
+
+/// Peek at the JWT payload (without verifying signature) to check the `relay`
+/// field. Mirrors `is_jwt_delegated`: a lightweight early check; a forged token
+/// is still rejected later by signature verification in the `AuthUser`
+/// extractor.
+fn is_jwt_relay(token: &str) -> bool {
+    let parts: Vec<&str> = token.splitn(3, '.').collect();
+    if parts.len() < 2 {
+        return false;
+    }
+
+    let payload = match base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(parts[1]) {
+        Ok(bytes) => bytes,
+        Err(_) => match base64::engine::general_purpose::URL_SAFE.decode(parts[1]) {
+            Ok(bytes) => bytes,
+            Err(_) => return false,
+        },
+    };
+
+    if let Ok(claims) = serde_json::from_slice::<serde_json::Value>(&payload) {
+        return claims.get("relay") == Some(&serde_json::Value::Bool(true));
+    }
+
+    false
 }
 
 /// Middleware that rejects delegated tokens from accessing protected endpoints.
@@ -1690,6 +1816,50 @@ mod tests {
     fn relay_auth_method_without_proxy_scope_cannot_rest_proxy() {
         let user = test_auth_user(AuthMethod::Relay, "read");
         assert!(!user.can_use_rest_proxy());
+    }
+
+    // -- reject_relay_tokens detection (deny-by-default off the proxy surfaces) --
+
+    fn fake_jwt(payload_json: &str) -> String {
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload_json.as_bytes());
+        format!("header.{b64}.sig")
+    }
+
+    #[test]
+    fn is_jwt_relay_detects_relay_claim() {
+        assert!(is_jwt_relay(&fake_jwt(r#"{"relay":true}"#)));
+        assert!(!is_jwt_relay(&fake_jwt(r#"{"relay":false}"#)));
+        assert!(!is_jwt_relay(&fake_jwt(r#"{"sub":"u1"}"#)));
+        assert!(!is_jwt_relay("not-a-jwt"));
+        assert!(!is_jwt_relay(""));
+    }
+
+    #[test]
+    fn is_relay_request_matches_bearer_relay_jwt() {
+        let relay = fake_jwt(r#"{"relay":true}"#);
+        let req = Request::builder()
+            .uri("/api/v1/keys")
+            .header("authorization", format!("Bearer {relay}"))
+            .body(Body::empty())
+            .unwrap();
+        assert!(is_relay_request(&req));
+
+        // A normal (non-relay) access token must NOT be treated as relay.
+        let non_relay = fake_jwt(r#"{"sub":"u1"}"#);
+        let req2 = Request::builder()
+            .uri("/api/v1/keys")
+            .header("authorization", format!("Bearer {non_relay}"))
+            .body(Body::empty())
+            .unwrap();
+        assert!(!is_relay_request(&req2));
+
+        // No Authorization header at all.
+        let req3 = Request::builder()
+            .uri("/api/v1/keys")
+            .body(Body::empty())
+            .unwrap();
+        assert!(!is_relay_request(&req3));
     }
 
     // -- parse_cookie edge cases --

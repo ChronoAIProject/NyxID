@@ -10,7 +10,8 @@ use tower_http::limit::RequestBodyLimitLayer;
 use crate::AppState;
 use crate::handlers;
 use crate::mw::auth::{
-    reject_api_key_tokens, reject_delegated_tokens, reject_service_account_tokens,
+    reject_api_key_tokens, reject_delegated_tokens, reject_relay_tokens,
+    reject_service_account_tokens,
 };
 
 /// Per RFC 9207 / OAuth 2.0 for Browser-Based Apps, the token endpoint,
@@ -988,7 +989,8 @@ pub fn build_router(
         .nest("/providers", provider_routes)
         .nest("/nodes", node_registration_routes)
         .nest("/oracle", oracle_consumer_routes)
-        .layer(middleware::from_fn(reject_delegated_tokens));
+        .layer(middleware::from_fn(reject_delegated_tokens))
+        .layer(middleware::from_fn(reject_relay_tokens));
 
     // Routes that BLOCK service account tokens (human-only endpoints)
     let api_v1_human_only = Router::new()
@@ -1055,7 +1057,8 @@ pub fn build_router(
         .route("/public/config", get(handlers::health::public_config))
         .layer(middleware::from_fn(reject_delegated_tokens))
         .layer(middleware::from_fn(reject_api_key_tokens))
-        .layer(middleware::from_fn(reject_service_account_tokens));
+        .layer(middleware::from_fn(reject_service_account_tokens))
+        .layer(middleware::from_fn(reject_relay_tokens));
 
     let api_v1 = api_v1_public
         .merge(api_v1_delegated)

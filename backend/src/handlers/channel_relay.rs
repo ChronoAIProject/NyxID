@@ -494,11 +494,30 @@ async fn resolve_reply_token_context(
     })
 }
 
+/// Reject relay access tokens (`X-NyxID-User-Token`) on the reply/edit paths.
+///
+/// A relay token carries the originating agent key's id, so without this guard
+/// it would satisfy the `conversation.agent_api_key_id == caller_api_key_id`
+/// check and be able to post/edit bot replies. Relay tokens are a first-party
+/// bearer credential that leaves NyxID's trust boundary and are scoped to
+/// proxy/LLM only; replying must use a real agent API key or the per-callback
+/// reply token (both documented in CHANNEL_BOT_RELAY.md).
+fn reject_relay_auth(auth_user: &AuthUser) -> AppResult<()> {
+    if auth_user.auth_method == crate::mw::auth::AuthMethod::Relay {
+        return Err(AppError::Forbidden(
+            "Relay tokens cannot post channel replies; use the agent API key or the per-callback reply token".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 async fn resolve_api_key_reply_context(
     state: &AppState,
     auth_user: &AuthUser,
     body: &AsyncReplyRequest,
 ) -> AppResult<ReplyRequestContext> {
+    reject_relay_auth(auth_user)?;
+
     let original = channel_relay_service::get_message(&state.db, &body.message_id).await?;
     let conversation = load_active_conversation(state, &original.conversation_id).await?;
 
@@ -579,6 +598,8 @@ async fn resolve_api_key_edit_context(
     auth_user: &AuthUser,
     body: &UpdateReplyRequest,
 ) -> AppResult<EditRequestContext> {
+    reject_relay_auth(auth_user)?;
+
     let caller_api_key_id = auth_user.api_key_id.as_deref().ok_or_else(|| {
         AppError::Forbidden("This endpoint requires API key authentication".to_string())
     })?;
@@ -1080,6 +1101,37 @@ mod tests {
             ip_address: None,
             user_agent: None,
         }
+    }
+
+    fn auth_user_with_method(method: crate::mw::auth::AuthMethod) -> AuthUser {
+        AuthUser {
+            user_id: Uuid::new_v4(),
+            session_id: None,
+            scope: "openid profile email proxy".to_string(),
+            acting_client_id: None,
+            approval_owner_user_id: None,
+            auth_method: method,
+            allow_all_services: true,
+            allow_all_nodes: true,
+            allowed_service_ids: vec![],
+            allowed_node_ids: vec![],
+            api_key_id: Some("key-1".to_string()),
+            api_key_name: Some("agent".to_string()),
+            rate_limit_per_second: None,
+            rate_limit_burst: None,
+            ip_address: None,
+            user_agent: None,
+        }
+    }
+
+    #[test]
+    fn reject_relay_auth_blocks_relay_but_allows_api_key() {
+        use crate::mw::auth::AuthMethod;
+        // A relay token carries an agent-key id, so without this guard it would
+        // pass the conversation.agent_api_key_id equality check on the reply path.
+        assert!(reject_relay_auth(&auth_user_with_method(AuthMethod::Relay)).is_err());
+        // Genuine agent API keys and other methods are unaffected.
+        assert!(reject_relay_auth(&auth_user_with_method(AuthMethod::ApiKey)).is_ok());
     }
 
     async fn insert_reply_token_use(
