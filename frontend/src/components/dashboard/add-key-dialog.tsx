@@ -2547,15 +2547,19 @@ export function AddKeyDialog({
           <DialogTitle>
             {step === "verify" && createdKey ? (
               // Umbrella framing: the DialogTitle communicates the state
-              // ("<service> connected") — that's the umbrella. The body
-              // then tells the user what's needed next (an Agent Key to
-              // let their AI tools actually use it).
+              // (Service "<name>" connected) — that's the umbrella. The
+              // body then tells the user what's needed next (an Agent
+              // Key to let their AI tools actually use it).
+              //
+              // "Service" prefix is intentional per Calvin's ask — it
+              // labels the noun so the quoted name isn't dangling.
               <span className="inline-flex items-center gap-2">
                 <ServiceIcon
                   slug={createdKey.catalogSlug}
                   className="h-5 w-5 shrink-0 text-muted-foreground"
                 />
                 <span>
+                  Service{" "}
                   <span className="text-muted-foreground">&ldquo;</span>
                   {createdKey.serviceName}
                   <span className="text-muted-foreground">&rdquo;</span>{" "}
