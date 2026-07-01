@@ -1,7 +1,9 @@
+import type { ReactNode } from "react";
 import { useState } from "react";
 import { Check, ExternalLink, Loader2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { CopyableField } from "@/components/shared/copyable-field";
+import { ServiceIcon } from "@/components/service-icons";
 import { useCreateApiKey } from "@/hooks/use-api-keys";
 import {
   FIRST_PROXY_CALL_SUCCEEDED_EVENT,
@@ -60,15 +62,22 @@ function proxyBaseUrl(slug: string): string {
   return `${window.location.origin}/api/v1/proxy/s/${slug}`;
 }
 
-function canProbe(createdKey: CreatedKey): boolean {
-  // Only show the Test button when we have a probeable path AND the
-  // upstream actually expects bearer creds — for Codex/ChatGPT-backed
-  // services (auth_method=none + non-openai backend) the probe would
-  // 404 against a working connection.
-  return (
-    createdKey.completionMode === "credential" &&
-    probePathForSlug(createdKey.slug) !== ""
-  );
+/**
+ * Even for services where we know the openai-shaped probe path won't
+ * return 200 (Codex's chat backend, custom endpoints), the test is
+ * still useful — a 4xx from the DOWNSTREAM proves NyxID's bearer-auth
+ * middleware accepted the Agent Key and forwarded the request. That's
+ * the half of the path the user actually cares about (their tool talks
+ * to NyxID, NyxID talks to the downstream). Diagnose copy explains
+ * outcomes honestly per HTTP status. Calvin: "the modal needs to be
+ * able to test the agent key" — so we always offer it.
+ */
+function probePath(createdKey: CreatedKey): string {
+  const openAiProbe = probePathForSlug(createdKey.slug);
+  // Fall back to root path when the slug isn't openai-shaped. Some
+  // downstreams will 404, some will return a landing page, some will
+  // 401 — all of them prove the Agent Key was accepted by NyxID.
+  return openAiProbe || "";
 }
 
 /**
@@ -102,8 +111,6 @@ export function ConnectVerifyStep({
   const [httpStatus, setHttpStatus] = useState<number | null>(null);
   const [probeError, setProbeError] = useState<string | null>(null);
 
-  const showProbeOption = canProbe(createdKey);
-
   function triggerMint() {
     setPhase("minting");
     setMintError(null);
@@ -136,7 +143,7 @@ export function ConnectVerifyStep({
 
     window.dispatchEvent(new CustomEvent(VERIFY_KEY_LOADING_START_EVENT));
 
-    const url = `${proxyBaseUrl(createdKey.slug)}/${probePathForSlug(createdKey.slug)}`;
+    const url = `${proxyBaseUrl(createdKey.slug)}/${probePath(createdKey)}`;
     const controller = new AbortController();
     const timer = window.setTimeout(
       () => controller.abort(),
@@ -184,7 +191,7 @@ export function ConnectVerifyStep({
       {/* Top status banner — what just happened / what we're doing now */}
       <StatusBanner
         phase={phase}
-        serviceName={createdKey.serviceName}
+        createdKey={createdKey}
         mintError={mintError}
         probeError={probeError}
         httpStatus={httpStatus}
@@ -204,7 +211,6 @@ export function ConnectVerifyStep({
       {/* Action buttons — gate every transition behind an explicit click. */}
       <Footer
         phase={phase}
-        showProbeOption={showProbeOption}
         onMint={triggerMint}
         onProbe={triggerProbe}
         onDone={onDone}
@@ -217,25 +223,40 @@ export function ConnectVerifyStep({
 
 function StatusBanner({
   phase,
-  serviceName,
+  createdKey,
   mintError,
   probeError,
   httpStatus,
 }: {
   readonly phase: Phase;
-  readonly serviceName: string;
+  readonly createdKey: CreatedKey;
   readonly mintError: string | null;
   readonly probeError: string | null;
   readonly httpStatus: number | null;
 }) {
+  const serviceName = createdKey.serviceName;
+  // Quoted + icon-prefixed service name — matches the DialogTitle styling
+  // so it's obvious that "OpenAI Codex API" is the THING that got
+  // connected, not part of the verb.
+  const quotedServiceTitle: ReactNode = (
+    <span className="inline-flex items-center gap-1.5">
+      <ServiceIcon
+        slug={createdKey.slug}
+        className="h-3.5 w-3.5 shrink-0 text-muted-foreground"
+      />
+      <span>
+        <span className="text-muted-foreground">&ldquo;</span>
+        {serviceName}
+        <span className="text-muted-foreground">&rdquo;</span>
+        {" "}connected
+      </span>
+    </span>
+  );
+
   switch (phase) {
     case "connected":
       return (
-        <Banner
-          icon="check"
-          tone="success"
-          title={`${serviceName} connected`}
-        >
+        <Banner icon="check" tone="success" title={quotedServiceTitle}>
           NyxID has stored your credentials. To let your AI tools use this
           connection, you&apos;ll need an Agent Key scoped to this service.
         </Banner>
@@ -384,7 +405,6 @@ function AgentKeyPanel({
 
 function Footer({
   phase,
-  showProbeOption,
   onMint,
   onProbe,
   onDone,
@@ -392,7 +412,6 @@ function Footer({
   hasKey,
 }: {
   readonly phase: Phase;
-  readonly showProbeOption: boolean;
   readonly onMint: () => void;
   readonly onProbe: () => void;
   readonly onDone: () => void;
@@ -443,20 +462,12 @@ function Footer({
 
       {phase === "key_ready" && (
         <>
-          {showProbeOption ? (
-            <>
-              <Button variant="outline" onClick={onDone}>
-                I&apos;ll wire it myself
-              </Button>
-              <Button variant="primary" size="lg" onClick={onProbe}>
-                Test connection
-              </Button>
-            </>
-          ) : (
-            <Button variant="primary" size="lg" onClick={onDone}>
-              Done
-            </Button>
-          )}
+          <Button variant="outline" onClick={onDone}>
+            I&apos;ll wire it myself
+          </Button>
+          <Button variant="primary" size="lg" onClick={onProbe}>
+            Test Agent Key
+          </Button>
         </>
       )}
 
@@ -490,8 +501,8 @@ function Banner({
 }: {
   readonly icon: "spinner" | "check" | "warn";
   readonly tone: "neutral" | "success" | "warn";
-  readonly title: string;
-  readonly children: React.ReactNode;
+  readonly title: ReactNode;
+  readonly children: ReactNode;
 }) {
   const tonalRing =
     tone === "success"

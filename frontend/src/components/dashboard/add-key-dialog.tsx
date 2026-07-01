@@ -2543,7 +2543,28 @@ export function AddKeyDialog({
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>{dialogTitle()}</DialogTitle>
+          <DialogTitle>
+            {step === "verify" && createdKey ? (
+              // Verify-step title gets the catalog brand icon + a quoted
+              // service name so the user can see at a glance which thing
+              // just got connected — feedback was "OpenAI Codex API
+              // connected" reads ambiguously without that separation.
+              <span className="inline-flex items-center gap-2">
+                <ServiceIcon
+                  slug={createdKey.slug}
+                  className="h-5 w-5 shrink-0 text-muted-foreground"
+                />
+                <span>
+                  <span className="text-muted-foreground">&ldquo;</span>
+                  {createdKey.serviceName}
+                  <span className="text-muted-foreground">&rdquo;</span>
+                  {" "}connected
+                </span>
+              </span>
+            ) : (
+              dialogTitle()
+            )}
+          </DialogTitle>
           <DialogDescription>{dialogDescription()}</DialogDescription>
         </DialogHeader>
 

@@ -244,12 +244,16 @@ describe("AddKeyDialog — custom endpoint path", () => {
     // step instead of toasting + navigating. The dialog stays open so
     // the user sees their first 200 (or a precise failure diagnosis)
     // right here. View-details / Done buttons handle the close + nav.
-    // Target the DialogTitle (heading) so the verify panel's failure copy
-    // ("…connected, but the test call didn't succeed") doesn't double-match
-    // when the test env can't reach the proxy.
+    // Target the DialogTitle (heading). The verify-step title now wraps
+    // the service name in curly quotes + an icon prefix, so the
+    // accessible name reads `"My Custom API" connected` — use a function
+    // matcher that tolerates whatever punctuation lands between the
+    // service name and the verb.
     await waitFor(() =>
       expect(
-        screen.getByRole("heading", { name: /My Custom API connected/i }),
+        screen.getByRole("heading", {
+          name: (n) => /My Custom API/i.test(n) && /connected/i.test(n),
+        }),
       ).toBeInTheDocument(),
     );
     expect(toastFns.success).not.toHaveBeenCalledWith("Key created");
@@ -326,7 +330,9 @@ describe("AddKeyDialog — catalog template path", () => {
     // no premature navigate.
     await waitFor(() =>
       expect(
-        screen.getByRole("heading", { name: /OpenAI connected/i }),
+        screen.getByRole("heading", {
+          name: (n) => /OpenAI/i.test(n) && /connected/i.test(n),
+        }),
       ).toBeInTheDocument(),
     );
     expect(toastFns.success).not.toHaveBeenCalledWith("Key created");
