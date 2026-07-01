@@ -10,11 +10,18 @@ import {
 } from "@/hooks/use-proxy-onboarding";
 
 /**
- * This suite is the regression fence for the "silent CTA" bug (Calvin,
- * 2026-06-30). The Footer used to return the handler reference from a
- * dispatch helper without invoking it, so clicking "Create Agent Key"
- * fired no mutation and no console log. These tests assert the
- * click→mutate→panel path end-to-end.
+ * Regression fence for two bugs:
+ *
+ * 1. The silent CTA (2026-06-30) — Footer's dispatch used to return
+ *    the handler reference without invoking it. See the "REGRESSION"
+ *    test below.
+ *
+ * 2. The false-negative probe (2026-07-01) — the probe used to define
+ *    success as "downstream returned 2xx", which mis-classified
+ *    services like telegram-bot (200 with bad creds → false positive)
+ *    and Codex / GitHub PAT (401 with valid Agent Key → false negative).
+ *    The fix keys off `X-NyxID-Agent-Id` on the response, which NyxID
+ *    only stamps when the Agent Key + scope + route all resolved.
  */
 
 const { createApiKeyMutate, toastFns } = vi.hoisted(() => ({
@@ -29,8 +36,7 @@ vi.mock("@/hooks/use-api-keys", () => ({
   }),
 }));
 
-// CopyableField calls sonner.toast on copy — the module isn't installed
-// in the test env's DOM, so mock to no-op.
+// CopyableField calls sonner.toast on copy — mock to no-op in test env.
 vi.mock("sonner", () => ({ toast: toastFns }));
 
 const CREATED_KEY: CreatedKey = {
@@ -57,6 +63,29 @@ const MINTED_KEY: ApiKeyCreateResponse = {
   platform: null,
 } as unknown as ApiKeyCreateResponse;
 
+/** Build a NyxID-proxied response — X-NyxID-Agent-Id present. */
+function proxied(status: number): Response {
+  return new Response("{}", {
+    status,
+    headers: { "x-nyxid-agent-id": "ak-1" },
+  });
+}
+
+/** Build a NyxID-rejected response — no agent-id header. */
+function rejected(status: number): Response {
+  return new Response("{}", { status });
+}
+
+async function mintKey(user: ReturnType<typeof userEvent.setup>) {
+  createApiKeyMutate.mockImplementation((_params, opts) => {
+    opts?.onSuccess?.(MINTED_KEY);
+  });
+  await user.click(screen.getByRole("button", { name: /Create Agent Key/i }));
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: /Test Agent Key/i })).toBeEnabled(),
+  );
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   vi.spyOn(window, "fetch").mockReset();
@@ -72,9 +101,6 @@ describe("ConnectVerifyStep — initial phase (connected)", () => {
       />,
     );
 
-    // Copy check: the "you need an Agent Key" prompt spans multiple
-    // inline <span>s, so bounce off the aggregated body text rather
-    // than any single element.
     expect(document.body.textContent ?? "").toMatch(
       /need an\s+Agent Key\s+to call/i,
     );
@@ -84,7 +110,7 @@ describe("ConnectVerifyStep — initial phase (connected)", () => {
     expect(screen.getByRole("button", { name: /Maybe later/i })).toBeEnabled();
   });
 
-  it("REGRESSION: clicking 'Create Agent Key' fires the mutation with proxy-scope + allowed_service_ids", async () => {
+  it("REGRESSION (silent CTA): clicking 'Create Agent Key' fires the mutation", async () => {
     const user = userEvent.setup();
     render(
       <ConnectVerifyStep
@@ -96,9 +122,8 @@ describe("ConnectVerifyStep — initial phase (connected)", () => {
 
     await user.click(screen.getByRole("button", { name: /Create Agent Key/i }));
 
-    // The whole point of this test file: the click MUST invoke the
-    // mutation. A silent-CTA regression here means the dispatch helper
-    // has drifted back into "return the function reference" form.
+    // If dispatch drifts back to "return function reference" form, this
+    // fails immediately with 0 calls instead of 1.
     expect(createApiKeyMutate).toHaveBeenCalledTimes(1);
     expect(createApiKeyMutate).toHaveBeenCalledWith(
       {
@@ -149,8 +174,6 @@ describe("ConnectVerifyStep — key_ready phase", () => {
 
     await user.click(screen.getByRole("button", { name: /Create Agent Key/i }));
 
-    // Panel appears with the minted secret rendered verbatim (needed —
-    // the raw secret is only shown once).
     await waitFor(() =>
       expect(screen.getByText(MINTED_KEY.full_key)).toBeInTheDocument(),
     );
@@ -184,14 +207,9 @@ describe("ConnectVerifyStep — key_ready phase", () => {
   });
 });
 
-describe("ConnectVerifyStep — probe phase", () => {
-  it("Test click hits the proxy with Bearer auth and transitions to probe_success on 200", async () => {
-    createApiKeyMutate.mockImplementation((_params, opts) => {
-      opts?.onSuccess?.(MINTED_KEY);
-    });
-    const fetchMock = vi
-      .spyOn(window, "fetch")
-      .mockResolvedValue(new Response("{}", { status: 200 }));
+describe("ConnectVerifyStep — probe (downstream OK)", () => {
+  it("200 with X-NyxID-Agent-Id → end-to-end verified, dispatches success event", async () => {
+    const fetchMock = vi.spyOn(window, "fetch").mockResolvedValue(proxied(200));
 
     const succeededSpy = vi.fn();
     window.addEventListener(FIRST_PROXY_CALL_SUCCEEDED_EVENT, succeededSpy);
@@ -204,38 +222,43 @@ describe("ConnectVerifyStep — probe phase", () => {
         onDone={vi.fn()}
       />,
     );
-
-    await user.click(screen.getByRole("button", { name: /Create Agent Key/i }));
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: /Test Agent Key/i })).toBeEnabled(),
-    );
+    await mintKey(user);
     await user.click(screen.getByRole("button", { name: /Test Agent Key/i }));
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
-    const [url, init] = fetchMock.mock.calls[0];
-    expect(String(url)).toMatch(/\/api\/v1\/proxy\/s\/openai\/v1\/models$/);
+    const firstCall = fetchMock.mock.calls[0];
+    if (!firstCall) throw new Error("fetch was not called");
+    const [url, init] = firstCall;
+    expect(String(url)).toBe("/api/v1/proxy/s/openai/v1/models");
     expect(init).toMatchObject({
       method: "GET",
+      credentials: "omit",
       headers: expect.objectContaining({
         Authorization: `Bearer ${MINTED_KEY.full_key}`,
       }),
     });
 
     await waitFor(() =>
-      expect(screen.getByText(/End-to-end test succeeded/i)).toBeInTheDocument(),
+      expect(screen.getByText(/End-to-end verified/i)).toBeInTheDocument(),
     );
     expect(succeededSpy).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: /^Done$/i })).toBeEnabled();
 
     window.removeEventListener(FIRST_PROXY_CALL_SUCCEEDED_EVENT, succeededSpy);
   });
+});
 
-  it("probe 403 renders the credential-rejected diagnose message + Retry test button", async () => {
-    createApiKeyMutate.mockImplementation((_params, opts) => {
-      opts?.onSuccess?.(MINTED_KEY);
-    });
-    vi.spyOn(window, "fetch").mockResolvedValue(
-      new Response("Forbidden", { status: 403 }),
-    );
+describe("ConnectVerifyStep — probe (agent key VALID despite downstream failure)", () => {
+  it("NEW SEMANTICS: 401 WITH agent-id header → agent key valid, warn tone, still fires success event", async () => {
+    // This is the case the OLD probe got wrong: telegram-bot,
+    // openclaw, and any service where a 4xx from downstream doesn't
+    // mean the Agent Key is broken. The header proves NyxID accepted
+    // the key + scope + reached downstream — the downstream's own
+    // 401 is a stored-credential issue, not an agent-key issue.
+    vi.spyOn(window, "fetch").mockResolvedValue(proxied(401));
+
+    const succeededSpy = vi.fn();
+    window.addEventListener(FIRST_PROXY_CALL_SUCCEEDED_EVENT, succeededSpy);
 
     const user = userEvent.setup();
     render(
@@ -245,27 +268,126 @@ describe("ConnectVerifyStep — probe phase", () => {
         onDone={vi.fn()}
       />,
     );
-    await user.click(screen.getByRole("button", { name: /Create Agent Key/i }));
+    await mintKey(user);
+    await user.click(screen.getByRole("button", { name: /Test Agent Key/i }));
+
+    // "Agent Key works" copy MUST appear even though the downstream
+    // returned 401 — this is the whole point of the fix.
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: /Test Agent Key/i })).toBeEnabled(),
+      expect(document.body.textContent ?? "").toMatch(/Agent Key works/i),
     );
+    expect(document.body.textContent ?? "").toMatch(
+      /rejected the stored credential/i,
+    );
+    // Success event still fires — the aha-moment activation flag flips
+    // as soon as the Agent Key is provably valid.
+    expect(succeededSpy).toHaveBeenCalledTimes(1);
+    // Done, not Retry — because the key IS valid.
+    expect(screen.getByRole("button", { name: /^Done$/i })).toBeEnabled();
+
+    window.removeEventListener(FIRST_PROXY_CALL_SUCCEEDED_EVENT, succeededSpy);
+  });
+
+  it("NEW SEMANTICS: 404 WITH agent-id header → agent key valid, does-not-mean-key-is-broken copy", async () => {
+    vi.spyOn(window, "fetch").mockResolvedValue(proxied(404));
+
+    const user = userEvent.setup();
+    render(
+      <ConnectVerifyStep
+        createdKey={CREATED_KEY}
+        isNodeRouted={false}
+        onDone={vi.fn()}
+      />,
+    );
+    await mintKey(user);
     await user.click(screen.getByRole("button", { name: /Test Agent Key/i }));
 
     await waitFor(() =>
-      expect(
-        screen.getByText(/downstream rejected the bearer-authenticated call/i),
-      ).toBeInTheDocument(),
+      expect(document.body.textContent ?? "").toMatch(
+        /does not mean the key is broken/i,
+      ),
     );
+    expect(screen.getByRole("button", { name: /^Done$/i })).toBeEnabled();
+  });
+});
+
+describe("ConnectVerifyStep — probe (agent key INVALID: NyxID-layer rejection)", () => {
+  it("401 WITHOUT agent-id header → NyxID rejected the Agent Key, transitions to probe_failed", async () => {
+    vi.spyOn(window, "fetch").mockResolvedValue(rejected(401));
+
+    const succeededSpy = vi.fn();
+    window.addEventListener(FIRST_PROXY_CALL_SUCCEEDED_EVENT, succeededSpy);
+
+    const user = userEvent.setup();
+    render(
+      <ConnectVerifyStep
+        createdKey={CREATED_KEY}
+        isNodeRouted={false}
+        onDone={vi.fn()}
+      />,
+    );
+    await mintKey(user);
+    await user.click(screen.getByRole("button", { name: /Test Agent Key/i }));
+
+    await waitFor(() =>
+      expect(document.body.textContent ?? "").toMatch(/rejected the Agent Key/i),
+    );
+    // Success event must NOT fire when the key was rejected.
+    expect(succeededSpy).not.toHaveBeenCalled();
+    // Retry test button, not Done — the user needs to fix the key.
     expect(screen.getByRole("button", { name: /Retry test/i })).toBeEnabled();
-    // The panel stays visible so the user can still copy the key even if
-    // the probe fails — the failure is diagnostic, not blocking.
+    // Panel stays visible so the user can grab the (broken) key and
+    // debug in devtools if needed.
     expect(screen.getByText(MINTED_KEY.full_key)).toBeInTheDocument();
+
+    window.removeEventListener(FIRST_PROXY_CALL_SUCCEEDED_EVENT, succeededSpy);
   });
 
+  it("403 WITHOUT agent-id header → scope violation, diagnostic names the slug", async () => {
+    vi.spyOn(window, "fetch").mockResolvedValue(rejected(403));
+
+    const user = userEvent.setup();
+    render(
+      <ConnectVerifyStep
+        createdKey={CREATED_KEY}
+        isNodeRouted={false}
+        onDone={vi.fn()}
+      />,
+    );
+    await mintKey(user);
+    await user.click(screen.getByRole("button", { name: /Test Agent Key/i }));
+
+    await waitFor(() =>
+      expect(document.body.textContent ?? "").toMatch(/out-of-scope/i),
+    );
+    expect(document.body.textContent ?? "").toMatch(/`openai`/);
+  });
+
+  it("network error → timed-out diagnostic, agent key remains unverified", async () => {
+    vi.spyOn(window, "fetch").mockRejectedValue(new TypeError("network down"));
+
+    const user = userEvent.setup();
+    render(
+      <ConnectVerifyStep
+        createdKey={CREATED_KEY}
+        isNodeRouted={false}
+        onDone={vi.fn()}
+      />,
+    );
+    await mintKey(user);
+    await user.click(screen.getByRole("button", { name: /Test Agent Key/i }));
+
+    await waitFor(() =>
+      expect(document.body.textContent ?? "").toMatch(
+        /timed out|blocked|network/i,
+      ),
+    );
+    expect(screen.getByRole("button", { name: /Retry test/i })).toBeEnabled();
+  });
+});
+
+describe("ConnectVerifyStep — loading events + Done", () => {
   it("Test click dispatches loading start + end events regardless of probe outcome", async () => {
-    createApiKeyMutate.mockImplementation((_params, opts) => {
-      opts?.onSuccess?.(MINTED_KEY);
-    });
     vi.spyOn(window, "fetch").mockRejectedValue(new TypeError("network error"));
 
     const startSpy = vi.fn();
@@ -281,10 +403,7 @@ describe("ConnectVerifyStep — probe phase", () => {
         onDone={vi.fn()}
       />,
     );
-    await user.click(screen.getByRole("button", { name: /Create Agent Key/i }));
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: /Test Agent Key/i })).toBeEnabled(),
-    );
+    await mintKey(user);
     await user.click(screen.getByRole("button", { name: /Test Agent Key/i }));
 
     await waitFor(() => expect(endSpy).toHaveBeenCalledTimes(1));
@@ -293,16 +412,9 @@ describe("ConnectVerifyStep — probe phase", () => {
     window.removeEventListener(VERIFY_KEY_LOADING_START_EVENT, startSpy);
     window.removeEventListener(VERIFY_KEY_LOADING_END_EVENT, endSpy);
   });
-});
 
-describe("ConnectVerifyStep — Done and umbrella copy", () => {
   it("shell env snippet renders only on probe_success for openai-shaped slugs", async () => {
-    createApiKeyMutate.mockImplementation((_params, opts) => {
-      opts?.onSuccess?.(MINTED_KEY);
-    });
-    vi.spyOn(window, "fetch").mockResolvedValue(
-      new Response("{}", { status: 200 }),
-    );
+    vi.spyOn(window, "fetch").mockResolvedValue(proxied(200));
 
     const user = userEvent.setup();
     render(
@@ -312,14 +424,9 @@ describe("ConnectVerifyStep — Done and umbrella copy", () => {
         onDone={vi.fn()}
       />,
     );
-    await user.click(screen.getByRole("button", { name: /Create Agent Key/i }));
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: /Test Agent Key/i })).toBeEnabled(),
-    );
+    await mintKey(user);
 
-    // Not visible before the probe runs. CopyableField renders a
-    // <p>{label}</p>, so we assert on the label — matching the raw
-    // multi-line value inside <code> is brittle.
+    // Not visible before the probe runs.
     expect(screen.queryByText("Shell env")).toBeNull();
 
     await user.click(screen.getByRole("button", { name: /Test Agent Key/i }));
@@ -327,8 +434,6 @@ describe("ConnectVerifyStep — Done and umbrella copy", () => {
     await waitFor(() =>
       expect(screen.getByText("Shell env")).toBeInTheDocument(),
     );
-    // The snippet's <code> has the two env-var lines — confirm they
-    // rendered with the minted secret, not template placeholders.
     const envCode = document.body.textContent ?? "";
     expect(envCode).toMatch(/OPENAI_API_KEY="nyxid_ag_abcd_full_secret_value"/);
     expect(envCode).toMatch(/OPENAI_BASE_URL=/);
@@ -336,12 +441,7 @@ describe("ConnectVerifyStep — Done and umbrella copy", () => {
   });
 
   it("Done in probe_success calls onDone", async () => {
-    createApiKeyMutate.mockImplementation((_params, opts) => {
-      opts?.onSuccess?.(MINTED_KEY);
-    });
-    vi.spyOn(window, "fetch").mockResolvedValue(
-      new Response("{}", { status: 200 }),
-    );
+    vi.spyOn(window, "fetch").mockResolvedValue(proxied(200));
 
     const onDone = vi.fn();
     const user = userEvent.setup();
@@ -352,10 +452,7 @@ describe("ConnectVerifyStep — Done and umbrella copy", () => {
         onDone={onDone}
       />,
     );
-    await user.click(screen.getByRole("button", { name: /Create Agent Key/i }));
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: /Test Agent Key/i })).toBeEnabled(),
-    );
+    await mintKey(user);
     await user.click(screen.getByRole("button", { name: /Test Agent Key/i }));
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /^Done$/i })).toBeEnabled(),

@@ -9,12 +9,14 @@ import {
   VERIFY_KEY_LOADING_END_EVENT,
   VERIFY_KEY_LOADING_START_EVENT,
 } from "@/hooks/use-proxy-onboarding";
+import { probeAgentKey, type ProbeOutcome } from "@/lib/proxy-probe";
 import type { ApiKeyCreateResponse } from "@/types/api";
 
+// Slug-shape hint used only to decide whether to render the
+// OPENAI_API_KEY / OPENAI_BASE_URL env-var snippet. The reliability
+// of the probe itself is driven by proxy-probe.ts, not this pattern.
 const OPENAI_SHAPED_HINTS =
   /(openai|anthropic|claude|gemini|deepseek|groq|together|mistral|fireworks|perplexity|cohere|xai|grok)/i;
-
-const PROBE_TIMEOUT_MS = 8000;
 
 /**
  * Phase machine — every transition is gated by an explicit user click
@@ -22,6 +24,11 @@ const PROBE_TIMEOUT_MS = 8000;
  * to create a key for this ai service instead of doing it
  * automatically. test comes after key is created"). Nothing fires in
  * the background.
+ *
+ * `probe_success` means "the Agent Key is valid" — the downstream may
+ * have returned any HTTP status (see proxy-probe.ts). `probe_failed`
+ * means NyxID itself rejected the request (bad key, scope violation,
+ * unknown slug, network error).
  */
 export type Phase =
   | "connected"
@@ -46,10 +53,6 @@ interface ConnectVerifyStepProps {
   readonly onDone: () => void;
 }
 
-function probePathForSlug(slug: string): string {
-  return OPENAI_SHAPED_HINTS.test(slug) ? "v1/models" : "";
-}
-
 function proxyBaseUrl(slug: string): string {
   return `${window.location.origin}/api/v1/proxy/s/${slug}`;
 }
@@ -66,26 +69,24 @@ function proxyBaseUrl(slug: string): string {
  *   mint_failed    → inline error + Maybe later / Try again
  *   key_ready      → Agent Key panel + I'll wire / Test Agent Key
  *   probing        → panel stays visible + inline spinner
- *   probe_success  → panel + env snippet + inline confirmation + Done
- *   probe_failed   → panel + inline error + Skip / Retry test
- *
- * No stepper, no repeated "connected" banners — the DialogTitle carries
- * that state exactly once, and everything else is either the current
- * action or its output.
+ *   probe_success  → panel + env snippet + probe diagnostic + Done
+ *                    (success is defined by proxy-probe classification —
+ *                    "agent key valid", not "downstream returned 2xx")
+ *   probe_failed   → panel + inline error + Retry test / Done
+ *                    (only reached when NyxID itself rejected the request)
  */
 export function ConnectVerifyStep({
   createdKey,
   isNodeRouted,
   onDone,
 }: ConnectVerifyStepProps) {
-  void isNodeRouted; // referenced only in diagnose() below
+  void isNodeRouted; // kept in props so the parent's data flow stays stable
 
   const createApiKey = useCreateApiKey();
   const [phase, setPhase] = useState<Phase>("connected");
   const [agentKey, setAgentKey] = useState<ApiKeyCreateResponse | null>(null);
   const [mintError, setMintError] = useState<string | null>(null);
-  const [httpStatus, setHttpStatus] = useState<number | null>(null);
-  const [probeError, setProbeError] = useState<string | null>(null);
+  const [probe, setProbe] = useState<ProbeOutcome | null>(null);
 
   function triggerMint() {
     console.info("[aha] triggerMint fired", createdKey.id, createdKey.serviceName);
@@ -119,43 +120,36 @@ export function ConnectVerifyStep({
     if (!agentKey) return;
     console.info("[aha] triggerProbe fired", createdKey.slug);
     setPhase("probing");
-    setProbeError(null);
-    setHttpStatus(null);
+    setProbe(null);
     window.dispatchEvent(new CustomEvent(VERIFY_KEY_LOADING_START_EVENT));
 
-    const url = `${proxyBaseUrl(createdKey.slug)}/${probePathForSlug(createdKey.slug)}`;
-    const controller = new AbortController();
-    const timer = window.setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
-
-    let status: number | null = null;
-    try {
-      const res = await fetch(url, {
-        method: "GET",
-        credentials: "omit",
-        headers: {
-          Authorization: `Bearer ${agentKey.full_key}`,
-          "Content-Type": "application/json",
-        },
-        signal: controller.signal,
-      });
-      status = res.status;
-    } catch {
-      status = null;
-    } finally {
-      window.clearTimeout(timer);
-    }
+    const outcome = await probeAgentKey(createdKey.slug, {
+      bearerToken: agentKey.full_key,
+    });
 
     window.dispatchEvent(new CustomEvent(VERIFY_KEY_LOADING_END_EVENT));
-    console.info("[aha] probe returned HTTP", status);
-    setHttpStatus(status);
+    console.info(
+      "[aha] probe outcome",
+      "agentKeyValid=",
+      outcome.agentKeyValid,
+      "http=",
+      outcome.httpStatus,
+      "downstream=",
+      outcome.downstreamStatus,
+    );
+    setProbe(outcome);
 
-    const ok = status !== null && status >= 200 && status < 400;
-    if (ok) {
+    // Success = the Agent Key + scope + route all resolved on NyxID's
+    // side. A downstream 401/404/500 is diagnostic, not blocking, so
+    // we still transition to probe_success and let the diagnostic
+    // copy explain what happened downstream. The one thing that
+    // fails the test is a NyxID-layer rejection (bad key, scope
+    // violation, network failure) — those land in probe_failed.
+    if (outcome.agentKeyValid) {
       setPhase("probe_success");
       window.dispatchEvent(new CustomEvent(FIRST_PROXY_CALL_SUCCEEDED_EVENT));
     } else {
       setPhase("probe_failed");
-      setProbeError(diagnose(status, isNodeRouted));
     }
   }
 
@@ -166,8 +160,7 @@ export function ConnectVerifyStep({
         createdKey={createdKey}
         agentKey={agentKey}
         mintError={mintError}
-        probeError={probeError}
-        httpStatus={httpStatus}
+        probe={probe}
       />
       <Footer
         phase={phase}
@@ -184,20 +177,15 @@ function Body({
   createdKey,
   agentKey,
   mintError,
-  probeError,
-  httpStatus,
+  probe,
 }: {
   readonly phase: Phase;
   readonly createdKey: CreatedKey;
   readonly agentKey: ApiKeyCreateResponse | null;
   readonly mintError: string | null;
-  readonly probeError: string | null;
-  readonly httpStatus: number | null;
+  readonly probe: ProbeOutcome | null;
 }) {
   if (phase === "connected") {
-    // Umbrella-view "what next" line — the DialogTitle already says
-    // "<service> connected"; this explains what an Agent Key is FOR so
-    // the user knows what they're about to opt into.
     return (
       <div className="flex items-start gap-3 rounded-xl border border-border/50 bg-card p-4">
         <KeyRound
@@ -236,14 +224,19 @@ function Body({
     );
   }
 
-  // key_ready + probing + probe_success + probe_failed all show the panel
+  // key_ready + probing + probe_success + probe_failed all show the panel.
+  // Env snippet renders only when the probe verified the key AND the slug
+  // is openai-shaped (compatible with OPENAI_BASE_URL / OPENAI_API_KEY).
+  const showOpenAiEnvSnippet =
+    phase === "probe_success" && OPENAI_SHAPED_HINTS.test(createdKey.slug);
+
   return (
     <div className="space-y-3">
       {agentKey && (
         <AgentKeyPanel
           agentKey={agentKey}
           createdKey={createdKey}
-          showOpenAiEnvSnippet={phase === "probe_success"}
+          showOpenAiEnvSnippet={showOpenAiEnvSnippet}
         />
       )}
 
@@ -254,25 +247,27 @@ function Body({
         </InlineStatus>
       )}
 
-      {phase === "probe_success" && (
+      {phase === "probe_success" && probe && (
         <InlineStatus
-          tone="success"
-          icon={<Check className="h-4 w-4 text-success" aria-hidden />}
+          tone={probe.downstreamStatus === "ok" ? "success" : "warn"}
+          icon={
+            probe.downstreamStatus === "ok" ? (
+              <Check className="h-4 w-4 text-success" aria-hidden />
+            ) : (
+              <AlertTriangle className="h-4 w-4 text-warning" aria-hidden />
+            )
+          }
         >
-          End-to-end test succeeded
-          {httpStatus !== null ? ` (HTTP ${String(httpStatus)})` : ""}.
-          Copy the Agent Key + Base URL above into your tool of choice.
+          {probe.diagnostic}
         </InlineStatus>
       )}
 
-      {phase === "probe_failed" && (
+      {phase === "probe_failed" && probe && (
         <InlineStatus
           tone="warn"
           icon={<AlertTriangle className="h-4 w-4 text-warning" aria-hidden />}
         >
-          {probeError ?? "The probe returned an unexpected response."}
-          {httpStatus !== null ? ` (HTTP ${String(httpStatus)})` : ""}
-          {" "}The Agent Key is still good — use it from your tool or retry.
+          {probe.diagnostic}
         </InlineStatus>
       )}
     </div>
@@ -321,7 +316,6 @@ function AgentKeyPanel({
   readonly showOpenAiEnvSnippet: boolean;
 }) {
   const proxyUrl = proxyBaseUrl(createdKey.slug);
-  const isOpenAiShaped = OPENAI_SHAPED_HINTS.test(createdKey.slug);
   return (
     <div className="space-y-3 rounded-xl border border-border/50 bg-card p-4">
       <div className="space-y-1">
@@ -338,7 +332,7 @@ function AgentKeyPanel({
       </div>
       <CopyableField label="Agent Key" value={agentKey.full_key} />
       <CopyableField label="Base URL" value={proxyUrl} />
-      {showOpenAiEnvSnippet && isOpenAiShaped && (
+      {showOpenAiEnvSnippet && (
         <>
           <p className="text-[11px] text-muted-foreground pt-1">
             Most OpenAI-compatible tools (openai-python, Cursor, Continue.dev, …)
@@ -371,7 +365,8 @@ function Footer({
   // Dispatch INVOKES the mapped handler. Do NOT refactor back to
   // `(a) => a === "onMint" ? onMint : …` — that returns the function
   // reference but never calls it (silent no-op click). This one bit
-  // Calvin twice in a row.
+  // Calvin twice in a row; the connect-verify-step.test.tsx suite
+  // has a REGRESSION test that will fail immediately if it does.
   function dispatch(action: FooterAction) {
     console.info("[aha] footer click", action, "phase=", phase);
     if (action === "onMint") onMint();
@@ -471,26 +466,4 @@ function footerConfig(phase: Phase): FooterConfig {
         busy: false,
       };
   }
-}
-
-function diagnose(status: number | null, isNodeRouted: boolean): string {
-  if (status === null) {
-    return "The probe timed out or was blocked by the browser.";
-  }
-  if (status === 401 || status === 403) {
-    return `The downstream rejected the bearer-authenticated call (HTTP ${String(status)}). The upstream credential may have been mistyped or revoked.`;
-  }
-  if (status === 404) {
-    if (isNodeRouted) {
-      return "The proxy returned 404 — node-routed services need the node agent online to respond.";
-    }
-    return "The proxy returned 404 — the slug isn't routable yet, or the downstream doesn't expose this probe path.";
-  }
-  if (status === 429) {
-    return "The downstream is rate-limiting (HTTP 429). Your credential + Agent Key work — retry in a minute.";
-  }
-  if (status >= 500) {
-    return `The downstream returned a server error (HTTP ${String(status)}). NyxID's part of the path is fine; the upstream is having issues.`;
-  }
-  return `The probe returned an unexpected HTTP ${String(status)}.`;
 }
