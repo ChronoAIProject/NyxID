@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { useState } from "react";
-import { Check, ExternalLink, Loader2, X } from "lucide-react";
+import { Check, Loader2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { CopyableField } from "@/components/shared/copyable-field";
 import { ServiceIcon } from "@/components/service-icons";
@@ -33,17 +33,23 @@ type Phase =
   | "probe_success"   // probe returned 2xx — the actual end-to-end aha
   | "probe_failed";   // probe returned 4xx/5xx/timeout — show diagnose hint + retry
 
-interface CreatedKey {
+export interface CreatedKey {
   readonly id: string;
-  readonly slug: string;
-  readonly serviceName: string;
   /**
-   * Drives whether the test button is even offered. Non-credential
-   * completions (device_code, oauth) typically have non-OpenAI-shape
-   * backends (Codex on chatgpt.com etc.) where re-probing /v1/models
-   * would false-fail against a working connection. We don't hide the
-   * test entirely — we just don't run it without an opt-in.
+   * The user's user_service slug — used for the proxy URL. Note this
+   * may differ from `catalogSlug`: users who connect the same catalog
+   * service twice get suffixed slugs (`llm-openai-codex-2`,
+   * `llm-openai-codex-3`, etc.) so proxy routes stay unique.
    */
+  readonly slug: string;
+  /**
+   * The original catalog slug (from `catalog_service_slug` on KeyInfo,
+   * or the selected catalog entry). Used for ServiceIcon lookup so the
+   * brand glyph resolves correctly even for `-2`/`-3` repeat connects.
+   * Falls back to `slug` when we don't have a catalog match.
+   */
+  readonly catalogSlug: string;
+  readonly serviceName: string;
   readonly completionMode: "credential" | "device_code" | "oauth" | "none";
 }
 
@@ -51,7 +57,6 @@ interface ConnectVerifyStepProps {
   readonly createdKey: CreatedKey;
   readonly isNodeRouted: boolean;
   readonly onDone: () => void;
-  readonly onViewDetails: () => void;
 }
 
 function probePathForSlug(slug: string): string {
@@ -102,8 +107,8 @@ export function ConnectVerifyStep({
   createdKey,
   isNodeRouted,
   onDone,
-  onViewDetails,
 }: ConnectVerifyStepProps) {
+  void isNodeRouted; // referenced only in the diagnose() helper below
   const createApiKey = useCreateApiKey();
   const [phase, setPhase] = useState<Phase>("connected");
   const [agentKey, setAgentKey] = useState<ApiKeyCreateResponse | null>(null);
@@ -214,8 +219,6 @@ export function ConnectVerifyStep({
         onMint={triggerMint}
         onProbe={triggerProbe}
         onDone={onDone}
-        onViewDetails={onViewDetails}
-        hasKey={agentKey !== null}
       />
     </div>
   );
@@ -241,7 +244,7 @@ function StatusBanner({
   const quotedServiceTitle: ReactNode = (
     <span className="inline-flex items-center gap-1.5">
       <ServiceIcon
-        slug={createdKey.slug}
+        slug={createdKey.catalogSlug}
         className="h-3.5 w-3.5 shrink-0 text-muted-foreground"
       />
       <span>
@@ -403,94 +406,127 @@ function AgentKeyPanel({
   );
 }
 
+type FooterAction = "onMint" | "onProbe" | "onDone";
+
 function Footer({
   phase,
   onMint,
   onProbe,
   onDone,
-  onViewDetails,
-  hasKey,
 }: {
   readonly phase: Phase;
   readonly onMint: () => void;
   readonly onProbe: () => void;
   readonly onDone: () => void;
-  readonly onViewDetails: () => void;
-  readonly hasKey: boolean;
 }) {
-  // "View details" only makes sense after a key exists AND the dialog is
-  // about to be dismissed anyway. Keep it available from key_ready
-  // onward so users with multi-service setups can keep poking.
-  const showViewDetails = hasKey;
+  // Uniform 2-button footer across every phase: [outline secondary]
+  // [primary]. Same size (`size="lg"`) on both so nothing jumps between
+  // transitions. Labels + actions change per phase; layout is constant.
+  // Secondary slot stays rendered but invisible when there's no
+  // meaningful alternative — keeps the primary button in the same
+  // horizontal position from phase to phase.
+  const config = footerConfig(phase);
+  const dispatch = (a: FooterAction) =>
+    a === "onMint" ? onMint : a === "onProbe" ? onProbe : onDone;
 
   return (
-    <div className="flex flex-wrap items-center justify-end gap-2">
-      {showViewDetails && (
-        <Button variant="outline" onClick={onViewDetails}>
-          <ExternalLink className="mr-1.5 h-3.5 w-3.5" />
-          View details
-        </Button>
-      )}
-
-      {phase === "connected" && (
-        <>
-          <Button variant="outline" onClick={onDone}>
-            Maybe later
-          </Button>
-          <Button variant="primary" size="lg" onClick={onMint}>
-            Create Agent Key
-          </Button>
-        </>
-      )}
-
-      {phase === "minting" && (
-        <Button variant="primary" size="lg" disabled isLoading>
-          Creating…
-        </Button>
-      )}
-
-      {phase === "mint_failed" && (
-        <>
-          <Button variant="outline" onClick={onDone}>
-            Maybe later
-          </Button>
-          <Button variant="primary" size="lg" onClick={onMint}>
-            Try again
-          </Button>
-        </>
-      )}
-
-      {phase === "key_ready" && (
-        <>
-          <Button variant="outline" onClick={onDone}>
-            I&apos;ll wire it myself
-          </Button>
-          <Button variant="primary" size="lg" onClick={onProbe}>
-            Test Agent Key
-          </Button>
-        </>
-      )}
-
-      {phase === "probing" && (
-        <Button variant="primary" size="lg" disabled isLoading>
-          Testing…
-        </Button>
-      )}
-
-      {(phase === "probe_success" || phase === "probe_failed") && (
-        <>
-          {phase === "probe_failed" && (
-            <Button variant="outline" onClick={onProbe}>
-              Retry test
-            </Button>
-          )}
-          <Button variant="primary" size="lg" onClick={onDone}>
-            Done
-          </Button>
-        </>
-      )}
+    <div className="flex items-center justify-end gap-2">
+      <Button
+        variant="outline"
+        size="lg"
+        onClick={() => dispatch(config.secondary)}
+        disabled={config.secondaryLabel === null || config.busy}
+        className={config.secondaryLabel === null ? "invisible" : ""}
+        aria-hidden={config.secondaryLabel === null}
+      >
+        {config.secondaryLabel ?? "placeholder"}
+      </Button>
+      <Button
+        variant="primary"
+        size="lg"
+        onClick={() => dispatch(config.primary)}
+        disabled={config.busy}
+        isLoading={config.busy}
+      >
+        {config.primaryLabel}
+      </Button>
     </div>
   );
+}
+
+interface FooterConfig {
+  readonly secondaryLabel: string | null;
+  readonly secondary: FooterAction;
+  readonly primaryLabel: string;
+  readonly primary: FooterAction;
+  readonly busy: boolean;
+}
+
+/**
+ * One place to see every label + action per phase. Data-driven layout
+ * keeps the JSX compact and prevents subtle drift between phases.
+ */
+function footerConfig(phase: Phase): FooterConfig {
+  switch (phase) {
+    case "connected":
+      return {
+        secondaryLabel: "Maybe later",
+        secondary: "onDone",
+        primaryLabel: "Create Agent Key",
+        primary: "onMint",
+        busy: false,
+      };
+    case "minting":
+      return {
+        secondaryLabel: null,
+        secondary: "onDone",
+        primaryLabel: "Creating…",
+        primary: "onMint",
+        busy: true,
+      };
+    case "mint_failed":
+      return {
+        secondaryLabel: "Maybe later",
+        secondary: "onDone",
+        primaryLabel: "Try again",
+        primary: "onMint",
+        busy: false,
+      };
+    case "key_ready":
+      return {
+        secondaryLabel: "I'll wire it myself",
+        secondary: "onDone",
+        primaryLabel: "Test Agent Key",
+        primary: "onProbe",
+        busy: false,
+      };
+    case "probing":
+      return {
+        secondaryLabel: null,
+        secondary: "onDone",
+        primaryLabel: "Testing…",
+        primary: "onProbe",
+        busy: true,
+      };
+    case "probe_success":
+      return {
+        secondaryLabel: null,
+        secondary: "onDone",
+        primaryLabel: "Done",
+        primary: "onDone",
+        busy: false,
+      };
+    case "probe_failed":
+      return {
+        // Secondary retries the probe; primary dismisses. Users who
+        // don't want to retry can Done and troubleshoot from /keys.
+        secondaryLabel: "Retry test",
+        secondary: "onProbe",
+        primaryLabel: "Done",
+        primary: "onDone",
+        busy: false,
+      };
+  }
 }
 
 function Banner({

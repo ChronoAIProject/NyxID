@@ -1,5 +1,4 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { useNavigate } from "@tanstack/react-router";
 import { useCatalog, useCreateKey } from "@/hooks/use-keys";
 import { useNodes } from "@/hooks/use-nodes";
 import { useOrgs } from "@/hooks/use-orgs";
@@ -50,7 +49,10 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { ServiceIcon } from "@/components/service-icons";
-import { ConnectVerifyStep } from "@/components/dashboard/connect-verify-step";
+import {
+  ConnectVerifyStep,
+  type CreatedKey,
+} from "@/components/dashboard/connect-verify-step";
 import type { CatalogEntry, KeyInfo } from "@/types/keys";
 import type { DeviceCodePollResponse } from "@/types/api";
 
@@ -69,20 +71,6 @@ type WizardStep =
    * instead of having to navigate to /keys/{id} → API Usage → Verify.
    */
   | "verify";
-
-interface CreatedKey {
-  readonly id: string;
-  readonly slug: string;
-  readonly serviceName: string;
-  /**
-   * How the underlying credential got established. Drives the verify
-   * step's UX: probe for `credential`, acknowledge-only for the OAuth
-   * flows + `none` (a probe against a Codex/ChatGPT-backed endpoint
-   * would 404 against a perfectly working connection, which is worse
-   * than skipping).
-   */
-  readonly completionMode: "credential" | "device_code" | "oauth" | "none";
-}
 
 /**
  * Pick the completion mode for a synchronous form-submit (the
@@ -2094,7 +2082,6 @@ export function AddKeyDialog({
   readonly prefillSlug?: string;
   readonly reconnectKey?: KeyInfo | null;
 }) {
-  const navigate = useNavigate();
   const createKey = useCreateKey();
   const { data: catalogEntries } = useCatalog();
   const [step, setStep] = useState<WizardStep>("catalog");
@@ -2341,9 +2328,19 @@ export function AddKeyDialog({
       authKey?.slug ??
       selectedEntry?.slug ??
       "";
+    // `catalogSlug` drives the ServiceIcon brand-glyph lookup. Repeat
+    // connects get suffixed user_service slugs (`-2`, `-3`, …), so
+    // prefer the catalog entry's canonical slug and only fall back to
+    // the KeyInfo's `catalog_service_slug` when we don't have the
+    // catalog entry in scope.
+    const catalogSlug =
+      selectedEntry?.slug ??
+      authKey?.catalog_service_slug ??
+      slug;
     setCreatedKey({
       id: keyId,
       slug,
+      catalogSlug,
       serviceName:
         selectedEntry?.name ??
         authKey?.label ??
@@ -2398,6 +2395,10 @@ export function AddKeyDialog({
         setCreatedKey({
           id: key.id,
           slug: key.slug,
+          catalogSlug:
+            selectedEntry?.slug ??
+            key.catalog_service_slug ??
+            key.slug,
           // Prefer the catalog entry's display name (e.g. "OpenAI"); fall
           // through to the user-typed form label, the API response label,
           // and finally the slug so we never end up with an "undefined
@@ -2472,10 +2473,10 @@ export function AddKeyDialog({
         setCreatedKey({
           id: key.id,
           slug: key.slug,
-          // Prefer the catalog entry's display name (e.g. "OpenAI"); fall
-          // through to the user-typed form label, the API response label,
-          // and finally the slug so we never end up with an "undefined
-          // connected" header.
+          catalogSlug:
+            selectedEntry?.slug ??
+            key.catalog_service_slug ??
+            key.slug,
           serviceName:
             selectedEntry?.name ??
             form.label.trim() ??
@@ -2551,7 +2552,7 @@ export function AddKeyDialog({
               // connected" reads ambiguously without that separation.
               <span className="inline-flex items-center gap-2">
                 <ServiceIcon
-                  slug={createdKey.slug}
+                  slug={createdKey.catalogSlug}
                   className="h-5 w-5 shrink-0 text-muted-foreground"
                 />
                 <span>
@@ -2711,13 +2712,6 @@ export function AddKeyDialog({
             isNodeRouted={Boolean(form.nodeId.trim())}
             onDone={() => {
               handleOpenChange(false);
-            }}
-            onViewDetails={() => {
-              handleOpenChange(false);
-              void navigate({
-                to: "/keys/$keyId",
-                params: { keyId: createdKey.id },
-              });
             }}
           />
         )}
