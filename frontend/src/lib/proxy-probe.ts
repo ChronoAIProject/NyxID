@@ -52,7 +52,7 @@ export const PROBE_TIMEOUT_MS = 8000;
  * safety-net check that at least tells the user whether NyxID is
  * reaching downstream at all.
  */
-interface ProbeRecipe {
+export interface ProbeRecipe {
   /** Path appended to the proxy base. Empty string = hit the root. */
   readonly path: string;
   /**
@@ -138,11 +138,30 @@ export function recipeForSlug(slug: string): ProbeRecipe | null | undefined {
 /**
  * Is this slug KNOWN to be untestable? Returns true only when we've
  * explicitly registered the slug (or its base) as `null` in the
- * registry — unknown slugs fall through to the safety-net probe and
- * are still testable.
+ * registry.
  */
 export function isKnownUntestable(slug: string): boolean {
   return recipeForSlug(slug) === null;
+}
+
+/**
+ * Should the UI OFFER a Test Agent Key button for this slug?
+ *
+ * Only true when we have an explicit, high-confidence recipe for the
+ * slug (registered in PROBE_REGISTRY as a ProbeRecipe, not `null`,
+ * not `undefined`). Everything else — known-untestable providers AND
+ * unregistered custom endpoints — hides the Test button so we never
+ * offer a probe we can't be highly confident will produce a
+ * meaningful result. A misleading green / red is worse than no probe.
+ *
+ * Rationale (Calvin, 2026-07-01): "tests button should have high
+ * degree confidence of working" — so unregistered custom slugs (base
+ * URL and API shape unknown) don't get the button either. The user
+ * can still verify by making one real call from their AI tool.
+ */
+export function isTestable(slug: string): boolean {
+  const recipe = recipeForSlug(slug);
+  return recipe !== null && recipe !== undefined;
 }
 
 /**
@@ -267,7 +286,14 @@ export function classifyProbe(
     };
   }
 
-  const agentKeyValid = response.headers.has("x-nyxid-agent-id");
+  // Guard against blank header values — a misconfigured reverse proxy
+  // (or a bug in the axum handler) can send `X-NyxID-Agent-Id:` with
+  // no value; `Headers.has()` returns true for that. We want the
+  // truth signal to be the actual agent id string, so require length.
+  // Header lookup is case-insensitive per WHATWG fetch spec.
+  const agentIdHeader = response.headers.get("x-nyxid-agent-id");
+  const agentKeyValid =
+    typeof agentIdHeader === "string" && agentIdHeader.length > 0;
   const reachedNyxid = true;
 
   if (!agentKeyValid) {

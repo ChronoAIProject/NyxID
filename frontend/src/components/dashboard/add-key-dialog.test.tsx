@@ -552,6 +552,80 @@ function minCatalogEntry(
   } as unknown as CatalogEntry;
 }
 
+describe("AddKeyDialog → ConnectVerifyStep integration (end-to-end wiring)", () => {
+  // GLM #8 + Kimi — the intentionally-swallowed createApiKeyMutate
+  // in the other tests hides the real dialog → verify-step wiring.
+  // This test lets the mint fire onSuccess so we can assert the
+  // subsequent probe actually reaches window.fetch with the right
+  // slug + bearer. A regression that broke createdKey.slug threading
+  // (undefined slug → empty proxy URL) would fail here.
+  it("mint success wires the probe against the correct proxy slug", async () => {
+    createKeyMutate.mockImplementation((_params, opts) => {
+      // Backend returns id + slug — the slug is what threads into
+      // ConnectVerifyStep and drives the probe URL. If the field
+      // name ever drifts (e.g. `service_slug` vs `slug`), the probe
+      // URL below breaks.
+      opts?.onSuccess?.({ id: "new-key-1", slug: "openai" });
+    });
+    createApiKeyMutate.mockImplementation((_params, opts) => {
+      opts?.onSuccess?.({
+        id: "ak-1",
+        full_key: "nyxid_ag_integration_secret",
+        key_prefix: "nyxid_ag_",
+        scopes: ["proxy"],
+        allow_all_services: false,
+        allowed_service_ids: ["new-key-1"],
+      });
+    });
+    // Downstream response with the X-NyxID-Agent-Id header set —
+    // proves the probe actually hits the classifier's happy path.
+    const fetchSpy = vi.spyOn(window, "fetch").mockResolvedValue(
+      new Response("{}", {
+        status: 200,
+        headers: { "x-nyxid-agent-id": "ak-1" },
+      }),
+    );
+
+    const user = userEvent.setup();
+    render(<AddKeyDialog open onOpenChange={vi.fn()} />);
+
+    // Walk the catalog → routing → form path.
+    await user.click(screen.getByRole("button", { name: /OpenAI/i }));
+    await user.click(
+      screen.getByRole("button", { name: /Next: Enter Credentials/i }),
+    );
+    await typeInto(user, "add-key-credential", "sk-integration");
+    await user.click(screen.getByRole("button", { name: "Connect Service" }));
+
+    // Wait for the verify step to mount + user clicks Create Agent Key
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: /Create Agent Key/i }),
+      ).toBeInTheDocument(),
+    );
+    await user.click(screen.getByRole("button", { name: /Create Agent Key/i }));
+
+    // Panel appears with the minted secret; Test button available.
+    await waitFor(() =>
+      expect(
+        screen.getByText("nyxid_ag_integration_secret"),
+      ).toBeInTheDocument(),
+    );
+    await user.click(screen.getByRole("button", { name: /Test Agent Key/i }));
+
+    // The probe reached fetch — pin the exact URL derived from the
+    // OpenAI slug's registry recipe (/v1/models). If the wiring
+    // drops createdKey.slug, this test fails immediately.
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
+    const call = fetchSpy.mock.calls[0];
+    if (!call) throw new Error("probe fetch was not called");
+    expect(String(call[0])).toBe("/api/v1/proxy/s/openai/v1/models");
+    expect(call[1]?.headers).toMatchObject({
+      Authorization: "Bearer nyxid_ag_integration_secret",
+    });
+  });
+});
+
 describe("AddKeyDialog — catalog service icons", () => {
   it("renders a dedicated brand icon for every seeded catalog slug (no fallback)", () => {
     catalog.entries = SPEC_CATALOG_SLUGS.map((slug) =>

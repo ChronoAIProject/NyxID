@@ -183,7 +183,7 @@ describe("ConnectVerifyStep — key_ready phase", () => {
     ).toBeEnabled();
   });
 
-  it("mint failure surfaces the server error message + a Try again button", async () => {
+  it("mint failure surfaces the server error message + a Try again button + hides the panel", async () => {
     createApiKeyMutate.mockImplementation((_params, opts) => {
       opts?.onError?.(new Error("scoped-service-must-be-active"));
     });
@@ -204,6 +204,14 @@ describe("ConnectVerifyStep — key_ready phase", () => {
       ).toBeInTheDocument(),
     );
     expect(screen.getByRole("button", { name: /Try again/i })).toBeEnabled();
+    // GLM finding #9 — silent-pass trap. The AgentKeyPanel must NOT
+    // render when mint failed (no minted secret to display). If a
+    // regression accidentally mounts the panel with a null agent key,
+    // the secret would appear as `undefined` or crash silently.
+    expect(screen.queryByText("Your new Agent Key")).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: /Test Agent Key/i }),
+    ).toBeNull();
   });
 });
 
@@ -363,6 +371,46 @@ describe("ConnectVerifyStep — probe (agent key INVALID: NyxID-layer rejection)
     expect(document.body.textContent ?? "").toMatch(/`openai`/);
   });
 
+  it("REGRESSION: Retry test click re-invokes the probe (Footer dispatch works across phase transitions)", async () => {
+    // Kimi finding — the initial dispatch was tested, but nothing
+    // pinned that dispatch STAYS wired after phase transitions.
+    // First probe: 401 without header → probe_failed with Retry test.
+    // Click Retry: probe fires again. Second probe: 200 with header →
+    // probe_success. Confirms dispatch survives re-render.
+    const fetchMock = vi
+      .spyOn(window, "fetch")
+      .mockResolvedValueOnce(new Response("{}", { status: 401 })) // fails
+      .mockResolvedValueOnce(
+        new Response("{}", {
+          status: 200,
+          headers: { "x-nyxid-agent-id": "ak-1" },
+        }),
+      );
+
+    const user = userEvent.setup();
+    render(
+      <ConnectVerifyStep
+        createdKey={CREATED_KEY}
+        isNodeRouted={false}
+        onDone={vi.fn()}
+      />,
+    );
+    await mintKey(user);
+    await user.click(screen.getByRole("button", { name: /Test Agent Key/i }));
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /Retry test/i })).toBeEnabled(),
+    );
+    await user.click(screen.getByRole("button", { name: /Retry test/i }));
+
+    // Two fetch calls, second one landed on success.
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(document.body.textContent ?? "").toMatch(/End-to-end verified/i),
+    );
+    expect(screen.getByRole("button", { name: /^Done$/i })).toBeEnabled();
+  });
+
   it("network error → timed-out diagnostic, agent key remains unverified", async () => {
     vi.spyOn(window, "fetch").mockRejectedValue(new TypeError("network down"));
 
@@ -386,7 +434,8 @@ describe("ConnectVerifyStep — probe (agent key INVALID: NyxID-layer rejection)
   });
 });
 
-describe("ConnectVerifyStep — known-untestable providers (Codex, OpenClaw, etc.)", () => {
+describe("ConnectVerifyStep — no Test button when we can't be highly confident it works", () => {
+  // Registered untestable (Codex chat-only API, no cheap GET).
   const CODEX_KEY: CreatedKey = {
     ...CREATED_KEY,
     slug: "openai-codex",
@@ -395,7 +444,17 @@ describe("ConnectVerifyStep — known-untestable providers (Codex, OpenClaw, etc
     completionMode: "device_code",
   };
 
-  it("after mint, shows 'automatic testing isn't supported' hint + only a Done button", async () => {
+  // Unregistered custom endpoint — we don't know its API shape at all,
+  // so we shouldn't offer a probe that might mislead the user.
+  const CUSTOM_KEY: CreatedKey = {
+    ...CREATED_KEY,
+    slug: "acme-internal-api",
+    catalogSlug: "acme-internal-api",
+    serviceName: "Acme Internal API",
+    completionMode: "credential",
+  };
+
+  it("registered-untestable (Codex): 'not supported' hint + only Done button, no probe fires", async () => {
     createApiKeyMutate.mockImplementation((_params, opts) => {
       opts?.onSuccess?.(MINTED_KEY);
     });
@@ -433,6 +492,47 @@ describe("ConnectVerifyStep — known-untestable providers (Codex, OpenClaw, etc
     ).toBeNull();
 
     // Sanity: no probe fired.
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("unregistered custom endpoint: also hides the Test button (high-confidence rule)", async () => {
+    // The tighter rule (Calvin, 2026-07-01): if we don't have an
+    // explicit recipe for this slug in PROBE_REGISTRY, we don't offer
+    // the Test button — even the header-based safety-net probe can
+    // return misleading yellow-warn states we haven't validated
+    // against real user endpoints. Better to say nothing.
+    createApiKeyMutate.mockImplementation((_params, opts) => {
+      opts?.onSuccess?.(MINTED_KEY);
+    });
+    const fetchSpy = vi.spyOn(window, "fetch");
+
+    const user = userEvent.setup();
+    render(
+      <ConnectVerifyStep
+        createdKey={CUSTOM_KEY}
+        isNodeRouted={false}
+        onDone={vi.fn()}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: /Create Agent Key/i }));
+
+    await waitFor(() =>
+      expect(screen.getByText(MINTED_KEY.full_key)).toBeInTheDocument(),
+    );
+    expect(document.body.textContent ?? "").toMatch(
+      /Automatic testing isn't supported/i,
+    );
+    expect(document.body.textContent ?? "").toMatch(/Acme Internal API/);
+    expect(
+      screen.queryByRole("button", { name: /Test Agent Key/i }),
+    ).toBeNull();
+    // Kimi parity check — both `Test Agent Key` AND `I'll wire it
+    // myself` must be hidden for untestable/unregistered slugs. The
+    // footer collapses to a single Done CTA in either case.
+    expect(
+      screen.queryByRole("button", { name: /I'll wire it myself/i }),
+    ).toBeNull();
+    expect(screen.getByRole("button", { name: /^Done$/i })).toBeEnabled();
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
