@@ -99,6 +99,14 @@ export function ConnectVerifyStep({
   const [probeError, setProbeError] = useState<string | null>(null);
 
   function triggerMint() {
+    // Temporary diagnostic logging while we chase the "button doesn't
+    // work" report — remove once the flow is confirmed working end-to-end.
+    // eslint-disable-next-line no-console
+    console.info(
+      "[aha] triggerMint fired for service",
+      createdKey.id,
+      createdKey.serviceName,
+    );
     setPhase("minting");
     setMintError(null);
     createApiKey.mutate(
@@ -111,11 +119,16 @@ export function ConnectVerifyStep({
       },
       {
         onSuccess: (key) => {
+          // eslint-disable-next-line no-console
+          console.info("[aha] mint success", key.id, key.key_prefix);
           setAgentKey(key);
           setPhase("key_ready");
         },
         onError: (err) => {
-          setMintError(err instanceof Error ? err.message : String(err));
+          const msg = err instanceof Error ? err.message : String(err);
+          // eslint-disable-next-line no-console
+          console.warn("[aha] mint failed", msg, err);
+          setMintError(msg);
           setPhase("mint_failed");
         },
       },
