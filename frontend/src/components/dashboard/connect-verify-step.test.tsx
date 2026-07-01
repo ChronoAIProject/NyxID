@@ -237,7 +237,7 @@ describe("ConnectVerifyStep — probe (downstream OK)", () => {
     const firstCall = fetchMock.mock.calls[0];
     if (!firstCall) throw new Error("fetch was not called");
     const [url, init] = firstCall;
-    expect(String(url)).toBe("/api/v1/proxy/s/llm-openai/v1/models");
+    expect(String(url)).toBe("/api/v1/proxy/s/llm-openai/models");
     expect(init).toMatchObject({
       method: "GET",
       credentials: "omit",
@@ -287,9 +287,12 @@ describe("ConnectVerifyStep — probe (agent key VALID despite downstream failur
     expect(document.body.textContent ?? "").toMatch(
       /rejected the stored credential/i,
     );
-    // Success event still fires — the aha-moment activation flag flips
-    // as soon as the Agent Key is provably valid.
-    expect(succeededSpy).toHaveBeenCalledTimes(1);
+    // FIRST_PROXY_CALL_SUCCEEDED_EVENT is gated on downstream OK
+    // (GLM review 2026-07-01): a downstream 401 means the Agent Key
+    // works but the stored credential is broken — we shouldn't tick
+    // the dashboard "first proxy call succeeded" checklist on that.
+    // Matches the VerifyKeyCard twin-probe's stricter semantic.
+    expect(succeededSpy).not.toHaveBeenCalled();
     // Done, not Retry — because the key IS valid.
     expect(screen.getByRole("button", { name: /^Done$/i })).toBeEnabled();
 

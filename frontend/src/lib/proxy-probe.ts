@@ -73,14 +73,26 @@ export interface ProbeRecipe {
  * to spot — a typo here maps 1:1 to a missing recipe at runtime.
  */
 export const PROBE_REGISTRY: Readonly<Record<string, ProbeRecipe | null>> = {
+  // Paths are RELATIVE to the seeded catalog `base_url` — the proxy
+  // forms the final URL as `{base_url.trim_end('/')}/{path}`. Common
+  // trap: don't repeat an API-version segment that's already in the
+  // base_url (e.g. openai's base is `.../v1`, so the recipe path is
+  // `models` NOT `v1/models` — otherwise the concatenated URL is
+  // `.../v1/v1/models` and every probe silently 404s). Kimi flagged
+  // this bug on 2026-07-01 review of the initial commit; the seeded
+  // base_urls are the source of truth (see backend/src/services/
+  // provider_service.rs line ~1878+).
+
   // ─── LLM providers (llm-* prefix) ──────────────────────────────
-  // OpenAI-compatible APIs — GET /v1/models is universal + cheap
-  "llm-openai": { path: "v1/models" },
-  "llm-anthropic": { path: "v1/models" },
-  "llm-google-ai": { path: "v1/models" },
-  "llm-mistral": { path: "v1/models" },
-  "llm-cohere": { path: "v1/models" },
-  "llm-deepseek": { path: "v1/models" },
+  // OpenAI-compatible APIs — GET {base}/models. All 6 base_urls end
+  // in the provider's version segment (openai .../v1, google-ai
+  // .../v1beta, cohere .../v2, etc.), so the recipe path is bare.
+  "llm-openai": { path: "models" },
+  "llm-anthropic": { path: "models" },
+  "llm-google-ai": { path: "models" },
+  "llm-mistral": { path: "models" },
+  "llm-cohere": { path: "models" },
+  "llm-deepseek": { path: "models" },
 
   // Chat-only API — no cheap GET. Verify by running `codex "hello"`.
   "llm-openai-codex": null,
@@ -88,27 +100,32 @@ export const PROBE_REGISTRY: Readonly<Record<string, ProbeRecipe | null>> = {
   "llm-openclaw": null,
 
   // ─── API providers (api-* prefix) ──────────────────────────────
-  // GitHub — /user works with both OAuth (api-github) and PAT (api-github-pat)
+  // GitHub — base is bare `https://api.github.com`, so `user` maps to
+  // `.../user` (works with both OAuth and PAT bearer tokens).
   "api-github": { path: "user" },
   "api-github-pat": { path: "user" },
 
-  // Bot APIs — dedicated bot-identity endpoints
+  // Bot APIs — dedicated bot-identity endpoints. Telegram Bot's path
+  // is bare because the token is injected via `path` auth method
+  // (adds /bot<TOKEN>/ prefix at proxy time). Discord + Slack bases
+  // include /api[/v10] so the recipe strips that repeated segment.
   "api-telegram-bot": { path: "getMe" },
-  "api-discord-bot": { path: "v10/users/@me" },
-  "api-slack-bot": { path: "api/auth.test" },
+  "api-discord-bot": { path: "users/@me" }, // base is .../api/v10
+  "api-slack-bot": { path: "auth.test" }, // base is .../api
 
-  // OAuth user-context providers — /me variants
-  "api-google": { path: "oauth2/v1/userinfo" },
-  "api-spotify": { path: "v1/me" },
-  "api-twitter": { path: "2/users/me" },
-  "api-reddit": { path: "api/v1/me" },
-  "api-twitch": { path: "helix/users" },
-  "api-microsoft": { path: "v1.0/me" },
-  "api-facebook": { path: "me" },
-  "api-slack": { path: "api/auth.test" },
-  "api-lark": { path: "open-apis/authen/v1/user_info" },
-  "api-feishu": { path: "open-apis/authen/v1/user_info" },
-  "api-discord": { path: "api/v10/users/@me" },
+  // OAuth user-context providers — /me variants. Recipes are relative
+  // to each provider's seeded base_url (see line comments below).
+  "api-google": { path: "oauth2/v1/userinfo" }, // base is bare googleapis.com
+  "api-spotify": { path: "me" }, // base is .../v1
+  "api-twitter": { path: "users/me" }, // base is .../2
+  "api-reddit": { path: "api/v1/me" }, // base is bare oauth.reddit.com
+  "api-twitch": { path: "users" }, // base is .../helix
+  "api-microsoft": { path: "me" }, // base is .../v1.0
+  "api-facebook": { path: "me" }, // base is .../v21.0
+  "api-slack": { path: "auth.test" }, // base is .../api
+  "api-lark": { path: "authen/v1/user_info" }, // base is .../open-apis
+  "api-feishu": { path: "authen/v1/user_info" }, // base is .../open-apis
+  "api-discord": { path: "users/@me" }, // base is .../api/v10
 
   // No suitable status endpoint / requires special auth we don't emulate
   "api-firecrawl": null, // no public status endpoint

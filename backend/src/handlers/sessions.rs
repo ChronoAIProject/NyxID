@@ -1,4 +1,8 @@
-use axum::{Json, extract::{Path, State}, http::StatusCode};
+use axum::{
+    Json,
+    extract::{Path, State},
+    http::StatusCode,
+};
 use chrono::Utc;
 use futures::TryStreamExt;
 use mongodb::bson::{self, doc};
@@ -59,9 +63,7 @@ pub async fn list_sessions(
     let items: Vec<SessionItem> = sessions
         .into_iter()
         .map(|s| {
-            let is_current = current_session_id
-                .as_deref()
-                .is_some_and(|cur| cur == s.id);
+            let is_current = current_session_id.as_deref().is_some_and(|cur| cur == s.id);
             SessionItem {
                 id: s.id,
                 ip_address: s.ip_address,
@@ -278,7 +280,9 @@ mod tests {
     #[tokio::test]
     async fn revoke_nonexistent_session_returns_404() {
         let Some(db) = connect_test_database("sessions_revoke_404").await else {
-            eprintln!("skipping revoke_nonexistent_session_returns_404: no local MongoDB available");
+            eprintln!(
+                "skipping revoke_nonexistent_session_returns_404: no local MongoDB available"
+            );
             return;
         };
         let user_id = Uuid::new_v4().to_string();

@@ -40,24 +40,38 @@ describe("probePathForSlug — registry uses seeded service_slug forms", () => {
   // `llm-` / `api-` / `aws-` prefix baked in). If these tests break
   // with a "returns ''" failure, the prefix is missing from the
   // registry entry — production runtime passes prefixed slugs.
-  it("returns v1/models for llm-* OpenAI-compatible providers", () => {
-    expect(probePathForSlug("llm-openai")).toBe("v1/models");
-    expect(probePathForSlug("llm-anthropic")).toBe("v1/models");
-    expect(probePathForSlug("llm-deepseek")).toBe("v1/models");
-    expect(probePathForSlug("llm-mistral")).toBe("v1/models");
-    expect(probePathForSlug("llm-cohere")).toBe("v1/models");
-    expect(probePathForSlug("llm-google-ai")).toBe("v1/models");
+  it("returns `models` (bare) for llm-* OpenAI-compatible providers — base_urls already include the version segment", () => {
+    // Kimi 2026-07-01: recipe paths must be RELATIVE to the seeded
+    // base_url (which for openai/anthropic/mistral/deepseek ends in
+    // `/v1`, google-ai `/v1beta`, cohere `/v2`). Duplicating the
+    // version segment produced `.../v1/v1/models` → silent 404 for
+    // every LLM probe.
+    expect(probePathForSlug("llm-openai")).toBe("models");
+    expect(probePathForSlug("llm-anthropic")).toBe("models");
+    expect(probePathForSlug("llm-deepseek")).toBe("models");
+    expect(probePathForSlug("llm-mistral")).toBe("models");
+    expect(probePathForSlug("llm-cohere")).toBe("models");
+    expect(probePathForSlug("llm-google-ai")).toBe("models");
   });
 
-  it("returns provider-specific paths for api-* known providers", () => {
+  it("returns provider-specific paths (relative to base_url) for api-* known providers", () => {
+    // Bare bases (no version in base_url) → recipe carries the path
     expect(probePathForSlug("api-github")).toBe("user");
     expect(probePathForSlug("api-github-pat")).toBe("user");
     expect(probePathForSlug("api-telegram-bot")).toBe("getMe");
-    expect(probePathForSlug("api-discord-bot")).toBe("v10/users/@me");
-    expect(probePathForSlug("api-slack-bot")).toBe("api/auth.test");
-    expect(probePathForSlug("api-spotify")).toBe("v1/me");
     expect(probePathForSlug("api-google")).toBe("oauth2/v1/userinfo");
-    expect(probePathForSlug("api-microsoft")).toBe("v1.0/me");
+    // Bases with version/api segment → recipe drops the duplicated prefix
+    expect(probePathForSlug("api-discord-bot")).toBe("users/@me");
+    expect(probePathForSlug("api-discord")).toBe("users/@me");
+    expect(probePathForSlug("api-slack-bot")).toBe("auth.test");
+    expect(probePathForSlug("api-slack")).toBe("auth.test");
+    expect(probePathForSlug("api-spotify")).toBe("me");
+    expect(probePathForSlug("api-microsoft")).toBe("me");
+    expect(probePathForSlug("api-twitter")).toBe("users/me");
+    expect(probePathForSlug("api-twitch")).toBe("users");
+    expect(probePathForSlug("api-facebook")).toBe("me");
+    expect(probePathForSlug("api-lark")).toBe("authen/v1/user_info");
+    expect(probePathForSlug("api-feishu")).toBe("authen/v1/user_info");
   });
 
   it("returns '' for explicitly untestable seeded slugs", () => {
@@ -73,8 +87,8 @@ describe("probePathForSlug — registry uses seeded service_slug forms", () => {
   });
 
   it("strips repeat-connect `-N` suffix (llm-openai-2 → llm-openai)", () => {
-    expect(probePathForSlug("llm-openai-2")).toBe("v1/models");
-    expect(probePathForSlug("llm-anthropic-99")).toBe("v1/models");
+    expect(probePathForSlug("llm-openai-2")).toBe("models");
+    expect(probePathForSlug("llm-anthropic-99")).toBe("models");
     expect(probePathForSlug("api-github-3")).toBe("user");
     expect(probePathForSlug("api-telegram-bot-7")).toBe("getMe");
     // Untestable base survives the suffix strip
@@ -171,7 +185,7 @@ describe("recipeForSlug — suffix strip edge cases", () => {
 
 describe("recipeForSlug + isKnownUntestable + isTestable — semantic truth table", () => {
   it("recipeForSlug returns a recipe object for registered testable seeded slugs", () => {
-    expect(recipeForSlug("llm-openai")).toEqual({ path: "v1/models" });
+    expect(recipeForSlug("llm-openai")).toEqual({ path: "models" });
     expect(recipeForSlug("api-telegram-bot")).toEqual({ path: "getMe" });
     expect(recipeForSlug("api-github-pat")).toEqual({ path: "user" });
   });
@@ -374,7 +388,7 @@ describe("probeAgentKey — fetch integration", () => {
     const firstCall = fetchMock.mock.calls[0];
     if (!firstCall) throw new Error("fetch was not called");
     const [url, init] = firstCall;
-    expect(String(url)).toBe("/api/v1/proxy/s/llm-openai/v1/models");
+    expect(String(url)).toBe("/api/v1/proxy/s/llm-openai/models");
     expect(init).toMatchObject({
       method: "GET",
       credentials: "omit",

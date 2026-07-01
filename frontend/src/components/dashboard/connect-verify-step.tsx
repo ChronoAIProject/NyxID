@@ -93,7 +93,6 @@ export function ConnectVerifyStep({
   const [probe, setProbe] = useState<ProbeOutcome | null>(null);
 
   function triggerMint() {
-    console.info("[aha] triggerMint fired", createdKey.id, createdKey.serviceName);
     setPhase("minting");
     setMintError(null);
     createApiKey.mutate(
@@ -106,13 +105,11 @@ export function ConnectVerifyStep({
       },
       {
         onSuccess: (key) => {
-          console.info("[aha] mint success", key.key_prefix);
           setAgentKey(key);
           setPhase("key_ready");
         },
         onError: (err) => {
           const msg = err instanceof Error ? err.message : String(err);
-          console.warn("[aha] mint failed", msg, err);
           setMintError(msg);
           setPhase("mint_failed");
         },
@@ -122,7 +119,6 @@ export function ConnectVerifyStep({
 
   async function triggerProbe() {
     if (!agentKey) return;
-    console.info("[aha] triggerProbe fired", createdKey.slug);
     setPhase("probing");
     setProbe(null);
     window.dispatchEvent(new CustomEvent(VERIFY_KEY_LOADING_START_EVENT));
@@ -132,15 +128,6 @@ export function ConnectVerifyStep({
     });
 
     window.dispatchEvent(new CustomEvent(VERIFY_KEY_LOADING_END_EVENT));
-    console.info(
-      "[aha] probe outcome",
-      "agentKeyValid=",
-      outcome.agentKeyValid,
-      "http=",
-      outcome.httpStatus,
-      "downstream=",
-      outcome.downstreamStatus,
-    );
     setProbe(outcome);
 
     // Success = the Agent Key + scope + route all resolved on NyxID's
@@ -149,9 +136,19 @@ export function ConnectVerifyStep({
     // copy explain what happened downstream. The one thing that
     // fails the test is a NyxID-layer rejection (bad key, scope
     // violation, network failure) — those land in probe_failed.
+    //
+    // FIRST_PROXY_CALL_SUCCEEDED_EVENT is gated on
+    // `downstreamStatus === "ok"` — a downstream 401/404 means the
+    // Agent Key works but the setup isn't end-to-end yet, and we
+    // shouldn't tick the dashboard "first proxy call succeeded"
+    // checklist item on a broken stored credential. Matches the
+    // VerifyKeyCard twin-probe's strictness (allowed AND denied
+    // both hold).
     if (outcome.agentKeyValid) {
       setPhase("probe_success");
-      window.dispatchEvent(new CustomEvent(FIRST_PROXY_CALL_SUCCEEDED_EVENT));
+      if (outcome.downstreamStatus === "ok") {
+        window.dispatchEvent(new CustomEvent(FIRST_PROXY_CALL_SUCCEEDED_EVENT));
+      }
     } else {
       setPhase("probe_failed");
     }
@@ -399,7 +396,6 @@ function Footer({
   // Calvin twice in a row; the connect-verify-step.test.tsx suite
   // has a REGRESSION test that will fail immediately if it does.
   function dispatch(action: FooterAction) {
-    console.info("[aha] footer click", action, "phase=", phase);
     if (action === "onMint") onMint();
     else if (action === "onProbe") onProbe();
     else onDone();

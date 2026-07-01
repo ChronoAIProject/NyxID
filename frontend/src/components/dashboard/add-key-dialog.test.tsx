@@ -617,12 +617,13 @@ describe("AddKeyDialog → ConnectVerifyStep integration (end-to-end wiring)", (
     await user.click(screen.getByRole("button", { name: /Test Agent Key/i }));
 
     // The probe reached fetch — pin the exact URL derived from the
-    // OpenAI slug's registry recipe (/v1/models). If the wiring
-    // drops createdKey.slug, this test fails immediately.
+    // OpenAI slug's registry recipe (/models — relative to the
+    // seeded base_url `.../v1`). If the wiring drops createdKey.slug,
+    // this test fails immediately.
     await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
     const call = fetchSpy.mock.calls[0];
     if (!call) throw new Error("probe fetch was not called");
-    expect(String(call[0])).toBe("/api/v1/proxy/s/llm-openai/v1/models");
+    expect(String(call[0])).toBe("/api/v1/proxy/s/llm-openai/models");
     expect(call[1]?.headers).toMatchObject({
       Authorization: "Bearer nyxid_ag_integration_secret",
     });
