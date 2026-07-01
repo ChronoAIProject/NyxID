@@ -1,9 +1,8 @@
 import { useState } from "react";
 import type { ReactNode } from "react";
-import { AlertTriangle, Check } from "lucide-react";
+import { AlertTriangle, Check, KeyRound, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { CopyableField } from "@/components/shared/copyable-field";
-import { cn } from "@/lib/utils";
 import { useCreateApiKey } from "@/hooks/use-api-keys";
 import {
   FIRST_PROXY_CALL_SUCCEEDED_EVENT,
@@ -25,12 +24,12 @@ const PROBE_TIMEOUT_MS = 8000;
  * the background.
  */
 export type Phase =
-  | "connected"       // step 2 is CURRENT
+  | "connected"
   | "minting"
   | "mint_failed"
-  | "key_ready"       // step 3 is CURRENT
+  | "key_ready"
   | "probing"
-  | "probe_success"   // step 4 is CURRENT
+  | "probe_success"
   | "probe_failed";
 
 export interface CreatedKey {
@@ -55,100 +54,31 @@ function proxyBaseUrl(slug: string): string {
   return `${window.location.origin}/api/v1/proxy/s/${slug}`;
 }
 
-type StepId = "connect" | "key" | "test" | "wire";
-
-interface StepDef {
-  readonly id: StepId;
-  readonly index: number;
-  readonly title: string;
-  readonly summary: string;
-}
-
-const STEPS: readonly StepDef[] = [
-  {
-    id: "connect",
-    index: 1,
-    title: "Connect service",
-    summary: "Credentials stored securely on NyxID.",
-  },
-  {
-    id: "key",
-    index: 2,
-    title: "Create Agent Key",
-    summary:
-      "A scoped bearer your AI tools use to call this service through NyxID — without ever seeing your original credentials.",
-  },
-  {
-    id: "test",
-    index: 3,
-    title: "Test the Agent Key",
-    summary: "Fire one bearer-authenticated call to prove the path works.",
-  },
-  {
-    id: "wire",
-    index: 4,
-    title: "Wire into your AI tool",
-    summary: "Copy the Agent Key + Base URL into your tool's config.",
-  },
-] as const;
-
 /**
- * Which step should carry the CURRENT focus (expanded body + action
- * buttons) based on the phase machine.
- */
-function currentStep(phase: Phase): StepId {
-  switch (phase) {
-    case "connected":
-    case "minting":
-    case "mint_failed":
-      return "key";
-    case "key_ready":
-    case "probing":
-    case "probe_failed":
-      return "test";
-    case "probe_success":
-      return "wire";
-  }
-}
-
-/**
- * Which steps have been completed (rendered with a checkmark) based on
- * the phase machine. Order matters — earlier steps are considered done
- * once we've moved past them.
- */
-function completedSteps(phase: Phase): ReadonlySet<StepId> {
-  // Connect is always done — the verify step only mounts after the
-  // POST /keys mutation returned successfully.
-  const done = new Set<StepId>(["connect"]);
-  if (phase === "key_ready" || phase === "probing" || phase === "probe_failed" || phase === "probe_success") {
-    done.add("key");
-  }
-  if (phase === "probe_success") {
-    done.add("test");
-  }
-  return done;
-}
-
-/**
- * Wave-aha-1 A4+ — umbrella "setup journey" layout per Calvin's
- * feedback: "this whole thing needs to be tied under a singular
- * umbrella to showcase what has happened and the logical next steps."
+ * Wave-aha-1 A4+ — umbrella-view post-connect setup.
  *
- * Every step (Connect / Create Key / Test / Wire) is always visible.
- * Completed steps render with a checkmark and muted text. The current
- * step is expanded with its body content + action buttons. Future
- * steps show only their title + one-line summary in muted text.
+ * The DialogTitle owns the umbrella state ("<service> connected").
+ * This component's body morphs per phase:
  *
- * This gives the user the whole roadmap at a glance instead of a
- * single-phase modal where they can't tell how far they've come or
- * how much is left.
+ *   connected      → one-line "you need an Agent Key to use this"
+ *                    + Maybe later / Create Agent Key
+ *   minting        → inline spinner
+ *   mint_failed    → inline error + Maybe later / Try again
+ *   key_ready      → Agent Key panel + I'll wire / Test Agent Key
+ *   probing        → panel stays visible + inline spinner
+ *   probe_success  → panel + env snippet + inline confirmation + Done
+ *   probe_failed   → panel + inline error + Skip / Retry test
+ *
+ * No stepper, no repeated "connected" banners — the DialogTitle carries
+ * that state exactly once, and everything else is either the current
+ * action or its output.
  */
 export function ConnectVerifyStep({
   createdKey,
   isNodeRouted,
   onDone,
 }: ConnectVerifyStepProps) {
-  void isNodeRouted; // referenced only in the diagnose() helper below
+  void isNodeRouted; // referenced only in diagnose() below
 
   const createApiKey = useCreateApiKey();
   const [phase, setPhase] = useState<Phase>("connected");
@@ -191,15 +121,11 @@ export function ConnectVerifyStep({
     setPhase("probing");
     setProbeError(null);
     setHttpStatus(null);
-
     window.dispatchEvent(new CustomEvent(VERIFY_KEY_LOADING_START_EVENT));
 
     const url = `${proxyBaseUrl(createdKey.slug)}/${probePathForSlug(createdKey.slug)}`;
     const controller = new AbortController();
-    const timer = window.setTimeout(
-      () => controller.abort(),
-      PROBE_TIMEOUT_MS,
-    );
+    const timer = window.setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
 
     let status: number | null = null;
     try {
@@ -226,262 +152,148 @@ export function ConnectVerifyStep({
     const ok = status !== null && status >= 200 && status < 400;
     if (ok) {
       setPhase("probe_success");
-      window.dispatchEvent(
-        new CustomEvent(FIRST_PROXY_CALL_SUCCEEDED_EVENT),
-      );
+      window.dispatchEvent(new CustomEvent(FIRST_PROXY_CALL_SUCCEEDED_EVENT));
     } else {
       setPhase("probe_failed");
       setProbeError(diagnose(status, isNodeRouted));
     }
   }
 
-  const current = currentStep(phase);
-  const done = completedSteps(phase);
-
   return (
-    <div className="space-y-1 py-1">
-      {STEPS.map((step) => (
-        <StepRow
-          key={step.id}
-          step={step}
-          isCurrent={step.id === current}
-          isDone={done.has(step.id)}
-        >
-          {step.id === current && (
-            <CurrentStepBody
-              step={step}
-              phase={phase}
-              createdKey={createdKey}
-              agentKey={agentKey}
-              mintError={mintError}
-              probeError={probeError}
-              httpStatus={httpStatus}
-              onMint={triggerMint}
-              onProbe={triggerProbe}
-              onDone={onDone}
-            />
-          )}
-        </StepRow>
-      ))}
+    <div className="space-y-4 py-2">
+      <Body
+        phase={phase}
+        createdKey={createdKey}
+        agentKey={agentKey}
+        mintError={mintError}
+        probeError={probeError}
+        httpStatus={httpStatus}
+      />
+      <Footer
+        phase={phase}
+        onMint={triggerMint}
+        onProbe={triggerProbe}
+        onDone={onDone}
+      />
     </div>
   );
 }
 
-function StepRow({
-  step,
-  isCurrent,
-  isDone,
-  children,
-}: {
-  readonly step: StepDef;
-  readonly isCurrent: boolean;
-  readonly isDone: boolean;
-  readonly children?: ReactNode;
-}) {
-  return (
-    <div
-      className={cn(
-        "rounded-xl border p-4",
-        isCurrent
-          ? "border-primary/40 bg-primary/5"
-          : "border-border/40 bg-transparent",
-      )}
-    >
-      <div className="flex items-start gap-3">
-        <StepBadge step={step} isCurrent={isCurrent} isDone={isDone} />
-        <div className="min-w-0 flex-1 space-y-0.5">
-          <div className="flex items-center gap-2">
-            <p
-              className={cn(
-                "text-[13px] font-semibold",
-                isCurrent
-                  ? "text-foreground"
-                  : isDone
-                    ? "text-muted-foreground line-through"
-                    : "text-muted-foreground",
-              )}
-            >
-              Step {step.index}. {step.title}
-            </p>
-            {isDone && !isCurrent && (
-              <span className="text-[10px] uppercase tracking-wide text-success/80">
-                Done
-              </span>
-            )}
-            {isCurrent && (
-              <span className="text-[10px] uppercase tracking-wide text-primary">
-                Now
-              </span>
-            )}
-          </div>
-          <p
-            className={cn(
-              "text-[11px] leading-relaxed",
-              isCurrent ? "text-muted-foreground" : "text-muted-foreground/70",
-            )}
-          >
-            {step.summary}
-          </p>
-        </div>
-      </div>
-      {children && <div className="mt-3 pl-9">{children}</div>}
-    </div>
-  );
-}
-
-function StepBadge({
-  step,
-  isCurrent,
-  isDone,
-}: {
-  readonly step: StepDef;
-  readonly isCurrent: boolean;
-  readonly isDone: boolean;
-}) {
-  if (isDone && !isCurrent) {
-    return (
-      <span className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-success/20 text-success">
-        <Check className="h-3.5 w-3.5" aria-hidden />
-      </span>
-    );
-  }
-  if (isCurrent) {
-    return (
-      <span className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground text-[11px] font-semibold">
-        {step.index}
-      </span>
-    );
-  }
-  return (
-    <span className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-border text-[11px] text-muted-foreground/70">
-      {step.index}
-    </span>
-  );
-}
-
-function CurrentStepBody({
-  step,
+function Body({
   phase,
   createdKey,
   agentKey,
   mintError,
   probeError,
   httpStatus,
-  onMint,
-  onProbe,
-  onDone,
 }: {
-  readonly step: StepDef;
   readonly phase: Phase;
   readonly createdKey: CreatedKey;
   readonly agentKey: ApiKeyCreateResponse | null;
   readonly mintError: string | null;
   readonly probeError: string | null;
   readonly httpStatus: number | null;
-  readonly onMint: () => void;
-  readonly onProbe: () => void;
-  readonly onDone: () => void;
 }) {
-  if (step.id === "key") {
+  if (phase === "connected") {
+    // Umbrella-view "what next" line — the DialogTitle already says
+    // "<service> connected"; this explains what an Agent Key is FOR so
+    // the user knows what they're about to opt into.
     return (
-      <div className="space-y-3">
-        {phase === "mint_failed" && (
-          <InlineStatus
-            tone="warn"
-            icon={<AlertTriangle className="h-4 w-4 text-warning" aria-hidden />}
-          >
-            {mintError ??
-              "The server didn't accept the request."}{" "}
-            You can retry, or create one later at{" "}
-            <span className="font-medium">/keys → Agent Keys → Create</span>.
-          </InlineStatus>
-        )}
-        <div className="flex items-center justify-end gap-2">
-          <Button variant="outline" size="lg" onClick={onDone}>
-            Maybe later
-          </Button>
-          <Button
-            variant="primary"
-            size="lg"
-            onClick={onMint}
-            disabled={phase === "minting"}
-            isLoading={phase === "minting"}
-          >
-            {phase === "mint_failed" ? "Try again" : "Create Agent Key"}
-          </Button>
-        </div>
+      <div className="flex items-start gap-3 rounded-xl border border-border/50 bg-card p-4">
+        <KeyRound
+          className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground"
+          aria-hidden
+        />
+        <p className="text-[12px] leading-relaxed text-muted-foreground">
+          Your AI tools need an{" "}
+          <span className="font-medium text-foreground">Agent Key</span> to
+          call <span className="font-medium text-foreground">{createdKey.serviceName}</span>{" "}
+          through NyxID. NyxID injects your stored credentials server-side —
+          your tool never sees the original secret.
+        </p>
       </div>
     );
   }
 
-  if (step.id === "test") {
+  if (phase === "minting") {
     return (
-      <div className="space-y-3">
-        {agentKey && (
-          <AgentKeyPanel agentKey={agentKey} createdKey={createdKey} />
-        )}
-        {phase === "probe_failed" && (
-          <InlineStatus
-            tone="warn"
-            icon={<AlertTriangle className="h-4 w-4 text-warning" aria-hidden />}
-          >
-            {probeError ??
-              "The probe returned an unexpected response."}
-            {httpStatus !== null ? ` (HTTP ${String(httpStatus)})` : ""}
-            {" "}The Agent Key is still good — use it from your tool or retry.
-          </InlineStatus>
-        )}
-        <div className="flex items-center justify-end gap-2">
-          <Button variant="outline" size="lg" onClick={onDone}>
-            {phase === "probe_failed" ? "Skip test" : "I'll wire it myself"}
-          </Button>
-          <Button
-            variant="primary"
-            size="lg"
-            onClick={onProbe}
-            disabled={phase === "probing"}
-            isLoading={phase === "probing"}
-          >
-            {phase === "probe_failed" ? "Retry test" : "Test Agent Key"}
-          </Button>
-        </div>
-      </div>
+      <InlineStatus icon={<Spinner />}>
+        Creating your Agent Key…
+      </InlineStatus>
     );
   }
 
-  // step.id === "wire"
+  if (phase === "mint_failed") {
+    return (
+      <InlineStatus
+        tone="warn"
+        icon={<AlertTriangle className="h-4 w-4 text-warning" aria-hidden />}
+      >
+        {mintError ?? "The server didn't accept the request."}{" "}
+        Retry, or create one later at{" "}
+        <span className="font-medium">/keys → Agent Keys → Create</span>.
+      </InlineStatus>
+    );
+  }
+
+  // key_ready + probing + probe_success + probe_failed all show the panel
   return (
     <div className="space-y-3">
       {agentKey && (
         <AgentKeyPanel
           agentKey={agentKey}
           createdKey={createdKey}
-          showOpenAiEnvSnippet
+          showOpenAiEnvSnippet={phase === "probe_success"}
         />
       )}
-      <InlineStatus
-        tone="success"
-        icon={<Check className="h-4 w-4 text-success" aria-hidden />}
-      >
-        End-to-end verified
-        {httpStatus !== null ? ` (HTTP ${String(httpStatus)})` : ""}.
-        Copy the Agent Key + Base URL above into your tool of choice — you&apos;re done.
-      </InlineStatus>
-      <div className="flex items-center justify-end gap-2">
-        <Button variant="primary" size="lg" onClick={onDone}>
-          Done
-        </Button>
-      </div>
+
+      {phase === "probing" && (
+        <InlineStatus icon={<Spinner />}>
+          Calling {createdKey.serviceName} with your Agent Key — the same
+          path your AI tool will take.
+        </InlineStatus>
+      )}
+
+      {phase === "probe_success" && (
+        <InlineStatus
+          tone="success"
+          icon={<Check className="h-4 w-4 text-success" aria-hidden />}
+        >
+          End-to-end test succeeded
+          {httpStatus !== null ? ` (HTTP ${String(httpStatus)})` : ""}.
+          Copy the Agent Key + Base URL above into your tool of choice.
+        </InlineStatus>
+      )}
+
+      {phase === "probe_failed" && (
+        <InlineStatus
+          tone="warn"
+          icon={<AlertTriangle className="h-4 w-4 text-warning" aria-hidden />}
+        >
+          {probeError ?? "The probe returned an unexpected response."}
+          {httpStatus !== null ? ` (HTTP ${String(httpStatus)})` : ""}
+          {" "}The Agent Key is still good — use it from your tool or retry.
+        </InlineStatus>
+      )}
     </div>
   );
 }
 
+function Spinner() {
+  return (
+    <Loader2
+      className="h-4 w-4 animate-spin text-muted-foreground"
+      aria-hidden
+    />
+  );
+}
+
 function InlineStatus({
-  tone,
+  tone = "neutral",
   icon,
   children,
 }: {
-  readonly tone: "neutral" | "success" | "warn";
+  readonly tone?: "neutral" | "success" | "warn";
   readonly icon: ReactNode;
   readonly children: ReactNode;
 }) {
@@ -502,21 +314,26 @@ function InlineStatus({
 function AgentKeyPanel({
   agentKey,
   createdKey,
-  showOpenAiEnvSnippet = false,
+  showOpenAiEnvSnippet,
 }: {
   readonly agentKey: ApiKeyCreateResponse;
   readonly createdKey: CreatedKey;
-  readonly showOpenAiEnvSnippet?: boolean;
+  readonly showOpenAiEnvSnippet: boolean;
 }) {
   const proxyUrl = proxyBaseUrl(createdKey.slug);
   const isOpenAiShaped = OPENAI_SHAPED_HINTS.test(createdKey.slug);
-
   return (
-    <div className="space-y-3 rounded-lg border border-border/50 bg-card p-3">
+    <div className="space-y-3 rounded-xl border border-border/50 bg-card p-4">
       <div className="space-y-1">
-        <p className="text-[11px] font-semibold text-foreground">Agent Key</p>
+        <p className="text-[12px] font-semibold text-foreground">
+          Your new Agent Key
+        </p>
         <p className="text-[11px] text-muted-foreground">
-          Save this now — the full secret is only shown here once.
+          Save this now. The full secret is only shown here once. Scoped to{" "}
+          <span className="font-medium text-foreground">
+            {createdKey.serviceName}
+          </span>{" "}
+          only, with the <code>proxy</code> scope.
         </p>
       </div>
       <CopyableField label="Agent Key" value={agentKey.full_key} />
@@ -524,7 +341,8 @@ function AgentKeyPanel({
       {showOpenAiEnvSnippet && isOpenAiShaped && (
         <>
           <p className="text-[11px] text-muted-foreground pt-1">
-            Most OpenAI-compatible tools read these two env vars:
+            Most OpenAI-compatible tools (openai-python, Cursor, Continue.dev, …)
+            read these two env vars.
           </p>
           <CopyableField
             label="Shell env"
@@ -536,10 +354,126 @@ function AgentKeyPanel({
   );
 }
 
-function diagnose(
-  status: number | null,
-  isNodeRouted: boolean,
-): string {
+type FooterAction = "onMint" | "onProbe" | "onDone";
+
+function Footer({
+  phase,
+  onMint,
+  onProbe,
+  onDone,
+}: {
+  readonly phase: Phase;
+  readonly onMint: () => void;
+  readonly onProbe: () => void;
+  readonly onDone: () => void;
+}) {
+  const config = footerConfig(phase);
+  // Dispatch INVOKES the mapped handler. Do NOT refactor back to
+  // `(a) => a === "onMint" ? onMint : …` — that returns the function
+  // reference but never calls it (silent no-op click). This one bit
+  // Calvin twice in a row.
+  function dispatch(action: FooterAction) {
+    console.info("[aha] footer click", action, "phase=", phase);
+    if (action === "onMint") onMint();
+    else if (action === "onProbe") onProbe();
+    else onDone();
+  }
+
+  return (
+    <div className="flex items-center justify-end gap-2">
+      <Button
+        variant="outline"
+        size="lg"
+        onClick={() => dispatch(config.secondary)}
+        disabled={config.secondaryLabel === null || config.busy}
+        className={config.secondaryLabel === null ? "invisible" : ""}
+        aria-hidden={config.secondaryLabel === null}
+      >
+        {config.secondaryLabel ?? "placeholder"}
+      </Button>
+      <Button
+        variant="primary"
+        size="lg"
+        onClick={() => dispatch(config.primary)}
+        disabled={config.busy}
+        isLoading={config.busy}
+      >
+        {config.primaryLabel}
+      </Button>
+    </div>
+  );
+}
+
+interface FooterConfig {
+  readonly secondaryLabel: string | null;
+  readonly secondary: FooterAction;
+  readonly primaryLabel: string;
+  readonly primary: FooterAction;
+  readonly busy: boolean;
+}
+
+function footerConfig(phase: Phase): FooterConfig {
+  switch (phase) {
+    case "connected":
+      return {
+        secondaryLabel: "Maybe later",
+        secondary: "onDone",
+        primaryLabel: "Create Agent Key",
+        primary: "onMint",
+        busy: false,
+      };
+    case "minting":
+      return {
+        secondaryLabel: null,
+        secondary: "onDone",
+        primaryLabel: "Creating…",
+        primary: "onMint",
+        busy: true,
+      };
+    case "mint_failed":
+      return {
+        secondaryLabel: "Maybe later",
+        secondary: "onDone",
+        primaryLabel: "Try again",
+        primary: "onMint",
+        busy: false,
+      };
+    case "key_ready":
+      return {
+        secondaryLabel: "I'll wire it myself",
+        secondary: "onDone",
+        primaryLabel: "Test Agent Key",
+        primary: "onProbe",
+        busy: false,
+      };
+    case "probing":
+      return {
+        secondaryLabel: null,
+        secondary: "onDone",
+        primaryLabel: "Testing…",
+        primary: "onProbe",
+        busy: true,
+      };
+    case "probe_success":
+      return {
+        secondaryLabel: null,
+        secondary: "onDone",
+        primaryLabel: "Done",
+        primary: "onDone",
+        busy: false,
+      };
+    case "probe_failed":
+      return {
+        secondaryLabel: "Retry test",
+        secondary: "onProbe",
+        primaryLabel: "Done",
+        primary: "onDone",
+        busy: false,
+      };
+  }
+}
+
+function diagnose(status: number | null, isNodeRouted: boolean): string {
   if (status === null) {
     return "The probe timed out or was blocked by the browser.";
   }

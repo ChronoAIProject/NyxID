@@ -2546,21 +2546,20 @@ export function AddKeyDialog({
         <DialogHeader>
           <DialogTitle>
             {step === "verify" && createdKey ? (
-              // Umbrella framing: the dialog is the "set up your service"
-              // journey; the individual phase progress lives in the step
-              // rows inside the body. Title reads as the action the
-              // journey accomplishes, with the service brand icon to
-              // anchor which service we're setting up.
+              // Umbrella framing: the DialogTitle communicates the state
+              // ("<service> connected") — that's the umbrella. The body
+              // then tells the user what's needed next (an Agent Key to
+              // let their AI tools actually use it).
               <span className="inline-flex items-center gap-2">
                 <ServiceIcon
                   slug={createdKey.catalogSlug}
                   className="h-5 w-5 shrink-0 text-muted-foreground"
                 />
                 <span>
-                  Set up{" "}
                   <span className="text-muted-foreground">&ldquo;</span>
                   {createdKey.serviceName}
-                  <span className="text-muted-foreground">&rdquo;</span>
+                  <span className="text-muted-foreground">&rdquo;</span>{" "}
+                  connected
                 </span>
               </span>
             ) : (
