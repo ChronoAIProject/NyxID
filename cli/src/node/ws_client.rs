@@ -2666,7 +2666,11 @@ async fn start_russh_web_terminal(
                 ssh_node_exec::SshNodeShellEvent::Closed(error) => {
                     let _ = remove_web_terminal_entry(&shell_terminals, &shell_session_id).await;
                     let error_message = error.as_ref().map(|error| error.message.as_str());
-                    let error_code = error.as_ref().map(|error| error.code);
+                    let error_code = if auth_mode == "cert" {
+                        error.as_ref().map(|error| error.code)
+                    } else {
+                        None
+                    };
                     let _ = send_web_terminal_closed_with_code(
                         &shell_tx,
                         &shell_session_id,
