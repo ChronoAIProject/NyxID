@@ -47,6 +47,14 @@ Per-principal private keys for `node_key` SSH services (see [Set up an SSH node]
 - **`list [--service <slug>]`**, **`show --service --principal`**, **`test --service --principal`**, **`remove --service --principal`**.
 - **`prune --stale`** — drop keys for services no longer in node-key mode.
 
+## node ssh cert-host-key (local cert-mode host pins)
+
+Target host-key pins for `cert` SSH services. The node agent stores these in `ssh_cert_host_keys.toml` under the profile's node config directory and reloads the store during host-key verification, so changes apply to a running daemon without restart.
+
+- **`cert-host-key list`** — list pinned cert-mode target host keys: host, port, SHA256 fingerprint, source (`tofu` / `explicit`), created, updated.
+- **`cert-host-key pin <host> <port> <sha256-fingerprint>`** — pre-seed or replace an explicit host-key pin. The fingerprint must be a valid SHA256 SSH host-key fingerprint, with or without the `SHA256:` prefix.
+- **`cert-host-key forget <host> <port>`** — remove a pin after legitimate target host-key rotation; the next cert-mode connection will trust-on-first-use and persist the observed key.
+
 ## node daemon (background service)
 
 Run the agent under launchd (macOS) or systemd (Linux):

@@ -36,6 +36,25 @@ nyxid service add-ssh \
 
 `--ttl` sets the certificate lifetime in minutes (cert mode only; default 30). Add `--org <id|slug|name>` to create an org-owned SSH service that members reach through their own accounts.
 
+## Cert mode: manage host-key pins
+
+For `cert` services, `ssh exec` and `ssh terminal` run from the node agent. The node pins the target's SSH host key on first contact in `ssh_cert_host_keys.toml` under the node config directory, then enforces that fingerprint on later sessions.
+
+To pre-seed a trusted host key before first contact, run this on the node machine:
+
+```bash
+nyxid node ssh cert-host-key pin 10.0.0.5 22 SHA256:<fingerprint>
+```
+
+Inspect and manage cert-mode host-key pins with:
+
+```bash
+nyxid node ssh cert-host-key list
+nyxid node ssh cert-host-key forget 10.0.0.5 22
+```
+
+Use `forget` only when the target legitimately rotates its SSH host key. The next cert-mode connection will trust-on-first-use and persist the newly observed key. `pin` and `forget` use the same `--config` / `--profile` resolution as `nyxid node start`, and an already-running daemon sees those changes without a restart.
+
 ## Node-key mode: store the key on the node
 
 In `node_key` mode the private key is held on the node, not on NyxID. On the node machine, add it per principal:
@@ -88,7 +107,7 @@ nyxid service convert-ssh prod-db  --to-cert        # node_key → cert
 nyxid service convert-ssh prod-web --to-proxy-only  # → proxy_only
 ```
 
-After converting *to* `node_key`, add the node-local key (above) before connecting. After converting *away* from it, prune the now-unused key on the node: `nyxid node ssh-credentials prune --stale`.
+After converting *to* `node_key`, add the node-local key (above) before connecting. After converting *away* from it, prune the now-unused key on the node: `nyxid node ssh-credentials prune --stale`. After converting *to* `cert`, optionally pre-seed the target host-key fingerprint with `nyxid node ssh cert-host-key pin`.
 
 ## Next
 
