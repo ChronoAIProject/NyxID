@@ -1332,6 +1332,7 @@ async fn handle_node_connection(
                         &node_id_reader,
                         &data.session_id,
                         Some("invalid_base64_payload".to_string()),
+                        None,
                     );
                 }
             }
@@ -1340,6 +1341,7 @@ async fn handle_node_connection(
                     &node_id_reader,
                     &closed.session_id,
                     closed.error,
+                    closed.error_code,
                 );
             }
             NodeMessage::SshExecResult(result) => {

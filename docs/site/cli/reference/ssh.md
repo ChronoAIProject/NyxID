@@ -25,6 +25,16 @@ nyxid ssh terminal <service> [--principal <user>]
 
 Open an interactive terminal over the WebSocket tunnel. Works for both `cert` and `node_key` services.
 
+For `cert` services, the node agent verifies the target host key with its local cert-mode host-key store. Manage those pins on the node with:
+
+```bash
+nyxid node ssh cert-host-key list
+nyxid node ssh cert-host-key pin <host> <port> SHA256:<fingerprint>
+nyxid node ssh cert-host-key forget <host> <port>
+```
+
+`pin` pre-seeds or replaces an explicit SHA256 fingerprint. `forget` removes a stale pin after legitimate target host-key rotation so the next cert-mode session can trust-on-first-use and persist the new key. These commands use the same `--config` / `--profile` resolution as the node daemon and apply to a running daemon without restart.
+
 ## ssh proxy
 
 ```bash

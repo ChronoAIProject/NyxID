@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use russh::client;
-use russh::keys::{PrivateKeyWithHashAlg, decode_secret_key};
+use russh::keys::{Certificate, PrivateKey, PrivateKeyWithHashAlg, decode_secret_key};
 use russh::{ChannelMsg, Disconnect};
 use tokio::sync::mpsc;
 
@@ -11,6 +11,7 @@ use super::config::SshAlgorithmPreferences;
 use super::credentials::ssh_keys::SshKeyEntry;
 use super::error::Error;
 use super::ssh_algos;
+use super::ssh_host_key_store::{CertHostKeyStoreError, HostKeyDecision, SharedCertHostKeyStore};
 
 pub const SSH_NODE_KEY_MISSING_CODE: u32 = 1011;
 pub const SSH_HOST_KEY_MISMATCH_CODE: u32 = 1012;
@@ -74,14 +75,25 @@ impl SshNodeExecError {
 
 #[derive(Clone)]
 struct HostKeyVerifier {
-    expected_sha256: Option<String>,
+    policy: HostKeyPolicy,
     observed_sha256: Arc<Mutex<Option<String>>>,
+}
+
+#[derive(Clone)]
+enum HostKeyPolicy {
+    StaticExpected(Option<String>),
+    CertTofu {
+        store: SharedCertHostKeyStore,
+        host: String,
+        port: u16,
+    },
 }
 
 #[derive(Debug)]
 enum SshClientError {
     Russh(russh::Error),
     HostKeyMismatch { expected: String, observed: String },
+    HostKeyStore(String),
 }
 
 impl From<russh::Error> for SshClientError {
@@ -100,6 +112,7 @@ impl fmt::Display for SshClientError {
                     "SSH host key mismatch: expected {expected}, got {observed}"
                 )
             }
+            Self::HostKeyStore(message) => write!(f, "SSH host key store error: {message}"),
         }
     }
 }
@@ -116,18 +129,44 @@ impl client::Handler for HostKeyVerifier {
         let fingerprint = host_key_sha256(server_public_key);
         *self.observed_sha256.lock().expect("host key lock poisoned") = Some(fingerprint.clone());
 
-        let Some(expected) = self.expected_sha256.as_deref() else {
-            tracing::info!(host_key_sha256 = %fingerprint, "Accepted SSH host key without pin");
-            return Ok(true);
-        };
-
-        if normalize_sha256_fingerprint(expected) == normalize_sha256_fingerprint(&fingerprint) {
-            Ok(true)
-        } else {
-            Err(SshClientError::HostKeyMismatch {
-                expected: format_sha256_fingerprint(expected),
-                observed: fingerprint,
-            })
+        match &self.policy {
+            HostKeyPolicy::StaticExpected(None) => {
+                tracing::info!(host_key_sha256 = %fingerprint, "Accepted SSH host key without pin");
+                Ok(true)
+            }
+            HostKeyPolicy::StaticExpected(Some(expected)) => {
+                if normalize_sha256_fingerprint(expected)
+                    == normalize_sha256_fingerprint(&fingerprint)
+                {
+                    Ok(true)
+                } else {
+                    Err(SshClientError::HostKeyMismatch {
+                        expected: format_sha256_fingerprint(expected),
+                        observed: fingerprint,
+                    })
+                }
+            }
+            HostKeyPolicy::CertTofu { store, host, port } => {
+                let mut guard = store.lock().map_err(|_| {
+                    SshClientError::HostKeyStore("host-key store lock poisoned".to_string())
+                })?;
+                match guard.ensure_matches_or_pin(host, *port, &fingerprint) {
+                    Ok(HostKeyDecision::MatchedExisting) => Ok(true),
+                    Ok(HostKeyDecision::PinnedNew) => {
+                        tracing::info!(
+                            host = %host,
+                            port,
+                            host_key_sha256 = %fingerprint,
+                            "Pinned SSH host key for cert-mode target"
+                        );
+                        Ok(true)
+                    }
+                    Err(CertHostKeyStoreError::HostKeyMismatch { expected, observed }) => {
+                        Err(SshClientError::HostKeyMismatch { expected, observed })
+                    }
+                    Err(error) => Err(SshClientError::HostKeyStore(error.to_string())),
+                }
+            }
         }
     }
 }
@@ -159,7 +198,7 @@ pub async fn scan_host_key_sha256(
 ) -> Result<String, SshNodeExecError> {
     let observed_sha256 = Arc::new(Mutex::new(None));
     let handler = HostKeyVerifier {
-        expected_sha256: None,
+        policy: HostKeyPolicy::StaticExpected(None),
         observed_sha256: observed_sha256.clone(),
     };
     let config = build_client_config(Duration::from_secs(timeout_secs.clamp(1, 300)), algorithms)?;
@@ -390,15 +429,9 @@ async fn run_shell_inner(
 async fn connect_authenticated(
     entry: &SshKeyEntry,
 ) -> Result<client::Handle<HostKeyVerifier>, SshNodeExecError> {
-    let passphrase = entry.passphrase.as_ref().map(|value| value.as_str());
-    let key_pair =
-        decode_secret_key(entry.private_key_pem.as_str(), passphrase).map_err(|error| {
-            SshNodeExecError::channel_closed(format!("invalid private key: {error}"))
-        })?;
-
     let observed_sha256 = Arc::new(Mutex::new(None));
     let handler = HostKeyVerifier {
-        expected_sha256: entry.host_key_sha256.clone(),
+        policy: host_key_policy(entry),
         observed_sha256: observed_sha256.clone(),
     };
 
@@ -407,42 +440,112 @@ async fn connect_authenticated(
     let addr = (entry.target_host.as_str(), entry.target_port);
     let mut session = match client::connect(config, addr, handler).await {
         Ok(session) => session,
-        Err(SshClientError::HostKeyMismatch { expected, observed }) => {
-            return Err(SshNodeExecError::host_key_mismatch(&expected, &observed));
-        }
-        Err(error) => {
-            return Err(SshNodeExecError::channel_closed(format!(
-                "ssh connect failed: {error}"
-            )));
-        }
+        Err(error) => return Err(map_client_connect_error(error)),
     };
 
-    let auth_result = session
-        .authenticate_publickey(
-            entry.principal.clone(),
-            PrivateKeyWithHashAlg::new(
-                Arc::new(key_pair),
-                session
-                    .best_supported_rsa_hash()
-                    .await
-                    .map_err(|error| {
-                        SshNodeExecError::channel_closed(format!(
-                            "failed to negotiate RSA signature hash: {error}"
-                        ))
-                    })?
-                    .flatten(),
-            ),
-        )
-        .await
-        .map_err(|error| SshNodeExecError::channel_closed(format!("ssh auth failed: {error}")))?;
+    let auth_material = build_auth_material(entry, &mut session).await?;
+    let auth_result = match auth_material {
+        ClientAuthMaterial::PublicKey(key) => {
+            session
+                .authenticate_publickey(entry.principal.clone(), key)
+                .await
+        }
+        ClientAuthMaterial::OpenSshCertificate { key, cert } => {
+            session
+                .authenticate_openssh_cert(entry.principal.clone(), key, *cert)
+                .await
+        }
+    }
+    .map_err(|error| SshNodeExecError::channel_closed(format!("ssh auth failed: {error}")))?;
 
     if !auth_result.success() {
         return Err(SshNodeExecError::channel_closed(
-            "ssh auth failed: public key rejected",
+            "ssh auth failed: credential rejected",
         ));
     }
 
     Ok(session)
+}
+
+fn host_key_policy(entry: &SshKeyEntry) -> HostKeyPolicy {
+    match &entry.cert_host_key_store {
+        Some(store) => HostKeyPolicy::CertTofu {
+            store: Arc::clone(store),
+            host: entry.target_host.clone(),
+            port: entry.target_port,
+        },
+        None => HostKeyPolicy::StaticExpected(entry.host_key_sha256.clone()),
+    }
+}
+
+enum ClientAuthMaterial {
+    PublicKey(PrivateKeyWithHashAlg),
+    OpenSshCertificate {
+        key: Arc<PrivateKey>,
+        cert: Box<Certificate>,
+    },
+}
+
+async fn build_auth_material(
+    entry: &SshKeyEntry,
+    session: &mut client::Handle<HostKeyVerifier>,
+) -> Result<ClientAuthMaterial, SshNodeExecError> {
+    let (key_pair, cert) = decode_auth_key_and_certificate(entry)?;
+
+    if let Some(cert) = cert {
+        return Ok(ClientAuthMaterial::OpenSshCertificate {
+            key: Arc::new(key_pair),
+            cert: Box::new(cert),
+        });
+    }
+
+    let rsa_hash = session
+        .best_supported_rsa_hash()
+        .await
+        .map_err(|error| {
+            SshNodeExecError::channel_closed(format!(
+                "failed to negotiate RSA signature hash: {error}"
+            ))
+        })?
+        .flatten();
+    Ok(ClientAuthMaterial::PublicKey(PrivateKeyWithHashAlg::new(
+        Arc::new(key_pair),
+        rsa_hash,
+    )))
+}
+
+fn decode_auth_key_and_certificate(
+    entry: &SshKeyEntry,
+) -> Result<(PrivateKey, Option<Certificate>), SshNodeExecError> {
+    let passphrase = entry.passphrase.as_ref().map(|value| value.as_str());
+    let key_pair =
+        decode_secret_key(entry.private_key_pem.as_str(), passphrase).map_err(|error| {
+            SshNodeExecError::channel_closed(format!("invalid private key: {error}"))
+        })?;
+    let cert = entry
+        .certificate_openssh
+        .as_ref()
+        .map(|certificate| {
+            Certificate::from_openssh(certificate.as_str()).map_err(|error| {
+                SshNodeExecError::channel_closed(format!("invalid SSH certificate: {error}"))
+            })
+        })
+        .transpose()?;
+    Ok((key_pair, cert))
+}
+
+fn map_client_connect_error(error: SshClientError) -> SshNodeExecError {
+    match error {
+        SshClientError::HostKeyMismatch { expected, observed } => {
+            SshNodeExecError::host_key_mismatch(&expected, &observed)
+        }
+        SshClientError::Russh(error) => {
+            SshNodeExecError::channel_closed(format!("ssh connect failed: {error}"))
+        }
+        SshClientError::HostKeyStore(error) => {
+            SshNodeExecError::channel_closed(format!("ssh connect failed: {error}"))
+        }
+    }
 }
 
 fn build_client_config(
@@ -504,6 +607,54 @@ fn append_capped(target: &mut Vec<u8>, chunk: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::node::ssh_host_key_store::CertHostKeyStore;
+    use chrono::Utc;
+    use russh::keys::ssh_key::{Algorithm, LineEnding, certificate};
+    use zeroize::Zeroizing;
+
+    fn test_entry_with_cert(certificate_openssh: Option<String>) -> SshKeyEntry {
+        let mut rng = rand::rngs::OsRng;
+        let private_key =
+            russh::keys::PrivateKey::random(&mut rng, Algorithm::Ed25519).expect("private key");
+        let private_key_pem = private_key.to_openssh(LineEnding::LF).expect("openssh");
+
+        SshKeyEntry {
+            service_slug: "cert:test.example:22".to_string(),
+            principal: "ubuntu".to_string(),
+            private_key_pem: Zeroizing::new(private_key_pem.to_string()),
+            passphrase: None,
+            certificate_openssh: certificate_openssh.map(Zeroizing::new),
+            target_host: "test.example".to_string(),
+            target_port: 22,
+            host_key_sha256: None,
+            cert_host_key_store: None,
+            algorithms: None,
+            created_at: Utc::now(),
+        }
+    }
+
+    fn user_certificate_for_entry(entry: &SshKeyEntry) -> String {
+        let mut rng = rand::rngs::OsRng;
+        let subject_key = decode_secret_key(entry.private_key_pem.as_str(), None).unwrap();
+        let ca_key = russh::keys::PrivateKey::random(&mut rng, Algorithm::Ed25519).expect("ca key");
+        let mut builder = certificate::Builder::new_with_random_nonce(
+            &mut rng,
+            subject_key.public_key().key_data().clone(),
+            0,
+            4_102_444_800,
+        )
+        .expect("cert builder");
+        builder
+            .cert_type(certificate::CertType::User)
+            .expect("cert type");
+        builder.valid_principal("ubuntu").expect("principal");
+        builder.key_id("nyxid:test").expect("key id");
+        builder
+            .sign(&ca_key)
+            .expect("signed cert")
+            .to_openssh()
+            .expect("openssh cert")
+    }
 
     #[test]
     fn client_config_uses_custom_algorithm_preferences() {
@@ -566,5 +717,58 @@ mod tests {
         append_capped(&mut output, b"bcdef");
         assert_eq!(output.len(), SSH_NODE_EXEC_MAX_OUTPUT_BYTES);
         assert!(output.ends_with(b"bc"));
+    }
+
+    #[test]
+    fn host_key_mismatch_maps_to_1012() {
+        let error = map_client_connect_error(SshClientError::HostKeyMismatch {
+            expected: "SHA256:expected".to_string(),
+            observed: "SHA256:observed".to_string(),
+        });
+
+        assert_eq!(error.code, SSH_HOST_KEY_MISMATCH_CODE);
+        assert!(error.message.contains("expected SHA256:expected"));
+        assert!(error.message.contains("got SHA256:observed"));
+    }
+
+    #[test]
+    fn auth_material_uses_public_key_without_certificate() {
+        let entry = test_entry_with_cert(None);
+
+        let (_key, cert) = decode_auth_key_and_certificate(&entry).expect("auth material");
+
+        assert!(cert.is_none());
+    }
+
+    #[test]
+    fn auth_material_uses_openssh_certificate_when_present() {
+        let mut entry = test_entry_with_cert(None);
+        let certificate_openssh = user_certificate_for_entry(&entry);
+        entry.certificate_openssh = Some(Zeroizing::new(certificate_openssh));
+
+        let (_key, cert) = decode_auth_key_and_certificate(&entry).expect("auth material");
+
+        assert!(cert.is_some());
+    }
+
+    #[test]
+    fn cert_entries_use_tofu_host_key_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(CertHostKeyStore::load(dir.path()).unwrap()));
+        let mut entry = test_entry_with_cert(None);
+        entry.cert_host_key_store = Some(store.clone());
+
+        match host_key_policy(&entry) {
+            HostKeyPolicy::CertTofu {
+                store: policy_store,
+                host,
+                port,
+            } => {
+                assert!(Arc::ptr_eq(&store, &policy_store));
+                assert_eq!(host, "test.example");
+                assert_eq!(port, 22);
+            }
+            HostKeyPolicy::StaticExpected(_) => panic!("cert entry must use TOFU policy"),
+        }
     }
 }

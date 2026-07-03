@@ -6507,7 +6507,8 @@ mod proxy_resolution_integration_tests {
             if found.is_some() {
                 return found;
             }
-            tokio::task::yield_now().await;
+
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
         None
     }

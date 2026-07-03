@@ -407,6 +407,35 @@ async fn handle_node_web_terminal(
                 break;
             }
             Err(error) => {
+                if let AppError::SshHostKeyMismatch(message) = &error
+                    && auth_mode == SshAuthMode::Cert
+                {
+                    audit_service::log_async(
+                        state.db.clone(),
+                        Some(user_id.clone()),
+                        "ssh_host_key_mismatch".to_string(),
+                        Some(serde_json::json!({
+                            "service_id": service_id,
+                            "session_id": session_id,
+                            "principal": principal,
+                            "error": message,
+                            "routed_via": "node",
+                            "node_id": node_id,
+                        })),
+                        ip_address.clone(),
+                        user_agent.clone(),
+                        None,
+                        None,
+                    );
+                    tracing::warn!(
+                        service_id = %service_id,
+                        node_id = %node_id,
+                        error = %error,
+                        "Web terminal SSH host-key verification failed"
+                    );
+                    send_error_and_close(&mut socket, "SSH host key mismatch").await;
+                    return;
+                }
                 tracing::warn!(
                     service_id = %service_id,
                     node_id = %node_id,

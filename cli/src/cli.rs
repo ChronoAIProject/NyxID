@@ -1749,6 +1749,17 @@ pub enum NodeCommands {
         #[arg(long, env = "NYXID_PROFILE")]
         profile: Option<String>,
     },
+    /// Manage local SSH state for the node agent
+    Ssh {
+        #[command(subcommand)]
+        command: NodeSshCommands,
+        /// Path to config directory
+        #[arg(long)]
+        config: Option<String>,
+        /// Agent profile name
+        #[arg(long, env = "NYXID_PROFILE")]
+        profile: Option<String>,
+    },
     /// Migrate secret storage from file to OS keychain (or vice versa)
     Migrate {
         /// Target backend: "keychain" or "file"
@@ -2640,6 +2651,67 @@ mod tests {
     }
 
     #[test]
+    fn node_ssh_cert_host_key_commands_parse() {
+        let cli = Cli::try_parse_from([
+            "nyxid",
+            "node",
+            "ssh",
+            "--config",
+            "/tmp/nyx-node",
+            "--profile",
+            "edge",
+            "cert-host-key",
+            "pin",
+            "SSH.Example",
+            "2222",
+            "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        ])
+        .expect("node ssh cert-host-key pin should parse");
+
+        match cli.command {
+            Commands::Node {
+                command:
+                    NodeCommands::Ssh {
+                        command:
+                            NodeSshCommands::CertHostKey {
+                                command:
+                                    NodeSshCertHostKeyCommands::Pin {
+                                        host,
+                                        port,
+                                        sha256_fingerprint,
+                                    },
+                            },
+                        config,
+                        profile,
+                    },
+            } => {
+                assert_eq!(config.as_deref(), Some("/tmp/nyx-node"));
+                assert_eq!(profile.as_deref(), Some("edge"));
+                assert_eq!(host, "SSH.Example");
+                assert_eq!(port, 2222);
+                assert_eq!(
+                    sha256_fingerprint,
+                    "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+                );
+            }
+            _ => panic!("unexpected parse result"),
+        }
+
+        Cli::try_parse_from(["nyxid", "node", "ssh", "cert-host-key", "list"])
+            .expect("node ssh cert-host-key list should parse");
+        Cli::try_parse_from([
+            "nyxid",
+            "node",
+            "ssh",
+            "cert-host-key",
+            "forget",
+            "ssh.example",
+            "22",
+        ])
+        .expect("node ssh cert-host-key forget should parse");
+    }
+
+    #[test]
     fn service_add_oauth_accepts_custom_slug_flag() {
         let cli = Cli::try_parse_from([
             "nyxid", "service", "add", "api-lark", "--oauth", "--slug", "my-lark",
@@ -2994,6 +3066,38 @@ pub enum NodeSshCredentialCommands {
         stale: bool,
         #[command(flatten)]
         auth: AuthArgs,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum NodeSshCommands {
+    /// Manage cert-mode target host-key pins
+    #[command(name = "cert-host-key")]
+    CertHostKey {
+        #[command(subcommand)]
+        command: NodeSshCertHostKeyCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum NodeSshCertHostKeyCommands {
+    /// List cert-mode target host-key pins
+    List,
+    /// Set or replace an explicit cert-mode target host-key pin
+    Pin {
+        /// Target SSH host reached by this node
+        host: String,
+        /// Target SSH port
+        port: u16,
+        /// SHA256 host-key fingerprint, with or without the SHA256: prefix
+        sha256_fingerprint: String,
+    },
+    /// Remove a cert-mode target host-key pin so the next connection re-TOFUs
+    Forget {
+        /// Target SSH host reached by this node
+        host: String,
+        /// Target SSH port
+        port: u16,
     },
 }
 

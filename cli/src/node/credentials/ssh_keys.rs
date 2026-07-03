@@ -6,6 +6,7 @@ use zeroize::Zeroizing;
 use crate::node::config::{NodeConfig, SshAlgorithmPreferences, SshKeyConfig};
 use crate::node::error::{Error, Result};
 use crate::node::secret_backend::SecretBackend;
+use crate::node::ssh_host_key_store::SharedCertHostKeyStore;
 
 pub const SSH_PRIVATE_KEY_SUFFIX: &str = "private_key";
 pub const SSH_PASSPHRASE_SUFFIX: &str = "passphrase";
@@ -15,9 +16,11 @@ pub struct SshKeyEntry {
     pub principal: String,
     pub private_key_pem: Zeroizing<String>,
     pub passphrase: Option<Zeroizing<String>>,
+    pub certificate_openssh: Option<Zeroizing<String>>,
     pub target_host: String,
     pub target_port: u16,
     pub host_key_sha256: Option<String>,
+    pub cert_host_key_store: Option<SharedCertHostKeyStore>,
     pub algorithms: Option<SshAlgorithmPreferences>,
     pub created_at: DateTime<Utc>,
 }
@@ -43,9 +46,17 @@ impl fmt::Debug for SshKeyEntry {
                 "passphrase",
                 &self.passphrase.as_ref().map(|_| "<redacted>"),
             )
+            .field(
+                "certificate_openssh",
+                &self.certificate_openssh.as_ref().map(|_| "<redacted>"),
+            )
             .field("target_host", &self.target_host)
             .field("target_port", &self.target_port)
             .field("host_key_sha256", &self.host_key_sha256)
+            .field(
+                "cert_host_key_store",
+                &self.cert_host_key_store.as_ref().map(|_| "<configured>"),
+            )
             .field("algorithms", &self.algorithms)
             .field("created_at", &self.created_at)
             .finish()
@@ -142,9 +153,11 @@ pub fn load_entry(config: &SshKeyConfig, backend: &SecretBackend) -> Result<SshK
         principal: config.principal.clone(),
         private_key_pem: Zeroizing::new(private_key),
         passphrase,
+        certificate_openssh: None,
         target_host: config.target_host.clone(),
         target_port: config.target_port,
         host_key_sha256: config.host_key_sha256.clone(),
+        cert_host_key_store: None,
         algorithms: config.algorithms.clone(),
         created_at,
     })
@@ -294,9 +307,11 @@ mod tests {
                 principal: "nyxid-ro".to_string(),
                 private_key_pem: Zeroizing::new("ro-key".to_string()),
                 passphrase: None,
+                certificate_openssh: None,
                 target_host: "10.0.0.1".to_string(),
                 target_port: 22,
                 host_key_sha256: None,
+                cert_host_key_store: None,
                 algorithms: None,
                 created_at: Utc::now(),
             },
@@ -305,9 +320,11 @@ mod tests {
                 principal: "nyxid-admin".to_string(),
                 private_key_pem: Zeroizing::new("admin-key".to_string()),
                 passphrase: None,
+                certificate_openssh: None,
                 target_host: "10.0.0.1".to_string(),
                 target_port: 22,
                 host_key_sha256: None,
+                cert_host_key_store: None,
                 algorithms: None,
                 created_at: Utc::now(),
             },

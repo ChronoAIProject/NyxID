@@ -738,6 +738,8 @@ pub struct WsWebTerminalClosedMsg {
     pub session_id: String,
     #[serde(default)]
     pub error: Option<String>,
+    #[serde(default)]
+    pub error_code: Option<u32>,
 }
 
 /// JSON message for pushing a credential update to a node. Includes an
@@ -2784,16 +2786,21 @@ impl NodeWsManager {
         node_id: &str,
         session_id: &str,
         error: Option<String>,
+        error_code: Option<u32>,
     ) {
         if let Some(conn) = self.connections.get(node_id)
             && let Some((_, pending)) = conn.web_terminals.remove(session_id)
         {
             match pending {
                 PendingWebTerminal::Awaiting(sender) => {
-                    let _ =
-                        sender.send(Err(AppError::NodeOffline(error.unwrap_or_else(|| {
-                            "Web terminal closed before starting".to_string()
-                        }))));
+                    let message =
+                        error.unwrap_or_else(|| "Web terminal closed before starting".to_string());
+                    let app_error = if error_code.is_some() {
+                        map_ssh_exec_result_error(message, error_code, true)
+                    } else {
+                        AppError::NodeOffline(message)
+                    };
+                    let _ = sender.send(Err(app_error));
                 }
                 PendingWebTerminal::Active(tx) => {
                     let _ = tx.try_send(WebTerminalChunk::Closed(error));
@@ -3234,6 +3241,52 @@ mod tests {
     fn heartbeat_ping_fails_for_disconnected_node() {
         let mgr = NodeWsManager::new(30, 100);
         assert!(mgr.send_heartbeat_ping("unknown").is_err());
+    }
+
+    #[tokio::test]
+    async fn web_terminal_closed_1012_maps_to_host_key_mismatch_before_start() {
+        let mgr = std::sync::Arc::new(NodeWsManager::new(30, 100));
+        let (tx, mut rx) = mpsc::channel(256);
+        mgr.register_connection("node-1", tx);
+
+        let open_mgr = std::sync::Arc::clone(&mgr);
+        let open_task = tokio::spawn(async move {
+            open_mgr
+                .open_web_terminal(
+                    "node-1",
+                    NodeWebTerminalRequest {
+                        session_id: "session-1".to_string(),
+                        service_id: "service-1".to_string(),
+                        service_slug: "ssh-service".to_string(),
+                        auth_mode: NodeWebTerminalAuthMode::Cert {
+                            private_key_pem: "redacted-private-key".to_string(),
+                            certificate_openssh: "redacted-cert".to_string(),
+                        },
+                        host: "ssh.example".to_string(),
+                        port: 22,
+                        principal: "ubuntu".to_string(),
+                        cols: 80,
+                        rows: 24,
+                    },
+                    None,
+                )
+                .await
+        });
+
+        let outbound = rx.recv().await.expect("web terminal open sent");
+        assert!(matches!(outbound, NodeOutboundMessage::Text(_)));
+
+        mgr.deliver_web_terminal_closed(
+            "node-1",
+            "session-1",
+            Some("SSH host key mismatch: expected SHA256:a, got SHA256:b".to_string()),
+            Some(1012),
+        );
+
+        let result = open_task.await.expect("open task joins");
+        assert!(
+            matches!(result, Err(AppError::SshHostKeyMismatch(message)) if message.contains("expected SHA256:a"))
+        );
     }
 
     #[test]
