@@ -15,6 +15,9 @@ use super::credentials::ssh_keys::{self, NewSshKeyEntry};
 use super::error::{Error, Result};
 use super::oauth;
 use super::secret_backend::SecretBackend;
+use super::ssh_host_key_store::{
+    CertHostKeySource, CertHostKeyStore, CertHostKeyStoreError, canonical_sha256_fingerprint,
+};
 use super::ssh_node_exec;
 use super::ws_client;
 
@@ -881,6 +884,111 @@ pub async fn cmd_ssh_credentials(
             println!("Pruned {} stale SSH key entries.", stale_entries.len());
             Ok(())
         }
+    }
+}
+
+pub fn cmd_node_ssh(command: crate::cli::NodeSshCommands, config_path: Option<&str>) -> Result<()> {
+    use crate::cli::NodeSshCommands;
+
+    init_cli_tracing();
+
+    match command {
+        NodeSshCommands::CertHostKey { command } => cmd_ssh_cert_host_key(command, config_path),
+    }
+}
+
+fn cmd_ssh_cert_host_key(
+    command: crate::cli::NodeSshCertHostKeyCommands,
+    config_path: Option<&str>,
+) -> Result<()> {
+    use crate::cli::NodeSshCertHostKeyCommands;
+
+    let config_dir = config::resolve_config_dir(config_path);
+    let mut store =
+        CertHostKeyStore::load(&config_dir).map_err(cert_host_key_store_error_to_node_error)?;
+
+    match command {
+        NodeSshCertHostKeyCommands::List => {
+            let entries = store.entries();
+            if entries.is_empty() {
+                println!("No cert-mode SSH host keys pinned.");
+            } else {
+                println!("Cert-mode SSH host keys:");
+                for entry in entries {
+                    println!(
+                        "  {}:{} {} source={} created={} updated={}",
+                        entry.host,
+                        entry.port,
+                        entry.host_key_sha256,
+                        cert_host_key_source_label(&entry.source),
+                        entry.created_at,
+                        entry.updated_at
+                    );
+                }
+            }
+            Ok(())
+        }
+        NodeSshCertHostKeyCommands::Pin {
+            host,
+            port,
+            sha256_fingerprint,
+        } => {
+            let fingerprint = canonical_sha256_fingerprint(&sha256_fingerprint)
+                .map_err(cert_host_key_store_error_to_node_error)?;
+            store
+                .set_explicit_pin(&host, port, &fingerprint)
+                .map_err(cert_host_key_store_error_to_node_error)?;
+            let entry = store.get(&host, port).ok_or_else(|| {
+                Error::Config("Explicit SSH host-key pin was not persisted".to_string())
+            })?;
+            println!(
+                "Pinned cert-mode SSH host key for {}:{}.",
+                entry.host, entry.port
+            );
+            println!("Fingerprint: {}", entry.host_key_sha256);
+            println!("Source:      explicit");
+            println!("Applies immediately to running node agents.");
+            Ok(())
+        }
+        NodeSshCertHostKeyCommands::Forget { host, port } => {
+            match store
+                .forget(&host, port)
+                .map_err(cert_host_key_store_error_to_node_error)?
+            {
+                Some(entry) => {
+                    println!(
+                        "Forgot cert-mode SSH host key for {}:{}.",
+                        entry.host, entry.port
+                    );
+                    println!("Previous fingerprint: {}", entry.host_key_sha256);
+                    println!(
+                        "Next cert-mode connection will trust-on-first-use and persist the observed host key."
+                    );
+                    println!("Applies immediately to running node agents.");
+                }
+                None => {
+                    println!("No cert-mode SSH host key pin found for {host}:{port}.");
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+fn cert_host_key_store_error_to_node_error(error: CertHostKeyStoreError) -> Error {
+    match error {
+        CertHostKeyStoreError::InvalidFingerprint => Error::Validation(
+            "Invalid SSH host-key fingerprint; expected a SHA256 fingerprint such as SHA256:AbCd... without MD5 or key material"
+                .to_string(),
+        ),
+        other => Error::Config(other.to_string()),
+    }
+}
+
+fn cert_host_key_source_label(source: &CertHostKeySource) -> &'static str {
+    match source {
+        CertHostKeySource::Tofu => "tofu",
+        CertHostKeySource::Explicit => "explicit",
     }
 }
 
@@ -2506,6 +2614,9 @@ mod tests {
     use super::super::error::Error;
     use super::*;
 
+    const KEY_A: &str = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    const KEY_B: &str = "SHA256://////////////////////////////////////////8";
+
     #[test]
     fn normalize_cli_scopes_splits_mixed_separators() {
         let input = vec![
@@ -2710,6 +2821,117 @@ mod tests {
             api_base_url_from_node_ws_url("wss://auth.example.com/api/v1/nodes/ws"),
             "https://auth.example.com"
         );
+    }
+
+    #[test]
+    fn cert_host_key_cli_list_pin_forget_round_trips_and_retofus() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().to_string_lossy();
+
+        cmd_node_ssh(
+            crate::cli::NodeSshCommands::CertHostKey {
+                command: crate::cli::NodeSshCertHostKeyCommands::List,
+            },
+            Some(config_path.as_ref()),
+        )
+        .unwrap();
+
+        cmd_node_ssh(
+            crate::cli::NodeSshCommands::CertHostKey {
+                command: crate::cli::NodeSshCertHostKeyCommands::Pin {
+                    host: "SSH.Example.".to_string(),
+                    port: 2222,
+                    sha256_fingerprint: "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+                        .to_string(),
+                },
+            },
+            Some(config_path.as_ref()),
+        )
+        .unwrap();
+
+        let store = CertHostKeyStore::load(dir.path()).unwrap();
+        let entry = store.get("ssh.example", 2222).unwrap();
+        assert_eq!(entry.host, "ssh.example");
+        assert_eq!(entry.host_key_sha256, KEY_A);
+        assert_eq!(entry.source, CertHostKeySource::Explicit);
+
+        cmd_node_ssh(
+            crate::cli::NodeSshCommands::CertHostKey {
+                command: crate::cli::NodeSshCertHostKeyCommands::Forget {
+                    host: "[ssh.example]".to_string(),
+                    port: 2222,
+                },
+            },
+            Some(config_path.as_ref()),
+        )
+        .unwrap();
+
+        let mut store = CertHostKeyStore::load(dir.path()).unwrap();
+        assert!(store.get("ssh.example", 2222).is_none());
+        assert_eq!(
+            store
+                .ensure_matches_or_pin("ssh.example", 2222, KEY_B)
+                .unwrap(),
+            super::super::ssh_host_key_store::HostKeyDecision::PinnedNew
+        );
+        let entry = store.get("ssh.example", 2222).unwrap();
+        assert_eq!(entry.host_key_sha256, KEY_B);
+        assert_eq!(entry.source, CertHostKeySource::Tofu);
+    }
+
+    #[test]
+    fn cert_host_key_cli_pin_rejects_bad_fingerprint() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().to_string_lossy();
+
+        let err = cmd_node_ssh(
+            crate::cli::NodeSshCommands::CertHostKey {
+                command: crate::cli::NodeSshCertHostKeyCommands::Pin {
+                    host: "ssh.example".to_string(),
+                    port: 22,
+                    sha256_fingerprint: "not-a-sha256-fingerprint".to_string(),
+                },
+            },
+            Some(config_path.as_ref()),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, Error::Validation(_)));
+        let store = CertHostKeyStore::load(dir.path()).unwrap();
+        assert!(store.entries().is_empty());
+    }
+
+    #[test]
+    fn cert_host_key_cli_explicit_pin_is_enforced_and_not_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().to_string_lossy();
+
+        cmd_node_ssh(
+            crate::cli::NodeSshCommands::CertHostKey {
+                command: crate::cli::NodeSshCertHostKeyCommands::Pin {
+                    host: "ssh.example".to_string(),
+                    port: 22,
+                    sha256_fingerprint: KEY_A.to_string(),
+                },
+            },
+            Some(config_path.as_ref()),
+        )
+        .unwrap();
+
+        let mut store = CertHostKeyStore::load(dir.path()).unwrap();
+        let err = store
+            .ensure_matches_or_pin("ssh.example", 22, KEY_B)
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            CertHostKeyStoreError::HostKeyMismatch { expected, observed }
+                if expected == KEY_A && observed == KEY_B
+        ));
+        let reloaded = CertHostKeyStore::load(dir.path()).unwrap();
+        let entry = reloaded.get("ssh.example", 22).unwrap();
+        assert_eq!(entry.host_key_sha256, KEY_A);
+        assert_eq!(entry.source, CertHostKeySource::Explicit);
     }
 
     #[test]

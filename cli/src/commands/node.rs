@@ -512,6 +512,16 @@ pub async fn run(command: NodeCommands) -> Result<()> {
                 .map_err(anyhow::Error::from)
         }
 
+        NodeCommands::Ssh {
+            command,
+            config,
+            profile,
+        } => {
+            let effective_config = resolve_effective_config(config.as_deref(), profile.as_deref())?;
+            crate::node::agent::cmd_node_ssh(command, effective_config.as_deref())
+                .map_err(anyhow::Error::from)
+        }
+
         NodeCommands::Migrate {
             to,
             config,

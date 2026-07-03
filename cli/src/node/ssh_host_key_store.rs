@@ -2,6 +2,7 @@ use std::fmt;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use base64::Engine as _;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
@@ -89,18 +90,25 @@ impl fmt::Debug for CertHostKeyStore {
 impl CertHostKeyStore {
     pub fn load(config_dir: &Path) -> Result<Self, CertHostKeyStoreError> {
         let path = store_path(config_dir);
-        if !path.exists() {
-            return Ok(Self {
-                path,
-                file: StoreFile::default(),
-            });
-        }
-
-        let content = std::fs::read_to_string(&path)?;
-        let mut file: StoreFile = toml::from_str(&content)?;
-        file.hosts
-            .sort_by(|a, b| (&a.host, a.port).cmp(&(&b.host, b.port)));
+        let file = load_store_file(&path)?;
         Ok(Self { path, file })
+    }
+
+    pub fn entries(&self) -> &[CertHostKeyEntry] {
+        &self.file.hosts
+    }
+
+    fn reload(&mut self) -> Result<(), CertHostKeyStoreError> {
+        self.file = load_store_file(&self.path)?;
+        Ok(())
+    }
+
+    pub fn get(&self, host: &str, port: u16) -> Option<&CertHostKeyEntry> {
+        let normalized_host = normalize_host(host);
+        self.file
+            .hosts
+            .iter()
+            .find(|entry| entry.host == normalized_host && entry.port == port)
     }
 
     pub fn ensure_matches_or_pin(
@@ -109,6 +117,7 @@ impl CertHostKeyStore {
         port: u16,
         observed_sha256: &str,
     ) -> Result<HostKeyDecision, CertHostKeyStoreError> {
+        self.reload()?;
         let normalized_host = normalize_host(host);
         let observed = canonical_sha256_fingerprint(observed_sha256)?;
 
@@ -132,20 +141,18 @@ impl CertHostKeyStore {
             created_at: now.clone(),
             updated_at: now,
         });
-        self.file
-            .hosts
-            .sort_by(|a, b| (&a.host, a.port).cmp(&(&b.host, b.port)));
+        self.sort_entries();
         self.save()?;
         Ok(HostKeyDecision::PinnedNew)
     }
 
-    #[cfg(test)]
     pub fn set_explicit_pin(
         &mut self,
         host: &str,
         port: u16,
         fingerprint: &str,
     ) -> Result<(), CertHostKeyStoreError> {
+        self.reload()?;
         let normalized_host = normalize_host(host);
         let fingerprint = canonical_sha256_fingerprint(fingerprint)?;
         let now = Utc::now().to_rfc3339();
@@ -163,21 +170,31 @@ impl CertHostKeyStore {
                 created_at: now.clone(),
                 updated_at: now,
             });
-            self.file
-                .hosts
-                .sort_by(|a, b| (&a.host, a.port).cmp(&(&b.host, b.port)));
+            self.sort_entries();
         }
 
         self.save()
     }
 
-    #[cfg(test)]
-    pub fn get(&self, host: &str, port: u16) -> Option<&CertHostKeyEntry> {
+    pub fn forget(
+        &mut self,
+        host: &str,
+        port: u16,
+    ) -> Result<Option<CertHostKeyEntry>, CertHostKeyStoreError> {
+        self.reload()?;
         let normalized_host = normalize_host(host);
-        self.file
+        let removed = self
+            .file
             .hosts
             .iter()
-            .find(|entry| entry.host == normalized_host && entry.port == port)
+            .position(|entry| entry.host == normalized_host && entry.port == port)
+            .map(|index| self.file.hosts.remove(index));
+
+        if removed.is_some() {
+            self.save()?;
+        }
+
+        Ok(removed)
     }
 
     fn entry_mut(&mut self, host: &str, port: u16) -> Option<&mut CertHostKeyEntry> {
@@ -185,6 +202,12 @@ impl CertHostKeyStore {
             .hosts
             .iter_mut()
             .find(|entry| entry.host == host && entry.port == port)
+    }
+
+    fn sort_entries(&mut self) {
+        self.file
+            .hosts
+            .sort_by(|a, b| (&a.host, a.port).cmp(&(&b.host, b.port)));
     }
 
     fn save(&self) -> Result<(), CertHostKeyStoreError> {
@@ -222,6 +245,18 @@ impl CertHostKeyStore {
     }
 }
 
+fn load_store_file(path: &Path) -> Result<StoreFile, CertHostKeyStoreError> {
+    if !path.exists() {
+        return Ok(StoreFile::default());
+    }
+
+    let content = std::fs::read_to_string(path)?;
+    let mut file: StoreFile = toml::from_str(&content)?;
+    file.hosts
+        .sort_by(|a, b| (&a.host, a.port).cmp(&(&b.host, b.port)));
+    Ok(file)
+}
+
 pub fn store_path(config_dir: &Path) -> PathBuf {
     config_dir.join(STORE_FILE_NAME)
 }
@@ -234,11 +269,23 @@ fn normalize_host(host: &str) -> String {
         .to_ascii_lowercase()
 }
 
-fn canonical_sha256_fingerprint(fingerprint: &str) -> Result<String, CertHostKeyStoreError> {
+pub fn canonical_sha256_fingerprint(fingerprint: &str) -> Result<String, CertHostKeyStoreError> {
     let normalized = normalize_sha256_fingerprint(fingerprint);
-    if normalized.is_empty() {
+    if normalized.len() != 43
+        || !normalized
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/')
+    {
         return Err(CertHostKeyStoreError::InvalidFingerprint);
     }
+
+    let decoded = base64::engine::general_purpose::STANDARD_NO_PAD
+        .decode(&normalized)
+        .map_err(|_| CertHostKeyStoreError::InvalidFingerprint)?;
+    if decoded.len() != 32 {
+        return Err(CertHostKeyStoreError::InvalidFingerprint);
+    }
+
     Ok(format!("SHA256:{normalized}"))
 }
 
@@ -259,8 +306,8 @@ fn fingerprints_equal(left: &str, right: &str) -> bool {
 mod tests {
     use super::*;
 
-    const KEY_A: &str = "SHA256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const KEY_B: &str = "SHA256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const KEY_A: &str = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    const KEY_B: &str = "SHA256://////////////////////////////////////////8";
 
     #[test]
     fn tofu_first_connect_accepts_and_persists() {
@@ -291,7 +338,7 @@ mod tests {
             .ensure_matches_or_pin(
                 "ssh.example",
                 22,
-                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa==",
+                "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
             )
             .unwrap();
 
@@ -325,7 +372,7 @@ mod tests {
             .set_explicit_pin(
                 "[SSH.Example]",
                 22,
-                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa==",
+                "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
             )
             .unwrap();
 
@@ -358,5 +405,73 @@ mod tests {
             store.get("ssh.example", 22).unwrap().source,
             CertHostKeySource::Explicit
         );
+    }
+
+    #[test]
+    fn running_store_reloads_external_explicit_pin_on_verify() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut running_store = CertHostKeyStore::load(dir.path()).unwrap();
+        running_store
+            .ensure_matches_or_pin("ssh.example", 22, KEY_A)
+            .unwrap();
+
+        let mut cli_store = CertHostKeyStore::load(dir.path()).unwrap();
+        cli_store
+            .set_explicit_pin("ssh.example", 22, KEY_B)
+            .unwrap();
+
+        let err = running_store
+            .ensure_matches_or_pin("ssh.example", 22, KEY_A)
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            CertHostKeyStoreError::HostKeyMismatch { expected, observed }
+                if expected == KEY_B && observed == KEY_A
+        ));
+        let reloaded = CertHostKeyStore::load(dir.path()).unwrap();
+        assert_eq!(
+            reloaded.get("ssh.example", 22).unwrap().source,
+            CertHostKeySource::Explicit
+        );
+    }
+
+    #[test]
+    fn running_store_reloads_external_forget_and_retofus() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut running_store = CertHostKeyStore::load(dir.path()).unwrap();
+        running_store
+            .ensure_matches_or_pin("ssh.example", 22, KEY_A)
+            .unwrap();
+
+        let mut cli_store = CertHostKeyStore::load(dir.path()).unwrap();
+        let removed = cli_store.forget("ssh.example", 22).unwrap();
+        assert!(removed.is_some());
+
+        let decision = running_store
+            .ensure_matches_or_pin("ssh.example", 22, KEY_B)
+            .unwrap();
+
+        assert_eq!(decision, HostKeyDecision::PinnedNew);
+        let reloaded = CertHostKeyStore::load(dir.path()).unwrap();
+        let entry = reloaded.get("ssh.example", 22).unwrap();
+        assert_eq!(entry.host_key_sha256, KEY_B);
+        assert_eq!(entry.source, CertHostKeySource::Tofu);
+    }
+
+    #[test]
+    fn invalid_fingerprint_is_rejected() {
+        for fingerprint in [
+            "",
+            "SHA256:",
+            "SHA256:not-base64",
+            "MD5:aa:bb:cc",
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...",
+        ] {
+            assert!(matches!(
+                canonical_sha256_fingerprint(fingerprint),
+                Err(CertHostKeyStoreError::InvalidFingerprint)
+            ));
+        }
     }
 }
