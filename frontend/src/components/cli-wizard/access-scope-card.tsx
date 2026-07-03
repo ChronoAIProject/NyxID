@@ -177,12 +177,7 @@ function AccessGroup({
                       onToggle(item.id)
                     }}
                   />
-                  {item.iconSlug ? (
-                    <ServiceIcon
-                      slug={item.iconSlug}
-                      className="h-4 w-4 shrink-0 text-muted-foreground"
-                    />
-                  ) : null}
+                  <ServiceIcon slug={item.iconSlug} size="xs" />
                   <span className="truncate">
                     {item.primary}
                     {item.secondary ? (

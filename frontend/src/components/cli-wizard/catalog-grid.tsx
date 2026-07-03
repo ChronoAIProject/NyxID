@@ -268,10 +268,7 @@ function CatalogCard({
         </span>
       ) : null}
       <div className="flex w-full items-center gap-2">
-        <ServiceIcon
-          slug={entry.slug}
-          className="h-5 w-5 shrink-0 text-muted-foreground"
-        />
+        <ServiceIcon slug={entry.slug} size="sm" />
         <span className="text-[13px] font-semibold text-foreground">
           {entry.name || entry.slug}
         </span>

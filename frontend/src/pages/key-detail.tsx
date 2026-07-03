@@ -2044,12 +2044,7 @@ export function KeyDetailPage() {
       <div className="flex flex-col gap-2">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-center gap-3">
-            {keyInfo.catalog_service_slug && (
-              <ServiceIcon
-                slug={keyInfo.catalog_service_slug}
-                className="h-6 w-6 shrink-0 text-muted-foreground"
-              />
-            )}
+            <ServiceIcon slug={keyInfo.catalog_service_slug} size="md" />
             <div className="flex flex-col gap-2">
             {keyInfo.auto_connected ? (
               <h2 className="text-[28px] font-bold leading-none tracking-tight" style={{ letterSpacing: "-0.03em" }}>

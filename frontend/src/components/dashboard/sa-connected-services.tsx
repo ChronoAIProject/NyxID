@@ -269,10 +269,7 @@ function ConnectServiceDropdown({
       <DropdownMenuContent style={{ maxHeight: "16rem", overflowY: "auto" }}>
         {services.map((s) => (
           <DropdownMenuItem key={s.id} onClick={() => onSelect(s)}>
-            <ServiceIcon
-              slug={s.slug}
-              className="h-4 w-4 shrink-0 text-muted-foreground"
-            />
+            <ServiceIcon slug={s.slug} size="xs" />
             <span>{s.name}</span>
             {s.requires_user_credential && (
               <KeyRound className="ml-1 h-3 w-3 text-muted-foreground" />

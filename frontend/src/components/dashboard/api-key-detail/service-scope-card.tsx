@@ -143,12 +143,7 @@ export function ServiceScopeCard({
                         checked={selectedIds.includes(k.id)}
                         onCheckedChange={() => toggleService(k.id)}
                       />
-                      {k.catalog_service_slug && (
-                        <ServiceIcon
-                          slug={k.catalog_service_slug}
-                          className="h-4 w-4 shrink-0 text-muted-foreground"
-                        />
-                      )}
+                      <ServiceIcon slug={k.catalog_service_slug} size="xs" />
                       <Label htmlFor={`svc-${k.id}`} className="text-xs">
                         {k.label}
                         <span className="text-muted-foreground">

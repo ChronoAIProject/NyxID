@@ -251,12 +251,10 @@ function MemberScopeForm({
                         checked={isChecked}
                         onCheckedChange={() => toggleService(service.id)}
                       />
-                      {service.catalog_service_slug && (
-                        <ServiceIcon
-                          slug={service.catalog_service_slug}
-                          className="h-5 w-5 shrink-0 text-muted-foreground"
-                        />
-                      )}
+                      <ServiceIcon
+                        slug={service.catalog_service_slug}
+                        size="sm"
+                      />
                       <Label
                         htmlFor={id}
                         className="flex-1 cursor-pointer space-y-0.5"

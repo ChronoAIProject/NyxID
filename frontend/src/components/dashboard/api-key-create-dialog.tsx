@@ -513,12 +513,10 @@ export function ApiKeyCreateDialog({
                                           )
                                         }
                                       />
-                                      {s.catalog_service_slug && (
-                                        <ServiceIcon
-                                          slug={s.catalog_service_slug}
-                                          className="h-4 w-4 shrink-0 text-muted-foreground"
-                                        />
-                                      )}
+                                      <ServiceIcon
+                                        slug={s.catalog_service_slug}
+                                        size="xs"
+                                      />
                                       <Label
                                         htmlFor={`create-svc-${s.id}`}
                                         className="text-xs"

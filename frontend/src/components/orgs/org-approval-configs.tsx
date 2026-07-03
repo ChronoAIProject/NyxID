@@ -505,12 +505,7 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
                     // configurable here (ChronoAIProject/NyxID#165).
                     <SelectItem key={s.id} value={s.id}>
                       <span className="inline-flex items-center gap-2">
-                        {s.catalog_service_slug && (
-                          <ServiceIcon
-                            slug={s.catalog_service_slug}
-                            className="h-4 w-4 shrink-0 text-muted-foreground"
-                          />
-                        )}
+                        <ServiceIcon slug={s.catalog_service_slug} size="xs" />
                         <span>{s.label}</span>
                       </span>
                     </SelectItem>

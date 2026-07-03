@@ -187,12 +187,7 @@ export function ServiceDetailPage() {
       <PageHeader
         title={service.name}
         description={service.description ?? undefined}
-        leading={
-          <ServiceIcon
-            slug={service.slug}
-            className="h-6 w-6 shrink-0 text-muted-foreground"
-          />
-        }
+        leading={<ServiceIcon slug={service.slug} size="md" />}
         actions={
           <>
             {terminalSupported && (

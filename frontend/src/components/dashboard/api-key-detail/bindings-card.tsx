@@ -242,12 +242,7 @@ export function BindingsCard({
                   {availableServices.map((s) => (
                     <SelectItem key={s.id} value={s.id}>
                       <span className="inline-flex items-center gap-2">
-                        {s.catalog_service_slug && (
-                          <ServiceIcon
-                            slug={s.catalog_service_slug}
-                            className="h-4 w-4 shrink-0 text-muted-foreground"
-                          />
-                        )}
+                        <ServiceIcon slug={s.catalog_service_slug} size="xs" />
                         <span>
                           {s.label}
                           {s.slug !== s.label ? ` (${s.slug})` : ""}
@@ -298,12 +293,7 @@ export function BindingsCard({
                 }
               >
                 <div className="flex items-center gap-2.5">
-                  {boundKey?.catalog_service_slug && (
-                    <ServiceIcon
-                      slug={boundKey.catalog_service_slug}
-                      className="h-5 w-5 shrink-0 text-muted-foreground"
-                    />
-                  )}
+                  <ServiceIcon slug={boundKey?.catalog_service_slug} size="sm" />
                   <div className="space-y-0.5">
                   <p className="text-[12px] font-medium flex items-center gap-1.5">
                     {b.is_invalid && (
