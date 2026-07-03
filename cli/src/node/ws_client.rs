@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use base64::Engine;
@@ -21,6 +21,7 @@ use super::metrics::NodeMetrics;
 use super::proxy_executor;
 use super::secret_backend::SecretBackend;
 use super::signing::{self, ReplayGuard};
+use super::ssh_host_key_store::{CertHostKeyStore, SharedCertHostKeyStore};
 use super::ssh_node_exec::{self, SshNodeExecError};
 use super::ws_frame_injector::{
     self, IncomingFrame, InjectorState, WsFrameDirection, WsFrameInjection, WsFrameKind,
@@ -30,21 +31,10 @@ use super::ws_frame_injector::{
 // Web terminal types
 // ---------------------------------------------------------------------------
 
-const WEB_TERMINAL_PTY_READ_BUF: usize = 16 * 1024;
-
-/// Maximum bytes captured per output stream (stdout / stderr) for ssh_exec.
-const SSH_EXEC_MAX_OUTPUT_BYTES: usize = 1_048_576; // 1 MB
-
 type ActiveWebTerminalMap = Arc<tokio::sync::Mutex<HashMap<String, ActiveWebTerminal>>>;
 
 enum ActiveWebTerminal {
-    Cert {
-        pty_writer: pty_process::OwnedWritePty,
-        child: tokio::process::Child,
-        task_handle: tokio::task::JoinHandle<()>,
-        _temp_dir: tempfile::TempDir,
-    },
-    NodeKey {
+    Russh {
         control_tx: mpsc::Sender<ssh_node_exec::SshNodeShellControl>,
         task_handle: tokio::task::JoinHandle<()>,
     },
@@ -901,6 +891,10 @@ async fn connect_and_serve(
     let active_web_terminals: ActiveWebTerminalMap =
         Arc::new(tokio::sync::Mutex::new(HashMap::new()));
     let active_ws_proxies: ActiveWsProxyMap = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    let cert_host_key_store: SharedCertHostKeyStore =
+        Arc::new(Mutex::new(CertHostKeyStore::load(config_dir).map_err(
+            |error| Error::Config(format!("Failed to load SSH host-key store: {error}")),
+        )?));
 
     // Writer task: forwards messages from the channel to the WS sink.
     // Text frames carry JSON control messages; binary frames carry raw data chunks.
@@ -1061,6 +1055,7 @@ async fn connect_and_serve(
                 let terminals = active_web_terminals.clone();
                 let secret = signing_secret.clone();
                 let replay = replay_guard.clone();
+                let cert_host_key_store = cert_host_key_store.clone();
                 let config_path = config_path.to_path_buf();
                 let config_dir = config_dir.to_path_buf();
                 let storage_backend = storage_backend.to_string();
@@ -1073,6 +1068,7 @@ async fn connect_and_serve(
                         &storage_backend,
                         tx_clone,
                         terminals,
+                        cert_host_key_store,
                         secret,
                         replay,
                     )
@@ -1093,8 +1089,17 @@ async fn connect_and_serve(
                 let ssh_config = config.ssh.clone();
                 let secret = signing_secret.clone();
                 let replay = replay_guard.clone();
+                let cert_host_key_store = cert_host_key_store.clone();
                 tokio::spawn(async move {
-                    handle_ssh_exec(&parsed, &ssh_config, tx_clone, secret, replay).await;
+                    handle_ssh_exec(
+                        &parsed,
+                        &ssh_config,
+                        tx_clone,
+                        cert_host_key_store,
+                        secret,
+                        replay,
+                    )
+                    .await;
                 });
             }
             Some("ssh_node_exec_open") => {
@@ -1725,6 +1730,7 @@ async fn handle_ssh_exec(
     parsed: &serde_json::Value,
     ssh_config: &SshConfig,
     tx: mpsc::Sender<NodeWsMessage>,
+    cert_host_key_store: SharedCertHostKeyStore,
     signing_secret: Option<SharedSigningSecret>,
     replay_guard: Arc<tokio::sync::Mutex<ReplayGuard>>,
 ) {
@@ -1817,10 +1823,24 @@ async fn handle_ssh_exec(
             return;
         }
     };
-    let certificate_openssh = parsed["certificate_openssh"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .map(String::from);
+    let certificate_openssh = match parsed["certificate_openssh"].as_str() {
+        Some(certificate) if !certificate.is_empty() => certificate.to_string(),
+        _ => {
+            tracing::warn!(request_id = %request_id, "ssh_exec missing certificate_openssh");
+            let _ = send_ssh_exec_result(
+                &tx,
+                &request_id,
+                -1,
+                &[],
+                &[],
+                0,
+                false,
+                Some("missing_certificate"),
+            )
+            .await;
+            return;
+        }
+    };
     let command = match parsed["command"].as_str() {
         Some(c) if !c.is_empty() => c.to_string(),
         _ => {
@@ -1855,172 +1875,25 @@ async fn handle_ssh_exec(
         return;
     }
 
-    // Write key + cert to temp files
-    let temp_dir = match tempfile::tempdir() {
-        Ok(d) => d,
-        Err(error) => {
-            tracing::error!(request_id = %request_id, %error, "failed to create temp dir for SSH exec");
+    let entry = cert_mode_ssh_entry(
+        &host,
+        port,
+        &principal,
+        private_key_pem,
+        certificate_openssh,
+        cert_host_key_store,
+    );
+
+    match ssh_node_exec::exec_command(entry, command, timeout_secs).await {
+        Ok(output) => {
             let _ = send_ssh_exec_result(
                 &tx,
                 &request_id,
-                -1,
-                &[],
-                &[],
-                0,
-                false,
-                Some("internal_error"),
-            )
-            .await;
-            return;
-        }
-    };
-
-    let key_path = temp_dir.path().join("id_key");
-    if let Err(error) = write_temp_key_file(&key_path, &private_key_pem) {
-        tracing::error!(request_id = %request_id, %error, "failed to write temp SSH key for exec");
-        let _ = send_ssh_exec_result(
-            &tx,
-            &request_id,
-            -1,
-            &[],
-            &[],
-            0,
-            false,
-            Some("internal_error"),
-        )
-        .await;
-        return;
-    }
-
-    let cert_path = certificate_openssh.as_ref().map(|cert| {
-        let path = temp_dir.path().join("id_key-cert.pub");
-        (path, cert.clone())
-    });
-    if let Some((ref path, ref cert_content)) = cert_path
-        && let Err(error) = std::fs::write(path, cert_content)
-    {
-        tracing::error!(request_id = %request_id, %error, "failed to write temp SSH certificate for exec");
-        let _ = send_ssh_exec_result(
-            &tx,
-            &request_id,
-            -1,
-            &[],
-            &[],
-            0,
-            false,
-            Some("internal_error"),
-        )
-        .await;
-        return;
-    }
-
-    // Build SSH command (no PTY needed for exec)
-    let identity_file_opt = format!("IdentityFile={}", key_path.display());
-    let port_str = port.to_string();
-    let user_host = format!("{principal}@{host}");
-    let cert_file_opt = cert_path
-        .as_ref()
-        .map(|(path, _)| format!("CertificateFile={}", path.display()));
-
-    let mut ssh_args: Vec<&str> = vec![
-        "-o",
-        "StrictHostKeyChecking=no",
-        "-o",
-        "UserKnownHostsFile=/dev/null",
-        "-o",
-        &identity_file_opt,
-        "-o",
-        "IdentitiesOnly=yes",
-        "-o",
-        "LogLevel=FATAL",
-        "-o",
-        "RequestTTY=no",
-    ];
-    if let Some(ref cert_opt) = cert_file_opt {
-        ssh_args.extend_from_slice(&["-o", cert_opt.as_str()]);
-    }
-    ssh_args.extend_from_slice(&["-p", &port_str, &user_host]);
-    ssh_args.push(&command);
-
-    let started_at = std::time::Instant::now();
-
-    let mut cmd = tokio::process::Command::new("ssh");
-    cmd.args(&ssh_args);
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::piped());
-    cmd.stdin(std::process::Stdio::null());
-
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(error) => {
-            tracing::error!(request_id = %request_id, %error, "failed to spawn ssh for exec");
-            let _ = send_ssh_exec_result(
-                &tx,
-                &request_id,
-                -1,
-                &[],
-                &[],
-                0,
-                false,
-                Some("ssh_spawn_failed"),
-            )
-            .await;
-            return;
-        }
-    };
-
-    let child_stdout = child.stdout.take();
-    let child_stderr = child.stderr.take();
-
-    let read_and_wait = async {
-        let stdout_handle = tokio::spawn(async move {
-            let mut buf = Vec::new();
-            if let Some(mut out) = child_stdout {
-                use tokio::io::AsyncReadExt;
-                // Cap output to prevent memory exhaustion
-                let _ = (&mut out)
-                    .take(SSH_EXEC_MAX_OUTPUT_BYTES as u64)
-                    .read_to_end(&mut buf)
-                    .await;
-            }
-            buf
-        });
-        let stderr_handle = tokio::spawn(async move {
-            let mut buf = Vec::new();
-            if let Some(mut err) = child_stderr {
-                use tokio::io::AsyncReadExt;
-                let _ = (&mut err)
-                    .take(SSH_EXEC_MAX_OUTPUT_BYTES as u64)
-                    .read_to_end(&mut buf)
-                    .await;
-            }
-            buf
-        });
-
-        let status = child.wait().await;
-        let stdout_bytes = stdout_handle.await.unwrap_or_default();
-        let stderr_bytes = stderr_handle.await.unwrap_or_default();
-        (status, stdout_bytes, stderr_bytes)
-    };
-
-    let result =
-        tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), read_and_wait).await;
-
-    let duration_ms = started_at.elapsed().as_millis() as u64;
-
-    // temp_dir is dropped here, cleaning up key files
-
-    match result {
-        Ok((Ok(status), stdout_bytes, stderr_bytes)) => {
-            let exit_code = status.code().unwrap_or(-1);
-            let _ = send_ssh_exec_result(
-                &tx,
-                &request_id,
-                exit_code,
-                &stdout_bytes,
-                &stderr_bytes,
-                duration_ms,
-                false,
+                output.exit_code,
+                &output.stdout,
+                &output.stderr,
+                output.duration_ms,
+                output.timed_out,
                 None,
             )
             .await;
@@ -2029,44 +1902,58 @@ async fn handle_ssh_exec(
                 host = %host,
                 port,
                 principal = %principal,
-                exit_code,
-                duration_ms,
+                exit_code = output.exit_code,
+                duration_ms = output.duration_ms,
+                timed_out = output.timed_out,
                 "ssh exec completed"
             );
         }
-        Ok((Err(error), _, _)) => {
-            tracing::error!(request_id = %request_id, %error, "ssh exec process failed");
-            let _ = send_ssh_exec_result(
-                &tx,
-                &request_id,
-                -1,
-                &[],
-                &[],
-                duration_ms,
-                false,
-                Some("ssh_process_failed"),
-            )
-            .await;
-        }
-        Err(_) => {
-            // Timeout: child is dropped (killed) by the async block drop
+        Err(error) => {
             tracing::warn!(
                 request_id = %request_id,
-                timeout_secs,
-                "ssh exec timed out"
+                host = %host,
+                port,
+                principal = %principal,
+                error_code = error.code,
+                error = %error.message,
+                "ssh exec failed"
             );
-            let _ = send_ssh_exec_result(
+            let _ = send_ssh_exec_result_with_code(
                 &tx,
                 &request_id,
                 -1,
                 &[],
-                b"Command execution timed out",
-                duration_ms,
-                true,
-                None,
+                &[],
+                0,
+                false,
+                Some(&error.message),
+                Some(error.code),
             )
             .await;
         }
+    }
+}
+
+fn cert_mode_ssh_entry(
+    host: &str,
+    port: u16,
+    principal: &str,
+    private_key_pem: String,
+    certificate_openssh: String,
+    cert_host_key_store: SharedCertHostKeyStore,
+) -> ssh_keys::SshKeyEntry {
+    ssh_keys::SshKeyEntry {
+        service_slug: format!("cert:{host}:{port}"),
+        principal: principal.to_string(),
+        private_key_pem: Zeroizing::new(private_key_pem),
+        passphrase: None,
+        certificate_openssh: Some(Zeroizing::new(certificate_openssh)),
+        target_host: host.to_string(),
+        target_port: port,
+        host_key_sha256: None,
+        cert_host_key_store: Some(cert_host_key_store),
+        algorithms: None,
+        created_at: chrono::Utc::now(),
     }
 }
 
@@ -2586,6 +2473,7 @@ async fn handle_web_terminal_open(
     storage_backend: &str,
     tx: mpsc::Sender<NodeWsMessage>,
     active_terminals: ActiveWebTerminalMap,
+    cert_host_key_store: SharedCertHostKeyStore,
     signing_secret: Option<SharedSigningSecret>,
     replay_guard: Arc<tokio::sync::Mutex<ReplayGuard>>,
 ) {
@@ -2661,10 +2549,14 @@ async fn handle_web_terminal_open(
             return;
         }
     };
-    let certificate_openssh = parsed["certificate_openssh"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .map(String::from);
+    let certificate_openssh = match parsed["certificate_openssh"].as_str() {
+        Some(certificate) if !certificate.is_empty() => certificate.to_string(),
+        _ => {
+            tracing::warn!(session_id = %session_id, "web_terminal_open missing certificate_openssh");
+            let _ = send_web_terminal_closed(&tx, &session_id, Some("missing_certificate")).await;
+            return;
+        }
+    };
 
     // Validate target against SSH config policy
     if let Err(error) = validate_node_ssh_target(ssh_config, &host, port).await {
@@ -2694,139 +2586,74 @@ async fn handle_web_terminal_open(
         }
     }
 
-    // Write SSH key material to temp files
-    let temp_dir = match tempfile::tempdir() {
-        Ok(d) => d,
-        Err(error) => {
-            tracing::error!(session_id = %session_id, %error, "failed to create temp dir for SSH keys");
-            let _ = send_web_terminal_closed(&tx, &session_id, Some("internal_error")).await;
-            return;
-        }
-    };
-
-    let key_path = temp_dir.path().join("id_key");
-    if let Err(error) = write_temp_key_file(&key_path, &private_key_pem) {
-        tracing::error!(session_id = %session_id, %error, "failed to write temp SSH key");
-        let _ = send_web_terminal_closed(&tx, &session_id, Some("internal_error")).await;
-        return;
-    }
-
-    let cert_path = certificate_openssh.as_ref().map(|cert| {
-        // OpenSSH expects the certificate file next to the key, named <key>-cert.pub
-        let path = temp_dir.path().join("id_key-cert.pub");
-        (path, cert.clone())
-    });
-    if let Some((ref path, ref cert_content)) = cert_path
-        && let Err(error) = std::fs::write(path, cert_content)
-    {
-        tracing::error!(session_id = %session_id, %error, "failed to write temp SSH certificate");
-        let _ = send_web_terminal_closed(&tx, &session_id, Some("internal_error")).await;
-        return;
-    }
-
-    // Open PTY and spawn SSH
-    let (pty, pts) = match pty_process::open() {
-        Ok(pair) => pair,
-        Err(error) => {
-            tracing::error!(session_id = %session_id, %error, "failed to open PTY");
-            let _ = send_web_terminal_closed(&tx, &session_id, Some("pty_open_failed")).await;
-            return;
-        }
-    };
-
-    if let Err(error) = pty.resize(pty_process::Size::new(rows, cols)) {
-        tracing::error!(session_id = %session_id, %error, "failed to resize PTY");
-        let _ = send_web_terminal_closed(&tx, &session_id, Some("pty_resize_failed")).await;
-        return;
-    }
-
-    // Set PTY to raw mode so control characters (Ctrl+C, Ctrl+Z, etc.) and
-    // special keys (for top, vim, etc.) pass through to the remote shell.
-    {
-        use std::os::fd::AsFd;
-        if let Ok(mut termios) = nix::sys::termios::tcgetattr(pty.as_fd()) {
-            nix::sys::termios::cfmakeraw(&mut termios);
-            let _ = nix::sys::termios::tcsetattr(
-                pty.as_fd(),
-                nix::sys::termios::SetArg::TCSANOW,
-                &termios,
-            );
-        }
-    }
-
-    let identity_file_opt = format!("IdentityFile={}", key_path.display());
-    let port_str = port.to_string();
-    let user_host = format!("{principal}@{host}");
-    let cert_file_opt = cert_path
-        .as_ref()
-        .map(|(path, _)| format!("CertificateFile={}", path.display()));
-
-    let mut ssh_args: Vec<&str> = vec![
-        "-o",
-        "StrictHostKeyChecking=no",
-        "-o",
-        "UserKnownHostsFile=/dev/null",
-        "-o",
-        &identity_file_opt,
-        "-o",
-        "IdentitiesOnly=yes",
-        "-o",
-        "RequestTTY=no",
-        "-o",
-        "LogLevel=FATAL",
-    ];
-    if let Some(ref cert_opt) = cert_file_opt {
-        ssh_args.extend_from_slice(&["-o", cert_opt.as_str()]);
-    }
-    let remote_cmd = format!(
-        "export TERM=xterm-256color COLUMNS={cols} LINES={rows}; \
-         script -q /dev/null sh -c 'stty cols {cols} rows {rows} 2>/dev/null; exec $SHELL -il' 2>/dev/null \
-         || exec $SHELL -il"
+    let term = parsed["term"]
+        .as_str()
+        .unwrap_or("xterm-256color")
+        .to_string();
+    let entry = cert_mode_ssh_entry(
+        &host,
+        port,
+        &principal,
+        private_key_pem,
+        certificate_openssh,
+        cert_host_key_store,
     );
-    ssh_args.extend_from_slice(&["-p", &port_str, &user_host]);
-    ssh_args.push(&remote_cmd);
 
-    let cmd = pty_process::Command::new("ssh");
-    let child = match cmd.args(&ssh_args).spawn(pts) {
-        Ok(c) => c,
-        Err(error) => {
-            tracing::error!(session_id = %session_id, %error, "failed to spawn SSH in PTY");
-            let _ = send_web_terminal_closed(&tx, &session_id, Some("ssh_spawn_failed")).await;
-            return;
-        }
-    };
-
-    // Send started notification
-    if !send_ws_message(
-        &tx,
-        serde_json::json!({
-            "type": "web_terminal_started",
-            "session_id": session_id,
-        })
-        .to_string(),
+    start_russh_web_terminal(
+        entry,
+        term,
+        cols,
+        rows,
+        tx,
+        active_terminals,
+        session_id,
+        "cert",
     )
-    .await
-    {
-        return;
-    }
+    .await;
+}
 
-    // Split PTY and spawn reader task
-    let (mut pty_reader, pty_writer) = pty.into_split();
-    let reader_session_id = session_id.clone();
-    let reader_tx = tx.clone();
-    let reader_terminals = active_terminals.clone();
+#[allow(clippy::too_many_arguments)]
+async fn start_russh_web_terminal(
+    entry: ssh_keys::SshKeyEntry,
+    term: String,
+    cols: u16,
+    rows: u16,
+    tx: mpsc::Sender<NodeWsMessage>,
+    active_terminals: ActiveWebTerminalMap,
+    session_id: String,
+    auth_mode: &'static str,
+) {
+    let (control_tx, control_rx) =
+        mpsc::channel::<ssh_node_exec::SshNodeShellControl>(SSH_CONTROL_CHANNEL_SIZE);
+    let (event_tx, mut event_rx) =
+        mpsc::channel::<ssh_node_exec::SshNodeShellEvent>(SSH_CONTROL_CHANNEL_SIZE);
+    let shell_session_id = session_id.clone();
+    let shell_tx = tx.clone();
+    let shell_terminals = active_terminals.clone();
+    let principal = entry.principal.clone();
+    let target_host = entry.target_host.clone();
+    let target_port = entry.target_port;
     let task_handle = tokio::spawn(async move {
-        let mut buf = [0u8; WEB_TERMINAL_PTY_READ_BUF];
-        loop {
-            match pty_reader.read(&mut buf).await {
-                Ok(0) => break,
-                Ok(n) => {
-                    let encoded = base64::engine::general_purpose::STANDARD.encode(&buf[..n]);
+        while let Some(event) = event_rx.recv().await {
+            match event {
+                ssh_node_exec::SshNodeShellEvent::Started => {
+                    let _ = send_ws_message(
+                        &shell_tx,
+                        serde_json::json!({
+                            "type": "web_terminal_started",
+                            "session_id": shell_session_id,
+                        })
+                        .to_string(),
+                    )
+                    .await;
+                }
+                ssh_node_exec::SshNodeShellEvent::Data(bytes) => {
+                    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
                     if !send_ws_message(
-                        &reader_tx,
+                        &shell_tx,
                         serde_json::json!({
                             "type": "web_terminal_data",
-                            "session_id": reader_session_id,
+                            "session_id": shell_session_id,
                             "data": encoded,
                         })
                         .to_string(),
@@ -2836,42 +2663,47 @@ async fn handle_web_terminal_open(
                         break;
                     }
                 }
-                Err(error) => {
-                    // EIO is expected when the child process exits on the PTY
-                    if error.raw_os_error() != Some(nix::libc::EIO) {
-                        tracing::debug!(
-                            session_id = %reader_session_id,
-                            %error,
-                            "PTY read error"
-                        );
-                    }
+                ssh_node_exec::SshNodeShellEvent::Closed(error) => {
+                    let _ = remove_web_terminal_entry(&shell_terminals, &shell_session_id).await;
+                    let error_message = error.as_ref().map(|error| error.message.as_str());
+                    let error_code = error.as_ref().map(|error| error.code);
+                    let _ = send_web_terminal_closed_with_code(
+                        &shell_tx,
+                        &shell_session_id,
+                        error_message,
+                        error_code,
+                    )
+                    .await;
                     break;
                 }
             }
         }
-
-        // Reader finished: clean up entry and notify server
-        let _ = remove_web_terminal_entry(&reader_terminals, &reader_session_id).await;
-        let _ = send_web_terminal_closed(&reader_tx, &reader_session_id, None).await;
     });
 
-    // Store the terminal entry
     active_terminals.lock().await.insert(
         session_id.clone(),
-        ActiveWebTerminal::Cert {
-            pty_writer,
-            child,
+        ActiveWebTerminal::Russh {
+            control_tx,
             task_handle,
-            _temp_dir: temp_dir,
         },
     );
 
+    tokio::spawn(ssh_node_exec::run_shell(
+        entry,
+        term,
+        u32::from(cols),
+        u32::from(rows),
+        control_rx,
+        event_tx,
+    ));
+
     tracing::info!(
         session_id = %session_id,
-        host = %host,
-        port,
+        auth_mode,
+        host = %target_host,
+        port = target_port,
         principal = %principal,
-        "web terminal session started"
+        "web terminal session starting"
     );
 }
 
@@ -2982,77 +2814,17 @@ async fn handle_node_key_web_terminal_open(
         }
     }
 
-    let (control_tx, control_rx) =
-        mpsc::channel::<ssh_node_exec::SshNodeShellControl>(SSH_CONTROL_CHANNEL_SIZE);
-    let (event_tx, mut event_rx) =
-        mpsc::channel::<ssh_node_exec::SshNodeShellEvent>(SSH_CONTROL_CHANNEL_SIZE);
-    let shell_session_id = session_id.clone();
-    let shell_tx = tx.clone();
-    let shell_terminals = active_terminals.clone();
-    let task_handle = tokio::spawn(async move {
-        tokio::spawn(ssh_node_exec::run_shell(
-            entry,
-            term,
-            u32::from(cols),
-            u32::from(rows),
-            control_rx,
-            event_tx,
-        ));
-
-        while let Some(event) = event_rx.recv().await {
-            match event {
-                ssh_node_exec::SshNodeShellEvent::Started => {
-                    let _ = send_ws_message(
-                        &shell_tx,
-                        serde_json::json!({
-                            "type": "web_terminal_started",
-                            "session_id": shell_session_id,
-                        })
-                        .to_string(),
-                    )
-                    .await;
-                }
-                ssh_node_exec::SshNodeShellEvent::Data(bytes) => {
-                    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
-                    if !send_ws_message(
-                        &shell_tx,
-                        serde_json::json!({
-                            "type": "web_terminal_data",
-                            "session_id": shell_session_id,
-                            "data": encoded,
-                        })
-                        .to_string(),
-                    )
-                    .await
-                    {
-                        break;
-                    }
-                }
-                ssh_node_exec::SshNodeShellEvent::Closed(error) => {
-                    let _ = remove_web_terminal_entry(&shell_terminals, &shell_session_id).await;
-                    let error_message = error.as_ref().map(|error| error.message.as_str());
-                    let _ =
-                        send_web_terminal_closed(&shell_tx, &shell_session_id, error_message).await;
-                    break;
-                }
-            }
-        }
-    });
-
-    active_terminals.lock().await.insert(
-        session_id.clone(),
-        ActiveWebTerminal::NodeKey {
-            control_tx,
-            task_handle,
-        },
-    );
-
-    tracing::info!(
-        session_id = %session_id,
-        service_slug = %service_slug,
-        principal = %principal,
-        "node-key web terminal session starting"
-    );
+    start_russh_web_terminal(
+        entry,
+        term,
+        cols,
+        rows,
+        tx,
+        active_terminals,
+        session_id,
+        "node_key",
+    )
+    .await;
 }
 
 async fn verify_signed_web_terminal_open(
@@ -3111,16 +2883,11 @@ async fn handle_web_terminal_data(
     let mut guard = active_terminals.lock().await;
     if let Some(terminal) = guard.get_mut(session_id) {
         match terminal {
-            ActiveWebTerminal::Cert { pty_writer, .. } => {
-                if let Err(error) = pty_writer.write_all(&bytes).await {
-                    tracing::warn!(session_id, %error, "failed to write to PTY");
-                }
-            }
-            ActiveWebTerminal::NodeKey { control_tx, .. } => {
+            ActiveWebTerminal::Russh { control_tx, .. } => {
                 if let Err(error) =
                     control_tx.try_send(ssh_node_exec::SshNodeShellControl::Data(bytes))
                 {
-                    tracing::warn!(session_id, %error, "failed to send node-key shell data");
+                    tracing::warn!(session_id, %error, "failed to send shell data");
                 }
             }
         }
@@ -3153,19 +2920,14 @@ async fn handle_web_terminal_resize(
     let guard = active_terminals.lock().await;
     if let Some(terminal) = guard.get(session_id) {
         match terminal {
-            ActiveWebTerminal::Cert { pty_writer, .. } => {
-                if let Err(error) = pty_writer.resize(pty_process::Size::new(rows, cols)) {
-                    tracing::warn!(session_id, %error, "failed to resize PTY");
-                }
-            }
-            ActiveWebTerminal::NodeKey { control_tx, .. } => {
+            ActiveWebTerminal::Russh { control_tx, .. } => {
                 if let Err(error) =
                     control_tx.try_send(ssh_node_exec::SshNodeShellControl::Resize {
                         cols: u32::from(cols),
                         rows: u32::from(rows),
                     })
                 {
-                    tracing::warn!(session_id, %error, "failed to send node-key shell resize");
+                    tracing::warn!(session_id, %error, "failed to send shell resize");
                 }
             }
         }
@@ -3184,15 +2946,7 @@ async fn handle_web_terminal_close(
 
     if let Some(terminal) = remove_web_terminal_entry(active_terminals, session_id).await {
         match terminal {
-            ActiveWebTerminal::Cert {
-                mut child,
-                task_handle,
-                ..
-            } => {
-                let _ = child.kill().await;
-                task_handle.abort();
-            }
-            ActiveWebTerminal::NodeKey {
+            ActiveWebTerminal::Russh {
                 control_tx,
                 task_handle,
             } => {
@@ -3220,15 +2974,7 @@ async fn drain_active_web_terminals(active_terminals: &ActiveWebTerminalMap) {
 
     for (session_id, terminal) in entries {
         match terminal {
-            ActiveWebTerminal::Cert {
-                mut child,
-                task_handle,
-                ..
-            } => {
-                let _ = child.kill().await;
-                task_handle.abort();
-            }
-            ActiveWebTerminal::NodeKey {
+            ActiveWebTerminal::Russh {
                 control_tx,
                 task_handle,
             } => {
@@ -3245,38 +2991,26 @@ async fn send_web_terminal_closed(
     session_id: &str,
     error: Option<&str>,
 ) -> bool {
+    send_web_terminal_closed_with_code(tx, session_id, error, None).await
+}
+
+async fn send_web_terminal_closed_with_code(
+    tx: &mpsc::Sender<NodeWsMessage>,
+    session_id: &str,
+    error: Option<&str>,
+    error_code: Option<u32>,
+) -> bool {
     send_ws_message(
         tx,
         serde_json::json!({
             "type": "web_terminal_closed",
             "session_id": session_id,
             "error": error,
+            "error_code": error_code,
         })
         .to_string(),
     )
     .await
-}
-
-/// Write key material to a temp file with 0600 permissions.
-fn write_temp_key_file(path: &std::path::Path, content: &str) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)?;
-        file.write_all(content.as_bytes())?;
-        file.sync_all()?;
-    }
-    #[cfg(not(unix))]
-    {
-        std::fs::write(path, content)?;
-    }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------

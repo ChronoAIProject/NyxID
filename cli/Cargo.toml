@@ -53,9 +53,8 @@ is-terminal = "0.4"
 directories = "6"
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 thiserror = "2"
-pty-process = { version = "0.5.3", features = ["async"] }
 libc = "0.2"
-nix = { version = "0.31.2", features = ["term", "process", "signal"] }
+nix = { version = "0.31.2", features = ["process", "signal"] }
 tempfile = "3"
 const-oid = { version = "0.9", features = ["db"] }
 # Direct rustls dep so we can install a default CryptoProvider at startup.

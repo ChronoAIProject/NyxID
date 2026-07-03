@@ -413,6 +413,27 @@ pub async fn ssh_exec(
                 } else {
                     last_error_message = Some(error.to_string());
                 }
+                if let AppError::SshHostKeyMismatch(message) = &error
+                    && auth_context.mode == SshAuthMode::Cert
+                {
+                    audit_service::log_async(
+                        state.db.clone(),
+                        Some(user_id.clone()),
+                        "ssh_host_key_mismatch".to_string(),
+                        Some(serde_json::json!({
+                            "service_id": service_id,
+                            "principal": principal,
+                            "error": message,
+                            "routed_via": "node",
+                            "node_id": node_id,
+                        })),
+                        ip_address.clone(),
+                        user_agent.clone(),
+                        None,
+                        None,
+                    );
+                    return Err(error);
+                }
                 tracing::warn!(
                     service_id = %service_id,
                     node_id = %node_id,

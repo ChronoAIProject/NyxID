@@ -24,9 +24,8 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 cargo-dist-version = "0.30.0"
 allow-dirty = ["ci"]
 ci = "github"
-# Windows is intentionally omitted: pty-process / nix / rustix are Unix-only
-# and the SSH/PTY paths in cli/src/node/ws_client.rs aren't yet cfg-gated for
-# Windows. Tracking the proper Windows port as a follow-up; until then,
+# Windows is intentionally omitted: nix/libc-based node daemon process checks
+# and Unix signal handling paths are not yet cfg-gated for Windows.
 # Windows users should run nyxid under WSL (see docs/WINDOWS_SETUP.md).
 installers = ["shell"]
 unix-archive = ".tar.gz"
