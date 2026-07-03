@@ -14,6 +14,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { Lock, Router, Trash2 } from "lucide-react";
+import { ServiceIcon } from "@/components/service-icons";
 
 interface ServiceCardProps {
   readonly service: DownstreamService;
@@ -72,9 +73,15 @@ export function ServiceCard({
 
       {/* Title + Badges row */}
       <div className="flex items-start justify-between gap-3">
-        <h3 className="text-lg font-normal text-foreground">
-          {service.name}
-        </h3>
+        <div className="flex min-w-0 items-center gap-2.5">
+          <ServiceIcon
+            slug={service.slug}
+            className="h-6 w-6 shrink-0 text-muted-foreground"
+          />
+          <h3 className="truncate text-lg font-normal text-foreground">
+            {service.name}
+          </h3>
+        </div>
         <div className="flex shrink-0 items-center gap-1.5">
           <Badge variant="secondary">
             {SERVICE_TYPE_LABELS[service.service_type] ?? service.service_type}

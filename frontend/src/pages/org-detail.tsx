@@ -2,16 +2,9 @@ import { useState } from "react";
 import { useParams, useNavigate, useRouterState } from "@tanstack/react-router";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
-import {
-  Camera,
-  Check,
-  Copy,
-  Globe,
-  KeyRound,
-  Trash2,
-  X,
-} from "lucide-react";
+import { Camera, Check, Copy, Trash2, X } from "lucide-react";
 import { BenchesIcon, MailSendingIcon } from "@/components/icons/empty-state";
+import { ServiceIcon } from "@/components/service-icons";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import {
   Popover,
@@ -942,15 +935,20 @@ function RolePermissionCard({
                 return (
                   <div
                     key={service.id}
-                    className="flex items-start gap-3 rounded px-2 py-1.5 hover:bg-accent/40"
+                    className="flex items-center gap-3 rounded px-2 py-1.5 hover:bg-accent/40"
                   >
                     <Checkbox
                       id={id}
                       checked={checked}
                       disabled={pending || draftFullAccess}
                       onCheckedChange={() => toggleService(service.id)}
-                      className="mt-1"
                     />
+                    {service.catalog_service_slug && (
+                      <ServiceIcon
+                        slug={service.catalog_service_slug}
+                        className="h-5 w-5 shrink-0 text-muted-foreground"
+                      />
+                    )}
                     <Label
                       htmlFor={id}
                       className="flex-1 cursor-pointer space-y-0.5"
@@ -958,13 +956,8 @@ function RolePermissionCard({
                       <span className="block text-[12px] font-medium text-foreground">
                         {service.label}
                       </span>
-                      <span className="flex items-center gap-2 text-xs text-muted-foreground">
-                        {service.service_type === "ssh" ? (
-                          <KeyRound className="h-3 w-3" aria-hidden />
-                        ) : (
-                          <Globe className="h-3 w-3" aria-hidden />
-                        )}
-                        <span>{service.slug}</span>
+                      <span className="block text-xs text-muted-foreground">
+                        {service.slug}
                       </span>
                     </Label>
                   </div>

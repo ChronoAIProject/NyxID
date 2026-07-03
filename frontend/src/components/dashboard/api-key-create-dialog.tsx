@@ -13,6 +13,7 @@ import { useKeys } from "@/hooks/use-keys";
 import { useNodes } from "@/hooks/use-nodes";
 import { useOrgs } from "@/hooks/use-orgs";
 import { OrgScopeSelect } from "@/components/shared/org-scope-select";
+import { ServiceIcon } from "@/components/service-icons";
 import { copyToClipboard } from "@/lib/utils";
 import { ApiError } from "@/lib/api-client";
 import {
@@ -512,6 +513,12 @@ export function ApiKeyCreateDialog({
                                           )
                                         }
                                       />
+                                      {s.catalog_service_slug && (
+                                        <ServiceIcon
+                                          slug={s.catalog_service_slug}
+                                          className="h-4 w-4 shrink-0 text-muted-foreground"
+                                        />
+                                      )}
                                       <Label
                                         htmlFor={`create-svc-${s.id}`}
                                         className="text-xs"

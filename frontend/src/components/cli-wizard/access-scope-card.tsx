@@ -17,6 +17,7 @@
 
 import { Checkbox } from "@/components/ui/checkbox"
 import { Label } from "@/components/ui/label"
+import { ServiceIcon } from "@/components/service-icons"
 import { useKeys } from "@/hooks/use-keys"
 import { useNodes } from "@/hooks/use-nodes"
 
@@ -78,6 +79,7 @@ export function AccessScopeCard({ value, onChange }: AccessScopeCardProps) {
             id: s.id,
             primary: s.label,
             secondary: s.slug,
+            iconSlug: s.catalog_service_slug,
           })) ?? []
         }
         selectedIds={value.selectedServiceIds}
@@ -118,6 +120,9 @@ interface AccessGroupProps {
     readonly id: string
     readonly primary: string
     readonly secondary?: string
+    /** Catalog slug for the brand glyph. Omitted for non-service rows
+     *  (e.g. nodes), which render without a leading icon. */
+    readonly iconSlug?: string | null
   }>
   readonly selectedIds: ReadonlySet<string>
   readonly onToggle: (id: string) => void
@@ -172,6 +177,12 @@ function AccessGroup({
                       onToggle(item.id)
                     }}
                   />
+                  {item.iconSlug ? (
+                    <ServiceIcon
+                      slug={item.iconSlug}
+                      className="h-4 w-4 shrink-0 text-muted-foreground"
+                    />
+                  ) : null}
                   <span className="truncate">
                     {item.primary}
                     {item.secondary ? (

@@ -31,6 +31,7 @@ import {
   useRevokeGrant,
 } from "@/hooks/use-approvals";
 import { useKeys } from "@/hooks/use-keys";
+import { ServiceIcon } from "@/components/service-icons";
 import { formatDate } from "@/lib/utils";
 import { ApprovalPolicyEditor } from "@/components/shared/approval-policy-editor";
 import {
@@ -503,7 +504,15 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
                     // — in particular, custom org services become
                     // configurable here (ChronoAIProject/NyxID#165).
                     <SelectItem key={s.id} value={s.id}>
-                      {s.label}
+                      <span className="inline-flex items-center gap-2">
+                        {s.catalog_service_slug && (
+                          <ServiceIcon
+                            slug={s.catalog_service_slug}
+                            className="h-4 w-4 shrink-0 text-muted-foreground"
+                          />
+                        )}
+                        <span>{s.label}</span>
+                      </span>
                     </SelectItem>
                   ))}
                 </SelectContent>
