@@ -17,7 +17,7 @@ import { useState } from "react"
 import { useQuery } from "@tanstack/react-query"
 import { ApiError, api } from "@/lib/api-client"
 import { Input } from "@/components/ui/input"
-import { ServiceIcon } from "@/components/service-icons"
+import { ServiceIcon } from "@/components/service-icon"
 
 interface CatalogEntry {
   readonly slug: string

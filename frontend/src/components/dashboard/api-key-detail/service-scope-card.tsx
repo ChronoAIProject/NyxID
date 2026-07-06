@@ -15,7 +15,7 @@ import {
 } from "@/components/ui/card";
 import { Shield, Pencil } from "lucide-react";
 import { toast } from "sonner";
-import { ServiceIcon } from "@/components/service-icons";
+import { ServiceIcon } from "@/components/service-icon";
 
 import type { CredentialSource } from "@/schemas/orgs";
 

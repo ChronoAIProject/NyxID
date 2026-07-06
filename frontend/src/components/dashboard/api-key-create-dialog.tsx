@@ -13,7 +13,7 @@ import { useKeys } from "@/hooks/use-keys";
 import { useNodes } from "@/hooks/use-nodes";
 import { useOrgs } from "@/hooks/use-orgs";
 import { OrgScopeSelect } from "@/components/shared/org-scope-select";
-import { ServiceIcon } from "@/components/service-icons";
+import { ServiceIcon } from "@/components/service-icon";
 import { copyToClipboard } from "@/lib/utils";
 import { ApiError } from "@/lib/api-client";
 import {

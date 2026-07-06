@@ -14,7 +14,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { Lock, Router, Trash2 } from "lucide-react";
-import { ServiceIcon } from "@/components/service-icons";
+import { ServiceIcon } from "@/components/service-icon";
 
 interface ServiceCardProps {
   readonly service: DownstreamService;

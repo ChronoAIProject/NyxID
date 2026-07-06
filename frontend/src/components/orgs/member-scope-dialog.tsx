@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
-import { ServiceIcon } from "@/components/service-icons";
+import { ServiceIcon } from "@/components/service-icon";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,

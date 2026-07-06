@@ -29,7 +29,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Plug, Unlink, KeyRound } from "lucide-react";
-import { ServiceIcon } from "@/components/service-icons";
+import { ServiceIcon } from "@/components/service-icon";
 import { toast } from "sonner";
 
 interface SaConnectedServicesProps {

@@ -15,6 +15,7 @@ frontend/src/components/cli-wizard/shell.tsx
 frontend/src/components/cli-wizard/step-label.tsx
 frontend/src/components/cli-wizard/upstream-error-banner.tsx
 frontend/src/components/cli-wizard/wizard-footer.tsx
+frontend/src/components/service-icon.tsx
 frontend/src/components/service-icons/_shared.tsx
 frontend/src/components/service-icons/api-discord-bot.tsx
 frontend/src/components/service-icons/api-discord.tsx

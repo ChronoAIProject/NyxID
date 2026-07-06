@@ -4,7 +4,7 @@ import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Camera, Check, Copy, Trash2, X } from "lucide-react";
 import { BenchesIcon, MailSendingIcon } from "@/components/icons/empty-state";
-import { ServiceIcon } from "@/components/service-icons";
+import { ServiceIcon } from "@/components/service-icon";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import {
   Popover,

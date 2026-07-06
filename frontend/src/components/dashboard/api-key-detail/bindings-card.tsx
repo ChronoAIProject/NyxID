@@ -35,7 +35,7 @@ import {
 } from "@/components/ui/dialog";
 import { AlertTriangle, Link2, Plus, Trash2 } from "lucide-react";
 import { CrystalLatticeIcon } from "@/components/icons/empty-state";
-import { ServiceIcon } from "@/components/service-icons";
+import { ServiceIcon } from "@/components/service-icon";
 import { toast } from "sonner";
 import type { AgentServiceBinding } from "@/types/keys";
 import type { CredentialSource } from "@/schemas/orgs";

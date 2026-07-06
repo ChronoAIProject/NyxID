@@ -17,7 +17,7 @@
 
 import { Checkbox } from "@/components/ui/checkbox"
 import { Label } from "@/components/ui/label"
-import { ServiceIcon } from "@/components/service-icons"
+import { ServiceIcon } from "@/components/service-icon"
 import { useKeys } from "@/hooks/use-keys"
 import { useNodes } from "@/hooks/use-nodes"
 

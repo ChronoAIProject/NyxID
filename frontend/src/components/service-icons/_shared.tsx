@@ -355,14 +355,14 @@ export function CompositeBadgeWrapper({
 }) {
   return (
     <span
-      className={`relative inline-flex shrink-0 items-center justify-center [&>svg]:h-full [&>svg]:w-full ${
+      className={`relative inline-flex shrink-0 items-center justify-center [&>svg]:!h-full [&>svg]:!w-full ${
         className ?? "h-5 w-5"
       }`}
     >
       {children}
       <span
         aria-hidden="true"
-        className="absolute -bottom-[30%] -right-[30%] inline-flex h-[70%] w-[70%] items-center justify-center rounded-md bg-muted ring-2 ring-background [&>svg]:h-full [&>svg]:w-full"
+        className="absolute -bottom-[30%] -right-[30%] inline-flex h-[70%] w-[70%] items-center justify-center rounded-md bg-muted ring-2 ring-background [&>svg]:!h-full [&>svg]:!w-full"
       >
         {badge}
       </span>

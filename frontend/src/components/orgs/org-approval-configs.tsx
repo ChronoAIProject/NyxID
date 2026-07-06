@@ -31,7 +31,7 @@ import {
   useRevokeGrant,
 } from "@/hooks/use-approvals";
 import { useKeys } from "@/hooks/use-keys";
-import { ServiceIcon } from "@/components/service-icons";
+import { ServiceIcon } from "@/components/service-icon";
 import { formatDate } from "@/lib/utils";
 import { ApprovalPolicyEditor } from "@/components/shared/approval-policy-editor";
 import {

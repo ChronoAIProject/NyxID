@@ -35,7 +35,7 @@ import {
   AgentKeyPicker,
   type PickedAgentKey,
 } from "@/components/dashboard/agent-key-picker";
-import { ServiceIcon } from "@/components/service-icons";
+import { ServiceIcon } from "@/components/service-icon";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button, ButtonIcon } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";

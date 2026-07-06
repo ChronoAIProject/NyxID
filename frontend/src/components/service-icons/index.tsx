@@ -15,7 +15,6 @@
 
 import type { ComponentType, SVGProps } from "react";
 import { Globe } from "lucide-react";
-import { cn } from "@/lib/utils";
 
 import LlmOpenaiIcon from "./llm-openai";
 import LlmOpenaiCodexIcon from "./llm-openai-codex";
@@ -140,57 +139,9 @@ export function FallbackIcon({ className }: ServiceIconProps) {
   );
 }
 
-/**
- * Fixed icon-size scale for service brand glyphs. Anchored to the app's
- * icon conventions (DESIGN.md): nav icons 16px, logo 20px, PageHeader
- * leading slot 32px. Pick the token that fits the surface and keep it
- * consistent within that surface; never hand-roll `h-[n]` on a service
- * icon — add a token here if a new size is genuinely needed.
- */
-export type ServiceIconSize = "xs" | "sm" | "md" | "lg";
-
-const SIZE_CLASS: Readonly<Record<ServiceIconSize, string>> = {
-  xs: "h-4 w-4", // 16px — dense rows: selects, dropdowns, checkbox lists
-  sm: "h-5 w-5", // 20px — list/table rows, compact cards
-  md: "h-6 w-6", // 24px — card headers, detail rows
-  lg: "h-8 w-8", // 32px — page-header leading / detail hero
-};
-
-/**
- * Brand icon for an AI service / proxy target, rendered at a predefined
- * `size`. Config-driven: give it the catalog slug and a size token, e.g.
- * `<ServiceIcon slug="api-reddit" size="sm" />`. Known slugs render their
- * brand glyph (badged composites included, correctly sized); an unknown
- * slug renders the generic globe; a null/absent slug (custom service with
- * no catalog backing) renders nothing so rows stay clean.
- *
- * A caller usually passes the full catalog slug (`api-reddit`,
- * `llm-openai`), but the bare vendor name (`reddit`) is accepted too — the
- * lookup falls through each known namespace prefix.
- */
-export function ServiceIcon({
-  slug,
-  size = "sm",
-  className,
-}: {
-  readonly slug?: string | null;
-  readonly size?: ServiceIconSize;
-  readonly className?: string;
-}) {
-  if (!slug) return null;
-  const Glyph =
-    SERVICE_ICONS[slug] ??
-    SERVICE_ICONS[`api-${slug}`] ??
-    SERVICE_ICONS[`llm-${slug}`] ??
-    SERVICE_ICONS[`provider-${slug}`] ??
-    FallbackIcon;
-  return (
-    <Glyph
-      className={cn(
-        SIZE_CLASS[size],
-        "shrink-0 text-muted-foreground",
-        className,
-      )}
-    />
-  );
-}
+// NOTE: this module is a *pure glyph registry* — design-owned and synced
+// from the icon planning worktree. It exposes brand glyphs keyed by slug
+// and nothing else. The app-facing, size-tokened `<ServiceIcon>` primitive
+// lives in `@/components/service-icon` (engineering-owned) and consumes
+// `SERVICE_ICONS` / `FallbackIcon` from here. Do not add app layout policy
+// (sizes, colors, `cn`) to this file.

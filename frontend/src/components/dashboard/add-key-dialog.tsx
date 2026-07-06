@@ -48,7 +48,7 @@ import {
   Terminal,
 } from "lucide-react";
 import { toast } from "sonner";
-import { ServiceIcon } from "@/components/service-icons";
+import { ServiceIcon } from "@/components/service-icon";
 import {
   ConnectVerifyStep,
   type CreatedKey,
