@@ -82,6 +82,9 @@ pub enum AppError {
     #[error("Invalid scope: {0}")]
     InvalidScope(String),
 
+    #[error("Invalid target: {0}")]
+    InvalidTarget(String),
+
     #[error("Role not found: {0}")]
     RoleNotFound(String),
 
@@ -401,9 +404,10 @@ impl AppError {
             Self::Conflict(_) => StatusCode::CONFLICT,
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::MfaRequired { .. } => StatusCode::FORBIDDEN,
-            Self::PkceVerificationFailed | Self::InvalidRedirectUri | Self::InvalidScope(_) => {
-                StatusCode::BAD_REQUEST
-            }
+            Self::PkceVerificationFailed
+            | Self::InvalidRedirectUri
+            | Self::InvalidScope(_)
+            | Self::InvalidTarget(_) => StatusCode::BAD_REQUEST,
             Self::RoleNotFound(_) | Self::GroupNotFound(_) | Self::ConsentNotFound => {
                 StatusCode::NOT_FOUND
             }
@@ -532,6 +536,7 @@ impl AppError {
             Self::PkceVerificationFailed => 3000,
             Self::InvalidRedirectUri => 3001,
             Self::InvalidScope(_) => 3002,
+            Self::InvalidTarget(_) => 3005,
             Self::RoleNotFound(_) => 4000,
             Self::GroupNotFound(_) => 4001,
             Self::ConsentNotFound => 4002,
@@ -641,6 +646,7 @@ impl AppError {
             Self::UnsupportedGrantType(_) => "unsupported_grant_type",
             Self::PkceVerificationFailed | Self::InvalidRedirectUri => "invalid_grant",
             Self::InvalidScope(_) => "invalid_scope",
+            Self::InvalidTarget(_) => "invalid_target",
             Self::Unauthorized(_)
             | Self::AuthenticationFailed(_)
             | Self::ServiceAccountNotFound(_)
@@ -690,6 +696,7 @@ impl AppError {
             Self::PkceVerificationFailed => "pkce_verification_failed",
             Self::InvalidRedirectUri => "invalid_redirect_uri",
             Self::InvalidScope(_) => "invalid_scope",
+            Self::InvalidTarget(_) => "invalid_target",
             Self::RoleNotFound(_) => "role_not_found",
             Self::GroupNotFound(_) => "group_not_found",
             Self::ConsentNotFound => "consent_not_found",

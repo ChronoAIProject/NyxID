@@ -395,6 +395,7 @@ function PoolEditorDialog({
       .map((member) => ({
         id: member.user_service_id,
         slug: member.user_service_id.slice(0, 8),
+        resource_uri: `https://unavailable.invalid/api/v1/proxy/s/${member.user_service_id.slice(0, 8)}`,
         endpoint_id: "",
         api_key_id: null,
         auth_method: "",

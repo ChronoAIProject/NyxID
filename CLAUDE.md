@@ -161,6 +161,8 @@ The services/connections/providers system was unified into 3 user-managed collec
 
 **Proxy resolution:** New path checks `UserService` first (by slug + user_id), falls back to old `DownstreamService` + `UserProviderToken` path for unmigrated users.
 
+**OAuth resource indicators:** RFC 8707 resource URIs for user services are deterministic and not stored. The canonical URI is `{BASE_URL}/api/v1/proxy/s/{slug}` where `{slug}` is `UserService.slug`; catalog and user-services responses expose this as `resource_uri`. OAuth `resource` parameters resolve back to active `UserService` rows through the same personal/org ACL model used by proxy resolution, and issued JWTs keep the fixed NyxID audience while carrying granted resource URIs in a dedicated `resources` claim plus `allowed_service_ids` for enforcement.
+
 **Proxy User-Agent:** By default, the client's `User-Agent` header is forwarded as-is (passthrough). When `UserService.custom_user_agent` or `DownstreamService.custom_user_agent` is set, it overrides the client UA on outgoing requests. Applied in all four proxy paths: direct HTTP, node HTTP, direct WS, node WS. Use this for downstreams whose WAFs block SDK-specific UA strings (e.g. `OpenAI/Python`).
 
 **ApiKey scope fields** (absorbed from deleted `AgentGroup` model): `allowed_service_ids`, `allowed_node_ids`, `allow_all_services`, `allow_all_nodes`. Enforced at proxy time via `key_service`.

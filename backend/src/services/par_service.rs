@@ -25,6 +25,7 @@ pub async fn create_request(
     code_challenge_method: Option<&str>,
     nonce: Option<&str>,
     prompt: Option<&str>,
+    resources: &[String],
     external_subject: Option<ExternalSubjectRef>,
 ) -> AppResult<(String, i64)> {
     let request_uri = generate_request_uri();
@@ -44,6 +45,7 @@ pub async fn create_request(
         nonce: nonce.map(String::from),
         prompt: prompt.map(String::from),
         external_subject,
+        resources: resources.to_vec(),
         expires_at,
         created_at: now,
     };
@@ -94,6 +96,7 @@ mod tests {
             nonce: None,
             prompt: None,
             external_subject: None,
+            resources: Vec::new(),
             expires_at: now - Duration::seconds(1),
             created_at: now - Duration::seconds(PAR_TTL_SECS + 1),
         };
@@ -120,6 +123,7 @@ mod tests {
             Some("S256"),
             Some("nonce-1"),
             None,
+            &[],
             None,
         )
         .await
@@ -160,6 +164,7 @@ mod tests {
             Some("S256"),
             Some("nonce-1"),
             Some("consent"),
+            &["https://nyx.example/api/v1/proxy/s/openai".to_string()],
             Some(external_subject.clone()),
         )
         .await
@@ -177,6 +182,10 @@ mod tests {
         assert_eq!(record.code_challenge_method.as_deref(), Some("S256"));
         assert_eq!(record.nonce.as_deref(), Some("nonce-1"));
         assert_eq!(record.prompt.as_deref(), Some("consent"));
+        assert_eq!(
+            record.resources,
+            vec!["https://nyx.example/api/v1/proxy/s/openai".to_string()]
+        );
         assert_eq!(record.external_subject, Some(external_subject));
     }
 
@@ -208,6 +217,7 @@ mod tests {
             Some("S256"),
             None,
             None,
+            &[],
             None,
         )
         .await
@@ -233,6 +243,7 @@ mod tests {
             Some("S256"),
             None,
             None,
+            &[],
             None,
         )
         .await

@@ -38,6 +38,8 @@ pub struct PushedAuthorizationRequest {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_subject: Option<ExternalSubjectRef>,
+    #[serde(default)]
+    pub resources: Vec<String>,
 
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub expires_at: DateTime<Utc>,

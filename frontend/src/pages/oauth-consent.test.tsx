@@ -1,10 +1,17 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { OAuthConsentPage } from "./oauth-consent";
 
-function setSearch(params: Record<string, string>) {
-  const qs = new URLSearchParams(params).toString();
+function setSearch(params: Record<string, string | readonly string[]>) {
+  const qs = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (typeof value === "string") {
+      qs.set(key, value);
+    } else {
+      for (const item of value) qs.append(key, item);
+    }
+  }
   window.history.pushState({}, "", `/oauth/consent?${qs}`);
 }
 
@@ -16,6 +23,7 @@ const VALID = {
   scope: "openid profile email offline_access custom:thing",
   code_challenge: "challenge-xyz",
   code_challenge_method: "S256",
+  consent_request: "signed-consent-request-token",
   state: "state-123",
   nonce: "nonce-456",
 };
@@ -23,6 +31,14 @@ const VALID = {
 function hiddenInput(name: string): HTMLInputElement | null {
   return document.querySelector<HTMLInputElement>(
     `input[type="hidden"][name="${name}"]`,
+  );
+}
+
+function hiddenInputs(name: string): HTMLInputElement[] {
+  return Array.from(
+    document.querySelectorAll<HTMLInputElement>(
+      `input[type="hidden"][name="${name}"]`,
+    ),
   );
 }
 
@@ -145,6 +161,9 @@ describe("OAuthConsentPage", () => {
     expect(hiddenInput("state")?.value).toBe("state-123");
     expect(hiddenInput("code_challenge")?.value).toBe("challenge-xyz");
     expect(hiddenInput("code_challenge_method")?.value).toBe("S256");
+    expect(hiddenInput("consent_request")?.value).toBe(
+      "signed-consent-request-token",
+    );
     expect(hiddenInput("nonce")?.value).toBe("nonce-456");
   });
 
@@ -177,6 +196,26 @@ describe("OAuthConsentPage", () => {
     expect(hiddenInput("external_subject_external_user_id")?.value).toBe(
       "ext-user-9",
     );
+  });
+
+  it("submits only the selected requested resources", () => {
+    const resourceA = "https://nyx.example/api/v1/proxy/s/openai";
+    const resourceB = "https://nyx.example/api/v1/proxy/s/anthropic";
+    setSearch({ ...VALID, resource: [resourceA, resourceB] });
+
+    render(<OAuthConsentPage />);
+
+    expect(hiddenInput("resource_selection_present")?.value).toBe("true");
+    expect(hiddenInputs("resource").map((input) => input.value)).toEqual([
+      resourceA,
+      resourceB,
+    ]);
+
+    fireEvent.click(screen.getByRole("checkbox", { name: resourceB }));
+
+    expect(hiddenInputs("resource").map((input) => input.value)).toEqual([
+      resourceA,
+    ]);
   });
 
   it("renders an Unknown redirect host for an unparseable redirect_uri", () => {

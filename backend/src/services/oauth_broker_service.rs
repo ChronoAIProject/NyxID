@@ -333,6 +333,9 @@ async fn try_exchange_once(ctx: &BrokerExchangeContext<'_>) -> AppResult<Exchang
         revoked: false,
         replaced_by: None,
         revoked_at: None,
+        resource_uris: Vec::new(),
+        allowed_service_ids: Vec::new(),
+        allow_all_services: true,
         created_at: now,
     };
 
@@ -488,6 +491,7 @@ async fn mint_broker_access_token(
         Some(BROKER_ACCESS_TTL_SECS),
         ctx.dpop_jkt,
         ctx.mtls_x5t_s256,
+        None,
     )
 }
 
@@ -1007,6 +1011,9 @@ mod tests {
             revoked,
             replaced_by: None,
             revoked_at: revoked.then_some(now),
+            resource_uris: Vec::new(),
+            allowed_service_ids: Vec::new(),
+            allow_all_services: true,
             created_at: now,
         }
     }

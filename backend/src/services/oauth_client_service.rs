@@ -714,6 +714,7 @@ mod tests {
                     user_id: "user-with-consent".to_string(),
                     client_id: client_id.to_string(),
                     scopes: DEFAULT_ALLOWED_SCOPES.to_string(),
+                    allowed_service_ids: None,
                     granted_at: now,
                     expires_at: None,
                 })
@@ -731,6 +732,9 @@ mod tests {
                     revoked: false,
                     replaced_by: None,
                     revoked_at: None,
+                    resource_uris: Vec::new(),
+                    allowed_service_ids: Vec::new(),
+                    allow_all_services: true,
                     created_at: now,
                 })
                 .await
