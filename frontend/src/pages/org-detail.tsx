@@ -945,7 +945,7 @@ function RolePermissionCard({
                     />
                     <ServiceIcon
                       slug={service.catalog_service_slug}
-                      size="2xs"
+                      size="sm"
                     />
                     <Label
                       htmlFor={id}
