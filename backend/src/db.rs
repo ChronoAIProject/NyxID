@@ -334,6 +334,20 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .build(),
         )
         .await?;
+    audit
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "seq": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("audit_log_seq_unique".to_string())
+                        .unique(true)
+                        .partial_filter_expression(doc! { "seq": { "$exists": true } })
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
 
     let anonymous_usage = db.collection::<mongodb::bson::Document>(ANONYMOUS_ENDPOINT_USAGE);
     anonymous_usage

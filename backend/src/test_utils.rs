@@ -198,6 +198,7 @@ pub(crate) fn test_app_config() -> AppConfig {
         trusted_proxy_ips: vec![],
         mtls_client_cert_header: None,
         cli_pairing_hmac_key: None,
+        audit_chain_hmac_key: None,
         sa_token_ttl_secs: 3600,
         cookie_domain: None,
         telegram_bot_token: None,
@@ -420,6 +421,7 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         // Tests don't exercise auth-device HMAC verification through AppState yet;
         // service-level tests pass their own explicit HMAC key.
         auth_device_hmac_key: Arc::new(zeroize::Zeroizing::new([1u8; 32])),
+        audit_chain_hmac_key: Arc::new(zeroize::Zeroizing::new([2u8; 32])),
         per_channel_event_limiter: Arc::new(crate::mw::rate_limit::PerChannelEventLimiter::new(
             config.channel_event_rate_limit_per_second,
             config.channel_event_rate_limit_burst,

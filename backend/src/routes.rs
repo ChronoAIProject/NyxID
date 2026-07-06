@@ -419,6 +419,7 @@ pub fn build_router(
             post(handlers::admin_nodes::admin_disconnect_node),
         )
         .route("/audit-log", get(handlers::admin::list_audit_log))
+        .route("/audit-log/verify", get(handlers::admin::verify_audit_log))
         .route(
             "/oauth-clients",
             get(handlers::admin::list_oauth_clients).post(handlers::admin::create_oauth_client),

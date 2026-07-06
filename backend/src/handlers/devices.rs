@@ -389,6 +389,9 @@ fn log_device_audit_for_user(
         user_agent: auth_user.user_agent.clone(),
         api_key_id: auth_user.api_key_id.clone(),
         api_key_name: auth_user.api_key_name.clone(),
+        seq: None,
+        prev_hash: None,
+        entry_hash: None,
         created_at: chrono::Utc::now(),
     };
 

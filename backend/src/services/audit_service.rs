@@ -1,10 +1,26 @@
-use chrono::Utc;
 #[cfg(test)]
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
+use std::sync::OnceLock;
+
+use chrono::Utc;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};
 use crate::mw::auth::AuthUser;
+use crate::services::audit_chain_service;
+
+static AUDIT_CHAIN_HMAC_KEY: OnceLock<Zeroizing<[u8; 32]>> = OnceLock::new();
+
+pub fn init_audit_chain_hmac_key(key: Zeroizing<[u8; 32]>) {
+    if AUDIT_CHAIN_HMAC_KEY.set(key).is_err() {
+        tracing::warn!("audit-chain HMAC key was already initialized");
+    }
+}
+
+fn audit_chain_hmac_key() -> Option<&'static [u8]> {
+    AUDIT_CHAIN_HMAC_KEY.get().map(|key| key.as_ref())
+}
 
 /// Fire-and-forget audit log entry.
 ///
@@ -78,6 +94,9 @@ fn build_audit_entry(
         user_agent,
         api_key_id,
         api_key_name,
+        seq: None,
+        prev_hash: None,
+        entry_hash: None,
         created_at: Utc::now(),
     }
 }
@@ -87,16 +106,28 @@ async fn write_audit_entry(
     entry: AuditLog,
     event_type: String,
 ) -> Result<(), mongodb::error::Error> {
-    let result = db
-        .collection::<AuditLog>(AUDIT_LOG)
-        .insert_one(&entry)
-        .await;
+    let result = if let Some(key) = audit_chain_hmac_key() {
+        audit_chain_service::append_chained_entry(&db, entry, key).await
+    } else {
+        tracing::warn!(
+            event_type = %event_type,
+            "audit-chain HMAC key is not initialized; writing legacy unchained audit entry"
+        );
+        match db
+            .collection::<AuditLog>(AUDIT_LOG)
+            .insert_one(&entry)
+            .await
+        {
+            Ok(_) => Ok(entry),
+            Err(error) => Err(error),
+        }
+    };
     if let Err(e) = &result {
         tracing::error!(event_type = %event_type, error = %e, "Failed to write audit log");
     }
     #[cfg(test)]
-    if result.is_ok() {
-        notify_test_audit_write(&entry);
+    if let Ok(inserted) = &result {
+        notify_test_audit_write(inserted);
     }
     result.map(|_| ())
 }

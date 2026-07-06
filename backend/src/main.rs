@@ -128,6 +128,9 @@ pub struct AppState {
     /// Server-side HMAC key used to derive auth-device login code hashes.
     /// Domain-separated from CLI pairing with the `auth-device` label.
     pub auth_device_hmac_key: std::sync::Arc<zeroize::Zeroizing<[u8; 32]>>,
+    /// Server-side HMAC key used for tamper-evident audit-log hash chaining.
+    /// Lives in process memory only and is never persisted to MongoDB.
+    pub audit_chain_hmac_key: std::sync::Arc<zeroize::Zeroizing<[u8; 32]>>,
     /// Per-channel rate limiter keyed by conversation_id, for the HTTP Event
     /// Gateway (NyxID#221). Distinct from `per_agent_limiter`.
     pub per_channel_event_limiter: mw::rate_limit::SharedPerChannelEventLimiter,
@@ -229,6 +232,43 @@ async fn main() {
     let db = db::create_connection(&config)
         .await
         .expect("Failed to connect to database");
+
+    // Load JWT signing keys early: DB-backed CLI subcommands may audit-log
+    // before the server state is built, and the audit-chain key can fall back
+    // to the JWT private key in KMS deployments.
+    let jwt_keys = JwtKeys::from_config(&config).expect("Failed to load JWT keys");
+    tracing::info!("JWT keys loaded (kid={})", jwt_keys.kid);
+
+    // Compute JWK from the public key for the JWKS endpoint.
+    let public_pem = std::fs::read_to_string(&config.jwt_public_key_path)
+        .expect("Failed to read public key for JWK");
+    let jwk_json =
+        crypto::jwt::public_key_jwk(&public_pem).expect("Failed to compute JWK from public key");
+
+    // Derive HMAC keys kept in process memory only. The JWT private key file
+    // contents are the universal fallback so KMS deployments without
+    // `ENCRYPTION_KEY` still start.
+    let jwt_private_key_pem = std::fs::read(&config.jwt_private_key_path)
+        .expect("Failed to read JWT private key for HMAC seed");
+    let cli_pairing_hmac_key = Arc::new(derive_cli_pairing_hmac_key(
+        config.cli_pairing_hmac_key.as_deref(),
+        config.encryption_key.as_deref(),
+        Some(&jwt_private_key_pem),
+    ));
+    let auth_device_hmac_key = Arc::new(derive_auth_device_hmac_key(
+        config.encryption_key.as_deref(),
+        Some(&jwt_private_key_pem),
+    ));
+    let audit_chain_hmac_key = services::audit_chain_service::derive_audit_chain_hmac_key(
+        config.audit_chain_hmac_key.as_deref(),
+        config.encryption_key.as_deref(),
+        Some(&jwt_private_key_pem),
+    );
+    services::audit_service::init_audit_chain_hmac_key(audit_chain_hmac_key.clone());
+    let audit_chain_hmac_key = Arc::new(audit_chain_hmac_key);
+    // JWT private key bytes carry no secret beyond what's already in JwtKeys;
+    // drop them immediately after derivation.
+    drop(jwt_private_key_pem);
 
     // Handle CLI commands (exit without starting server)
     if let Some(email) = cli.promote_admin {
@@ -404,16 +444,6 @@ async fn main() {
         None
     };
 
-    // Load JWT signing keys
-    let jwt_keys = JwtKeys::from_config(&config).expect("Failed to load JWT keys");
-    tracing::info!("JWT keys loaded (kid={})", jwt_keys.kid);
-
-    // Compute JWK from the public key for the JWKS endpoint
-    let public_pem = std::fs::read_to_string(&config.jwt_public_key_path)
-        .expect("Failed to read public key for JWK");
-    let jwk_json =
-        crypto::jwt::public_key_jwk(&public_pem).expect("Failed to compute JWK from public key");
-
     // Create a shared reqwest client for connection reuse.
     // Use connect_timeout (not global timeout) so SSE streaming responses
     // from LLM services are not killed after 30 seconds.
@@ -460,26 +490,6 @@ async fn main() {
         config.channel_relay_edit_rate_limit_per_second,
         config.channel_relay_edit_rate_limit_burst,
     ));
-
-    // Derive the CLI-pairing HMAC key. Kept in process memory
-    // only; see `derive_cli_pairing_hmac_key` for the key source.
-    // The JWT private key file contents are the universal
-    // fallback so KMS deployments without `ENCRYPTION_KEY` still
-    // start — see the function's doc for the full priority chain.
-    let jwt_private_key_pem = std::fs::read(&config.jwt_private_key_path)
-        .expect("Failed to read JWT private key for CLI-pairing HMAC seed");
-    let cli_pairing_hmac_key = Arc::new(derive_cli_pairing_hmac_key(
-        config.cli_pairing_hmac_key.as_deref(),
-        config.encryption_key.as_deref(),
-        Some(&jwt_private_key_pem),
-    ));
-    let auth_device_hmac_key = Arc::new(derive_auth_device_hmac_key(
-        config.encryption_key.as_deref(),
-        Some(&jwt_private_key_pem),
-    ));
-    // JWT private key bytes carry no secret beyond what's
-    // already in JwtKeys; drop them immediately after derivation.
-    drop(jwt_private_key_pem);
 
     // Create shared state
     let billing = Arc::new(services::billing::BillingService::new(
@@ -540,6 +550,7 @@ async fn main() {
         ),
         cli_pairing_hmac_key,
         auth_device_hmac_key,
+        audit_chain_hmac_key,
         per_channel_event_limiter,
         per_message_edit_limiter,
         event_dedup_cache,

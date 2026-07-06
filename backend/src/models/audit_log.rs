@@ -20,6 +20,15 @@ pub struct AuditLog {
     /// Human-readable API key name
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key_name: Option<String>,
+    /// Chain position, strictly increasing from 1. None on pre-chain legacy rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<i64>,
+    /// Hex entry_hash of the previous chained entry; 64 zero chars for genesis.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prev_hash: Option<String>,
+    /// Hex HMAC-SHA256 over the canonical encoded audit entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_hash: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
 }
@@ -44,6 +53,9 @@ mod tests {
             user_agent: Some("Mozilla/5.0".to_string()),
             api_key_id: None,
             api_key_name: None,
+            seq: Some(1),
+            prev_hash: Some("0".repeat(64)),
+            entry_hash: Some("a".repeat(64)),
             created_at: Utc::now(),
         };
         let doc = bson::to_document(&log).expect("serialize");
@@ -51,6 +63,15 @@ mod tests {
         assert_eq!(log.id, restored.id);
         assert_eq!(log.event_type, restored.event_type);
         assert!(restored.api_key_id.is_none());
+        assert_eq!(restored.seq, Some(1));
+        assert_eq!(
+            restored.prev_hash.as_deref(),
+            Some("0000000000000000000000000000000000000000000000000000000000000000")
+        );
+        assert_eq!(
+            restored.entry_hash.as_deref(),
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
     }
 
     #[test]
@@ -64,6 +85,9 @@ mod tests {
             user_agent: None,
             api_key_id: None,
             api_key_name: None,
+            seq: None,
+            prev_hash: None,
+            entry_hash: None,
             created_at: Utc::now(),
         };
         let doc = bson::to_document(&log).expect("serialize");
@@ -72,6 +96,9 @@ mod tests {
         assert!(restored.event_data.is_none());
         assert!(restored.api_key_id.is_none());
         assert!(restored.api_key_name.is_none());
+        assert!(restored.seq.is_none());
+        assert!(restored.prev_hash.is_none());
+        assert!(restored.entry_hash.is_none());
     }
 
     #[test]
@@ -85,12 +112,16 @@ mod tests {
             user_agent: None,
             api_key_id: Some("key-id-123".to_string()),
             api_key_name: Some("coding-agent".to_string()),
+            seq: Some(42),
+            prev_hash: Some("1".repeat(64)),
+            entry_hash: Some("2".repeat(64)),
             created_at: Utc::now(),
         };
         let doc = bson::to_document(&log).expect("serialize");
         let restored: AuditLog = bson::from_document(doc).expect("deserialize");
         assert_eq!(restored.api_key_id.as_deref(), Some("key-id-123"));
         assert_eq!(restored.api_key_name.as_deref(), Some("coding-agent"));
+        assert_eq!(restored.seq, Some(42));
     }
 
     #[test]
@@ -104,14 +135,23 @@ mod tests {
             user_agent: None,
             api_key_id: Some("should-be-skipped".to_string()),
             api_key_name: None,
+            seq: Some(99),
+            prev_hash: Some("3".repeat(64)),
+            entry_hash: Some("4".repeat(64)),
             created_at: Utc::now(),
         };
         let mut doc = bson::to_document(&log).expect("serialize");
         // Simulate old document without api_key fields
         doc.remove("api_key_id");
         doc.remove("api_key_name");
+        doc.remove("seq");
+        doc.remove("prev_hash");
+        doc.remove("entry_hash");
         let restored: AuditLog = bson::from_document(doc).expect("deserialize");
         assert!(restored.api_key_id.is_none());
         assert!(restored.api_key_name.is_none());
+        assert!(restored.seq.is_none());
+        assert!(restored.prev_hash.is_none());
+        assert!(restored.entry_hash.is_none());
     }
 }

@@ -160,6 +160,24 @@ If all three sources are missing, the backend refuses to start with a clear erro
 
 Otherwise the automatic derivation chain is safe: local deployments derive from `ENCRYPTION_KEY`, KMS deployments derive from the JWT signing key.
 
+## Audit Log Hash Chain (Optional)
+
+NyxID audit-log rows created after this feature is enabled are tamper-evident. Each chained row carries `seq`, `prev_hash`, and `entry_hash`; `entry_hash` is an HMAC-SHA256 over a canonical encoding of the row content and the previous row's hash. The HMAC key stays in process memory and is never written to MongoDB, so a database-only attacker cannot recompute a valid chain after editing, deleting, inserting, or reordering chained rows.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AUDIT_CHAIN_HMAC_KEY` | *(derived from `ENCRYPTION_KEY`, then JWT private key)* | Explicit 32-byte HMAC key (64 hex chars) for audit-log hash chaining. Generate with `openssl rand -hex 32`. Set this when you need to rotate the audit-chain key independently of both `ENCRYPTION_KEY` and the JWT signing key, or when deployment policy forbids deriving secondary HMAC keys from those sources. |
+
+### Key selection rules
+
+The backend picks the audit-chain key at startup using the first match:
+
+1. `AUDIT_CHAIN_HMAC_KEY` if set (must be 64 hex chars).
+2. Derived from `ENCRYPTION_KEY` via HMAC-SHA256 with the domain-separated `audit-chain` label.
+3. Derived from the JWT private key file contents with the same domain-separated label.
+
+Legacy rows without `seq` are not backfilled. The verifier reports them as `pre_chain_count` rather than claiming historical integrity. This v1 chain does not detect tail truncation: deleting the newest N rows leaves a valid shorter chain until `(head_seq, head_hash)` is anchored outside MongoDB.
+
 ## Social Login (Optional)
 
 | Variable | Description |
