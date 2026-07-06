@@ -12,18 +12,15 @@ pub struct Consent {
     pub user_id: String,
     pub client_id: String,
     pub scopes: String,
-    #[serde(default = "default_allow_all_services")]
-    pub allow_all_services: bool,
-    #[serde(default)]
-    pub allowed_service_ids: Vec<String>,
+    /// None means the consent grant is unrestricted at the service layer.
+    /// Some(ids), including an empty list, is the resource-owner-approved
+    /// UserService allowlist for this client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_service_ids: Option<Vec<String>>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub granted_at: DateTime<Utc>,
     #[serde(default, with = "bson_datetime::optional")]
     pub expires_at: Option<DateTime<Utc>>,
-}
-
-pub fn default_allow_all_services() -> bool {
-    true
 }
 
 #[cfg(test)]
@@ -41,8 +38,7 @@ mod tests {
             user_id: "user-1".to_string(),
             client_id: "client-1".to_string(),
             scopes: "openid profile email".to_string(),
-            allow_all_services: true,
-            allowed_service_ids: Vec::new(),
+            allowed_service_ids: None,
             granted_at: Utc::now(),
             expires_at: None,
         }
@@ -58,22 +54,21 @@ mod tests {
         assert_eq!(consent.id, restored.id);
         assert_eq!(consent.user_id, restored.user_id);
         assert_eq!(consent.scopes, restored.scopes);
+        assert_eq!(consent.allowed_service_ids, restored.allowed_service_ids);
     }
 
     #[test]
-    fn bson_legacy_row_defaults_to_allow_all_services() {
+    fn bson_defaults_service_grant() {
         let now = Utc::now();
         let doc = bson::doc! {
             "_id": "consent-legacy",
             "user_id": "user-1",
             "client_id": "client-1",
-            "scopes": "openid profile",
+            "scopes": "openid",
             "granted_at": bson::DateTime::from_chrono(now),
         };
-
-        let restored: Consent = bson::from_document(doc).expect("deserialize legacy consent");
-        assert!(restored.allow_all_services);
-        assert!(restored.allowed_service_ids.is_empty());
+        let restored: Consent = bson::from_document(doc).expect("deserialize");
+        assert!(restored.allowed_service_ids.is_none());
     }
 
     #[test]
@@ -86,6 +81,15 @@ mod tests {
     }
 
     #[test]
+    fn bson_roundtrip_with_service_grant() {
+        let mut consent = make_consent();
+        consent.allowed_service_ids = Some(vec!["svc-1".to_string(), "svc-2".to_string()]);
+        let doc = bson::to_document(&consent).expect("serialize");
+        let restored: Consent = bson::from_document(doc).expect("deserialize");
+        assert_eq!(restored.allowed_service_ids, consent.allowed_service_ids);
+    }
+
+    #[test]
     fn bson_all_fields_serialized() {
         let consent = make_consent();
         let doc = bson::to_document(&consent).expect("serialize");
@@ -94,8 +98,6 @@ mod tests {
         assert!(keys.contains(&"user_id"));
         assert!(keys.contains(&"client_id"));
         assert!(keys.contains(&"scopes"));
-        assert!(keys.contains(&"allow_all_services"));
-        assert!(keys.contains(&"allowed_service_ids"));
         assert!(keys.contains(&"granted_at"));
     }
 }

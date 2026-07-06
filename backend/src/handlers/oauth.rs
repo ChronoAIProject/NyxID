@@ -5,6 +5,8 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use base64::Engine as _;
+use chrono::Utc;
+use jsonwebtoken::{Algorithm, Header, Validation, decode, encode};
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 
@@ -17,8 +19,9 @@ use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
 use crate::mw::auth::{AuthUser, OptionalAuthUser};
 use crate::services::{
-    audit_service, consent_service, oauth_broker_service, oauth_client_service, oauth_service,
-    par_service, service_account_service, social_token_exchange_service, token_exchange_service,
+    audit_service, consent_service, oauth_broker_service, oauth_client_service,
+    oauth_resource_service, oauth_service, par_service, service_account_service,
+    social_token_exchange_service, token_exchange_service,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event, hash_short_id};
 
@@ -42,6 +45,8 @@ pub struct AuthorizeQuery {
     /// OIDC prompt parameter: "none", "login", "consent", or space-separated combo.
     pub prompt: Option<String>,
     pub request_uri: Option<String>,
+    #[serde(default)]
+    pub resource: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -62,6 +67,11 @@ pub struct ConsentDecisionForm {
     pub allow_all_services: bool,
     #[serde(default)]
     pub allowed_service_ids: Vec<String>,
+    pub consent_request: Option<String>,
+    #[serde(default)]
+    pub resource: Vec<String>,
+    #[serde(default)]
+    pub resource_selection_present: bool,
     pub decision: String,
 }
 
@@ -91,6 +101,8 @@ pub struct TokenRequest {
     pub scope: Option<String>,
     /// Social provider hint for external token exchange ("google" or "github")
     pub provider: Option<String>,
+    #[serde(default)]
+    pub resource: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -101,6 +113,8 @@ pub struct TokenResponse {
     pub refresh_token: Option<String>,
     pub id_token: Option<String>,
     pub scope: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub binding_id: Option<String>,
     /// RFC 8693: Indicates the type of the issued token (only for token exchange grant).
@@ -164,6 +178,8 @@ pub struct IntrospectResponse {
     pub groups: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub permissions: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -231,6 +247,8 @@ pub struct PushedAuthorizationRequestForm {
     pub code_challenge_method: Option<String>,
     pub nonce: Option<String>,
     pub prompt: Option<String>,
+    #[serde(default)]
+    pub resource: Vec<String>,
     pub external_subject_platform: Option<String>,
     pub external_subject_tenant: Option<String>,
     pub external_subject_external_user_id: Option<String>,
@@ -251,6 +269,33 @@ pub struct PushedAuthorizationRequestResponse {
 struct OAuthErrorBody {
     error: &'static str,
     error_description: String,
+}
+
+const CONSENT_REQUEST_AUDIENCE: &str = "nyxid/oauth-consent";
+const CONSENT_REQUEST_TOKEN_TYPE: &str = "oauth_consent_request";
+const CONSENT_REQUEST_TTL_SECS: i64 = 15 * 60;
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ConsentRequestClaims {
+    sub: String,
+    iss: String,
+    aud: String,
+    exp: i64,
+    iat: i64,
+    token_type: String,
+    response_type: String,
+    client_id: String,
+    redirect_uri: String,
+    scope: Option<String>,
+    state: Option<String>,
+    code_challenge: Option<String>,
+    code_challenge_method: Option<String>,
+    nonce: Option<String>,
+    external_subject_platform: Option<String>,
+    external_subject_tenant: Option<String>,
+    external_subject_external_user_id: Option<String>,
+    prompt: Option<String>,
+    resource: Vec<String>,
 }
 
 /// Map internal `AppError` to an RFC 6749 §5.2 JSON error response.
@@ -321,6 +366,120 @@ fn client_credentials_from_basic_or_params(
         (None, Some(id), secret) => Some((id, secret)),
         _ => None,
     }
+}
+
+fn non_empty_resources(resources: &[String]) -> Option<&[String]> {
+    (!resources.is_empty()).then_some(resources)
+}
+
+fn response_resources(resources: Vec<String>) -> Option<Vec<String>> {
+    (!resources.is_empty()).then_some(resources)
+}
+
+fn intersect_service_ids(left: &[String], right: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for id in left {
+        if right.iter().any(|granted| granted == id) && !out.iter().any(|existing| existing == id) {
+            out.push(id.clone());
+        }
+    }
+    out
+}
+
+fn params_from_consent_form(form: &ConsentDecisionForm) -> AuthorizeQuery {
+    AuthorizeQuery {
+        response_type: form.response_type.clone(),
+        client_id: form.client_id.clone(),
+        redirect_uri: form.redirect_uri.clone(),
+        scope: form.scope.clone(),
+        state: form.state.clone(),
+        code_challenge: form.code_challenge.clone(),
+        code_challenge_method: form.code_challenge_method.clone(),
+        nonce: form.nonce.clone(),
+        external_subject_platform: form.external_subject_platform.clone(),
+        external_subject_tenant: form.external_subject_tenant.clone(),
+        external_subject_external_user_id: form.external_subject_external_user_id.clone(),
+        prompt: form.prompt.clone(),
+        resource: form.resource.clone(),
+        request_uri: None,
+    }
+}
+
+fn selected_resources_are_subset(requested: &[String], selected: &[String]) -> bool {
+    selected
+        .iter()
+        .all(|resource| requested.iter().any(|allowed| allowed == resource))
+}
+
+fn sign_consent_request(
+    state: &AppState,
+    user_id: &str,
+    params: &AuthorizeQuery,
+    validated_scope: &str,
+) -> AppResult<String> {
+    let now = Utc::now().timestamp();
+    let claims = ConsentRequestClaims {
+        sub: user_id.to_string(),
+        iss: state.config.jwt_issuer.clone(),
+        aud: CONSENT_REQUEST_AUDIENCE.to_string(),
+        exp: now + CONSENT_REQUEST_TTL_SECS,
+        iat: now,
+        token_type: CONSENT_REQUEST_TOKEN_TYPE.to_string(),
+        response_type: params.response_type.clone(),
+        client_id: params.client_id.clone(),
+        redirect_uri: params.redirect_uri.clone(),
+        scope: Some(validated_scope.to_string()),
+        state: params.state.clone(),
+        code_challenge: params.code_challenge.clone(),
+        code_challenge_method: params.code_challenge_method.clone(),
+        nonce: params.nonce.clone(),
+        external_subject_platform: params.external_subject_platform.clone(),
+        external_subject_tenant: params.external_subject_tenant.clone(),
+        external_subject_external_user_id: params.external_subject_external_user_id.clone(),
+        prompt: params.prompt.clone(),
+        resource: params.resource.clone(),
+    };
+
+    let mut header = Header::new(Algorithm::RS256);
+    header.kid = Some(state.jwt_keys.kid.clone());
+
+    encode(&header, &claims, &state.jwt_keys.encoding)
+        .map_err(|e| AppError::Internal(format!("Failed to encode consent request: {e}")))
+}
+
+fn verify_consent_request(
+    state: &AppState,
+    token: &str,
+    user_id: &str,
+) -> AppResult<AuthorizeQuery> {
+    let mut validation = Validation::new(Algorithm::RS256);
+    validation.set_issuer(&[&state.config.jwt_issuer]);
+    validation.set_audience(&[CONSENT_REQUEST_AUDIENCE]);
+
+    let claims = decode::<ConsentRequestClaims>(token, &state.jwt_keys.decoding, &validation)
+        .map_err(|_| AppError::BadRequest("Invalid consent request".to_string()))?
+        .claims;
+
+    if claims.token_type != CONSENT_REQUEST_TOKEN_TYPE || claims.sub != user_id {
+        return Err(AppError::BadRequest("Invalid consent request".to_string()));
+    }
+
+    Ok(AuthorizeQuery {
+        response_type: claims.response_type,
+        client_id: claims.client_id,
+        redirect_uri: claims.redirect_uri,
+        scope: claims.scope,
+        state: claims.state,
+        code_challenge: claims.code_challenge,
+        code_challenge_method: claims.code_challenge_method,
+        nonce: claims.nonce,
+        external_subject_platform: claims.external_subject_platform,
+        external_subject_tenant: claims.external_subject_tenant,
+        external_subject_external_user_id: claims.external_subject_external_user_id,
+        prompt: claims.prompt,
+        resource: claims.resource,
+        request_uri: None,
+    })
 }
 
 // --- Handlers ---
@@ -450,31 +609,10 @@ pub async fn authorize_decision(
     tele: TelemetryContext,
     Form(form): Form<ConsentDecisionForm>,
 ) -> Result<Response, AppError> {
-    let params = AuthorizeQuery {
-        response_type: form.response_type,
-        client_id: form.client_id,
-        redirect_uri: form.redirect_uri,
-        scope: form.scope,
-        state: form.state,
-        code_challenge: form.code_challenge,
-        code_challenge_method: form.code_challenge_method,
-        nonce: form.nonce,
-        external_subject_platform: form.external_subject_platform,
-        external_subject_tenant: form.external_subject_tenant,
-        external_subject_external_user_id: form.external_subject_external_user_id,
-        prompt: form.prompt,
-        request_uri: None,
-    };
-
-    let external_subject = validate_external_subject_params(
-        params.external_subject_platform.as_deref(),
-        params.external_subject_tenant.as_deref(),
-        params.external_subject_external_user_id.as_deref(),
-    )?;
-
     let auth_user = match opt_auth.0 {
         Some(user) => user,
         None => {
+            let params = params_from_consent_form(&form);
             let return_to = build_authorize_url(&state.config.frontend_url, &params);
             let login_url = format!(
                 "{}/login?return_to={}",
@@ -484,6 +622,21 @@ pub async fn authorize_decision(
             return Ok(redirect_302(&login_url));
         }
     };
+
+    let user_id_str = auth_user.user_id.to_string();
+    let params = verify_consent_request(
+        &state,
+        form.consent_request
+            .as_deref()
+            .ok_or_else(|| AppError::BadRequest("Missing consent request".to_string()))?,
+        &user_id_str,
+    )?;
+
+    let external_subject = validate_external_subject_params(
+        params.external_subject_platform.as_deref(),
+        params.external_subject_tenant.as_deref(),
+        params.external_subject_external_user_id.as_deref(),
+    )?;
 
     let (_client, validated_scope) = validate_authorize_request(&state, &params).await?;
 
@@ -500,23 +653,50 @@ pub async fn authorize_decision(
         return Err(AppError::BadRequest("Invalid consent decision".to_string()));
     }
 
-    let user_id_str = auth_user.user_id.to_string();
-    let selected_service_ids = normalize_allowed_service_ids(form.allowed_service_ids);
-    let grant_allowed_service_ids = if form.allow_all_services {
-        Vec::new()
-    } else {
+    if !selected_resources_are_subset(&params.resource, &form.resource) {
+        return Err(AppError::InvalidTarget(
+            "selected resource was not in the original authorization request".to_string(),
+        ));
+    }
+
+    let consent_allowed_service_ids = if !form.allow_all_services {
+        let selected_service_ids = normalize_allowed_service_ids(form.allowed_service_ids);
         validate_allowed_service_ids(&state.db, &user_id_str, &selected_service_ids).await?;
-        selected_service_ids
+        Some(selected_service_ids)
+    } else if form.resource_selection_present || !params.resource.is_empty() {
+        let resolved_consent_resources = oauth_resource_service::resolve_requested_resources(
+            &state.db,
+            &state.config,
+            &user_id_str,
+            non_empty_resources(&form.resource),
+        )
+        .await?;
+        Some(
+            resolved_consent_resources
+                .map(|resolved| resolved.service_ids)
+                .unwrap_or_default(),
+        )
+    } else {
+        None
     };
-    consent_service::grant_consent(
-        &state.db,
-        &user_id_str,
-        &params.client_id,
-        &validated_scope,
-        form.allow_all_services,
-        &grant_allowed_service_ids,
-    )
-    .await?;
+    if let Some(ids) = consent_allowed_service_ids {
+        consent_service::grant_consent_with_services(
+            &state.db,
+            &user_id_str,
+            &params.client_id,
+            &validated_scope,
+            Some(ids),
+        )
+        .await?;
+    } else {
+        consent_service::grant_consent(
+            &state.db,
+            &user_id_str,
+            &params.client_id,
+            &validated_scope,
+        )
+        .await?;
+    }
 
     let code = issue_authorization_code(
         &state,
@@ -524,8 +704,6 @@ pub async fn authorize_decision(
         &params,
         &validated_scope,
         external_subject.as_ref(),
-        form.allow_all_services,
-        &grant_allowed_service_ids,
     )
     .await?;
     let redirect_url = build_callback_url(&params, &code);
@@ -640,8 +818,6 @@ async fn authorize_inner(
                     &user_id_str,
                     &params.client_id,
                     &validated_scope,
-                    false,
-                    &[],
                 )
                 .await?;
 
@@ -663,6 +839,12 @@ async fn authorize_inner(
                         params,
                         &client.client_name,
                         &validated_scope,
+                        Some(&sign_consent_request(
+                            state,
+                            &user_id_str,
+                            params,
+                            &validated_scope,
+                        )?),
                     );
                     return Ok(redirect_302(&consent_url));
                 }
@@ -673,14 +855,6 @@ async fn authorize_inner(
                     params,
                     &validated_scope,
                     external_subject,
-                    consent
-                        .as_ref()
-                        .map(|c| c.allow_all_services)
-                        .unwrap_or(true),
-                    consent
-                        .as_ref()
-                        .map(|c| c.allowed_service_ids.as_slice())
-                        .unwrap_or(&[]),
                 )
                 .await?;
                 let redirect_url = build_callback_url(params, &code);
@@ -704,8 +878,6 @@ async fn authorize_inner(
             &user_id_str,
             &params.client_id,
             &validated_scope,
-            false,
-            &[],
         )
         .await?;
 
@@ -715,6 +887,12 @@ async fn authorize_inner(
                 params,
                 &client.client_name,
                 &validated_scope,
+                Some(&sign_consent_request(
+                    state,
+                    &user_id_str,
+                    params,
+                    &validated_scope,
+                )?),
             );
             return Err(AppError::ConsentRequired { consent_url });
         }
@@ -725,14 +903,6 @@ async fn authorize_inner(
             params,
             &validated_scope,
             external_subject,
-            consent
-                .as_ref()
-                .map(|c| c.allow_all_services)
-                .unwrap_or(true),
-            consent
-                .as_ref()
-                .map(|c| c.allowed_service_ids.as_slice())
-                .unwrap_or(&[]),
         )
         .await?;
         let redirect_url = build_callback_url(params, &code);
@@ -906,6 +1076,7 @@ fn has_non_par_authorize_params(params: &AuthorizeQuery) -> bool {
         || params.external_subject_tenant.is_some()
         || params.external_subject_external_user_id.is_some()
         || params.prompt.is_some()
+        || !params.resource.is_empty()
 }
 
 async fn resolve_pushed_authorize_params(
@@ -950,6 +1121,7 @@ async fn resolve_pushed_authorize_params(
         external_subject_tenant,
         external_subject_external_user_id,
         prompt: record.prompt,
+        resource: record.resources,
         request_uri: None,
     })
 }
@@ -1018,6 +1190,9 @@ fn build_authorize_url(base_url: &str, params: &AuthorizeQuery) -> String {
     }
     if let Some(ref prompt) = params.prompt {
         url.push_str(&format!("&prompt={}", urlencoding::encode(prompt)));
+    }
+    for resource in &params.resource {
+        url.push_str(&format!("&resource={}", urlencoding::encode(resource)));
     }
 
     url
@@ -1090,6 +1265,7 @@ fn build_consent_url(
     params: &AuthorizeQuery,
     client_name: &str,
     validated_scope: &str,
+    consent_request: Option<&str>,
 ) -> String {
     let mut url = format!(
         "{}/oauth-consent?response_type={}&client_id={}&client_name={}&redirect_uri={}",
@@ -1144,6 +1320,15 @@ fn build_consent_url(
     if let Some(ref prompt) = params.prompt {
         url.push_str(&format!("&prompt={}", urlencoding::encode(prompt)));
     }
+    for resource in &params.resource {
+        url.push_str(&format!("&resource={}", urlencoding::encode(resource)));
+    }
+    if let Some(consent_request) = consent_request {
+        url.push_str(&format!(
+            "&consent_request={}",
+            urlencoding::encode(consent_request)
+        ));
+    }
 
     url
 }
@@ -1155,10 +1340,59 @@ async fn issue_authorization_code(
     params: &AuthorizeQuery,
     validated_scope: &str,
     external_subject: Option<&ExternalSubjectRef>,
-    allow_all_services: bool,
-    allowed_service_ids: &[String],
 ) -> AppResult<String> {
     let user_id_str = auth_user.user_id.to_string();
+    let consent = match consent_service::check_consent(
+        &state.db,
+        &user_id_str,
+        &params.client_id,
+        validated_scope,
+    )
+    .await?
+    {
+        Some(consent) => consent,
+        None => {
+            let consent_request =
+                sign_consent_request(state, &user_id_str, params, validated_scope)?;
+            return Err(AppError::ConsentRequired {
+                consent_url: build_consent_url(
+                    &state.config.frontend_url,
+                    params,
+                    &params.client_id,
+                    validated_scope,
+                    Some(&consent_request),
+                ),
+            });
+        }
+    };
+    let resolved_resources = oauth_resource_service::resolve_requested_resources(
+        &state.db,
+        &state.config,
+        &user_id_str,
+        non_empty_resources(&params.resource),
+    )
+    .await?;
+    let (resource_uris, allowed_service_ids, service_restricted) =
+        match (resolved_resources, consent.allowed_service_ids.as_ref()) {
+            (Some(resolved), Some(consented_ids)) => {
+                let allowed = intersect_service_ids(&resolved.service_ids, consented_ids);
+                let resources = resolved
+                    .resource_uris
+                    .into_iter()
+                    .zip(resolved.service_ids)
+                    .filter_map(|(resource, service_id)| {
+                        allowed
+                            .iter()
+                            .any(|id| id == &service_id)
+                            .then_some(resource)
+                    })
+                    .collect::<Vec<_>>();
+                (resources, allowed, true)
+            }
+            (Some(resolved), None) => (resolved.resource_uris, resolved.service_ids, true),
+            (None, Some(consented_ids)) => (Vec::new(), consented_ids.clone(), true),
+            (None, None) => (Vec::new(), Vec::new(), false),
+        };
     let code = oauth_service::create_authorization_code(
         &state.db,
         &params.client_id,
@@ -1169,17 +1403,27 @@ async fn issue_authorization_code(
         params.code_challenge_method.as_deref(),
         params.nonce.as_deref(),
         external_subject,
-        allow_all_services,
-        allowed_service_ids,
+        &resource_uris,
+        &allowed_service_ids,
+        service_restricted,
     )
     .await?;
 
     let mut event_data = serde_json::json!({
         "client_id": params.client_id,
         "scope": validated_scope,
-        "allow_all_services": allow_all_services,
+        "allow_all_services": !service_restricted,
         "allowed_service_ids_count": allowed_service_ids.len(),
     });
+    if !resource_uris.is_empty()
+        && let Some(obj) = event_data.as_object_mut()
+    {
+        obj.insert("resources".to_string(), serde_json::json!(resource_uris));
+        obj.insert(
+            "allowed_service_ids".to_string(),
+            serde_json::json!(allowed_service_ids),
+        );
+    }
     if let Some(external_subject) = external_subject
         && let Some(obj) = event_data.as_object_mut()
     {
@@ -1246,6 +1490,9 @@ pub async fn pushed_authorization_request(
         body.external_subject_tenant.as_deref(),
         body.external_subject_external_user_id.as_deref(),
     )?;
+    for resource in &body.resource {
+        oauth_resource_service::validate_resource_uri(resource)?;
+    }
 
     let (request_uri, expires_in) = par_service::create_request(
         &state.db,
@@ -1258,6 +1505,7 @@ pub async fn pushed_authorization_request(
         body.code_challenge_method.as_deref(),
         body.nonce.as_deref(),
         body.prompt.as_deref(),
+        &body.resource,
         external_subject,
     )
     .await?;
@@ -1327,6 +1575,7 @@ async fn token_inner(
                 body.code_verifier.as_deref(),
                 body.client_secret.as_deref(),
                 Some(oauth_broker_service::BROKER_ACCESS_TTL_SECS),
+                non_empty_resources(&body.resource),
             )
             .await?;
 
@@ -1347,8 +1596,9 @@ async fn token_inner(
                         client_id_str,
                         &exchanged.user_id,
                         &exchanged.granted_scope,
-                        exchanged.allow_all_services,
+                        &exchanged.resource_uris,
                         &exchanged.allowed_service_ids,
+                        exchanged.allow_all_services,
                     )
                     .await?
                 } else {
@@ -1397,6 +1647,7 @@ async fn token_inner(
                     refresh_token: return_refresh_token.then_some(exchanged.refresh_token),
                     id_token: exchanged.id_token,
                     scope: Some(exchanged.granted_scope),
+                    resource: response_resources(exchanged.resource_uris),
                     binding_id: Some(binding_id),
                     issued_token_type: None,
                 }));
@@ -1409,6 +1660,7 @@ async fn token_inner(
                 refresh_token: Some(exchanged.refresh_token),
                 id_token: exchanged.id_token,
                 scope: Some(exchanged.granted_scope),
+                resource: response_resources(exchanged.resource_uris),
                 binding_id: None,
                 issued_token_type: None,
             }))
@@ -1424,6 +1676,7 @@ async fn token_inner(
                 &state.jwt_keys,
                 refresh,
                 Some(&state.mcp_sessions),
+                non_empty_resources(&body.resource),
             )
             .await?;
 
@@ -1434,6 +1687,7 @@ async fn token_inner(
                 refresh_token: Some(tokens.refresh_token),
                 id_token: None,
                 scope: None,
+                resource: response_resources(tokens.resource_uris),
                 binding_id: None,
                 issued_token_type: None,
             }))
@@ -1501,6 +1755,7 @@ async fn token_inner(
                     refresh_token: Some(result.refresh_token),
                     id_token: result.id_token,
                     scope: Some(result.scope),
+                    resource: None,
                     binding_id: None,
                     issued_token_type: Some(
                         "urn:ietf:params:oauth:token-type:access_token".to_string(),
@@ -1558,6 +1813,7 @@ async fn token_inner(
                     refresh_token: None,
                     id_token: None,
                     scope: Some(result.scope),
+                    resource: None,
                     binding_id: None,
                     issued_token_type: Some(result.issued_token_type),
                 }))
@@ -1669,6 +1925,7 @@ async fn token_inner(
                     refresh_token: None,
                     id_token: None,
                     scope: Some(result.granted_scope),
+                    resource: None,
                     binding_id: None,
                     issued_token_type: Some(result.issued_token_type),
                 }))
@@ -1723,6 +1980,7 @@ async fn token_inner(
                         refresh_token: None,
                         id_token: None,
                         scope: Some(response.scope),
+                        resource: None,
                         binding_id: None,
                         issued_token_type: None,
                     }))
@@ -1816,6 +2074,7 @@ pub async fn introspect(
     let inactive = IntrospectResponse {
         active: false,
         scope: None,
+        resource: None,
         client_id: None,
         username: None,
         token_type: None,
@@ -1873,6 +2132,7 @@ pub async fn introspect(
         return Json(IntrospectResponse {
             active: true,
             scope: Some(binding.scopes.join(" ")),
+            resource: None,
             client_id: Some(binding.client_id),
             username: None,
             token_type: Some("broker_binding".to_string()),
@@ -1948,6 +2208,7 @@ pub async fn introspect(
     Json(IntrospectResponse {
         active: true,
         scope: Some(claims.scope),
+        resource: response_resources(claims.resources.unwrap_or_default()),
         client_id: None,
         username,
         token_type: Some(claims.token_type),
@@ -2431,12 +2692,13 @@ mod tests {
             user_id: user_id.to_string(),
             session_id: None,
             scope: Some(scopes.join(" ")),
-            allow_all_services: true,
-            allowed_service_ids: Vec::new(),
             expires_at: now + Duration::days(7),
             revoked: false,
             replaced_by: None,
             revoked_at: None,
+            resource_uris: Vec::new(),
+            allowed_service_ids: Vec::new(),
+            allow_all_services: true,
             created_at: now,
         };
         state
@@ -2509,9 +2771,10 @@ mod tests {
                 code_challenge: None,
                 code_challenge_method: None,
                 nonce: Some("nonce-1".to_string()),
-                allow_all_services: true,
-                allowed_service_ids: Vec::new(),
                 external_subject: None,
+                resource_uris: Vec::new(),
+                allowed_service_ids: Vec::new(),
+                allow_all_services: true,
                 expires_at: now + Duration::minutes(5),
                 used: false,
                 created_at: now,
@@ -2626,6 +2889,7 @@ mod tests {
                 subject_token_type: None,
                 scope: None,
                 provider: None,
+                resource: Vec::new(),
             },
         )
         .await
@@ -2673,6 +2937,7 @@ mod tests {
                 subject_token_type: None,
                 scope: None,
                 provider: None,
+                resource: Vec::new(),
             },
         )
         .await
@@ -2698,6 +2963,7 @@ mod tests {
                 subject_token_type: None,
                 scope: None,
                 provider: None,
+                resource: Vec::new(),
             },
         )
         .await
@@ -2723,6 +2989,7 @@ mod tests {
                 ),
                 scope: Some("openid".to_string()),
                 provider: None,
+                resource: Vec::new(),
             },
         )
         .await
@@ -2824,6 +3091,7 @@ mod tests {
                 ),
                 scope: Some("openid".to_string()),
                 provider: None,
+                resource: Vec::new(),
             },
         )
         .await
@@ -3001,6 +3269,7 @@ mod tests {
                 subject_token_type: None,
                 scope: None,
                 provider: None,
+                resource: Vec::new(),
             },
         )
         .await
@@ -3030,6 +3299,7 @@ mod tests {
                 subject_token_type: None,
                 scope: None,
                 provider: None,
+                resource: Vec::new(),
             },
         )
         .await
@@ -3059,11 +3329,101 @@ mod tests {
                 subject_token_type: None,
                 scope: None,
                 provider: None,
+                resource: Vec::new(),
             },
         )
         .await
         .expect_err("should reject unsupported grant_type");
         assert!(matches!(err, AppError::UnsupportedGrantType(_)));
+    }
+
+    #[tokio::test]
+    async fn authorize_decision_rejects_resource_selection_outside_signed_request() {
+        let Some(db) = connect_test_database("oauth_consent_resource_tamper").await else {
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let user_id = Uuid::new_v4().to_string();
+        let client_id = "oauth-consent-resource-tamper-client";
+        let requested_resource = "http://localhost:3001/api/v1/proxy/s/openai".to_string();
+        let tampered_resource = "http://localhost:3001/api/v1/proxy/s/anthropic".to_string();
+        let now = Utc::now();
+
+        insert_person_user(&db, &user_id).await;
+        db.collection::<OauthClient>(OAUTH_CLIENTS)
+            .insert_one(OauthClient {
+                id: client_id.to_string(),
+                client_name: "Resource Tamper Test".to_string(),
+                client_secret_hash: String::new(),
+                redirect_uris: vec!["http://localhost/callback".to_string()],
+                allowed_scopes: "openid".to_string(),
+                grant_types: "authorization_code refresh_token".to_string(),
+                client_type: "public".to_string(),
+                is_active: true,
+                delegation_scopes: String::new(),
+                broker_capability_enabled: false,
+                revocation_webhook_url: None,
+                revocation_webhook_secret_encrypted: None,
+                created_by: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .expect("insert oauth client");
+
+        let trusted_params = AuthorizeQuery {
+            response_type: "code".to_string(),
+            client_id: client_id.to_string(),
+            redirect_uri: "http://localhost/callback".to_string(),
+            scope: Some("openid".to_string()),
+            state: Some("state-1".to_string()),
+            code_challenge: Some("challenge".to_string()),
+            code_challenge_method: Some("S256".to_string()),
+            nonce: None,
+            external_subject_platform: None,
+            external_subject_tenant: None,
+            external_subject_external_user_id: None,
+            prompt: None,
+            request_uri: None,
+            resource: vec![requested_resource],
+        };
+        let consent_request =
+            sign_consent_request(&state, &user_id, &trusted_params, "openid").unwrap();
+
+        let err = match authorize_decision(
+            State(state),
+            OptionalAuthUser(Some(crate::test_utils::test_auth_user(&user_id))),
+            TelemetryContext::default(),
+            Form(ConsentDecisionForm {
+                response_type: "code".to_string(),
+                client_id: client_id.to_string(),
+                redirect_uri: "http://localhost/callback".to_string(),
+                scope: Some("openid".to_string()),
+                state: Some("state-1".to_string()),
+                code_challenge: Some("challenge".to_string()),
+                code_challenge_method: Some("S256".to_string()),
+                nonce: None,
+                external_subject_platform: None,
+                external_subject_tenant: None,
+                external_subject_external_user_id: None,
+                prompt: None,
+                allow_all_services: true,
+                allowed_service_ids: Vec::new(),
+                consent_request: Some(consent_request),
+                resource: vec![tampered_resource],
+                resource_selection_present: true,
+                decision: "allow".to_string(),
+            }),
+        )
+        .await
+        {
+            Ok(_) => panic!("tampered resource selection must be rejected"),
+            Err(err) => err,
+        };
+
+        assert!(
+            matches!(err, AppError::InvalidTarget(msg) if msg.contains("original authorization request"))
+        );
     }
 
     #[tokio::test]
@@ -3088,6 +3448,7 @@ mod tests {
                 subject_token_type: None,
                 scope: None,
                 provider: None,
+                resource: Vec::new(),
             },
         )
         .await
@@ -3117,6 +3478,7 @@ mod tests {
                 subject_token_type: None,
                 scope: None,
                 provider: None,
+                resource: Vec::new(),
             },
         )
         .await
@@ -3148,6 +3510,7 @@ mod tests {
                 ),
                 scope: None,
                 provider: None,
+                resource: Vec::new(),
             },
         )
         .await
@@ -3177,6 +3540,7 @@ mod tests {
                 subject_token_type: Some("urn:unknown:type".to_string()),
                 scope: None,
                 provider: None,
+                resource: Vec::new(),
             },
         )
         .await
@@ -3230,6 +3594,30 @@ mod tests {
         assert!(prompts.contains("login"));
         assert!(prompts.contains("consent"));
         assert_eq!(prompts.len(), 2);
+    }
+
+    #[test]
+    fn intersect_service_ids_preserves_requested_order_and_dedupes() {
+        let requested = vec![
+            "svc-2".to_string(),
+            "svc-1".to_string(),
+            "svc-2".to_string(),
+            "svc-3".to_string(),
+        ];
+        let consented = vec!["svc-1".to_string(), "svc-2".to_string()];
+
+        assert_eq!(
+            intersect_service_ids(&requested, &consented),
+            vec!["svc-2".to_string(), "svc-1".to_string()]
+        );
+    }
+
+    #[test]
+    fn intersect_service_ids_empty_when_disjoint() {
+        let requested = vec!["svc-3".to_string()];
+        let consented = vec!["svc-1".to_string(), "svc-2".to_string()];
+
+        assert!(intersect_service_ids(&requested, &consented).is_empty());
     }
 
     #[tokio::test]

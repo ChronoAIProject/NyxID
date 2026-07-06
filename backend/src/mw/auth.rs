@@ -557,9 +557,9 @@ impl FromRequestParts<AppState> for AuthUser {
                     }
 
                     // Relay tokens inherit the originating agent key's scope.
-                    // Regular OAuth access tokens carry the user's consented
-                    // service grant directly in JWT claims; absent claims are
-                    // legacy allow-all.
+                    // OAuth access tokens carry optional resource/service
+                    // restrictions in JWT claims; absent claims are legacy
+                    // allow-all.
                     let (
                         allow_all_services,
                         allow_all_nodes,

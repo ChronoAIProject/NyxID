@@ -69,12 +69,6 @@ pub struct Claims {
     /// True if this token was issued for channel relay callbacks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay: Option<bool>,
-    /// OAuth access-token service scope. Missing means allow all services.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub allowed_service_ids: Option<Vec<String>>,
-    /// OAuth access-token service scope flag. Missing means allow all services.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub allow_all_services: Option<bool>,
     /// Agent key ID that triggered the relay (for scope inheritance).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_api_key_id: Option<String>,
@@ -93,6 +87,15 @@ pub struct Claims {
     /// Inherited scope: allow all nodes flag from the agent key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_allow_all_nodes: Option<bool>,
+    /// RFC 8707 resource indicators granted to this access token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<Vec<String>>,
+    /// UserService IDs granted to this access token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_service_ids: Option<Vec<String>>,
+    /// False when this access token is restricted to `allowed_service_ids`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_all_services: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -294,11 +297,9 @@ pub struct RbacClaimData {
     pub sid: Option<String>,
 }
 
-/// Optional resource-owner service grant to embed in OAuth access tokens.
-#[derive(Clone, Copy)]
-pub struct AccessTokenServiceScope<'a> {
+pub struct AccessTokenRestrictions<'a> {
+    pub resources: &'a [String],
     pub allowed_service_ids: &'a [String],
-    pub allow_all_services: bool,
 }
 
 /// Generate an access token for the given user.
@@ -314,7 +315,7 @@ pub fn generate_access_token(
     ttl_override_secs: Option<i64>,
     dpop_jkt: Option<&str>,
     mtls_x5t_s256: Option<&str>,
-    service_scope: Option<AccessTokenServiceScope<'_>>,
+    restrictions: Option<AccessTokenRestrictions<'_>>,
 ) -> Result<String, AppError> {
     let now = Utc::now().timestamp();
     let cnf = if dpop_jkt.is_some() || mtls_x5t_s256.is_some() {
@@ -344,14 +345,17 @@ pub fn generate_access_token(
         sa: None,
         cnf,
         relay: None,
-        allowed_service_ids: service_scope.map(|s| s.allowed_service_ids.to_vec()),
-        allow_all_services: service_scope.map(|s| s.allow_all_services),
         relay_api_key_id: None,
         relay_api_key_name: None,
         relay_allowed_service_ids: None,
         relay_allowed_node_ids: None,
         relay_allow_all_services: None,
         relay_allow_all_nodes: None,
+        resources: restrictions.as_ref().map(|r| r.resources.to_vec()),
+        allowed_service_ids: restrictions
+            .as_ref()
+            .map(|r| r.allowed_service_ids.to_vec()),
+        allow_all_services: restrictions.as_ref().map(|_| false),
     };
 
     let mut header = Header::new(Algorithm::RS256);
@@ -408,14 +412,15 @@ pub fn generate_relay_access_token(
         sa: None,
         cnf: None,
         relay: Some(true),
-        allowed_service_ids: None,
-        allow_all_services: None,
         relay_api_key_id: Some(agent_scope.api_key_id.clone()),
         relay_api_key_name: Some(agent_scope.api_key_name.clone()),
         relay_allowed_service_ids: Some(agent_scope.allowed_service_ids.clone()),
         relay_allowed_node_ids: Some(agent_scope.allowed_node_ids.clone()),
         relay_allow_all_services: Some(agent_scope.allow_all_services),
         relay_allow_all_nodes: Some(agent_scope.allow_all_nodes),
+        resources: None,
+        allowed_service_ids: None,
+        allow_all_services: None,
     };
 
     let mut header = Header::new(Algorithm::RS256);
@@ -515,14 +520,15 @@ pub fn generate_refresh_token(
         sa: None,
         cnf: None,
         relay: None,
-        allowed_service_ids: None,
-        allow_all_services: None,
         relay_api_key_id: None,
         relay_api_key_name: None,
         relay_allowed_service_ids: None,
         relay_allowed_node_ids: None,
         relay_allow_all_services: None,
         relay_allow_all_nodes: None,
+        resources: None,
+        allowed_service_ids: None,
+        allow_all_services: None,
     };
 
     let mut header = Header::new(Algorithm::RS256);
@@ -564,14 +570,15 @@ pub fn reissue_refresh_token(
         sa: None,
         cnf: None,
         relay: None,
-        allowed_service_ids: None,
-        allow_all_services: None,
         relay_api_key_id: None,
         relay_api_key_name: None,
         relay_allowed_service_ids: None,
         relay_allowed_node_ids: None,
         relay_allow_all_services: None,
         relay_allow_all_nodes: None,
+        resources: None,
+        allowed_service_ids: None,
+        allow_all_services: None,
     };
 
     let mut header = Header::new(Algorithm::RS256);
@@ -626,14 +633,15 @@ pub fn generate_delegated_access_token(
         sa: None,
         cnf: None,
         relay: None,
-        allowed_service_ids: None,
-        allow_all_services: None,
         relay_api_key_id: None,
         relay_api_key_name: None,
         relay_allowed_service_ids: None,
         relay_allowed_node_ids: None,
         relay_allow_all_services: None,
         relay_allow_all_nodes: None,
+        resources: None,
+        allowed_service_ids: None,
+        allow_all_services: None,
     };
 
     let mut header = Header::new(Algorithm::RS256);
@@ -766,14 +774,15 @@ pub fn generate_service_account_token(
         sa: Some(true),
         cnf: None,
         relay: None,
-        allowed_service_ids: None,
-        allow_all_services: None,
         relay_api_key_id: None,
         relay_api_key_name: None,
         relay_allowed_service_ids: None,
         relay_allowed_node_ids: None,
         relay_allow_all_services: None,
         relay_allow_all_nodes: None,
+        resources: None,
+        allowed_service_ids: None,
+        allow_all_services: None,
     };
 
     let mut header = Header::new(Algorithm::RS256);
@@ -1141,10 +1150,11 @@ mod tests {
     }
 
     #[test]
-    fn access_token_service_scope_round_trips() {
+    fn access_token_can_carry_resource_restrictions_without_changing_audience() {
         let (keys, config) = test_keys_and_config();
         let user_id = Uuid::new_v4();
-        let service_ids = vec!["svc-1".to_string(), "svc-2".to_string()];
+        let resources = vec!["http://localhost:3001/api/v1/proxy/s/openai".to_string()];
+        let allowed_service_ids = vec!["svc-1".to_string()];
         let token = generate_access_token(
             &keys,
             &config,
@@ -1154,20 +1164,22 @@ mod tests {
             None,
             None,
             None,
-            Some(AccessTokenServiceScope {
-                allowed_service_ids: &service_ids,
-                allow_all_services: false,
+            Some(AccessTokenRestrictions {
+                resources: &resources,
+                allowed_service_ids: &allowed_service_ids,
             }),
         )
         .unwrap();
 
         let claims = verify_token(&keys, &config, &token).unwrap();
+        assert_eq!(claims.aud, config.base_url);
+        assert_eq!(claims.resources, Some(resources));
+        assert_eq!(claims.allowed_service_ids, Some(allowed_service_ids));
         assert_eq!(claims.allow_all_services, Some(false));
-        assert_eq!(claims.allowed_service_ids, Some(service_ids));
     }
 
     #[test]
-    fn access_token_without_service_scope_omits_service_claims() {
+    fn access_token_without_restrictions_omits_resource_claims() {
         let (keys, config) = test_keys_and_config();
         let user_id = Uuid::new_v4();
         let token = generate_access_token(
@@ -1176,6 +1188,7 @@ mod tests {
         .unwrap();
 
         let claims = verify_token(&keys, &config, &token).unwrap();
+        assert!(claims.resources.is_none());
         assert!(claims.allow_all_services.is_none());
         assert!(claims.allowed_service_ids.is_none());
     }
@@ -1275,14 +1288,15 @@ mod tests {
             sa: None,
             cnf: None,
             relay: None,
-            allowed_service_ids: None,
-            allow_all_services: None,
             relay_api_key_id: None,
             relay_api_key_name: None,
             relay_allowed_service_ids: None,
             relay_allowed_node_ids: None,
             relay_allow_all_services: None,
             relay_allow_all_nodes: None,
+            resources: None,
+            allowed_service_ids: None,
+            allow_all_services: None,
         };
 
         let mut header = Header::new(Algorithm::RS256);
@@ -1388,14 +1402,15 @@ mod tests {
             sa: None,
             cnf: None,
             relay: None,
-            allowed_service_ids: None,
-            allow_all_services: None,
             relay_api_key_id: None,
             relay_api_key_name: None,
             relay_allowed_service_ids: None,
             relay_allowed_node_ids: None,
             relay_allow_all_services: None,
             relay_allow_all_nodes: None,
+            resources: None,
+            allowed_service_ids: None,
+            allow_all_services: None,
         };
         let json = serde_json::to_string(&claims).unwrap();
         let restored: Claims = serde_json::from_str(&json).unwrap();

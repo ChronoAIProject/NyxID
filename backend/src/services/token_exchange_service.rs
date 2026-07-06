@@ -91,8 +91,7 @@ pub async fn exchange_token(
     let user_id_str = &subject_claims.sub;
 
     // Step 4: Verify user has consented to this client
-    let consent =
-        consent_service::check_consent(db, user_id_str, client_id, "openid", false, &[]).await?;
+    let consent = consent_service::check_consent(db, user_id_str, client_id, "openid").await?;
 
     if consent.is_none() {
         log_exchange_failure(db, Some(user_id_str), client_id, "consent_missing");
@@ -199,8 +198,7 @@ pub async fn refresh_delegation_token(
     // Verify user still has active consent for this client.
     // Without this check, a client could indefinitely refresh delegation
     // tokens even after the user revokes consent.
-    let consent =
-        consent_service::check_consent(db, user_id, acting_client_id, "openid", false, &[]).await?;
+    let consent = consent_service::check_consent(db, user_id, acting_client_id, "openid").await?;
 
     if consent.is_none() {
         log_exchange_failure(db, Some(user_id), acting_client_id, "consent_revoked");

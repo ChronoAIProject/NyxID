@@ -2,7 +2,6 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::errors::{AppError, AppResult};
-use crate::models::consent::default_allow_all_services;
 
 pub const COLLECTION_NAME: &str = "authorization_codes";
 
@@ -26,17 +25,23 @@ pub struct AuthorizationCode {
     pub code_challenge: Option<String>,
     pub code_challenge_method: Option<String>,
     pub nonce: Option<String>,
-    #[serde(default = "default_allow_all_services")]
-    pub allow_all_services: bool,
-    #[serde(default)]
-    pub allowed_service_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_subject: Option<ExternalSubjectRef>,
+    #[serde(default)]
+    pub resource_uris: Vec<String>,
+    #[serde(default)]
+    pub allowed_service_ids: Vec<String>,
+    #[serde(default = "default_allow_all_services")]
+    pub allow_all_services: bool,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub expires_at: DateTime<Utc>,
     pub used: bool,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
+}
+
+fn default_allow_all_services() -> bool {
+    true
 }
 
 pub fn validate_external_subject_params(
@@ -122,13 +127,14 @@ mod tests {
             code_challenge: Some("challenge".to_string()),
             code_challenge_method: Some("S256".to_string()),
             nonce: Some("nonce123".to_string()),
-            allow_all_services: false,
-            allowed_service_ids: vec!["svc-1".to_string()],
             external_subject: Some(ExternalSubjectRef {
                 platform: "lark".to_string(),
                 tenant: Some("t1".to_string()),
                 external_user_id: "u1".to_string(),
             }),
+            resource_uris: vec!["https://nyx.example/api/v1/proxy/s/openai".to_string()],
+            allowed_service_ids: vec!["svc-1".to_string()],
+            allow_all_services: false,
             expires_at: Utc::now(),
             used: false,
             created_at: Utc::now(),
@@ -138,9 +144,10 @@ mod tests {
         assert_eq!(code.id, restored.id);
         assert_eq!(code.scope, restored.scope);
         assert_eq!(code.code_challenge, restored.code_challenge);
-        assert_eq!(code.allow_all_services, restored.allow_all_services);
-        assert_eq!(code.allowed_service_ids, restored.allowed_service_ids);
         assert_eq!(code.external_subject, restored.external_subject);
+        assert_eq!(code.resource_uris, restored.resource_uris);
+        assert_eq!(code.allowed_service_ids, restored.allowed_service_ids);
+        assert_eq!(code.allow_all_services, restored.allow_all_services);
     }
 
     #[test]
@@ -155,9 +162,10 @@ mod tests {
             code_challenge: None,
             code_challenge_method: None,
             nonce: None,
-            allow_all_services: true,
-            allowed_service_ids: Vec::new(),
             external_subject: None,
+            resource_uris: Vec::new(),
+            allowed_service_ids: Vec::new(),
+            allow_all_services: true,
             expires_at: Utc::now(),
             used: true,
             created_at: Utc::now(),
@@ -166,6 +174,9 @@ mod tests {
         let restored: AuthorizationCode = bson::from_document(doc).expect("deserialize");
         assert!(restored.code_challenge.is_none());
         assert!(restored.nonce.is_none());
+        assert!(restored.resource_uris.is_empty());
+        assert!(restored.allowed_service_ids.is_empty());
+        assert!(restored.allow_all_services);
         assert!(restored.used);
     }
 
@@ -189,8 +200,9 @@ mod tests {
 
         let restored: AuthorizationCode = bson::from_document(doc).expect("deserialize");
         assert!(restored.external_subject.is_none());
-        assert!(restored.allow_all_services);
+        assert!(restored.resource_uris.is_empty());
         assert!(restored.allowed_service_ids.is_empty());
+        assert!(restored.allow_all_services);
     }
 
     #[test]

@@ -331,12 +331,13 @@ async fn try_exchange_once(ctx: &BrokerExchangeContext<'_>) -> AppResult<Exchang
         user_id: binding.user_id.clone(),
         session_id: None,
         scope: Some(granted_scope.clone()),
-        allow_all_services: refresh_token_doc.allow_all_services,
-        allowed_service_ids: refresh_token_doc.allowed_service_ids.clone(),
         expires_at: refresh_expires,
         revoked: false,
         replaced_by: None,
         revoked_at: None,
+        resource_uris: refresh_token_doc.resource_uris.clone(),
+        allowed_service_ids: refresh_token_doc.allowed_service_ids.clone(),
+        allow_all_services: refresh_token_doc.allow_all_services,
         created_at: now,
     };
 
@@ -494,9 +495,9 @@ async fn mint_broker_access_token(
         Some(BROKER_ACCESS_TTL_SECS),
         ctx.dpop_jkt,
         ctx.mtls_x5t_s256,
-        Some(jwt::AccessTokenServiceScope {
+        (!refresh_token_doc.allow_all_services).then_some(jwt::AccessTokenRestrictions {
+            resources: &refresh_token_doc.resource_uris,
             allowed_service_ids: &refresh_token_doc.allowed_service_ids,
-            allow_all_services: refresh_token_doc.allow_all_services,
         }),
     )
 }
@@ -1014,12 +1015,13 @@ mod tests {
             user_id: user_id.to_string(),
             session_id: None,
             scope: None,
-            allow_all_services: true,
-            allowed_service_ids: Vec::new(),
             expires_at: now + Duration::days(7),
             revoked,
             replaced_by: None,
             revoked_at: revoked.then_some(now),
+            resource_uris: Vec::new(),
+            allowed_service_ids: Vec::new(),
+            allow_all_services: true,
             created_at: now,
         }
     }

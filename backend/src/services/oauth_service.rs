@@ -15,6 +15,7 @@ use crate::models::authorization_code::{
 use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
 use crate::models::refresh_token::{COLLECTION_NAME as REFRESH_TOKENS, RefreshToken};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
+use crate::services::oauth_resource_service;
 
 /// Validate an OAuth client and its redirect URI.
 pub async fn validate_client(
@@ -91,8 +92,9 @@ pub async fn create_authorization_code(
     code_challenge_method: Option<&str>,
     nonce: Option<&str>,
     external_subject: Option<&ExternalSubjectRef>,
-    allow_all_services: bool,
+    resource_uris: &[String],
     allowed_service_ids: &[String],
+    allow_all_services: bool,
 ) -> AppResult<String> {
     let code = generate_random_token();
     let code_hash = hash_token(&code);
@@ -108,9 +110,10 @@ pub async fn create_authorization_code(
         code_challenge: code_challenge.map(String::from),
         code_challenge_method: code_challenge_method.map(String::from),
         nonce: nonce.map(String::from),
-        allow_all_services,
-        allowed_service_ids: allowed_service_ids.to_vec(),
         external_subject: external_subject.cloned(),
+        resource_uris: resource_uris.to_vec(),
+        allowed_service_ids: allowed_service_ids.to_vec(),
+        allow_all_services,
         expires_at: now + Duration::minutes(5),
         used: false,
         created_at: now,
@@ -191,10 +194,11 @@ pub struct ExchangedTokens {
     pub id_token: Option<String>,
     pub granted_scope: String,
     pub user_id: String,
-    pub allow_all_services: bool,
-    pub allowed_service_ids: Vec<String>,
     pub external_subject: Option<ExternalSubjectRef>,
     pub broker_capability_enabled: bool,
+    pub resource_uris: Vec<String>,
+    pub allowed_service_ids: Vec<String>,
+    pub allow_all_services: bool,
 }
 
 pub struct IssuedOAuthRefreshToken {
@@ -202,6 +206,7 @@ pub struct IssuedOAuthRefreshToken {
     pub refresh_token_jti: String,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn issue_oauth_refresh_token(
     db: &mongodb::Database,
     config: &AppConfig,
@@ -209,8 +214,9 @@ pub async fn issue_oauth_refresh_token(
     client_id: &str,
     user_id: &str,
     scope: &str,
-    allow_all_services: bool,
+    resource_uris: &[String],
     allowed_service_ids: &[String],
+    allow_all_services: bool,
 ) -> AppResult<IssuedOAuthRefreshToken> {
     let user_uuid = Uuid::parse_str(user_id)
         .map_err(|e| AppError::Internal(format!("Invalid user_id for refresh token: {e}")))?;
@@ -226,12 +232,13 @@ pub async fn issue_oauth_refresh_token(
         user_id: user_id.to_string(),
         session_id: None,
         scope: Some(scope.to_string()),
-        allow_all_services,
-        allowed_service_ids: allowed_service_ids.to_vec(),
         expires_at: refresh_expires,
         revoked: false,
         replaced_by: None,
         revoked_at: None,
+        resource_uris: resource_uris.to_vec(),
+        allowed_service_ids: allowed_service_ids.to_vec(),
+        allow_all_services,
         created_at: now,
     };
 
@@ -256,6 +263,7 @@ pub async fn exchange_authorization_code(
     code_verifier: Option<&str>,
     client_secret: Option<&str>,
     access_token_ttl_override_secs: Option<i64>,
+    requested_resources: Option<&[String]>,
 ) -> AppResult<ExchangedTokens> {
     let code_hash = hash_token(code);
 
@@ -367,6 +375,39 @@ pub async fn exchange_authorization_code(
     // Parse user_id back to Uuid for JWT generation
     let user_uuid = Uuid::parse_str(&stored.user_id)
         .map_err(|e| AppError::Internal(format!("Invalid user_id in authorization code: {e}")))?;
+    let resolved_requested_resources = match requested_resources {
+        Some(resources) if stored.allow_all_services => {
+            oauth_resource_service::resolve_requested_resources(
+                db,
+                config,
+                &stored.user_id,
+                Some(resources),
+            )
+            .await?
+        }
+        _ => None,
+    };
+    let resource_uris = match (requested_resources, resolved_requested_resources.as_ref()) {
+        (Some(_), Some(resolved)) if stored.allow_all_services => resolved.resource_uris.clone(),
+        (Some(resources), _) => {
+            oauth_resource_service::filter_resource_narrowing(resources, &stored.resource_uris)?
+        }
+        (None, _) => stored.resource_uris.clone(),
+    };
+    let allowed_service_ids = if let Some(resolved) = resolved_requested_resources {
+        resolved.service_ids
+    } else if requested_resources.is_some() {
+        oauth_resource_service::resolve_resource_service_ids_for_user(
+            db,
+            config,
+            &stored.user_id,
+            &resource_uris,
+        )
+        .await?
+    } else {
+        stored.allowed_service_ids.clone()
+    };
+    let allow_all_services = stored.allow_all_services && requested_resources.is_none();
 
     // Resolve RBAC data filtered by the granted scope
     let rbac_data =
@@ -385,9 +426,9 @@ pub async fn exchange_authorization_code(
             .flatten(),
         None,
         None,
-        Some(crate::crypto::jwt::AccessTokenServiceScope {
-            allowed_service_ids: &stored.allowed_service_ids,
-            allow_all_services: stored.allow_all_services,
+        (!allow_all_services).then_some(crate::crypto::jwt::AccessTokenRestrictions {
+            resources: &resource_uris,
+            allowed_service_ids: &allowed_service_ids,
         }),
     )?;
 
@@ -398,8 +439,9 @@ pub async fn exchange_authorization_code(
         client_id,
         &stored.user_id,
         &stored.scope,
-        stored.allow_all_services,
-        &stored.allowed_service_ids,
+        &resource_uris,
+        &allowed_service_ids,
+        allow_all_services,
     )
     .await?;
 
@@ -445,10 +487,11 @@ pub async fn exchange_authorization_code(
         id_token,
         granted_scope,
         user_id: stored.user_id,
-        allow_all_services: stored.allow_all_services,
-        allowed_service_ids: stored.allowed_service_ids,
         external_subject: stored.external_subject,
         broker_capability_enabled,
+        resource_uris,
+        allowed_service_ids,
+        allow_all_services,
     })
 }
 
@@ -687,8 +730,9 @@ mod tests {
             Some("S256"),
             Some("nonce-1"),
             Some(&external),
-            false,
+            &["https://nyx.example/api/v1/proxy/s/openai".to_string()],
             &["svc-1".to_string()],
+            false,
         )
         .await
         .expect("create authorization code");
@@ -708,11 +752,91 @@ mod tests {
         assert_eq!(stored.code_challenge.as_deref(), Some("challenge"));
         assert_eq!(stored.code_challenge_method.as_deref(), Some("S256"));
         assert_eq!(stored.nonce.as_deref(), Some("nonce-1"));
-        assert!(!stored.allow_all_services);
-        assert_eq!(stored.allowed_service_ids, vec!["svc-1".to_string()]);
         assert_eq!(stored.external_subject, Some(external));
+        assert_eq!(
+            stored.resource_uris,
+            vec!["https://nyx.example/api/v1/proxy/s/openai".to_string()]
+        );
+        assert_eq!(stored.allowed_service_ids, vec!["svc-1".to_string()]);
+        assert!(!stored.allow_all_services);
         assert!(!stored.used);
         assert!(stored.expires_at > Utc::now());
+    }
+
+    #[tokio::test]
+    async fn exchange_authorization_code_preserves_empty_service_grant() {
+        let Some(db) = connect_test_database("oauth_empty_service_grant").await else {
+            return;
+        };
+        let client = test_client("client-empty-service-grant", "public", "");
+        insert_client(&db, &client).await;
+        let user_id = Uuid::new_v4().to_string();
+        let code = "empty-service-grant-code";
+        let now = Utc::now();
+
+        db.collection::<AuthorizationCode>(AUTH_CODES)
+            .insert_one(AuthorizationCode {
+                id: Uuid::new_v4().to_string(),
+                code_hash: hash_token(code),
+                client_id: client.id.clone(),
+                user_id: user_id.clone(),
+                redirect_uri: "https://app.example/callback".to_string(),
+                scope: "openid".to_string(),
+                code_challenge: None,
+                code_challenge_method: None,
+                nonce: None,
+                external_subject: None,
+                resource_uris: Vec::new(),
+                allowed_service_ids: Vec::new(),
+                allow_all_services: false,
+                expires_at: now + Duration::minutes(5),
+                used: false,
+                created_at: now,
+            })
+            .await
+            .expect("insert authorization code");
+
+        db.collection::<User>(USERS)
+            .insert_one(crate::test_utils::test_user(
+                &user_id,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .expect("insert user");
+
+        let config = crate::test_utils::test_app_config();
+        let jwt_keys = crate::test_utils::cached_test_jwt_keys();
+        let exchanged = exchange_authorization_code(
+            &db,
+            &config,
+            &jwt_keys,
+            code,
+            &client.id,
+            "https://app.example/callback",
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("exchange authorization code");
+
+        assert!(!exchanged.allow_all_services);
+        assert!(exchanged.allowed_service_ids.is_empty());
+        let claims = crate::crypto::jwt::verify_token(&jwt_keys, &config, &exchanged.access_token)
+            .expect("verify access token");
+        assert_eq!(claims.allow_all_services, Some(false));
+        assert_eq!(claims.allowed_service_ids, Some(Vec::new()));
+        assert_eq!(claims.resources, Some(Vec::new()));
+
+        let stored_refresh = db
+            .collection::<RefreshToken>(REFRESH_TOKENS)
+            .find_one(doc! { "jti": &exchanged.refresh_token_jti })
+            .await
+            .expect("query refresh")
+            .expect("refresh stored");
+        assert!(!stored_refresh.allow_all_services);
+        assert!(stored_refresh.allowed_service_ids.is_empty());
     }
 
     #[tokio::test]
@@ -736,9 +860,10 @@ mod tests {
                 code_challenge: None,
                 code_challenge_method: None,
                 nonce: None,
-                allow_all_services: true,
-                allowed_service_ids: Vec::new(),
                 external_subject: None,
+                resource_uris: Vec::new(),
+                allowed_service_ids: Vec::new(),
+                allow_all_services: true,
                 expires_at: now + Duration::minutes(5),
                 used: true,
                 created_at: now,
@@ -753,12 +878,13 @@ mod tests {
             user_id: user_id.clone(),
             session_id: None,
             scope: Some("openid".to_string()),
-            allow_all_services: true,
-            allowed_service_ids: Vec::new(),
             expires_at: now + Duration::days(1),
             revoked: false,
             replaced_by: None,
             revoked_at: None,
+            resource_uris: Vec::new(),
+            allowed_service_ids: Vec::new(),
+            allow_all_services: true,
             created_at: now,
         };
         db.collection::<RefreshToken>(REFRESH_TOKENS)
@@ -775,6 +901,7 @@ mod tests {
             code,
             client_id,
             "https://app.example/callback",
+            None,
             None,
             None,
             None,

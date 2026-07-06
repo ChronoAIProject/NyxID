@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Card,
   CardContent,
@@ -8,7 +9,6 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { AlertTriangle, ShieldCheck } from "lucide-react";
@@ -54,11 +54,13 @@ export function OAuthConsentPage() {
   const codeChallengeMethod = readParam(search, "code_challenge_method");
   const nonce = search.get("nonce") ?? "";
   const prompt = search.get("prompt") ?? "";
-  const externalSubjectPlatform =
-    search.get("external_subject_platform") ?? "";
+  const externalSubjectPlatform = search.get("external_subject_platform") ?? "";
   const externalSubjectTenant = search.get("external_subject_tenant") ?? "";
   const externalSubjectExternalUserId =
     search.get("external_subject_external_user_id") ?? "";
+  const consentRequest = search.get("consent_request") ?? "";
+  const resources = search.getAll("resource");
+  const [selectedResources, setSelectedResources] = useState(resources);
 
   const missing =
     !responseType ||
@@ -66,7 +68,8 @@ export function OAuthConsentPage() {
     !redirectUri ||
     !scope ||
     !codeChallenge ||
-    !codeChallengeMethod;
+    !codeChallengeMethod ||
+    !consentRequest;
 
   const scopes = scope.split(/\s+/).filter(Boolean);
   const redirectHost = parseHost(redirectUri);
@@ -92,6 +95,14 @@ export function OAuthConsentPage() {
       }
       return current.filter((id) => id !== serviceId);
     });
+  }
+
+  function toggleResource(resource: string) {
+    setSelectedResources((current) =>
+      current.includes(resource)
+        ? current.filter((item) => item !== resource)
+        : [...current, resource],
+    );
   }
 
   if (missing) {
@@ -151,9 +162,7 @@ export function OAuthConsentPage() {
               </p>
               <p>
                 Redirect host:{" "}
-                <span className="text-foreground">
-                  {redirectHost}
-                </span>
+                <span className="text-foreground">{redirectHost}</span>
               </p>
             </div>
           </div>
@@ -170,6 +179,32 @@ export function OAuthConsentPage() {
               ))}
             </div>
           </div>
+
+          {resources.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-xs uppercase tracking-wide text-text-tertiary">
+                Requested resources
+              </p>
+              <div className="space-y-2">
+                {resources.map((resource) => (
+                  <label
+                    key={resource}
+                    className="flex items-start gap-3 rounded-lg border border-border bg-muted/50 px-3 py-2"
+                  >
+                    <Checkbox
+                      className="mt-0.5"
+                      aria-label={resource}
+                      checked={selectedResources.includes(resource)}
+                      onCheckedChange={() => toggleResource(resource)}
+                    />
+                    <p className="break-all text-xs text-foreground">
+                      {resource}
+                    </p>
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
 
           <div className="space-y-2">
             <p className="text-xs uppercase tracking-wide text-text-tertiary">
@@ -282,9 +317,7 @@ export function OAuthConsentPage() {
             <p className="text-xs uppercase tracking-wide text-text-tertiary">
               Redirect URI
             </p>
-            <p className="break-all text-xs text-foreground">
-              {redirectUri}
-            </p>
+            <p className="break-all text-xs text-foreground">{redirectUri}</p>
           </div>
 
           <div className="rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-4 py-3">
@@ -314,6 +347,11 @@ export function OAuthConsentPage() {
               value={codeChallengeMethod}
             />
             <input type="hidden" name="nonce" value={nonce} />
+            <input
+              type="hidden"
+              name="consent_request"
+              value={consentRequest}
+            />
             {prompt && <input type="hidden" name="prompt" value={prompt} />}
             {externalSubjectPlatform && (
               <input
@@ -350,6 +388,21 @@ export function OAuthConsentPage() {
                   value={serviceId}
                 />
               ))}
+            {resources.length > 0 && (
+              <input
+                type="hidden"
+                name="resource_selection_present"
+                value="true"
+              />
+            )}
+            {selectedResources.map((resource) => (
+              <input
+                key={resource}
+                type="hidden"
+                name="resource"
+                value={resource}
+              />
+            ))}
 
             <Button
               type="submit"
@@ -359,7 +412,12 @@ export function OAuthConsentPage() {
             >
               Deny
             </Button>
-            <Button variant="primary" type="submit" name="decision" value="allow">
+            <Button
+              variant="primary"
+              type="submit"
+              name="decision"
+              value="allow"
+            >
               Allow
             </Button>
           </form>

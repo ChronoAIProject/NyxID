@@ -40,6 +40,7 @@ export type {
 export const userServiceResponseSchema = z.object({
   id: z.string(),
   slug: z.string(),
+  resource_uri: z.string().url(),
   endpoint_id: z.string(),
   api_key_id: z.string().nullable().optional(),
   auth_method: z.string(),

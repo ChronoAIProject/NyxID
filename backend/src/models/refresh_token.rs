@@ -1,8 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::models::consent::default_allow_all_services;
-
 pub const COLLECTION_NAME: &str = "refresh_tokens";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -16,18 +14,24 @@ pub struct RefreshToken {
     pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
-    #[serde(default = "default_allow_all_services")]
-    pub allow_all_services: bool,
-    #[serde(default)]
-    pub allowed_service_ids: Vec<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub expires_at: DateTime<Utc>,
     pub revoked: bool,
     pub replaced_by: Option<String>,
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub revoked_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub resource_uris: Vec<String>,
+    #[serde(default)]
+    pub allowed_service_ids: Vec<String>,
+    #[serde(default = "default_allow_all_services")]
+    pub allow_all_services: bool,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
+}
+
+fn default_allow_all_services() -> bool {
+    true
 }
 
 #[cfg(test)]
@@ -48,12 +52,13 @@ mod tests {
             user_id: uuid::Uuid::new_v4().to_string(),
             session_id: Some(uuid::Uuid::new_v4().to_string()),
             scope: Some("openid profile".to_string()),
-            allow_all_services: false,
-            allowed_service_ids: vec!["svc-1".to_string()],
             expires_at: Utc::now(),
             revoked: false,
             replaced_by: None,
             revoked_at: None,
+            resource_uris: vec!["https://nyx.example/api/v1/proxy/s/openai".to_string()],
+            allowed_service_ids: vec!["svc-1".to_string()],
+            allow_all_services: false,
             created_at: Utc::now(),
         };
         let doc = bson::to_document(&token).expect("serialize");
@@ -62,12 +67,13 @@ mod tests {
         assert_eq!(token.jti, restored.jti);
         assert_eq!(token.revoked, restored.revoked);
         assert_eq!(token.scope, restored.scope);
-        assert_eq!(token.allow_all_services, restored.allow_all_services);
+        assert_eq!(token.resource_uris, restored.resource_uris);
         assert_eq!(token.allowed_service_ids, restored.allowed_service_ids);
+        assert_eq!(token.allow_all_services, restored.allow_all_services);
     }
 
     #[test]
-    fn bson_legacy_row_defaults_to_allow_all_services() {
+    fn bson_defaults_resource_fields() {
         let now = Utc::now();
         let doc = bson::doc! {
             "_id": uuid::Uuid::new_v4().to_string(),
@@ -80,10 +86,10 @@ mod tests {
             "replaced_by": bson::Bson::Null,
             "created_at": bson::DateTime::from_chrono(now),
         };
-
-        let restored: RefreshToken = bson::from_document(doc).expect("deserialize legacy token");
+        let restored: RefreshToken = bson::from_document(doc).expect("deserialize");
         assert!(restored.scope.is_none());
-        assert!(restored.allow_all_services);
+        assert!(restored.resource_uris.is_empty());
         assert!(restored.allowed_service_ids.is_empty());
+        assert!(restored.allow_all_services);
     }
 }
