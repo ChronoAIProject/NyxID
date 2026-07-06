@@ -171,6 +171,7 @@ mod tests {
         assert_eq!(consent.user_id, user_id);
         assert_eq!(consent.client_id, client_id);
         assert_eq!(consent.scopes, "openid profile");
+        assert!(consent.allowed_service_ids.is_none());
         assert!(consent.expires_at.is_none());
 
         let stored = db
@@ -193,12 +194,19 @@ mod tests {
         let first = grant_consent(&db, &user_id, &client_id, "openid")
             .await
             .unwrap();
-        let second = grant_consent(&db, &user_id, &client_id, "openid profile email")
-            .await
-            .unwrap();
+        let second = grant_consent_with_services(
+            &db,
+            &user_id,
+            &client_id,
+            "openid profile email",
+            Some(vec!["svc-1".to_string()]),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(first.id, second.id);
         assert_eq!(second.scopes, "openid profile email");
+        assert_eq!(second.allowed_service_ids, Some(vec!["svc-1".to_string()]));
 
         let count = db
             .collection::<Consent>(CONSENTS)

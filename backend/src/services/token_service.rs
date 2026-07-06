@@ -235,6 +235,7 @@ pub async fn create_session_and_issue_tokens(
         client_id: Uuid::nil().to_string(), // first-party client
         user_id: user_id.to_string(),
         session_id: Some(session.session_id.clone()),
+        scope: None,
         expires_at: refresh_expires,
         revoked: false,
         replaced_by: None,
@@ -455,8 +456,13 @@ pub async fn refresh_tokens(
     let session_id = active_token.session_id.clone();
     let now = Utc::now();
 
-    // Resolve RBAC data and inject into the refreshed access token
-    let scope = FIRST_PARTY_ACCESS_SCOPES;
+    // Resolve RBAC data and inject into the refreshed access token. OAuth
+    // refresh-token rows persist the originally granted scope; legacy and
+    // first-party rows fall back to the historical first-party scope string.
+    let scope = active_token
+        .scope
+        .as_deref()
+        .unwrap_or(FIRST_PARTY_ACCESS_SCOPES);
     let resolved_requested_resources = match requested_resources {
         Some(resources) if active_token.allow_all_services => {
             crate::services::oauth_resource_service::resolve_requested_resources(
@@ -590,6 +596,7 @@ pub async fn refresh_tokens(
         client_id: active_token.client_id.clone(),
         user_id: user_id_str,
         session_id: session_id.clone(),
+        scope: active_token.scope.clone(),
         expires_at: refresh_expires,
         revoked: false,
         replaced_by: None,
@@ -829,6 +836,85 @@ mod tests {
             .unwrap();
         assert!(old_stored.revoked);
         assert!(old_stored.replaced_by.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_refresh_tokens_preserves_oauth_service_scope() {
+        let Some(db) = connect_test_database("token_svc_oauth_scope").await else {
+            return;
+        };
+        let config = test_app_config();
+        let jwt_keys = cached_test_jwt_keys();
+        let user_id = Uuid::new_v4().to_string();
+        seed_user(&db, &user_id).await;
+        let client_id = Uuid::new_v4().to_string();
+        let now = Utc::now();
+
+        db.collection::<OauthClient>(OAUTH_CLIENTS)
+            .insert_one(OauthClient {
+                id: client_id.clone(),
+                client_name: "Scoped OAuth Client".to_string(),
+                client_secret_hash: String::new(),
+                redirect_uris: vec!["https://app.example/callback".to_string()],
+                allowed_scopes: "openid proxy".to_string(),
+                grant_types: "authorization_code refresh_token".to_string(),
+                client_type: "public".to_string(),
+                is_active: true,
+                delegation_scopes: String::new(),
+                broker_capability_enabled: false,
+                revocation_webhook_url: None,
+                revocation_webhook_secret_encrypted: None,
+                created_by: Some(user_id.clone()),
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+
+        let user_uuid = Uuid::parse_str(&user_id).unwrap();
+        let (refresh_jwt, refresh_jti) =
+            crate::crypto::jwt::generate_refresh_token(&jwt_keys, &config, &user_uuid).unwrap();
+        let allowed_service_ids = vec!["svc-1".to_string()];
+        db.collection::<RefreshToken>(REFRESH_TOKENS)
+            .insert_one(RefreshToken {
+                id: Uuid::new_v4().to_string(),
+                jti: refresh_jti,
+                client_id: client_id.clone(),
+                user_id: user_id.clone(),
+                session_id: None,
+                scope: Some("openid proxy".to_string()),
+                expires_at: now + Duration::days(7),
+                revoked: false,
+                replaced_by: None,
+                revoked_at: None,
+                resource_uris: Vec::new(),
+                allowed_service_ids: allowed_service_ids.clone(),
+                allow_all_services: false,
+                created_at: now,
+            })
+            .await
+            .unwrap();
+
+        let refreshed = refresh_tokens(&db, &config, &jwt_keys, &refresh_jwt, None, None)
+            .await
+            .unwrap();
+        let access_claims =
+            crate::crypto::jwt::verify_token(&jwt_keys, &config, &refreshed.access_token).unwrap();
+        assert_eq!(access_claims.scope, "openid proxy");
+        assert_eq!(access_claims.allow_all_services, Some(false));
+        assert_eq!(access_claims.allowed_service_ids, Some(allowed_service_ids));
+
+        let new_refresh_claims =
+            crate::crypto::jwt::verify_token(&jwt_keys, &config, &refreshed.refresh_token).unwrap();
+        let new_stored = db
+            .collection::<RefreshToken>(REFRESH_TOKENS)
+            .find_one(doc! { "jti": new_refresh_claims.jti })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(new_stored.scope.as_deref(), Some("openid proxy"));
+        assert!(!new_stored.allow_all_services);
+        assert_eq!(new_stored.allowed_service_ids, vec!["svc-1".to_string()]);
     }
 
     #[tokio::test]
