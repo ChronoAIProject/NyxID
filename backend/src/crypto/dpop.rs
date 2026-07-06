@@ -6,8 +6,9 @@
 
 use base64::Engine as _;
 use chrono::Utc;
+use jsonwebtoken::jwk::{AlgorithmParameters, EllipticCurve, Jwk};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use url::Url;
 
 use crate::errors::{AppError, AppResult};
@@ -15,21 +16,6 @@ use crate::services::dpop_jti_cache::DpopJtiCache;
 
 const DPOP_ACCEPTED_TYP: &str = "dpop+jwt";
 const DPOP_IAT_WINDOW_SECS: i64 = 300;
-
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
-pub struct Jwk {
-    pub kty: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub crv: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub x: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub y: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub e: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub n: Option<String>,
-}
 
 #[derive(Debug, Deserialize)]
 struct DpopHeader {
@@ -81,12 +67,7 @@ pub fn validate_proof(
         return Err(AppError::Unauthorized("unsupported DPoP alg".to_string()));
     }
 
-    let jwt_jwk: jsonwebtoken::jwk::Jwk = serde_json::from_value(
-        serde_json::to_value(&header.jwk)
-            .map_err(|_| AppError::Unauthorized("invalid DPoP proof header".to_string()))?,
-    )
-    .map_err(|_| AppError::Unauthorized("invalid DPoP key".to_string()))?;
-    let key = DecodingKey::from_jwk(&jwt_jwk)
+    let key = DecodingKey::from_jwk(&header.jwk)
         .map_err(|_| AppError::Unauthorized("invalid DPoP key".to_string()))?;
 
     let mut validation = Validation::new(Algorithm::ES256);
@@ -125,22 +106,29 @@ pub fn validate_proof(
 pub fn jwk_thumbprint(jwk: &Jwk) -> String {
     use sha2::{Digest, Sha256};
 
-    let canonical = match jwk.kty.as_str() {
-        "EC" => format!(
+    let canonical = match &jwk.algorithm {
+        AlgorithmParameters::EllipticCurve(params) => format!(
             r#"{{"crv":"{}","kty":"EC","x":"{}","y":"{}"}}"#,
-            jwk.crv.as_deref().unwrap_or(""),
-            jwk.x.as_deref().unwrap_or(""),
-            jwk.y.as_deref().unwrap_or("")
+            curve_name(&params.curve),
+            params.x,
+            params.y
         ),
-        "RSA" => format!(
-            r#"{{"e":"{}","kty":"RSA","n":"{}"}}"#,
-            jwk.e.as_deref().unwrap_or(""),
-            jwk.n.as_deref().unwrap_or("")
-        ),
+        AlgorithmParameters::RSA(params) => {
+            format!(r#"{{"e":"{}","kty":"RSA","n":"{}"}}"#, params.e, params.n)
+        }
         _ => return String::new(),
     };
     let digest = Sha256::digest(canonical.as_bytes());
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
+}
+
+fn curve_name(curve: &EllipticCurve) -> &'static str {
+    match curve {
+        EllipticCurve::P256 => "P-256",
+        EllipticCurve::P384 => "P-384",
+        EllipticCurve::P521 => "P-521",
+        EllipticCurve::Ed25519 => "Ed25519",
+    }
 }
 
 fn canonicalize_htu(uri: &str) -> AppResult<String> {
@@ -167,11 +155,28 @@ fn canonicalize_htu(uri: &str) -> AppResult<String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use jsonwebtoken::{EncodingKey, Header, encode};
+pub(crate) fn test_dpop_keypair() -> (jsonwebtoken::EncodingKey, Jwk) {
+    use jsonwebtoken::EncodingKey;
     use p256::ecdsa::SigningKey;
     use p256::pkcs8::{EncodePrivateKey, LineEnding};
+
+    let signing_key = SigningKey::random(&mut rand::rngs::OsRng);
+    let private_pem = signing_key
+        .to_pkcs8_pem(LineEnding::LF)
+        .expect("encode P-256 private key");
+    let encoding_key = EncodingKey::from_ec_pem(private_pem.as_bytes()).expect("EC encoding key");
+    let jwk = Jwk::from_encoding_key(&encoding_key, Algorithm::ES256).expect("derive public JWK");
+    (encoding_key, jwk)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use jsonwebtoken::jwk::{
+        AlgorithmParameters, CommonParameters, OctetKeyPairParameters, OctetKeyPairType,
+        RSAKeyParameters, RSAKeyType,
+    };
+    use jsonwebtoken::{EncodingKey, Header, encode};
     use serde::Serialize;
     use uuid::Uuid;
 
@@ -181,20 +186,6 @@ mod tests {
         htu: String,
         iat: i64,
         jti: String,
-    }
-
-    pub(crate) fn test_dpop_keypair() -> (EncodingKey, Jwk) {
-        let signing_key = SigningKey::random(&mut rand::rngs::OsRng);
-        let private_pem = signing_key
-            .to_pkcs8_pem(LineEnding::LF)
-            .expect("encode P-256 private key");
-        let encoding_key =
-            EncodingKey::from_ec_pem(private_pem.as_bytes()).expect("EC encoding key");
-        let jwt_jwk = jsonwebtoken::jwk::Jwk::from_encoding_key(&encoding_key, Algorithm::ES256)
-            .expect("derive public JWK");
-        let jwk: Jwk = serde_json::from_value(serde_json::to_value(jwt_jwk).expect("JWK JSON"))
-            .expect("test JWK");
-        (encoding_key, jwk)
     }
 
     pub(crate) fn sign_test_proof(
@@ -207,10 +198,7 @@ mod tests {
     ) -> String {
         let mut header = Header::new(Algorithm::ES256);
         header.typ = Some(DPOP_ACCEPTED_TYP.to_string());
-        header.jwk = Some(
-            serde_json::from_value(serde_json::to_value(jwk).expect("JWK value"))
-                .expect("jsonwebtoken JWK"),
-        );
+        header.jwk = Some(jwk.clone());
         encode(
             &header,
             &TestDpopClaims {
@@ -228,12 +216,12 @@ mod tests {
     #[test]
     fn rfc7638_rsa_thumbprint_test_vector() {
         let jwk = Jwk {
-            kty: "RSA".to_string(),
-            crv: None,
-            x: None,
-            y: None,
-            n: Some("0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAtVT86zwu1RK7aPFFxuhDR1L6tSoc_BJECPebWKRXjBZCiFV4n3oknjhMstn64tZ_2W-5JsGY4Hc5n9yBXArwl93lqt7_RN5w6Cf0h4QyQ5v-65YGjQR0_FDW2QvzqY368QQMicAtaSqzs8KJZgnYb9c7d0zgdAZHzu6qMQvRL5hajrn1n91CbOpbISD08qNLyrdkt-bFTWhAI4vMQFh6WeZu0fM4lFd2NcRwr3XPksINHaQ-G_xBniIqbw0Ls1jF44-csFCur-kEgU8awapJzKnqDKgw".to_string()),
-            e: Some("AQAB".to_string()),
+            common: CommonParameters::default(),
+            algorithm: AlgorithmParameters::RSA(RSAKeyParameters {
+                key_type: RSAKeyType::RSA,
+                n: "0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAtVT86zwu1RK7aPFFxuhDR1L6tSoc_BJECPebWKRXjBZCiFV4n3oknjhMstn64tZ_2W-5JsGY4Hc5n9yBXArwl93lqt7_RN5w6Cf0h4QyQ5v-65YGjQR0_FDW2QvzqY368QQMicAtaSqzs8KJZgnYb9c7d0zgdAZHzu6qMQvRL5hajrn1n91CbOpbISD08qNLyrdkt-bFTWhAI4vMQFh6WeZu0fM4lFd2NcRwr3XPksINHaQ-G_xBniIqbw0Ls1jF44-csFCur-kEgU8awapJzKnqDKgw".to_string(),
+                e: "AQAB".to_string(),
+            }),
         };
         assert_eq!(
             jwk_thumbprint(&jwk),
@@ -336,14 +324,7 @@ mod tests {
 
     #[test]
     fn jwk_thumbprint_ec_key() {
-        let jwk = Jwk {
-            kty: "EC".to_string(),
-            crv: Some("P-256".to_string()),
-            x: Some("test_x".to_string()),
-            y: Some("test_y".to_string()),
-            e: None,
-            n: None,
-        };
+        let (_, jwk) = test_dpop_keypair();
         let t = jwk_thumbprint(&jwk);
         assert!(!t.is_empty());
         // base64url-no-pad encoded SHA-256 should be 43 chars
@@ -353,12 +334,12 @@ mod tests {
     #[test]
     fn jwk_thumbprint_unknown_kty_returns_empty() {
         let jwk = Jwk {
-            kty: "OKP".into(),
-            crv: None,
-            x: None,
-            y: None,
-            e: None,
-            n: None,
+            common: CommonParameters::default(),
+            algorithm: AlgorithmParameters::OctetKeyPair(OctetKeyPairParameters {
+                key_type: OctetKeyPairType::OctetKeyPair,
+                curve: EllipticCurve::Ed25519,
+                x: "test_x".to_string(),
+            }),
         };
         assert_eq!(jwk_thumbprint(&jwk), "");
     }

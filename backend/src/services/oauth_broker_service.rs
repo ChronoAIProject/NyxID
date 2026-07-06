@@ -2081,23 +2081,7 @@ mod tests {
         )
         .await;
 
-        let signing_key = p256::ecdsa::SigningKey::random(&mut rand::rngs::OsRng);
-        let private_pem = {
-            use p256::pkcs8::{EncodePrivateKey, LineEnding};
-            signing_key
-                .to_pkcs8_pem(LineEnding::LF)
-                .expect("encode P-256 private key")
-        };
-        let encoding_key = jsonwebtoken::EncodingKey::from_ec_pem(private_pem.as_bytes())
-            .expect("EC encoding key");
-        let jwt_jwk = jsonwebtoken::jwk::Jwk::from_encoding_key(
-            &encoding_key,
-            jsonwebtoken::Algorithm::ES256,
-        )
-        .expect("derive public JWK");
-        let jwk: crate::crypto::dpop::Jwk =
-            serde_json::from_value(serde_json::to_value(jwt_jwk).expect("JWK JSON"))
-                .expect("DPoP JWK");
+        let (_, jwk) = crate::crypto::dpop::test_dpop_keypair();
         let jkt = crate::crypto::dpop::jwk_thumbprint(&jwk);
 
         let result = exchange_via_binding(
