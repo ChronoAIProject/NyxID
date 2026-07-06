@@ -9,6 +9,7 @@ import {
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/toast";
 import { ChunkErrorBoundary } from "@/components/chunk-error-boundary";
+import { AppNotFound } from "@/components/shared/app-not-found";
 import { AuthLayout } from "@/components/layout/auth-layout";
 import { DashboardLayout } from "@/components/layout/dashboard-layout";
 import { BillingRouteGuard } from "@/components/billing-route-guard";
@@ -823,6 +824,7 @@ const routeTree = rootRoute.addChildren([
 export const router = createRouter({
   routeTree,
   defaultPreload: "intent",
+  defaultNotFoundComponent: AppNotFound,
 });
 
 declare module "@tanstack/react-router" {
