@@ -1390,7 +1390,7 @@ async fn issue_authorization_code(
         external_subject,
         &resource_uris,
         &allowed_service_ids,
-        service_restricted,
+        !service_restricted,
     )
     .await?;
 
