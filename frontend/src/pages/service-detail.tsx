@@ -36,6 +36,7 @@ import { CopyableField } from "@/components/shared/copyable-field";
 import { DefaultHeadersEditor } from "@/components/shared/default-headers-editor";
 import { OidcCredentialsSection } from "@/components/dashboard/oidc-credentials-section";
 import { EndpointList } from "@/components/dashboard/endpoint-list";
+import { ServiceIcon } from "@/components/service-icon";
 import { McpConnectionInfo } from "@/components/dashboard/mcp-connection-info";
 import { SshServiceInstructions } from "@/components/dashboard/ssh-service-instructions";
 import { ServiceRequirementsView } from "@/components/dashboard/service-requirements-editor";
@@ -186,6 +187,7 @@ export function ServiceDetailPage() {
       <PageHeader
         title={service.name}
         description={service.description ?? undefined}
+        leading={<ServiceIcon slug={service.slug} size="md" />}
         actions={
           <>
             {terminalSupported && (

@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
-import { Globe, KeyRound } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { ServiceIcon } from "@/components/service-icon";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
@@ -244,13 +244,16 @@ function MemberScopeForm({
                   return (
                     <div
                       key={service.id}
-                      className="flex items-start gap-3 rounded px-2 py-1.5 hover:bg-accent/40"
+                      className="flex items-center gap-3 rounded px-2 py-1.5 hover:bg-accent/40"
                     >
                       <Checkbox
                         id={id}
                         checked={isChecked}
                         onCheckedChange={() => toggleService(service.id)}
-                        className="mt-1"
+                      />
+                      <ServiceIcon
+                        slug={service.catalog_service_slug}
+                        size="2xs"
                       />
                       <Label
                         htmlFor={id}
@@ -259,13 +262,8 @@ function MemberScopeForm({
                         <span className="block text-[12px] font-medium text-foreground">
                           {service.label}
                         </span>
-                        <span className="flex items-center gap-2 text-xs text-muted-foreground">
-                          {service.service_type === "ssh" ? (
-                            <KeyRound className="h-3 w-3" aria-hidden />
-                          ) : (
-                            <Globe className="h-3 w-3" aria-hidden />
-                          )}
-                          <span>{service.slug}</span>
+                        <span className="block text-xs text-muted-foreground">
+                          {service.slug}
                         </span>
                       </Label>
                     </div>

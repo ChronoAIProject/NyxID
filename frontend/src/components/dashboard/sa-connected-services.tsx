@@ -29,6 +29,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Plug, Unlink, KeyRound } from "lucide-react";
+import { ServiceIcon } from "@/components/service-icon";
 import { toast } from "sonner";
 
 interface SaConnectedServicesProps {
@@ -142,6 +143,7 @@ export function SaConnectedServices({ saId }: SaConnectedServicesProps) {
   return (
     <>
       <DetailSection title="Connected Services">
+        <div className="space-y-3 p-4">
         {connectionsLoading ? (
           <Skeleton className="h-24 w-full" />
         ) : saConnections && saConnections.length > 0 ? (
@@ -223,13 +225,12 @@ export function SaConnectedServices({ saId }: SaConnectedServicesProps) {
         )}
 
         {availableServices.length > 0 && (
-          <div className="mt-3">
-            <ConnectServiceDropdown
-              services={availableServices}
-              onSelect={handleConnectService}
-            />
-          </div>
+          <ConnectServiceDropdown
+            services={availableServices}
+            onSelect={handleConnectService}
+          />
         )}
+        </div>
       </DetailSection>
 
       {serviceCredentialDialog !== null && (
@@ -268,6 +269,7 @@ function ConnectServiceDropdown({
       <DropdownMenuContent style={{ maxHeight: "16rem", overflowY: "auto" }}>
         {services.map((s) => (
           <DropdownMenuItem key={s.id} onClick={() => onSelect(s)}>
+            <ServiceIcon slug={s.slug} size="2xs" />
             <span>{s.name}</span>
             {s.requires_user_credential && (
               <KeyRound className="ml-1 h-3 w-3 text-muted-foreground" />
