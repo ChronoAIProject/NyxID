@@ -117,6 +117,11 @@ pub struct AppConfig {
     /// via the same path as every other env-backed setting.
     pub cli_pairing_hmac_key: Option<String>,
 
+    /// Explicit HMAC key (64 hex chars = 32 bytes) used for audit-log
+    /// hash chaining. When unset, the backend derives the key from
+    /// `ENCRYPTION_KEY` if configured, otherwise from the JWT private key PEM.
+    pub audit_chain_hmac_key: Option<String>,
+
     /// Service account token TTL in seconds (default: 3600 = 1 hour)
     pub sa_token_ttl_secs: i64,
 
@@ -397,6 +402,14 @@ impl std::fmt::Debug for AppConfig {
             .field(
                 "cli_pairing_hmac_key",
                 if self.cli_pairing_hmac_key.is_some() {
+                    &"Some([REDACTED])"
+                } else {
+                    &"None"
+                },
+            )
+            .field(
+                "audit_chain_hmac_key",
+                if self.audit_chain_hmac_key.is_some() {
                     &"Some([REDACTED])"
                 } else {
                     &"None"
@@ -752,6 +765,9 @@ impl AppConfig {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty()),
             cli_pairing_hmac_key: env::var("CLI_PAIRING_HMAC_KEY")
+                .ok()
+                .filter(|s| !s.trim().is_empty()),
+            audit_chain_hmac_key: env::var("AUDIT_CHAIN_HMAC_KEY")
                 .ok()
                 .filter(|s| !s.trim().is_empty()),
 
@@ -1269,6 +1285,7 @@ mod tests {
             trusted_proxy_ips: vec![],
             mtls_client_cert_header: None,
             cli_pairing_hmac_key: None,
+            audit_chain_hmac_key: None,
             sa_token_ttl_secs: 3600,
             telemetry_dsn: None,
             telemetry_host: None,

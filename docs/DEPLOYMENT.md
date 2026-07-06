@@ -710,6 +710,15 @@ curl "https://auth.example.com/api/v1/admin/audit-log?page=1&per_page=50" \
   -H "Authorization: Bearer <admin_token>"
 ```
 
+New audit rows are HMAC hash-chained with a monotonically increasing `seq`. Verify the chain on demand:
+
+```bash
+curl "https://auth.example.com/api/v1/admin/audit-log/verify?limit=10000" \
+  -H "Authorization: Bearer <admin_token>"
+```
+
+Rows created before hash chaining are reported as `pre_chain_count`. This v1 chain detects edits, non-tail deletion gaps, forged inserts, and reordering by a database-only attacker, but it does not detect deleting the newest N rows until the chain head is anchored outside MongoDB.
+
 ---
 
 ## Backup and Recovery
