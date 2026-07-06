@@ -5,6 +5,8 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use base64::Engine as _;
+use chrono::Utc;
+use jsonwebtoken::{Algorithm, Header, Validation, decode, encode};
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 
@@ -60,6 +62,7 @@ pub struct ConsentDecisionForm {
     pub external_subject_tenant: Option<String>,
     pub external_subject_external_user_id: Option<String>,
     pub prompt: Option<String>,
+    pub consent_request: Option<String>,
     #[serde(default)]
     pub resource: Vec<String>,
     #[serde(default)]
@@ -259,6 +262,33 @@ struct OAuthErrorBody {
     error_description: String,
 }
 
+const CONSENT_REQUEST_AUDIENCE: &str = "nyxid/oauth-consent";
+const CONSENT_REQUEST_TOKEN_TYPE: &str = "oauth_consent_request";
+const CONSENT_REQUEST_TTL_SECS: i64 = 15 * 60;
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ConsentRequestClaims {
+    sub: String,
+    iss: String,
+    aud: String,
+    exp: i64,
+    iat: i64,
+    token_type: String,
+    response_type: String,
+    client_id: String,
+    redirect_uri: String,
+    scope: Option<String>,
+    state: Option<String>,
+    code_challenge: Option<String>,
+    code_challenge_method: Option<String>,
+    nonce: Option<String>,
+    external_subject_platform: Option<String>,
+    external_subject_tenant: Option<String>,
+    external_subject_external_user_id: Option<String>,
+    prompt: Option<String>,
+    resource: Vec<String>,
+}
+
 /// Map internal `AppError` to an RFC 6749 §5.2 JSON error response.
 /// Uses `AppError::oauth_error_code()` and `AppError::oauth_status()` —
 /// each variant declares its own OAuth semantics, no string matching.
@@ -345,6 +375,102 @@ fn intersect_service_ids(left: &[String], right: &[String]) -> Vec<String> {
         }
     }
     out
+}
+
+fn params_from_consent_form(form: &ConsentDecisionForm) -> AuthorizeQuery {
+    AuthorizeQuery {
+        response_type: form.response_type.clone(),
+        client_id: form.client_id.clone(),
+        redirect_uri: form.redirect_uri.clone(),
+        scope: form.scope.clone(),
+        state: form.state.clone(),
+        code_challenge: form.code_challenge.clone(),
+        code_challenge_method: form.code_challenge_method.clone(),
+        nonce: form.nonce.clone(),
+        external_subject_platform: form.external_subject_platform.clone(),
+        external_subject_tenant: form.external_subject_tenant.clone(),
+        external_subject_external_user_id: form.external_subject_external_user_id.clone(),
+        prompt: form.prompt.clone(),
+        resource: form.resource.clone(),
+        request_uri: None,
+    }
+}
+
+fn selected_resources_are_subset(requested: &[String], selected: &[String]) -> bool {
+    selected
+        .iter()
+        .all(|resource| requested.iter().any(|allowed| allowed == resource))
+}
+
+fn sign_consent_request(
+    state: &AppState,
+    user_id: &str,
+    params: &AuthorizeQuery,
+    validated_scope: &str,
+) -> AppResult<String> {
+    let now = Utc::now().timestamp();
+    let claims = ConsentRequestClaims {
+        sub: user_id.to_string(),
+        iss: state.config.jwt_issuer.clone(),
+        aud: CONSENT_REQUEST_AUDIENCE.to_string(),
+        exp: now + CONSENT_REQUEST_TTL_SECS,
+        iat: now,
+        token_type: CONSENT_REQUEST_TOKEN_TYPE.to_string(),
+        response_type: params.response_type.clone(),
+        client_id: params.client_id.clone(),
+        redirect_uri: params.redirect_uri.clone(),
+        scope: Some(validated_scope.to_string()),
+        state: params.state.clone(),
+        code_challenge: params.code_challenge.clone(),
+        code_challenge_method: params.code_challenge_method.clone(),
+        nonce: params.nonce.clone(),
+        external_subject_platform: params.external_subject_platform.clone(),
+        external_subject_tenant: params.external_subject_tenant.clone(),
+        external_subject_external_user_id: params.external_subject_external_user_id.clone(),
+        prompt: params.prompt.clone(),
+        resource: params.resource.clone(),
+    };
+
+    let mut header = Header::new(Algorithm::RS256);
+    header.kid = Some(state.jwt_keys.kid.clone());
+
+    encode(&header, &claims, &state.jwt_keys.encoding)
+        .map_err(|e| AppError::Internal(format!("Failed to encode consent request: {e}")))
+}
+
+fn verify_consent_request(
+    state: &AppState,
+    token: &str,
+    user_id: &str,
+) -> AppResult<AuthorizeQuery> {
+    let mut validation = Validation::new(Algorithm::RS256);
+    validation.set_issuer(&[&state.config.jwt_issuer]);
+    validation.set_audience(&[CONSENT_REQUEST_AUDIENCE]);
+
+    let claims = decode::<ConsentRequestClaims>(token, &state.jwt_keys.decoding, &validation)
+        .map_err(|_| AppError::BadRequest("Invalid consent request".to_string()))?
+        .claims;
+
+    if claims.token_type != CONSENT_REQUEST_TOKEN_TYPE || claims.sub != user_id {
+        return Err(AppError::BadRequest("Invalid consent request".to_string()));
+    }
+
+    Ok(AuthorizeQuery {
+        response_type: claims.response_type,
+        client_id: claims.client_id,
+        redirect_uri: claims.redirect_uri,
+        scope: claims.scope,
+        state: claims.state,
+        code_challenge: claims.code_challenge,
+        code_challenge_method: claims.code_challenge_method,
+        nonce: claims.nonce,
+        external_subject_platform: claims.external_subject_platform,
+        external_subject_tenant: claims.external_subject_tenant,
+        external_subject_external_user_id: claims.external_subject_external_user_id,
+        prompt: claims.prompt,
+        resource: claims.resource,
+        request_uri: None,
+    })
 }
 
 // --- Handlers ---
@@ -474,32 +600,10 @@ pub async fn authorize_decision(
     tele: TelemetryContext,
     Form(form): Form<ConsentDecisionForm>,
 ) -> Result<Response, AppError> {
-    let params = AuthorizeQuery {
-        response_type: form.response_type,
-        client_id: form.client_id,
-        redirect_uri: form.redirect_uri,
-        scope: form.scope,
-        state: form.state,
-        code_challenge: form.code_challenge,
-        code_challenge_method: form.code_challenge_method,
-        nonce: form.nonce,
-        external_subject_platform: form.external_subject_platform,
-        external_subject_tenant: form.external_subject_tenant,
-        external_subject_external_user_id: form.external_subject_external_user_id,
-        prompt: form.prompt,
-        resource: form.resource,
-        request_uri: None,
-    };
-
-    let external_subject = validate_external_subject_params(
-        params.external_subject_platform.as_deref(),
-        params.external_subject_tenant.as_deref(),
-        params.external_subject_external_user_id.as_deref(),
-    )?;
-
     let auth_user = match opt_auth.0 {
         Some(user) => user,
         None => {
+            let params = params_from_consent_form(&form);
             let return_to = build_authorize_url(&state.config.frontend_url, &params);
             let login_url = format!(
                 "{}/login?return_to={}",
@@ -509,6 +613,21 @@ pub async fn authorize_decision(
             return Ok(redirect_302(&login_url));
         }
     };
+
+    let user_id_str = auth_user.user_id.to_string();
+    let params = verify_consent_request(
+        &state,
+        form.consent_request
+            .as_deref()
+            .ok_or_else(|| AppError::BadRequest("Missing consent request".to_string()))?,
+        &user_id_str,
+    )?;
+
+    let external_subject = validate_external_subject_params(
+        params.external_subject_platform.as_deref(),
+        params.external_subject_tenant.as_deref(),
+        params.external_subject_external_user_id.as_deref(),
+    )?;
 
     let (_client, validated_scope) = validate_authorize_request(&state, &params).await?;
 
@@ -525,14 +644,19 @@ pub async fn authorize_decision(
         return Err(AppError::BadRequest("Invalid consent decision".to_string()));
     }
 
-    let user_id_str = auth_user.user_id.to_string();
+    if !selected_resources_are_subset(&params.resource, &form.resource) {
+        return Err(AppError::InvalidTarget(
+            "selected resource was not in the original authorization request".to_string(),
+        ));
+    }
+
     let consent_allowed_service_ids =
         if form.resource_selection_present || !params.resource.is_empty() {
             let resolved_consent_resources = oauth_resource_service::resolve_requested_resources(
                 &state.db,
                 &state.config,
                 &user_id_str,
-                non_empty_resources(&params.resource),
+                non_empty_resources(&form.resource),
             )
             .await?;
             Some(
@@ -704,6 +828,12 @@ async fn authorize_inner(
                         params,
                         &client.client_name,
                         &validated_scope,
+                        Some(&sign_consent_request(
+                            state,
+                            &user_id_str,
+                            params,
+                            &validated_scope,
+                        )?),
                     );
                     return Ok(redirect_302(&consent_url));
                 }
@@ -747,6 +877,12 @@ async fn authorize_inner(
                 params,
                 &client.client_name,
                 &validated_scope,
+                Some(&sign_consent_request(
+                    state,
+                    &user_id_str,
+                    params,
+                    &validated_scope,
+                )?),
             );
             return Err(AppError::ConsentRequired { consent_url });
         }
@@ -1079,6 +1215,7 @@ fn build_consent_url(
     params: &AuthorizeQuery,
     client_name: &str,
     validated_scope: &str,
+    consent_request: Option<&str>,
 ) -> String {
     let mut url = format!(
         "{}/oauth-consent?response_type={}&client_id={}&client_name={}&redirect_uri={}",
@@ -1136,6 +1273,12 @@ fn build_consent_url(
     for resource in &params.resource {
         url.push_str(&format!("&resource={}", urlencoding::encode(resource)));
     }
+    if let Some(consent_request) = consent_request {
+        url.push_str(&format!(
+            "&consent_request={}",
+            urlencoding::encode(consent_request)
+        ));
+    }
 
     url
 }
@@ -1149,17 +1292,29 @@ async fn issue_authorization_code(
     external_subject: Option<&ExternalSubjectRef>,
 ) -> AppResult<String> {
     let user_id_str = auth_user.user_id.to_string();
-    let consent =
-        consent_service::check_consent(&state.db, &user_id_str, &params.client_id, validated_scope)
-            .await?
-            .ok_or_else(|| AppError::ConsentRequired {
+    let consent = match consent_service::check_consent(
+        &state.db,
+        &user_id_str,
+        &params.client_id,
+        validated_scope,
+    )
+    .await?
+    {
+        Some(consent) => consent,
+        None => {
+            let consent_request =
+                sign_consent_request(state, &user_id_str, params, validated_scope)?;
+            return Err(AppError::ConsentRequired {
                 consent_url: build_consent_url(
                     &state.config.frontend_url,
                     params,
                     &params.client_id,
                     validated_scope,
+                    Some(&consent_request),
                 ),
-            })?;
+            });
+        }
+    };
     let resolved_resources = oauth_resource_service::resolve_requested_resources(
         &state.db,
         &state.config,
@@ -1174,7 +1329,7 @@ async fn issue_authorization_code(
                 let resources = resolved
                     .resource_uris
                     .into_iter()
-                    .zip(resolved.service_ids.into_iter())
+                    .zip(resolved.service_ids)
                     .filter_map(|(resource, service_id)| {
                         allowed
                             .iter()
@@ -3126,6 +3281,93 @@ mod tests {
         .await
         .expect_err("should reject unsupported grant_type");
         assert!(matches!(err, AppError::UnsupportedGrantType(_)));
+    }
+
+    #[tokio::test]
+    async fn authorize_decision_rejects_resource_selection_outside_signed_request() {
+        let Some(db) = connect_test_database("oauth_consent_resource_tamper").await else {
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let user_id = Uuid::new_v4().to_string();
+        let client_id = "oauth-consent-resource-tamper-client";
+        let requested_resource = "http://localhost:3001/api/v1/proxy/s/openai".to_string();
+        let tampered_resource = "http://localhost:3001/api/v1/proxy/s/anthropic".to_string();
+        let now = Utc::now();
+
+        insert_person_user(&db, &user_id).await;
+        db.collection::<OauthClient>(OAUTH_CLIENTS)
+            .insert_one(OauthClient {
+                id: client_id.to_string(),
+                client_name: "Resource Tamper Test".to_string(),
+                client_secret_hash: String::new(),
+                redirect_uris: vec!["http://localhost/callback".to_string()],
+                allowed_scopes: "openid".to_string(),
+                grant_types: "authorization_code refresh_token".to_string(),
+                client_type: "public".to_string(),
+                is_active: true,
+                delegation_scopes: String::new(),
+                broker_capability_enabled: false,
+                revocation_webhook_url: None,
+                revocation_webhook_secret_encrypted: None,
+                created_by: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .expect("insert oauth client");
+
+        let trusted_params = AuthorizeQuery {
+            response_type: "code".to_string(),
+            client_id: client_id.to_string(),
+            redirect_uri: "http://localhost/callback".to_string(),
+            scope: Some("openid".to_string()),
+            state: Some("state-1".to_string()),
+            code_challenge: Some("challenge".to_string()),
+            code_challenge_method: Some("S256".to_string()),
+            nonce: None,
+            external_subject_platform: None,
+            external_subject_tenant: None,
+            external_subject_external_user_id: None,
+            prompt: None,
+            request_uri: None,
+            resource: vec![requested_resource],
+        };
+        let consent_request =
+            sign_consent_request(&state, &user_id, &trusted_params, "openid").unwrap();
+
+        let err = match authorize_decision(
+            State(state),
+            OptionalAuthUser(Some(crate::test_utils::test_auth_user(&user_id))),
+            TelemetryContext::default(),
+            Form(ConsentDecisionForm {
+                response_type: "code".to_string(),
+                client_id: client_id.to_string(),
+                redirect_uri: "http://localhost/callback".to_string(),
+                scope: Some("openid".to_string()),
+                state: Some("state-1".to_string()),
+                code_challenge: Some("challenge".to_string()),
+                code_challenge_method: Some("S256".to_string()),
+                nonce: None,
+                external_subject_platform: None,
+                external_subject_tenant: None,
+                external_subject_external_user_id: None,
+                prompt: None,
+                consent_request: Some(consent_request),
+                resource: vec![tampered_resource],
+                resource_selection_present: true,
+                decision: "allow".to_string(),
+            }),
+        )
+        .await
+        {
+            Ok(_) => panic!("tampered resource selection must be rejected"),
+            Err(err) => err,
+        };
+
+        assert!(
+            matches!(err, AppError::InvalidTarget(msg) if msg.contains("original authorization request"))
+        );
     }
 
     #[tokio::test]

@@ -23,6 +23,7 @@ const VALID = {
   scope: "openid profile email offline_access custom:thing",
   code_challenge: "challenge-xyz",
   code_challenge_method: "S256",
+  consent_request: "signed-consent-request-token",
   state: "state-123",
   nonce: "nonce-456",
 };
@@ -160,6 +161,9 @@ describe("OAuthConsentPage", () => {
     expect(hiddenInput("state")?.value).toBe("state-123");
     expect(hiddenInput("code_challenge")?.value).toBe("challenge-xyz");
     expect(hiddenInput("code_challenge_method")?.value).toBe("S256");
+    expect(hiddenInput("consent_request")?.value).toBe(
+      "signed-consent-request-token",
+    );
     expect(hiddenInput("nonce")?.value).toBe("nonce-456");
   });
 

@@ -206,6 +206,7 @@ pub struct IssuedOAuthRefreshToken {
     pub refresh_token_jti: String,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn issue_oauth_refresh_token(
     db: &mongodb::Database,
     config: &AppConfig,

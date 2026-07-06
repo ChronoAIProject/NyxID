@@ -48,6 +48,7 @@ export function OAuthConsentPage() {
   const externalSubjectTenant = search.get("external_subject_tenant") ?? "";
   const externalSubjectExternalUserId =
     search.get("external_subject_external_user_id") ?? "";
+  const consentRequest = search.get("consent_request") ?? "";
   const resources = search.getAll("resource");
   const [selectedResources, setSelectedResources] = useState(resources);
 
@@ -57,7 +58,8 @@ export function OAuthConsentPage() {
     !redirectUri ||
     !scope ||
     !codeChallenge ||
-    !codeChallengeMethod;
+    !codeChallengeMethod ||
+    !consentRequest;
 
   const scopes = scope.split(/\s+/).filter(Boolean);
   const redirectHost = parseHost(redirectUri);
@@ -252,6 +254,11 @@ export function OAuthConsentPage() {
               value={codeChallengeMethod}
             />
             <input type="hidden" name="nonce" value={nonce} />
+            <input
+              type="hidden"
+              name="consent_request"
+              value={consentRequest}
+            />
             {prompt && <input type="hidden" name="prompt" value={prompt} />}
             {externalSubjectPlatform && (
               <input
