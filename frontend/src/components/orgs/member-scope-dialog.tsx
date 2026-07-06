@@ -253,7 +253,7 @@ function MemberScopeForm({
                       />
                       <ServiceIcon
                         slug={service.catalog_service_slug}
-                        size="sm"
+                        size="2xs"
                       />
                       <Label
                         htmlFor={id}

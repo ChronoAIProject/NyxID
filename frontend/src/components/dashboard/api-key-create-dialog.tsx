@@ -510,7 +510,7 @@ export function ApiKeyCreateDialog({
                                       />
                                       <ServiceIcon
                                         slug={s.catalog_service_slug}
-                                        size="xs"
+                                        size="2xs"
                                       />
                                       <Label
                                         htmlFor={`create-svc-${s.id}`}

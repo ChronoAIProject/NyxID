@@ -177,7 +177,7 @@ function AccessGroup({
                       onToggle(item.id)
                     }}
                   />
-                  <ServiceIcon slug={item.iconSlug} size="xs" />
+                  <ServiceIcon slug={item.iconSlug} size="2xs" />
                   <span className="truncate">
                     {item.primary}
                     {item.secondary ? (

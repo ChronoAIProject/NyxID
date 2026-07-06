@@ -273,7 +273,7 @@ export function ApiKeyCreateConfirm({
               {PLATFORMS.map((p) => (
                 <SelectItem key={p} value={p}>
                   <span className="inline-flex items-center gap-2">
-                    <PlatformIcon platform={p} size="xs" />
+                    <PlatformIcon platform={p} size="2xs" />
                     <span>{p}</span>
                   </span>
                 </SelectItem>

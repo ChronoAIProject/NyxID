@@ -242,7 +242,7 @@ export function BindingsCard({
                   {availableServices.map((s) => (
                     <SelectItem key={s.id} value={s.id}>
                       <span className="inline-flex items-center gap-2">
-                        <ServiceIcon slug={s.catalog_service_slug} size="xs" />
+                        <ServiceIcon slug={s.catalog_service_slug} size="2xs" />
                         <span>
                           {s.label}
                           {s.slug !== s.label ? ` (${s.slug})` : ""}

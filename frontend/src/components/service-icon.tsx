@@ -9,14 +9,15 @@ import { cn } from "@/lib/utils";
  * `h-[n]` on a service icon — add a token here if a new size is genuinely
  * needed.
  */
-export type ServiceIconSize = "xs" | "sm" | "md" | "lg";
+export type ServiceIconSize = "2xs" | "xs" | "sm" | "md" | "lg";
 
 // Sizes are `!important` on purpose: some shadcn containers (e.g.
 // `DropdownMenuItem`, `Button`) ship a blanket `[&_svg]:h-3.5 w-3.5` that
 // would otherwise override a service icon dropped inside them. As the
 // design-system primitive, ServiceIcon must own its own box everywhere.
 const SIZE_CLASS: Readonly<Record<ServiceIconSize, string>> = {
-  xs: "!h-4 !w-4", // 16px — dense rows: selects, dropdowns, checkbox lists
+  "2xs": "!h-3.5 !w-3.5", // 14px — inline checkbox rows + dropdown/select items
+  xs: "!h-4 !w-4", // 16px — dense rows
   sm: "!h-5 !w-5", // 20px — list/table rows, compact cards
   md: "!h-6 !w-6", // 24px — card headers, detail rows
   lg: "!h-8 !w-8", // 32px — page-header leading / detail hero

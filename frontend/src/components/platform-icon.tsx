@@ -19,6 +19,7 @@ const PLATFORM_SLUG: Readonly<Record<string, string>> = {
 // robust inside containers that ship a blanket `[&_svg]` size (e.g.
 // `DropdownMenuItem`).
 const SIZE_CLASS: Readonly<Record<ServiceIconSize, string>> = {
+  "2xs": "!h-3.5 !w-3.5",
   xs: "!h-4 !w-4",
   sm: "!h-5 !w-5",
   md: "!h-6 !w-6",
