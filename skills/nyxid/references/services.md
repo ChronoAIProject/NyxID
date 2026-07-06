@@ -63,19 +63,21 @@ Some OAuth providers (Lark, Google, GitHub, Atlassian, ...) expose many scopes b
 
 ```bash
 # Single scope
-nyxid service add api-lark --oauth --scope contact:contact.base:readonly
+nyxid service add api-lark --oauth --scope contact:user.base:readonly
 
 # Multiple scopes (repeat the flag or comma-separate)
 nyxid service add api-lark --oauth \
-  --scope contact:contact.base:readonly \
-  --scope contact:department.base:readonly
+  --scope contact:user.base:readonly \
+  --scope contact:user.department:readonly
 
 nyxid service add api-lark --oauth \
-  --scope "contact:contact.base:readonly,contact:department.base:readonly"
+  --scope "contact:user.base:readonly,contact:user.department:readonly"
 
 # Works the same way for device-code services
 nyxid service add llm-openai --device-code --scope "custom-scope-1,custom-scope-2"
 ```
+
+Lark note: bot (tenant) scope names differ from user OAuth scope names. For example, `contact:contact.base:readonly` is a bot/tenant scope; the user OAuth variant is `contact:user.base:readonly`. Requesting a bot-only scope in a user OAuth flow fails at the provider.
 
 The extra scopes are merged (deduped) on top of the provider's `default_scopes` and forwarded in the authorization URL (or device code request). The upstream provider decides whether to grant them -- if the user's app/client doesn't have a scope enabled on the provider side, the authorization flow will still fail there.
 
@@ -95,14 +97,14 @@ Node-routed OAuth flows run on the node agent (so user credentials never leave t
 # Step 1: On any machine -- create the placeholder record on NyxID. The CLI
 # prints the exact next-step command with your scopes pre-filled.
 nyxid service add api-lark --oauth --via-node my-node \
-  --scope contact:contact.base:readonly,contact:department.base:readonly
+  --scope contact:user.base:readonly,contact:user.department:readonly
 # -> "Next step: run this on the node that owns the credential:"
-# -> "  nyxid node credentials setup --service api-lark --scope \"contact:contact.base:readonly,contact:department.base:readonly\""
+# -> "  nyxid node credentials setup --service api-lark --scope \"contact:user.base:readonly,contact:user.department:readonly\""
 
 # Step 2: On the node machine -- run the OAuth flow locally with the extras
 # merged on top of the catalog's default scopes.
 nyxid node credentials setup --service api-lark \
-  --scope contact:contact.base:readonly,contact:department.base:readonly
+  --scope contact:user.base:readonly,contact:user.department:readonly
 ```
 
 `nyxid node credentials add-oauth` also accepts the same `--scope` flag (additive, repeatable) for manual setups. It still accepts the legacy `--scopes` flag (which **replaces** the default scope list entirely) for backward compatibility; prefer `--scope` unless you specifically need override semantics.
