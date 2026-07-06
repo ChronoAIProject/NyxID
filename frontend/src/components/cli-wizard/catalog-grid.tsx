@@ -17,6 +17,7 @@ import { useState } from "react"
 import { useQuery } from "@tanstack/react-query"
 import { ApiError, api } from "@/lib/api-client"
 import { Input } from "@/components/ui/input"
+import { ServiceIcon } from "@/components/service-icon"
 
 interface CatalogEntry {
   readonly slug: string
@@ -266,9 +267,12 @@ function CatalogCard({
           {badge}
         </span>
       ) : null}
-      <span className="text-[13px] font-semibold text-foreground">
-        {entry.name || entry.slug}
-      </span>
+      <div className="flex w-full items-center gap-2">
+        <ServiceIcon slug={entry.slug} size="sm" />
+        <span className="text-[13px] font-semibold text-foreground">
+          {entry.name || entry.slug}
+        </span>
+      </div>
       {entry.description ? (
         <span className="line-clamp-2 text-xs text-muted-foreground">
           {entry.description}

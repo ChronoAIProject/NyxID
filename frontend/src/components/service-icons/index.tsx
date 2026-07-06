@@ -139,13 +139,9 @@ export function FallbackIcon({ className }: ServiceIconProps) {
   );
 }
 
-export function ServiceIcon({
-  slug,
-  className,
-}: {
-  slug: string;
-  className?: string;
-}) {
-  const Icon = SERVICE_ICONS[slug] ?? FallbackIcon;
-  return <Icon className={className} />;
-}
+// NOTE: this module is a *pure glyph registry* — design-owned and synced
+// from the icon planning worktree. It exposes brand glyphs keyed by slug
+// and nothing else. The app-facing, size-tokened `<ServiceIcon>` primitive
+// lives in `@/components/service-icon` (engineering-owned) and consumes
+// `SERVICE_ICONS` / `FallbackIcon` from here. Do not add app layout policy
+// (sizes, colors, `cn`) to this file.

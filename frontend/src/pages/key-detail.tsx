@@ -35,6 +35,7 @@ import {
   AgentKeyPicker,
   type PickedAgentKey,
 } from "@/components/dashboard/agent-key-picker";
+import { ServiceIcon } from "@/components/service-icon";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button, ButtonIcon } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -2042,7 +2043,9 @@ export function KeyDetailPage() {
     <div className="space-y-8">
       <div className="flex flex-col gap-2">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex flex-col gap-2">
+          <div className="flex items-center gap-3">
+            <ServiceIcon slug={keyInfo.catalog_service_slug} size="md" />
+            <div className="flex flex-col gap-2">
             {keyInfo.auto_connected ? (
               <h2 className="text-[28px] font-bold leading-none tracking-tight" style={{ letterSpacing: "-0.03em" }}>
                 {keyInfo.label}
@@ -2070,6 +2073,7 @@ export function KeyDetailPage() {
               {keyInfo.admin_only && (
                 <Badge variant="secondary">Admin-only</Badge>
               )}
+            </div>
             </div>
           </div>
           <div className="flex items-center gap-2">

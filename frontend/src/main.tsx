@@ -124,7 +124,18 @@ function Root() {
     if (isAuthenticated && path === "/") {
       router.navigate({ to: "/dashboard" });
     } else if (!isAuthenticated) {
-      if (!isPublicPath(path)) {
+      // Send unauthenticated users on a real protected route to login,
+      // but let a genuinely-unmatched path fall through to the router's
+      // 404 (`defaultNotFoundComponent`) — a mistyped URL isn't a
+      // protected route, so bouncing it to login is wrong. The 404 page
+      // shows a "return to main page" link for signed-out visitors.
+      // `getMatchedRoutes` is a synchronous, pure matcher (no dependency
+      // on the router having loaded yet), so `foundRoute === undefined`
+      // is a reliable "this path matches no route" signal here.
+      const pathMatchesRoute = Boolean(
+        router.getMatchedRoutes(path).foundRoute,
+      );
+      if (pathMatchesRoute && !isPublicPath(path)) {
         router.navigate({ to: "/login" });
       }
     }

@@ -48,7 +48,7 @@ import {
   Terminal,
 } from "lucide-react";
 import { toast } from "sonner";
-import { ServiceIcon } from "@/components/service-icons";
+import { ServiceIcon } from "@/components/service-icon";
 import {
   ConnectVerifyStep,
   type CreatedKey,
@@ -397,7 +397,7 @@ function CatalogGrid({
             className="flex min-h-[7.5rem] flex-col items-start gap-1.5 rounded-lg border border-border p-4 text-left transition-colors duration-300 hover:border-white/[0.15] hover:bg-accent/40"
           >
             <div className="flex w-full items-start justify-between gap-2">
-              <ServiceIcon slug={entry.slug} className="h-5 w-5 shrink-0 text-muted-foreground" />
+              <ServiceIcon slug={entry.slug} size="sm" />
               <div className="flex flex-wrap justify-end gap-1">
                 {entry.service_type === "ssh" && (
                   <Badge variant="secondary" className="text-[10px]">
@@ -2554,10 +2554,7 @@ export function AddKeyDialog({
               // "Service" prefix is intentional per Calvin's ask — it
               // labels the noun so the quoted name isn't dangling.
               <span className="inline-flex items-center gap-2">
-                <ServiceIcon
-                  slug={createdKey.catalogSlug}
-                  className="h-5 w-5 shrink-0 text-muted-foreground"
-                />
+                <ServiceIcon slug={createdKey.catalogSlug} size="sm" />
                 <span>
                   Service{" "}
                   <span className="text-muted-foreground">&ldquo;</span>

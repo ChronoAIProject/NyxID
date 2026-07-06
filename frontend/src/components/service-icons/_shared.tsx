@@ -335,6 +335,14 @@ export function OpenClawGlyph(props: GlyphProps) {
  * `text-muted-foreground`), so the badge and brand glyph render in the same
  * color — visual separation comes from the backdrop + ring, not a second
  * accent color.
+ *
+ * Sizing: the wrapper's box comes entirely from the caller's `className`
+ * (e.g. `h-4 w-4`, `h-5 w-5`), defaulting to `h-5 w-5`. The brand glyph and
+ * the badge are sized *relative to that box* — the glyph fills it
+ * (`[&>svg]:h-full`) and the badge scales proportionally — so a composite
+ * icon renders at exactly the requested height, matching the plain glyphs
+ * that apply `className` directly. Without this the glyph's own hard-coded
+ * `h-5 w-5` would ignore the caller and composites would always render 20px.
  */
 export function CompositeBadgeWrapper({
   children,
@@ -347,14 +355,14 @@ export function CompositeBadgeWrapper({
 }) {
   return (
     <span
-      className={`relative inline-flex h-5 w-5 items-center justify-center ${
-        className ?? ""
+      className={`relative inline-flex shrink-0 items-center justify-center [&>svg]:!h-full [&>svg]:!w-full ${
+        className ?? "h-5 w-5"
       }`}
     >
       {children}
       <span
         aria-hidden="true"
-        className="absolute -bottom-1.5 -right-1.5 inline-flex h-3.5 w-3.5 items-center justify-center rounded-md bg-muted ring-2 ring-background"
+        className="absolute -bottom-[30%] -right-[30%] inline-flex h-[70%] w-[70%] items-center justify-center rounded-md bg-muted ring-2 ring-background [&>svg]:!h-full [&>svg]:!w-full"
       >
         {badge}
       </span>

@@ -15,6 +15,7 @@ import {
 } from "@/components/ui/card";
 import { Shield, Pencil } from "lucide-react";
 import { toast } from "sonner";
+import { ServiceIcon } from "@/components/service-icon";
 
 import type { CredentialSource } from "@/schemas/orgs";
 
@@ -142,6 +143,7 @@ export function ServiceScopeCard({
                         checked={selectedIds.includes(k.id)}
                         onCheckedChange={() => toggleService(k.id)}
                       />
+                      <ServiceIcon slug={k.catalog_service_slug} size="2xs" />
                       <Label htmlFor={`svc-${k.id}`} className="text-xs">
                         {k.label}
                         <span className="text-muted-foreground">

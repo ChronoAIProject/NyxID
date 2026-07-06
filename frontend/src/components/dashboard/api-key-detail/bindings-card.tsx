@@ -35,6 +35,7 @@ import {
 } from "@/components/ui/dialog";
 import { AlertTriangle, Link2, Plus, Trash2 } from "lucide-react";
 import { CrystalLatticeIcon } from "@/components/icons/empty-state";
+import { ServiceIcon } from "@/components/service-icon";
 import { toast } from "sonner";
 import type { AgentServiceBinding } from "@/types/keys";
 import type { CredentialSource } from "@/schemas/orgs";
@@ -240,8 +241,13 @@ export function BindingsCard({
                 <SelectContent>
                   {availableServices.map((s) => (
                     <SelectItem key={s.id} value={s.id}>
-                      {s.label}
-                      {s.slug !== s.label ? ` (${s.slug})` : ""}
+                      <span className="inline-flex items-center gap-2">
+                        <ServiceIcon slug={s.catalog_service_slug} size="2xs" />
+                        <span>
+                          {s.label}
+                          {s.slug !== s.label ? ` (${s.slug})` : ""}
+                        </span>
+                      </span>
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -275,7 +281,9 @@ export function BindingsCard({
           </div>
         ) : bindings && bindings.length > 0 ? (
           <div className="space-y-2">
-            {bindings.map((b) => (
+            {bindings.map((b) => {
+              const boundKey = services.find((s) => s.id === b.user_service_id);
+              return (
               <div
                 key={b.id}
                 className={
@@ -284,7 +292,9 @@ export function BindingsCard({
                     : "flex items-center justify-between rounded-lg border border-border p-3"
                 }
               >
-                <div className="space-y-0.5">
+                <div className="flex items-center gap-2.5">
+                  <ServiceIcon slug={boundKey?.catalog_service_slug} size="sm" />
+                  <div className="space-y-0.5">
                   <p className="text-[12px] font-medium flex items-center gap-1.5">
                     {b.is_invalid && (
                       <AlertTriangle
@@ -307,6 +317,7 @@ export function BindingsCard({
                       orphan binding to clean up.
                     </p>
                   )}
+                  </div>
                 </div>
                 <Button
                   size="icon"
@@ -317,7 +328,8 @@ export function BindingsCard({
                   <Trash2 className="h-3.5 w-3.5 text-destructive" />
                 </Button>
               </div>
-            ))}
+              );
+            })}
           </div>
         ) : (
           <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">

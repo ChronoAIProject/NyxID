@@ -86,6 +86,7 @@ import {
 import { DisconnectBanner } from "@/components/cli-wizard/disconnect-banner"
 import { UpstreamErrorBanner } from "@/components/cli-wizard/upstream-error-banner"
 import { Button } from "@/components/ui/button"
+import { NotFoundPage } from "@/components/shared/not-found-page"
 import { parseAiKeyPrefill } from "@/schemas/cli-wizard"
 
 declare global {
@@ -760,16 +761,16 @@ function CancelLink({ onCancel }: { readonly onCancel: () => void }) {
 
 function NoBootstrapFallback() {
   return (
-    <div className="mx-auto flex min-h-screen max-w-md items-center justify-center p-6">
-      <div className="w-full rounded-xl border border-border bg-card p-8">
-        <h1 className="font-serif text-xl">Wizard bootstrap missing</h1>
-        <p className="mt-2 text-sm text-muted-foreground">
-          This page expects to be served by the <code>nyxid</code> CLI's local
-          wizard server, which injects bootstrap config on request. Open the URL
+    <NotFoundPage
+      title="Wizard not available here"
+      description={
+        <>
+          This page is served by the <code>nyxid</code> CLI&rsquo;s local
+          wizard server, which injects its config on request. Open the URL
           printed by the CLI instead.
-        </p>
-      </div>
-    </div>
+        </>
+      }
+    />
   )
 }
 
