@@ -39,13 +39,8 @@ import { AddCtaButton } from "@/components/shared/add-cta-button";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
-import {
-  Copy,
-  Check,
-  Shield,
-  Server,
-  Monitor,
-} from "lucide-react";
+import { Copy, Check, Shield, Server } from "lucide-react";
+import { PlatformIcon } from "@/components/platform-icon";
 import { DatePicker } from "@/components/ui/date-picker";
 import { toast } from "sonner";
 
@@ -282,10 +277,10 @@ export function ApiKeyCreateDialog({
                             <Badge
                               key={platform}
                               variant={field.value === platform ? "default" : "secondary"}
-                              className="cursor-pointer"
+                              className="cursor-pointer gap-1"
                               onClick={() => field.onChange(platform)}
                             >
-                              <Monitor className="mr-1 h-3 w-3" />
+                              <PlatformIcon platform={platform} size="xs" />
                               {platform}
                             </Badge>
                           ))}

@@ -3,6 +3,7 @@ import { useUpdateApiKey } from "@/hooks/use-api-keys";
 import { ApiError } from "@/lib/api-client";
 import { PLATFORM_OPTIONS } from "@/schemas/agent-bindings";
 import { Button } from "@/components/ui/button";
+import { PlatformIcon } from "@/components/platform-icon";
 import { Badge } from "@/components/ui/badge";
 import {
   Card,
@@ -74,7 +75,10 @@ export function PlatformCard({
                 <SelectItem value={NO_PLATFORM}>None</SelectItem>
                 {PLATFORM_OPTIONS.map((p) => (
                   <SelectItem key={p} value={p}>
-                    {p}
+                    <span className="inline-flex items-center gap-2">
+                      <PlatformIcon platform={p} size="xs" />
+                      <span>{p}</span>
+                    </span>
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -100,7 +104,8 @@ export function PlatformCard({
           </div>
         ) : (
           <div className="flex items-center justify-between">
-            <Badge variant="secondary">
+            <Badge variant="secondary" className="gap-1.5">
+              <PlatformIcon platform={platform} size="xs" />
               {platform ?? "Not set"}
             </Badge>
             <Button

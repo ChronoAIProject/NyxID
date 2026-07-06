@@ -10,6 +10,7 @@ import { useEffect, useRef, useState } from "react";
 import { Info, Plus, Trash2 } from "lucide-react";
 import QRCode from "qrcode";
 import { Button } from "@/components/ui/button";
+import { PlatformIcon } from "@/components/platform-icon";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
@@ -271,7 +272,10 @@ export function ApiKeyCreateConfirm({
               <SelectItem value="__none__">— none —</SelectItem>
               {PLATFORMS.map((p) => (
                 <SelectItem key={p} value={p}>
-                  {p}
+                  <span className="inline-flex items-center gap-2">
+                    <PlatformIcon platform={p} size="xs" />
+                    <span>{p}</span>
+                  </span>
                 </SelectItem>
               ))}
             </SelectContent>
