@@ -17,7 +17,7 @@ export function AppNotFound() {
           {isAuthenticated ? (
             <Link to="/dashboard">Back to dashboard</Link>
           ) : (
-            <Link to="/">Go home</Link>
+            <Link to="/">Go to homepage</Link>
           )}
         </Button>
       }
