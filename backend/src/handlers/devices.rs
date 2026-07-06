@@ -215,7 +215,7 @@ pub async fn onboard_device(
     .await?;
 
     log_device_audit_for_user(
-        state.db.clone(),
+        &state,
         &auth_user,
         "device_onboard_created",
         Some(json!({
@@ -254,7 +254,7 @@ pub async fn revoke_onboard_device(
     revoke_onboard(&state.db, &actor_user_id, &bootstrap_id).await?;
 
     log_device_audit_for_user(
-        state.db.clone(),
+        &state,
         &auth_user,
         "device_onboard_revoked",
         Some(json!({
@@ -319,7 +319,7 @@ where
     };
 
     log_device_audit_for_user(
-        state.db.clone(),
+        &state,
         &auth_user,
         "device_code_approved",
         Some(json!({
@@ -351,7 +351,7 @@ fn audit_failed_approve_attempt(
     error: &AppError,
 ) {
     log_device_audit_for_user(
-        state.db.clone(),
+        state,
         auth_user,
         "device_code_approve_failed",
         Some(json!({
@@ -364,22 +364,22 @@ fn audit_failed_approve_attempt(
 
 #[cfg(not(test))]
 fn log_device_audit_for_user(
-    db: mongodb::Database,
+    state: &AppState,
     auth_user: &AuthUser,
     event_type: &'static str,
     event_data: Option<serde_json::Value>,
 ) {
-    audit_service::log_for_user(db, auth_user, event_type, event_data);
+    audit_service::log_for_user(state.db.clone(), auth_user, event_type, event_data);
 }
 
 #[cfg(test)]
 fn log_device_audit_for_user(
-    db: mongodb::Database,
+    state: &AppState,
     auth_user: &AuthUser,
     event_type: &'static str,
     event_data: Option<serde_json::Value>,
 ) {
-    use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};
+    use crate::models::audit_log::AuditLog;
     let entry = AuditLog {
         id: uuid::Uuid::new_v4().to_string(),
         user_id: Some(auth_user.user_id.to_string()),
@@ -394,15 +394,19 @@ fn log_device_audit_for_user(
         entry_hash: None,
         created_at: chrono::Utc::now(),
     };
+    let db = state.db.clone();
+    let audit_chain_hmac_key = state.audit_chain_hmac_key.clone();
 
     tokio::spawn(async move {
         let event_type = entry.event_type.clone();
         let user_id = entry.user_id.clone();
-        if let Err(error) = db
-            .collection::<AuditLog>(AUDIT_LOG)
-            .insert_one(&entry)
-            .await
-        {
+        let result = crate::services::audit_chain_service::append_chained_entry(
+            &db,
+            entry,
+            audit_chain_hmac_key.as_slice(),
+        )
+        .await;
+        if let Err(error) = result {
             tracing::error!(event_type = %event_type, error = %error, "Failed to write audit log");
             return;
         }
