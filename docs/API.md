@@ -4728,6 +4728,7 @@ Query the audit log with pagination. Entries are returned in reverse chronologic
   "entries": [
     {
       "id": "entry-uuid-here",
+      "seq": 123,
       "user_id": "550e8400-e29b-41d4-a716-446655440000",
       "event_type": "admin.user.deleted",
       "event_data": {
@@ -4744,6 +4745,35 @@ Query the audit log with pagination. Entries are returned in reverse chronologic
   "per_page": 50
 }
 ```
+
+#### GET /api/v1/admin/audit-log/verify
+
+Verify the tamper-evident audit-log hash chain over a bounded range. A broken chain returns HTTP 200 with `status: "broken"` because the integrity break is the report finding, not a transport error.
+
+**Auth:** Admin or operator
+
+**Query Parameters:**
+
+| Parameter  | Type    | Default | Description |
+|------------|---------|---------|-------------|
+| `from_seq` | integer | `1` | First chained sequence number to verify |
+| `to_seq`   | integer | -- | Optional final sequence number |
+| `limit`    | integer | `10000` | Maximum rows to verify in this call, capped at 10000 |
+
+**Response (200):**
+
+```json
+{
+  "status": "ok",
+  "checked_count": 10000,
+  "pre_chain_count": 42,
+  "head_seq": 58321,
+  "head_hash": "8b7d...",
+  "next_from_seq": 10001
+}
+```
+
+If a break is detected, `break_info` contains the first broken sequence, its kind (`gap`, `link_mismatch`, or `hash_mismatch`), and the expected/actual values.
 
 **Audit Event Types:**
 

@@ -14,7 +14,8 @@ use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};
 use crate::models::user::{COLLECTION_NAME as USERS, PlatformRole, User};
 use crate::mw::auth::AuthUser;
 use crate::services::{
-    admin_user_service, audit_service, consent_service, oauth_client_service, role_service,
+    admin_user_service, audit_chain_service, audit_service, consent_service, oauth_client_service,
+    role_service,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
@@ -33,6 +34,13 @@ pub struct AuditLogQuery {
     pub per_page: Option<u64>,
     pub user_id: Option<String>,
     pub api_key_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AuditLogVerifyQuery {
+    pub from_seq: Option<i64>,
+    pub to_seq: Option<i64>,
+    pub limit: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -63,6 +71,7 @@ pub struct AdminUserListResponse {
 #[derive(Debug, Serialize)]
 pub struct AuditLogItem {
     pub id: String,
+    pub seq: Option<i64>,
     pub user_id: Option<String>,
     pub api_key_id: Option<String>,
     pub api_key_name: Option<String>,
@@ -79,6 +88,19 @@ pub struct AuditLogListResponse {
     pub total: u64,
     pub page: u64,
     pub per_page: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AuditLogVerifyResponse {
+    pub status: audit_chain_service::AuditChainStatus,
+    pub checked_count: u64,
+    pub pre_chain_count: u64,
+    pub head_seq: Option<i64>,
+    pub head_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub break_info: Option<audit_chain_service::AuditChainBreak>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_from_seq: Option<i64>,
 }
 
 // --- New request/response types for admin user management ---
@@ -726,6 +748,7 @@ pub async fn list_audit_log(
         .into_iter()
         .map(|e| AuditLogItem {
             id: e.id,
+            seq: e.seq,
             user_id: e.user_id,
             api_key_id: e.api_key_id,
             api_key_name: e.api_key_name,
@@ -752,6 +775,36 @@ pub async fn list_audit_log(
         total,
         page,
         per_page,
+    }))
+}
+
+/// GET /api/v1/admin/audit-log/verify
+///
+/// Verify tamper-evident audit-log hash-chain integrity over a bounded range.
+pub async fn verify_audit_log(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Query(query): Query<AuditLogVerifyQuery>,
+) -> AppResult<Json<AuditLogVerifyResponse>> {
+    require_admin_or_operator(&state, &auth_user, "admin.audit_log.verify").await?;
+
+    let report = audit_chain_service::verify_chain(
+        &state.db,
+        state.audit_chain_hmac_key.as_slice(),
+        query.from_seq,
+        query.to_seq,
+        query.limit,
+    )
+    .await?;
+
+    Ok(Json(AuditLogVerifyResponse {
+        status: report.status,
+        checked_count: report.checked_count,
+        pre_chain_count: report.pre_chain_count,
+        head_seq: report.head_seq,
+        head_hash: report.head_hash,
+        break_info: report.break_info,
+        next_from_seq: report.next_from_seq,
     }))
 }
 

@@ -63,6 +63,7 @@ Reserved device-code binding errors live in numeric block 9500-9599.
 - JWT auth middleware (`mw/auth.rs`)
 - PKCE for OAuth flows
 - Input validation on all endpoints
+- Audit logs are tamper-evident for new rows via HMAC-SHA256 hash chaining (`services/audit_chain_service.rs`). New `AuditLog` rows must set `seq`, `prev_hash`, and `entry_hash` through the audit service append path; legacy rows without `seq` are counted by verification as pre-chain rows, not backfilled. `AUDIT_CHAIN_HMAC_KEY` is an optional 64-hex override; otherwise the key is domain-derived from `ENCRYPTION_KEY` or the JWT private key. v1 does not detect tail truncation without external head anchoring.
 - Enabled anonymous catalog endpoints are valid only when the catalog service has `identity_propagation_mode = "none"`, `forward_access_token = false`, and `inject_delegation_token = false`; disabled draft rules may be stored on any service. Admin writes that violate this return `AppError::AnonymousIncompatibleService`, HTTP 400, code 11100. Public execution still force-strips identity propagation, access-token forwarding, delegation-token injection, and downstream auth defaults as defense in depth.
 
 ### 5a. Vendor URN Namespace
@@ -460,6 +461,9 @@ CLI_PAIRING_HMAC_KEY=                   # 64 hex chars; keys `CliPairing.code_ha
                                         # key PEM. Both are stable per-worker so
                                         # multi-instance deployments stay in sync
                                         # without extra config. See docs/ENV.md.
+AUDIT_CHAIN_HMAC_KEY=                   # Optional 64 hex chars; keys audit-log
+                                        # HMAC chaining. If unset, derives from
+                                        # ENCRYPTION_KEY or the JWT private key.
 
 CHANNEL_RELAY_CALLBACK_TIMEOUT_SECS=30          # Callback timeout for inbound agent delivery (default: 30)
 CHANNEL_RELAY_MAX_BOTS_PER_USER=5               # Maximum bots a user can register (default: 5)

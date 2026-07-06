@@ -159,6 +159,7 @@ ci0O2dgc19c2/sLtanU7P2KAzhEo8O0tIc0Dwe/nMqKfue82eGVL3DqM\n\
             trusted_proxy_ips: vec![],
             mtls_client_cert_header: None,
             cli_pairing_hmac_key: None,
+            audit_chain_hmac_key: None,
             sa_token_ttl_secs: 3600,
             telemetry_dsn: None,
             telemetry_host: None,
