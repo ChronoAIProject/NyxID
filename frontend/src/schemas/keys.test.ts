@@ -8,6 +8,7 @@ import {
 const validResponse = {
   id: "us-1",
   slug: "openai",
+  resource_uri: "https://nyxid.example.test/api/v1/proxy/s/openai",
   endpoint_id: "ep-1",
   api_key_id: null,
   auth_method: "bearer",
