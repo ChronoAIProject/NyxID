@@ -1390,7 +1390,9 @@ async fn issue_authorization_code(
         external_subject,
         &resource_uris,
         &allowed_service_ids,
-        service_restricted,
+        // AuthorizationCode stores the allow-all flag, while this path
+        // tracks whether the grant is service-restricted.
+        !service_restricted,
     )
     .await?;
 
