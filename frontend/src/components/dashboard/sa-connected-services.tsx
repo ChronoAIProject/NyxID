@@ -143,6 +143,7 @@ export function SaConnectedServices({ saId }: SaConnectedServicesProps) {
   return (
     <>
       <DetailSection title="Connected Services">
+        <div className="space-y-3 p-4">
         {connectionsLoading ? (
           <Skeleton className="h-24 w-full" />
         ) : saConnections && saConnections.length > 0 ? (
@@ -224,13 +225,12 @@ export function SaConnectedServices({ saId }: SaConnectedServicesProps) {
         )}
 
         {availableServices.length > 0 && (
-          <div className="mt-3">
-            <ConnectServiceDropdown
-              services={availableServices}
-              onSelect={handleConnectService}
-            />
-          </div>
+          <ConnectServiceDropdown
+            services={availableServices}
+            onSelect={handleConnectService}
+          />
         )}
+        </div>
       </DetailSection>
 
       {serviceCredentialDialog !== null && (
