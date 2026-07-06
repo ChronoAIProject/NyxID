@@ -12,6 +12,8 @@ pub struct RefreshToken {
     pub client_id: String,
     pub user_id: String,
     pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub expires_at: DateTime<Utc>,
     pub revoked: bool,
@@ -49,6 +51,7 @@ mod tests {
             client_id: "default".to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             session_id: Some(uuid::Uuid::new_v4().to_string()),
+            scope: Some("openid profile".to_string()),
             expires_at: Utc::now(),
             revoked: false,
             replaced_by: None,
@@ -63,6 +66,7 @@ mod tests {
         assert_eq!(token.id, restored.id);
         assert_eq!(token.jti, restored.jti);
         assert_eq!(token.revoked, restored.revoked);
+        assert_eq!(token.scope, restored.scope);
         assert_eq!(token.resource_uris, restored.resource_uris);
         assert_eq!(token.allowed_service_ids, restored.allowed_service_ids);
         assert_eq!(token.allow_all_services, restored.allow_all_services);
@@ -83,6 +87,7 @@ mod tests {
             "created_at": bson::DateTime::from_chrono(now),
         };
         let restored: RefreshToken = bson::from_document(doc).expect("deserialize");
+        assert!(restored.scope.is_none());
         assert!(restored.resource_uris.is_empty());
         assert!(restored.allowed_service_ids.is_empty());
         assert!(restored.allow_all_services);

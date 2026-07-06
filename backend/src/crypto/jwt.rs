@@ -1179,6 +1179,21 @@ mod tests {
     }
 
     #[test]
+    fn access_token_without_restrictions_omits_resource_claims() {
+        let (keys, config) = test_keys_and_config();
+        let user_id = Uuid::new_v4();
+        let token = generate_access_token(
+            &keys, &config, &user_id, "openid", None, None, None, None, None,
+        )
+        .unwrap();
+
+        let claims = verify_token(&keys, &config, &token).unwrap();
+        assert!(claims.resources.is_none());
+        assert!(claims.allow_all_services.is_none());
+        assert!(claims.allowed_service_ids.is_none());
+    }
+
+    #[test]
     fn relay_access_token_uses_relay_ttl_not_access_ttl() {
         let (keys, config) = test_keys_and_config();
         let user_id = Uuid::new_v4();

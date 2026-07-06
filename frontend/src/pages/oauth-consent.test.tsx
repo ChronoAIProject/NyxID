@@ -1,7 +1,29 @@
 import { fireEvent, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { vi } from "vitest";
 
 import { OAuthConsentPage } from "./oauth-consent";
+
+const { state } = vi.hoisted(() => ({
+  state: {
+    userServices: [] as Array<{
+      id: string;
+      slug: string;
+      auth_method: string;
+      is_active: boolean;
+      credential_source: { type: "personal" } | { type: "org" };
+    }>,
+    userServicesLoading: false,
+  },
+}));
+
+vi.mock("@/hooks/use-user-services", () => ({
+  useUserServices: () => ({
+    data: state.userServices,
+    isLoading: state.userServicesLoading,
+  }),
+}));
 
 function setSearch(params: Record<string, string | readonly string[]>) {
   const qs = new URLSearchParams();
@@ -44,6 +66,30 @@ function hiddenInputs(name: string): HTMLInputElement[] {
 
 beforeEach(() => {
   window.history.pushState({}, "", "/");
+  state.userServices = [
+    {
+      id: "svc-openai",
+      slug: "openai",
+      auth_method: "bearer",
+      is_active: true,
+      credential_source: { type: "personal" },
+    },
+    {
+      id: "svc-inactive",
+      slug: "inactive",
+      auth_method: "bearer",
+      is_active: false,
+      credential_source: { type: "personal" },
+    },
+    {
+      id: "svc-org",
+      slug: "org-service",
+      auth_method: "bearer",
+      is_active: true,
+      credential_source: { type: "org" },
+    },
+  ];
+  state.userServicesLoading = false;
 });
 
 afterEach(() => {
@@ -165,6 +211,8 @@ describe("OAuthConsentPage", () => {
       "signed-consent-request-token",
     );
     expect(hiddenInput("nonce")?.value).toBe("nonce-456");
+    expect(hiddenInput("allow_all_services")?.value).toBe("true");
+    expect(hiddenInput("allowed_service_ids")).toBeNull();
   });
 
   it("omits optional external-subject hidden inputs unless provided", () => {
@@ -226,5 +274,47 @@ describe("OAuthConsentPage", () => {
     // parseHost() catches the URL error and returns "Unknown" as the host,
     // rendered in the "Redirect host:" line of the verification block.
     expect(screen.getByText("Unknown")).toBeInTheDocument();
+  });
+
+  it("defaults service access to all services", () => {
+    setSearch(VALID);
+
+    render(<OAuthConsentPage />);
+
+    const allServices = screen.getByRole("switch", { name: "All services" });
+    expect(allServices).toHaveAttribute("aria-checked", "true");
+    expect(screen.queryByText("openai")).not.toBeInTheDocument();
+    expect(hiddenInput("allow_all_services")?.value).toBe("true");
+  });
+
+  it("renders active personal services when all-services is disabled", async () => {
+    const user = userEvent.setup();
+    setSearch(VALID);
+
+    render(<OAuthConsentPage />);
+
+    await user.click(screen.getByRole("switch", { name: "All services" }));
+
+    expect(screen.getByText("openai")).toBeInTheDocument();
+    expect(screen.queryByText("inactive")).not.toBeInTheDocument();
+    expect(screen.queryByText("org-service")).not.toBeInTheDocument();
+    expect(hiddenInput("allow_all_services")?.value).toBe("false");
+  });
+
+  it("submits selected service ids only when scoped access is chosen", async () => {
+    const user = userEvent.setup();
+    setSearch(VALID);
+
+    render(<OAuthConsentPage />);
+
+    await user.click(screen.getByRole("switch", { name: "All services" }));
+    await user.click(screen.getByRole("checkbox", { name: /openai/i }));
+
+    const selected = document.querySelectorAll<HTMLInputElement>(
+      'input[type="hidden"][name="allowed_service_ids"]',
+    );
+    expect(Array.from(selected).map((input) => input.value)).toEqual([
+      "svc-openai",
+    ]);
   });
 });

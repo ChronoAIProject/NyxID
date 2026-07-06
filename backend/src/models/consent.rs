@@ -58,6 +58,20 @@ mod tests {
     }
 
     #[test]
+    fn bson_defaults_service_grant() {
+        let now = Utc::now();
+        let doc = bson::doc! {
+            "_id": "consent-legacy",
+            "user_id": "user-1",
+            "client_id": "client-1",
+            "scopes": "openid",
+            "granted_at": bson::DateTime::from_chrono(now),
+        };
+        let restored: Consent = bson::from_document(doc).expect("deserialize");
+        assert!(restored.allowed_service_ids.is_none());
+    }
+
+    #[test]
     fn bson_roundtrip_with_expires() {
         let mut consent = make_consent();
         consent.expires_at = Some(Utc::now());
@@ -73,20 +87,6 @@ mod tests {
         let doc = bson::to_document(&consent).expect("serialize");
         let restored: Consent = bson::from_document(doc).expect("deserialize");
         assert_eq!(restored.allowed_service_ids, consent.allowed_service_ids);
-    }
-
-    #[test]
-    fn bson_defaults_service_grant() {
-        let now = Utc::now();
-        let doc = bson::doc! {
-            "_id": "consent-legacy",
-            "user_id": "user-1",
-            "client_id": "client-1",
-            "scopes": "openid",
-            "granted_at": bson::DateTime::from_chrono(now),
-        };
-        let restored: Consent = bson::from_document(doc).expect("deserialize");
-        assert!(restored.allowed_service_ids.is_none());
     }
 
     #[test]

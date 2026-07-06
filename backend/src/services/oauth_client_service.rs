@@ -728,6 +728,7 @@ mod tests {
                     client_id: client_id.to_string(),
                     user_id: "user-with-refresh-token".to_string(),
                     session_id: Some(format!("session-{client_id}")),
+                    scope: Some(DEFAULT_ALLOWED_SCOPES.to_string()),
                     expires_at: now + chrono::Duration::days(1),
                     revoked: false,
                     replaced_by: None,

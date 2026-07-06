@@ -14,8 +14,10 @@ use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::handlers::admin_helpers::{extract_ip, extract_user_agent};
 use crate::models::authorization_code::{ExternalSubjectRef, validate_external_subject_params};
+use crate::models::consent::Consent;
 use crate::models::service_account_token::{COLLECTION_NAME as SA_TOKENS, ServiceAccountToken};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
+use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
 use crate::mw::auth::{AuthUser, OptionalAuthUser};
 use crate::services::{
     audit_service, consent_service, oauth_broker_service, oauth_client_service,
@@ -62,12 +64,20 @@ pub struct ConsentDecisionForm {
     pub external_subject_tenant: Option<String>,
     pub external_subject_external_user_id: Option<String>,
     pub prompt: Option<String>,
+    #[serde(default = "default_allow_all_services_form")]
+    pub allow_all_services: bool,
+    #[serde(default)]
+    pub allowed_service_ids: Vec<String>,
     pub consent_request: Option<String>,
     #[serde(default)]
     pub resource: Vec<String>,
     #[serde(default)]
     pub resource_selection_present: bool,
     pub decision: String,
+}
+
+fn default_allow_all_services_form() -> bool {
+    true
 }
 
 #[derive(Debug, Serialize)]
@@ -650,24 +660,27 @@ pub async fn authorize_decision(
         ));
     }
 
-    let consent_allowed_service_ids =
-        if form.resource_selection_present || !params.resource.is_empty() {
-            let resolved_consent_resources = oauth_resource_service::resolve_requested_resources(
-                &state.db,
-                &state.config,
-                &user_id_str,
-                non_empty_resources(&form.resource),
-            )
-            .await?;
-            Some(
-                resolved_consent_resources
-                    .map(|resolved| resolved.service_ids)
-                    .unwrap_or_default(),
-            )
-        } else {
-            None
-        };
-    if let Some(ids) = consent_allowed_service_ids {
+    let consent_allowed_service_ids = if !form.allow_all_services {
+        let selected_service_ids = normalize_allowed_service_ids(form.allowed_service_ids);
+        validate_allowed_service_ids(&state.db, &user_id_str, &selected_service_ids).await?;
+        Some(selected_service_ids)
+    } else if form.resource_selection_present || !params.resource.is_empty() {
+        let resolved_consent_resources = oauth_resource_service::resolve_requested_resources(
+            &state.db,
+            &state.config,
+            &user_id_str,
+            non_empty_resources(&form.resource),
+        )
+        .await?;
+        Some(
+            resolved_consent_resources
+                .map(|resolved| resolved.service_ids)
+                .unwrap_or_default(),
+        )
+    } else {
+        None
+    };
+    let consent = if let Some(ids) = consent_allowed_service_ids {
         consent_service::grant_consent_with_services(
             &state.db,
             &user_id_str,
@@ -675,22 +688,18 @@ pub async fn authorize_decision(
             &validated_scope,
             Some(ids),
         )
-        .await?;
+        .await?
     } else {
-        consent_service::grant_consent(
-            &state.db,
-            &user_id_str,
-            &params.client_id,
-            &validated_scope,
-        )
-        .await?;
-    }
+        consent_service::grant_consent(&state.db, &user_id_str, &params.client_id, &validated_scope)
+            .await?
+    };
 
     let code = issue_authorization_code(
         &state,
         &auth_user,
         &params,
         &validated_scope,
+        &consent,
         external_subject.as_ref(),
     )
     .await?;
@@ -801,16 +810,15 @@ async fn authorize_inner(
             Some(auth_user) => {
                 let user_id_str = auth_user.user_id.to_string();
 
-                let has_consent = consent_service::check_consent(
+                let consent = consent_service::check_consent(
                     &state.db,
                     &user_id_str,
                     &params.client_id,
                     &validated_scope,
                 )
-                .await?
-                .is_some();
+                .await?;
 
-                let needs_consent = !has_consent || force_consent;
+                let needs_consent = consent.is_none() || force_consent;
 
                 if needs_consent {
                     // prompt=none + needs consent → error, not redirect
@@ -838,11 +846,16 @@ async fn authorize_inner(
                     return Ok(redirect_302(&consent_url));
                 }
 
+                let consent = consent.ok_or_else(|| {
+                    AppError::Internal("Consent check unexpectedly returned no grant".to_string())
+                })?;
+
                 let code = issue_authorization_code(
                     state,
                     &auth_user,
                     params,
                     &validated_scope,
+                    &consent,
                     external_subject,
                 )
                 .await?;
@@ -862,16 +875,15 @@ async fn authorize_inner(
 
         let user_id_str = auth_user.user_id.to_string();
 
-        let has_consent = consent_service::check_consent(
+        let consent = consent_service::check_consent(
             &state.db,
             &user_id_str,
             &params.client_id,
             &validated_scope,
         )
-        .await?
-        .is_some();
+        .await?;
 
-        if !has_consent || force_consent {
+        if consent.is_none() || force_consent {
             let consent_url = build_consent_url(
                 &state.config.frontend_url,
                 params,
@@ -887,11 +899,16 @@ async fn authorize_inner(
             return Err(AppError::ConsentRequired { consent_url });
         }
 
+        let consent = consent.ok_or_else(|| {
+            AppError::Internal("Consent check unexpectedly returned no grant".to_string())
+        })?;
+
         let code = issue_authorization_code(
             state,
             &auth_user,
             params,
             &validated_scope,
+            &consent,
             external_subject,
         )
         .await?;
@@ -1210,6 +1227,46 @@ fn build_callback_error_url(params: &AuthorizeQuery, error: &str, description: &
     url
 }
 
+fn normalize_allowed_service_ids(ids: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut normalized = Vec::new();
+
+    for id in ids {
+        let trimmed = id.trim();
+        if !trimmed.is_empty() && seen.insert(trimmed.to_string()) {
+            normalized.push(trimmed.to_string());
+        }
+    }
+
+    normalized
+}
+
+async fn validate_allowed_service_ids(
+    db: &mongodb::Database,
+    user_id: &str,
+    allowed_service_ids: &[String],
+) -> AppResult<()> {
+    if allowed_service_ids.is_empty() {
+        return Ok(());
+    }
+
+    let count = db
+        .collection::<UserService>(USER_SERVICES)
+        .count_documents(doc! {
+            "_id": { "$in": allowed_service_ids },
+            "user_id": user_id,
+        })
+        .await?;
+
+    if count != allowed_service_ids.len() as u64 {
+        return Err(AppError::BadRequest(
+            "Selected service access contains an unknown service".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 fn build_consent_url(
     frontend_url: &str,
     params: &AuthorizeQuery,
@@ -1289,32 +1346,10 @@ async fn issue_authorization_code(
     auth_user: &crate::mw::auth::AuthUser,
     params: &AuthorizeQuery,
     validated_scope: &str,
+    consent: &Consent,
     external_subject: Option<&ExternalSubjectRef>,
 ) -> AppResult<String> {
     let user_id_str = auth_user.user_id.to_string();
-    let consent = match consent_service::check_consent(
-        &state.db,
-        &user_id_str,
-        &params.client_id,
-        validated_scope,
-    )
-    .await?
-    {
-        Some(consent) => consent,
-        None => {
-            let consent_request =
-                sign_consent_request(state, &user_id_str, params, validated_scope)?;
-            return Err(AppError::ConsentRequired {
-                consent_url: build_consent_url(
-                    &state.config.frontend_url,
-                    params,
-                    &params.client_id,
-                    validated_scope,
-                    Some(&consent_request),
-                ),
-            });
-        }
-    };
     let resolved_resources = oauth_resource_service::resolve_requested_resources(
         &state.db,
         &state.config,
@@ -1362,6 +1397,8 @@ async fn issue_authorization_code(
     let mut event_data = serde_json::json!({
         "client_id": params.client_id,
         "scope": validated_scope,
+        "allow_all_services": !service_restricted,
+        "allowed_service_ids_count": allowed_service_ids.len(),
     });
     if !resource_uris.is_empty()
         && let Some(obj) = event_data.as_object_mut()
@@ -1543,6 +1580,7 @@ async fn token_inner(
                         &state.jwt_keys,
                         client_id_str,
                         &exchanged.user_id,
+                        &exchanged.granted_scope,
                         &exchanged.resource_uris,
                         &exchanged.allowed_service_ids,
                         exchanged.allow_all_services,
@@ -2638,6 +2676,7 @@ mod tests {
             client_id: client_id.to_string(),
             user_id: user_id.to_string(),
             session_id: None,
+            scope: Some(scopes.join(" ")),
             expires_at: now + Duration::days(7),
             revoked: false,
             replaced_by: None,
@@ -2727,6 +2766,65 @@ mod tests {
             })
             .await
             .expect("insert authorization code");
+    }
+
+    #[tokio::test]
+    async fn authorize_inner_threads_stored_service_consent_into_code() {
+        let Some(db) = connect_test_database("oauth_stored_service_consent_code").await else {
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let user_id = Uuid::new_v4().to_string();
+        let client_id = "stored-service-consent-client";
+        let allowed_service_ids = vec!["svc-allowed".to_string()];
+
+        insert_person_user(&db, &user_id).await;
+        insert_public_client(&db, client_id, "openid").await;
+        consent_service::grant_consent_with_services(
+            &db,
+            &user_id,
+            client_id,
+            "openid",
+            Some(allowed_service_ids.clone()),
+        )
+        .await
+        .expect("grant restricted consent");
+
+        let params = AuthorizeQuery {
+            response_type: "code".to_string(),
+            client_id: client_id.to_string(),
+            redirect_uri: "http://localhost/callback".to_string(),
+            scope: Some("openid".to_string()),
+            state: Some("state-1".to_string()),
+            code_challenge: Some("challenge".to_string()),
+            code_challenge_method: Some("S256".to_string()),
+            nonce: None,
+            external_subject_platform: None,
+            external_subject_tenant: None,
+            external_subject_external_user_id: None,
+            prompt: None,
+            request_uri: None,
+            resource: Vec::new(),
+        };
+
+        let _response = authorize_inner(
+            &state,
+            OptionalAuthUser(Some(crate::test_utils::test_auth_user(&user_id))),
+            &params,
+            true,
+            None,
+        )
+        .await
+        .expect("authorize without prompting");
+
+        let stored = db
+            .collection::<AuthorizationCode>(AUTH_CODES)
+            .find_one(doc! { "client_id": client_id, "user_id": &user_id })
+            .await
+            .expect("query authorization code")
+            .expect("authorization code exists");
+        assert!(!stored.allow_all_services);
+        assert_eq!(stored.allowed_service_ids, allowed_service_ids);
     }
 
     #[tokio::test]
@@ -3353,6 +3451,8 @@ mod tests {
                 external_subject_tenant: None,
                 external_subject_external_user_id: None,
                 prompt: None,
+                allow_all_services: true,
+                allowed_service_ids: Vec::new(),
                 consent_request: Some(consent_request),
                 resource: vec![tampered_resource],
                 resource_selection_present: true,
