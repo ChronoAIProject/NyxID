@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::errors::{AppError, AppResult};
+use crate::models::consent::default_allow_all_services;
 
 pub const COLLECTION_NAME: &str = "authorization_codes";
 
@@ -25,6 +26,10 @@ pub struct AuthorizationCode {
     pub code_challenge: Option<String>,
     pub code_challenge_method: Option<String>,
     pub nonce: Option<String>,
+    #[serde(default = "default_allow_all_services")]
+    pub allow_all_services: bool,
+    #[serde(default)]
+    pub allowed_service_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_subject: Option<ExternalSubjectRef>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
@@ -117,6 +122,8 @@ mod tests {
             code_challenge: Some("challenge".to_string()),
             code_challenge_method: Some("S256".to_string()),
             nonce: Some("nonce123".to_string()),
+            allow_all_services: false,
+            allowed_service_ids: vec!["svc-1".to_string()],
             external_subject: Some(ExternalSubjectRef {
                 platform: "lark".to_string(),
                 tenant: Some("t1".to_string()),
@@ -131,6 +138,8 @@ mod tests {
         assert_eq!(code.id, restored.id);
         assert_eq!(code.scope, restored.scope);
         assert_eq!(code.code_challenge, restored.code_challenge);
+        assert_eq!(code.allow_all_services, restored.allow_all_services);
+        assert_eq!(code.allowed_service_ids, restored.allowed_service_ids);
         assert_eq!(code.external_subject, restored.external_subject);
     }
 
@@ -146,6 +155,8 @@ mod tests {
             code_challenge: None,
             code_challenge_method: None,
             nonce: None,
+            allow_all_services: true,
+            allowed_service_ids: Vec::new(),
             external_subject: None,
             expires_at: Utc::now(),
             used: true,
@@ -178,6 +189,8 @@ mod tests {
 
         let restored: AuthorizationCode = bson::from_document(doc).expect("deserialize");
         assert!(restored.external_subject.is_none());
+        assert!(restored.allow_all_services);
+        assert!(restored.allowed_service_ids.is_empty());
     }
 
     #[test]

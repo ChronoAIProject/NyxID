@@ -69,6 +69,12 @@ pub struct Claims {
     /// True if this token was issued for channel relay callbacks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay: Option<bool>,
+    /// OAuth access-token service scope. Missing means allow all services.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_service_ids: Option<Vec<String>>,
+    /// OAuth access-token service scope flag. Missing means allow all services.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_all_services: Option<bool>,
     /// Agent key ID that triggered the relay (for scope inheritance).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_api_key_id: Option<String>,
@@ -288,6 +294,13 @@ pub struct RbacClaimData {
     pub sid: Option<String>,
 }
 
+/// Optional resource-owner service grant to embed in OAuth access tokens.
+#[derive(Clone, Copy)]
+pub struct AccessTokenServiceScope<'a> {
+    pub allowed_service_ids: &'a [String],
+    pub allow_all_services: bool,
+}
+
 /// Generate an access token for the given user.
 // Access token issuance carries optional TTL, RBAC, DPoP, and mTLS knobs.
 // Keeping these explicit avoids hiding security-sensitive claim inputs.
@@ -301,6 +314,7 @@ pub fn generate_access_token(
     ttl_override_secs: Option<i64>,
     dpop_jkt: Option<&str>,
     mtls_x5t_s256: Option<&str>,
+    service_scope: Option<AccessTokenServiceScope<'_>>,
 ) -> Result<String, AppError> {
     let now = Utc::now().timestamp();
     let cnf = if dpop_jkt.is_some() || mtls_x5t_s256.is_some() {
@@ -330,6 +344,8 @@ pub fn generate_access_token(
         sa: None,
         cnf,
         relay: None,
+        allowed_service_ids: service_scope.map(|s| s.allowed_service_ids.to_vec()),
+        allow_all_services: service_scope.map(|s| s.allow_all_services),
         relay_api_key_id: None,
         relay_api_key_name: None,
         relay_allowed_service_ids: None,
@@ -392,6 +408,8 @@ pub fn generate_relay_access_token(
         sa: None,
         cnf: None,
         relay: Some(true),
+        allowed_service_ids: None,
+        allow_all_services: None,
         relay_api_key_id: Some(agent_scope.api_key_id.clone()),
         relay_api_key_name: Some(agent_scope.api_key_name.clone()),
         relay_allowed_service_ids: Some(agent_scope.allowed_service_ids.clone()),
@@ -497,6 +515,8 @@ pub fn generate_refresh_token(
         sa: None,
         cnf: None,
         relay: None,
+        allowed_service_ids: None,
+        allow_all_services: None,
         relay_api_key_id: None,
         relay_api_key_name: None,
         relay_allowed_service_ids: None,
@@ -544,6 +564,8 @@ pub fn reissue_refresh_token(
         sa: None,
         cnf: None,
         relay: None,
+        allowed_service_ids: None,
+        allow_all_services: None,
         relay_api_key_id: None,
         relay_api_key_name: None,
         relay_allowed_service_ids: None,
@@ -604,6 +626,8 @@ pub fn generate_delegated_access_token(
         sa: None,
         cnf: None,
         relay: None,
+        allowed_service_ids: None,
+        allow_all_services: None,
         relay_api_key_id: None,
         relay_api_key_name: None,
         relay_allowed_service_ids: None,
@@ -742,6 +766,8 @@ pub fn generate_service_account_token(
         sa: Some(true),
         cnf: None,
         relay: None,
+        allowed_service_ids: None,
+        allow_all_services: None,
         relay_api_key_id: None,
         relay_api_key_name: None,
         relay_allowed_service_ids: None,
@@ -1082,6 +1108,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
 
@@ -1105,11 +1132,52 @@ mod tests {
             Some(300),
             None,
             None,
+            None,
         )
         .unwrap();
 
         let claims = verify_token(&keys, &config, &token).unwrap();
         assert_eq!(claims.exp - claims.iat, 300);
+    }
+
+    #[test]
+    fn access_token_service_scope_round_trips() {
+        let (keys, config) = test_keys_and_config();
+        let user_id = Uuid::new_v4();
+        let service_ids = vec!["svc-1".to_string(), "svc-2".to_string()];
+        let token = generate_access_token(
+            &keys,
+            &config,
+            &user_id,
+            "openid proxy",
+            None,
+            None,
+            None,
+            None,
+            Some(AccessTokenServiceScope {
+                allowed_service_ids: &service_ids,
+                allow_all_services: false,
+            }),
+        )
+        .unwrap();
+
+        let claims = verify_token(&keys, &config, &token).unwrap();
+        assert_eq!(claims.allow_all_services, Some(false));
+        assert_eq!(claims.allowed_service_ids, Some(service_ids));
+    }
+
+    #[test]
+    fn access_token_without_service_scope_omits_service_claims() {
+        let (keys, config) = test_keys_and_config();
+        let user_id = Uuid::new_v4();
+        let token = generate_access_token(
+            &keys, &config, &user_id, "openid", None, None, None, None, None,
+        )
+        .unwrap();
+
+        let claims = verify_token(&keys, &config, &token).unwrap();
+        assert!(claims.allow_all_services.is_none());
+        assert!(claims.allowed_service_ids.is_none());
     }
 
     #[test]
@@ -1207,6 +1275,8 @@ mod tests {
             sa: None,
             cnf: None,
             relay: None,
+            allowed_service_ids: None,
+            allow_all_services: None,
             relay_api_key_id: None,
             relay_api_key_name: None,
             relay_allowed_service_ids: None,
@@ -1227,9 +1297,10 @@ mod tests {
     fn access_token_has_kid_header() {
         let (keys, config) = test_keys_and_config();
         let user_id = Uuid::new_v4();
-        let token =
-            generate_access_token(&keys, &config, &user_id, "openid", None, None, None, None)
-                .unwrap();
+        let token = generate_access_token(
+            &keys, &config, &user_id, "openid", None, None, None, None, None,
+        )
+        .unwrap();
 
         // Decode header without validation to check kid
         let header = jsonwebtoken::decode_header(&token).unwrap();
@@ -1270,9 +1341,10 @@ mod tests {
     fn generate_id_token_with_at_hash() {
         let (keys, config) = test_keys_and_config();
         let user_id = Uuid::new_v4();
-        let access_token =
-            generate_access_token(&keys, &config, &user_id, "openid", None, None, None, None)
-                .unwrap();
+        let access_token = generate_access_token(
+            &keys, &config, &user_id, "openid", None, None, None, None, None,
+        )
+        .unwrap();
 
         let id_token = generate_id_token(
             &keys,
@@ -1316,6 +1388,8 @@ mod tests {
             sa: None,
             cnf: None,
             relay: None,
+            allowed_service_ids: None,
+            allow_all_services: None,
             relay_api_key_id: None,
             relay_api_key_name: None,
             relay_allowed_service_ids: None,
@@ -1371,9 +1445,10 @@ mod tests {
         // Verify that tokens without act/delegated fields still deserialize
         let (keys, config) = test_keys_and_config();
         let user_id = Uuid::new_v4();
-        let token =
-            generate_access_token(&keys, &config, &user_id, "openid", None, None, None, None)
-                .unwrap();
+        let token = generate_access_token(
+            &keys, &config, &user_id, "openid", None, None, None, None, None,
+        )
+        .unwrap();
 
         let claims = verify_token(&keys, &config, &token).unwrap();
         assert!(claims.act.is_none());
@@ -1450,9 +1525,10 @@ mod tests {
     fn sa_claim_skipped_when_none() {
         let (keys, config) = test_keys_and_config();
         let user_id = Uuid::new_v4();
-        let token =
-            generate_access_token(&keys, &config, &user_id, "openid", None, None, None, None)
-                .unwrap();
+        let token = generate_access_token(
+            &keys, &config, &user_id, "openid", None, None, None, None, None,
+        )
+        .unwrap();
 
         let claims = verify_token(&keys, &config, &token).unwrap();
         assert!(claims.sa.is_none());

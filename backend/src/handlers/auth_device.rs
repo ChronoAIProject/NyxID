@@ -414,6 +414,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("sign access token")
     }

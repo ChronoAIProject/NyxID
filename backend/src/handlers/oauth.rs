@@ -14,6 +14,7 @@ use crate::handlers::admin_helpers::{extract_ip, extract_user_agent};
 use crate::models::authorization_code::{ExternalSubjectRef, validate_external_subject_params};
 use crate::models::service_account_token::{COLLECTION_NAME as SA_TOKENS, ServiceAccountToken};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
+use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
 use crate::mw::auth::{AuthUser, OptionalAuthUser};
 use crate::services::{
     audit_service, consent_service, oauth_broker_service, oauth_client_service, oauth_service,
@@ -57,7 +58,15 @@ pub struct ConsentDecisionForm {
     pub external_subject_tenant: Option<String>,
     pub external_subject_external_user_id: Option<String>,
     pub prompt: Option<String>,
+    #[serde(default = "default_allow_all_services_form")]
+    pub allow_all_services: bool,
+    #[serde(default)]
+    pub allowed_service_ids: Vec<String>,
     pub decision: String,
+}
+
+fn default_allow_all_services_form() -> bool {
+    true
 }
 
 #[derive(Debug, Serialize)]
@@ -492,8 +501,22 @@ pub async fn authorize_decision(
     }
 
     let user_id_str = auth_user.user_id.to_string();
-    consent_service::grant_consent(&state.db, &user_id_str, &params.client_id, &validated_scope)
-        .await?;
+    let selected_service_ids = normalize_allowed_service_ids(form.allowed_service_ids);
+    let grant_allowed_service_ids = if form.allow_all_services {
+        Vec::new()
+    } else {
+        validate_allowed_service_ids(&state.db, &user_id_str, &selected_service_ids).await?;
+        selected_service_ids
+    };
+    consent_service::grant_consent(
+        &state.db,
+        &user_id_str,
+        &params.client_id,
+        &validated_scope,
+        form.allow_all_services,
+        &grant_allowed_service_ids,
+    )
+    .await?;
 
     let code = issue_authorization_code(
         &state,
@@ -501,6 +524,8 @@ pub async fn authorize_decision(
         &params,
         &validated_scope,
         external_subject.as_ref(),
+        form.allow_all_services,
+        &grant_allowed_service_ids,
     )
     .await?;
     let redirect_url = build_callback_url(&params, &code);
@@ -610,16 +635,17 @@ async fn authorize_inner(
             Some(auth_user) => {
                 let user_id_str = auth_user.user_id.to_string();
 
-                let has_consent = consent_service::check_consent(
+                let consent = consent_service::check_consent(
                     &state.db,
                     &user_id_str,
                     &params.client_id,
                     &validated_scope,
+                    false,
+                    &[],
                 )
-                .await?
-                .is_some();
+                .await?;
 
-                let needs_consent = !has_consent || force_consent;
+                let needs_consent = consent.is_none() || force_consent;
 
                 if needs_consent {
                     // prompt=none + needs consent → error, not redirect
@@ -647,6 +673,14 @@ async fn authorize_inner(
                     params,
                     &validated_scope,
                     external_subject,
+                    consent
+                        .as_ref()
+                        .map(|c| c.allow_all_services)
+                        .unwrap_or(true),
+                    consent
+                        .as_ref()
+                        .map(|c| c.allowed_service_ids.as_slice())
+                        .unwrap_or(&[]),
                 )
                 .await?;
                 let redirect_url = build_callback_url(params, &code);
@@ -665,16 +699,17 @@ async fn authorize_inner(
 
         let user_id_str = auth_user.user_id.to_string();
 
-        let has_consent = consent_service::check_consent(
+        let consent = consent_service::check_consent(
             &state.db,
             &user_id_str,
             &params.client_id,
             &validated_scope,
+            false,
+            &[],
         )
-        .await?
-        .is_some();
+        .await?;
 
-        if !has_consent || force_consent {
+        if consent.is_none() || force_consent {
             let consent_url = build_consent_url(
                 &state.config.frontend_url,
                 params,
@@ -690,6 +725,14 @@ async fn authorize_inner(
             params,
             &validated_scope,
             external_subject,
+            consent
+                .as_ref()
+                .map(|c| c.allow_all_services)
+                .unwrap_or(true),
+            consent
+                .as_ref()
+                .map(|c| c.allowed_service_ids.as_slice())
+                .unwrap_or(&[]),
         )
         .await?;
         let redirect_url = build_callback_url(params, &code);
@@ -1002,6 +1045,46 @@ fn build_callback_error_url(params: &AuthorizeQuery, error: &str, description: &
     url
 }
 
+fn normalize_allowed_service_ids(ids: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut normalized = Vec::new();
+
+    for id in ids {
+        let trimmed = id.trim();
+        if !trimmed.is_empty() && seen.insert(trimmed.to_string()) {
+            normalized.push(trimmed.to_string());
+        }
+    }
+
+    normalized
+}
+
+async fn validate_allowed_service_ids(
+    db: &mongodb::Database,
+    user_id: &str,
+    allowed_service_ids: &[String],
+) -> AppResult<()> {
+    if allowed_service_ids.is_empty() {
+        return Ok(());
+    }
+
+    let count = db
+        .collection::<UserService>(USER_SERVICES)
+        .count_documents(doc! {
+            "_id": { "$in": allowed_service_ids },
+            "user_id": user_id,
+        })
+        .await?;
+
+    if count != allowed_service_ids.len() as u64 {
+        return Err(AppError::BadRequest(
+            "Selected service access contains an unknown service".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 fn build_consent_url(
     frontend_url: &str,
     params: &AuthorizeQuery,
@@ -1072,6 +1155,8 @@ async fn issue_authorization_code(
     params: &AuthorizeQuery,
     validated_scope: &str,
     external_subject: Option<&ExternalSubjectRef>,
+    allow_all_services: bool,
+    allowed_service_ids: &[String],
 ) -> AppResult<String> {
     let user_id_str = auth_user.user_id.to_string();
     let code = oauth_service::create_authorization_code(
@@ -1084,12 +1169,16 @@ async fn issue_authorization_code(
         params.code_challenge_method.as_deref(),
         params.nonce.as_deref(),
         external_subject,
+        allow_all_services,
+        allowed_service_ids,
     )
     .await?;
 
     let mut event_data = serde_json::json!({
         "client_id": params.client_id,
         "scope": validated_scope,
+        "allow_all_services": allow_all_services,
+        "allowed_service_ids_count": allowed_service_ids.len(),
     });
     if let Some(external_subject) = external_subject
         && let Some(obj) = event_data.as_object_mut()
@@ -1257,6 +1346,9 @@ async fn token_inner(
                         &state.jwt_keys,
                         client_id_str,
                         &exchanged.user_id,
+                        &exchanged.granted_scope,
+                        exchanged.allow_all_services,
+                        &exchanged.allowed_service_ids,
                     )
                     .await?
                 } else {
@@ -2338,6 +2430,9 @@ mod tests {
             client_id: client_id.to_string(),
             user_id: user_id.to_string(),
             session_id: None,
+            scope: Some(scopes.join(" ")),
+            allow_all_services: true,
+            allowed_service_ids: Vec::new(),
             expires_at: now + Duration::days(7),
             revoked: false,
             replaced_by: None,
@@ -2414,6 +2509,8 @@ mod tests {
                 code_challenge: None,
                 code_challenge_method: None,
                 nonce: Some("nonce-1".to_string()),
+                allow_all_services: true,
+                allowed_service_ids: Vec::new(),
                 external_subject: None,
                 expires_at: now + Duration::minutes(5),
                 used: false,

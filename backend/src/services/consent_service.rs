@@ -13,6 +13,8 @@ pub async fn grant_consent(
     user_id: &str,
     client_id: &str,
     scopes: &str,
+    allow_all_services: bool,
+    allowed_service_ids: &[String],
 ) -> AppResult<Consent> {
     let now = Utc::now();
 
@@ -21,6 +23,8 @@ pub async fn grant_consent(
         user_id: user_id.to_string(),
         client_id: client_id.to_string(),
         scopes: scopes.to_string(),
+        allow_all_services,
+        allowed_service_ids: allowed_service_ids.to_vec(),
         granted_at: now,
         expires_at: None,
     };
@@ -39,6 +43,8 @@ pub async fn grant_consent(
                 user_id: user_id.to_string(),
                 client_id: client_id.to_string(),
                 scopes: scopes.to_string(),
+                allow_all_services,
+                allowed_service_ids: allowed_service_ids.to_vec(),
                 granted_at: now,
                 expires_at: None,
             };
@@ -65,6 +71,8 @@ pub async fn check_consent(
     user_id: &str,
     client_id: &str,
     requested_scopes: &str,
+    requested_allow_all_services: bool,
+    requested_allowed_service_ids: &[String],
 ) -> AppResult<Option<Consent>> {
     let consent = db
         .collection::<Consent>(CONSENTS)
@@ -83,11 +91,41 @@ pub async fn check_consent(
             let granted: std::collections::HashSet<&str> = c.scopes.split_whitespace().collect();
             let requested: Vec<&str> = requested_scopes.split_whitespace().collect();
 
-            let all_covered = requested.iter().all(|s| granted.contains(s));
+            let scopes_covered = requested.iter().all(|s| granted.contains(s));
+            let services_covered = service_grant_covers_request(
+                c.allow_all_services,
+                &c.allowed_service_ids,
+                requested_allow_all_services,
+                requested_allowed_service_ids,
+            );
+            let all_covered = scopes_covered && services_covered;
             if all_covered { Ok(Some(c)) } else { Ok(None) }
         }
         None => Ok(None),
     }
+}
+
+pub fn service_grant_covers_request(
+    granted_allow_all_services: bool,
+    granted_allowed_service_ids: &[String],
+    requested_allow_all_services: bool,
+    requested_allowed_service_ids: &[String],
+) -> bool {
+    if requested_allow_all_services {
+        return granted_allow_all_services;
+    }
+
+    if granted_allow_all_services {
+        return true;
+    }
+
+    let granted: std::collections::HashSet<&str> = granted_allowed_service_ids
+        .iter()
+        .map(String::as_str)
+        .collect();
+    requested_allowed_service_ids
+        .iter()
+        .all(|id| granted.contains(id.as_str()))
 }
 
 /// Revoke consent for a specific client.
@@ -148,13 +186,15 @@ mod tests {
         let user_id = Uuid::new_v4().to_string();
         let client_id = Uuid::new_v4().to_string();
 
-        let consent = grant_consent(&db, &user_id, &client_id, "openid profile")
+        let consent = grant_consent(&db, &user_id, &client_id, "openid profile", true, &[])
             .await
             .unwrap();
 
         assert_eq!(consent.user_id, user_id);
         assert_eq!(consent.client_id, client_id);
         assert_eq!(consent.scopes, "openid profile");
+        assert!(consent.allow_all_services);
+        assert!(consent.allowed_service_ids.is_empty());
         assert!(consent.expires_at.is_none());
 
         let stored = db
@@ -174,15 +214,24 @@ mod tests {
         let user_id = Uuid::new_v4().to_string();
         let client_id = Uuid::new_v4().to_string();
 
-        let first = grant_consent(&db, &user_id, &client_id, "openid")
+        let first = grant_consent(&db, &user_id, &client_id, "openid", true, &[])
             .await
             .unwrap();
-        let second = grant_consent(&db, &user_id, &client_id, "openid profile email")
-            .await
-            .unwrap();
+        let second = grant_consent(
+            &db,
+            &user_id,
+            &client_id,
+            "openid profile email",
+            false,
+            &["svc-1".to_string()],
+        )
+        .await
+        .unwrap();
 
         assert_eq!(first.id, second.id);
         assert_eq!(second.scopes, "openid profile email");
+        assert!(!second.allow_all_services);
+        assert_eq!(second.allowed_service_ids, vec!["svc-1".to_string()]);
 
         let count = db
             .collection::<Consent>(CONSENTS)
@@ -200,24 +249,80 @@ mod tests {
         let user_id = Uuid::new_v4().to_string();
         let client_id = Uuid::new_v4().to_string();
 
-        grant_consent(&db, &user_id, &client_id, "openid profile email")
+        grant_consent(&db, &user_id, &client_id, "openid profile email", true, &[])
             .await
             .unwrap();
 
-        let found = check_consent(&db, &user_id, &client_id, "openid profile")
+        let found = check_consent(&db, &user_id, &client_id, "openid profile", true, &[])
             .await
             .unwrap();
         assert!(found.is_some());
 
-        let missing = check_consent(&db, &user_id, &client_id, "openid admin")
+        let missing = check_consent(&db, &user_id, &client_id, "openid admin", true, &[])
             .await
             .unwrap();
         assert!(missing.is_none());
 
-        let no_consent = check_consent(&db, &user_id, &Uuid::new_v4().to_string(), "openid")
+        let no_consent = check_consent(
+            &db,
+            &user_id,
+            &Uuid::new_v4().to_string(),
+            "openid",
+            true,
+            &[],
+        )
+        .await
+        .unwrap();
+        assert!(no_consent.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_check_consent_covers_requested_services_without_widening() {
+        let Some(db) = connect_test_database("consent_svc_scope").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let client_id = Uuid::new_v4().to_string();
+
+        grant_consent(
+            &db,
+            &user_id,
+            &client_id,
+            "openid profile",
+            false,
+            &["svc-1".to_string(), "svc-2".to_string()],
+        )
+        .await
+        .unwrap();
+
+        let subset = check_consent(
+            &db,
+            &user_id,
+            &client_id,
+            "openid",
+            false,
+            &["svc-1".to_string()],
+        )
+        .await
+        .unwrap();
+        assert!(subset.is_some());
+
+        let widened = check_consent(
+            &db,
+            &user_id,
+            &client_id,
+            "openid",
+            false,
+            &["svc-1".to_string(), "svc-3".to_string()],
+        )
+        .await
+        .unwrap();
+        assert!(widened.is_none());
+
+        let all_services = check_consent(&db, &user_id, &client_id, "openid", true, &[])
             .await
             .unwrap();
-        assert!(no_consent.is_none());
+        assert!(all_services.is_none());
     }
 
     #[tokio::test]
@@ -228,12 +333,12 @@ mod tests {
         let user_id = Uuid::new_v4().to_string();
         let client_id = Uuid::new_v4().to_string();
 
-        grant_consent(&db, &user_id, &client_id, "openid")
+        grant_consent(&db, &user_id, &client_id, "openid", true, &[])
             .await
             .unwrap();
         revoke_consent(&db, &user_id, &client_id).await.unwrap();
 
-        let after = check_consent(&db, &user_id, &client_id, "openid")
+        let after = check_consent(&db, &user_id, &client_id, "openid", true, &[])
             .await
             .unwrap();
         assert!(after.is_none());
@@ -251,10 +356,10 @@ mod tests {
         let client_a = Uuid::new_v4().to_string();
         let client_b = Uuid::new_v4().to_string();
 
-        grant_consent(&db, &user_id, &client_a, "openid")
+        grant_consent(&db, &user_id, &client_a, "openid", true, &[])
             .await
             .unwrap();
-        grant_consent(&db, &user_id, &client_b, "profile")
+        grant_consent(&db, &user_id, &client_b, "profile", true, &[])
             .await
             .unwrap();
 

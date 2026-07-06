@@ -91,6 +91,8 @@ pub async fn create_authorization_code(
     code_challenge_method: Option<&str>,
     nonce: Option<&str>,
     external_subject: Option<&ExternalSubjectRef>,
+    allow_all_services: bool,
+    allowed_service_ids: &[String],
 ) -> AppResult<String> {
     let code = generate_random_token();
     let code_hash = hash_token(&code);
@@ -106,6 +108,8 @@ pub async fn create_authorization_code(
         code_challenge: code_challenge.map(String::from),
         code_challenge_method: code_challenge_method.map(String::from),
         nonce: nonce.map(String::from),
+        allow_all_services,
+        allowed_service_ids: allowed_service_ids.to_vec(),
         external_subject: external_subject.cloned(),
         expires_at: now + Duration::minutes(5),
         used: false,
@@ -187,6 +191,8 @@ pub struct ExchangedTokens {
     pub id_token: Option<String>,
     pub granted_scope: String,
     pub user_id: String,
+    pub allow_all_services: bool,
+    pub allowed_service_ids: Vec<String>,
     pub external_subject: Option<ExternalSubjectRef>,
     pub broker_capability_enabled: bool,
 }
@@ -202,6 +208,9 @@ pub async fn issue_oauth_refresh_token(
     jwt_keys: &JwtKeys,
     client_id: &str,
     user_id: &str,
+    scope: &str,
+    allow_all_services: bool,
+    allowed_service_ids: &[String],
 ) -> AppResult<IssuedOAuthRefreshToken> {
     let user_uuid = Uuid::parse_str(user_id)
         .map_err(|e| AppError::Internal(format!("Invalid user_id for refresh token: {e}")))?;
@@ -216,6 +225,9 @@ pub async fn issue_oauth_refresh_token(
         client_id: client_id.to_string(),
         user_id: user_id.to_string(),
         session_id: None,
+        scope: Some(scope.to_string()),
+        allow_all_services,
+        allowed_service_ids: allowed_service_ids.to_vec(),
         expires_at: refresh_expires,
         revoked: false,
         replaced_by: None,
@@ -373,10 +385,23 @@ pub async fn exchange_authorization_code(
             .flatten(),
         None,
         None,
+        Some(crate::crypto::jwt::AccessTokenServiceScope {
+            allowed_service_ids: &stored.allowed_service_ids,
+            allow_all_services: stored.allow_all_services,
+        }),
     )?;
 
-    let issued_refresh =
-        issue_oauth_refresh_token(db, config, jwt_keys, client_id, &stored.user_id).await?;
+    let issued_refresh = issue_oauth_refresh_token(
+        db,
+        config,
+        jwt_keys,
+        client_id,
+        &stored.user_id,
+        &stored.scope,
+        stored.allow_all_services,
+        &stored.allowed_service_ids,
+    )
+    .await?;
 
     // Generate ID token if openid scope was requested
     let id_token = if stored.scope.split_whitespace().any(|s| s == "openid") {
@@ -420,6 +445,8 @@ pub async fn exchange_authorization_code(
         id_token,
         granted_scope,
         user_id: stored.user_id,
+        allow_all_services: stored.allow_all_services,
+        allowed_service_ids: stored.allowed_service_ids,
         external_subject: stored.external_subject,
         broker_capability_enabled,
     })
@@ -660,6 +687,8 @@ mod tests {
             Some("S256"),
             Some("nonce-1"),
             Some(&external),
+            false,
+            &["svc-1".to_string()],
         )
         .await
         .expect("create authorization code");
@@ -679,6 +708,8 @@ mod tests {
         assert_eq!(stored.code_challenge.as_deref(), Some("challenge"));
         assert_eq!(stored.code_challenge_method.as_deref(), Some("S256"));
         assert_eq!(stored.nonce.as_deref(), Some("nonce-1"));
+        assert!(!stored.allow_all_services);
+        assert_eq!(stored.allowed_service_ids, vec!["svc-1".to_string()]);
         assert_eq!(stored.external_subject, Some(external));
         assert!(!stored.used);
         assert!(stored.expires_at > Utc::now());
@@ -705,6 +736,8 @@ mod tests {
                 code_challenge: None,
                 code_challenge_method: None,
                 nonce: None,
+                allow_all_services: true,
+                allowed_service_ids: Vec::new(),
                 external_subject: None,
                 expires_at: now + Duration::minutes(5),
                 used: true,
@@ -719,6 +752,9 @@ mod tests {
             client_id: client_id.to_string(),
             user_id: user_id.clone(),
             session_id: None,
+            scope: Some("openid".to_string()),
+            allow_all_services: true,
+            allowed_service_ids: Vec::new(),
             expires_at: now + Duration::days(1),
             revoked: false,
             replaced_by: None,

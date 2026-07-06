@@ -556,8 +556,10 @@ impl FromRequestParts<AppState> for AuthUser {
                         ensure_relay_agent_key_active(&state.db, &claims).await?;
                     }
 
-                    // For relay tokens, inherit the agent key's scope restrictions.
-                    // For regular access tokens, allow all (scope enforced at JWT level).
+                    // Relay tokens inherit the originating agent key's scope.
+                    // Regular OAuth access tokens carry the user's consented
+                    // service grant directly in JWT claims; absent claims are
+                    // legacy allow-all.
                     let (
                         allow_all_services,
                         allow_all_nodes,
@@ -567,6 +569,15 @@ impl FromRequestParts<AppState> for AuthUser {
                         api_key_name,
                     ) = if auth_method == AuthMethod::Relay {
                         relay_scope_from_claims(&claims)
+                    } else if auth_method == AuthMethod::AccessToken {
+                        (
+                            claims.allow_all_services.unwrap_or(true),
+                            true,
+                            claims.allowed_service_ids.clone().unwrap_or_default(),
+                            vec![],
+                            None,
+                            None,
+                        )
                     } else {
                         (true, true, vec![], vec![], None, None)
                     };

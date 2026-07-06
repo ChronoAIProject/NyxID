@@ -1,6 +1,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::models::consent::default_allow_all_services;
+
 pub const COLLECTION_NAME: &str = "refresh_tokens";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -12,6 +14,12 @@ pub struct RefreshToken {
     pub client_id: String,
     pub user_id: String,
     pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    #[serde(default = "default_allow_all_services")]
+    pub allow_all_services: bool,
+    #[serde(default)]
+    pub allowed_service_ids: Vec<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub expires_at: DateTime<Utc>,
     pub revoked: bool,
@@ -39,6 +47,9 @@ mod tests {
             client_id: "default".to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             session_id: Some(uuid::Uuid::new_v4().to_string()),
+            scope: Some("openid profile".to_string()),
+            allow_all_services: false,
+            allowed_service_ids: vec!["svc-1".to_string()],
             expires_at: Utc::now(),
             revoked: false,
             replaced_by: None,
@@ -50,5 +61,29 @@ mod tests {
         assert_eq!(token.id, restored.id);
         assert_eq!(token.jti, restored.jti);
         assert_eq!(token.revoked, restored.revoked);
+        assert_eq!(token.scope, restored.scope);
+        assert_eq!(token.allow_all_services, restored.allow_all_services);
+        assert_eq!(token.allowed_service_ids, restored.allowed_service_ids);
+    }
+
+    #[test]
+    fn bson_legacy_row_defaults_to_allow_all_services() {
+        let now = Utc::now();
+        let doc = bson::doc! {
+            "_id": uuid::Uuid::new_v4().to_string(),
+            "jti": uuid::Uuid::new_v4().to_string(),
+            "client_id": "default",
+            "user_id": uuid::Uuid::new_v4().to_string(),
+            "session_id": bson::Bson::Null,
+            "expires_at": bson::DateTime::from_chrono(now),
+            "revoked": false,
+            "replaced_by": bson::Bson::Null,
+            "created_at": bson::DateTime::from_chrono(now),
+        };
+
+        let restored: RefreshToken = bson::from_document(doc).expect("deserialize legacy token");
+        assert!(restored.scope.is_none());
+        assert!(restored.allow_all_services);
+        assert!(restored.allowed_service_ids.is_empty());
     }
 }

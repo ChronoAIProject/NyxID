@@ -714,6 +714,8 @@ mod tests {
                     user_id: "user-with-consent".to_string(),
                     client_id: client_id.to_string(),
                     scopes: DEFAULT_ALLOWED_SCOPES.to_string(),
+                    allow_all_services: true,
+                    allowed_service_ids: Vec::new(),
                     granted_at: now,
                     expires_at: None,
                 })
@@ -727,6 +729,9 @@ mod tests {
                     client_id: client_id.to_string(),
                     user_id: "user-with-refresh-token".to_string(),
                     session_id: Some(format!("session-{client_id}")),
+                    scope: Some(DEFAULT_ALLOWED_SCOPES.to_string()),
+                    allow_all_services: true,
+                    allowed_service_ids: Vec::new(),
                     expires_at: now + chrono::Duration::days(1),
                     revoked: false,
                     replaced_by: None,
