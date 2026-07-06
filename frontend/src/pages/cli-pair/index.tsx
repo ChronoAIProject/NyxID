@@ -731,7 +731,13 @@ function ConfirmPanel({
   readonly claim: ClaimResponse;
   readonly onActionComplete: (result: ActionResult) => void;
 }) {
-  const prefill = claim.prefill;
+  // `claim.prefill` is `null` whenever the pairing was created without a
+  // prefill (a valid backend state — the `prefill` field defaults to JSON
+  // null). The ai-key branch guards this via `parseAiKeyPrefill`, but the
+  // other kinds pass `prefill` straight to panels that read
+  // `prefill.<field> ?? default` and would throw "Cannot read properties
+  // of null". Default to an empty object so every panel falls back cleanly.
+  const prefill = claim.prefill ?? {};
 
   // NOTE: `resumed && action_started` is handled upstream in
   // `StageRouter.onClaim` — rotations route to
