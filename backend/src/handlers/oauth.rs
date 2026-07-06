@@ -14,6 +14,7 @@ use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::handlers::admin_helpers::{extract_ip, extract_user_agent};
 use crate::models::authorization_code::{ExternalSubjectRef, validate_external_subject_params};
+use crate::models::consent::Consent;
 use crate::models::service_account_token::{COLLECTION_NAME as SA_TOKENS, ServiceAccountToken};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
@@ -679,7 +680,7 @@ pub async fn authorize_decision(
     } else {
         None
     };
-    if let Some(ids) = consent_allowed_service_ids {
+    let consent = if let Some(ids) = consent_allowed_service_ids {
         consent_service::grant_consent_with_services(
             &state.db,
             &user_id_str,
@@ -687,22 +688,18 @@ pub async fn authorize_decision(
             &validated_scope,
             Some(ids),
         )
-        .await?;
+        .await?
     } else {
-        consent_service::grant_consent(
-            &state.db,
-            &user_id_str,
-            &params.client_id,
-            &validated_scope,
-        )
-        .await?;
-    }
+        consent_service::grant_consent(&state.db, &user_id_str, &params.client_id, &validated_scope)
+            .await?
+    };
 
     let code = issue_authorization_code(
         &state,
         &auth_user,
         &params,
         &validated_scope,
+        &consent,
         external_subject.as_ref(),
     )
     .await?;
@@ -849,11 +846,16 @@ async fn authorize_inner(
                     return Ok(redirect_302(&consent_url));
                 }
 
+                let consent = consent.ok_or_else(|| {
+                    AppError::Internal("Consent check unexpectedly returned no grant".to_string())
+                })?;
+
                 let code = issue_authorization_code(
                     state,
                     &auth_user,
                     params,
                     &validated_scope,
+                    &consent,
                     external_subject,
                 )
                 .await?;
@@ -897,11 +899,16 @@ async fn authorize_inner(
             return Err(AppError::ConsentRequired { consent_url });
         }
 
+        let consent = consent.ok_or_else(|| {
+            AppError::Internal("Consent check unexpectedly returned no grant".to_string())
+        })?;
+
         let code = issue_authorization_code(
             state,
             &auth_user,
             params,
             &validated_scope,
+            &consent,
             external_subject,
         )
         .await?;
@@ -1339,32 +1346,10 @@ async fn issue_authorization_code(
     auth_user: &crate::mw::auth::AuthUser,
     params: &AuthorizeQuery,
     validated_scope: &str,
+    consent: &Consent,
     external_subject: Option<&ExternalSubjectRef>,
 ) -> AppResult<String> {
     let user_id_str = auth_user.user_id.to_string();
-    let consent = match consent_service::check_consent(
-        &state.db,
-        &user_id_str,
-        &params.client_id,
-        validated_scope,
-    )
-    .await?
-    {
-        Some(consent) => consent,
-        None => {
-            let consent_request =
-                sign_consent_request(state, &user_id_str, params, validated_scope)?;
-            return Err(AppError::ConsentRequired {
-                consent_url: build_consent_url(
-                    &state.config.frontend_url,
-                    params,
-                    &params.client_id,
-                    validated_scope,
-                    Some(&consent_request),
-                ),
-            });
-        }
-    };
     let resolved_resources = oauth_resource_service::resolve_requested_resources(
         &state.db,
         &state.config,
@@ -2781,6 +2766,65 @@ mod tests {
             })
             .await
             .expect("insert authorization code");
+    }
+
+    #[tokio::test]
+    async fn authorize_inner_threads_stored_service_consent_into_code() {
+        let Some(db) = connect_test_database("oauth_stored_service_consent_code").await else {
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let user_id = Uuid::new_v4().to_string();
+        let client_id = "stored-service-consent-client";
+        let allowed_service_ids = vec!["svc-allowed".to_string()];
+
+        insert_person_user(&db, &user_id).await;
+        insert_public_client(&db, client_id, "openid").await;
+        consent_service::grant_consent_with_services(
+            &db,
+            &user_id,
+            client_id,
+            "openid",
+            Some(allowed_service_ids.clone()),
+        )
+        .await
+        .expect("grant restricted consent");
+
+        let params = AuthorizeQuery {
+            response_type: "code".to_string(),
+            client_id: client_id.to_string(),
+            redirect_uri: "http://localhost/callback".to_string(),
+            scope: Some("openid".to_string()),
+            state: Some("state-1".to_string()),
+            code_challenge: Some("challenge".to_string()),
+            code_challenge_method: Some("S256".to_string()),
+            nonce: None,
+            external_subject_platform: None,
+            external_subject_tenant: None,
+            external_subject_external_user_id: None,
+            prompt: None,
+            request_uri: None,
+            resource: Vec::new(),
+        };
+
+        let _response = authorize_inner(
+            &state,
+            OptionalAuthUser(Some(crate::test_utils::test_auth_user(&user_id))),
+            &params,
+            true,
+            None,
+        )
+        .await
+        .expect("authorize without prompting");
+
+        let stored = db
+            .collection::<AuthorizationCode>(AUTH_CODES)
+            .find_one(doc! { "client_id": client_id, "user_id": &user_id })
+            .await
+            .expect("query authorization code")
+            .expect("authorization code exists");
+        assert!(!stored.allow_all_services);
+        assert_eq!(stored.allowed_service_ids, allowed_service_ids);
     }
 
     #[tokio::test]
