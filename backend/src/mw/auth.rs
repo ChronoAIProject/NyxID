@@ -557,7 +557,8 @@ impl FromRequestParts<AppState> for AuthUser {
                     }
 
                     // For relay tokens, inherit the agent key's scope restrictions.
-                    // For regular access tokens, allow all (scope enforced at JWT level).
+                    // For OAuth access tokens, RFC 8707 resource indicators
+                    // can narrow access to specific UserService IDs.
                     let (
                         allow_all_services,
                         allow_all_nodes,
@@ -567,6 +568,15 @@ impl FromRequestParts<AppState> for AuthUser {
                         api_key_name,
                     ) = if auth_method == AuthMethod::Relay {
                         relay_scope_from_claims(&claims)
+                    } else if claims.allow_all_services == Some(false) {
+                        (
+                            false,
+                            true,
+                            claims.allowed_service_ids.clone().unwrap_or_default(),
+                            vec![],
+                            None,
+                            None,
+                        )
                     } else {
                         (true, true, vec![], vec![], None, None)
                     };

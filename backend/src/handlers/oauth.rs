@@ -16,8 +16,9 @@ use crate::models::service_account_token::{COLLECTION_NAME as SA_TOKENS, Service
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::{AuthUser, OptionalAuthUser};
 use crate::services::{
-    audit_service, consent_service, oauth_broker_service, oauth_client_service, oauth_service,
-    par_service, service_account_service, social_token_exchange_service, token_exchange_service,
+    audit_service, consent_service, oauth_broker_service, oauth_client_service,
+    oauth_resource_service, oauth_service, par_service, service_account_service,
+    social_token_exchange_service, token_exchange_service,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event, hash_short_id};
 
@@ -41,6 +42,8 @@ pub struct AuthorizeQuery {
     /// OIDC prompt parameter: "none", "login", "consent", or space-separated combo.
     pub prompt: Option<String>,
     pub request_uri: Option<String>,
+    #[serde(default)]
+    pub resource: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -57,6 +60,8 @@ pub struct ConsentDecisionForm {
     pub external_subject_tenant: Option<String>,
     pub external_subject_external_user_id: Option<String>,
     pub prompt: Option<String>,
+    #[serde(default)]
+    pub resource: Vec<String>,
     pub decision: String,
 }
 
@@ -82,6 +87,8 @@ pub struct TokenRequest {
     pub scope: Option<String>,
     /// Social provider hint for external token exchange ("google" or "github")
     pub provider: Option<String>,
+    #[serde(default)]
+    pub resource: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -92,6 +99,8 @@ pub struct TokenResponse {
     pub refresh_token: Option<String>,
     pub id_token: Option<String>,
     pub scope: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub binding_id: Option<String>,
     /// RFC 8693: Indicates the type of the issued token (only for token exchange grant).
@@ -155,6 +164,8 @@ pub struct IntrospectResponse {
     pub groups: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub permissions: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -222,6 +233,8 @@ pub struct PushedAuthorizationRequestForm {
     pub code_challenge_method: Option<String>,
     pub nonce: Option<String>,
     pub prompt: Option<String>,
+    #[serde(default)]
+    pub resource: Vec<String>,
     pub external_subject_platform: Option<String>,
     pub external_subject_tenant: Option<String>,
     pub external_subject_external_user_id: Option<String>,
@@ -312,6 +325,14 @@ fn client_credentials_from_basic_or_params(
         (None, Some(id), secret) => Some((id, secret)),
         _ => None,
     }
+}
+
+fn non_empty_resources(resources: &[String]) -> Option<&[String]> {
+    (!resources.is_empty()).then_some(resources)
+}
+
+fn response_resources(resources: Vec<String>) -> Option<Vec<String>> {
+    (!resources.is_empty()).then_some(resources)
 }
 
 // --- Handlers ---
@@ -454,6 +475,7 @@ pub async fn authorize_decision(
         external_subject_tenant: form.external_subject_tenant,
         external_subject_external_user_id: form.external_subject_external_user_id,
         prompt: form.prompt,
+        resource: form.resource,
         request_uri: None,
     };
 
@@ -863,6 +885,7 @@ fn has_non_par_authorize_params(params: &AuthorizeQuery) -> bool {
         || params.external_subject_tenant.is_some()
         || params.external_subject_external_user_id.is_some()
         || params.prompt.is_some()
+        || !params.resource.is_empty()
 }
 
 async fn resolve_pushed_authorize_params(
@@ -907,6 +930,7 @@ async fn resolve_pushed_authorize_params(
         external_subject_tenant,
         external_subject_external_user_id,
         prompt: record.prompt,
+        resource: record.resources,
         request_uri: None,
     })
 }
@@ -975,6 +999,9 @@ fn build_authorize_url(base_url: &str, params: &AuthorizeQuery) -> String {
     }
     if let Some(ref prompt) = params.prompt {
         url.push_str(&format!("&prompt={}", urlencoding::encode(prompt)));
+    }
+    for resource in &params.resource {
+        url.push_str(&format!("&resource={}", urlencoding::encode(resource)));
     }
 
     url
@@ -1061,6 +1088,9 @@ fn build_consent_url(
     if let Some(ref prompt) = params.prompt {
         url.push_str(&format!("&prompt={}", urlencoding::encode(prompt)));
     }
+    for resource in &params.resource {
+        url.push_str(&format!("&resource={}", urlencoding::encode(resource)));
+    }
 
     url
 }
@@ -1074,6 +1104,21 @@ async fn issue_authorization_code(
     external_subject: Option<&ExternalSubjectRef>,
 ) -> AppResult<String> {
     let user_id_str = auth_user.user_id.to_string();
+    let resolved_resources = oauth_resource_service::resolve_requested_resources(
+        &state.db,
+        &state.config,
+        &user_id_str,
+        non_empty_resources(&params.resource),
+    )
+    .await?;
+    let resource_uris = resolved_resources
+        .as_ref()
+        .map(|resolved| resolved.resource_uris.as_slice())
+        .unwrap_or(&[]);
+    let allowed_service_ids = resolved_resources
+        .as_ref()
+        .map(|resolved| resolved.service_ids.as_slice())
+        .unwrap_or(&[]);
     let code = oauth_service::create_authorization_code(
         &state.db,
         &params.client_id,
@@ -1084,6 +1129,8 @@ async fn issue_authorization_code(
         params.code_challenge_method.as_deref(),
         params.nonce.as_deref(),
         external_subject,
+        resource_uris,
+        allowed_service_ids,
     )
     .await?;
 
@@ -1091,6 +1138,15 @@ async fn issue_authorization_code(
         "client_id": params.client_id,
         "scope": validated_scope,
     });
+    if !resource_uris.is_empty()
+        && let Some(obj) = event_data.as_object_mut()
+    {
+        obj.insert("resources".to_string(), serde_json::json!(resource_uris));
+        obj.insert(
+            "allowed_service_ids".to_string(),
+            serde_json::json!(allowed_service_ids),
+        );
+    }
     if let Some(external_subject) = external_subject
         && let Some(obj) = event_data.as_object_mut()
     {
@@ -1157,6 +1213,9 @@ pub async fn pushed_authorization_request(
         body.external_subject_tenant.as_deref(),
         body.external_subject_external_user_id.as_deref(),
     )?;
+    for resource in &body.resource {
+        oauth_resource_service::validate_resource_uri(resource)?;
+    }
 
     let (request_uri, expires_in) = par_service::create_request(
         &state.db,
@@ -1169,6 +1228,7 @@ pub async fn pushed_authorization_request(
         body.code_challenge_method.as_deref(),
         body.nonce.as_deref(),
         body.prompt.as_deref(),
+        &body.resource,
         external_subject,
     )
     .await?;
@@ -1238,6 +1298,7 @@ async fn token_inner(
                 body.code_verifier.as_deref(),
                 body.client_secret.as_deref(),
                 Some(oauth_broker_service::BROKER_ACCESS_TTL_SECS),
+                non_empty_resources(&body.resource),
             )
             .await?;
 
@@ -1257,6 +1318,8 @@ async fn token_inner(
                         &state.jwt_keys,
                         client_id_str,
                         &exchanged.user_id,
+                        &exchanged.resource_uris,
+                        &exchanged.allowed_service_ids,
                     )
                     .await?
                 } else {
@@ -1305,6 +1368,7 @@ async fn token_inner(
                     refresh_token: return_refresh_token.then_some(exchanged.refresh_token),
                     id_token: exchanged.id_token,
                     scope: Some(exchanged.granted_scope),
+                    resource: response_resources(exchanged.resource_uris),
                     binding_id: Some(binding_id),
                     issued_token_type: None,
                 }));
@@ -1317,6 +1381,7 @@ async fn token_inner(
                 refresh_token: Some(exchanged.refresh_token),
                 id_token: exchanged.id_token,
                 scope: Some(exchanged.granted_scope),
+                resource: response_resources(exchanged.resource_uris),
                 binding_id: None,
                 issued_token_type: None,
             }))
@@ -1332,6 +1397,7 @@ async fn token_inner(
                 &state.jwt_keys,
                 refresh,
                 Some(&state.mcp_sessions),
+                non_empty_resources(&body.resource),
             )
             .await?;
 
@@ -1342,6 +1408,7 @@ async fn token_inner(
                 refresh_token: Some(tokens.refresh_token),
                 id_token: None,
                 scope: None,
+                resource: response_resources(tokens.resource_uris),
                 binding_id: None,
                 issued_token_type: None,
             }))
@@ -1409,6 +1476,7 @@ async fn token_inner(
                     refresh_token: Some(result.refresh_token),
                     id_token: result.id_token,
                     scope: Some(result.scope),
+                    resource: None,
                     binding_id: None,
                     issued_token_type: Some(
                         "urn:ietf:params:oauth:token-type:access_token".to_string(),
@@ -1466,6 +1534,7 @@ async fn token_inner(
                     refresh_token: None,
                     id_token: None,
                     scope: Some(result.scope),
+                    resource: None,
                     binding_id: None,
                     issued_token_type: Some(result.issued_token_type),
                 }))
@@ -1577,6 +1646,7 @@ async fn token_inner(
                     refresh_token: None,
                     id_token: None,
                     scope: Some(result.granted_scope),
+                    resource: None,
                     binding_id: None,
                     issued_token_type: Some(result.issued_token_type),
                 }))
@@ -1631,6 +1701,7 @@ async fn token_inner(
                         refresh_token: None,
                         id_token: None,
                         scope: Some(response.scope),
+                        resource: None,
                         binding_id: None,
                         issued_token_type: None,
                     }))
@@ -1724,6 +1795,7 @@ pub async fn introspect(
     let inactive = IntrospectResponse {
         active: false,
         scope: None,
+        resource: None,
         client_id: None,
         username: None,
         token_type: None,
@@ -1781,6 +1853,7 @@ pub async fn introspect(
         return Json(IntrospectResponse {
             active: true,
             scope: Some(binding.scopes.join(" ")),
+            resource: None,
             client_id: Some(binding.client_id),
             username: None,
             token_type: Some("broker_binding".to_string()),
@@ -1856,6 +1929,7 @@ pub async fn introspect(
     Json(IntrospectResponse {
         active: true,
         scope: Some(claims.scope),
+        resource: response_resources(claims.resources.unwrap_or_default()),
         client_id: None,
         username,
         token_type: Some(claims.token_type),
@@ -2342,6 +2416,8 @@ mod tests {
             revoked: false,
             replaced_by: None,
             revoked_at: None,
+            resource_uris: Vec::new(),
+            allowed_service_ids: Vec::new(),
             created_at: now,
         };
         state
@@ -2415,6 +2491,8 @@ mod tests {
                 code_challenge_method: None,
                 nonce: Some("nonce-1".to_string()),
                 external_subject: None,
+                resource_uris: Vec::new(),
+                allowed_service_ids: Vec::new(),
                 expires_at: now + Duration::minutes(5),
                 used: false,
                 created_at: now,
@@ -2529,6 +2607,7 @@ mod tests {
                 subject_token_type: None,
                 scope: None,
                 provider: None,
+                resource: Vec::new(),
             },
         )
         .await
@@ -2576,6 +2655,7 @@ mod tests {
                 subject_token_type: None,
                 scope: None,
                 provider: None,
+                resource: Vec::new(),
             },
         )
         .await
@@ -2601,6 +2681,7 @@ mod tests {
                 subject_token_type: None,
                 scope: None,
                 provider: None,
+                resource: Vec::new(),
             },
         )
         .await
@@ -2626,6 +2707,7 @@ mod tests {
                 ),
                 scope: Some("openid".to_string()),
                 provider: None,
+                resource: Vec::new(),
             },
         )
         .await
@@ -2727,6 +2809,7 @@ mod tests {
                 ),
                 scope: Some("openid".to_string()),
                 provider: None,
+                resource: Vec::new(),
             },
         )
         .await
@@ -2904,6 +2987,7 @@ mod tests {
                 subject_token_type: None,
                 scope: None,
                 provider: None,
+                resource: Vec::new(),
             },
         )
         .await
@@ -2933,6 +3017,7 @@ mod tests {
                 subject_token_type: None,
                 scope: None,
                 provider: None,
+                resource: Vec::new(),
             },
         )
         .await
@@ -2962,6 +3047,7 @@ mod tests {
                 subject_token_type: None,
                 scope: None,
                 provider: None,
+                resource: Vec::new(),
             },
         )
         .await
@@ -2991,6 +3077,7 @@ mod tests {
                 subject_token_type: None,
                 scope: None,
                 provider: None,
+                resource: Vec::new(),
             },
         )
         .await
@@ -3020,6 +3107,7 @@ mod tests {
                 subject_token_type: None,
                 scope: None,
                 provider: None,
+                resource: Vec::new(),
             },
         )
         .await
@@ -3051,6 +3139,7 @@ mod tests {
                 ),
                 scope: None,
                 provider: None,
+                resource: Vec::new(),
             },
         )
         .await
@@ -3080,6 +3169,7 @@ mod tests {
                 subject_token_type: Some("urn:unknown:type".to_string()),
                 scope: None,
                 provider: None,
+                resource: Vec::new(),
             },
         )
         .await

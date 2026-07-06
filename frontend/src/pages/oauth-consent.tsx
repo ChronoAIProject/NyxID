@@ -47,6 +47,7 @@ export function OAuthConsentPage() {
   const externalSubjectTenant = search.get("external_subject_tenant") ?? "";
   const externalSubjectExternalUserId =
     search.get("external_subject_external_user_id") ?? "";
+  const resources = search.getAll("resource");
 
   const missing =
     !responseType ||
@@ -135,6 +136,26 @@ export function OAuthConsentPage() {
               ))}
             </div>
           </div>
+
+          {resources.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-xs uppercase tracking-wide text-text-tertiary">
+                Requested resources
+              </p>
+              <div className="space-y-2">
+                {resources.map((resource) => (
+                  <div
+                    key={resource}
+                    className="rounded-lg border border-border bg-muted/50 px-3 py-2"
+                  >
+                    <p className="break-all text-xs text-foreground">
+                      {resource}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           <div className="space-y-2">
             <p className="text-xs uppercase tracking-wide text-text-tertiary">
@@ -241,6 +262,14 @@ export function OAuthConsentPage() {
                 value={externalSubjectExternalUserId}
               />
             )}
+            {resources.map((resource) => (
+              <input
+                key={resource}
+                type="hidden"
+                name="resource"
+                value={resource}
+              />
+            ))}
 
             <Button
               type="submit"

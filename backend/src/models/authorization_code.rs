@@ -27,6 +27,10 @@ pub struct AuthorizationCode {
     pub nonce: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_subject: Option<ExternalSubjectRef>,
+    #[serde(default)]
+    pub resource_uris: Vec<String>,
+    #[serde(default)]
+    pub allowed_service_ids: Vec<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub expires_at: DateTime<Utc>,
     pub used: bool,
@@ -122,6 +126,8 @@ mod tests {
                 tenant: Some("t1".to_string()),
                 external_user_id: "u1".to_string(),
             }),
+            resource_uris: vec!["https://nyx.example/api/v1/proxy/s/openai".to_string()],
+            allowed_service_ids: vec!["svc-1".to_string()],
             expires_at: Utc::now(),
             used: false,
             created_at: Utc::now(),
@@ -132,6 +138,8 @@ mod tests {
         assert_eq!(code.scope, restored.scope);
         assert_eq!(code.code_challenge, restored.code_challenge);
         assert_eq!(code.external_subject, restored.external_subject);
+        assert_eq!(code.resource_uris, restored.resource_uris);
+        assert_eq!(code.allowed_service_ids, restored.allowed_service_ids);
     }
 
     #[test]
@@ -147,6 +155,8 @@ mod tests {
             code_challenge_method: None,
             nonce: None,
             external_subject: None,
+            resource_uris: Vec::new(),
+            allowed_service_ids: Vec::new(),
             expires_at: Utc::now(),
             used: true,
             created_at: Utc::now(),
@@ -155,6 +165,8 @@ mod tests {
         let restored: AuthorizationCode = bson::from_document(doc).expect("deserialize");
         assert!(restored.code_challenge.is_none());
         assert!(restored.nonce.is_none());
+        assert!(restored.resource_uris.is_empty());
+        assert!(restored.allowed_service_ids.is_empty());
         assert!(restored.used);
     }
 
@@ -178,6 +190,8 @@ mod tests {
 
         let restored: AuthorizationCode = bson::from_document(doc).expect("deserialize");
         assert!(restored.external_subject.is_none());
+        assert!(restored.resource_uris.is_empty());
+        assert!(restored.allowed_service_ids.is_empty());
     }
 
     #[test]

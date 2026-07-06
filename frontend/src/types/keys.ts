@@ -143,6 +143,7 @@ export interface ScopeCatalogEntry {
 
 export interface CatalogEntry {
   readonly slug: string;
+  readonly resource_uri: string;
   readonly name: string;
   readonly description: string | null;
   readonly base_url: string;
@@ -219,6 +220,7 @@ export interface UserEndpointInfo {
 export interface UserServiceInfo {
   readonly id: string;
   readonly slug: string;
+  readonly resource_uri: string;
   readonly endpoint_id: string;
   readonly api_key_id?: string | null;
   readonly auth_method: string;

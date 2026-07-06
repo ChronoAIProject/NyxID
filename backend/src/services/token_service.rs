@@ -46,6 +46,7 @@ pub struct IssuedTokens {
     pub refresh_token: String,
     pub session_id: String,
     pub access_expires_in: i64,
+    pub resource_uris: Vec<String>,
 }
 
 /// Session issued for browser-based authentication flows.
@@ -128,6 +129,7 @@ fn build_reused_refresh_response(
     user_id: &Uuid,
     active_token: &RefreshToken,
     access_token: String,
+    resource_uris: Vec<String>,
 ) -> AppResult<IssuedTokens> {
     let refresh_token = jwt::reissue_refresh_token(
         jwt_keys,
@@ -146,6 +148,7 @@ fn build_reused_refresh_response(
             .clone()
             .unwrap_or_else(|| Uuid::nil().to_string()),
         access_expires_in: config.jwt_access_ttl_secs,
+        resource_uris,
     })
 }
 
@@ -215,6 +218,7 @@ pub async fn create_session_and_issue_tokens(
         None,
         None,
         None,
+        None,
     )?;
 
     // Generate refresh token
@@ -235,6 +239,8 @@ pub async fn create_session_and_issue_tokens(
         revoked: false,
         replaced_by: None,
         revoked_at: None,
+        resource_uris: Vec::new(),
+        allowed_service_ids: Vec::new(),
         created_at: now,
     };
 
@@ -247,6 +253,7 @@ pub async fn create_session_and_issue_tokens(
         refresh_token: refresh_token_jwt,
         session_id: session.session_id,
         access_expires_in: config.jwt_access_ttl_secs,
+        resource_uris: Vec::new(),
     })
 }
 
@@ -298,6 +305,7 @@ pub async fn refresh_tokens(
     jwt_keys: &JwtKeys,
     refresh_token_str: &str,
     mcp_sessions: Option<&McpSessionStore>,
+    requested_resources: Option<&[String]>,
 ) -> AppResult<IssuedTokens> {
     // Verify the refresh JWT
     let claims = jwt::verify_token(jwt_keys, config, refresh_token_str)?;
@@ -448,6 +456,41 @@ pub async fn refresh_tokens(
 
     // Resolve RBAC data and inject into the refreshed access token
     let scope = FIRST_PARTY_ACCESS_SCOPES;
+    let resolved_requested_resources = match requested_resources {
+        Some(resources) if active_token.resource_uris.is_empty() => {
+            crate::services::oauth_resource_service::resolve_requested_resources(
+                db,
+                config,
+                &user_id_str,
+                Some(resources),
+            )
+            .await?
+        }
+        _ => None,
+    };
+    let resource_uris = match (requested_resources, resolved_requested_resources.as_ref()) {
+        (Some(_), Some(resolved)) if active_token.resource_uris.is_empty() => {
+            resolved.resource_uris.clone()
+        }
+        (Some(resources), _) => crate::services::oauth_resource_service::filter_resource_narrowing(
+            resources,
+            &active_token.resource_uris,
+        )?,
+        (None, _) => active_token.resource_uris.clone(),
+    };
+    let allowed_service_ids = if let Some(resolved) = resolved_requested_resources {
+        resolved.service_ids
+    } else if !resource_uris.is_empty() {
+        crate::services::oauth_resource_service::resolve_resource_service_ids_for_user(
+            db,
+            config,
+            &user_id_str,
+            &resource_uris,
+        )
+        .await?
+    } else {
+        Vec::new()
+    };
     let rbac_data =
         crate::services::rbac_helpers::build_rbac_claim_data(db, &user_id_str, scope).await?;
     let new_access = jwt::generate_access_token(
@@ -459,6 +502,10 @@ pub async fn refresh_tokens(
         None,
         None,
         None,
+        (!resource_uris.is_empty()).then_some(jwt::AccessTokenRestrictions {
+            resources: &resource_uris,
+            allowed_service_ids: &allowed_service_ids,
+        }),
     )?;
 
     if reuse_existing_refresh_token {
@@ -469,6 +516,7 @@ pub async fn refresh_tokens(
             &user_id,
             &active_token,
             new_access,
+            resource_uris,
         );
     }
 
@@ -519,7 +567,12 @@ pub async fn refresh_tokens(
             );
             touch_session_last_active(db, session_id.as_deref(), now).await?;
             return build_reused_refresh_response(
-                jwt_keys, config, &user_id, &recovered, new_access,
+                jwt_keys,
+                config,
+                &user_id,
+                &recovered,
+                new_access,
+                resource_uris,
             );
         }
 
@@ -539,6 +592,8 @@ pub async fn refresh_tokens(
         revoked: false,
         replaced_by: None,
         revoked_at: None,
+        resource_uris: resource_uris.clone(),
+        allowed_service_ids: allowed_service_ids.clone(),
         created_at: now,
     };
 
@@ -556,6 +611,7 @@ pub async fn refresh_tokens(
         refresh_token: new_refresh_jwt,
         session_id: session_id.unwrap_or_else(|| Uuid::nil().to_string()),
         access_expires_in: config.jwt_access_ttl_secs,
+        resource_uris,
     })
 }
 
@@ -752,7 +808,7 @@ mod tests {
             .await
             .unwrap();
 
-        let refreshed = refresh_tokens(&db, &config, &jwt_keys, &issued.refresh_token, None)
+        let refreshed = refresh_tokens(&db, &config, &jwt_keys, &issued.refresh_token, None, None)
             .await
             .unwrap();
 
@@ -782,11 +838,11 @@ mod tests {
         let user_id = Uuid::new_v4();
 
         let access_token = crate::crypto::jwt::generate_access_token(
-            &jwt_keys, &config, &user_id, "openid", None, None, None, None,
+            &jwt_keys, &config, &user_id, "openid", None, None, None, None, None,
         )
         .unwrap();
 
-        let result = refresh_tokens(&db, &config, &jwt_keys, &access_token, None).await;
+        let result = refresh_tokens(&db, &config, &jwt_keys, &access_token, None, None).await;
         assert!(result.is_err());
     }
 
@@ -814,7 +870,8 @@ mod tests {
             .await
             .unwrap();
 
-        let result = refresh_tokens(&db, &config, &jwt_keys, &issued.refresh_token, None).await;
+        let result =
+            refresh_tokens(&db, &config, &jwt_keys, &issued.refresh_token, None, None).await;
         assert!(result.is_err());
     }
 

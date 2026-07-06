@@ -731,6 +731,8 @@ mod tests {
                     revoked: false,
                     replaced_by: None,
                     revoked_at: None,
+                    resource_uris: Vec::new(),
+                    allowed_service_ids: Vec::new(),
                     created_at: now,
                 })
                 .await

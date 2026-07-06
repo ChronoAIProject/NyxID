@@ -15,6 +15,7 @@ use crate::models::authorization_code::{
 use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
 use crate::models::refresh_token::{COLLECTION_NAME as REFRESH_TOKENS, RefreshToken};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
+use crate::services::oauth_resource_service;
 
 /// Validate an OAuth client and its redirect URI.
 pub async fn validate_client(
@@ -91,6 +92,8 @@ pub async fn create_authorization_code(
     code_challenge_method: Option<&str>,
     nonce: Option<&str>,
     external_subject: Option<&ExternalSubjectRef>,
+    resource_uris: &[String],
+    allowed_service_ids: &[String],
 ) -> AppResult<String> {
     let code = generate_random_token();
     let code_hash = hash_token(&code);
@@ -107,6 +110,8 @@ pub async fn create_authorization_code(
         code_challenge_method: code_challenge_method.map(String::from),
         nonce: nonce.map(String::from),
         external_subject: external_subject.cloned(),
+        resource_uris: resource_uris.to_vec(),
+        allowed_service_ids: allowed_service_ids.to_vec(),
         expires_at: now + Duration::minutes(5),
         used: false,
         created_at: now,
@@ -189,6 +194,8 @@ pub struct ExchangedTokens {
     pub user_id: String,
     pub external_subject: Option<ExternalSubjectRef>,
     pub broker_capability_enabled: bool,
+    pub resource_uris: Vec<String>,
+    pub allowed_service_ids: Vec<String>,
 }
 
 pub struct IssuedOAuthRefreshToken {
@@ -202,6 +209,8 @@ pub async fn issue_oauth_refresh_token(
     jwt_keys: &JwtKeys,
     client_id: &str,
     user_id: &str,
+    resource_uris: &[String],
+    allowed_service_ids: &[String],
 ) -> AppResult<IssuedOAuthRefreshToken> {
     let user_uuid = Uuid::parse_str(user_id)
         .map_err(|e| AppError::Internal(format!("Invalid user_id for refresh token: {e}")))?;
@@ -220,6 +229,8 @@ pub async fn issue_oauth_refresh_token(
         revoked: false,
         replaced_by: None,
         revoked_at: None,
+        resource_uris: resource_uris.to_vec(),
+        allowed_service_ids: allowed_service_ids.to_vec(),
         created_at: now,
     };
 
@@ -244,6 +255,7 @@ pub async fn exchange_authorization_code(
     code_verifier: Option<&str>,
     client_secret: Option<&str>,
     access_token_ttl_override_secs: Option<i64>,
+    requested_resources: Option<&[String]>,
 ) -> AppResult<ExchangedTokens> {
     let code_hash = hash_token(code);
 
@@ -355,6 +367,40 @@ pub async fn exchange_authorization_code(
     // Parse user_id back to Uuid for JWT generation
     let user_uuid = Uuid::parse_str(&stored.user_id)
         .map_err(|e| AppError::Internal(format!("Invalid user_id in authorization code: {e}")))?;
+    let resolved_requested_resources = match requested_resources {
+        Some(resources) if stored.resource_uris.is_empty() => {
+            oauth_resource_service::resolve_requested_resources(
+                db,
+                config,
+                &stored.user_id,
+                Some(resources),
+            )
+            .await?
+        }
+        _ => None,
+    };
+    let resource_uris = match (requested_resources, resolved_requested_resources.as_ref()) {
+        (Some(_), Some(resolved)) if stored.resource_uris.is_empty() => {
+            resolved.resource_uris.clone()
+        }
+        (Some(resources), _) => {
+            oauth_resource_service::filter_resource_narrowing(resources, &stored.resource_uris)?
+        }
+        (None, _) => stored.resource_uris.clone(),
+    };
+    let allowed_service_ids = if let Some(resolved) = resolved_requested_resources {
+        resolved.service_ids
+    } else if requested_resources.is_some() {
+        oauth_resource_service::resolve_resource_service_ids_for_user(
+            db,
+            config,
+            &stored.user_id,
+            &resource_uris,
+        )
+        .await?
+    } else {
+        stored.allowed_service_ids.clone()
+    };
 
     // Resolve RBAC data filtered by the granted scope
     let rbac_data =
@@ -373,10 +419,22 @@ pub async fn exchange_authorization_code(
             .flatten(),
         None,
         None,
+        (!resource_uris.is_empty()).then_some(crate::crypto::jwt::AccessTokenRestrictions {
+            resources: &resource_uris,
+            allowed_service_ids: &allowed_service_ids,
+        }),
     )?;
 
-    let issued_refresh =
-        issue_oauth_refresh_token(db, config, jwt_keys, client_id, &stored.user_id).await?;
+    let issued_refresh = issue_oauth_refresh_token(
+        db,
+        config,
+        jwt_keys,
+        client_id,
+        &stored.user_id,
+        &resource_uris,
+        &allowed_service_ids,
+    )
+    .await?;
 
     // Generate ID token if openid scope was requested
     let id_token = if stored.scope.split_whitespace().any(|s| s == "openid") {
@@ -422,6 +480,8 @@ pub async fn exchange_authorization_code(
         user_id: stored.user_id,
         external_subject: stored.external_subject,
         broker_capability_enabled,
+        resource_uris,
+        allowed_service_ids,
     })
 }
 
@@ -660,6 +720,8 @@ mod tests {
             Some("S256"),
             Some("nonce-1"),
             Some(&external),
+            &["https://nyx.example/api/v1/proxy/s/openai".to_string()],
+            &["svc-1".to_string()],
         )
         .await
         .expect("create authorization code");
@@ -680,6 +742,11 @@ mod tests {
         assert_eq!(stored.code_challenge_method.as_deref(), Some("S256"));
         assert_eq!(stored.nonce.as_deref(), Some("nonce-1"));
         assert_eq!(stored.external_subject, Some(external));
+        assert_eq!(
+            stored.resource_uris,
+            vec!["https://nyx.example/api/v1/proxy/s/openai".to_string()]
+        );
+        assert_eq!(stored.allowed_service_ids, vec!["svc-1".to_string()]);
         assert!(!stored.used);
         assert!(stored.expires_at > Utc::now());
     }
@@ -706,6 +773,8 @@ mod tests {
                 code_challenge_method: None,
                 nonce: None,
                 external_subject: None,
+                resource_uris: Vec::new(),
+                allowed_service_ids: Vec::new(),
                 expires_at: now + Duration::minutes(5),
                 used: true,
                 created_at: now,
@@ -723,6 +792,8 @@ mod tests {
             revoked: false,
             replaced_by: None,
             revoked_at: None,
+            resource_uris: Vec::new(),
+            allowed_service_ids: Vec::new(),
             created_at: now,
         };
         db.collection::<RefreshToken>(REFRESH_TOKENS)
@@ -739,6 +810,7 @@ mod tests {
             code,
             client_id,
             "https://app.example/callback",
+            None,
             None,
             None,
             None,

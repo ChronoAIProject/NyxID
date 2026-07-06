@@ -846,6 +846,7 @@ pub async fn refresh(
         &state.jwt_keys,
         &refresh_token,
         Some(&state.mcp_sessions),
+        None,
     )
     .await?;
 

@@ -16,7 +16,9 @@ use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService}
 use crate::models::ws_frame_injection::WsFrameInjection;
 use crate::mw::auth::AuthUser;
 use crate::services::user_service_service::{CredentialSource, UserServiceWithSource};
-use crate::services::{node_service, org_service, unified_key_service, user_service_service};
+use crate::services::{
+    node_service, oauth_resource_service, org_service, unified_key_service, user_service_service,
+};
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 /// Resolve which user_id owns this user service and whether the actor may
@@ -93,6 +95,7 @@ pub struct UpdateUserServiceRequest {
 pub struct UserServiceResponse {
     pub id: String,
     pub slug: String,
+    pub resource_uri: String,
     pub endpoint_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key_id: Option<String>,
@@ -226,7 +229,7 @@ pub async fn list_user_services(
         user_service_service::list_user_services_with_sources(&state.db, &user_id_str).await?;
     let items = services
         .into_iter()
-        .map(user_service_with_source_response)
+        .map(|item| user_service_with_source_response(&state.config, item))
         .collect();
     Ok(Json(UserServiceListResponse { services: items }))
 }
@@ -374,7 +377,7 @@ pub async fn update_user_service(
         );
     }
 
-    Ok(Json(user_service_response(svc)))
+    Ok(Json(user_service_response(&state.config, svc)))
 }
 
 #[utoipa::path(
@@ -411,7 +414,7 @@ pub async fn patch_user_service_ssh_auth_mode(
     )
     .await?;
 
-    Ok(Json(user_service_response(svc)))
+    Ok(Json(user_service_response(&state.config, svc)))
 }
 
 #[utoipa::path(
@@ -472,21 +475,32 @@ pub async fn delete_user_service(
     Ok(StatusCode::NO_CONTENT)
 }
 
-fn user_service_response(svc: UserService) -> UserServiceResponse {
-    user_service_with_source_response(UserServiceWithSource {
-        service: svc,
-        source: CredentialSource::Personal,
-    })
+fn user_service_response(
+    config: &crate::config::AppConfig,
+    svc: UserService,
+) -> UserServiceResponse {
+    user_service_with_source_response(
+        config,
+        UserServiceWithSource {
+            service: svc,
+            source: CredentialSource::Personal,
+        },
+    )
 }
 
-fn user_service_with_source_response(item: UserServiceWithSource) -> UserServiceResponse {
+fn user_service_with_source_response(
+    config: &crate::config::AppConfig,
+    item: UserServiceWithSource,
+) -> UserServiceResponse {
     let UserServiceWithSource {
         service: svc,
         source,
     } = item;
+    let resource_uri = oauth_resource_service::user_service_resource_uri(config, &svc.slug);
     UserServiceResponse {
         id: svc.id,
         slug: svc.slug,
+        resource_uri,
         endpoint_id: svc.endpoint_id,
         api_key_id: svc.api_key_id,
         auth_method: svc.auth_method,
@@ -522,7 +536,11 @@ mod tests {
     use super::*;
     use crate::models::org_membership::OrgRole;
     use crate::services::user_service_service::CredentialSource;
-    use crate::test_utils::test_user_service;
+    use crate::test_utils::{test_app_config, test_user_service};
+
+    fn test_config() -> crate::config::AppConfig {
+        test_app_config()
+    }
 
     // ---- OrgRoleResponse From<OrgRole> ----
 
@@ -663,10 +681,15 @@ mod tests {
         let created_at = svc.created_at;
         let updated_at = svc.updated_at;
 
-        let resp = user_service_response(svc);
+        let config = test_config();
+        let resp = user_service_response(&config, svc);
 
         assert_eq!(resp.id, "svc-1");
         assert_eq!(resp.slug, "openai");
+        assert_eq!(
+            resp.resource_uri,
+            format!("{}/api/v1/proxy/s/openai", config.base_url)
+        );
         assert_eq!(resp.endpoint_id, "ep-1");
         assert!(resp.api_key_id.is_none());
         assert_eq!(resp.auth_method, "none");
@@ -698,7 +721,7 @@ mod tests {
     #[test]
     fn user_service_response_none_optional_fields() {
         let svc = test_user_service("svc-2", "user-2", "custom", "ep-2", None, None);
-        let resp = user_service_response(svc);
+        let resp = user_service_response(&test_config(), svc);
 
         assert!(resp.catalog_service_id.is_none());
         assert!(resp.node_id.is_none());
@@ -713,7 +736,7 @@ mod tests {
             service: svc,
             source: CredentialSource::Personal,
         };
-        let resp = user_service_with_source_response(item);
+        let resp = user_service_with_source_response(&test_config(), item);
         assert!(matches!(
             resp.credential_source,
             CredentialSourceResponse::Personal
@@ -734,7 +757,7 @@ mod tests {
                 allowed: true,
             },
         };
-        let resp = user_service_with_source_response(item);
+        let resp = user_service_with_source_response(&test_config(), item);
         match resp.credential_source {
             CredentialSourceResponse::Org {
                 org_id,
@@ -762,7 +785,7 @@ mod tests {
     #[test]
     fn user_service_response_json_skips_none_fields() {
         let svc = test_user_service("svc-5", "user-5", "test", "ep-5", None, None);
-        let resp = user_service_response(svc);
+        let resp = user_service_response(&test_config(), svc);
         let json = serde_json::to_value(&resp).unwrap();
 
         // Fields with skip_serializing_if = "Option::is_none" should be absent
