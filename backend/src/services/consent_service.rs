@@ -14,6 +14,20 @@ pub async fn grant_consent(
     client_id: &str,
     scopes: &str,
 ) -> AppResult<Consent> {
+    grant_consent_with_services(db, user_id, client_id, scopes, None).await
+}
+
+/// Grant consent for a user to a client with optional service restriction.
+///
+/// `None` keeps the historical unrestricted service grant. `Some(ids)`,
+/// including an empty list, is an explicit per-service consent grant.
+pub async fn grant_consent_with_services(
+    db: &mongodb::Database,
+    user_id: &str,
+    client_id: &str,
+    scopes: &str,
+    allowed_service_ids: Option<Vec<String>>,
+) -> AppResult<Consent> {
     let now = Utc::now();
 
     let consent = Consent {
@@ -21,6 +35,7 @@ pub async fn grant_consent(
         user_id: user_id.to_string(),
         client_id: client_id.to_string(),
         scopes: scopes.to_string(),
+        allowed_service_ids: allowed_service_ids.clone(),
         granted_at: now,
         expires_at: None,
     };
@@ -39,6 +54,7 @@ pub async fn grant_consent(
                 user_id: user_id.to_string(),
                 client_id: client_id.to_string(),
                 scopes: scopes.to_string(),
+                allowed_service_ids,
                 granted_at: now,
                 expires_at: None,
             };
@@ -190,6 +206,37 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_grant_consent_with_services_persists_allowlist() {
+        let Some(db) = connect_test_database("consent").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let client_id = Uuid::new_v4().to_string();
+
+        let consent = grant_consent_with_services(
+            &db,
+            &user_id,
+            &client_id,
+            "openid",
+            Some(vec!["svc-1".to_string(), "svc-2".to_string()]),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            consent.allowed_service_ids,
+            Some(vec!["svc-1".to_string(), "svc-2".to_string()])
+        );
+
+        let updated =
+            grant_consent_with_services(&db, &user_id, &client_id, "openid", Some(vec![]))
+                .await
+                .unwrap();
+        assert_eq!(updated.id, consent.id);
+        assert_eq!(updated.allowed_service_ids, Some(vec![]));
     }
 
     #[tokio::test]

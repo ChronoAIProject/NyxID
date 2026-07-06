@@ -241,6 +241,7 @@ pub async fn create_session_and_issue_tokens(
         revoked_at: None,
         resource_uris: Vec::new(),
         allowed_service_ids: Vec::new(),
+        allow_all_services: true,
         created_at: now,
     };
 
@@ -457,7 +458,7 @@ pub async fn refresh_tokens(
     // Resolve RBAC data and inject into the refreshed access token
     let scope = FIRST_PARTY_ACCESS_SCOPES;
     let resolved_requested_resources = match requested_resources {
-        Some(resources) if active_token.resource_uris.is_empty() => {
+        Some(resources) if active_token.allow_all_services => {
             crate::services::oauth_resource_service::resolve_requested_resources(
                 db,
                 config,
@@ -469,7 +470,7 @@ pub async fn refresh_tokens(
         _ => None,
     };
     let resource_uris = match (requested_resources, resolved_requested_resources.as_ref()) {
-        (Some(_), Some(resolved)) if active_token.resource_uris.is_empty() => {
+        (Some(_), Some(resolved)) if active_token.allow_all_services => {
             resolved.resource_uris.clone()
         }
         (Some(resources), _) => crate::services::oauth_resource_service::filter_resource_narrowing(
@@ -489,8 +490,9 @@ pub async fn refresh_tokens(
         )
         .await?
     } else {
-        Vec::new()
+        active_token.allowed_service_ids.clone()
     };
+    let allow_all_services = active_token.allow_all_services && requested_resources.is_none();
     let rbac_data =
         crate::services::rbac_helpers::build_rbac_claim_data(db, &user_id_str, scope).await?;
     let new_access = jwt::generate_access_token(
@@ -502,7 +504,7 @@ pub async fn refresh_tokens(
         None,
         None,
         None,
-        (!resource_uris.is_empty()).then_some(jwt::AccessTokenRestrictions {
+        (!allow_all_services).then_some(jwt::AccessTokenRestrictions {
             resources: &resource_uris,
             allowed_service_ids: &allowed_service_ids,
         }),
@@ -594,6 +596,7 @@ pub async fn refresh_tokens(
         revoked_at: None,
         resource_uris: resource_uris.clone(),
         allowed_service_ids: allowed_service_ids.clone(),
+        allow_all_services,
         created_at: now,
     };
 

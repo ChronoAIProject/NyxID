@@ -335,6 +335,7 @@ async fn try_exchange_once(ctx: &BrokerExchangeContext<'_>) -> AppResult<Exchang
         revoked_at: None,
         resource_uris: Vec::new(),
         allowed_service_ids: Vec::new(),
+        allow_all_services: true,
         created_at: now,
     };
 
@@ -1012,6 +1013,7 @@ mod tests {
             revoked_at: revoked.then_some(now),
             resource_uris: Vec::new(),
             allowed_service_ids: Vec::new(),
+            allow_all_services: true,
             created_at: now,
         }
     }

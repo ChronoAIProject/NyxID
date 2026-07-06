@@ -62,6 +62,8 @@ pub struct ConsentDecisionForm {
     pub prompt: Option<String>,
     #[serde(default)]
     pub resource: Vec<String>,
+    #[serde(default)]
+    pub resource_selection_present: bool,
     pub decision: String,
 }
 
@@ -335,6 +337,16 @@ fn response_resources(resources: Vec<String>) -> Option<Vec<String>> {
     (!resources.is_empty()).then_some(resources)
 }
 
+fn intersect_service_ids(left: &[String], right: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for id in left {
+        if right.iter().any(|granted| granted == id) && !out.iter().any(|existing| existing == id) {
+            out.push(id.clone());
+        }
+    }
+    out
+}
+
 // --- Handlers ---
 
 /// GET /oauth/authorize
@@ -514,8 +526,41 @@ pub async fn authorize_decision(
     }
 
     let user_id_str = auth_user.user_id.to_string();
-    consent_service::grant_consent(&state.db, &user_id_str, &params.client_id, &validated_scope)
+    let consent_allowed_service_ids =
+        if form.resource_selection_present || !params.resource.is_empty() {
+            let resolved_consent_resources = oauth_resource_service::resolve_requested_resources(
+                &state.db,
+                &state.config,
+                &user_id_str,
+                non_empty_resources(&params.resource),
+            )
+            .await?;
+            Some(
+                resolved_consent_resources
+                    .map(|resolved| resolved.service_ids)
+                    .unwrap_or_default(),
+            )
+        } else {
+            None
+        };
+    if let Some(ids) = consent_allowed_service_ids {
+        consent_service::grant_consent_with_services(
+            &state.db,
+            &user_id_str,
+            &params.client_id,
+            &validated_scope,
+            Some(ids),
+        )
         .await?;
+    } else {
+        consent_service::grant_consent(
+            &state.db,
+            &user_id_str,
+            &params.client_id,
+            &validated_scope,
+        )
+        .await?;
+    }
 
     let code = issue_authorization_code(
         &state,
@@ -1104,6 +1149,17 @@ async fn issue_authorization_code(
     external_subject: Option<&ExternalSubjectRef>,
 ) -> AppResult<String> {
     let user_id_str = auth_user.user_id.to_string();
+    let consent =
+        consent_service::check_consent(&state.db, &user_id_str, &params.client_id, validated_scope)
+            .await?
+            .ok_or_else(|| AppError::ConsentRequired {
+                consent_url: build_consent_url(
+                    &state.config.frontend_url,
+                    params,
+                    &params.client_id,
+                    validated_scope,
+                ),
+            })?;
     let resolved_resources = oauth_resource_service::resolve_requested_resources(
         &state.db,
         &state.config,
@@ -1111,14 +1167,27 @@ async fn issue_authorization_code(
         non_empty_resources(&params.resource),
     )
     .await?;
-    let resource_uris = resolved_resources
-        .as_ref()
-        .map(|resolved| resolved.resource_uris.as_slice())
-        .unwrap_or(&[]);
-    let allowed_service_ids = resolved_resources
-        .as_ref()
-        .map(|resolved| resolved.service_ids.as_slice())
-        .unwrap_or(&[]);
+    let (resource_uris, allowed_service_ids, service_restricted) =
+        match (resolved_resources, consent.allowed_service_ids.as_ref()) {
+            (Some(resolved), Some(consented_ids)) => {
+                let allowed = intersect_service_ids(&resolved.service_ids, consented_ids);
+                let resources = resolved
+                    .resource_uris
+                    .into_iter()
+                    .zip(resolved.service_ids.into_iter())
+                    .filter_map(|(resource, service_id)| {
+                        allowed
+                            .iter()
+                            .any(|id| id == &service_id)
+                            .then_some(resource)
+                    })
+                    .collect::<Vec<_>>();
+                (resources, allowed, true)
+            }
+            (Some(resolved), None) => (resolved.resource_uris, resolved.service_ids, true),
+            (None, Some(consented_ids)) => (Vec::new(), consented_ids.clone(), true),
+            (None, None) => (Vec::new(), Vec::new(), false),
+        };
     let code = oauth_service::create_authorization_code(
         &state.db,
         &params.client_id,
@@ -1129,8 +1198,9 @@ async fn issue_authorization_code(
         params.code_challenge_method.as_deref(),
         params.nonce.as_deref(),
         external_subject,
-        resource_uris,
-        allowed_service_ids,
+        &resource_uris,
+        &allowed_service_ids,
+        service_restricted,
     )
     .await?;
 
@@ -1320,6 +1390,7 @@ async fn token_inner(
                         &exchanged.user_id,
                         &exchanged.resource_uris,
                         &exchanged.allowed_service_ids,
+                        exchanged.allow_all_services,
                     )
                     .await?
                 } else {
@@ -2418,6 +2489,7 @@ mod tests {
             revoked_at: None,
             resource_uris: Vec::new(),
             allowed_service_ids: Vec::new(),
+            allow_all_services: true,
             created_at: now,
         };
         state
@@ -2493,6 +2565,7 @@ mod tests {
                 external_subject: None,
                 resource_uris: Vec::new(),
                 allowed_service_ids: Vec::new(),
+                allow_all_services: true,
                 expires_at: now + Duration::minutes(5),
                 used: false,
                 created_at: now,
@@ -3223,6 +3296,30 @@ mod tests {
         assert!(prompts.contains("login"));
         assert!(prompts.contains("consent"));
         assert_eq!(prompts.len(), 2);
+    }
+
+    #[test]
+    fn intersect_service_ids_preserves_requested_order_and_dedupes() {
+        let requested = vec![
+            "svc-2".to_string(),
+            "svc-1".to_string(),
+            "svc-2".to_string(),
+            "svc-3".to_string(),
+        ];
+        let consented = vec!["svc-1".to_string(), "svc-2".to_string()];
+
+        assert_eq!(
+            intersect_service_ids(&requested, &consented),
+            vec!["svc-2".to_string(), "svc-1".to_string()]
+        );
+    }
+
+    #[test]
+    fn intersect_service_ids_empty_when_disjoint() {
+        let requested = vec!["svc-3".to_string()];
+        let consented = vec!["svc-1".to_string(), "svc-2".to_string()];
+
+        assert!(intersect_service_ids(&requested, &consented).is_empty());
     }
 
     #[tokio::test]
