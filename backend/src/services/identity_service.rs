@@ -249,6 +249,53 @@ mod tests {
         }
     }
 
+    fn make_sa() -> crate::models::service_account::ServiceAccount {
+        crate::models::service_account::ServiceAccount {
+            id: "sa-123".to_string(),
+            name: "CI Bot".to_string(),
+            description: None,
+            client_id: "sa_client".to_string(),
+            client_secret_hash: "hash".to_string(),
+            secret_prefix: "sas_1234".to_string(),
+            role_ids: vec!["role-1".to_string()],
+            allowed_scopes: "openid profile".to_string(),
+            is_active: true,
+            rate_limit_override: None,
+            created_by: "admin-1".to_string(),
+            owner_user_id: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_authenticated_at: None,
+        }
+    }
+
+    #[test]
+    fn service_account_principal_shape() {
+        let principal = Principal::from(&make_sa());
+        assert_eq!(principal.id, "sa-123");
+        assert_eq!(principal.email, None); // service accounts have no email
+        assert_eq!(principal.display_name.as_deref(), Some("CI Bot"));
+        assert_eq!(principal.role_ids, vec!["role-1".to_string()]);
+        assert!(principal.group_ids.is_empty()); // no group membership for SAs
+    }
+
+    #[test]
+    fn service_account_headers_omit_email_even_when_requested() {
+        let mut svc = dummy_service();
+        svc.identity_propagation_mode = "headers".to_string();
+        svc.identity_include_user_id = true;
+        svc.identity_include_email = true; // requested, but an SA has no email
+        svc.identity_include_name = true;
+
+        let headers = build_identity_headers(&Principal::from(&make_sa()), &svc);
+        let names: Vec<&str> = headers.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"X-NyxID-User-Id"));
+        assert!(!names.contains(&"X-NyxID-User-Email")); // no email header despite the include flag
+        assert!(names.contains(&"X-NyxID-User-Name"));
+        let id_header = headers.iter().find(|(n, _)| n == "X-NyxID-User-Id").unwrap();
+        assert_eq!(id_header.1, "sa-123");
+    }
+
     #[test]
     fn mode_none_returns_empty() {
         let user = make_user();

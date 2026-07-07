@@ -291,6 +291,63 @@ mod tests {
         assert!(result.permissions.contains(&"read".to_string()));
     }
 
+    fn make_sa(id: &str, role_ids: Vec<String>) -> ServiceAccount {
+        ServiceAccount {
+            id: id.to_string(),
+            name: "test-sa".to_string(),
+            description: None,
+            client_id: format!("sa_{id}"),
+            client_secret_hash: "hash".to_string(),
+            secret_prefix: "sas_test".to_string(),
+            role_ids,
+            allowed_scopes: "openid".to_string(),
+            is_active: true,
+            rate_limit_override: None,
+            created_by: "admin".to_string(),
+            owner_user_id: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            last_authenticated_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_user_rbac_resolves_service_account_roles() {
+        let Some(db) = connect_test_database("rbac_sa_roles").await else {
+            return;
+        };
+        let role = make_role(
+            "role-sa1",
+            "sa-editor",
+            vec!["object:read".to_string(), "object:write".to_string()],
+        );
+        db.collection::<Role>(ROLES).insert_one(&role).await.unwrap();
+
+        // A service account has NO users doc — only a service_accounts record.
+        let sa = make_sa("11111111-2222-3333-4444-555555555555", vec!["role-sa1".to_string()]);
+        db.collection::<ServiceAccount>(SERVICE_ACCOUNTS)
+            .insert_one(&sa)
+            .await
+            .unwrap();
+
+        let result = resolve_user_rbac(&db, &sa.id).await.unwrap();
+        assert_eq!(result.role_slugs, vec!["sa-editor"]);
+        assert!(result.group_slugs.is_empty()); // service accounts have no groups
+        assert!(result.permissions.contains(&"object:read".to_string()));
+        assert!(result.permissions.contains(&"object:write".to_string()));
+    }
+
+    #[tokio::test]
+    async fn resolve_user_rbac_unknown_principal_returns_empty() {
+        let Some(db) = connect_test_database("rbac_sa_neither").await else {
+            return;
+        };
+        // An id present in neither `users` nor `service_accounts` → empty (fail-closed).
+        let result = resolve_user_rbac(&db, "no-such-principal").await.unwrap();
+        assert!(result.role_slugs.is_empty());
+        assert!(result.permissions.is_empty());
+    }
+
     #[tokio::test]
     async fn resolve_user_rbac_with_group_inherited_roles() {
         let Some(db) = connect_test_database("rbac_group_roles").await else {
