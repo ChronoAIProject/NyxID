@@ -28,7 +28,7 @@ NyxID prints the assigned slug. On a fresh account it is `llm-openrouter`; subse
 ```bash
 nyxid api-key create \
   --name "openrouter-agent" \
-  --platform custom \
+  --platform generic \
   --scopes "proxy"
 ```
 
@@ -54,7 +54,7 @@ curl -i -X POST "$OPENAI_BASE_URL/chat/completions" \
   -d '{"model":"openai/gpt-4o-mini","max_tokens":16,"messages":[{"role":"user","content":"ping"}]}'
 ```
 
-A successful response includes `HTTP/1.1 200 OK` and the header `X-NyxID-Agent-Id: <uuid>` — confirming NyxID attributed the request to your Agent Key.
+A successful response includes `HTTP/1.1 200 OK`. The same request also works through the general proxy route form, `POST /api/v1/proxy/s/llm-openrouter/chat/completions`, whose responses additionally carry `X-NyxID-Agent-Id: <uuid>` — confirming NyxID attributed the request to your Agent Key.
 
 ## App attribution
 
