@@ -321,10 +321,16 @@ mod tests {
             "sa-editor",
             vec!["object:read".to_string(), "object:write".to_string()],
         );
-        db.collection::<Role>(ROLES).insert_one(&role).await.unwrap();
+        db.collection::<Role>(ROLES)
+            .insert_one(&role)
+            .await
+            .unwrap();
 
         // A service account has NO users doc — only a service_accounts record.
-        let sa = make_sa("11111111-2222-3333-4444-555555555555", vec!["role-sa1".to_string()]);
+        let sa = make_sa(
+            "11111111-2222-3333-4444-555555555555",
+            vec!["role-sa1".to_string()],
+        );
         db.collection::<ServiceAccount>(SERVICE_ACCOUNTS)
             .insert_one(&sa)
             .await

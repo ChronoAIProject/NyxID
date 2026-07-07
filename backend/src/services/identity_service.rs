@@ -292,7 +292,10 @@ mod tests {
         assert!(names.contains(&"X-NyxID-User-Id"));
         assert!(!names.contains(&"X-NyxID-User-Email")); // no email header despite the include flag
         assert!(names.contains(&"X-NyxID-User-Name"));
-        let id_header = headers.iter().find(|(n, _)| n == "X-NyxID-User-Id").unwrap();
+        let id_header = headers
+            .iter()
+            .find(|(n, _)| n == "X-NyxID-User-Id")
+            .unwrap();
         assert_eq!(id_header.1, "sa-123");
     }
 
