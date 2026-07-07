@@ -414,7 +414,6 @@ In QA mode, flag any code that doesn't match DESIGN.md.
 - Never commit to main directly
 - PRs require review
 - All tests must pass before merge
-- `CLAUDE.md` sync conflicts must preserve both the project guidance above and the managed `consensus-rnd` invariant block below; do not replace one with the other
 
 
 <!-- consensus-rnd:foundational-invariants:start version=1 sha256=f5c24b0c3515993a7b86c4ed78ce7386add665f8c8b84cc7275aedebd6c3e6af -->
