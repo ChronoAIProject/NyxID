@@ -9,13 +9,14 @@
 // `<span>` in the composite (per-slug) files, never inside the SVG itself.
 //
 // Sources:
-//   - OpenAI, Anthropic, Mistral AI, DeepSeek, OpenRouter, X (Twitter),
-//     Google, GitHub, Facebook, Discord, Spotify, Slack, Microsoft, TikTok,
-//     Twitch, Reddit, Telegram, AWS — path data hand-extracted from Simple Icons
+//   - OpenAI, Anthropic, Mistral AI, DeepSeek, X (Twitter), Google, GitHub,
+//     Facebook, Discord, Spotify, Slack, Microsoft, TikTok, Twitch, Reddit,
+//     Telegram, AWS — path data hand-extracted from Simple Icons
 //     (https://simpleicons.org, CC0 1.0). No runtime dependency on the
 //     `simple-icons` npm package.
 //   - Cohere, Lark, Feishu, OpenClaw — hand-built glyphs (these brands have no
 //     Simple Icons entry and ship no publicly-extractable brand mark).
+//   - OpenRouter — official mark from openrouter.ai's own logo markup.
 
 import type { ReactNode, SVGProps } from "react";
 
@@ -108,13 +109,32 @@ export function DeepSeekGlyph(props: GlyphProps) {
 }
 
 /**
- * OpenRouter routing mark — arrows converging into and fanning out of a
- * central channel. (Simple Icons: openrouter)
+ * OpenRouter official mark — two stroked route lines fanning out of a shared
+ * origin into filled arrowheads. Path data from openrouter.ai's own logo
+ * markup (512 canvas, stroke-width 90); rendered monochrome via
+ * currentColor like every other glyph in this set.
  */
 export function OpenRouterGlyph(props: GlyphProps) {
   return (
-    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" {...props}>
-      <path d="M16.778 1.844v1.919q-.569-.026-1.138-.032-.708-.008-1.415.037c-1.93.126-4.023.728-6.149 2.237-2.911 2.066-2.731 1.95-4.14 2.75-.396.223-1.342.574-2.185.798-.841.225-1.753.333-1.751.333v4.229s.768.108 1.61.333c.842.224 1.789.575 2.185.799 1.41.798 1.228.683 4.14 2.75 2.126 1.509 4.22 2.11 6.148 2.236.88.058 1.716.041 2.555.005v1.918l7.222-4.168-7.222-4.17v2.176c-.86.038-1.611.065-2.278.021-1.364-.09-2.417-.357-3.979-1.465-2.244-1.593-2.866-2.027-3.68-2.508.889-.518 1.449-.906 3.822-2.59 1.56-1.109 2.614-1.377 3.978-1.466.667-.044 1.418-.017 2.278.02v2.176L24 6.014Z" />
+    <svg
+      viewBox="0 0 512 512"
+      fill="currentColor"
+      stroke="currentColor"
+      aria-hidden="true"
+      {...props}
+    >
+      <path
+        d="M3 248.945C18 248.945 76 236 106 219C136 202 136 202 198 158C276.497 102.293 332 120.945 423 120.945"
+        fill="none"
+        strokeWidth="90"
+      />
+      <path d="M511 121.5L357.25 210.268L357.25 32.7324L511 121.5Z" />
+      <path
+        d="M0 249C15 249 73 261.945 103 278.945C133 295.945 133 295.945 195 339.945C273.497 395.652 329 377 420 377"
+        fill="none"
+        strokeWidth="90"
+      />
+      <path d="M508 376.445L354.25 287.678L354.25 465.213L508 376.445Z" />
     </svg>
   );
 }

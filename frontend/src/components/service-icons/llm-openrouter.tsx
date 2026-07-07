@@ -1,6 +1,6 @@
-// OpenRouter catalog tile. Routing mark from Simple Icons (openrouter) —
-// arrows converging into and fanning out of a central channel, matching
-// OpenRouter's multi-model routing pitch.
+// OpenRouter catalog tile. Official OpenRouter mark (route lines fanning
+// into arrowheads) taken from openrouter.ai's own logo markup, flattened
+// to currentColor to match the rest of the tile grid.
 import { OpenRouterGlyph } from "./_shared";
 
 export default function LlmOpenRouterIcon({
