@@ -50,6 +50,7 @@ frontend/src/components/service-icons/llm-mistral.tsx
 frontend/src/components/service-icons/llm-openai-codex.tsx
 frontend/src/components/service-icons/llm-openai.tsx
 frontend/src/components/service-icons/llm-openclaw.tsx
+frontend/src/components/service-icons/llm-openrouter.tsx
 frontend/src/components/shared/copyable-url-callout.tsx
 frontend/src/components/shared/not-found-page.tsx
 frontend/src/components/shared/org-scope-select.tsx

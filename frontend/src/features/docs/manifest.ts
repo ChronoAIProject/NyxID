@@ -48,6 +48,7 @@ export const DOCS_TABS: readonly DocTab[] = [
         group: "Guides",
         pages: [
           { slug: "ai/guides/claude-code-cursor-codex", title: "Set up Claude Code, Cursor & Codex" },
+          { slug: "ai/guides/openrouter", title: "Use OpenRouter through NyxID" },
           { slug: "ai/guides/mcp-proxy", title: "MCP proxy & tool discovery" },
           { slug: "ai/guides/agent-isolation", title: "Isolate agents with scoped keys" },
           { slug: "ai/guides/wrap-rest-api-as-mcp", title: "Wrap a REST API as MCP tools" },
