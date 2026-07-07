@@ -36,10 +36,6 @@ function parseHost(uri: string): string {
 
 export function OAuthConsentPage() {
   useApplyTheme();
-  const [allowAllServices, setAllowAllServices] = useState(true);
-  const [selectedServiceIds, setSelectedServiceIds] = useState<readonly string[]>(
-    [],
-  );
   const { data: userServices, isLoading: userServicesLoading } =
     useUserServices();
   const search = new URLSearchParams(window.location.search);
@@ -60,6 +56,13 @@ export function OAuthConsentPage() {
     search.get("external_subject_external_user_id") ?? "";
   const consentRequest = search.get("consent_request") ?? "";
   const resources = search.getAll("resource");
+  const [allowAllServices, setAllowAllServices] = useState(false);
+  const [selectedServiceIds, setSelectedServiceIds] = useState<
+    readonly string[]
+  >([]);
+  const [deselectedServiceIds, setDeselectedServiceIds] = useState<
+    readonly string[]
+  >([]);
   const [selectedResources, setSelectedResources] = useState(resources);
 
   const missing =
@@ -83,9 +86,22 @@ export function OAuthConsentPage() {
         .sort((a, b) => a.slug.localeCompare(b.slug)),
     [userServices],
   );
+  const resourceSelectedServiceIds = useMemo(() => {
+    const requested = new Set(selectedResources);
+    return selectableServices
+      .filter((service) => requested.has(service.resource_uri))
+      .map((service) => service.id);
+  }, [selectableServices, selectedResources]);
+  const effectiveSelectedServiceIds = useMemo(
+    () =>
+      Array.from(
+        new Set([...resourceSelectedServiceIds, ...selectedServiceIds]),
+      ).filter((id) => !deselectedServiceIds.includes(id)),
+    [deselectedServiceIds, resourceSelectedServiceIds, selectedServiceIds],
+  );
   const serviceAccess = oauthConsentServiceAccessSchema.parse({
     allow_all_services: allowAllServices,
-    allowed_service_ids: [...selectedServiceIds],
+    allowed_service_ids: effectiveSelectedServiceIds,
   });
 
   function toggleService(serviceId: string, checked: boolean) {
@@ -94,6 +110,12 @@ export function OAuthConsentPage() {
         return current.includes(serviceId) ? current : [...current, serviceId];
       }
       return current.filter((id) => id !== serviceId);
+    });
+    setDeselectedServiceIds((current) => {
+      if (checked) {
+        return current.filter((id) => id !== serviceId);
+      }
+      return current.includes(serviceId) ? current : [...current, serviceId];
     });
   }
 
@@ -282,7 +304,9 @@ export function OAuthConsentPage() {
                     >
                       <Checkbox
                         id={`oauth-service-${service.id}`}
-                        checked={selectedServiceIds.includes(service.id)}
+                        checked={effectiveSelectedServiceIds.includes(
+                          service.id,
+                        )}
                         onCheckedChange={(checked) =>
                           toggleService(service.id, checked === true)
                         }

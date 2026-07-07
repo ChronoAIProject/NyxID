@@ -14,18 +14,39 @@ pub async fn grant_consent(
     client_id: &str,
     scopes: &str,
 ) -> AppResult<Consent> {
-    grant_consent_with_services(db, user_id, client_id, scopes, None).await
+    grant_consent_internal(db, user_id, client_id, scopes, false, Some(Vec::new())).await
 }
 
 /// Grant consent for a user to a client with optional service restriction.
 ///
-/// `None` keeps the historical unrestricted service grant. `Some(ids)`,
-/// including an empty list, is an explicit per-service consent grant.
+/// `Some(ids)`, including an empty list, is an explicit per-service consent
+/// grant. `None` is an explicit unrestricted service grant.
 pub async fn grant_consent_with_services(
     db: &mongodb::Database,
     user_id: &str,
     client_id: &str,
     scopes: &str,
+    allowed_service_ids: Option<Vec<String>>,
+) -> AppResult<Consent> {
+    let allow_all_services = allowed_service_ids.is_none();
+    let explicit_allowed_service_ids = allowed_service_ids.or_else(|| Some(Vec::new()));
+    grant_consent_internal(
+        db,
+        user_id,
+        client_id,
+        scopes,
+        allow_all_services,
+        explicit_allowed_service_ids,
+    )
+    .await
+}
+
+async fn grant_consent_internal(
+    db: &mongodb::Database,
+    user_id: &str,
+    client_id: &str,
+    scopes: &str,
+    allow_all_services: bool,
     allowed_service_ids: Option<Vec<String>>,
 ) -> AppResult<Consent> {
     let now = Utc::now();
@@ -35,6 +56,7 @@ pub async fn grant_consent_with_services(
         user_id: user_id.to_string(),
         client_id: client_id.to_string(),
         scopes: scopes.to_string(),
+        allow_all_services,
         allowed_service_ids: allowed_service_ids.clone(),
         granted_at: now,
         expires_at: None,
@@ -54,6 +76,7 @@ pub async fn grant_consent_with_services(
                 user_id: user_id.to_string(),
                 client_id: client_id.to_string(),
                 scopes: scopes.to_string(),
+                allow_all_services,
                 allowed_service_ids,
                 granted_at: now,
                 expires_at: None,
@@ -171,7 +194,8 @@ mod tests {
         assert_eq!(consent.user_id, user_id);
         assert_eq!(consent.client_id, client_id);
         assert_eq!(consent.scopes, "openid profile");
-        assert!(consent.allowed_service_ids.is_none());
+        assert!(!consent.allow_all_services);
+        assert_eq!(consent.allowed_service_ids, Some(vec![]));
         assert!(consent.expires_at.is_none());
 
         let stored = db
@@ -206,6 +230,7 @@ mod tests {
 
         assert_eq!(first.id, second.id);
         assert_eq!(second.scopes, "openid profile email");
+        assert!(!second.allow_all_services);
         assert_eq!(second.allowed_service_ids, Some(vec!["svc-1".to_string()]));
 
         let count = db
@@ -238,13 +263,22 @@ mod tests {
             consent.allowed_service_ids,
             Some(vec!["svc-1".to_string(), "svc-2".to_string()])
         );
+        assert!(!consent.allow_all_services);
 
         let updated =
             grant_consent_with_services(&db, &user_id, &client_id, "openid", Some(vec![]))
                 .await
                 .unwrap();
         assert_eq!(updated.id, consent.id);
+        assert!(!updated.allow_all_services);
         assert_eq!(updated.allowed_service_ids, Some(vec![]));
+
+        let unrestricted = grant_consent_with_services(&db, &user_id, &client_id, "openid", None)
+            .await
+            .unwrap();
+        assert_eq!(unrestricted.id, consent.id);
+        assert!(unrestricted.allow_all_services);
+        assert_eq!(unrestricted.allowed_service_ids, Some(vec![]));
     }
 
     #[tokio::test]

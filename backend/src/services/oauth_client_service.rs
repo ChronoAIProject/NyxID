@@ -714,6 +714,7 @@ mod tests {
                     user_id: "user-with-consent".to_string(),
                     client_id: client_id.to_string(),
                     scopes: DEFAULT_ALLOWED_SCOPES.to_string(),
+                    allow_all_services: false,
                     allowed_service_ids: None,
                     granted_at: now,
                     expires_at: None,

@@ -1743,6 +1743,7 @@ async fn execute_proxy_inner(
 
     if target.service.inject_delegation_token {
         let user_uuid = auth_user.user_id;
+        let restrictions = crate::crypto::jwt::TokenRestrictionClaims::from_auth_user(auth_user);
 
         match crate::crypto::jwt::generate_delegated_access_token(
             &state.jwt_keys,
@@ -1751,6 +1752,7 @@ async fn execute_proxy_inner(
             &target.service.delegation_token_scope,
             &target.service.slug,
             crate::crypto::jwt::MCP_DELEGATION_TOKEN_TTL_SECS,
+            Some(&restrictions),
         ) {
             Ok(delegation_token) => {
                 identity_headers.push(("X-NyxID-Delegation-Token".to_string(), delegation_token));
@@ -6257,6 +6259,7 @@ mod proxy_resolution_integration_tests {
             allow_all_services: true,
             allow_all_nodes: true,
             allowed_service_ids: vec![],
+            resource_uris: None,
             allowed_node_ids: vec![],
             api_key_id: None,
             api_key_name: None,
@@ -6278,6 +6281,7 @@ mod proxy_resolution_integration_tests {
             allow_all_services: true,
             allow_all_nodes: true,
             allowed_service_ids: vec![],
+            resource_uris: None,
             allowed_node_ids: vec![],
             api_key_id: None,
             api_key_name: None,
