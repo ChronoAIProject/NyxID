@@ -7,6 +7,7 @@ use crate::crypto::jwt::{IdTokenAuthContext, RbacClaimData};
 use crate::errors::AppResult;
 use crate::models::group::{COLLECTION_NAME as GROUPS, Group};
 use crate::models::role::{COLLECTION_NAME as ROLES, Role};
+use crate::models::service_account::{COLLECTION_NAME as SERVICE_ACCOUNTS, ServiceAccount};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 
 /// Resolved RBAC data for a user, ready to inject into JWT claims.
@@ -16,36 +17,56 @@ pub struct UserRbacData {
     pub permissions: Vec<String>,
 }
 
-/// Fetch and resolve all RBAC data for a user.
+/// Fetch and resolve all RBAC data for a principal (human user OR service account).
 ///
-/// Collects directly-assigned roles, group-inherited roles, and flattened
-/// permissions. Performs at most 3 MongoDB queries.
+/// Looks the id up in `users` first; if there is no users doc, falls back to
+/// `service_accounts` so a service account's directly-assigned `role_ids` resolve
+/// too (single source of truth — SAs are never seeded into `users`). Returns
+/// empty RBAC only when the id matches neither collection. Service accounts have
+/// no group membership. Performs at most 3 MongoDB queries.
 pub async fn resolve_user_rbac(db: &mongodb::Database, user_id: &str) -> AppResult<UserRbacData> {
-    let user = db
+    if let Some(user) = db
         .collection::<User>(USERS)
         .find_one(doc! { "_id": user_id })
-        .await?;
+        .await?
+    {
+        return resolve_rbac_from_ids(db, &user.role_ids, &user.group_ids).await;
+    }
 
-    let user = match user {
-        Some(u) => u,
-        None => {
-            return Ok(UserRbacData {
-                role_slugs: vec![],
-                group_slugs: vec![],
-                permissions: vec![],
-            });
-        }
-    };
+    // Principal-aware fallback: a service account has no users doc; resolve its
+    // directly-assigned roles from the service_accounts record (SAs have no groups).
+    if let Some(sa) = db
+        .collection::<ServiceAccount>(SERVICE_ACCOUNTS)
+        .find_one(doc! { "_id": user_id })
+        .await?
+    {
+        return resolve_rbac_from_ids(db, &sa.role_ids, &[]).await;
+    }
 
+    Ok(UserRbacData {
+        role_slugs: vec![],
+        group_slugs: vec![],
+        permissions: vec![],
+    })
+}
+
+/// Resolve a set of directly-assigned role ids + group ids into role slugs,
+/// group slugs, and flattened+deduplicated permissions. Shared by human users
+/// and service-account principals so both resolve through identical machinery.
+pub async fn resolve_rbac_from_ids(
+    db: &mongodb::Database,
+    role_ids: &[String],
+    group_ids: &[String],
+) -> AppResult<UserRbacData> {
     // Collect all role IDs: direct + group-inherited
-    let mut all_role_ids: HashSet<String> = user.role_ids.iter().cloned().collect();
+    let mut all_role_ids: HashSet<String> = role_ids.iter().cloned().collect();
 
-    // Get user's groups and their role_ids
-    let groups: Vec<Group> = if user.group_ids.is_empty() {
+    // Get the principal's groups and their role_ids
+    let groups: Vec<Group> = if group_ids.is_empty() {
         vec![]
     } else {
         db.collection::<Group>(GROUPS)
-            .find(doc! { "_id": { "$in": &user.group_ids } })
+            .find(doc! { "_id": { "$in": group_ids } })
             .await?
             .try_collect()
             .await?
@@ -268,6 +289,69 @@ mod tests {
         assert!(result.group_slugs.is_empty());
         assert!(result.permissions.contains(&"write".to_string()));
         assert!(result.permissions.contains(&"read".to_string()));
+    }
+
+    fn make_sa(id: &str, role_ids: Vec<String>) -> ServiceAccount {
+        ServiceAccount {
+            id: id.to_string(),
+            name: "test-sa".to_string(),
+            description: None,
+            client_id: format!("sa_{id}"),
+            client_secret_hash: "hash".to_string(),
+            secret_prefix: "sas_test".to_string(),
+            role_ids,
+            allowed_scopes: "openid".to_string(),
+            is_active: true,
+            rate_limit_override: None,
+            created_by: "admin".to_string(),
+            owner_user_id: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            last_authenticated_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_user_rbac_resolves_service_account_roles() {
+        let Some(db) = connect_test_database("rbac_sa_roles").await else {
+            return;
+        };
+        let role = make_role(
+            "role-sa1",
+            "sa-editor",
+            vec!["object:read".to_string(), "object:write".to_string()],
+        );
+        db.collection::<Role>(ROLES)
+            .insert_one(&role)
+            .await
+            .unwrap();
+
+        // A service account has NO users doc — only a service_accounts record.
+        let sa = make_sa(
+            "11111111-2222-3333-4444-555555555555",
+            vec!["role-sa1".to_string()],
+        );
+        db.collection::<ServiceAccount>(SERVICE_ACCOUNTS)
+            .insert_one(&sa)
+            .await
+            .unwrap();
+
+        let result = resolve_user_rbac(&db, &sa.id).await.unwrap();
+        assert_eq!(result.role_slugs, vec!["sa-editor"]);
+        assert!(result.group_slugs.is_empty()); // service accounts have no groups
+        assert!(result.permissions.contains(&"object:read".to_string()));
+        assert!(result.permissions.contains(&"object:write".to_string()));
+    }
+
+    #[tokio::test]
+    async fn resolve_user_rbac_unknown_principal_returns_empty() {
+        let Some(db) = connect_test_database("rbac_sa_neither").await else {
+            return;
+        };
+        // An id present in neither `users` nor `service_accounts` → empty (fail-closed).
+        let result = resolve_user_rbac(&db, "no-such-principal").await.unwrap();
+        assert!(result.role_slugs.is_empty());
+        assert!(result.permissions.is_empty());
     }
 
     #[tokio::test]

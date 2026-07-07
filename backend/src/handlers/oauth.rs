@@ -15,10 +15,11 @@ use crate::errors::{AppError, AppResult};
 use crate::handlers::admin_helpers::{extract_ip, extract_user_agent};
 use crate::models::authorization_code::{ExternalSubjectRef, validate_external_subject_params};
 use crate::models::consent::Consent;
+use crate::models::service_account::{COLLECTION_NAME as SERVICE_ACCOUNTS, ServiceAccount};
 use crate::models::service_account_token::{COLLECTION_NAME as SA_TOKENS, ServiceAccountToken};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
-use crate::mw::auth::{AuthUser, OptionalAuthUser};
+use crate::mw::auth::{AuthMethod, AuthUser, OptionalAuthUser};
 use crate::services::{
     audit_service, consent_service, oauth_broker_service, oauth_client_service,
     oauth_resource_service, oauth_service, par_service, service_account_service,
@@ -1991,18 +1992,14 @@ pub async fn userinfo(
     auth_user: AuthUser,
 ) -> AppResult<Json<UserinfoResponse>> {
     let user_id_str = auth_user.user_id.to_string();
-    let user = state
-        .db
-        .collection::<User>(USERS)
-        .find_one(doc! { "_id": &user_id_str })
-        .await?
-        .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
     // Check scopes from the access token claims
     let scopes: Vec<&str> = auth_user.scope.split_whitespace().collect();
     let include_roles = scopes.contains(&"roles");
     let include_groups = scopes.contains(&"groups");
 
+    // RBAC resolution is principal-aware (users OR service_accounts) so it works
+    // for both a human user and a service-account subject.
     let (roles, groups, permissions) = if include_roles || include_groups {
         let rbac =
             crate::services::rbac_helpers::resolve_user_rbac(&state.db, &user_id_str).await?;
@@ -2026,6 +2023,34 @@ pub async fn userinfo(
     } else {
         (None, None, None)
     };
+
+    // Service accounts have no users doc; build the subject from the SA record so
+    // an SA access token gets a 200 (with SA-resolved roles) instead of a 404.
+    if auth_user.auth_method == AuthMethod::ServiceAccount {
+        let sa = state
+            .db
+            .collection::<ServiceAccount>(SERVICE_ACCOUNTS)
+            .find_one(doc! { "_id": &user_id_str })
+            .await?
+            .ok_or_else(|| AppError::NotFound("Service account not found".to_string()))?;
+        return Ok(Json(UserinfoResponse {
+            sub: sa.id,
+            email: None,
+            email_verified: None,
+            name: Some(sa.name),
+            picture: None,
+            roles,
+            groups,
+            permissions,
+        }));
+    }
+
+    let user = state
+        .db
+        .collection::<User>(USERS)
+        .find_one(doc! { "_id": &user_id_str })
+        .await?
+        .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
     Ok(Json(UserinfoResponse {
         sub: user.id.to_string(),

@@ -2380,6 +2380,7 @@ pub async fn execute_tool(
     cloud_response_cache: &crate::services::cloud_response_cache::CloudResponseCache,
     exec_ctx: &McpExecContext<'_>,
 ) -> AppResult<(u16, String)> {
+    use crate::models::service_account::{COLLECTION_NAME as SERVICE_ACCOUNTS, ServiceAccount};
     use crate::models::user::{COLLECTION_NAME as USERS, User};
     use crate::services::node_ws_manager::{NodeProxyRequest, ProxyResponseType};
     use crate::services::{delegation_service, identity_service, node_service};
@@ -2560,17 +2561,31 @@ pub async fn execute_tool(
     // Build identity headers if configured on the service (CR-8)
     let mut identity_headers = Vec::new();
     if target.service.identity_propagation_mode != "none" {
-        let user = db
+        // Resolve the propagation principal — a human user OR a service account.
+        // MCP tool calls are reachable by SA tokens (authenticate_mcp accepts
+        // `claims.sa` and uses the SA id), and an SA has no users doc; without this
+        // fallback the identity token would never be emitted for an SA on this path.
+        let principal: Option<identity_service::Principal> = match db
             .collection::<User>(USERS)
             .find_one(doc! { "_id": user_id })
-            .await?;
+            .await?
+        {
+            Some(user) => Some(identity_service::Principal::from(&user)),
+            None => db
+                .collection::<ServiceAccount>(SERVICE_ACCOUNTS)
+                .find_one(doc! { "_id": user_id })
+                .await?
+                .as_ref()
+                .map(identity_service::Principal::from),
+        };
 
-        if let Some(ref user) = user {
+        if let Some(ref principal) = principal {
             if matches!(
                 target.service.identity_propagation_mode.as_str(),
                 "headers" | "both"
             ) {
-                identity_headers = identity_service::build_identity_headers(user, &target.service);
+                identity_headers =
+                    identity_service::build_identity_headers(principal, &target.service);
             }
 
             if matches!(
@@ -2580,7 +2595,7 @@ pub async fn execute_tool(
                 match identity_service::generate_identity_assertion(
                     jwt_keys,
                     config,
-                    user,
+                    principal,
                     &target.service,
                     db,
                 )
