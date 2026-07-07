@@ -13,10 +13,11 @@ use utoipa::ToSchema;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
+use crate::models::service_account::{COLLECTION_NAME as SERVICE_ACCOUNTS, ServiceAccount};
 use crate::models::service_billing::{BillingMetric, PlatformUsage, ResaleUsage};
 use crate::models::usage_meter::CredentialClass;
 use crate::models::user::{COLLECTION_NAME as USERS, User};
-use crate::mw::auth::AuthUser;
+use crate::mw::auth::{AuthMethod, AuthUser};
 use crate::services::node_ws_manager::{NodeProxyRequest, ProxyResponseType, StreamChunk};
 use crate::services::{
     approval_service, audit_service, chatgpt_translator, delegation_service, identity_service,
@@ -1671,18 +1672,35 @@ async fn execute_proxy_inner(
     let mut identity_headers = Vec::new();
 
     if target.service.identity_propagation_mode != "none" {
-        let user = state
-            .db
-            .collection::<User>(USERS)
-            .find_one(doc! { "_id": &user_id_str })
-            .await?;
+        // Resolve the propagation principal — a human user OR a service account —
+        // so identity is emitted for both. A service account has no `users` doc;
+        // detect it via the verified auth method and load the SA record instead.
+        let principal: Option<identity_service::Principal> =
+            if auth_user.auth_method == AuthMethod::ServiceAccount {
+                state
+                    .db
+                    .collection::<ServiceAccount>(SERVICE_ACCOUNTS)
+                    .find_one(doc! { "_id": &user_id_str })
+                    .await?
+                    .as_ref()
+                    .map(identity_service::Principal::from)
+            } else {
+                state
+                    .db
+                    .collection::<User>(USERS)
+                    .find_one(doc! { "_id": &user_id_str })
+                    .await?
+                    .as_ref()
+                    .map(identity_service::Principal::from)
+            };
 
-        if let Some(ref user) = user {
+        if let Some(ref principal) = principal {
             if matches!(
                 target.service.identity_propagation_mode.as_str(),
                 "headers" | "both"
             ) {
-                identity_headers = identity_service::build_identity_headers(user, &target.service);
+                identity_headers =
+                    identity_service::build_identity_headers(principal, &target.service);
             }
 
             if matches!(
@@ -1692,7 +1710,7 @@ async fn execute_proxy_inner(
                 match identity_service::generate_identity_assertion(
                     &state.jwt_keys,
                     &state.config,
-                    user,
+                    principal,
                     &target.service,
                     &state.db,
                 )
@@ -1710,6 +1728,12 @@ async fn execute_proxy_inner(
                     }
                 }
             }
+        } else {
+            tracing::warn!(
+                service_id = %service_id,
+                user_id = %user_id_str,
+                "No principal found for identity propagation"
+            );
         }
 
         match crate::services::rbac_helpers::resolve_user_rbac(&state.db, &user_id_str).await {

@@ -7,7 +7,44 @@ use crate::config::AppConfig;
 use crate::crypto::jwt::JwtKeys;
 use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::DownstreamService;
+use crate::models::service_account::ServiceAccount;
 use crate::models::user::User;
+
+/// A propagation principal — a human user OR a service account — reduced to the
+/// fields the identity path needs (subject, optional email/name, and the role/
+/// group ids used for RBAC). Lets identity headers and the identity assertion be
+/// built for either principal type without assuming a `users` document exists.
+pub struct Principal {
+    pub id: String,
+    pub email: Option<String>,
+    pub display_name: Option<String>,
+    pub role_ids: Vec<String>,
+    pub group_ids: Vec<String>,
+}
+
+impl From<&User> for Principal {
+    fn from(u: &User) -> Self {
+        Self {
+            id: u.id.clone(),
+            email: Some(u.email.clone()),
+            display_name: u.display_name.clone(),
+            role_ids: u.role_ids.clone(),
+            group_ids: u.group_ids.clone(),
+        }
+    }
+}
+
+impl From<&ServiceAccount> for Principal {
+    fn from(sa: &ServiceAccount) -> Self {
+        Self {
+            id: sa.id.clone(),
+            email: None, // service accounts have no email
+            display_name: Some(sa.name.clone()),
+            role_ids: sa.role_ids.clone(),
+            group_ids: Vec::new(), // no group membership for service accounts
+        }
+    }
+}
 
 /// Short-lived identity assertion JWT claims.
 #[derive(Debug, Serialize, Deserialize)]
@@ -69,7 +106,10 @@ fn sanitize_header_value(val: &str) -> String {
 }
 
 /// Build identity headers for a proxied request based on service configuration.
-pub fn build_identity_headers(user: &User, service: &DownstreamService) -> Vec<(String, String)> {
+pub fn build_identity_headers(
+    principal: &Principal,
+    service: &DownstreamService,
+) -> Vec<(String, String)> {
     let mode = service.identity_propagation_mode.as_str();
 
     if mode == "none" {
@@ -94,19 +134,22 @@ pub fn build_identity_headers(user: &User, service: &DownstreamService) -> Vec<(
     if service.identity_include_user_id {
         headers.push((
             "X-NyxID-User-Id".to_string(),
-            sanitize_header_value(&user.id),
+            sanitize_header_value(&principal.id),
         ));
     }
 
-    if service.identity_include_email {
+    // Email is optional on the principal (service accounts have none).
+    if service.identity_include_email
+        && let Some(ref email) = principal.email
+    {
         headers.push((
             "X-NyxID-User-Email".to_string(),
-            sanitize_header_value(&user.email),
+            sanitize_header_value(email),
         ));
     }
 
     if service.identity_include_name
-        && let Some(ref name) = user.display_name
+        && let Some(ref name) = principal.display_name
     {
         headers.push(("X-NyxID-User-Name".to_string(), sanitize_header_value(name)));
     }
@@ -123,7 +166,7 @@ pub fn build_identity_headers(user: &User, service: &DownstreamService) -> Vec<(
 pub async fn generate_identity_assertion(
     jwt_keys: &JwtKeys,
     config: &AppConfig,
-    user: &User,
+    principal: &Principal,
     service: &DownstreamService,
     db: &mongodb::Database,
 ) -> AppResult<String> {
@@ -134,22 +177,26 @@ pub async fn generate_identity_assertion(
         .as_deref()
         .unwrap_or(&service.base_url);
 
-    let rbac = super::rbac_helpers::resolve_user_rbac(db, &user.id).await?;
+    // Resolve RBAC from the principal's own role/group ids — works for both a
+    // human user and a service account (single source of truth).
+    let rbac =
+        super::rbac_helpers::resolve_rbac_from_ids(db, &principal.role_ids, &principal.group_ids)
+            .await?;
 
     let claims = IdentityAssertionClaims {
-        sub: user.id.clone(),
+        sub: principal.id.clone(),
         iss: config.jwt_issuer.clone(),
         aud: audience.to_string(),
         exp: now + 60, // 60-second lifetime
         iat: now,
         jti: Uuid::new_v4().to_string(),
         email: if service.identity_include_email {
-            Some(user.email.clone())
+            principal.email.clone()
         } else {
             None
         },
         name: if service.identity_include_name {
-            user.display_name.clone()
+            principal.display_name.clone()
         } else {
             None
         },
@@ -202,12 +249,62 @@ mod tests {
         }
     }
 
+    fn make_sa() -> crate::models::service_account::ServiceAccount {
+        crate::models::service_account::ServiceAccount {
+            id: "sa-123".to_string(),
+            name: "CI Bot".to_string(),
+            description: None,
+            client_id: "sa_client".to_string(),
+            client_secret_hash: "hash".to_string(),
+            secret_prefix: "sas_1234".to_string(),
+            role_ids: vec!["role-1".to_string()],
+            allowed_scopes: "openid profile".to_string(),
+            is_active: true,
+            rate_limit_override: None,
+            created_by: "admin-1".to_string(),
+            owner_user_id: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_authenticated_at: None,
+        }
+    }
+
+    #[test]
+    fn service_account_principal_shape() {
+        let principal = Principal::from(&make_sa());
+        assert_eq!(principal.id, "sa-123");
+        assert_eq!(principal.email, None); // service accounts have no email
+        assert_eq!(principal.display_name.as_deref(), Some("CI Bot"));
+        assert_eq!(principal.role_ids, vec!["role-1".to_string()]);
+        assert!(principal.group_ids.is_empty()); // no group membership for SAs
+    }
+
+    #[test]
+    fn service_account_headers_omit_email_even_when_requested() {
+        let mut svc = dummy_service();
+        svc.identity_propagation_mode = "headers".to_string();
+        svc.identity_include_user_id = true;
+        svc.identity_include_email = true; // requested, but an SA has no email
+        svc.identity_include_name = true;
+
+        let headers = build_identity_headers(&Principal::from(&make_sa()), &svc);
+        let names: Vec<&str> = headers.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"X-NyxID-User-Id"));
+        assert!(!names.contains(&"X-NyxID-User-Email")); // no email header despite the include flag
+        assert!(names.contains(&"X-NyxID-User-Name"));
+        let id_header = headers
+            .iter()
+            .find(|(n, _)| n == "X-NyxID-User-Id")
+            .unwrap();
+        assert_eq!(id_header.1, "sa-123");
+    }
+
     #[test]
     fn mode_none_returns_empty() {
         let user = make_user();
         let mut svc = dummy_service();
         svc.identity_propagation_mode = "none".to_string();
-        let headers = build_identity_headers(&user, &svc);
+        let headers = build_identity_headers(&Principal::from(&user), &svc);
         assert!(headers.is_empty());
     }
 
@@ -220,7 +317,7 @@ mod tests {
         svc.identity_include_name = false;
         svc.identity_include_user_id = false;
 
-        let headers = build_identity_headers(&user, &svc);
+        let headers = build_identity_headers(&Principal::from(&user), &svc);
         assert_eq!(headers.len(), 1);
         assert_eq!(headers[0].0, "X-NyxID-User-Email");
         assert_eq!(headers[0].1, "alice@example.com");
@@ -238,7 +335,7 @@ mod tests {
         // All flags off means no identity headers at runtime (a misconfiguration
         // that is caught by a warning log). The provisioning layer is responsible
         // for setting sensible defaults when copying from catalog.
-        let headers = build_identity_headers(&user, &svc);
+        let headers = build_identity_headers(&Principal::from(&user), &svc);
         assert!(headers.is_empty());
     }
 
@@ -251,7 +348,7 @@ mod tests {
         svc.identity_include_email = true;
         svc.identity_include_name = true;
 
-        let headers = build_identity_headers(&user, &svc);
+        let headers = build_identity_headers(&Principal::from(&user), &svc);
         let names: Vec<&str> = headers.iter().map(|(n, _)| n.as_str()).collect();
         assert!(names.contains(&"X-NyxID-User-Id"));
         assert!(names.contains(&"X-NyxID-User-Email"));
@@ -267,7 +364,7 @@ mod tests {
         svc.identity_propagation_mode = "headers".to_string();
         svc.identity_include_email = true;
 
-        let headers = build_identity_headers(&user, &svc);
+        let headers = build_identity_headers(&Principal::from(&user), &svc);
         let email_header = headers
             .iter()
             .find(|(n, _)| n == "X-NyxID-User-Email")
@@ -287,7 +384,7 @@ mod tests {
         svc.identity_include_email = false;
         svc.identity_include_name = true;
 
-        let headers = build_identity_headers(&user, &svc);
+        let headers = build_identity_headers(&Principal::from(&user), &svc);
         let name_header = headers
             .iter()
             .find(|(n, _)| n == "X-NyxID-User-Name")
@@ -312,7 +409,7 @@ mod tests {
         svc.identity_include_email = false;
         svc.identity_include_name = true;
 
-        let headers = build_identity_headers(&user, &svc);
+        let headers = build_identity_headers(&Principal::from(&user), &svc);
         let name_header = headers
             .iter()
             .find(|(n, _)| n == "X-NyxID-User-Name")
@@ -331,7 +428,7 @@ mod tests {
         svc.identity_include_email = false;
         svc.identity_include_name = true;
 
-        let headers = build_identity_headers(&user, &svc);
+        let headers = build_identity_headers(&Principal::from(&user), &svc);
         let name_header = headers
             .iter()
             .find(|(n, _)| n == "X-NyxID-User-Name")
@@ -350,7 +447,7 @@ mod tests {
         svc.identity_include_email = true;
         svc.identity_include_name = true;
 
-        let headers = build_identity_headers(&user, &svc);
+        let headers = build_identity_headers(&Principal::from(&user), &svc);
         let user_id_header = headers
             .iter()
             .find(|(n, _)| n == "X-NyxID-User-Id")
