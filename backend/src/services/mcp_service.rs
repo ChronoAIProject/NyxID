@@ -2566,11 +2566,13 @@ pub async fn execute_tool(
             .await?;
 
         if let Some(ref user) = user {
+            let principal = identity_service::Principal::from(user);
             if matches!(
                 target.service.identity_propagation_mode.as_str(),
                 "headers" | "both"
             ) {
-                identity_headers = identity_service::build_identity_headers(user, &target.service);
+                identity_headers =
+                    identity_service::build_identity_headers(&principal, &target.service);
             }
 
             if matches!(
@@ -2580,7 +2582,7 @@ pub async fn execute_tool(
                 match identity_service::generate_identity_assertion(
                     jwt_keys,
                     config,
-                    user,
+                    &principal,
                     &target.service,
                     db,
                 )

@@ -7,6 +7,7 @@ use crate::crypto::jwt::{IdTokenAuthContext, RbacClaimData};
 use crate::errors::AppResult;
 use crate::models::group::{COLLECTION_NAME as GROUPS, Group};
 use crate::models::role::{COLLECTION_NAME as ROLES, Role};
+use crate::models::service_account::{COLLECTION_NAME as SERVICE_ACCOUNTS, ServiceAccount};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 
 /// Resolved RBAC data for a user, ready to inject into JWT claims.
@@ -16,36 +17,56 @@ pub struct UserRbacData {
     pub permissions: Vec<String>,
 }
 
-/// Fetch and resolve all RBAC data for a user.
+/// Fetch and resolve all RBAC data for a principal (human user OR service account).
 ///
-/// Collects directly-assigned roles, group-inherited roles, and flattened
-/// permissions. Performs at most 3 MongoDB queries.
+/// Looks the id up in `users` first; if there is no users doc, falls back to
+/// `service_accounts` so a service account's directly-assigned `role_ids` resolve
+/// too (single source of truth — SAs are never seeded into `users`). Returns
+/// empty RBAC only when the id matches neither collection. Service accounts have
+/// no group membership. Performs at most 3 MongoDB queries.
 pub async fn resolve_user_rbac(db: &mongodb::Database, user_id: &str) -> AppResult<UserRbacData> {
-    let user = db
+    if let Some(user) = db
         .collection::<User>(USERS)
         .find_one(doc! { "_id": user_id })
-        .await?;
+        .await?
+    {
+        return resolve_rbac_from_ids(db, &user.role_ids, &user.group_ids).await;
+    }
 
-    let user = match user {
-        Some(u) => u,
-        None => {
-            return Ok(UserRbacData {
-                role_slugs: vec![],
-                group_slugs: vec![],
-                permissions: vec![],
-            });
-        }
-    };
+    // Principal-aware fallback: a service account has no users doc; resolve its
+    // directly-assigned roles from the service_accounts record (SAs have no groups).
+    if let Some(sa) = db
+        .collection::<ServiceAccount>(SERVICE_ACCOUNTS)
+        .find_one(doc! { "_id": user_id })
+        .await?
+    {
+        return resolve_rbac_from_ids(db, &sa.role_ids, &[]).await;
+    }
 
+    Ok(UserRbacData {
+        role_slugs: vec![],
+        group_slugs: vec![],
+        permissions: vec![],
+    })
+}
+
+/// Resolve a set of directly-assigned role ids + group ids into role slugs,
+/// group slugs, and flattened+deduplicated permissions. Shared by human users
+/// and service-account principals so both resolve through identical machinery.
+pub async fn resolve_rbac_from_ids(
+    db: &mongodb::Database,
+    role_ids: &[String],
+    group_ids: &[String],
+) -> AppResult<UserRbacData> {
     // Collect all role IDs: direct + group-inherited
-    let mut all_role_ids: HashSet<String> = user.role_ids.iter().cloned().collect();
+    let mut all_role_ids: HashSet<String> = role_ids.iter().cloned().collect();
 
-    // Get user's groups and their role_ids
-    let groups: Vec<Group> = if user.group_ids.is_empty() {
+    // Get the principal's groups and their role_ids
+    let groups: Vec<Group> = if group_ids.is_empty() {
         vec![]
     } else {
         db.collection::<Group>(GROUPS)
-            .find(doc! { "_id": { "$in": &user.group_ids } })
+            .find(doc! { "_id": { "$in": group_ids } })
             .await?
             .try_collect()
             .await?
