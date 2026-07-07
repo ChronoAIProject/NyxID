@@ -616,6 +616,36 @@ describe("ConnectVerifyStep — loading events + Done", () => {
     expect(screen.getByRole("button", { name: /^Done$/i })).toBeEnabled();
   });
 
+  it("shell env snippet also renders for OpenRouter (OpenAI-shaped, vendor/model IDs)", async () => {
+    vi.spyOn(window, "fetch").mockResolvedValue(proxied(200));
+
+    const user = userEvent.setup();
+    render(
+      <ConnectVerifyStep
+        createdKey={{
+          ...CREATED_KEY,
+          slug: "llm-openrouter",
+          catalogSlug: "llm-openrouter",
+          serviceName: "OpenRouter",
+        }}
+        isNodeRouted={false}
+        onDone={vi.fn()}
+      />,
+    );
+    await mintKey(user);
+
+    // llm-openrouter is registered in PROBE_REGISTRY, so the Test
+    // button must be offered...
+    await user.click(screen.getByRole("button", { name: /Test Agent Key/i }));
+
+    // ...and on probe success the OPENAI_* env snippet renders because
+    // OpenRouter speaks the OpenAI Chat Completions API.
+    await waitFor(() =>
+      expect(screen.getByText("Shell env")).toBeInTheDocument(),
+    );
+    expect(document.body.textContent ?? "").toMatch(/OPENAI_BASE_URL=/);
+  });
+
   it("Done in probe_success calls onDone", async () => {
     vi.spyOn(window, "fetch").mockResolvedValue(proxied(200));
 

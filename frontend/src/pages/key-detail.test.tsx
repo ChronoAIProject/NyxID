@@ -559,6 +559,26 @@ describe("KeyDetailPage — API usage section", () => {
     );
     expect(mockToastSuccess).toHaveBeenCalledWith("Proxy URL copied");
   });
+
+  it("shows a vendor-prefixed model example for OpenRouter keys", () => {
+    hooks.key.data = makeKey({
+      label: "My OpenRouter",
+      slug: "llm-openrouter",
+      endpoint_url: "https://openrouter.ai/api/v1",
+      catalog_service_slug: "llm-openrouter",
+      catalog_service_name: "OpenRouter API",
+    });
+
+    render(<KeyDetailPage />);
+
+    // OpenRouter rejects bare model IDs — the curl example must use the
+    // `vendor/model` form, and the generic "replace gpt-4o with your
+    // provider's model" note must NOT render (the example is already
+    // provider-correct).
+    const body = document.body.textContent ?? "";
+    expect(body).toContain('"model":"openai/gpt-4o"');
+    expect(body).not.toMatch(/with your provider('|’)s model/);
+  });
 });
 
 describe("KeyDetailPage — org read-only branch", () => {

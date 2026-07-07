@@ -20,7 +20,7 @@ import type { ApiKeyCreateResponse } from "@/types/api";
 // OPENAI_API_KEY / OPENAI_BASE_URL env-var snippet. The reliability
 // of the probe itself is driven by proxy-probe.ts, not this pattern.
 const OPENAI_SHAPED_HINTS =
-  /(openai|anthropic|claude|gemini|deepseek|groq|together|mistral|fireworks|perplexity|cohere|xai|grok)/i;
+  /(openai|openrouter|anthropic|claude|gemini|deepseek|groq|together|mistral|fireworks|perplexity|cohere|xai|grok)/i;
 
 /**
  * Phase machine — every transition is gated by an explicit user click

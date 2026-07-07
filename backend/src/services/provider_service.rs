@@ -4675,6 +4675,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn seeded_openrouter_resolves_via_llm_gateway_provider_slug() {
+        let Some(db) = seed_default_catalog("prov_seed_openrouter_llm_route").await else {
+            return;
+        };
+        // The docs guide points OpenAI-compatible tools at
+        // /api/v1/llm/openrouter/v1/... — that route resolves by PROVIDER
+        // slug and then finds the linked llm-* service. Guard the whole
+        // chain so a seed rename can't silently break the documented URL.
+        let (service, provider) =
+            crate::services::llm_gateway_service::resolve_llm_service_by_slug(&db, "openrouter")
+                .await
+                .expect("openrouter must resolve on the /llm/{provider_slug} route");
+        assert_eq!(provider.slug, "openrouter");
+        assert_eq!(service.slug, "llm-openrouter");
+        assert_eq!(service.base_url, "https://openrouter.ai/api/v1");
+    }
+
+    #[tokio::test]
     async fn seed_default_services_seeds_openclaw_capabilities() {
         let Some(db) = seed_default_catalog("prov_seed_openclaw_caps").await else {
             return;
