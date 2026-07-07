@@ -289,7 +289,14 @@ fn validate_delegation_scope(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{
+        Router,
+        body::{Body, to_bytes},
+        http::{Method, Request, StatusCode, header},
+        routing::any,
+    };
     use chrono::Utc;
+    use tower::ServiceExt;
 
     #[test]
     fn validate_delegation_scope_allows_subset() {
@@ -389,20 +396,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exchange_token_copies_subject_service_restrictions() {
+    async fn exchange_token_copies_subject_service_restrictions_and_proxy_denies_out_of_scope() {
         let Some(db) =
             crate::test_utils::connect_test_database("token_exchange_restriction_propagation")
                 .await
         else {
             return;
         };
-        let config = crate::test_utils::test_app_config();
-        let jwt_keys = crate::test_utils::cached_test_jwt_keys();
+        let state = crate::test_utils::test_app_state(db.clone());
+        let config = state.config.clone();
+        let jwt_keys = state.jwt_keys.clone();
         let user_id = Uuid::new_v4();
         let client_id = "restricted-token-exchange-client";
         let client_secret = "secret";
-        let resources = vec!["http://localhost:3001/api/v1/proxy/s/openai".to_string()];
-        let allowed_service_ids = vec!["svc-allowed".to_string()];
+        let allowed_service_id = Uuid::new_v4().to_string();
+        let denied_service_id = Uuid::new_v4().to_string();
+        let resources = vec![format!(
+            "{}/api/v1/proxy/s/allowed-service",
+            config.base_url
+        )];
+        let allowed_service_ids = vec![allowed_service_id.clone()];
         let now = Utc::now();
 
         db.collection::<User>(USERS)
@@ -422,7 +435,7 @@ mod tests {
                 grant_types: "authorization_code refresh_token".to_string(),
                 client_type: "confidential".to_string(),
                 is_active: true,
-                delegation_scopes: "llm:proxy".to_string(),
+                delegation_scopes: "llm:proxy proxy".to_string(),
                 broker_capability_enabled: false,
                 revocation_webhook_url: None,
                 revocation_webhook_secret_encrypted: None,
@@ -432,6 +445,50 @@ mod tests {
             })
             .await
             .expect("insert oauth client");
+        let allowed_endpoint = crate::test_utils::test_user_endpoint(
+            &Uuid::new_v4().to_string(),
+            &user_id.to_string(),
+            "Allowed Service",
+            "http://127.0.0.1:9",
+            None,
+            None,
+        );
+        let denied_endpoint = crate::test_utils::test_user_endpoint(
+            &Uuid::new_v4().to_string(),
+            &user_id.to_string(),
+            "Denied Service",
+            "http://127.0.0.1:9",
+            None,
+            None,
+        );
+        let allowed_service = crate::test_utils::test_user_service(
+            &allowed_service_id,
+            &user_id.to_string(),
+            "allowed-service",
+            &allowed_endpoint.id,
+            None,
+            None,
+        );
+        let denied_service = crate::test_utils::test_user_service(
+            &denied_service_id,
+            &user_id.to_string(),
+            "denied-service",
+            &denied_endpoint.id,
+            None,
+            None,
+        );
+        db.collection::<crate::models::user_endpoint::UserEndpoint>(
+            crate::models::user_endpoint::COLLECTION_NAME,
+        )
+        .insert_many([allowed_endpoint, denied_endpoint])
+        .await
+        .expect("insert user endpoints");
+        db.collection::<crate::models::user_service::UserService>(
+            crate::models::user_service::COLLECTION_NAME,
+        )
+        .insert_many([allowed_service, denied_service])
+        .await
+        .expect("insert user services");
         consent_service::grant_consent_with_services(
             &db,
             &user_id.to_string(),
@@ -466,7 +523,7 @@ mod tests {
             client_secret,
             &subject_token,
             "urn:ietf:params:oauth:token-type:access_token",
-            Some("llm:proxy"),
+            Some("proxy"),
         )
         .await
         .expect("exchange token");
@@ -476,5 +533,35 @@ mod tests {
         assert_eq!(claims.resources, Some(resources));
         assert_eq!(claims.allowed_service_ids, Some(allowed_service_ids));
         assert_eq!(claims.allow_all_services, Some(false));
+
+        let app = Router::new()
+            .route(
+                "/proxy/s/{slug}/{*path}",
+                any(crate::handlers::proxy::proxy_request_by_slug),
+            )
+            .with_state(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/proxy/s/denied-service/status")
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("Bearer {}", exchanged.access_token),
+                    )
+                    .body(Body::empty())
+                    .expect("build proxy request"),
+            )
+            .await
+            .expect("proxy request should return a response");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("read error body");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("parse error response");
+        assert_eq!(payload["error"], "api_key_scope_forbidden");
+        assert_eq!(payload["error_code"], 9000);
     }
 }
