@@ -302,6 +302,32 @@ pub struct AccessTokenRestrictions<'a> {
     pub allowed_service_ids: &'a [String],
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct TokenRestrictionClaims {
+    pub resources: Option<Vec<String>>,
+    pub allowed_service_ids: Option<Vec<String>>,
+    pub allow_all_services: Option<bool>,
+}
+
+impl TokenRestrictionClaims {
+    pub fn from_claims(claims: &Claims) -> Self {
+        Self {
+            resources: claims.resources.clone(),
+            allowed_service_ids: claims.allowed_service_ids.clone(),
+            allow_all_services: claims.allow_all_services,
+        }
+    }
+
+    pub fn from_auth_user(auth_user: &crate::mw::auth::AuthUser) -> Self {
+        Self {
+            resources: auth_user.resource_uris.clone(),
+            allowed_service_ids: (!auth_user.allow_all_services)
+                .then(|| auth_user.allowed_service_ids.clone()),
+            allow_all_services: Some(auth_user.allow_all_services),
+        }
+    }
+}
+
 /// Generate an access token for the given user.
 // Access token issuance carries optional TTL, RBAC, DPoP, and mTLS knobs.
 // Keeping these explicit avoids hiding security-sensitive claim inputs.
@@ -610,6 +636,7 @@ pub fn generate_delegated_access_token(
     scope: &str,
     acting_client_id: &str,
     ttl_secs: i64,
+    restrictions: Option<&TokenRestrictionClaims>,
 ) -> Result<String, AppError> {
     let now = Utc::now().timestamp();
 
@@ -639,9 +666,9 @@ pub fn generate_delegated_access_token(
         relay_allowed_node_ids: None,
         relay_allow_all_services: None,
         relay_allow_all_nodes: None,
-        resources: None,
-        allowed_service_ids: None,
-        allow_all_services: None,
+        resources: restrictions.and_then(|r| r.resources.as_ref().cloned()),
+        allowed_service_ids: restrictions.and_then(|r| r.allowed_service_ids.as_ref().cloned()),
+        allow_all_services: restrictions.and_then(|r| r.allow_all_services),
     };
 
     let mut header = Header::new(Algorithm::RS256);
@@ -1429,6 +1456,7 @@ mod tests {
             "llm:proxy",
             "test-client-id",
             300,
+            None,
         )
         .unwrap();
 
@@ -1442,11 +1470,72 @@ mod tests {
     }
 
     #[test]
+    fn delegated_token_carries_resource_restrictions() {
+        let (keys, config) = test_keys_and_config();
+        let user_id = Uuid::new_v4();
+        let restrictions = TokenRestrictionClaims {
+            resources: Some(vec![
+                "http://localhost:3001/api/v1/proxy/s/openai".to_string(),
+            ]),
+            allowed_service_ids: Some(vec!["svc-1".to_string()]),
+            allow_all_services: Some(false),
+        };
+        let token = generate_delegated_access_token(
+            &keys,
+            &config,
+            &user_id,
+            "llm:proxy",
+            "test-client-id",
+            300,
+            Some(&restrictions),
+        )
+        .unwrap();
+
+        let claims = verify_token(&keys, &config, &token).unwrap();
+        assert_eq!(claims.resources, restrictions.resources);
+        assert_eq!(claims.allowed_service_ids, restrictions.allowed_service_ids);
+        assert_eq!(claims.allow_all_services, restrictions.allow_all_services);
+    }
+
+    #[test]
+    fn token_restriction_claims_from_auth_user_preserves_resources() {
+        let resources = Some(vec![
+            "http://localhost:3001/api/v1/proxy/s/openai".to_string(),
+        ]);
+        let allowed_service_ids = vec!["svc-1".to_string()];
+        let auth_user = crate::mw::auth::AuthUser {
+            user_id: Uuid::new_v4(),
+            session_id: None,
+            scope: "llm:proxy".to_string(),
+            acting_client_id: Some("test-client-id".to_string()),
+            approval_owner_user_id: None,
+            auth_method: crate::mw::auth::AuthMethod::Delegated,
+            allow_all_services: false,
+            allow_all_nodes: true,
+            allowed_service_ids: allowed_service_ids.clone(),
+            resource_uris: resources.clone(),
+            allowed_node_ids: vec![],
+            api_key_id: None,
+            api_key_name: None,
+            rate_limit_per_second: None,
+            rate_limit_burst: None,
+            ip_address: None,
+            user_agent: None,
+        };
+
+        let restrictions = TokenRestrictionClaims::from_auth_user(&auth_user);
+
+        assert_eq!(restrictions.resources, resources);
+        assert_eq!(restrictions.allowed_service_ids, Some(allowed_service_ids));
+        assert_eq!(restrictions.allow_all_services, Some(false));
+    }
+
+    #[test]
     fn delegated_token_respects_ttl() {
         let (keys, config) = test_keys_and_config();
         let user_id = Uuid::new_v4();
         let token =
-            generate_delegated_access_token(&keys, &config, &user_id, "llm:proxy", "svc", 60)
+            generate_delegated_access_token(&keys, &config, &user_id, "llm:proxy", "svc", 60, None)
                 .unwrap();
 
         let claims = verify_token(&keys, &config, &token).unwrap();

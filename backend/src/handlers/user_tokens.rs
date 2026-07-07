@@ -1250,6 +1250,7 @@ mod tests {
             allow_all_services: true,
             allow_all_nodes: true,
             allowed_service_ids: vec![],
+            resource_uris: None,
             allowed_node_ids: vec![],
             api_key_id: None,
             api_key_name: None,

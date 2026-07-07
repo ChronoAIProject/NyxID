@@ -109,6 +109,7 @@ pub async fn exchange_token(
     // Step 6: Issue delegated access token (short-lived: 5 minutes)
     let user_uuid = Uuid::parse_str(user_id_str)
         .map_err(|e| AppError::Internal(format!("Invalid user_id in subject token: {e}")))?;
+    let restrictions = jwt::TokenRestrictionClaims::from_claims(&subject_claims);
     let delegated_token = jwt::generate_delegated_access_token(
         jwt_keys,
         config,
@@ -116,6 +117,7 @@ pub async fn exchange_token(
         &scope,
         client_id,
         DELEGATED_TOKEN_TTL_SECS,
+        Some(&restrictions),
     )?;
 
     Ok(TokenExchangeResponse {
@@ -152,6 +154,7 @@ pub async fn refresh_delegation_token(
     user_id: &str,
     acting_client_id: &str,
     scope: &str,
+    restrictions: &jwt::TokenRestrictionClaims,
 ) -> AppResult<DelegationRefreshResponse> {
     // Verify user still exists and is active
     let user = db
@@ -222,6 +225,7 @@ pub async fn refresh_delegation_token(
         &validated_scope,
         acting_client_id,
         DELEGATED_TOKEN_TTL_SECS,
+        Some(restrictions),
     )?;
 
     Ok(DelegationRefreshResponse {
@@ -285,6 +289,7 @@ fn validate_delegation_scope(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
 
     #[test]
     fn validate_delegation_scope_allows_subset() {
@@ -381,5 +386,95 @@ mod tests {
         assert_eq!(resp.expires_in, 900);
         assert_eq!(resp.scope, "llm:proxy");
         assert_eq!(resp.user_id, "user_1");
+    }
+
+    #[tokio::test]
+    async fn exchange_token_copies_subject_service_restrictions() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("token_exchange_restriction_propagation")
+                .await
+        else {
+            return;
+        };
+        let config = crate::test_utils::test_app_config();
+        let jwt_keys = crate::test_utils::cached_test_jwt_keys();
+        let user_id = Uuid::new_v4();
+        let client_id = "restricted-token-exchange-client";
+        let client_secret = "secret";
+        let resources = vec!["http://localhost:3001/api/v1/proxy/s/openai".to_string()];
+        let allowed_service_ids = vec!["svc-allowed".to_string()];
+        let now = Utc::now();
+
+        db.collection::<User>(USERS)
+            .insert_one(crate::test_utils::test_user(
+                &user_id.to_string(),
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .expect("insert user");
+        db.collection::<OauthClient>(OAUTH_CLIENTS)
+            .insert_one(OauthClient {
+                id: client_id.to_string(),
+                client_name: "Restricted Token Exchange".to_string(),
+                client_secret_hash: crate::crypto::token::hash_token(client_secret),
+                redirect_uris: vec!["http://localhost/callback".to_string()],
+                allowed_scopes: "openid".to_string(),
+                grant_types: "authorization_code refresh_token".to_string(),
+                client_type: "confidential".to_string(),
+                is_active: true,
+                delegation_scopes: "llm:proxy".to_string(),
+                broker_capability_enabled: false,
+                revocation_webhook_url: None,
+                revocation_webhook_secret_encrypted: None,
+                created_by: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .expect("insert oauth client");
+        consent_service::grant_consent_with_services(
+            &db,
+            &user_id.to_string(),
+            client_id,
+            "openid",
+            Some(allowed_service_ids.clone()),
+        )
+        .await
+        .expect("grant consent");
+
+        let subject_token = jwt::generate_access_token(
+            &jwt_keys,
+            &config,
+            &user_id,
+            "openid proxy",
+            None,
+            None,
+            None,
+            None,
+            Some(jwt::AccessTokenRestrictions {
+                resources: &resources,
+                allowed_service_ids: &allowed_service_ids,
+            }),
+        )
+        .expect("generate restricted subject token");
+
+        let exchanged = exchange_token(
+            &db,
+            &config,
+            &jwt_keys,
+            client_id,
+            client_secret,
+            &subject_token,
+            "urn:ietf:params:oauth:token-type:access_token",
+            Some("llm:proxy"),
+        )
+        .await
+        .expect("exchange token");
+
+        let claims = jwt::verify_token(&jwt_keys, &config, &exchanged.access_token)
+            .expect("verify delegated token");
+        assert_eq!(claims.resources, Some(resources));
+        assert_eq!(claims.allowed_service_ids, Some(allowed_service_ids));
+        assert_eq!(claims.allow_all_services, Some(false));
     }
 }
