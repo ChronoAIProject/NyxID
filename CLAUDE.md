@@ -1,6 +1,6 @@
 ## Project Overview
 
-NyxID is an Auth/SSO platform (similar to Supabase Auth) with a Rust backend, React frontend, and CLI tools. It provides user authentication, OAuth/OIDC, MFA, credential brokering, admin management, and MCP proxy capabilities. The `nyxid` CLI covers all user-facing operations (services, keys, catalog, nodes, approvals, SSH, MCP, notifications) and also includes the `nyxid node` subcommand for managing on-premise credential nodes.
+NyxID is an Auth/SSO platform (similar to Supabase Auth) with a Rust backend, React frontend, and CLI tools: user authentication, OAuth/OIDC, MFA, credential brokering, admin management, and MCP proxy. The `nyxid` CLI covers all user-facing operations (services, keys, catalog, nodes, approvals, SSH, MCP, notifications) and includes `nyxid node` for managing on-premise credential nodes.
 
 **Tech Stack:**
 - **Backend:** Rust, Axum 0.8, MongoDB 8.0 (`mongodb` 3.5, `bson` 2.15)
@@ -9,276 +9,159 @@ NyxID is an Auth/SSO platform (similar to Supabase Auth) with a Rust backend, Re
 - **SDK:** TypeScript OAuth 2.0 client (`@nyxids/oauth-core`, `@nyxids/oauth-react`)
 - **Dev tools:** Docker Compose (MongoDB + Mailpit), RSA keys for JWT signing
 
+Deep-dive docs live in `docs/` -- notably ENV.md, ORACLE_RELAY.md, AGENT_ISOLATION.md, CHANNEL_BOT_RELAY.md, CHANNEL_EVENT_GATEWAY.md, NODE_PROXY_ARCHITECTURE.md, OPENCLAW_INTEGRATION.md, API_DISCOVERY.md, SSH_NODE_KEY_AUTH.md. Read the relevant doc before working in that subsystem.
+
 ## Critical Rules
 
 ### 1. MongoDB Model Conventions
 
 - NEVER use `#[serde(skip_serializing)]` on model fields -- prevents `insert_one(&struct)` from storing them
-- ALWAYS use `#[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]` on `DateTime<Utc>` fields
-- For `Option<DateTime<Utc>>`, use the custom `bson_datetime::optional` helper (in `models/bson_datetime.rs`)
-- IDs are UUID v4 stored as strings in MongoDB `_id` fields
-- Each model has a `COLLECTION_NAME` constant
+- ALWAYS use `#[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]` on `DateTime<Utc>` fields; for `Option<DateTime<Utc>>` use the `bson_datetime::optional` helper (`models/bson_datetime.rs`)
+- IDs are UUID v4 stored as strings in MongoDB `_id`; each model has a `COLLECTION_NAME` constant
 
 ### 2. Layer Architecture
 
 Strict separation: `handlers/` -> `services/` -> `models/`
-- **models/** -- Plain structs with serde, `COLLECTION_NAME` constant, no business logic
-- **services/** -- Business logic, takes `&mongodb::Database` and `&str` for IDs
-- **handlers/** -- HTTP layer, converts `AuthUser.user_id` (Uuid) to string for services, uses dedicated response structs (never serialize model structs to API responses)
-- **crypto/jwt.rs** -- JWT functions take `&Uuid` (kept for signing)
-- **token_service** -- Parses `&str` to `Uuid` internally for JWT generation
-- **unified_key_service** -- Orchestration layer for the streamlined services architecture; auto-provisions UserEndpoint + UserApiKey + UserService from catalog or custom input in a single operation
+- **models/** -- plain serde structs, `COLLECTION_NAME`, no business logic
+- **services/** -- business logic; takes `&mongodb::Database` and `&str` for IDs
+- **handlers/** -- HTTP layer; converts `AuthUser.user_id` (Uuid) to string for services; dedicated response structs (never serialize model structs to API responses)
+- **crypto/jwt.rs** takes `&Uuid` (kept for signing); **token_service** parses `&str` to `Uuid` internally
+- **unified_key_service** -- orchestration layer for the streamlined services architecture; auto-provisions UserEndpoint + UserApiKey + UserService from catalog or custom input in one operation
 
 ### 3. Error Handling
 
-Backend uses `AppError` enum (`errors/mod.rs`) with `thiserror`:
-```rust
-fn my_handler() -> AppResult<Json<MyResponse>> {
-    // AppResult<T> = Result<T, AppError>
-}
-```
-Error variants map to HTTP status codes and numeric error codes; see `backend/src/errors/mod.rs` for the authoritative list. Internal/database errors never leak details to clients.
+`AppError` enum (`errors/mod.rs`, `thiserror`); handlers return `AppResult<T> = Result<T, AppError>`. Variants map to HTTP status codes and numeric error codes; `backend/src/errors/mod.rs` is the authoritative list. Internal/database errors never leak details to clients.
 
-Reserved device-code binding errors live in numeric block 9500-9599.
+**Reserved numeric code blocks** (single source of truth -- do not duplicate these tables elsewhere):
+- 1011-1019 SSH node-key/auth-mode: 1011 `SshNodeKeyMissing`, 1012 `SshHostKeyMismatch`, 1013 `SshNodeExecChannelClosed`, 1014 `SshPrincipalAmbiguous`, 1015 `SshAuthModeUnsupportedForOperation`
+- 8000-8005 node/proxy: 8000 `NodeNotFound`, 8001 `NodeOffline`, 8002 `NodeProxyTimeout`, 8003 `NodeRegistrationFailed`, 8004 `NodeCredentialMissing`, 8005 `WsProxyDownstream`
+- 8006-8011 pending-credential protocol: 8006 `PendingCredentialDecryptFailed`, 8007 `PendingCredentialVersionUnsupported`, 8008 `PendingCredentialCiphertextTooLarge`, 8009 `PendingCredentialPubkeyAwaiting`, 8010 `PendingCredentialNodeOffline`, 8011 `PendingCredentialQueueFull`
+- 9500-9599 device-code binding: 9500 `DeviceCodeNotFound`, 9501 `DeviceCodeExpired`, 9502 `DevicePollSignatureInvalid`, 9503 `DeviceUserCodeInvalid`, 9504 `DeviceCodePending`, 9505 `DeviceCodeAlreadyDelivered`, 9506 `DeviceCodeRateLimited`, 9507 `DeviceCodeLocked`, 9508 `DeviceCodeSlowDown`
+- 11000-11099 oracle relay: 11000 `OraclePoolNotFound`, 11001 `OraclePoolSlugTaken`, 11002 `OraclePoolInactive`, 11003 `OracleWorkerTokenInvalid`, 11004 `OracleQueueFull`, 11005 `OracleQuotaExceeded`, 11006 `OracleTaskNotFound`, 11007 `OracleSessionNotFound`, 11008 `OracleSessionClosed`, 11009 `OraclePayloadTooLarge`, 11010 `OracleExtractDisabled`
+- 11100 `AnonymousIncompatibleService` (HTTP 400)
+- 11200-11207 auth-device login: 11200 `AuthDeviceCodeNotFound`, 11201 `AuthDeviceCodeExpired`, 11202 `AuthDeviceCodePending`, 11203 `AuthDeviceCodeSlowDown`, 11204 `AuthDeviceCodeDenied`, 11205 `AuthDeviceCodeAlreadyDelivered`, 11206 `AuthDeviceCodeRateLimited`, 11207 `AuthDeviceUserCodeInvalid`
 
 ### 4. Frontend Patterns
 
-- Validation with Zod schemas (`schemas/` directory, one per domain)
-- React Hook Form with `@hookform/resolvers` for form handling
-- TanStack Query hooks in `hooks/` (one per domain: `use-auth.ts`, `use-services.ts`, `use-keys.ts`, etc.)
-- Auth state in Zustand store (`stores/auth-store.ts`)
-- UI components via Radix UI + shadcn/ui pattern (`components/ui/`)
-- No `console.log` in production code
+- Zod schemas in `schemas/` (one per domain); React Hook Form + `@hookform/resolvers`
+- TanStack Query hooks in `hooks/` (one per domain: `use-auth.ts`, `use-services.ts`, ...); auth state in Zustand (`stores/auth-store.ts`)
+- UI components via Radix UI + shadcn/ui pattern (`components/ui/`); no `console.log` in production code
 
 ### 5. Security
 
-- No hardcoded secrets -- environment variables for all sensitive data
-- AES-256 envelope encryption with pluggable async `KeyProvider` trait (`crypto/aes.rs`, `crypto/key_provider.rs`)
-- Cloud KMS support: AWS KMS (`crypto/aws_kms_provider.rs`, feature `aws-kms`) and GCP Cloud KMS (`crypto/gcp_kms_provider.rs`, feature `gcp-kms`) behind feature flags
-- Fallback provider for zero-downtime migration between encryption backends
-- All key material in `Zeroizing` wrappers; all Debug impls redact secrets and key identifiers
-- `MAX_WRAPPED_DEK_SIZE = 1024` enforced on encrypt and decrypt paths
-- Rate limiting middleware (`mw/rate_limit.rs`)
-- Security headers middleware (`mw/security_headers.rs`)
-- JWT auth middleware (`mw/auth.rs`)
-- PKCE for OAuth flows
-- Input validation on all endpoints
-- Audit logs are tamper-evident for new rows via HMAC-SHA256 hash chaining (`services/audit_chain_service.rs`). New `AuditLog` rows must set `seq`, `prev_hash`, and `entry_hash` through the audit service append path; legacy rows without `seq` are counted by verification as pre-chain rows, not backfilled. `AUDIT_CHAIN_HMAC_KEY` is an optional 64-hex override; otherwise the key is domain-derived from `ENCRYPTION_KEY` or the JWT private key. v1 does not detect tail truncation without external head anchoring.
-- Enabled anonymous catalog endpoints are valid only when the catalog service has `identity_propagation_mode = "none"`, `forward_access_token = false`, and `inject_delegation_token = false`; disabled draft rules may be stored on any service. Admin writes that violate this return `AppError::AnonymousIncompatibleService`, HTTP 400, code 11100. Public execution still force-strips identity propagation, access-token forwarding, delegation-token injection, and downstream auth defaults as defense in depth.
+- No hardcoded secrets -- env vars for all sensitive data; input validation on all endpoints; PKCE for OAuth flows
+- AES-256 envelope encryption with pluggable async `KeyProvider` trait (`crypto/aes.rs`, `crypto/key_provider.rs`); AWS KMS (`crypto/aws_kms_provider.rs`, feature `aws-kms`) and GCP Cloud KMS (`crypto/gcp_kms_provider.rs`, feature `gcp-kms`); fallback provider for zero-downtime migration between encryption backends
+- All key material in `Zeroizing` wrappers; all Debug impls redact secrets and key identifiers; `MAX_WRAPPED_DEK_SIZE = 1024` enforced on encrypt and decrypt paths
+- Middleware: rate limiting (`mw/rate_limit.rs`), security headers (`mw/security_headers.rs`), JWT auth (`mw/auth.rs`)
+- Audit logs are tamper-evident for new rows via HMAC-SHA256 hash chaining (`services/audit_chain_service.rs`): new `AuditLog` rows must set `seq`, `prev_hash`, `entry_hash` through the audit service append path; legacy rows without `seq` count as pre-chain, not backfilled. `AUDIT_CHAIN_HMAC_KEY` is an optional 64-hex override; otherwise the key is domain-derived from `ENCRYPTION_KEY` or the JWT private key. v1 does not detect tail truncation without external head anchoring.
+- Anonymous catalog endpoints may be enabled only when the service has `identity_propagation_mode = "none"`, `forward_access_token = false`, and `inject_delegation_token = false` (disabled draft rules may be stored on any service); violating admin writes return `AppError::AnonymousIncompatibleService` (400, code 11100). Public execution still force-strips identity propagation, access-token forwarding, delegation-token injection, and downstream auth defaults as defense in depth.
 
 ### 5a. Vendor URN Namespace
 
-NyxID-vendored URN types live under `urn:nyxid:params:oauth:<category>:<name>`. The `params:oauth` infix mirrors the IETF style at `urn:ietf:params:oauth:*` so generic OAuth vendor-extension parsers recognize the suffix shape. Currently registered:
+NyxID-vendored URN types live under `urn:nyxid:params:oauth:<category>:<name>` (the `params:oauth` infix mirrors `urn:ietf:params:oauth:*` so generic vendor-extension parsers recognize the shape). Registered:
 
-- `urn:nyxid:params:oauth:token-type:binding-id` — RFC 8693 subject_token_type identifying an `OauthBrokerBinding` handle. Used at `/oauth/token` with `grant_type=urn:ietf:params:oauth:grant-type:token-exchange`.
+- `urn:nyxid:params:oauth:token-type:binding-id` -- RFC 8693 subject_token_type identifying an `OauthBrokerBinding` handle; used at `/oauth/token` with `grant_type=urn:ietf:params:oauth:grant-type:token-exchange`.
 
 Add new entries here when introducing additional vendored URN types.
 
 ### 6. Node Proxy Conventions
 
-- `NodeWsManager` is an in-memory connection pool shared via `Arc` in `AppState`; uses `DashMap` for lock-free concurrent access
-- `Node.user_id` is the polymorphic owner field, matching `UserService` / `UserApiKey`: it may point to a person user or an org user (`user_type=Org`). Do not add a separate `org_id` to node-related models; use `org_service::resolve_owner_access(actor, node.user_id)` for ACL.
-- Registration tokens carry the chosen owner at mint time; admin role is verified at issuance, not at redemption. A revoked admin can still complete a node registration within the token TTL (default 1h, `NODE_REGISTRATION_TOKEN_TTL_SECS`). Operators removing org admins should also delete pending registration tokens for that owner.
-- Node auth tokens (`nyx_nauth_...`) and registration tokens (`nyx_nreg_...`) are 32-byte random values; only SHA-256 hashes are stored
-- HMAC signing secrets are generated at registration; stored as SHA-256 hashes on server, encrypted locally on the node agent
+- `NodeWsManager`: in-memory connection pool shared via `Arc` in `AppState`; `DashMap` for lock-free concurrent access
+- `Node.user_id` is the polymorphic owner field (person or org user, matching `UserService`/`UserApiKey`). Do not add a separate `org_id` to node-related models; ACL via `org_service::resolve_owner_access(actor, node.user_id)`.
+- Registration tokens carry the chosen owner at mint time; admin role is verified at issuance, not redemption -- a revoked admin can still complete registration within the token TTL (default 1h, `NODE_REGISTRATION_TOKEN_TTL_SECS`). When removing org admins, also delete their pending registration tokens.
+- Node auth tokens (`nyx_nauth_...`) and registration tokens (`nyx_nreg_...`) are 32 random bytes; only SHA-256 hashes stored. HMAC signing secrets are generated at registration: SHA-256 hash on server, encrypted locally on the node agent.
 - WebSocket handler (`handlers/node_ws.rs`) authenticates in the first message, not via HTTP middleware
-- Proxy routing check (`node_routing_service::resolve_node_route`) runs before credential resolution in `execute_proxy()`; returns `NodeRoute` with `fallback_node_ids` for multi-node failover
-- Streaming proxy uses `proxy_response_start` / chunk frames / `proxy_response_end`; preferred chunk transport is a WebSocket binary frame with a 36-byte request_id prefix, with legacy `proxy_response_chunk` JSON fallback for older servers
-- Node metrics (`node_metrics_service`) are recorded asynchronously (fire-and-forget) after each proxy request; stored as embedded `NodeMetrics` document on the Node model
-- Node-routed audit events include `"routed_via": "node"` and `"node_id"` in event data
-- Error codes 8000-8005 are occupied by node/proxy-node errors:
-  - 8000 `NodeNotFound`
-  - 8001 `NodeOffline`
-  - 8002 `NodeProxyTimeout`
-  - 8003 `NodeRegistrationFailed`
-  - 8004 `NodeCredentialMissing`
-  - 8005 `WsProxyDownstream`
-- Error codes 8006-8011 are reserved for remote credential injection pending-credential protocol outcomes:
-  - 8006 `PendingCredentialDecryptFailed`
-  - 8007 `PendingCredentialVersionUnsupported`
-  - 8008 `PendingCredentialCiphertextTooLarge`
-  - 8009 `PendingCredentialPubkeyAwaiting`
-  - 8010 `PendingCredentialNodeOffline`
-  - 8011 `PendingCredentialQueueFull`
-- Error codes 1011-1019 are reserved for SSH-specific node-key/auth-mode errors:
-  - 1011 `SshNodeKeyMissing`
-  - 1012 `SshHostKeyMismatch`
-  - 1013 `SshNodeExecChannelClosed`
-  - 1014 `SshPrincipalAmbiguous`
-  - 1015 `SshAuthModeUnsupportedForOperation`
-- Error codes 9500-9599 are reserved for device-code binding:
-  - 9500 `DeviceCodeNotFound`
-  - 9501 `DeviceCodeExpired`
-  - 9502 `DevicePollSignatureInvalid`
-  - 9503 `DeviceUserCodeInvalid`
-  - 9504 `DeviceCodePending`
-  - 9505 `DeviceCodeAlreadyDelivered`
-  - 9506 `DeviceCodeRateLimited`
-  - 9507 `DeviceCodeLocked`
-  - 9508 `DeviceCodeSlowDown`
-- Error codes 11200-11207 are reserved for auth-device login:
-  - 11200 `AuthDeviceCodeNotFound`
-  - 11201 `AuthDeviceCodeExpired`
-  - 11202 `AuthDeviceCodePending`
-  - 11203 `AuthDeviceCodeSlowDown`
-  - 11204 `AuthDeviceCodeDenied`
-  - 11205 `AuthDeviceCodeAlreadyDelivered`
-  - 11206 `AuthDeviceCodeRateLimited`
-  - 11207 `AuthDeviceUserCodeInvalid`
-- `NodeStatus` is an enum (`Online`/`Offline`/`Draining`) -- not a bare string
-- WS writer channels are bounded (capacity: 256); `try_send` treats full buffers as node offline (H4)
-- WebSocket auth-frame injection rules live on `DownstreamService.ws_frame_injections` and `UserService.ws_frame_injections`; they are additive and separate from HTTP `auth_method` injection. `WsFrameDirection` is the trigger direction, so a `downstream` rule matches frames from the service and injects the configured response back toward that service. Direct and node-routed WS paths emit metadata-only `ws_frame_auth_injected` audit events; never log injected payloads or credentials.
-- SSH services use `ssh_auth_mode` (`cert`, `node_key`, `proxy_only`) instead of deriving behavior from `certificate_auth_enabled` alone. Legacy `certificate_auth_enabled=true` maps to `cert`; `false` maps to `proxy_only`. Node-key SSH credentials live only in the node-local encrypted store and are keyed by `(service_slug, principal)`; their configured `host_key_sha256` is enforced by the russh client. Cert-mode `ssh exec` and browser terminal sessions also run through russh on the node agent, present the backend-issued ephemeral private key + OpenSSH user certificate, and verify the target host key against a node-local TOFU store at `ssh_cert_host_keys.toml` in the node config dir. Existing cert-mode pins are enforced on every session; a changed key returns `SshHostKeyMismatch` (1012) and emits `ssh_host_key_mismatch` audit. Manage cert-mode pins on the node with `nyxid node ssh cert-host-key list|pin|forget` (`pin` pre-seeds or replaces an explicit SHA256 fingerprint; `forget` is the legitimate host-key rotation recovery path). The node agent reloads this tiny store during host-key verification, so CLI `pin`/`forget` applies to a running daemon without restart. `ssh proxy` is unsupported for `node_key`; use `ssh exec` or the browser terminal.
+- `node_routing_service::resolve_node_route` runs before credential resolution in `execute_proxy()`; returns `NodeRoute` with `fallback_node_ids` for multi-node failover
+- Streaming proxy: `proxy_response_start` / chunk frames / `proxy_response_end`; preferred chunk transport is a WS binary frame with a 36-byte request_id prefix, with legacy `proxy_response_chunk` JSON fallback for older servers
+- Node metrics (`node_metrics_service`) recorded fire-and-forget after each proxy request; stored as embedded `NodeMetrics` document on the Node model. Node-routed audit events include `"routed_via": "node"` and `"node_id"`.
+- `NodeStatus` is an enum (`Online`/`Offline`/`Draining`) -- not a bare string. WS writer channels are bounded (capacity 256); `try_send` treats full buffers as node offline (H4).
+- WS auth-frame injection rules live on `DownstreamService.ws_frame_injections` and `UserService.ws_frame_injections`; additive, separate from HTTP `auth_method` injection. `WsFrameDirection` is the trigger direction: a `downstream` rule matches frames from the service and injects the configured response back toward it. Direct and node-routed WS paths emit metadata-only `ws_frame_auth_injected` audit events; never log injected payloads or credentials.
+- SSH services use `ssh_auth_mode` (`cert` | `node_key` | `proxy_only`); legacy `certificate_auth_enabled` true/false maps to `cert`/`proxy_only`. Node-key credentials live only in the node-local encrypted store, keyed by `(service_slug, principal)`, with configured `host_key_sha256` enforced by the russh client. Cert-mode `ssh exec` and browser terminal also run through russh on the node agent (backend-issued ephemeral private key + OpenSSH user certificate) and verify target host keys against a node-local TOFU store `ssh_cert_host_keys.toml` in the node config dir; pins are enforced on every session, and a changed key returns `SshHostKeyMismatch` (1012) + `ssh_host_key_mismatch` audit. Manage pins with `nyxid node ssh cert-host-key list|pin|forget` (`pin` pre-seeds/replaces a SHA256 fingerprint; `forget` is the legitimate rotation recovery path; the store is live-reloaded, so no daemon restart). `ssh proxy` is unsupported for `node_key` -- use `ssh exec` or the browser terminal.
 - Admin node endpoints (`handlers/admin_nodes.rs`) require admin role and have no ownership check
-- `nyxid node daemon` subcommands manage background service lifecycle (`cli/src/node/daemon.rs`): `install` creates a launchd LaunchAgent on macOS or systemd user unit on Linux; `start`/`stop`/`restart`/`status`/`logs`/`uninstall` wrap platform service managers
-- All node commands support `--profile` for multi-instance operation. Profile-aware service labels: `dev.nyxid.node.{profile}` (macOS) / `nyxid-node-{profile}.service` (Linux). Config stored at `~/.nyxid-node/profiles/{name}/`
+- `nyxid node daemon` manages background service lifecycle (`cli/src/node/daemon.rs`): launchd LaunchAgent on macOS / systemd user unit on Linux. All node commands support `--profile` for multi-instance: service labels `dev.nyxid.node.{profile}` (macOS) / `nyxid-node-{profile}.service` (Linux), config at `~/.nyxid-node/profiles/{name}/`.
 
 ### 7. OpenClaw Integration
 
-OpenClaw is a self-hosted AI gateway that NyxID integrates with at three levels:
+OpenClaw is a self-hosted AI gateway integrated at three levels (details: `docs/OPENCLAW_INTEGRATION.md`):
 
-**Provider (Option 1):** OpenClaw is seeded as an `api_key` provider with `requires_gateway_url: true`. Users connect by providing their gateway URL + bearer token. The `UserProviderToken.gateway_url` field stores the per-user instance URL. `proxy_service::resolve_gateway_url_override()` resolves this URL at proxy time, overriding the service's default `base_url`.
+1. **Provider**: seeded as an `api_key` provider with `requires_gateway_url: true`; users supply gateway URL + bearer token. `UserProviderToken.gateway_url` stores the per-user instance URL; `proxy_service::resolve_gateway_url_override()` overrides the service's default `base_url` at proxy time.
+2. **Node proxy**: `nyxid node openclaw` stores credentials locally, registers the provider connection, and creates the node service binding in one step. Flow: NyxID -> node agent (WS) -> local OpenClaw; the node agent injects the bearer token from its credential store.
+3. **Channels**: `openclaw_channel_service` handles inbound webhooks from OpenClaw channels (WhatsApp, Telegram, Discord, ...); `openclaw_channel_mappings` maps channel users to NyxID users, each with its own per-user webhook secret (SHA-256 hash stored, raw secret returned once). No server-level env var needed.
 
-**Node Proxy (Option 2):** The node agent has an `openclaw` subcommand that stores credentials locally, registers the provider connection with NyxID, and creates the node service binding in one step. Proxy requests flow: NyxID -> node agent (WS) -> local OpenClaw instance. The node agent injects the bearer token via the credential store.
+Key files: `services/openclaw_channel_service.rs`, `handlers/openclaw_channel.rs`, `models/user_provider_token.rs` (`gateway_url`), `models/provider_config.rs` (`requires_gateway_url`).
 
-**Channel Integration (Option 3):** `openclaw_channel_service` handles inbound webhook messages from OpenClaw channels (WhatsApp, Telegram, Discord, etc.). `openclaw_channel_mappings` collection maps channel users to NyxID users. Each mapping has its own per-user webhook secret (SHA-256 hash stored, raw secret returned once at creation). No server-level env var needed.
-
-Key files:
-- `services/openclaw_channel_service.rs` -- HMAC verification, user mapping, provider slug resolution
-- `handlers/openclaw_channel.rs` -- Webhook endpoint + mapping CRUD
-- `models/user_provider_token.rs` -- `gateway_url` field for per-user instance URLs
-- `models/provider_config.rs` -- `requires_gateway_url` flag for self-hosted providers
 ### 8. Streamlined Services Architecture
 
-The services/connections/providers system was unified into 3 user-managed collections with a single orchestration layer. Old collections are kept for backward compatibility during migration.
+Services/connections/providers were unified into 3 user-managed collections plus one orchestration layer; old collections are kept for backward compatibility during migration.
 
-**New user collections:**
-- `user_endpoints` -- target URLs (custom or auto-provisioned from catalog)
-- `user_api_keys` -- external credentials (API keys, OAuth tokens, bearer tokens)
-- `user_services` -- proxy routing config (binds endpoint + key + auth method + optional node + identity propagation + custom User-Agent override)
+- Collections: `user_endpoints` (target URLs, custom or from catalog), `user_api_keys` (external credentials: API keys, OAuth tokens, bearer tokens), `user_services` (proxy routing config: endpoint + key + auth method + optional node + identity propagation + custom User-Agent override)
+- `unified_key_service` auto-provisions all 3 records from a single `POST /api/v1/keys` request, using catalog defaults or user-provided values
+- Proxy resolution checks `UserService` first (by slug + user_id), then falls back to the legacy `DownstreamService` + `UserProviderToken` path for unmigrated users
+- Proxy User-Agent: client UA is forwarded as-is by default; `UserService.custom_user_agent` / `DownstreamService.custom_user_agent` overrides it in all four proxy paths (direct HTTP, node HTTP, direct WS, node WS). Use for downstreams whose WAFs block SDK UA strings (e.g. `OpenAI/Python`).
+- `ApiKey` scope fields (absorbed from the deleted `AgentGroup` model): `allowed_service_ids`, `allowed_node_ids`, `allow_all_services`, `allow_all_nodes`; enforced at proxy time via `key_service`
+- Frontend: unified "AI Services" page at `/keys` with 2 tabs (External Services; NyxID API Keys with scope). Services/Connections/Providers removed from the normal user sidebar (admin-only); old `/api-keys` page deleted.
+- Legacy models kept for migration: DownstreamService (now the read-only catalog), UserServiceConnection, UserProviderToken, UserProviderCredentials, NodeServiceBinding (node routing absorbed into `UserService.node_id`)
 
-**Orchestration:** `unified_key_service` auto-provisions all 3 records from a single `POST /api/v1/keys` request, using catalog defaults or user-provided values.
-
-**Proxy resolution:** New path checks `UserService` first (by slug + user_id), falls back to old `DownstreamService` + `UserProviderToken` path for unmigrated users.
-
-**Proxy User-Agent:** By default, the client's `User-Agent` header is forwarded as-is (passthrough). When `UserService.custom_user_agent` or `DownstreamService.custom_user_agent` is set, it overrides the client UA on outgoing requests. Applied in all four proxy paths: direct HTTP, node HTTP, direct WS, node WS. Use this for downstreams whose WAFs block SDK-specific UA strings (e.g. `OpenAI/Python`).
-
-**ApiKey scope fields** (absorbed from deleted `AgentGroup` model): `allowed_service_ids`, `allowed_node_ids`, `allow_all_services`, `allow_all_nodes`. Enforced at proxy time via `key_service`.
-
-**Frontend:** Unified "AI Services" page at `/keys` with 2 tabs: External Services (UserEndpoint + UserApiKey + UserService) and NyxID API Keys (ApiKey with scope). Services/Connections/Providers removed from normal user sidebar (admin-only). Old `/api-keys` page deleted.
-
-**Old models kept for migration:** DownstreamService (now serves as read-only catalog), UserServiceConnection, UserProviderToken, UserProviderCredentials, NodeServiceBinding (node routing absorbed into `UserService.node_id`).
-
-Key files:
-- `services/unified_key_service.rs` -- orchestration: auto-provision endpoint + key + service
-- `services/catalog_service.rs` -- read-only catalog from DownstreamService, `list_catalog_all` for full discovery
-- `handlers/keys.rs` -- `/api/v1/keys` CRUD
-- `handlers/catalog.rs` -- `/api/v1/catalog` read-only, `/api/v1/catalog/{slug}/endpoints` for OpenAPI endpoint discovery
-- `models/user_endpoint.rs`, `models/user_api_key.rs`, `models/user_service.rs` -- new user collections
+Key files: `services/unified_key_service.rs`, `services/catalog_service.rs` (`list_catalog_all`), `handlers/keys.rs`, `handlers/catalog.rs`, `models/user_{endpoint,api_key,service}.rs`.
 
 ### 9. Agent Isolation
 
-Per-agent credential binding, rate limiting, and audit attribution for AI agents. Each agent (Claude Code, Codex, OpenClaw, etc.) uses its own scoped API key (`nyxid_ag_` prefix) for isolation.
+Per-agent credential binding, rate limiting, and audit attribution: each agent (Claude Code, Codex, OpenClaw, ...) uses its own scoped API key (`nyxid_ag_` prefix). Details: `docs/AGENT_ISOLATION.md`.
 
-**Backend:**
-- `AuthUser` carries `api_key_id`, `api_key_name`, `rate_limit_per_second`, `rate_limit_burst` when auth is via API key
-- `ApiKey` model has `rate_limit_per_second`, `rate_limit_burst`, `platform` fields
-- `AuditLog` model has `api_key_id`, `api_key_name` for per-agent attribution
-- `AgentServiceBinding` collection maps `(api_key_id, user_service_id)` to an override `user_api_key_id`
-- Proxy handler checks `agent_service_bindings` before credential injection; falls back to service default if no binding exists
-- `PerAgentRateLimiter` in `mw/rate_limit.rs` provides per-API-key rate limit buckets (1-second sliding window)
-- Proxy responses include `X-NyxID-Agent-Id` header when request was made with an API key
+- `AuthUser` carries `api_key_id`, `api_key_name`, `rate_limit_per_second`, `rate_limit_burst` when auth is via API key; `ApiKey` has `rate_limit_per_second`, `rate_limit_burst`, `platform`; `AuditLog` has `api_key_id`, `api_key_name` for attribution
+- `AgentServiceBinding` maps `(api_key_id, user_service_id)` to an override `user_api_key_id`; the proxy handler checks bindings before credential injection and falls back to the service default
+- `PerAgentRateLimiter` (`mw/rate_limit.rs`): per-API-key buckets, 1-second sliding window. Proxy responses include `X-NyxID-Agent-Id` when the request used an API key.
+- CLI: `--profile` flag on `AuthArgs`, `LoginArgs`, `BaseUrlArgs`, and all node commands (env `NYXID_PROFILE`); token storage `~/.nyxid/profiles/{name}/` (default profile uses `~/.nyxid/`); profile names 1-64 chars, alphanumeric + hyphens + underscores
+- `nyxid api-key create --platform` and `nyxid api-key bind` manage agent identities (consolidated from former `ai-setup agent` subcommands)
+- `--org` flags accept UUID, slug, or display name, resolved in that order: UUID locally, slug via `GET /orgs/{slug}`, display name via one `GET /orgs` fetch (errors with candidate rows when ambiguous). Org users have an auto-generated `slug` (visible in `nyxid org list`). `nyxid service add-ssh` also accepts `--org` for org-owned SSH services.
+- Frontend: API key detail page has platform selector, rate limit editor, and bindings CRUD; the key table shows platform and bindings count
 
-**CLI:**
-- `--profile` flag on `AuthArgs`, `LoginArgs`, `BaseUrlArgs`, and all node commands (env: `NYXID_PROFILE`)
-- Profile-aware token storage: `~/.nyxid/profiles/{name}/` (default profile uses `~/.nyxid/`)
-- Profile name validation: 1-64 chars, alphanumeric + hyphens + underscores only
-- Node multi-instance: profile-aware service labels (`dev.nyxid.node.{profile}` / `nyxid-node-{profile}.service`)
-- `nyxid api-key create --platform`, `nyxid api-key bind` commands for managing agent identities (consolidated from former `ai-setup agent` subcommands)
-- Organization `--org` flags accept UUID, slug, or display name. The CLI resolves in that order: UUID returns locally, slug calls `GET /orgs/{slug}`, and display-name lookup fetches `GET /orgs` once and errors with candidate rows when ambiguous. Org users have an auto-generated `slug`, visible in `nyxid org list`.
-- `nyxid service add-ssh` also accepts `--org` and creates org-owned SSH services the same way `nyxid service add` creates org-owned HTTP services.
-
-**Frontend:**
-- API key detail page shows platform selector, rate limit editor, and credential bindings CRUD
-- API key table shows platform and bindings count columns
-
-Key files:
-- `models/agent_service_binding.rs` -- per-agent credential override model
-- `services/agent_binding_service.rs` -- binding CRUD + credential override lookup
-- `handlers/agent_bindings.rs` -- REST endpoints under `/api/v1/api-keys/{id}/bindings`
-- `services/proxy_service.rs` -- `resolve_agent_credential_override()` for proxy-time binding lookup
-- `cli/src/commands/api_key.rs` -- API key management + credential binding commands
-- `frontend/src/hooks/use-agent-bindings.ts` -- TanStack Query hooks for bindings CRUD
-- `frontend/src/schemas/agent-bindings.ts` -- Zod schemas for bindings and rate limits
+Key files: `models/agent_service_binding.rs`, `services/agent_binding_service.rs`, `handlers/agent_bindings.rs`, `services/proxy_service.rs` (`resolve_agent_credential_override`), `cli/src/commands/api_key.rs`, `frontend/src/hooks/use-agent-bindings.ts`, `frontend/src/schemas/agent-bindings.ts`.
 
 ### 10. Catalog Metadata and Endpoint Discovery
 
-Rich metadata on `DownstreamService` for AI agent discovery (issue #148). Agents can discover service docs, repos, capabilities, and API endpoints from the catalog without guessing.
+Rich metadata on `DownstreamService` so agents can discover service docs, repos, capabilities, and API endpoints without guessing (issue #148; details: `docs/API_DISCOVERY.md`).
 
-**Model fields** (on `DownstreamService`):
-- `homepage_url`, `repository_url`, `issues_url` -- validated URLs for docs/source/issues
-- `capabilities` -- `ServiceCapabilities` struct with boolean flags: `supports_proxy_read`, `supports_proxy_write`, `supports_proxy_binary_upload`, `supports_direct_downstream_auth`, `supports_authoring_via_nyx`, `supports_websocket`, `supports_streaming`
-- `auth_notes`, `known_limitations` -- freeform text (max 4096 chars)
-- `required_permissions` -- array of permission strings (max 100 entries, 256 chars each)
-
-**API:**
-- `GET /api/v1/catalog?include_all=true` -- includes system services without auth (default filters to connectable services only)
-- `GET /api/v1/catalog/{slug}/endpoints` -- fetches and parses OpenAPI spec via hardened `api_docs_service::fetch_spec_json` (DNS pinning, 5MB limit, 60s cache), returns structured endpoint list
-- Admin `POST/PUT /services` accepts all metadata fields with URL validation and length limits
-
-**CLI:**
-- `nyxid catalog list --all` -- includes system services
-- `nyxid catalog show <slug>` -- displays links, capabilities, auth notes, limitations, permissions
-- `nyxid catalog endpoints <slug>` -- lists parsed OpenAPI endpoints in table format
-
-**Frontend:**
-- Service edit page: "Service Metadata" section with URL inputs, auth notes, limitations, permissions, and capability toggle switches
-- Service detail page: "Service Metadata" section with links, notes, permissions, and capability badges
-
-**Legacy migration:** `migrate_legacy_api_spec_url()` runs at startup to rename `api_spec_url` -> `openapi_spec_url` and remove duplicates. Update handler includes `$unset: { api_spec_url: "" }` as belt-and-suspenders.
+- Fields: `homepage_url` / `repository_url` / `issues_url` (validated URLs); `capabilities` (`ServiceCapabilities` boolean flags: `supports_proxy_read`, `supports_proxy_write`, `supports_proxy_binary_upload`, `supports_direct_downstream_auth`, `supports_authoring_via_nyx`, `supports_websocket`, `supports_streaming`); `auth_notes` / `known_limitations` (max 4096 chars); `required_permissions` (max 100 entries, 256 chars each)
+- API: `GET /api/v1/catalog?include_all=true` includes system services without auth (default filters to connectable); `GET /api/v1/catalog/{slug}/endpoints` fetches + parses the OpenAPI spec via hardened `api_docs_service::fetch_spec_json` (DNS pinning, 5MB limit, 60s cache); admin `POST/PUT /services` accepts all metadata fields with URL validation and length limits
+- CLI: `nyxid catalog list --all`, `nyxid catalog show <slug>`, `nyxid catalog endpoints <slug>`. Frontend: "Service Metadata" sections on the service edit and detail pages.
+- Legacy: `migrate_legacy_api_spec_url()` runs at startup to rename `api_spec_url` -> `openapi_spec_url` and remove duplicates; the update handler also includes `$unset: { api_spec_url: "" }`.
 
 ### 11. Oracle Relay (browser LLM pools)
 
-Generic async task relay that lets any NyxID user/agent call a browser-driven LLM (ChatGPT Pro, etc.) through NyxID. A logged-in ChatGPT tab running the `integrations/oracle/nyxid_oracle.user.js` userscript is a **worker**; a **pool** is the capacity unit that owns the worker token. Consumers submit prompts via `/api/v1/oracle` and poll for answers; the browser/LLM specifics live entirely in the userscript, so the backend stays a neutral relay. See `docs/ORACLE_RELAY.md`.
+Generic async task relay: any NyxID user/agent calls a browser-driven LLM (ChatGPT Pro, etc.) via `/api/v1/oracle`. A logged-in ChatGPT tab running a worker client is a **worker**; a **pool** is the capacity unit that owns the worker token. Consumers submit prompts and poll for answers; browser/LLM specifics live entirely in the worker, so the backend stays a neutral relay. Full design: `docs/ORACLE_RELAY.md`.
 
-- **Models** (all UUID-string `_id`, `COLLECTION_NAME`): `oracle_pool` (polymorphic `user_id` owner like Node/UserService; `visibility` = private/org/platform; `worker_token_hash`; quotas), `oracle_task` (prompt/response bodies + lease + status + TTL `expires_at`), `oracle_session` (multi-turn `conv_…`), `oracle_worker` (tab presence, id = `{pool_id}:{label}`).
-- **Queue** (`oracle_task_service`): MongoDB-backed, no in-memory state — any instance serves any request. FIFO claim via `find_one_and_update` sorted by `created_at`; `task_timeout_secs` lease (default 4h) refreshed by `ack` heartbeats; expired leases requeue to the FIFO front (preserved `created_at`, the Mongo analogue of the local servers' `appendleft`); idempotent re-claim survives mid-task tab reload; `client_ref` gives submitter-scoped submit idempotency (partial unique index); empty/`ERROR:`-prefixed results → `failed` (extraction-failure detection).
-- **Worker token** `nyx_owk_…` (32 random bytes, SHA-256 stored, shown once, rotatable). Worker endpoints (`/api/v1/oracle/worker/{task,ack,result,pin-conv-url}`) authenticate by Bearer token **inside the handler**, mounted outside JWT middleware like `/api/v1/node-agent`. `ack` returning `{status:"cancelled"}` is the cancellation back-channel.
+- **Models** (all UUID-string `_id`, `COLLECTION_NAME`): `oracle_pool` (polymorphic `user_id` owner like Node/UserService; `visibility` = private/org/platform; `worker_token_hash`; quotas), `oracle_task` (prompt/response bodies + lease + status + TTL `expires_at`), `oracle_session` (multi-turn `conv_...`), `oracle_worker` (tab presence, id = `{pool_id}:{label}`)
+- **Queue** (`oracle_task_service`): MongoDB-backed, no in-memory state -- any instance serves any request. FIFO claim via `find_one_and_update` sorted by `created_at`; `task_timeout_secs` lease (default 4h) refreshed by `ack` heartbeats; expired leases requeue to the FIFO front (preserved `created_at`); idempotent re-claim survives mid-task tab reload; `client_ref` gives submitter-scoped submit idempotency (partial unique index); empty or `ERROR:`-prefixed results -> `failed`
+- **Worker token** `nyx_owk_...` (32 random bytes, SHA-256 stored, shown once, rotatable). Worker endpoints (`/api/v1/oracle/worker/{task,ack,result,pin-conv-url}`) authenticate by Bearer token inside the handler, mounted outside JWT middleware. `ack` returning `{status:"cancelled"}` is the cancellation back-channel.
 - **ACL**: `oracle_pool_service::ensure_can_submit` gates by visibility via `org_service::resolve_owner_access`; `ensure_can_manage` (owner/org-admin) gates pool mutation + token rotation. Unauthorized task/session reads return a not-found-shaped error (don't leak existence).
-- **Privacy**: prompt/response bodies live only on the task doc (TTL `ORACLE_TASK_RETENTION_DAYS`, default 30); audit + tracing are metadata-only (ids/sizes/outcomes), never the prompt or answer — same discipline as WS frame injection.
-- **Error codes 11000-11099** (oracle relay): 11000 `OraclePoolNotFound`, 11001 `OraclePoolSlugTaken`, 11002 `OraclePoolInactive`, 11003 `OracleWorkerTokenInvalid`, 11004 `OracleQueueFull`, 11005 `OracleQuotaExceeded`, 11006 `OracleTaskNotFound`, 11007 `OracleSessionNotFound`, 11008 `OracleSessionClosed`, 11009 `OraclePayloadTooLarge`, 11010 `OracleExtractDisabled`.
-- **Attach/scrape (bidirectional)**: `OracleTask.kind` (`prompt`|`scrape`) + `OracleSession.origin` (`nyxid`|`imported`), both serde-defaulted. `POST /pools/{slug}/attach {chatgpt_url}` mints an imported session + a `kind=scrape` control task; the worker navigates to the URL, `extractFullTranscript()` scrapes every turn, and `POST /oracle/worker/transcript` imports them as completed (user,assistant) turns (atomic claim-guard, staggered `created_at` for order). `list_session_tasks` hides `kind=scrape` tasks. So an existing ChatGPT conversation becomes a first-class session: read via `oracle session`, continue via `oracle ask --conversation`.
-- **CLI**: `nyxid oracle ask` (submit + poll; `--no-wait`, `--pdf`, `--new-conversation`/`--conversation`, `--client-ref`), `oracle attach <pool> <url>` (import existing conversation), `oracle result/cancel/status/sessions/session/close-session`, `oracle pool create/list/show/update/rotate-token`.
-- **Browser worker — two interchangeable clients, same worker API**: (a) `integrations/oracle/nyxid_oracle.user.js` — Tampermonkey userscript forked from newmath `bedc-deep` (DOM core verbatim; only GM config `nyxid_base_url`/`nyxid_worker_token`/`nyxid_worker_label`, `?nyx=N`→`tab_N`, + Bearer networking rewritten; project pinning server-driven via pool `chatgpt_project_url`). (b) `integrations/oracle/cdp-worker/` — Node + `playwright-core` daemon that `connectOverCDP`s to the user's real logged-in Chrome (launched with `--remote-debugging-port`), reuses the same extractors via `page.evaluate`, needs **no backend change**. CDP worker = lower friction (no extension, runs as daemon, drives real Chrome session); userscript = zero local process. Computer-use agents (Operator/Claude/Gemini) were evaluated as a transport but rejected for this task (slower/costlier, still hits the same Cloudflare); backend-API/session-token rejected (PoW + continuous verification, fragile, ToS).
+- **Privacy**: prompt/response bodies live only on the task doc (TTL `ORACLE_TASK_RETENTION_DAYS`, default 30); audit + tracing are metadata-only (ids/sizes/outcomes), never the prompt or answer -- same discipline as WS frame injection
+- **Attach/scrape**: `OracleTask.kind` (`prompt`|`scrape`) + `OracleSession.origin` (`nyxid`|`imported`), both serde-defaulted. `POST /pools/{slug}/attach {chatgpt_url}` mints an imported session + a `kind=scrape` control task; the worker scrapes the full transcript and `POST /oracle/worker/transcript` imports it as completed (user,assistant) turns (atomic claim-guard, staggered `created_at` for order). `list_session_tasks` hides scrape tasks. An existing ChatGPT conversation thus becomes a first-class session (`oracle session`, `oracle ask --conversation`).
+- **CLI**: `nyxid oracle ask` (submit + poll; `--no-wait`, `--pdf`, `--new-conversation`/`--conversation`, `--client-ref`), `oracle attach <pool> <url>`, `oracle result/cancel/status/sessions/session/close-session`, `oracle pool create/list/show/update/rotate-token`
+- **Workers** (two interchangeable clients, same worker API): (a) `integrations/oracle/nyxid_oracle.user.js` -- Tampermonkey userscript (zero local process; GM config `nyxid_base_url`/`nyxid_worker_token`/`nyxid_worker_label`, `?nyx=N` -> `tab_N`; project pinning server-driven via pool `chatgpt_project_url`); (b) `integrations/oracle/cdp-worker/` -- Node + `playwright-core` daemon that `connectOverCDP`s to the user's real logged-in Chrome (launched with `--remote-debugging-port`), reusing the same extractors via `page.evaluate`; lower friction, no backend change
 
 Key files: `models/oracle_{pool,task,session,worker}.rs`, `services/oracle_{pool,task,session}_service.rs`, `handlers/oracle_{pools,tasks,worker}.rs`, `cli/src/commands/oracle.rs`, `integrations/oracle/nyxid_oracle.user.js`.
 
 ### 12. Auth Device-Code Login
 
-First-party RFC 8628-style login for headless CLI environments. `nyxid login --device` starts an unauthenticated browser-assisted login, displays a short `user_code`, and lets an already logged-in human approve the code in the web UI so the waiting CLI receives normal first-party access and refresh tokens without collecting a password in the terminal.
+First-party RFC 8628-style login for headless CLI environments: `nyxid login --device` displays a short `user_code`; an already logged-in human approves it in the web UI; the waiting CLI receives normal first-party access + refresh tokens without a password in the terminal.
 
-- **Storage**: `auth_device_codes` collection. It stores HMACs of both the opaque `device_code` and display `user_code`, a `pending` / `approved` / `denied` / `expired` / `delivered` status state machine, sanitized client context, encrypted delivery tokens, and timestamps. Raw codes and token plaintext are never persisted.
-- **Worker token**: N/A. This is not a worker-pool flow; the CLI receives an opaque `device_code` secret with the `nyx_adc_` prefix and polls with that value until the human approves or the code expires.
-- **Routes**:
-  - `POST /api/v1/auth/device/request` -- public router, no auth; mints `device_code`, `user_code`, and verification URLs.
-  - `POST /api/v1/auth/device/poll` -- public router, no auth; polls by opaque `device_code` and returns the one-time token pair when approved.
-  - `POST /api/v1/auth/device/approve` -- human-only router, JWT-authenticated session user; rejects API keys, service accounts, and delegated tokens before handler execution.
-  - `POST /api/v1/auth/device/preview` -- public router, no auth; returns non-sensitive anti-phishing context (`client_label`, `client_user_agent`, timestamps, status) for a `user_code` without changing state. All fields are device-supplied at `/request` time so there is nothing to leak. The verification page itself gates entry on JWT auth and only calls this endpoint after the user has signed in (matching GitHub's terminal -> URL -> login -> code flow); the endpoint stays public as defense-in-depth simplification and to leave room for future surfaces (e.g. anonymous preview before login) without backend changes. Rate-limited per IP by `auth_device_preview_limiter`.
-- **Error codes**: auth-device login uses the existing 11200-11207 block in the node/proxy conventions section above; do not duplicate that table elsewhere.
-- **Atomic delivery**: polling uses a MongoDB `find_one_and_update(...).return_document(Before)` claim from `approved` to `delivered`. The returned pre-update document contains the encrypted delivery tokens for exactly one poller; concurrent or later pollers see `delivered` and receive `AuthDeviceCodeAlreadyDelivered` (11205).
-- **Rate limiters**: `auth_device_request_limiter`, `auth_device_poll_limiter`, `auth_device_approve_limiter`, `auth_device_approve_per_user_limiter`, and `auth_device_preview_limiter`.
-- **CLI output**: prints `user_code` plus the bare `verification_uri` (never `verification_uri_complete`, which would put the code in the URL and defeat manual-entry anti-phishing). On stdin+stderr TTYs, prompts `Open in your browser? [Y/n]` and `crate::browser::open_browser`s the URL on Enter; falls through with a "paste it manually" hint if the open fails. Non-TTY (CI / piped) skips the prompt and starts polling immediately.
-- **CLI dispatch**: `nyxid login --device` forces device-code login. Plain `nyxid login` auto-falls back to device-code login when browser launch is unavailable unless `NYXID_LOGIN_NO_DEVICE_FALLBACK=1` is set.
-- **Verification page UX** (`/login/device`): auth-gated at entry — unauthenticated visitors are redirected to `/login?return_to=/login/device` (matches GH's terminal → URL → login → code → terminal order). Empty code input on arrival; the `?user_code=` query param is stripped by the router's `validateSearch` and ignored. Two explicit clicks: **Continue** calls `/preview` (anti-phishing block renders), then **Approve** calls `/approve`. No API call fires on typing, focus, mount, or reconnect. Both buttons throttled to ≥ 750 ms between clicks and disabled while their mutation is pending. The input is also disabled during pending preview/approve.
-- **Out of scope**: Mobile approval (deep-link from `/login/device` to the existing approval app) is out of scope for v1; tracked in a follow-up issue if needed.
+- **Storage**: `auth_device_codes` collection -- HMACs of both the opaque `device_code` and display `user_code` (raw codes and token plaintext never persisted), `pending`/`approved`/`denied`/`expired`/`delivered` status state machine, sanitized client context, encrypted delivery tokens. The CLI polls with an opaque `nyx_adc_`-prefixed `device_code` secret (not a worker-pool flow).
+- **Routes**: `POST /auth/device/request` and `POST /auth/device/poll` are public (no auth). `POST /auth/device/approve` is human-only: JWT session user; API keys, service accounts, and delegated tokens are rejected before handler execution. `POST /auth/device/preview` is public and returns non-sensitive anti-phishing context (`client_label`, `client_user_agent`, timestamps, status) for a `user_code` without changing state -- all fields are device-supplied at `/request` time so there is nothing to leak; the verification page only calls it after login (GitHub-style flow), but it stays public as defense-in-depth simplification and for future anonymous-preview surfaces. Rate-limited per IP.
+- **Atomic delivery**: poll claims `approved` -> `delivered` via `find_one_and_update(...).return_document(Before)`; the pre-update document carries the encrypted delivery tokens for exactly one poller; later pollers get `AuthDeviceCodeAlreadyDelivered` (11205).
+- **Rate limiters**: `auth_device_{request,poll,approve,approve_per_user,preview}_limiter`
+- **CLI output**: prints `user_code` plus the bare `verification_uri` -- never `verification_uri_complete`, which would put the code in the URL and defeat manual-entry anti-phishing. On stdin+stderr TTYs: prompts `Open in your browser? [Y/n]` and opens via `crate::browser::open_browser`, falling through with a "paste it manually" hint on failure. Non-TTY (CI/piped) skips the prompt and polls immediately.
+- **CLI dispatch**: `nyxid login --device` forces device-code login; plain `nyxid login` auto-falls back to it when browser launch is unavailable unless `NYXID_LOGIN_NO_DEVICE_FALLBACK=1`.
+- **Verification page** (`/login/device`): auth-gated at entry (redirect to `/login?return_to=/login/device`). Code input starts empty; the `?user_code=` query param is stripped by the router's `validateSearch` and ignored. Two explicit clicks: Continue calls `/preview` (anti-phishing block renders), then Approve calls `/approve`. No API call fires on typing, focus, mount, or reconnect; both buttons are throttled to >= 750 ms between clicks and disabled while pending (input disabled too).
+- **Out of scope for v1**: mobile approval deep-link to the approval app (follow-up issue if needed).
 
 ## File Structure
 
 ```
 cli/src/
 |-- main.rs              # CLI entry point
-|-- cli.rs               # Clap subcommand definitions (top-level commands incl. channel-bot, channel-event, pairing, telemetry, repo)
-|-- commands/            # Command implementations (one file per command group, incl. ai_setup.rs with agent subcommands, channel_bot.rs with bot+route CRUD)
+|-- cli.rs               # Clap subcommand definitions
+|-- commands/            # Command implementations (one file per command group)
 |-- api_client.rs        # HTTP client for NyxID API calls
 |-- auth.rs              # Token storage and retrieval (file-based session)
 |-- output.rs            # Table/JSON output formatting
@@ -288,125 +171,102 @@ backend/src/
 |-- db.rs                # MongoDB connection + ensure_indexes()
 |-- routes.rs            # All route definitions
 |-- main.rs              # Server startup
-|-- models/              # MongoDB document structs, one per collection (incl. agent_service_binding, device_code, node, node_service_binding, mcp_session, openclaw_channel_mapping, user_endpoint, user_api_key, user_service, channel_bot, channel_conversation, channel_event_log, channel_message)
-|-- services/            # Business logic (incl. agent_binding_service, device_code_service, node_service, node_routing_service, node_ws_manager, node_metrics_service, openclaw_channel_service, unified_key_service, catalog_service, user_endpoint_service, user_api_key_service, user_service_service, action_description, channel_bot_service, channel_event_service, channel_routing_service, channel_relay_service, channel_platform, event_dedup_cache, channel_adapters/{telegram,discord,lark,openclaw})
-|-- handlers/            # HTTP handlers (incl. agent_bindings, devices, node_admin, admin_nodes, node_ws, developer_apps, ssh_exec, llms_txt, openclaw_channel, keys, catalog, user_endpoints, user_api_keys_external, user_services_handler, channel_bots, channel_conversations, channel_events, channel_webhooks, channel_relay)
+|-- models/              # MongoDB document structs, one per collection
+|-- services/            # Business logic (incl. channel_adapters/{telegram,discord,lark,openclaw})
+|-- handlers/            # HTTP handlers
 |-- crypto/              # JWT, AES, password hashing, token generation, device-code Ed25519 verification, KeyProvider trait, KMS providers, JWKS
 |-- errors/              # AppError enum, ErrorResponse, AppResult
 |-- mw/                  # Middleware: auth, rate_limit, security_headers
 
 frontend/src/
-|-- pages/               # Route pages (incl. nodes, node-detail, admin-nodes, service-detail, providers, ai-setup, keys, key-detail, devices-bind, channel-bots, channel-bot-detail, channel-conversation-detail)
-|-- components/          # UI components (auth/, dashboard/, layout/, shared/, ui/; incl. add-key-dialog for unified key creation)
-|-- hooks/               # TanStack Query hooks (incl. use-agent-bindings, use-devices, use-nodes, use-admin-nodes, use-providers, use-developer-apps, use-keys, use-channel-bots, use-channel-conversations, use-channel-messages)
-|-- schemas/             # Zod validation schemas with vitest specs (incl. agent-bindings.ts, devices.ts, nodes.ts, channels.ts)
+|-- pages/               # Route pages
+|-- components/          # UI components (auth/, dashboard/, layout/, shared/, ui/)
+|-- hooks/               # TanStack Query hooks (one per domain)
+|-- schemas/             # Zod validation schemas with vitest specs
 |-- stores/              # Zustand stores (auth-store)
 |-- lib/                 # API client, constants, utils
-|-- types/               # TypeScript type definitions (incl. AdminNodeInfo, NodeMetricsInfo, approvals, keys)
+|-- types/               # TypeScript type definitions
 |-- router.tsx           # TanStack Router config
 
-mobile/src/              # React Native + Expo mobile app (Expo 53, RN 0.79, TypeScript)
-|-- app/                 # App shell, navigator, deep linking (nyxid://challenge/{id})
-|-- features/            # Feature modules: auth, challenges, approvals, account, legal
-|-- components/          # Reusable mobile UI components
-|-- lib/                 # API client, auth session store (SecureStore), push notification registration
-|-- theme/               # Design tokens and mobile theme
+mobile/src/              # React Native + Expo app (Expo 53, RN 0.79): app/ (shell, navigator,
+                         # deep linking nyxid://challenge/{id}), features/ (auth, challenges,
+                         # approvals, account, legal), components/, lib/ (API client, SecureStore
+                         # session, push registration), theme/
 
-sdk/                     # OAuth SDK monorepo (TypeScript, @nyxids/* npm namespace)
-|-- oauth-core/          # @nyxids/oauth-core: PKCE OAuth 2.0 client (NyxIDClient class)
-|-- oauth-react/         # @nyxids/oauth-react: React context + useNyxID() hook
-|-- demo-react/          # Demo Vite app (private, not published)
+sdk/                     # OAuth SDK monorepo (@nyxids/* npm namespace): oauth-core (PKCE OAuth 2.0
+                         # client, NyxIDClient), oauth-react (React context + useNyxID() hook),
+                         # demo-react (private demo app)
 ```
 
 ## Key API Routes
 
 All API routes under `/api/v1`:
 - `/auth` -- register, login, logout, refresh, verify-email, forgot/reset-password
-- `/auth/device/request` -- public auth device-code login start; mints `device_code`, `user_code`, and verification URLs
-- `/auth/device/poll` -- public auth device-code login poll; exchanges an approved opaque `device_code` for a token pair
-- `/auth/device/approve` -- human-only auth device-code approval; JWT-authenticated user approves a `user_code`
-- `/auth/device/preview` -- public auth device-code anti-phishing lookup for a `user_code` (no auth, rate-limited per IP)
+- `/auth/device/{request,poll,approve,preview}` -- auth device-code login (see Critical Rule 12 for auth posture per route)
+- `/auth/mfa` -- setup, confirm, verify (login), disable (nested under `/auth` in `routes.rs`; `setup` is idempotent against unverified factors per NyxID#506)
 - `/users` -- get/update current user
-- `/auth/mfa` -- setup, confirm, verify (login), disable (nested under `/auth` in `backend/src/routes.rs`; `setup` is idempotent against unverified factors per NyxID#506)
-- `/api-keys` -- CRUD + rotate. `ApiKey` model has scope fields: `allowed_service_ids`, `allowed_node_ids`, `allow_all_services`, `allow_all_nodes` (absorbed from deleted AgentGroup model). Also has agent isolation fields: `rate_limit_per_second`, `rate_limit_burst`, `platform`
-- `/api-keys/{id}/bindings` -- agent credential binding CRUD (list, create, delete). Maps an API key (agent) to a per-service credential override via `AgentServiceBinding`
+- `/api-keys` -- CRUD + rotate; `ApiKey` scope + agent isolation fields per Critical Rules 8-9
+- `/api-keys/{id}/bindings` -- agent credential binding CRUD (`AgentServiceBinding`)
 - `/services` -- CRUD + OIDC credentials + endpoints + requirements
 - `/sessions` -- list sessions
 - `/connections` -- connect/disconnect services
 - `/providers` -- CRUD + OAuth/device-code/API-key flows + token management + per-user credentials
 - `/admin` -- user management, audit log, OAuth clients, service accounts
-- `/proxy/{service_id}/{path}` -- authenticated proxy (UUID-based); supports HTTP and WebSocket passthrough
-- `/proxy/s/{slug}/{path}` -- authenticated proxy (slug-based); supports HTTP and WebSocket passthrough
+- `/proxy/{service_id}/{path}` and `/proxy/s/{slug}/{path}` -- authenticated proxy (UUID- and slug-based); HTTP + WebSocket passthrough
 - `/proxy/services` -- service discovery (paginated list of proxyable services)
 - `/llm` -- LLM gateway (provider proxy, OpenAI-compatible gateway, status)
 - `/delegation/refresh` -- refresh delegated access tokens
-- `/notifications` -- notification settings CRUD, Telegram link/disconnect, device token management (register/list/remove)
-- `/approvals` -- approval request history, grants, decide, status polling, per-service approval configs (with `approval_mode`: `per_request` default or `grant` opt-in)
+- `/notifications` -- notification settings CRUD, Telegram link/disconnect, device token management
+- `/approvals` -- approval history, grants, decide, status polling, per-service approval configs (`approval_mode`: `per_request` default or `grant` opt-in)
 - `/webhooks/telegram` -- Telegram webhook (unauthenticated, secret-verified)
-- `/devices` -- headless-device provisioning namespace; currently used for `/devices/code/*`
-- `/devices/code/request` -- unauthenticated device-code binding start for headless devices; returns `device_code`, `user_code`, and verification URLs
+- `/devices/code/request` -- unauthenticated device-code binding start for headless devices; returns `device_code`, `user_code`, verification URLs
 - `/devices/code/poll` -- unauthenticated but Ed25519-signed device poll; returns pending user-code rotations or one-time credentials after approval
-- `/devices/code/approve` -- authenticated user approval endpoint for web and CLI; creates the scoped API key, node row, and refresh token. `DeviceCodeApprove` accepts `default_services` as an opt-in list of user-service UUIDs or slugs to grant proxy access at approval time; omit it for an empty service allowlist.
-- `/devices/onboard` -- authenticated server-side QR provisioning for no-WiFi headless devices; creates the scoped API key and device node stub, embeds WiFi + raw one-time credentials in a `nyxprov://` QR payload, stores only the refresh-token hash, and never persists the WiFi password.
+- `/devices/code/approve` -- authenticated approval (web + CLI); creates the scoped API key, node row, and refresh token. `DeviceCodeApprove.default_services` is an opt-in list of user-service UUIDs/slugs granted proxy access at approval; omit for an empty allowlist.
+- `/devices/onboard` -- authenticated server-side QR provisioning for no-WiFi headless devices; creates the scoped API key + device node stub, embeds WiFi + raw one-time credentials in a `nyxprov://` QR payload, stores only the refresh-token hash, never persists the WiFi password
 - `/nodes` -- node management (register-token, list, get, delete, rotate-token, bindings CRUD + priority update)
-- `/nodes/ws` -- WebSocket upgrade for node agent connections (auth via WS protocol, not middleware)
+- `/nodes/ws` -- WebSocket upgrade for node agents (auth via WS protocol, not middleware)
 - `/admin/nodes` -- admin node management (list all, get, disconnect, delete -- no ownership check)
-- `/integrations/openclaw/channel` -- OpenClaw channel webhook (unauthenticated, HMAC-verified)
-- `/integrations/openclaw/mappings` -- OpenClaw channel-to-user mapping CRUD (authenticated)
+- `/integrations/openclaw/channel` -- OpenClaw channel webhook (unauthenticated, HMAC-verified); `/integrations/openclaw/mappings` -- mapping CRUD (authenticated)
 - `/keys` -- unified key management: auto-provisions UserEndpoint + UserApiKey + UserService from catalog or custom input (CRUD + OAuth flows)
-- `/endpoints` -- user-managed target URLs (list, update, delete)
-- `/api-keys/external` -- user's external API keys / credentials (list, update, delete)
-- `/user-services` -- user's proxy routing config (list, update, delete)
-- `/catalog` -- read-only service catalog for users (list templates, get template by slug, `?include_all=true` for full discovery including system services). Supports `/{slug}/endpoints` for OpenAPI endpoint discovery via hardened spec fetch.
-- `/oracle` -- browser LLM relay (§11). Consumer side (JWT or `nyxid_ag_` key): `/pools` CRUD + `/pools/{slug}/rotate-token`, `/pools/{slug}/tasks` submit, `/pools/{slug}/status`, `/tasks/{id}` poll + `/tasks/{id}/cancel`, `/sessions` list + `/sessions/{conv_id}` transcript + `/close`. Worker side `/oracle/worker/{task,ack,result,pin-conv-url}` authenticates by pool worker token (`nyx_owk_…`) inside the handler, mounted outside JWT middleware. 16 MiB body cap (PDF attach / multi-MB answers).
-- `/channel-bots` -- channel bot registration CRUD + PATCH updates for platform verification material
-- `/channel-conversations` -- conversation-to-agent routing (CRUD). Maps platform conversations to agent API keys.
-- `/channel-relay/reply` -- agent async reply to a platform conversation. **Only async replies are supported** — sync 200+body replies from agent callbacks were removed per ADR-013 / NyxID#221. Agents must return 202 to the callback and post replies here. Accepts two auth modes: (a) the agent's API key (`Authorization: Bearer nyxid_ag_…`), scoped by `conversation.agent_api_key_id`; or (b) a per-callback reply token (`Authorization: Bearer <reply_token>`) delivered in the inbound callback payload's `reply_token` field. Reply tokens are RS256 JWTs with `aud="channel-relay/reply"`, bound to one `inbound_message_id` + `conversation_id` + `api_key_id` + `platform`, single-use (enforced via MongoDB `reply_token_uses`), and valid for `JWT_RELAY_REPLY_TTL_SECS` (default 30 min). Intended for downstream runtimes (e.g. Aevatar) that want to reply without persisting agent API keys.
-- `/channel-relay/reply/update` -- agent edit of a previously-sent platform reply, addressed by the upstream `platform_message_id` returned from `/channel-relay/reply`. Accepts the same dual auth as `/channel-relay/reply`: agent API key or the original per-callback reply token. Reply tokens remain `aud="channel-relay/reply"` and single-use for the initial send; edit requests revalidate the same token and require its JTI to already exist in `reply_token_uses`, which proves the token was previously used to send before it can edit. V1 platform support: Lark / Feishu only; other bot platforms return `edit_unsupported`.
-- `/channel-relay/messages/{conversation_id}` -- message history for agents
-- `/channel-relay/resolve-sender` -- resolve platform sender to NyxID user
-- `/channel-events/{conversation_id}` -- HTTP Event Gateway ingress (NyxID#221, ADR-013). Accepts device event envelopes `{event_id, source, type, timestamp, payload, metadata}`, converts to `CallbackPayload` with `platform="device"`, and forwards through the channel relay pipeline. Per-channel rate limited (default 100/s), idempotent via in-memory LRU dedup (5min TTL), metadata-only logging to `channel_event_logs` (no payload persistence).
+- `/endpoints`, `/api-keys/external`, `/user-services` -- list/update/delete for the three user collections
+- `/catalog` -- read-only service catalog (`?include_all=true` for full discovery; `/{slug}/endpoints` for OpenAPI endpoint discovery via hardened spec fetch)
+- `/oracle` -- browser LLM relay (Critical Rule 11). Consumer side (JWT or `nyxid_ag_` key): `/pools` CRUD + `/pools/{slug}/rotate-token`, `/pools/{slug}/tasks`, `/pools/{slug}/status`, `/tasks/{id}` + `/cancel`, `/sessions` + `/sessions/{conv_id}` + `/close`. Worker side `/oracle/worker/*` authenticates by pool worker token inside the handler, outside JWT middleware. 16 MiB body cap (PDF attach / multi-MB answers).
+- `/channel-bots` -- channel bot registration CRUD + PATCH for platform verification material
+- `/channel-conversations` -- conversation-to-agent routing CRUD (platform conversations -> agent API keys)
+- `/channel-relay/reply` -- agent async reply to a platform conversation. Only async replies are supported (sync 200+body callback replies removed per ADR-013 / NyxID#221): agents return 202 to the callback and post here. Dual auth: (a) agent API key (`Bearer nyxid_ag_...`, scoped by `conversation.agent_api_key_id`); (b) per-callback `reply_token` from the inbound payload -- a single-use RS256 JWT, `aud="channel-relay/reply"`, bound to one `inbound_message_id` + `conversation_id` + `api_key_id` + `platform`, TTL `JWT_RELAY_REPLY_TTL_SECS`, use tracked in MongoDB `reply_token_uses`. Lets downstream runtimes (e.g. Aevatar) reply without persisting agent keys. Details: `docs/CHANNEL_BOT_RELAY.md`.
+- `/channel-relay/reply/update` -- edit a previously-sent reply by the upstream `platform_message_id`; same dual auth. A reply token may edit only if its JTI already exists in `reply_token_uses` (proves it was used to send first). V1: Lark/Feishu only; other platforms return `edit_unsupported`.
+- `/channel-relay/messages/{conversation_id}` -- message history for agents; `/channel-relay/resolve-sender` -- resolve platform sender to NyxID user
+- `/channel-events/{conversation_id}` -- HTTP Event Gateway ingress (NyxID#221, ADR-013). Accepts device event envelopes `{event_id, source, type, timestamp, payload, metadata}`, converts to `CallbackPayload` with `platform="device"`, forwards through the channel relay pipeline. Per-channel rate limited (default 100/s), idempotent via in-memory LRU dedup (5 min TTL), metadata-only logging to `channel_event_logs` (no payload persistence).
 - `/webhooks/channel/{telegram,discord,lark,feishu}/{bot_id}` -- platform webhook receivers
-- `/ssh/{service_id}/certificate` -- issue short-lived SSH user certificate (POST)
-- `/ssh/{service_id}` -- SSH-over-WebSocket tunnel (GET, upgrade)
-- `/ssh/{service_id}/terminal` -- SSH web terminal (GET, upgrade)
-- `/ssh/{service_id}/exec` -- remote command execution (POST)
-
-- `/admin/service-accounts` -- service account CRUD, secret rotation, token revocation, provider management (connect via API key/OAuth redirect/device-code, list, disconnect providers on behalf of SAs)
-
-- `/oauth/token` -- also supports `grant_type=client_credentials` (service accounts), `grant_type=urn:ietf:params:oauth:grant-type:token-exchange` (RFC 8693 delegated access and social token exchange via `subject_token_type=id_token` for native mobile Google/GitHub login)
+- `/ssh/{service_id}/certificate` (POST, issue short-lived SSH user cert), `/ssh/{service_id}` (WS tunnel), `/ssh/{service_id}/terminal` (WS web terminal), `/ssh/{service_id}/exec` (POST, remote command execution)
+- `/admin/service-accounts` -- service account CRUD, secret rotation, token revocation, provider management on behalf of SAs
+- `/oauth/token` -- also supports `grant_type=client_credentials` (service accounts) and RFC 8693 token exchange (`grant_type=urn:ietf:params:oauth:grant-type:token-exchange`) for delegated access and social token exchange (`subject_token_type=id_token` for native mobile Google/GitHub login)
 
 Top-level: `/health`, `/.well-known/openid-configuration`, `/oauth/*`, `/mcp`, `/llms.txt`, `/llms-full.txt`
 
 ## Channel Bot Notes
 
-For Lark / Feishu channel bots, the developer console fields are used for different purposes and must not be conflated:
+Lark / Feishu developer-console fields serve different purposes -- do not conflate:
+- **App ID + App Secret**: authenticate outbound NyxID calls to Lark/Feishu APIs (tenant access tokens, sending replies)
+- **Verification Token**: required for inbound webhook verification; compared against `header.token` on v2 events or top-level `token` on v1 / `url_verification` payloads
+- **Encrypt Key**: optional; when configured, NyxID verifies `X-Lark-Signature`, decrypts the `encrypt` payload, then validates the Verification Token on the decrypted JSON
 
-- **App ID** + **App Secret** authenticate outbound NyxID calls to the Lark / Feishu APIs so NyxID can fetch tenant access tokens and send replies.
-- **Verification Token** is required for inbound webhook verification. NyxID compares it against `header.token` on v2 events or top-level `token` on v1 / `url_verification` payloads.
-- **Encrypt Key** is optional. When configured in the Lark / Feishu Event Subscriptions console, NyxID verifies `X-Lark-Signature`, decrypts the `encrypt` payload, and then validates the Verification Token on the decrypted JSON.
-
-If an older Lark / Feishu bot is stuck in `pending_webhook`, patch the bot with its Verification Token and optional Encrypt Key, then wait for the next verified inbound to auto-promote it to `active`:
-
-- `PATCH /api/v1/channel-bots/{id}`
-- `nyxid channel-bot update <ID> --verification-token ... [--encrypt-key ...] [--app-id ...] [--app-secret ...]`
+A bot stuck in `pending_webhook`: patch it with its Verification Token (and optional Encrypt Key) via `PATCH /api/v1/channel-bots/{id}` or `nyxid channel-bot update <ID> --verification-token ... [--encrypt-key ...] [--app-id ...] [--app-secret ...]`; the next verified inbound auto-promotes it to `active`.
 
 ## Environment Variables
+
+Full semantics for the long-form entries: `docs/ENV.md`.
 
 ```bash
 # Required
 DATABASE_URL=mongodb://...          # MongoDB connection string
-ENCRYPTION_KEY=                     # 64 hex chars (32 bytes AES-256); required for local, optional for KMS (enables fallback)
-ENCRYPTION_KEY_PREVIOUS=            # Optional: previous key for zero-downtime rotation (64 hex chars)
-KEY_PROVIDER=local                  # Key provider backend: "local" (default), "aws-kms" (feature aws-kms), "gcp-kms" (feature gcp-kms)
+ENCRYPTION_KEY=                     # 64 hex chars (AES-256); required for local, optional for KMS (enables fallback)
+ENCRYPTION_KEY_PREVIOUS=            # Optional previous key for zero-downtime rotation
+KEY_PROVIDER=local                  # "local" (default), "aws-kms", "gcp-kms" (feature-gated)
 
-# AWS KMS (optional, requires --features aws-kms)
-AWS_KMS_KEY_ARN=                    # Full ARN of AWS KMS key (required when KEY_PROVIDER=aws-kms)
-AWS_KMS_KEY_ARN_PREVIOUS=           # Optional: previous AWS KMS key ARN for rotation
-
-# GCP Cloud KMS (optional, requires --features gcp-kms)
-GCP_KMS_KEY_NAME=                   # Full GCP KMS key resource name (required when KEY_PROVIDER=gcp-kms)
-GCP_KMS_KEY_NAME_PREVIOUS=          # Optional: previous GCP KMS key name for rotation
+# KMS (optional; --features aws-kms / gcp-kms; *_PREVIOUS for rotation)
+AWS_KMS_KEY_ARN= / AWS_KMS_KEY_ARN_PREVIOUS=
+GCP_KMS_KEY_NAME= / GCP_KMS_KEY_NAME_PREVIOUS=
 
 # Defaults provided
 PORT=3001
@@ -415,116 +275,74 @@ FRONTEND_URL=http://localhost:3000
 JWT_PRIVATE_KEY_PATH=keys/private.pem
 JWT_PUBLIC_KEY_PATH=keys/public.pem
 JWT_ISSUER=nyxid
-JWT_ACCESS_TTL_SECS=900             # 15 minutes
+JWT_ACCESS_TTL_SECS=900             # 15 min
 JWT_REFRESH_TTL_SECS=604800         # 7 days
-JWT_RELAY_REPLY_TTL_SECS=1800       # 30 minutes (per-callback reply token TTL)
-JWT_RELAY_CALLBACK_TTL_SECS=300     # 5 minutes (callback authentication JWT TTL)
-JWT_RELAY_ACCESS_TTL_SECS=300       # 5 minutes (X-NyxID-User-Token relay access token TTL;
-                                    # first-party bearer shipped to a bot callback URL, kept
-                                    # short vs the 900s general access token. Relay access
-                                    # tokens are usable only on proxy/LLM surfaces — rejected
-                                    # elsewhere by reject_relay_tokens — inherit the agent key's
-                                    # service/node allowlist, and are invalidated when that agent
-                                    # key is revoked (ensure_relay_agent_key_active).)
-SA_TOKEN_TTL_SECS=3600              # 1 hour (service account tokens)
+JWT_RELAY_REPLY_TTL_SECS=1800       # Per-callback reply token TTL
+JWT_RELAY_CALLBACK_TTL_SECS=300     # Callback authentication JWT TTL
+JWT_RELAY_ACCESS_TTL_SECS=300       # X-NyxID-User-Token relay access token TTL. Relay tokens are
+                                    # proxy/LLM-only (rejected elsewhere by reject_relay_tokens),
+                                    # inherit the agent key's service/node allowlist, and are
+                                    # invalidated when that key is revoked (ensure_relay_agent_key_active).
+SA_TOKEN_TTL_SECS=3600              # Service account tokens
 ENVIRONMENT=development
 RATE_LIMIT_PER_SECOND=10
 RATE_LIMIT_BURST=30
-TRUSTED_PROXY_IPS=                     # Comma-separated list of reverse-proxy IPs
-                                        # whose `X-Forwarded-For` / `X-Real-IP` may
-                                        # be trusted for per-IP rate-limit keying
-                                        # (CLI-pairing claim: 5/60s). Empty default
-                                        # means "trust only the TCP peer" — safe for
-                                        # direct-exposure deployments. Behind nginx /
-                                        # ALB / Fly.io, set this to the proxy IPs so
-                                        # each user gets their own bucket instead of
-                                        # colliding on a single proxy-wide bucket.
-                                        # ONLY list proxies you've configured to
-                                        # overwrite client-supplied forwarded
-                                        # headers. See docs/ENV.md.
+TRUSTED_PROXY_IPS=                  # Reverse-proxy IPs whose X-Forwarded-For/X-Real-IP are trusted for
+                                    # per-IP rate-limit keying. Empty = trust only the TCP peer. Only list
+                                    # proxies configured to overwrite client-supplied forwarded headers.
+MTLS_CLIENT_CERT_HEADER=            # Header carrying a URL-encoded PEM client cert from a trusted
+                                    # mTLS-terminating proxy (RFC 8705 cert-bound broker tokens).
+                                    # Unset = disabled. The proxy must strip this header from external requests.
+CLI_PAIRING_HMAC_KEY=               # Optional 64 hex; keys CliPairing.code_hash against DB-snapshot
+                                    # brute force. Unset = derived from ENCRYPTION_KEY or the JWT key
+                                    # (stable per-worker, multi-instance safe).
+AUDIT_CHAIN_HMAC_KEY=               # Optional 64 hex; keys audit-log HMAC chaining; same derivation fallback
 
-MTLS_CLIENT_CERT_HEADER=                # Optional header name carrying a URL-encoded PEM
-                                        # client certificate from a trusted mTLS-terminating
-                                        # reverse proxy. Leave unset/empty to disable
-                                        # RFC 8705 certificate-bound broker access tokens.
-                                        # When set, configure the proxy to strip this
-                                        # header from external requests before forwarding.
-
-# CLI remote pairing (optional)
-CLI_PAIRING_HMAC_KEY=                   # 64 hex chars; keys `CliPairing.code_hash`
-                                        # so a DB snapshot cannot brute-force the
-                                        # ~2^40 pairing-code space. Leave unset
-                                        # unless you need to rotate it independently
-                                        # of ENCRYPTION_KEY / the JWT signing key:
-                                        # the backend derives from ENCRYPTION_KEY
-                                        # when set, otherwise from the JWT private
-                                        # key PEM. Both are stable per-worker so
-                                        # multi-instance deployments stay in sync
-                                        # without extra config. See docs/ENV.md.
-AUDIT_CHAIN_HMAC_KEY=                   # Optional 64 hex chars; keys audit-log
-                                        # HMAC chaining. If unset, derives from
-                                        # ENCRYPTION_KEY or the JWT private key.
-
-CHANNEL_RELAY_CALLBACK_TIMEOUT_SECS=30          # Callback timeout for inbound agent delivery (default: 30)
-CHANNEL_RELAY_MAX_BOTS_PER_USER=5               # Maximum bots a user can register (default: 5)
-CHANNEL_RELAY_MESSAGE_TTL_DAYS=30               # Channel message TTL in MongoDB (default: 30 days)
-CHANNEL_RELAY_EDIT_RATE_LIMIT_PER_SECOND=10     # Per-platform-message edit rate limit (default: 10)
-CHANNEL_RELAY_EDIT_RATE_LIMIT_BURST=20          # Per-platform-message edit burst capacity (default: 20)
+CHANNEL_RELAY_CALLBACK_TIMEOUT_SECS=30
+CHANNEL_RELAY_MAX_BOTS_PER_USER=5
+CHANNEL_RELAY_MESSAGE_TTL_DAYS=30
+CHANNEL_RELAY_EDIT_RATE_LIMIT_PER_SECOND=10   # Per-platform-message edit rate limit
+CHANNEL_RELAY_EDIT_RATE_LIMIT_BURST=20
 
 # Telegram / Approval System (optional)
-TELEGRAM_BOT_TOKEN=                     # From @BotFather
-TELEGRAM_WEBHOOK_SECRET=                # Random string for webhook verification
-TELEGRAM_WEBHOOK_URL=                   # e.g. https://auth.nyxid.dev/api/v1/webhooks/telegram
-TELEGRAM_BOT_USERNAME=                  # Bot username without @
-APPROVAL_EXPIRY_INTERVAL_SECS=5         # Interval between expiry sweeps
+TELEGRAM_BOT_TOKEN=                 # From @BotFather
+TELEGRAM_WEBHOOK_SECRET=            # Random string for webhook verification
+TELEGRAM_WEBHOOK_URL=               # e.g. https://auth.nyxid.dev/api/v1/webhooks/telegram
+TELEGRAM_BOT_USERNAME=              # Without @
+APPROVAL_EXPIRY_INTERVAL_SECS=5     # Interval between expiry sweeps
 
 # OAuth token refresh (optional)
-OAUTH_REFRESH_SWEEP_INTERVAL_SECS=600  # Interval between proactive OAuth refresh sweeps
-                                        # (default 600 = 10 min). 0 disables the sweep
-                                        # (lazy proxy-time refresh still applies). The sweep
-                                        # refreshes multi-connection OAuth access tokens
-                                        # (Google / Lark / GitHub BYO etc.) that expire within
-                                        # OAUTH_REFRESH_SWEEP_WINDOW_SECS so a token stays warm
-                                        # even for services that aren't proxied often, and a
-                                        # dead refresh token surfaces as status="failed"
-                                        # promptly. It does NOT extend refresh-token lifetime:
-                                        # a Google app left in "Testing" status still expires
-                                        # refresh tokens after 7 days (publish the app to fix).
-OAUTH_REFRESH_SWEEP_WINDOW_SECS=900    # How far ahead (seconds) the sweep looks for expiring
-                                        # tokens (default 900 = 15 min). Keep larger than the
-                                        # proxy-time 5-min buffer so the sweep wins for idle
-                                        # services.
+OAUTH_REFRESH_SWEEP_INTERVAL_SECS=600  # Proactive refresh sweep for expiring multi-connection OAuth
+                                       # tokens; 0 disables (lazy proxy-time refresh still applies).
+                                       # Does NOT extend refresh-token lifetime (a Google app in
+                                       # "Testing" still expires refresh tokens after 7 days).
+OAUTH_REFRESH_SWEEP_WINDOW_SECS=900    # Look-ahead window; keep larger than the proxy-time 5-min buffer
 
-# Mobile Push Notifications (optional)
-FCM_SERVICE_ACCOUNT_PATH=               # Path to Firebase service account JSON
-APNS_KEY_PATH=                          # Path to APNs .p8 private key
-APNS_KEY_ID=                            # APNs Key ID (Apple Developer portal)
-APNS_TEAM_ID=                           # APNs Team ID (Apple Developer portal)
-APNS_TOPIC=                             # APNs topic / iOS bundle ID (e.g. dev.nyxid.app)
-APNS_SANDBOX=true                       # Use APNs sandbox (default: true in dev)
+# Mobile Push (optional)
+FCM_SERVICE_ACCOUNT_PATH=           # Firebase service account JSON
+APNS_KEY_PATH= / APNS_KEY_ID= / APNS_TEAM_ID=
+APNS_TOPIC=                         # iOS bundle ID (e.g. dev.nyxid.app)
+APNS_SANDBOX=true                   # Default true in dev
 
-# Credential Nodes (optional, all have defaults)
-NODE_HEARTBEAT_INTERVAL_SECS=30        # Heartbeat ping interval (default: 30)
-NODE_HEARTBEAT_TIMEOUT_SECS=90         # Mark offline after N seconds without heartbeat (default: 90)
-NODE_PROXY_TIMEOUT_SECS=30             # Timeout for proxy requests through nodes (default: 30)
-NODE_REGISTRATION_TOKEN_TTL_SECS=3600  # Registration token validity (default: 1 hour)
-NODE_MAX_PER_USER=10                   # Maximum nodes per user (default: 10)
-NODE_MAX_WS_CONNECTIONS=100            # Maximum concurrent node WebSocket connections (default: 100)
-NODE_MAX_STREAM_DURATION_SECS=300      # Maximum duration for streaming proxy responses (default: 300)
-NODE_HMAC_SIGNING_ENABLED=true         # Enable HMAC request signing for node proxy (default: true)
-WS_PASSTHROUGH_MAX_CONNECTIONS=200     # Maximum concurrent WebSocket passthrough connections (default: 200)
+# Credential Nodes (optional, defaults shown)
+NODE_HEARTBEAT_INTERVAL_SECS=30
+NODE_HEARTBEAT_TIMEOUT_SECS=90      # Mark offline after N secs without heartbeat
+NODE_PROXY_TIMEOUT_SECS=30
+NODE_REGISTRATION_TOKEN_TTL_SECS=3600
+NODE_MAX_PER_USER=10
+NODE_MAX_WS_CONNECTIONS=100
+NODE_MAX_STREAM_DURATION_SECS=300
+NODE_HMAC_SIGNING_ENABLED=true
+WS_PASSTHROUGH_MAX_CONNECTIONS=200
 
-# HTTP Event Gateway (NyxID#221, ADR-013 pure passthrough)
-CHANNEL_EVENT_RATE_LIMIT_PER_SECOND=100  # Per-channel event rate limit (default: 100)
-CHANNEL_EVENT_RATE_LIMIT_BURST=200       # Per-channel burst capacity (default: 200)
-CHANNEL_EVENT_DEDUP_CAPACITY=32768       # LRU dedup cache size (default: 32768; sized to honor 5-min window at 100 events/s)
-CHANNEL_EVENT_DEDUP_TTL_SECS=300         # Dedup entry TTL (default: 300 = 5 min)
+# HTTP Event Gateway (NyxID#221, ADR-013)
+CHANNEL_EVENT_RATE_LIMIT_PER_SECOND=100
+CHANNEL_EVENT_RATE_LIMIT_BURST=200
+CHANNEL_EVENT_DEDUP_CAPACITY=32768  # Sized to honor the 5-min window at 100 events/s
+CHANNEL_EVENT_DEDUP_TTL_SECS=300
 
-# Registration gate (issue #179)
-INVITE_CODE_REQUIRED=true              # Gate new-user registration behind invite codes (default: true). Set to false for public launch.
-
-# Dev convenience
-AUTO_VERIFY_EMAIL=false                # When true, skip email verification on registration (default: false). Dev only.
+INVITE_CODE_REQUIRED=true           # Gate registration behind invite codes (issue #179); false for public launch
+AUTO_VERIFY_EMAIL=false             # Dev only: skip email verification on registration
 
 # Optional
 GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET
@@ -535,87 +353,51 @@ SMTP_HOST / SMTP_PORT / SMTP_USERNAME / SMTP_PASSWORD / SMTP_FROM_ADDRESS
 ## Available Commands
 
 ```bash
-# CLI (from project root)
-source "$HOME/.cargo/env" 2>/dev/null  # Ensure cargo is available
-cargo build -p nyxid-cli                # Build CLI binary
-cargo install --path cli                # Install CLI as `nyxid`
-nyxid --help                            # Verify installation
-nyxid login --device                    # Headless browser-assisted login; set NYXID_LOGIN_NO_DEVICE_FALLBACK=1 to disable automatic fallback from plain `nyxid login`
-# End users install prebuilt release binaries; cargo install is for dev.
+# CLI (from project root; end users install prebuilt release binaries, cargo install is for dev)
+source "$HOME/.cargo/env" 2>/dev/null   # Ensure cargo is available
+cargo build -p nyxid-cli                # Build CLI binary (includes node subcommand)
+cargo test -p nyxid-cli                 # CLI tests (includes node agent tests)
+cargo install --path cli                # Install as `nyxid`
+nyxid login --device                    # Headless browser-assisted login;
+                                        # NYXID_LOGIN_NO_DEVICE_FALLBACK=1 disables auto-fallback from plain `nyxid login`
 
 # Backend (from project root)
-cargo build                             # Build backend (local provider only)
-cargo build --features aws-kms          # Build with AWS KMS support
-cargo build --features gcp-kms          # Build with GCP Cloud KMS support
-cargo build --features aws-kms,gcp-kms  # Build with both KMS providers
-cargo test                              # Run backend tests
-cargo test --all-features               # Run all tests including KMS provider tests
+cargo build [--features aws-kms,gcp-kms]   # Feature-gated KMS providers
+cargo test [--all-features]
 cargo run                               # Start backend (port 3001)
 
-# Node Agent (from project root, via nyxid CLI)
-cargo build -p nyxid-cli                # Build CLI binary (includes node subcommand)
-cargo test -p nyxid-cli                 # Run CLI tests (includes node agent tests)
+# Node agent
 nyxid node register --token nyx_nreg_... --url ws://localhost:3001/api/v1/nodes/ws
-nyxid node start                        # Start node agent (foreground)
-nyxid node agent-status                 # Show local config status
-nyxid node credentials list             # List configured credentials
-nyxid node openclaw connect --url http://localhost:18789  # Connect OpenClaw (use --credential-env for non-interactive)
-nyxid node openclaw status              # Show OpenClaw connection status
-nyxid node openclaw disconnect          # Remove OpenClaw credentials
+nyxid node start | agent-status | credentials list
+nyxid node openclaw connect --url http://localhost:18789   # --credential-env for non-interactive
+nyxid node openclaw status | disconnect
+nyxid node daemon install|start|stop|restart|status|logs --follow|uninstall   # launchd/systemd; supports --profile
+nyxid node docker build|start|stop|status|logs [--profile <name>]             # Docker alternative to native daemon
 
-# Node daemon lifecycle (background service, supports --profile for multi-instance)
-nyxid node daemon install               # Install as system service (launchd/systemd)
-nyxid node daemon start                 # Start background service
-nyxid node daemon stop                  # Stop background service
-nyxid node daemon restart               # Restart background service
-nyxid node daemon status                # Check if installed and running
-nyxid node daemon logs --follow         # Tail daemon logs
-nyxid node daemon uninstall             # Remove system service
-
-# Node agent via Docker (alternative to native daemon)
-nyxid node docker build                                # Build node agent image
-nyxid node docker start [--profile <name>]             # Start container (mounts config volume)
-nyxid node docker stop [--profile <name>]              # Stop container
-nyxid node docker status [--profile <name>]            # Check container status
-nyxid node docker logs [--profile <name>]              # Tail container logs
-
-# Agent isolation (api-key subcommands)
+# Agent isolation
 nyxid api-key create --name "coding-agent" --platform claude-code
-nyxid api-key list                      # List API keys
-nyxid api-key show <ID_OR_NAME>         # Show key details + bindings
-nyxid api-key bind <ID_OR_NAME> --service <SLUG> --credential <LABEL>  # Credential override
-nyxid api-key rotate <ID_OR_NAME>       # Rotate API key
-nyxid api-key delete <ID_OR_NAME>       # Delete API key
+nyxid api-key list | show <ID_OR_NAME> | rotate <ID_OR_NAME> | delete <ID_OR_NAME>
+nyxid api-key bind <ID_OR_NAME> --service <SLUG> --credential <LABEL>   # Credential override
 
 # Device-code binding
 nyxid device approve XXXX-XXXX-XXXX [--org <ID|SLUG|NAME>] [--label <LABEL>] [--service <SLUG_OR_UUID>]...
-nyxid device onboard --label "Kitchen Camera" --ssid "MyNetwork" --password-env WIFI_PASSWORD [--org <ID|SLUG|NAME>] [--service <SLUG_OR_UUID>]...
+nyxid device onboard --label "Kitchen Camera" --ssid "MyNetwork" --password-env WIFI_PASSWORD [--org ...] [--service ...]...
 nyxid device factory-key [--count N] [--out FILE] [--ndjson]
 
 # Channel bots
 nyxid channel-bot register --platform telegram --label support --token-env TELEGRAM_BOT_TOKEN
-nyxid channel-bot register --platform lark --label support --token-env LARK_BOT_TOKEN --app-id cli_xxx --app-secret-env LARK_APP_SECRET --verification-token vtoken_xxx
-nyxid channel-bot update <BOT_ID> --verification-token vtoken_xxx --encrypt-key key_xxx
-NYXID_LARK_VERIFICATION_TOKEN=vtoken_xxx NYXID_LARK_ENCRYPT_KEY=key_xxx nyxid channel-bot update <BOT_ID>
+nyxid channel-bot register --platform lark --label support --token-env LARK_BOT_TOKEN \
+  --app-id cli_xxx --app-secret-env LARK_APP_SECRET --verification-token vtoken_xxx
+nyxid channel-bot update <BOT_ID> --verification-token ... [--encrypt-key ...]
+  # env alternatives: NYXID_LARK_VERIFICATION_TOKEN / NYXID_LARK_ENCRYPT_KEY
 
 # Frontend (from frontend/)
-npm run dev                             # Dev server (port 3000)
-npm run build                           # Type-check + production build
-npm run test                            # Run vitest
-npm run test:watch                      # Vitest in watch mode
-npm run lint                            # ESLint
+npm run dev | build | test | test:watch | lint   # dev = port 3000; build = type-check + prod build
 
-# Mobile (from mobile/)
-npm run start                           # Expo dev server
-npm run ios                             # Run on iOS simulator
-npm run android                         # Run on Android emulator
-
-# SDK (from sdk/)
-npm run build                           # Build all SDK packages
-npm run clean                           # Clean build artifacts
-
-# Docker (from project root)
-docker compose up -d                    # Start MongoDB (27018) + Mailpit (8025)
+# Mobile (from mobile/): npm run start | ios | android
+# SDK (from sdk/): npm run build | clean
+# Docker (from project root):
+docker compose up -d                    # MongoDB (27018) + Mailpit (8025)
 ```
 
 ## Design System
