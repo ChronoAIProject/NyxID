@@ -14,6 +14,8 @@ use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::handlers::admin_helpers::{extract_ip, extract_user_agent};
 use crate::models::authorization_code::{ExternalSubjectRef, validate_external_subject_params};
+// Keep both import surfaces: this handler resolves consent-scoped resources and
+// service-account principals in the OAuth endpoints.
 use crate::models::consent::Consent;
 use crate::models::service_account::{COLLECTION_NAME as SERVICE_ACCOUNTS, ServiceAccount};
 use crate::models::service_account_token::{COLLECTION_NAME as SA_TOKENS, ServiceAccountToken};
