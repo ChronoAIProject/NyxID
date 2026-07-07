@@ -8,7 +8,6 @@ use crate::models::consent::{COLLECTION_NAME as CONSENTS, Consent};
 
 /// Grant consent for a user to a client with specific scopes.
 /// Upserts: if consent exists for (user_id, client_id), replaces scopes.
-#[cfg(test)]
 pub async fn grant_consent(
     db: &mongodb::Database,
     user_id: &str,
