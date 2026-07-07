@@ -416,7 +416,7 @@ In QA mode, flag any code that doesn't match DESIGN.md.
 - All tests must pass before merge
 
 
-<!-- consensus-rnd:foundational-invariants:start version=1 sha256=f5c24b0c3515993a7b86c4ed78ce7386add665f8c8b84cc7275aedebd6c3e6af -->
+<!-- consensus-rnd:foundational-invariants:start version=1 sha256=180aef50d385eb24f73e772f75753fa61a2adde8407539bbacd586878d7e2166 -->
 ## Consensus R&D Foundational Invariants (managed by consensus-rnd)
 
 - FI-001 AI outputs are untrusted by default; before entering the mainline they must pass independent checks, including the applicable mix of consensus, review, or automated verification.
