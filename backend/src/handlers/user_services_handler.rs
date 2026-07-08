@@ -95,6 +95,14 @@ pub struct UpdateUserServiceRequest {
 pub struct UserServiceResponse {
     pub id: String,
     pub slug: String,
+    /// Human-readable display name (the linked endpoint's label). Present in
+    /// list responses; single-item responses omit it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Catalog service name when this service was provisioned from the
+    /// catalog. Present in list responses; single-item responses omit it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub catalog_service_name: Option<String>,
     pub resource_uri: String,
     pub endpoint_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -224,12 +232,72 @@ pub async fn list_user_services(
     State(state): State<AppState>,
     auth_user: AuthUser,
 ) -> AppResult<Json<UserServiceListResponse>> {
+    use futures::TryStreamExt as _;
+
     let user_id_str = auth_user.user_id.to_string();
     let services =
         user_service_service::list_user_services_with_sources(&state.db, &user_id_str).await?;
+
+    // Batch-resolve display metadata: endpoint label (human name shown in
+    // the UI instead of the raw slug, issue #1121) and catalog service name.
+    let endpoint_ids: Vec<&str> = services
+        .iter()
+        .map(|item| item.service.endpoint_id.as_str())
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    let endpoint_label_map: std::collections::HashMap<String, String> = if endpoint_ids.is_empty() {
+        std::collections::HashMap::new()
+    } else {
+        let endpoints: Vec<crate::models::user_endpoint::UserEndpoint> = state
+            .db
+            .collection(crate::models::user_endpoint::COLLECTION_NAME)
+            .find(doc! { "_id": { "$in": &endpoint_ids } })
+            .await?
+            .try_collect()
+            .await?;
+        endpoints
+            .into_iter()
+            .map(|ep| (ep.id.clone(), ep.label))
+            .collect()
+    };
+
+    let catalog_ids: Vec<&str> = services
+        .iter()
+        .filter_map(|item| item.service.catalog_service_id.as_deref())
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    let catalog_name_map: std::collections::HashMap<String, String> = if catalog_ids.is_empty() {
+        std::collections::HashMap::new()
+    } else {
+        let catalog_services: Vec<crate::models::downstream_service::DownstreamService> = state
+            .db
+            .collection(crate::models::downstream_service::COLLECTION_NAME)
+            .find(doc! { "_id": { "$in": &catalog_ids } })
+            .await?
+            .try_collect()
+            .await?;
+        catalog_services
+            .into_iter()
+            .map(|ds| (ds.id.clone(), ds.name))
+            .collect()
+    };
+
     let items = services
         .into_iter()
-        .map(|item| user_service_with_source_response(&state.config, item))
+        .map(|item| {
+            let label = endpoint_label_map.get(&item.service.endpoint_id).cloned();
+            let catalog_service_name = item
+                .service
+                .catalog_service_id
+                .as_deref()
+                .and_then(|cid| catalog_name_map.get(cid).cloned());
+            let mut response = user_service_with_source_response(&state.config, item);
+            response.label = label;
+            response.catalog_service_name = catalog_service_name;
+            response
+        })
         .collect();
     Ok(Json(UserServiceListResponse { services: items }))
 }
@@ -500,6 +568,8 @@ fn user_service_with_source_response(
     UserServiceResponse {
         id: svc.id,
         slug: svc.slug,
+        label: None,
+        catalog_service_name: None,
         resource_uri,
         endpoint_id: svc.endpoint_id,
         api_key_id: svc.api_key_id,

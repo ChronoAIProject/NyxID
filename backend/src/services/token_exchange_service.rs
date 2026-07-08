@@ -436,6 +436,7 @@ mod tests {
                 client_type: "confidential".to_string(),
                 is_active: true,
                 delegation_scopes: "llm:proxy proxy".to_string(),
+                default_service_catalog_slugs: Vec::new(),
                 broker_capability_enabled: false,
                 revocation_webhook_url: None,
                 revocation_webhook_secret_encrypted: None,

@@ -100,6 +100,9 @@ pub struct CreateDeveloperOAuthClientRequest {
     /// manageable by every admin of that org. The caller must be an admin
     /// of the target org.
     pub target_org_id: Option<String>,
+    /// Catalog service slugs this app requests by default at consent time.
+    /// Each slug must exist in the service catalog.
+    pub default_service_catalog_slugs: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -113,6 +116,9 @@ pub struct UpdateDeveloperOAuthClientRequest {
     pub revocation_webhook_secret: Option<String>,
     /// OIDC scopes this client is allowed to request. `[]` canonicalizes to `["openid"]`.
     pub allowed_scopes: Option<Vec<String>>,
+    /// Catalog service slugs this app requests by default at consent time.
+    /// `[]` clears the list; omitted leaves it unchanged.
+    pub default_service_catalog_slugs: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -126,6 +132,7 @@ pub struct DeveloperOAuthClientResponse {
     pub broker_capability_enabled: bool,
     pub revocation_webhook_url: Option<String>,
     pub is_active: bool,
+    pub default_service_catalog_slugs: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_secret: Option<String>,
     pub created_at: String,
@@ -155,9 +162,53 @@ fn to_response(c: OauthClient, secret: Option<String>) -> DeveloperOAuthClientRe
         broker_capability_enabled: c.broker_capability_enabled,
         revocation_webhook_url: c.revocation_webhook_url,
         is_active: c.is_active,
+        default_service_catalog_slugs: c.default_service_catalog_slugs,
         client_secret: secret,
         created_at: c.created_at.to_rfc3339(),
     }
+}
+
+/// Maximum catalog slugs an app may declare as consent defaults.
+const MAX_DEFAULT_SERVICE_SLUGS: usize = 25;
+
+/// Trim, de-duplicate, and verify each declared catalog slug against the
+/// active service catalog. Unknown slugs are rejected so app owners catch
+/// typos at save time instead of silently pre-selecting nothing.
+async fn validate_default_service_catalog_slugs(
+    state: &AppState,
+    slugs: &[String],
+) -> AppResult<Vec<String>> {
+    let mut seen = HashSet::new();
+    let mut validated = Vec::new();
+    for raw in slugs {
+        let slug = raw.trim();
+        if slug.is_empty() {
+            continue;
+        }
+        if !seen.insert(slug.to_string()) {
+            continue;
+        }
+        let exists = state
+            .db
+            .collection::<crate::models::downstream_service::DownstreamService>(
+                crate::models::downstream_service::COLLECTION_NAME,
+            )
+            .find_one(doc! { "slug": slug, "is_active": true })
+            .await?
+            .is_some();
+        if !exists {
+            return Err(AppError::ValidationError(format!(
+                "Unknown catalog service slug: {slug}"
+            )));
+        }
+        validated.push(slug.to_string());
+    }
+    if validated.len() > MAX_DEFAULT_SERVICE_SLUGS {
+        return Err(AppError::ValidationError(format!(
+            "At most {MAX_DEFAULT_SERVICE_SLUGS} default services may be declared"
+        )));
+    }
+    Ok(validated)
 }
 
 fn validate_redirect_uris(redirect_uris: &[String]) -> AppResult<Vec<String>> {
@@ -259,6 +310,10 @@ pub async fn create_my_oauth_client(
             Some(secret) => Some(state.encryption_keys.encrypt(secret.as_bytes()).await?),
             None => None,
         };
+    let default_service_catalog_slugs = match body.default_service_catalog_slugs.as_deref() {
+        Some(slugs) => validate_default_service_catalog_slugs(&state, slugs).await?,
+        None => Vec::new(),
+    };
 
     let (client, raw_secret) = oauth_client_service::create_client(
         &state.db,
@@ -271,6 +326,7 @@ pub async fn create_my_oauth_client(
         body.broker_capability_enabled.unwrap_or(false),
         revocation_webhook_url,
         revocation_webhook_secret_encrypted,
+        &default_service_catalog_slugs,
     )
     .await?;
 
@@ -365,6 +421,10 @@ pub async fn update_my_oauth_client(
             Some(secret) => Some(state.encryption_keys.encrypt(secret.as_bytes()).await?),
             None => None,
         };
+    let validated_default_slugs = match body.default_service_catalog_slugs.as_deref() {
+        Some(slugs) => Some(validate_default_service_catalog_slugs(&state, slugs).await?),
+        None => None,
+    };
 
     let updated = oauth_client_service::update_client_for_creator(
         &state.db,
@@ -377,6 +437,7 @@ pub async fn update_my_oauth_client(
         body.broker_capability_enabled,
         revocation_webhook_url,
         revocation_webhook_secret_encrypted,
+        validated_default_slugs.as_deref(),
     )
     .await?;
 
@@ -465,6 +526,7 @@ mod tests {
                 revocation_webhook_secret: None,
                 allowed_scopes: None,
                 target_org_id: None,
+                default_service_catalog_slugs: None,
             }),
         )
         .await
@@ -514,6 +576,7 @@ mod tests {
                 revocation_webhook_secret: None,
                 allowed_scopes: None,
                 target_org_id: None,
+                default_service_catalog_slugs: None,
             }),
         )
         .await
@@ -555,6 +618,7 @@ mod tests {
                 revocation_webhook_secret: None,
                 allowed_scopes: None,
                 target_org_id: None,
+                default_service_catalog_slugs: None,
             }),
         )
         .await
@@ -572,6 +636,7 @@ mod tests {
                 revocation_webhook_url: None,
                 revocation_webhook_secret: None,
                 allowed_scopes: None,
+                default_service_catalog_slugs: None,
             }),
         )
         .await
@@ -608,6 +673,7 @@ mod tests {
                 revocation_webhook_secret: None,
                 allowed_scopes: None,
                 target_org_id: None,
+                default_service_catalog_slugs: None,
             }),
         )
         .await
@@ -651,6 +717,7 @@ mod tests {
                 revocation_webhook_secret: None,
                 allowed_scopes: None,
                 target_org_id: None,
+                default_service_catalog_slugs: None,
             }),
         )
         .await
@@ -696,6 +763,7 @@ mod tests {
                 revocation_webhook_secret: None,
                 allowed_scopes: None,
                 target_org_id: None,
+                default_service_catalog_slugs: None,
             }),
         )
         .await;
@@ -840,6 +908,7 @@ mod tests {
             allowed_scopes: "openid profile".to_string(),
             grant_types: "authorization_code".to_string(),
             delegation_scopes: "proxy:*".to_string(),
+            default_service_catalog_slugs: Vec::new(),
             broker_capability_enabled: true,
             revocation_webhook_url: Some("https://ex.com/revoke".to_string()),
             revocation_webhook_secret_encrypted: None,
@@ -869,6 +938,7 @@ mod tests {
             allowed_scopes: "openid".to_string(),
             grant_types: "authorization_code".to_string(),
             delegation_scopes: String::new(),
+            default_service_catalog_slugs: Vec::new(),
             broker_capability_enabled: false,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: None,
@@ -891,6 +961,7 @@ mod tests {
             redirect_uris: vec!["https://x.com/cb".to_string()],
             allowed_scopes: "openid".to_string(),
             delegation_scopes: String::new(),
+            default_service_catalog_slugs: Vec::new(),
             broker_capability_enabled: false,
             revocation_webhook_url: None,
             is_active: true,
@@ -911,6 +982,7 @@ mod tests {
             redirect_uris: vec![],
             allowed_scopes: "openid".to_string(),
             delegation_scopes: String::new(),
+            default_service_catalog_slugs: Vec::new(),
             broker_capability_enabled: false,
             revocation_webhook_url: None,
             is_active: true,

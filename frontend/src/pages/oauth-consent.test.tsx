@@ -9,7 +9,9 @@ const { state } = vi.hoisted(() => ({
   state: {
     userServices: [] as Array<{
       id: string;
+      label: string;
       slug: string;
+      catalog_service_name: string | null;
       resource_uri: string;
       auth_method: string;
       is_active: boolean;
@@ -70,7 +72,9 @@ beforeEach(() => {
   state.userServices = [
     {
       id: "svc-openai",
-      slug: "openai",
+      label: "My OpenAI",
+      slug: "openai-x2",
+      catalog_service_name: "OpenAI",
       resource_uri: "https://nyx.example/api/v1/proxy/s/openai",
       auth_method: "bearer",
       is_active: true,
@@ -78,7 +82,9 @@ beforeEach(() => {
     },
     {
       id: "svc-inactive",
+      label: "Inactive",
       slug: "inactive",
+      catalog_service_name: null,
       resource_uri: "https://nyx.example/api/v1/proxy/s/inactive",
       auth_method: "bearer",
       is_active: false,
@@ -86,7 +92,9 @@ beforeEach(() => {
     },
     {
       id: "svc-org",
+      label: "Org Service",
       slug: "org-service",
+      catalog_service_name: null,
       resource_uri: "https://nyx.example/api/v1/proxy/s/org-service",
       auth_method: "bearer",
       is_active: true,
@@ -280,29 +288,37 @@ describe("OAuthConsentPage", () => {
     expect(screen.getByText("Unknown")).toBeInTheDocument();
   });
 
-  it("defaults service access to no selected services", () => {
+  it("defaults to a sign-in-only summary with no picker rendered", () => {
     setSearch(VALID);
 
     render(<OAuthConsentPage />);
 
-    const allServices = screen.getByRole("switch", { name: "All services" });
-    expect(allServices).toHaveAttribute("aria-checked", "false");
-    expect(screen.getByText("openai")).toBeInTheDocument();
+    expect(
+      screen.getByText(/No service access requested/i),
+    ).toBeInTheDocument();
+    // Picker is collapsed by default: no checkboxes, no All-services switch.
+    expect(
+      screen.queryByRole("switch", { name: "All services" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("My OpenAI")).not.toBeInTheDocument();
     expect(hiddenInput("allow_all_services")?.value).toBe("false");
     expect(hiddenInput("allowed_service_ids")).toBeNull();
   });
 
-  it("hides service choices when all-services is enabled", async () => {
+  it("reveals the picker behind Customize and hides choices when all-services is enabled", async () => {
     const user = userEvent.setup();
     setSearch(VALID);
 
     render(<OAuthConsentPage />);
 
+    await user.click(screen.getByRole("button", { name: "Customize" }));
+    expect(screen.getByText("My OpenAI")).toBeInTheDocument();
+
     await user.click(screen.getByRole("switch", { name: "All services" }));
 
-    expect(screen.queryByText("openai")).not.toBeInTheDocument();
-    expect(screen.queryByText("inactive")).not.toBeInTheDocument();
-    expect(screen.queryByText("org-service")).not.toBeInTheDocument();
+    expect(screen.queryByText("My OpenAI")).not.toBeInTheDocument();
+    expect(screen.queryByText("Inactive")).not.toBeInTheDocument();
+    expect(screen.queryByText("Org Service")).not.toBeInTheDocument();
     expect(hiddenInput("allow_all_services")?.value).toBe("true");
   });
 
@@ -312,7 +328,8 @@ describe("OAuthConsentPage", () => {
 
     render(<OAuthConsentPage />);
 
-    await user.click(screen.getByRole("checkbox", { name: /openai/i }));
+    await user.click(screen.getByRole("button", { name: "Customize" }));
+    await user.click(screen.getByRole("checkbox", { name: /My OpenAI/i }));
 
     const selected = document.querySelectorAll<HTMLInputElement>(
       'input[type="hidden"][name="allowed_service_ids"]',
@@ -320,6 +337,58 @@ describe("OAuthConsentPage", () => {
     expect(Array.from(selected).map((input) => input.value)).toEqual([
       "svc-openai",
     ]);
+  });
+
+  it("renders service display names, not raw slugs, in the picker", async () => {
+    const user = userEvent.setup();
+    setSearch(VALID);
+
+    render(<OAuthConsentPage />);
+
+    await user.click(screen.getByRole("button", { name: "Customize" }));
+
+    // Primary text is the label; catalog name + slug appear as secondary.
+    expect(screen.getByText("My OpenAI")).toBeInTheDocument();
+    expect(screen.getByText("OpenAI · openai-x2")).toBeInTheDocument();
+  });
+
+  it("pre-selects app default services from preselect_service_ids and grants them on plain approve", () => {
+    setSearch({ ...VALID, preselect_service_ids: ["svc-openai"] });
+
+    render(<OAuthConsentPage />);
+
+    // Summary lists the resolved default with the app-requested badge; the
+    // hidden inputs already carry the grant without any user interaction.
+    expect(screen.getByText("My OpenAI")).toBeInTheDocument();
+    expect(screen.getByText("Requested by app")).toBeInTheDocument();
+    expect(hiddenInput("allow_all_services")?.value).toBe("false");
+    expect(hiddenInputs("allowed_service_ids").map((i) => i.value)).toEqual([
+      "svc-openai",
+    ]);
+  });
+
+  it("lets the user remove an app default via Customize", async () => {
+    const user = userEvent.setup();
+    setSearch({ ...VALID, preselect_service_ids: ["svc-openai"] });
+
+    render(<OAuthConsentPage />);
+
+    await user.click(screen.getByRole("button", { name: "Customize" }));
+    await user.click(screen.getByRole("checkbox", { name: /My OpenAI/i }));
+
+    expect(hiddenInput("allowed_service_ids")).toBeNull();
+  });
+
+  it("shows unmatched app defaults as informational rows", () => {
+    setSearch({ ...VALID, unmatched_defaults: ["Lark Bot"] });
+
+    render(<OAuthConsentPage />);
+
+    expect(screen.getByText("Lark Bot")).toBeInTheDocument();
+    expect(
+      screen.getByText(/no matching service in your account/i),
+    ).toBeInTheDocument();
+    expect(hiddenInput("allowed_service_ids")).toBeNull();
   });
 
   it("preselects services for requested resource indicators", async () => {

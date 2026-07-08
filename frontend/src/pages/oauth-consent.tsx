@@ -34,11 +34,33 @@ function parseHost(uri: string): string {
   }
 }
 
+interface ConsentServiceDisplay {
+  readonly label?: string | null;
+  readonly slug: string;
+  readonly catalog_service_name?: string | null;
+}
+
+/// Human-readable primary text for a service row. Never render the raw
+/// user slug as the primary label (issue #1121).
+function serviceDisplayName(service: ConsentServiceDisplay): string {
+  return service.label || service.slug;
+}
+
+function serviceSecondaryText(service: ConsentServiceDisplay): string {
+  const parts = [service.catalog_service_name, service.slug].filter(
+    (part): part is string => Boolean(part) && part !== serviceDisplayName(service),
+  );
+  return parts.join(" · ");
+}
+
 export function OAuthConsentPage() {
   useApplyTheme();
   const { data: userServices, isLoading: userServicesLoading } =
     useUserServices();
-  const search = new URLSearchParams(window.location.search);
+  // The consent page renders once per authorize redirect; the query string
+  // never changes within a mount, so URL-derived values are memoized to keep
+  // referential stability for the memos below.
+  const search = useMemo(() => new URLSearchParams(window.location.search), []);
 
   const responseType = readParam(search, "response_type");
   const clientId = readParam(search, "client_id");
@@ -55,11 +77,23 @@ export function OAuthConsentPage() {
   const externalSubjectExternalUserId =
     search.get("external_subject_external_user_id") ?? "";
   const consentRequest = search.get("consent_request") ?? "";
-  const resources = search.getAll("resource");
+  const resources = useMemo(() => search.getAll("resource"), [search]);
+  // Server-resolved hints: the app's declared default services matched to
+  // this user (pre-selected), and declared services the user has no match
+  // for (informational only).
+  const preselectServiceIds = useMemo(
+    () => search.getAll("preselect_service_ids"),
+    [search],
+  );
+  const unmatchedDefaults = useMemo(
+    () => search.getAll("unmatched_defaults"),
+    [search],
+  );
   const [allowAllServices, setAllowAllServices] = useState(false);
+  const [customize, setCustomize] = useState(false);
   const [selectedServiceIds, setSelectedServiceIds] = useState<
     readonly string[]
-  >([]);
+  >(preselectServiceIds);
   const [deselectedServiceIds, setDeselectedServiceIds] = useState<
     readonly string[]
   >([]);
@@ -83,7 +117,11 @@ export function OAuthConsentPage() {
           (service) =>
             service.is_active && service.credential_source.type === "personal",
         )
-        .sort((a, b) => a.slug.localeCompare(b.slug)),
+        .sort((a, b) =>
+          serviceDisplayName(a).localeCompare(serviceDisplayName(b), undefined, {
+            sensitivity: "base",
+          }),
+        ),
     [userServices],
   );
   const resourceSelectedServiceIds = useMemo(() => {
@@ -103,6 +141,29 @@ export function OAuthConsentPage() {
     allow_all_services: allowAllServices,
     allowed_service_ids: effectiveSelectedServiceIds,
   });
+  // Rows for the read-only summary: granted services with display names,
+  // marked when the app itself requested them (via declared defaults or
+  // RFC 8707 resource params).
+  const summaryServices = useMemo(
+    () =>
+      effectiveSelectedServiceIds.map((id) => {
+        const service = selectableServices.find((item) => item.id === id);
+        return {
+          id,
+          primary: service ? serviceDisplayName(service) : id,
+          secondary: service ? serviceSecondaryText(service) : "",
+          requestedByApp:
+            preselectServiceIds.includes(id) ||
+            resourceSelectedServiceIds.includes(id),
+        };
+      }),
+    [
+      effectiveSelectedServiceIds,
+      preselectServiceIds,
+      resourceSelectedServiceIds,
+      selectableServices,
+    ],
+  );
 
   function toggleService(serviceId: string, checked: boolean) {
     setSelectedServiceIds((current) => {
@@ -275,56 +336,121 @@ export function OAuthConsentPage() {
                   Service access
                 </p>
                 <p className="mt-1 text-xs text-muted-foreground">
-                  Choose which personal services this app can use through the
-                  proxy.
+                  {serviceAccess.allow_all_services
+                    ? "This app will be able to use all of your personal services through the proxy."
+                    : summaryServices.length > 0
+                      ? "This app will be able to use these services through the proxy:"
+                      : "No service access requested. This app only signs you in."}
                 </p>
               </div>
-              <div className="flex shrink-0 items-center gap-2">
-                <Label htmlFor="oauth-allow-all-services">All services</Label>
-                <Switch
-                  id="oauth-allow-all-services"
-                  aria-label="All services"
-                  checked={allowAllServices}
-                  onCheckedChange={setAllowAllServices}
-                />
-              </div>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="shrink-0"
+                onClick={() => setCustomize((current) => !current)}
+              >
+                {customize ? "Done" : "Customize"}
+              </Button>
             </div>
 
-            {!allowAllServices && (
-              <div className="space-y-2 border-t border-border pt-3">
-                {userServicesLoading ? (
-                  <p className="text-xs text-muted-foreground">
-                    Loading services...
-                  </p>
-                ) : selectableServices.length > 0 ? (
-                  selectableServices.map((service) => (
+            {!customize &&
+              !serviceAccess.allow_all_services &&
+              (summaryServices.length > 0 || unmatchedDefaults.length > 0) && (
+                <div className="space-y-2 border-t border-border pt-3">
+                  {summaryServices.map((item) => (
                     <div
-                      key={service.id}
-                      className="flex items-start gap-2 rounded-md border border-border bg-background/60 px-3 py-2"
+                      key={item.id}
+                      className="flex items-start justify-between gap-2 rounded-md border border-border bg-background/60 px-3 py-2"
                     >
-                      <Checkbox
-                        id={`oauth-service-${service.id}`}
-                        checked={effectiveSelectedServiceIds.includes(
-                          service.id,
+                      <div className="min-w-0">
+                        <p className="break-words text-xs font-medium text-foreground">
+                          {item.primary}
+                        </p>
+                        {item.secondary && (
+                          <p className="mt-0.5 break-words text-[11px] text-muted-foreground">
+                            {item.secondary}
+                          </p>
                         )}
-                        onCheckedChange={(checked) =>
-                          toggleService(service.id, checked === true)
-                        }
-                      />
-                      <Label
-                        htmlFor={`oauth-service-${service.id}`}
-                        className="min-w-0 cursor-pointer text-xs leading-5 text-foreground"
-                      >
-                        <span className="block break-words font-medium">
-                          {service.slug}
-                        </span>
-                      </Label>
+                      </div>
+                      {item.requestedByApp && (
+                        <Badge variant="secondary" className="shrink-0 text-[10px]">
+                          Requested by app
+                        </Badge>
+                      )}
                     </div>
-                  ))
-                ) : (
-                  <p className="text-xs text-muted-foreground">
-                    No active personal services are available.
-                  </p>
+                  ))}
+                  {unmatchedDefaults.map((name) => (
+                    <div
+                      key={`unmatched-${name}`}
+                      className="rounded-md border border-dashed border-border bg-background/40 px-3 py-2"
+                    >
+                      <p className="break-words text-xs text-muted-foreground">
+                        <span className="font-medium text-foreground">
+                          {name}
+                        </span>{" "}
+                        — requested by this app, but you have no matching
+                        service in your account.
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+            {customize && (
+              <div className="space-y-3 border-t border-border pt-3">
+                <div className="flex items-center justify-between gap-2">
+                  <Label htmlFor="oauth-allow-all-services">All services</Label>
+                  <Switch
+                    id="oauth-allow-all-services"
+                    aria-label="All services"
+                    checked={allowAllServices}
+                    onCheckedChange={setAllowAllServices}
+                  />
+                </div>
+
+                {!allowAllServices && (
+                  <div className="space-y-2">
+                    {userServicesLoading ? (
+                      <p className="text-xs text-muted-foreground">
+                        Loading services...
+                      </p>
+                    ) : selectableServices.length > 0 ? (
+                      selectableServices.map((service) => (
+                        <div
+                          key={service.id}
+                          className="flex items-start gap-2 rounded-md border border-border bg-background/60 px-3 py-2"
+                        >
+                          <Checkbox
+                            id={`oauth-service-${service.id}`}
+                            checked={effectiveSelectedServiceIds.includes(
+                              service.id,
+                            )}
+                            onCheckedChange={(checked) =>
+                              toggleService(service.id, checked === true)
+                            }
+                          />
+                          <Label
+                            htmlFor={`oauth-service-${service.id}`}
+                            className="min-w-0 cursor-pointer text-xs leading-5 text-foreground"
+                          >
+                            <span className="block break-words font-medium">
+                              {serviceDisplayName(service)}
+                            </span>
+                            {serviceSecondaryText(service) && (
+                              <span className="block break-words text-[11px] font-normal text-muted-foreground">
+                                {serviceSecondaryText(service)}
+                              </span>
+                            )}
+                          </Label>
+                        </div>
+                      ))
+                    ) : (
+                      <p className="text-xs text-muted-foreground">
+                        No active personal services are available.
+                      </p>
+                    )}
+                  </div>
                 )}
               </div>
             )}

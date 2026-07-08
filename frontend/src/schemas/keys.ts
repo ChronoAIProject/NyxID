@@ -40,6 +40,10 @@ export type {
 export const userServiceResponseSchema = z.object({
   id: z.string(),
   slug: z.string(),
+  // Human display name (endpoint label) + catalog service name; present in
+  // list responses only (issue #1121).
+  label: z.string().nullable().optional(),
+  catalog_service_name: z.string().nullable().optional(),
   resource_uri: z.string().url(),
   endpoint_id: z.string(),
   api_key_id: z.string().nullable().optional(),
