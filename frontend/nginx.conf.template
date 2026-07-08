@@ -74,6 +74,35 @@ server {
         try_files $uri =404;
     }
 
+    # The SPA shell names the content-hashed asset chunks, so it must never be
+    # cached: a stale index.html pins a browser to an old chunk map for as long
+    # as its heuristic freshness lasts (nginx sends no Cache-Control here, so
+    # browsers invent one from Last-Modified). Symptom: a newly deployed catalog
+    # icon renders as the fallback globe because the old service-icon chunk has
+    # no entry for the new slug. `try_files` below internally redirects to
+    # /index.html, which re-enters location matching and lands here.
+    #
+    # `add_header` in a location replaces (not merges with) the server-level
+    # add_headers, so the security headers are repeated -- same as the asset
+    # location above.
+    location = /index.html {
+        add_header Cache-Control "no-cache" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    }
+
+    # Docs markdown and the search index are mirrored from `docs/site/**` and
+    # are NOT content-hashed, so the same staleness applies: without this a
+    # deploy's new or edited guide keeps serving the previously cached copy.
+    location ~* ^/docs/.*\.(?:md|json)$ {
+        add_header Cache-Control "no-cache" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        try_files $uri =404;
+    }
+
     # SPA fallback -- serve index.html for all non-file routes.
     # Do NOT add `$uri/`: the build mirrors `docs/site/**` into `public/docs/`,
     # so a real `/docs/` directory exists. With `$uri/`, a request to `/docs`
