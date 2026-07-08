@@ -61,7 +61,3 @@ nyxid catalog show llm-openrouter    # base URL, auth method, capabilities
 nyxid service list                   # ids, slugs + status of your connections
 nyxid service rotate-credential <id> --credential-env OPENROUTER_KEY   # rotate the key
 ```
-
-## App attribution
-
-OpenRouter [attributes API traffic to apps](https://openrouter.ai/docs/app-attribution) via the `HTTP-Referer` and `X-OpenRouter-Title` request headers. NyxID attaches its own attribution on proxied requests **only when your client does not send these headers itself** — a tool that already identifies itself to OpenRouter keeps its own attribution.

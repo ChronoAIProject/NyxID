@@ -55,7 +55,3 @@ curl -i -X POST "$OPENAI_BASE_URL/chat/completions" \
 ```
 
 A successful response includes `HTTP/1.1 200 OK`. The same request also works through the general proxy route form, `POST /api/v1/proxy/s/llm-openrouter/chat/completions`, whose responses additionally carry `X-NyxID-Agent-Id: <uuid>` — confirming NyxID attributed the request to your Agent Key.
-
-## App attribution
-
-OpenRouter [attributes API traffic to apps](https://openrouter.ai/docs/app-attribution) via the `HTTP-Referer` and `X-OpenRouter-Title` request headers. NyxID attaches its own attribution on proxied requests **only when your client does not send these headers itself** — a tool that already identifies itself to OpenRouter keeps its own attribution.

@@ -24,7 +24,3 @@ To limit the blast radius of a leak, scope the key: open **AI Services → Agent
 Open the service from **AI Services → External Services** to get its detail page. The **API Usage** card shows the proxy URL and copy-ready curl examples — note the model field uses OpenRouter's `vendor/model` form (`openai/gpt-4o`, `anthropic/claude-sonnet-4`, `meta-llama/llama-3.3-70b-instruct`); bare model names are rejected by OpenRouter.
 
 Rotation and credential edits work like any other service — see [Manage keys & credentials](/docs/web/guides/manage-keys).
-
-## App attribution
-
-OpenRouter [attributes API traffic to apps](https://openrouter.ai/docs/app-attribution) via the `HTTP-Referer` and `X-OpenRouter-Title` request headers. NyxID attaches its own attribution on proxied requests **only when your client does not send these headers itself** — a tool that already identifies itself to OpenRouter keeps its own attribution.
