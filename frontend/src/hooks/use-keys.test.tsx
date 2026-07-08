@@ -64,6 +64,17 @@ describe("query hooks unwrap their list envelopes", () => {
     expect(result.current.data).toEqual([{ slug: "openai" }]);
   });
 
+  it("useCatalog can include all catalog entries when requested", async () => {
+    mockGet.mockResolvedValue({ entries: [{ slug: "chrono-llm-public" }] });
+    const { result } = renderHook(() => useCatalog({ includeAll: true }), {
+      wrapper: wrapperFactory(),
+    });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(mockGet).toHaveBeenCalledWith("/catalog?include_all=true");
+    expect(result.current.data).toEqual([{ slug: "chrono-llm-public" }]);
+  });
+
   it("useExternalApiKeys returns the `api_keys` array from /api-keys/external", async () => {
     mockGet.mockResolvedValue({ api_keys: [{ id: "ext1" }] });
     const { result } = renderHook(() => useExternalApiKeys(), {

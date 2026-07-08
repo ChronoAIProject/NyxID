@@ -33,11 +33,19 @@ export function useKey(keyId: string) {
   });
 }
 
-export function useCatalog() {
+interface UseCatalogOptions {
+  readonly includeAll?: boolean;
+}
+
+export function useCatalog(options: UseCatalogOptions = {}) {
+  const includeAll = options.includeAll ?? false;
+
   return useQuery({
-    queryKey: ["catalog"],
+    queryKey: includeAll ? ["catalog", { includeAll: true }] : ["catalog"],
     queryFn: async (): Promise<readonly CatalogEntry[]> => {
-      const res = await api.get<CatalogListResponse>("/catalog");
+      const res = await api.get<CatalogListResponse>(
+        includeAll ? "/catalog?include_all=true" : "/catalog",
+      );
       return res.entries;
     },
   });
