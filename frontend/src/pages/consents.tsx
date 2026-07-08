@@ -39,6 +39,7 @@ import {
 import { Trash2 } from "lucide-react";
 import { SmartLockIcon, BiometricLockIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
+import type { Consent } from "@/types/rbac";
 
 function formatExternalSubject(
   subject: BrokerBindingExternalSubject | null,
@@ -48,6 +49,61 @@ function formatExternalSubject(
   if (subject.tenant) parts.push(subject.tenant);
   parts.push(subject.external_user_id);
   return parts.join(" · ");
+}
+
+function ServiceAccess({ consent }: { readonly consent: Consent }) {
+  const allowedServiceIds = consent.allowed_service_ids ?? [];
+  const allowedServices = consent.allowed_services ?? [];
+
+  if (consent.legacy_unrestricted) {
+    return (
+      <div className="space-y-1">
+        <Badge variant="warning" className="text-xs">
+          Legacy grant
+        </Badge>
+        <p className="text-[11px] text-muted-foreground">
+          Full service access until the app asks you to sign in again.
+        </p>
+      </div>
+    );
+  }
+
+  if (consent.allow_all_services) {
+    return (
+      <Badge variant="secondary" className="text-xs">
+        All services
+      </Badge>
+    );
+  }
+
+  if (allowedServiceIds.length === 0) {
+    return (
+      <Badge variant="secondary" className="text-xs">
+        No services
+      </Badge>
+    );
+  }
+
+  return (
+    <div className="flex flex-wrap gap-1">
+      {allowedServices.map((service) => (
+        <Badge
+          key={service.id}
+          variant={service.deleted ? "destructive" : "secondary"}
+          className="text-xs"
+          title={
+            service.deleted
+              ? "Deleted service"
+              : service.catalog_service_name ?? service.slug ?? service.id
+          }
+        >
+          {service.deleted
+            ? `${service.id} (deleted)`
+            : service.catalog_service_name ?? service.label}
+        </Badge>
+      ))}
+    </div>
+  );
 }
 
 export function ConsentsPage() {
@@ -176,6 +232,12 @@ function AuthorizedAppsTab({ viewMode }: { readonly viewMode: ViewMode }) {
               ))}
             </div>
             <div className="mt-3 space-y-1">
+              <p className="text-[11px] font-medium text-muted-foreground">
+                Service access
+              </p>
+              <ServiceAccess consent={consent} />
+            </div>
+            <div className="mt-3 space-y-1">
               <p className="text-[11px] text-muted-foreground">
                 <span className="font-medium">Granted:</span>{" "}
                 {formatDate(consent.granted_at)}
@@ -220,6 +282,12 @@ function AuthorizedAppsTab({ viewMode }: { readonly viewMode: ViewMode }) {
                 ))}
               </div>
               <div className="mt-3 space-y-1">
+                <p className="text-[11px] font-medium text-muted-foreground">
+                  Service access
+                </p>
+                <ServiceAccess consent={consent} />
+              </div>
+              <div className="mt-3 space-y-1">
                 <p className="text-[11px] text-muted-foreground">
                   <span className="font-medium">Granted:</span>{" "}
                   {formatDate(consent.granted_at)}
@@ -244,6 +312,7 @@ function AuthorizedAppsTab({ viewMode }: { readonly viewMode: ViewMode }) {
               <TableRow>
                 <TableHead>Application</TableHead>
                 <TableHead>Scopes</TableHead>
+                <TableHead>Service access</TableHead>
                 <TableHead>Granted</TableHead>
                 <TableHead>Expires</TableHead>
                 <TableHead className="w-[60px]">Actions</TableHead>
@@ -267,6 +336,9 @@ function AuthorizedAppsTab({ viewMode }: { readonly viewMode: ViewMode }) {
                         </Badge>
                       ))}
                     </div>
+                  </TableCell>
+                  <TableCell>
+                    <ServiceAccess consent={consent} />
                   </TableCell>
                   <TableCell className="text-muted-foreground">
                     {formatDate(consent.granted_at)}
@@ -307,8 +379,9 @@ function AuthorizedAppsTab({ viewMode }: { readonly viewMode: ViewMode }) {
               {revokeTarget
                 ? `"${revokeTarget.client_name}"`
                 : "this application"}
-              ? The application will no longer be able to access your account
-              with the granted scopes.
+              ? The application will need your consent again before it can
+              refresh access or use brokered authorizations. Any access tokens
+              already issued can keep working for up to 15 minutes.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
