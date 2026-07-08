@@ -197,7 +197,13 @@ pub struct ExchangedTokens {
     pub external_subject: Option<ExternalSubjectRef>,
     pub broker_capability_enabled: bool,
     pub resource_uris: Vec<String>,
+    // Populated by the token exchange for the granted per-service access, but not
+    // yet consumed on the access-token path (only the refresh_token_* siblings are
+    // read today). Allowed rather than removed so the completing work (#1111) can
+    // wire consumption without re-adding them.
+    #[allow(dead_code)]
     pub allowed_service_ids: Vec<String>,
+    #[allow(dead_code)]
     pub allow_all_services: bool,
     pub refresh_token_resource_uris: Vec<String>,
     pub refresh_token_allowed_service_ids: Vec<String>,
