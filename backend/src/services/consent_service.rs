@@ -1,10 +1,11 @@
 use chrono::Utc;
 use futures::TryStreamExt;
-use mongodb::bson::doc;
+use mongodb::bson::{self, doc};
 use uuid::Uuid;
 
 use crate::errors::{AppError, AppResult};
 use crate::models::consent::{COLLECTION_NAME as CONSENTS, Consent};
+use crate::models::refresh_token::{COLLECTION_NAME as REFRESH_TOKENS, RefreshToken};
 
 /// Grant consent for a user to a client with specific scopes.
 /// Upserts: if consent exists for (user_id, client_id), replaces scopes.
@@ -139,7 +140,35 @@ pub async fn revoke_consent(
     db: &mongodb::Database,
     user_id: &str,
     client_id: &str,
-) -> AppResult<()> {
+) -> AppResult<ConsentRevocationResult> {
+    let existing = db
+        .collection::<Consent>(CONSENTS)
+        .find_one(doc! { "user_id": user_id, "client_id": client_id })
+        .await?;
+    if existing.is_none() {
+        return Err(AppError::ConsentNotFound);
+    }
+
+    let now = Utc::now();
+    let revoked_refresh_tokens = if client_id == Uuid::nil().to_string() {
+        0
+    } else {
+        db.collection::<RefreshToken>(REFRESH_TOKENS)
+            .update_many(
+                doc! {
+                    "user_id": user_id,
+                    "client_id": client_id,
+                    "revoked": false,
+                },
+                doc! { "$set": {
+                    "revoked": true,
+                    "revoked_at": bson::DateTime::from_chrono(now),
+                }},
+            )
+            .await?
+            .modified_count
+    };
+
     let result = db
         .collection::<Consent>(CONSENTS)
         .delete_one(doc! { "user_id": user_id, "client_id": client_id })
@@ -149,7 +178,14 @@ pub async fn revoke_consent(
         return Err(AppError::ConsentNotFound);
     }
 
-    Ok(())
+    Ok(ConsentRevocationResult {
+        revoked_refresh_tokens,
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConsentRevocationResult {
+    pub revoked_refresh_tokens: u64,
 }
 
 /// List all consents for a user.
@@ -182,7 +218,9 @@ pub async fn list_client_consents(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
     use crate::test_utils::*;
+    use chrono::Duration;
 
     #[tokio::test]
     async fn test_grant_consent_creates_new() {
@@ -325,7 +363,8 @@ mod tests {
         grant_consent(&db, &user_id, &client_id, "openid")
             .await
             .unwrap();
-        revoke_consent(&db, &user_id, &client_id).await.unwrap();
+        let result = revoke_consent(&db, &user_id, &client_id).await.unwrap();
+        assert_eq!(result.revoked_refresh_tokens, 0);
 
         let after = check_consent(&db, &user_id, &client_id, "openid")
             .await
@@ -334,6 +373,141 @@ mod tests {
 
         let err = revoke_consent(&db, &user_id, &client_id).await;
         assert!(err.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_revoke_consent_revokes_refresh_token_chain_for_client_only() {
+        let Some(db) = connect_test_database("consent_revoke_refresh").await else {
+            return;
+        };
+        let config = test_app_config();
+        let jwt_keys = cached_test_jwt_keys();
+        let user_id = Uuid::new_v4().to_string();
+        let client_id = Uuid::new_v4().to_string();
+        let other_client_id = Uuid::new_v4().to_string();
+        let now = Utc::now();
+
+        db.collection::<OauthClient>(OAUTH_CLIENTS)
+            .insert_one(OauthClient {
+                id: client_id.clone(),
+                client_name: "Revoked Client".to_string(),
+                client_secret_hash: String::new(),
+                redirect_uris: vec!["https://app.example/callback".to_string()],
+                allowed_scopes: "openid profile".to_string(),
+                grant_types: "authorization_code refresh_token".to_string(),
+                client_type: "public".to_string(),
+                is_active: true,
+                delegation_scopes: String::new(),
+                broker_capability_enabled: false,
+                revocation_webhook_url: None,
+                revocation_webhook_secret_encrypted: None,
+                created_by: Some(user_id.clone()),
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+
+        grant_consent(&db, &user_id, &client_id, "openid")
+            .await
+            .unwrap();
+        let user_uuid = Uuid::parse_str(&user_id).unwrap();
+        let (refresh_jwt, refresh_jti) =
+            crate::crypto::jwt::generate_refresh_token(&jwt_keys, &config, &user_uuid).unwrap();
+        let first_party_jti = Uuid::new_v4().to_string();
+        let other_client_jti = Uuid::new_v4().to_string();
+
+        db.collection::<RefreshToken>(REFRESH_TOKENS)
+            .insert_many([
+                RefreshToken {
+                    id: Uuid::new_v4().to_string(),
+                    jti: refresh_jti.clone(),
+                    client_id: client_id.clone(),
+                    user_id: user_id.clone(),
+                    session_id: None,
+                    scope: Some("openid".to_string()),
+                    expires_at: now + Duration::days(7),
+                    revoked: false,
+                    replaced_by: None,
+                    revoked_at: None,
+                    resource_uris: Vec::new(),
+                    allowed_service_ids: Vec::new(),
+                    allow_all_services: true,
+                    created_at: now,
+                },
+                RefreshToken {
+                    id: Uuid::new_v4().to_string(),
+                    jti: first_party_jti.clone(),
+                    client_id: Uuid::nil().to_string(),
+                    user_id: user_id.clone(),
+                    session_id: None,
+                    scope: None,
+                    expires_at: now + Duration::days(7),
+                    revoked: false,
+                    replaced_by: None,
+                    revoked_at: None,
+                    resource_uris: Vec::new(),
+                    allowed_service_ids: Vec::new(),
+                    allow_all_services: true,
+                    created_at: now,
+                },
+                RefreshToken {
+                    id: Uuid::new_v4().to_string(),
+                    jti: other_client_jti.clone(),
+                    client_id: other_client_id,
+                    user_id: user_id.clone(),
+                    session_id: None,
+                    scope: Some("openid".to_string()),
+                    expires_at: now + Duration::days(7),
+                    revoked: false,
+                    replaced_by: None,
+                    revoked_at: None,
+                    resource_uris: Vec::new(),
+                    allowed_service_ids: Vec::new(),
+                    allow_all_services: true,
+                    created_at: now,
+                },
+            ])
+            .await
+            .unwrap();
+
+        let result = revoke_consent(&db, &user_id, &client_id).await.unwrap();
+        assert_eq!(result.revoked_refresh_tokens, 1);
+
+        let revoked = db
+            .collection::<RefreshToken>(REFRESH_TOKENS)
+            .find_one(doc! { "jti": &refresh_jti })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(revoked.revoked);
+        assert!(revoked.revoked_at.is_some());
+
+        let first_party = db
+            .collection::<RefreshToken>(REFRESH_TOKENS)
+            .find_one(doc! { "jti": &first_party_jti })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!first_party.revoked);
+        let other_client = db
+            .collection::<RefreshToken>(REFRESH_TOKENS)
+            .find_one(doc! { "jti": &other_client_jti })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!other_client.revoked);
+
+        let refresh_result = crate::services::token_service::refresh_tokens(
+            &db,
+            &config,
+            &jwt_keys,
+            &refresh_jwt,
+            None,
+            None,
+        )
+        .await;
+        assert!(matches!(refresh_result, Err(AppError::Unauthorized(_))));
     }
 
     #[tokio::test]

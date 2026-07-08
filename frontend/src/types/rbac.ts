@@ -57,8 +57,20 @@ export interface Consent {
   readonly client_id: string;
   readonly client_name: string;
   readonly scopes: string;
+  readonly allow_all_services: boolean;
+  readonly allowed_service_ids: readonly string[];
+  readonly allowed_services: readonly ConsentAllowedService[];
+  readonly legacy_unrestricted: boolean;
   readonly granted_at: string;
   readonly expires_at: string | null;
+}
+
+export interface ConsentAllowedService {
+  readonly id: string;
+  readonly slug: string | null;
+  readonly label: string;
+  readonly catalog_service_name: string | null;
+  readonly deleted: boolean;
 }
 
 export interface ConsentListResponse {
