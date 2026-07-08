@@ -4,7 +4,7 @@
 // for unknown slugs.
 //
 // 2-tone discipline (checked in the test `add-key-dialog.test.tsx`):
-//  - The 29 known-slugs in `SPEC_CATALOG_SLUGS` carry `data-slug="<slug>"` on
+//  - The 30 known-slugs in `SPEC_CATALOG_SLUGS` carry `data-slug="<slug>"` on
 //    the rendered `<svg>` (or, for composites, on the brand `<svg>` nested
 //    inside the wrapper `<span>`).
 //  - `FallbackIcon` carries `data-fallback="true"` instead — it MUST NOT carry
@@ -24,6 +24,7 @@ import LlmMistralIcon from "./llm-mistral";
 import LlmCohereIcon from "./llm-cohere";
 import LlmDeepSeekIcon from "./llm-deepseek";
 import LlmOpenClawIcon from "./llm-openclaw";
+import LlmOpenRouterIcon from "./llm-openrouter";
 
 import ApiFirecrawlIcon from "./api-firecrawl";
 import ApiTwitterIcon from "./api-twitter";
@@ -53,8 +54,8 @@ export type ServiceIconProps = { className?: string };
 
 export type IconComponent = ComponentType<ServiceIconProps>;
 
-// The 29 slugs seeded in `backend/src/services/provider_service.rs`
-// (lines ~1818-2218) — authoritative the test setup asserts against.
+// The 30 slugs seeded in `backend/src/services/provider_service.rs`
+// (`DEFAULT_SERVICE_SEEDS`) — authoritative the test setup asserts against.
 export const SPEC_CATALOG_SLUGS = [
   "llm-openai",
   "llm-openai-codex",
@@ -64,6 +65,7 @@ export const SPEC_CATALOG_SLUGS = [
   "llm-cohere",
   "llm-deepseek",
   "llm-openclaw",
+  "llm-openrouter",
 
   "api-firecrawl",
   "api-twitter",
@@ -101,6 +103,7 @@ export const SERVICE_ICONS: Readonly<Record<string, IconComponent>> = {
   "llm-cohere": LlmCohereIcon,
   "llm-deepseek": LlmDeepSeekIcon,
   "llm-openclaw": LlmOpenClawIcon,
+  "llm-openrouter": LlmOpenRouterIcon,
 
   "api-firecrawl": ApiFirecrawlIcon,
   "api-twitter": ApiTwitterIcon,

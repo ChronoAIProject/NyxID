@@ -54,6 +54,16 @@ describe("probePathForSlug — registry uses seeded service_slug forms", () => {
     expect(probePathForSlug("llm-google-ai")).toBe("models");
   });
 
+  it("llm-openrouter probes the credential-validating `key` endpoint, not `models`", () => {
+    // OpenRouter's /models is public (200 without auth) and would
+    // green-light an invalid credential; GET {base}/key 401s on a bad
+    // key, so it is the only high-confidence probe for this provider.
+    expect(probePathForSlug("llm-openrouter")).toBe("key");
+    expect(isTestable("llm-openrouter")).toBe(true);
+    // Repeat-connect suffix resolves to the same recipe.
+    expect(probePathForSlug("llm-openrouter-2")).toBe("key");
+  });
+
   it("returns provider-specific paths (relative to base_url) for api-* known providers", () => {
     // Bare bases (no version in base_url) → recipe carries the path
     expect(probePathForSlug("api-github")).toBe("user");

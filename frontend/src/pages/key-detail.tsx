@@ -1130,6 +1130,12 @@ function exampleModelForSlug(slugText: string): {
   readonly model: string;
   readonly needsProviderModelNote: boolean;
 } {
+  if (slugText.includes("openrouter")) {
+    // OpenRouter routes by vendor-prefixed model IDs (`vendor/model`);
+    // a bare `gpt-4o` is rejected. Checked before the generic fallback
+    // so OpenRouter keys never show an example the API won't accept.
+    return { model: "openai/gpt-4o", needsProviderModelNote: false };
+  }
   if (slugText.includes("openai")) {
     return { model: "gpt-4o", needsProviderModelNote: false };
   }

@@ -1,0 +1,96 @@
+import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+// vi.mock factories are hoisted above const initializers — declare the
+// mocks with vi.hoisted so the factory can't hit the TDZ when another
+// module in the graph imports @/lib/utils first (repo pattern, see
+// key-detail.test.tsx).
+const { mockCopyToClipboard, mockToastSuccess } = vi.hoisted(() => ({
+  mockCopyToClipboard: vi.fn(),
+  mockToastSuccess: vi.fn(),
+}));
+
+vi.mock("@/lib/utils", async () => {
+  const actual =
+    await vi.importActual<typeof import("@/lib/utils")>("@/lib/utils");
+  return { ...actual, copyToClipboard: mockCopyToClipboard };
+});
+
+vi.mock("sonner", () => ({
+  toast: {
+    success: (...args: unknown[]) => mockToastSuccess(...args),
+    error: vi.fn(),
+  },
+}));
+
+import { DocMarkdown } from "./docs-markdown";
+
+const MARKDOWN = [
+  "Some intro prose.",
+  "",
+  "```bash",
+  'nyxid service add llm-openrouter \\',
+  '  --credential-env OPENROUTER_KEY',
+  "```",
+  "",
+  "Inline `code span` stays button-free.",
+].join("\n");
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  mockCopyToClipboard.mockResolvedValue(undefined);
+});
+
+describe("DocMarkdown — code block copy button", () => {
+  it("copies the fenced snippet text to the clipboard", async () => {
+    const user = userEvent.setup();
+    render(<DocMarkdown markdown={MARKDOWN} baseHref="/docs/ai/guides/" />);
+
+    const button = screen.getByRole("button", { name: /copy code snippet/i });
+    await user.click(button);
+
+    await waitFor(() => expect(mockCopyToClipboard).toHaveBeenCalledTimes(1));
+    const copied = mockCopyToClipboard.mock.calls[0]?.[0] as string;
+    expect(copied).toContain("nyxid service add llm-openrouter");
+    expect(copied).toContain("--credential-env OPENROUTER_KEY");
+    // The trailing newline a fenced block renders with is trimmed.
+    expect(copied.endsWith("\n")).toBe(false);
+    expect(mockToastSuccess).toHaveBeenCalledWith("Copied to clipboard");
+  });
+
+  it("renders one button per fenced block and none for inline code", () => {
+    const twoBlocks = "```bash\nfirst\n```\n\ntext with `inline` code\n\n```bash\nsecond\n```";
+    render(<DocMarkdown markdown={twoBlocks} baseHref="/docs/ai/guides/" />);
+
+    expect(
+      screen.getAllByRole("button", { name: /copy code snippet/i }),
+    ).toHaveLength(2);
+  });
+
+  it("skips untagged fences (ASCII diagrams) and text-family languages", () => {
+    // Mirrors the broker-model concept page: an untagged fence holding a
+    // sequence diagram, plus a ```text block — neither is terminal-paste
+    // material, so neither gets a copy affordance.
+    const markdown = [
+      "```",
+      "Caller ──▶ NyxID Proxy ──▶ Downstream API",
+      "  │            │                │",
+      "```",
+      "",
+      "```text",
+      "plain prose sample",
+      "```",
+      "",
+      "```bash",
+      "nyxid service list",
+      "```",
+    ].join("\n");
+    render(<DocMarkdown markdown={markdown} baseHref="/docs/shared/concepts/" />);
+
+    // Only the bash block is copyable.
+    expect(
+      screen.getAllByRole("button", { name: /copy code snippet/i }),
+    ).toHaveLength(1);
+  });
+});

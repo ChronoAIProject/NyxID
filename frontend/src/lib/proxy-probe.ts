@@ -93,6 +93,10 @@ export const PROBE_REGISTRY: Readonly<Record<string, ProbeRecipe | null>> = {
   "llm-mistral": { path: "models" },
   "llm-cohere": { path: "models" },
   "llm-deepseek": { path: "models" },
+  // OpenRouter — GET {base}/key returns the stored key's metadata and
+  // 401s on a bad credential. NOT `models`: OpenRouter's /models is
+  // public (200 without auth), so it would green-light an invalid key.
+  "llm-openrouter": { path: "key" },
 
   // Chat-only API — no cheap GET. Verify by running `codex "hello"`.
   "llm-openai-codex": null,
