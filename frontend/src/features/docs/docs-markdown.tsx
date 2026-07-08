@@ -1,9 +1,13 @@
-import { useMemo } from "react";
+import { useMemo, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkDirective from "remark-directive";
 import rehypeSlug from "rehype-slug";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
+import { Check, Copy } from "lucide-react";
+import { toast } from "sonner";
+import { Button } from "@/components/ui/button";
+import { copyToClipboard } from "@/lib/utils";
 import { Callout } from "./components/callout";
 
 // Allow class names (callout markers + `language-*` code classes) through the
@@ -37,6 +41,55 @@ function remarkCallouts() {
   };
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return (tree: any) => walk(tree);
+}
+
+/**
+ * Fenced code block with a copy button pinned to the top-right corner.
+ * The button lives on a wrapper (not inside the <pre>) so it stays put
+ * when the block scrolls horizontally. Snippet text is read from the
+ * DOM instead of the React children so nested renderers can't drift
+ * from what the user actually sees.
+ */
+function DocCodeBlock({ children }: { readonly children: ReactNode }) {
+  const preRef = useRef<HTMLPreElement>(null);
+  const [copied, setCopied] = useState(false);
+
+  async function handleCopy() {
+    const text = preRef.current?.textContent?.replace(/\n$/, "") ?? "";
+    if (!text) return;
+    try {
+      await copyToClipboard(text);
+      setCopied(true);
+      toast.success("Copied to clipboard");
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      toast.error("Failed to copy");
+    }
+  }
+
+  return (
+    <div className="group relative my-5">
+      <pre
+        ref={preRef}
+        className="border-border bg-muted overflow-x-auto rounded-xl border p-4 font-mono text-sm leading-relaxed text-foreground"
+      >
+        {children}
+      </pre>
+      <Button
+        variant="ghost"
+        size="icon"
+        className="absolute top-1.5 right-1.5 h-7 w-7 text-muted-foreground opacity-60 transition-opacity group-hover:opacity-100 hover:opacity-100"
+        onClick={() => void handleCopy()}
+      >
+        {copied ? (
+          <Check className="h-3.5 w-3.5 text-success" />
+        ) : (
+          <Copy className="h-3.5 w-3.5" />
+        )}
+        <span className="sr-only">Copy code snippet</span>
+      </Button>
+    </div>
+  );
 }
 
 const REMARK_PLUGINS = [remarkGfm, remarkDirective, remarkCallouts];
@@ -126,11 +179,7 @@ export function DocMarkdown({
           <code className="bg-muted text-foreground rounded px-1.5 py-0.5 font-mono text-[0.85em]">{children}</code>
         );
       },
-      pre: ({ children }) => (
-        <pre className="border-border bg-muted my-5 overflow-x-auto rounded-xl border p-4 font-mono text-sm leading-relaxed text-foreground">
-          {children}
-        </pre>
-      ),
+      pre: ({ children }) => <DocCodeBlock>{children}</DocCodeBlock>,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       div: ({ className, children }: any) => {
         if (typeof className === "string" && className.includes("callout")) {
