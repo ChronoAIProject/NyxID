@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useForm, useWatch } from "react-hook-form";
+import { useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useSearch } from "@tanstack/react-router";
 import { CheckCircle2, ShieldCheck } from "lucide-react";
@@ -27,6 +27,7 @@ import {
 } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
+  useAppForm,
   Form,
   FormControl,
   FormDescription,
@@ -60,7 +61,7 @@ export function DevicesBindPage() {
 
   const adminOrgs = (orgs ?? []).filter((org) => org.your_role === "admin");
 
-  const form = useForm<
+  const form = useAppForm<
     ApproveDeviceFormData,
     unknown,
     ApproveDeviceRequest
@@ -96,7 +97,13 @@ export function DevicesBindPage() {
 
   useEffect(() => {
     if (!initialUserCode || form.formState.dirtyFields.user_code) return;
-    form.setValue("user_code", initialUserCode, { shouldValidate: true });
+    // Programmatic prefill, not a user edit: keep the field pristine so the
+    // dirtyFields guard above still detects real user input.
+    form.setValue("user_code", initialUserCode, {
+      shouldValidate: true,
+      shouldDirty: false,
+      shouldTouch: false,
+    });
   }, [form, initialUserCode]);
 
   useEffect(() => {
@@ -104,7 +111,12 @@ export function DevicesBindPage() {
     const current = form.getValues("default_services") ?? [];
     const filtered = current.filter((serviceId) => visibleIds.has(serviceId));
     if (filtered.length !== current.length) {
-      form.setValue("default_services", filtered, { shouldValidate: true });
+      // Programmatic normalization, not a user edit: don't dirty the form.
+      form.setValue("default_services", filtered, {
+        shouldValidate: true,
+        shouldDirty: false,
+        shouldTouch: false,
+      });
     }
   }, [form, grantableServices]);
 
@@ -116,7 +128,13 @@ export function DevicesBindPage() {
       toast.success("Device approved");
     } catch (error) {
       const message = deviceApprovalErrorMessage(error);
-      form.setError("root", { message });
+      // Rejections about the typed code itself belong on the field (red
+      // border + inline message); everything else stays on the banner.
+      if (isUserCodeApiError(error)) {
+        form.setError("user_code", { message });
+      } else {
+        form.setError("root", { message });
+      }
     }
   }
 
@@ -383,6 +401,19 @@ function toggleStringArray(values: readonly string[], value: string): string[] {
   return values.includes(value)
     ? values.filter((item) => item !== value)
     : [...values, value];
+}
+
+/**
+ * Backend rejections that are about the typed user code itself (reserved
+ * device-code block 9500-9508): not found, expired, invalid, already
+ * delivered. Rate limiting and lockout stay on the root banner because the
+ * code the user typed may be perfectly fine.
+ */
+function isUserCodeApiError(error: unknown): boolean {
+  return (
+    error instanceof ApiError &&
+    [9500, 9501, 9503, 9505].includes(error.errorCode)
+  );
 }
 
 function deviceApprovalErrorMessage(error: unknown): string {

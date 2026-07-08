@@ -44,6 +44,9 @@ export const serviceSlugSchema = z
   .refine((v) => !v.startsWith("-") && !v.endsWith("-"), {
     message: "Slug must not start or end with a hyphen",
   })
+  .refine((v) => !v.includes("--"), {
+    message: "Slug must not contain consecutive hyphens",
+  })
 
 /**
  * API key name: the backend only caps length, so the client rules are

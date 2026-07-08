@@ -281,13 +281,42 @@ describe("AddKeyDialog — custom endpoint path", () => {
     );
     await typeInto(user, "add-key-label", "Broken");
     await typeInto(user, "add-key-credential", "sk-x");
-    await typeInto(user, "add-key-endpoint", "not-a-url");
+    // Well-formed URL so the client-side format check passes and the
+    // mocked backend rejection is what surfaces.
+    await typeInto(user, "add-key-endpoint", "https://api.example.com/v1");
     await user.click(screen.getByRole("button", { name: "Connect Service" }));
 
     await waitFor(() =>
       expect(toastFns.error).toHaveBeenCalledWith("Endpoint URL is invalid"),
     );
     expect(mockNavigate).not.toHaveBeenCalled();
+  });
+
+  it("blocks submit and shows an inline error for a TLD-less endpoint URL", async () => {
+    const user = userEvent.setup();
+    render(<AddKeyDialog open onOpenChange={vi.fn()} />);
+
+    await user.click(
+      screen.getByRole("button", { name: /Custom Endpoint/i }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: /Next: Enter Credentials/i }),
+    );
+    await typeInto(user, "add-key-label", "Typo URL");
+    await typeInto(user, "add-key-credential", "sk-x");
+    await typeInto(user, "add-key-endpoint", "https://www.");
+
+    expect(
+      screen.getByText(/Must be a full URL with a domain/),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText(/Endpoint URL/)).toHaveAttribute(
+      "aria-invalid",
+      "true",
+    );
+    expect(
+      screen.getByRole("button", { name: "Connect Service" }),
+    ).toBeDisabled();
+    expect(createKeyMutate).not.toHaveBeenCalled();
   });
 });
 

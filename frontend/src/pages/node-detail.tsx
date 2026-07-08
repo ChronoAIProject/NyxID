@@ -1,7 +1,6 @@
 import { useState } from "react";
 import { useParams, useNavigate } from "@tanstack/react-router";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useForm } from "react-hook-form";
 import {
   useNode,
   useNodeAdmins,
@@ -57,6 +56,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import {
+  useAppForm,
   Form,
   FormControl,
   FormField,
@@ -120,7 +120,7 @@ export function NodeDetailPage() {
     readonly auth_token: string;
     readonly signing_secret: string;
   } | null>(null);
-  const credentialPushForm = useForm<
+  const credentialPushForm = useAppForm<
     PushNodeCredentialFormInput,
     unknown,
     PushNodeCredentialFormData
@@ -559,7 +559,6 @@ export function NodeDetailPage() {
                             credentialPushForm.setValue(
                               "field_name",
                               defaultFieldNameForMethod(method),
-                              { shouldDirty: true, shouldValidate: true },
                             );
                           }
                         }}

@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
   useNotificationSettings,
@@ -40,6 +39,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import {
+  useAppForm,
   Form,
   FormControl,
   FormDescription,
@@ -126,7 +126,7 @@ export function NotificationSettingsPage() {
 
   const linkData = telegramLinkMutation.data;
 
-  const form = useForm<UpdateNotificationSettingsFormData>({
+  const form = useAppForm<UpdateNotificationSettingsFormData>({
     resolver: zodResolver(updateNotificationSettingsSchema),
     values: settings
       ? {

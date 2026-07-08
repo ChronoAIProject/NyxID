@@ -24,6 +24,30 @@ export default defineConfig([
         'warn',
         { allowConstantExport: true },
       ],
+      // Raw useForm's setValue silently skips dirty/touched/validation state,
+      // so non-text inputs (Switch/Select/Checkbox wired via watch+setValue)
+      // never enable dirty-gated submit buttons. useAppForm flips those
+      // defaults; see src/components/ui/form.tsx.
+      'no-restricted-imports': [
+        'error',
+        {
+          paths: [
+            {
+              name: 'react-hook-form',
+              importNames: ['useForm'],
+              message:
+                'Use useAppForm from "@/components/ui/form" instead: its setValue defaults to shouldDirty/shouldTouch/shouldValidate so non-text inputs mark the form dirty.',
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
+    // The one place allowed to wrap the raw hook.
+    files: ['src/components/ui/form.tsx'],
+    rules: {
+      'no-restricted-imports': 'off',
     },
   },
   {

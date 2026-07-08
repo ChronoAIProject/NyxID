@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { isValidHttpUrl } from "./http-url";
 
 export const CREDENTIAL_MODES = ["admin", "user", "both"] as const;
 
@@ -8,7 +9,8 @@ export const userCredentialsSchema = z.object({
   client_id: z
     .string()
     .min(1, "Client ID is required")
-    .max(500, "Client ID must be at most 500 characters"),
+    .max(500, "Client ID must be at most 500 characters")
+    .refine((v) => v.trim().length > 0, "Client ID must not be blank"),
   client_secret: z
     .string()
     .max(2000, "Client Secret must be at most 2000 characters")
@@ -27,11 +29,11 @@ export const connectApiKeySchema = z.object({
   api_key: z
     .string()
     .min(1, "API key is required")
-    .max(8192, "API key must be at most 8192 characters"),
+    .max(4096, "API key must be at most 4096 characters"),
   label: z.string().max(200, "Label must be at most 200 characters").optional(),
   gateway_url: z
     .string()
-    .url("Must be a valid URL")
+    .refine(isValidHttpUrl, "Must be a valid URL")
     .max(2048, "URL must be at most 2048 characters")
     .optional()
     .or(z.literal("")),
@@ -49,7 +51,7 @@ export const telegramLoginDataSchema = z.object({
   first_name: z.string().trim().min(1, "First name is required"),
   last_name: optionalTelegramString.optional(),
   username: optionalTelegramString.optional(),
-  photo_url: z.string().url("Photo URL must be a valid URL").optional(),
+  photo_url: z.string().refine(isValidHttpUrl, "Photo URL must be a valid URL").optional(),
   auth_date: z.coerce.number().int().positive(),
   hash: z
     .string()
@@ -80,7 +82,8 @@ const baseProviderFields = {
     .regex(
       SLUG_PATTERN,
       "Slug must contain only lowercase letters, digits, and hyphens (no leading/trailing hyphens)",
-    ),
+    )
+    .refine((v) => !v.includes("--"), "Slug must not contain consecutive hyphens"),
   description: z
     .string()
     .max(500, "Description must be at most 500 characters")
@@ -89,13 +92,13 @@ const baseProviderFields = {
   provider_type: z.enum(PROVIDER_TYPES),
   authorization_url: z
     .string()
-    .url("Must be a valid URL")
+    .refine(isValidHttpUrl, "Must be a valid URL")
     .optional()
     .or(z.literal("")),
-  token_url: z.string().url("Must be a valid URL").optional().or(z.literal("")),
+  token_url: z.string().refine(isValidHttpUrl, "Must be a valid URL").optional().or(z.literal("")),
   revocation_url: z
     .string()
-    .url("Must be a valid URL")
+    .refine(isValidHttpUrl, "Must be a valid URL")
     .optional()
     .or(z.literal("")),
   default_scopes: z
@@ -107,22 +110,22 @@ const baseProviderFields = {
   supports_pkce: z.boolean().optional(),
   device_code_url: z
     .string()
-    .url("Must be a valid URL")
+    .refine(isValidHttpUrl, "Must be a valid URL")
     .optional()
     .or(z.literal("")),
   device_token_url: z
     .string()
-    .url("Must be a valid URL")
+    .refine(isValidHttpUrl, "Must be a valid URL")
     .optional()
     .or(z.literal("")),
   device_verification_url: z
     .string()
-    .url("Must be a valid URL")
+    .refine(isValidHttpUrl, "Must be a valid URL")
     .optional()
     .or(z.literal("")),
   hosted_callback_url: z
     .string()
-    .url("Must be a valid URL")
+    .refine(isValidHttpUrl, "Must be a valid URL")
     .optional()
     .or(z.literal("")),
   api_key_instructions: z
@@ -132,13 +135,13 @@ const baseProviderFields = {
     .or(z.literal("")),
   api_key_url: z
     .string()
-    .url("Must be a valid URL")
+    .refine(isValidHttpUrl, "Must be a valid URL")
     .optional()
     .or(z.literal("")),
-  icon_url: z.string().url("Must be a valid URL").optional().or(z.literal("")),
+  icon_url: z.string().refine(isValidHttpUrl, "Must be a valid URL").optional().or(z.literal("")),
   documentation_url: z
     .string()
-    .url("Must be a valid URL")
+    .refine(isValidHttpUrl, "Must be a valid URL")
     .optional()
     .or(z.literal("")),
   token_endpoint_auth_method: z

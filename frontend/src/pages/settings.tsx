@@ -1,7 +1,5 @@
 import { useState } from "react";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
-import { useForm } from "react-hook-form";
-import { zodResolver } from "@hookform/resolvers/zod";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuthStore } from "@/stores/auth-store";
 import { useConsentStore } from "@/stores/consent-store";
@@ -9,10 +7,20 @@ import { useUser, useMfaDisable, useRevokeSession } from "@/hooks/use-auth";
 import { api, ApiError } from "@/lib/api-client";
 import { disableTelemetry } from "@/lib/telemetry";
 import type { User, Session } from "@/types/api";
+import { zodResolver } from "@hookform/resolvers/zod";
 import {
   changePasswordSchema,
   type ChangePasswordFormData,
 } from "@/schemas/auth";
+import {
+  useAppForm,
+  Form,
+  FormControl,
+  FormField,
+  FormItem,
+  FormLabel,
+  FormMessage,
+} from "@/components/ui/form";
 import { copyToClipboard, formatDate } from "@/lib/utils";
 import { openExternal } from "@/lib/navigation";
 import {
@@ -39,18 +47,15 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import {
-  Form,
-  FormControl,
-  FormField,
-  FormItem,
-  FormLabel,
-  FormMessage,
-} from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { Button, ButtonIcon } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -62,12 +67,12 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import {
+  Eye,
+  EyeOff,
   Trash2,
   ExternalLink,
   Copy,
   Check,
-  Eye,
-  EyeOff,
 } from "lucide-react";
 import { PowerButtonIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
@@ -250,13 +255,32 @@ function SecurityTab() {
   const [deleteAccountOpen, setDeleteAccountOpen] = useState(false);
   const [deleteConfirmEmail, setDeleteConfirmEmail] = useState("");
   const [isDeletingAccount, setIsDeletingAccount] = useState(false);
+
+  // Email comparison is case-insensitive (addresses are), and requires the
+  // user to actually be loaded — otherwise an empty input would match an
+  // empty `?? ""` fallback and arm the destructive button.
+  const deleteEmailMatches =
+    Boolean(user?.email) &&
+    deleteConfirmEmail.trim().toLowerCase() === user?.email.toLowerCase();
+  const deleteEmailError =
+    deleteConfirmEmail.trim().length > 0 && !deleteEmailMatches
+      ? "That does not match your account email."
+      : null;
   const disableMfa = useMfaDisable();
 
   const [showCurrentPw, setShowCurrentPw] = useState(false);
   const [showNewPw, setShowNewPw] = useState(false);
   const [showConfirmPw, setShowConfirmPw] = useState(false);
 
-  const passwordForm = useForm<ChangePasswordFormData>({
+  // Password changes only make sense for email/password accounts. Social
+  // (OAuth) accounts have no password — social_provider is set for them.
+  const isPasswordUser = !user?.social_provider;
+  const providerLabel = user?.social_provider
+    ? user.social_provider.charAt(0).toUpperCase() +
+      user.social_provider.slice(1)
+    : null;
+
+  const passwordForm = useAppForm<ChangePasswordFormData>({
     resolver: zodResolver(changePasswordSchema),
     defaultValues: {
       currentPassword: "",
@@ -265,6 +289,9 @@ function SecurityTab() {
     },
   });
 
+  // NOTE: this route is not implemented on the backend yet — password login
+  // flows are opt-in (OAuth is the default) and this form is wired up ahead
+  // of that integration.
   async function handleChangePassword(data: ChangePasswordFormData) {
     try {
       await api.post<void>("/auth/password/change", {
@@ -310,7 +337,7 @@ function SecurityTab() {
 
   async function handleDeleteAccount() {
     if (!user?.email) return;
-    if (deleteConfirmEmail.trim() !== user.email) {
+    if (!deleteEmailMatches) {
       toast.error("Please enter your email to confirm");
       return;
     }
@@ -433,14 +460,19 @@ function SecurityTab() {
         <CardHeader>
           <CardTitle>Change Password</CardTitle>
           <CardDescription>
-            Update your password to keep your account secure.
+            {isPasswordUser
+              ? "Update your password to keep your account secure."
+              : `You signed in with ${providerLabel ?? "an OAuth provider"} — this account has no password to change.`}
           </CardDescription>
         </CardHeader>
         <CardContent>
           <Form {...passwordForm}>
             <form
               onSubmit={passwordForm.handleSubmit(handleChangePassword)}
-              className="space-y-4"
+            >
+            <fieldset
+              disabled={!isPasswordUser}
+              className="space-y-4 disabled:opacity-60"
             >
               {passwordForm.formState.errors.root && (
                 <div
@@ -544,15 +576,35 @@ function SecurityTab() {
               />
 
               <div className="flex justify-end">
-                <Button
-                  variant="primary"
-                  type="submit"
-                  isLoading={passwordForm.formState.isSubmitting}
-                  disabled={!passwordForm.formState.isDirty}
-                >
-                  Change Password
-                </Button>
+                {isPasswordUser ? (
+                  <Button
+                    variant="primary"
+                    type="submit"
+                    isLoading={passwordForm.formState.isSubmitting}
+                    disabled={!passwordForm.formState.isDirty}
+                  >
+                    Change Password
+                  </Button>
+                ) : (
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      {/* span wrapper: disabled buttons swallow pointer events */}
+                      <span tabIndex={0}>
+                        <Button variant="primary" type="button" disabled>
+                          Change Password
+                        </Button>
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent className="max-w-[280px] text-xs">
+                      You signed in with{" "}
+                      {providerLabel ?? "an OAuth provider"}, so this account
+                      has no password. Password sign-in can be added when
+                      email/password login is enabled for your account.
+                    </TooltipContent>
+                  </Tooltip>
+                )}
               </div>
+            </fieldset>
             </form>
           </Form>
         </CardContent>
@@ -600,8 +652,12 @@ function SecurityTab() {
               value={deleteConfirmEmail}
               onChange={(e) => setDeleteConfirmEmail(e.target.value)}
               placeholder={user?.email ?? "your@email.com"}
+              aria-invalid={deleteEmailError ? true : undefined}
               autoFocus
             />
+            {deleteEmailError && (
+              <p className="text-xs text-destructive">{deleteEmailError}</p>
+            )}
           </div>
 
           <DialogFooter>
@@ -615,7 +671,7 @@ function SecurityTab() {
             <Button
               variant="destructive"
               isLoading={isDeletingAccount}
-              disabled={deleteConfirmEmail.trim() !== (user?.email ?? "")}
+              disabled={!deleteEmailMatches || isDeletingAccount}
               onClick={() => void handleDeleteAccount()}
             >
               Permanently Delete

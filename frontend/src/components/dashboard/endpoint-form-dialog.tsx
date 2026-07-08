@@ -1,5 +1,4 @@
 import { useEffect } from "react";
-import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import type { ServiceEndpoint } from "@/types/api";
@@ -18,6 +17,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
+  useAppForm,
   Form,
   FormControl,
   FormField,
@@ -94,7 +94,7 @@ export function EndpointFormDialog({
     isEditing ? endpoint?.description : undefined,
   );
 
-  const form = useForm<CreateEndpointFormData>({
+  const form = useAppForm<CreateEndpointFormData>({
     resolver: zodResolver(formSchema),
     defaultValues: {
       name: "",

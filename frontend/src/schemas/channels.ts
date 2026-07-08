@@ -36,11 +36,13 @@ export const createChannelBotSchema = z
     bot_token: z
       .string()
       .min(1, "Bot token is required")
-      .max(512, "Bot token is too long"),
+      .max(512, "Bot token is too long")
+      .refine((v) => v.trim().length > 0, "Bot token must not be blank"),
     label: z
       .string()
       .min(1, "Label is required")
-      .max(128, "Label must be at most 128 characters"),
+      .max(128, "Label must be at most 128 characters")
+      .refine((v) => v.trim().length > 0, "Label must not be blank"),
     app_id: z.string().max(256).optional(),
     app_secret: z.string().max(512).optional(),
     verification_token: z.string().max(512).optional(),
@@ -104,7 +106,12 @@ export const createChannelBotSchema = z
 export type CreateChannelBotFormData = z.infer<typeof createChannelBotSchema>;
 
 export const updateChannelBotSchema = z.object({
-  label: z.string().max(128, "Label must be at most 128 characters").optional(),
+  label: z
+    .string()
+    .min(1, "Label is required")
+    .max(128, "Label must be at most 128 characters")
+    .refine((v) => v.trim().length > 0, "Label must not be blank")
+    .optional(),
   verification_token: z.string().max(512).optional(),
   encrypt_key: z.string().max(512).optional(),
   app_id: z.string().max(256).optional(),

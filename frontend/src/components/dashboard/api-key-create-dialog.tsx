@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "@tanstack/react-router";
-import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
   createApiKeySchema,
@@ -26,6 +25,7 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import {
+  useAppForm,
   Form,
   FormControl,
   FormField,
@@ -86,7 +86,7 @@ export function ApiKeyCreateDialog({
     [orgs],
   );
 
-  const form = useForm<CreateApiKeyFormData>({
+  const form = useAppForm<CreateApiKeyFormData>({
     resolver: zodResolver(createApiKeySchema),
     defaultValues: {
       name: "",

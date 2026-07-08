@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
   useGroups,
@@ -28,6 +27,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
+  useAppForm,
   Form,
   FormControl,
   FormField,
@@ -62,7 +62,7 @@ export function AdminGroupsPage() {
   const groups = data?.groups ?? [];
   const availableRoles = rolesData?.roles ?? [];
 
-  const createForm = useForm<CreateGroupFormData>({
+  const createForm = useAppForm<CreateGroupFormData>({
     resolver: zodResolver(createGroupSchema),
     defaultValues: {
       name: "",

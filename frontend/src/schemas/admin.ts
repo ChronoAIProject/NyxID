@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { isValidHttpUrl } from "./http-url";
 
 export const updateUserSchema = z.object({
   display_name: z
@@ -9,7 +10,11 @@ export const updateUserSchema = z.object({
   email: z.string().email("Invalid email address").optional().or(z.literal("")),
   avatar_url: z
     .string()
-    .url("Must be a valid URL")
+    .refine(isValidHttpUrl, "Must be a valid URL")
+    .refine(
+      (v) => v.startsWith("https://"),
+      "Avatar URL must use https:// (admin path rejects http)",
+    )
     .max(2048, "URL must be 2048 characters or less")
     .optional()
     .or(z.literal("")),

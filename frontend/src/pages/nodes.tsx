@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { ViewToggle, useViewMode } from "@/components/shared/view-toggle";
-import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
   createRegistrationTokenSchema,
@@ -36,6 +35,7 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import {
+  useAppForm,
   Form,
   FormControl,
   FormField,
@@ -103,7 +103,7 @@ function RegisterNodeDialog({
     nodeWsUrl?.includes("localhost") || nodeWsUrl?.includes("127.0.0.1");
   const urlFlag = nodeWsUrl && !isLocalhost ? ` --url ${nodeWsUrl}` : "";
 
-  const form = useForm<CreateRegistrationTokenFormData>({
+  const form = useAppForm<CreateRegistrationTokenFormData>({
     resolver: zodResolver(createRegistrationTokenSchema),
     defaultValues: { name: "", owner_user_id: null },
   });

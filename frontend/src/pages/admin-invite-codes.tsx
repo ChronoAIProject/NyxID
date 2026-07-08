@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import {
@@ -39,6 +38,7 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import {
+  useAppForm,
   Form,
   FormControl,
   FormField,
@@ -134,7 +134,7 @@ export function AdminInviteCodesPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedCodeId]);
 
-  const createForm = useForm<CreateInviteCodeFormData>({
+  const createForm = useAppForm<CreateInviteCodeFormData>({
     resolver: zodResolver(createInviteCodeSchema),
     defaultValues: {
       max_uses: DEFAULT_MAX_USES,

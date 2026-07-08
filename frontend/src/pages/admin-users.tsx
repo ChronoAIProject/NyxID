@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useAdminUsers, useCreateUser } from "@/hooks/use-admin";
 import { createUserSchema, type CreateUserFormData } from "@/schemas/admin";
@@ -30,6 +29,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
+  useAppForm,
   Form,
   FormControl,
   FormField,
@@ -74,7 +74,7 @@ export function AdminUsersPage() {
   const total = data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / PER_PAGE));
 
-  const createForm = useForm<CreateUserFormData>({
+  const createForm = useAppForm<CreateUserFormData>({
     resolver: zodResolver(createUserSchema),
     defaultValues: {
       email: "",

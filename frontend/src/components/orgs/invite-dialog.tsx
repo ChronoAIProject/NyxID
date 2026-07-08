@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
 import { Check, Copy } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -12,6 +12,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
+  useAppForm,
   Form,
   FormControl,
   FormField,
@@ -32,8 +33,9 @@ import { buildOrgInviteJoinUrl } from "@/lib/org-invite-links";
 import { copyToClipboard } from "@/lib/utils";
 import { useCreateInvite } from "@/hooks/use-org-invites";
 import {
-  createInviteRequestSchema,
+  inviteFormSchema,
   ORG_ROLES,
+  type InviteFormValues,
   type InviteResponse,
   type OrgRole,
 } from "@/schemas/orgs";
@@ -44,11 +46,6 @@ interface InviteDialogProps {
   readonly onOpenChange: (open: boolean) => void;
 }
 
-interface InviteFormValues {
-  readonly role: OrgRole;
-  readonly ttl_hours: string;
-}
-
 export function InviteDialog({ orgId, open, onOpenChange }: InviteDialogProps) {
   const createMutation = useCreateInvite();
   const [createdInvite, setCreatedInvite] = useState<InviteResponse | null>(
@@ -56,7 +53,8 @@ export function InviteDialog({ orgId, open, onOpenChange }: InviteDialogProps) {
   );
   const [copied, setCopied] = useState(false);
 
-  const form = useForm<InviteFormValues>({
+  const form = useAppForm<InviteFormValues>({
+    resolver: zodResolver(inviteFormSchema),
     defaultValues: {
       role: "member",
       ttl_hours: "24",
@@ -73,22 +71,10 @@ export function InviteDialog({ orgId, open, onOpenChange }: InviteDialogProps) {
   }
 
   async function onSubmit(values: InviteFormValues) {
-    const ttlHoursNumber = Number.parseInt(values.ttl_hours, 10);
-    const parsed = createInviteRequestSchema.safeParse({
-      role: values.role,
-      ttl_hours: Number.isFinite(ttlHoursNumber) ? ttlHoursNumber : undefined,
-    });
-    if (!parsed.success) {
-      const issue = parsed.error.issues[0];
-      form.setError("root", {
-        message: issue?.message ?? "Invalid invite settings",
-      });
-      return;
-    }
     try {
       const invite = await createMutation.mutateAsync({
         orgId,
-        body: parsed.data,
+        body: { role: values.role, ttl_hours: Number(values.ttl_hours) },
       });
       setCreatedInvite(invite);
       toast.success("Invite created");

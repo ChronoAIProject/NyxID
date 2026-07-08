@@ -17,8 +17,10 @@ export const registerSchema = z
       .transform((s) => s.toUpperCase()),
     name: z
       .string()
+      .trim()
       .min(1, "Name is required")
-      .min(2, "Name must be at least 2 characters"),
+      .min(2, "Name must be at least 2 characters")
+      .max(200, "Name must be at most 200 characters"),
     email: z
       .string()
       .min(1, "Email is required")
@@ -27,6 +29,7 @@ export const registerSchema = z
       .string()
       .min(1, "Password is required")
       .min(8, "Password must be at least 8 characters")
+      .max(128, "Password must be at most 128 characters")
       .regex(/[A-Z]/, "Password must contain at least one uppercase letter")
       .regex(/[a-z]/, "Password must contain at least one lowercase letter")
       .regex(/[0-9]/, "Password must contain at least one number"),
@@ -51,6 +54,7 @@ export const resetPasswordSchema = z
       .string()
       .min(1, "Password is required")
       .min(8, "Password must be at least 8 characters")
+      .max(128, "Password must be at most 128 characters")
       .regex(/[A-Z]/, "Password must contain at least one uppercase letter")
       .regex(/[a-z]/, "Password must contain at least one lowercase letter")
       .regex(/[0-9]/, "Password must contain at least one number"),
@@ -70,6 +74,7 @@ export const changePasswordSchema = z
       .string()
       .min(1, "New password is required")
       .min(8, "Password must be at least 8 characters")
+      .max(128, "Password must be at most 128 characters")
       .regex(/[A-Z]/, "Password must contain at least one uppercase letter")
       .regex(/[a-z]/, "Password must contain at least one lowercase letter")
       .regex(/[0-9]/, "Password must contain at least one number"),
@@ -81,6 +86,7 @@ export const changePasswordSchema = z
   });
 
 export type ChangePasswordFormData = z.infer<typeof changePasswordSchema>;
+
 
 export const mfaVerifySchema = z.object({
   code: z

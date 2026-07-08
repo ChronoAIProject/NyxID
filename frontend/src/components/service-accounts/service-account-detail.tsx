@@ -1,6 +1,5 @@
 import { useState, useEffect } from "react";
 import { useNavigate, useSearch } from "@tanstack/react-router";
-import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
   useServiceAccount,
@@ -32,6 +31,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
+  useAppForm,
   Form,
   FormControl,
   FormField,
@@ -98,7 +98,7 @@ export function ServiceAccountDetail({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search.provider_status]);
 
-  const form = useForm<UpdateServiceAccountFormData>({
+  const form = useAppForm<UpdateServiceAccountFormData>({
     resolver: zodResolver(updateServiceAccountSchema),
     defaultValues: {
       name: "",
@@ -316,7 +316,7 @@ export function ServiceAccountDetail({
         <SaConnectedServices saId={saId} />
       ) : (
         <DetailSection title="Provider Connections">
-          <p className="text-[12px] text-muted-foreground">
+          <p className="px-4 py-3 text-[12px] text-muted-foreground">
             Provider connections for org-owned service accounts aren't yet
             available here. Use the{" "}
             <code className="rounded bg-muted px-1 font-mono text-xs">
@@ -330,7 +330,7 @@ export function ServiceAccountDetail({
       <Separator />
 
       <DetailSection title="Actions">
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap gap-2 px-4 py-3">
           <Button variant="outline" onClick={openRotateDialog}>
             <ButtonIcon><RefreshCw className="h-3 w-3" /></ButtonIcon>
             Rotate Secret

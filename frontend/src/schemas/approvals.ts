@@ -25,6 +25,10 @@ export const approvalRuleSchema = z.object({
       ]),
     )
     .max(16, "A rule can include at most 16 methods")
+    .refine(
+      (methods) => !methods.includes("*") || methods.length === 1,
+      "'*' cannot be combined with explicit methods",
+    )
     .default([]),
   resource_pattern: z
     .string()

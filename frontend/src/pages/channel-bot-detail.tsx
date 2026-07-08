@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useParams, useNavigate, Link } from "@tanstack/react-router";
-import { useForm } from "react-hook-form";
+import { useAppForm } from "@/components/ui/form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
   useChannelBot,
@@ -319,15 +319,15 @@ function AddRouteDialog({
 }) {
   const { data: apiKeys } = useApiKeys({ orgId: ownerOrgId });
   const createConversation = useCreateChannelConversation();
-  const [defaultAgent, setDefaultAgent] = useState(false);
 
   const {
     register,
     handleSubmit,
     setValue,
+    watch,
     reset,
     formState: { errors },
-  } = useForm<CreateChannelConversationFormData>({
+  } = useAppForm<CreateChannelConversationFormData>({
     resolver: zodResolver(createChannelConversationSchema),
     defaultValues: {
       channel_bot_id: botId,
@@ -340,6 +340,13 @@ function AddRouteDialog({
     },
   });
 
+  // The dialog component stays mounted across open/close, so a cancelled
+  // draft would otherwise leak into the next open.
+  function handleOpenChange(next: boolean) {
+    if (!next) reset();
+    onOpenChange(next);
+  }
+
   function onSubmit(data: CreateChannelConversationFormData) {
     // Backend enforces that channel_bot.user_id, agent_api_key.user_id
     // and target_org_id all match. The dialog is already scoped to the
@@ -347,14 +354,12 @@ function AddRouteDialog({
     createConversation.mutate(
       {
         ...data,
-        default_agent: defaultAgent,
         target_org_id: ownerOrgId ?? undefined,
       },
       {
         onSuccess: () => {
           toast.success("Conversation route added");
           reset();
-          setDefaultAgent(false);
           onOpenChange(false);
         },
         onError: (err) => {
@@ -372,7 +377,7 @@ function AddRouteDialog({
   const keysWithCallback = activeApiKeys.filter((k) => k.callback_url);
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="md:max-w-md">
         <DialogHeader>
           <DialogTitle>Add Conversation Route</DialogTitle>
@@ -399,6 +404,7 @@ function AddRouteDialog({
               </div>
             ) : (
               <Select
+                value={watch("agent_api_key_id") ?? ""}
                 onValueChange={(value) => setValue("agent_api_key_id", value)}
               >
                 <SelectTrigger>
@@ -439,11 +445,17 @@ function AddRouteDialog({
               Platform-specific chat/channel ID. Leave empty to create a default
               route for all unmatched conversations.
             </p>
+            {errors.platform_conversation_id && (
+              <p className="text-xs text-destructive">
+                {errors.platform_conversation_id.message}
+              </p>
+            )}
           </div>
 
           <div className="space-y-2">
             <Label>Conversation Type</Label>
             <Select
+              value={watch("platform_conversation_type") ?? ""}
               onValueChange={(value) =>
                 setValue(
                   "platform_conversation_type",
@@ -465,8 +477,8 @@ function AddRouteDialog({
           <div className="flex items-center gap-3">
             <Switch
               id="default_agent"
-              checked={defaultAgent}
-              onCheckedChange={setDefaultAgent}
+              checked={watch("default_agent") ?? false}
+              onCheckedChange={(v) => setValue("default_agent", v)}
             />
             <Label htmlFor="default_agent" className="text-[12px]">
               Set as default agent for this bot
@@ -477,7 +489,7 @@ function AddRouteDialog({
             <Button
               type="button"
               variant="outline"
-              onClick={() => onOpenChange(false)}
+              onClick={() => handleOpenChange(false)}
             >
               Cancel
             </Button>
@@ -603,38 +615,40 @@ function LarkPermissionSetupSection({
 
   return (
     <DetailSection title="Configure Permissions">
-      <p className="text-[12px] text-muted-foreground">
-        Open this link to grant the scopes NyxID's adapter needs in the
-        Lark/Feishu developer console. The required scopes are
-        pre-selected — confirm and bulk-enable them to finish setup.
-      </p>
-      {scopes.length > 0 && (
-        <div className="mt-3">
-          <p className="text-xs font-medium text-text-tertiary uppercase tracking-wide">
-            Scopes pre-selected
-          </p>
-          <ul className="mt-2 flex flex-wrap gap-2">
-            {scopes.map((scope) => (
-              <li key={scope}>
-                <Badge variant="secondary" className="text-xs">
-                  {scope}
-                </Badge>
-              </li>
-            ))}
-          </ul>
+      <div className="p-4">
+        <p className="text-[12px] text-muted-foreground">
+          Open this link to grant the scopes NyxID's adapter needs in the
+          Lark/Feishu developer console. The required scopes are
+          pre-selected — confirm and bulk-enable them to finish setup.
+        </p>
+        {scopes.length > 0 && (
+          <div className="mt-3">
+            <p className="text-xs font-medium text-text-tertiary uppercase tracking-wide">
+              Scopes pre-selected
+            </p>
+            <ul className="mt-2 flex flex-wrap gap-2">
+              {scopes.map((scope) => (
+                <li key={scope}>
+                  <Badge variant="secondary" className="text-xs">
+                    {scope}
+                  </Badge>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+        <div className="mt-4">
+          <Button variant="primary" asChild>
+            <a
+              href={bot.permission_setup_url}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Open Permissions Page
+              <ButtonIcon variant="primary"><ExternalLink className="h-3 w-3" /></ButtonIcon>
+            </a>
+          </Button>
         </div>
-      )}
-      <div className="mt-4">
-        <Button variant="primary" asChild>
-          <a
-            href={bot.permission_setup_url}
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Open Permissions Page
-            <ButtonIcon variant="primary"><ExternalLink className="h-3 w-3" /></ButtonIcon>
-          </a>
-        </Button>
       </div>
     </DetailSection>
   );
@@ -652,7 +666,7 @@ function EditVerificationSection({
     handleSubmit,
     reset,
     formState: { errors, isDirty },
-  } = useForm<UpdateChannelBotFormData>({
+  } = useAppForm<UpdateChannelBotFormData>({
     resolver: zodResolver(updateChannelBotSchema),
     defaultValues: {
       verification_token: "",
@@ -714,7 +728,7 @@ function EditVerificationSection({
 
   return (
     <DetailSection title="Edit Verification">
-      <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
+      <form onSubmit={handleSubmit(onSubmit)} className="space-y-4 p-5">
         <div className="space-y-2">
           <div className="flex items-center justify-between gap-3">
             <Label htmlFor="verification_token">Verification Token</Label>
@@ -801,6 +815,15 @@ function EditVerificationSection({
           )}
         </div>
 
+        {bot.status === "pending" && (
+          <p className="text-xs text-muted-foreground">
+            Saving stores these credentials immediately (watch the
+            &ldquo;Configured&rdquo; badges above) — the bot stays{" "}
+            <span className="text-warning">Pending</span> until the platform
+            delivers its first verified webhook, which auto-promotes it to
+            Active.
+          </p>
+        )}
         <div className="flex justify-end">
           <Button variant="primary" type="submit" disabled={updateBot.isPending || !isDirty}>
             {updateBot.isPending ? "Saving..." : "Save Verification Settings"}

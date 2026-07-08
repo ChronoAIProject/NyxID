@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { isValidHttpUrl } from "./http-url";
 
 /**
  * Valid API key scopes -- must match backend VALID_API_KEY_SCOPES
@@ -22,7 +23,8 @@ export const createApiKeySchema = z.object({
   name: z
     .string()
     .min(1, "Name is required")
-    .max(64, "Name must be at most 64 characters"),
+    .max(64, "Name must be at most 64 characters")
+    .refine((v) => v.trim().length > 0, "Name must not be blank"),
   scopes: z
     .array(z.enum(API_KEY_SCOPES))
     .min(1, "At least one scope is required"),
@@ -50,7 +52,7 @@ export const createApiKeySchema = z.object({
   allowed_node_ids: z.array(z.string()).optional(),
   callback_url: z
     .string()
-    .url("Must be a valid URL")
+    .refine(isValidHttpUrl, "Must be a valid URL")
     .nullable()
     .optional(),
   platform: z.string().nullable().optional(),

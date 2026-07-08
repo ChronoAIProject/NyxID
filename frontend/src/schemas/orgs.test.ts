@@ -3,6 +3,7 @@ import {
   createInviteRequestSchema,
   createOrgRequestSchema,
   credentialSourceSchema,
+  inviteFormSchema,
   inviteResponseSchema,
   memberResponseSchema,
   orgListItemSchema,
@@ -275,6 +276,29 @@ describe("createInviteRequestSchema", () => {
         ttl_hours: 24 * 31,
       }).success,
     ).toBe(false);
+  });
+});
+
+describe("inviteFormSchema", () => {
+  it("accepts the dialog defaults", () => {
+    expect(
+      inviteFormSchema.safeParse({ role: "member", ttl_hours: "24" }).success,
+    ).toBe(true);
+  });
+
+  it("rejects empty, non-numeric, fractional, and out-of-range TTL strings", () => {
+    for (const ttl_hours of ["", "abc", "1.5", "0", "-3", String(24 * 31)]) {
+      expect(
+        inviteFormSchema.safeParse({ role: "member", ttl_hours }).success,
+      ).toBe(false);
+    }
+  });
+
+  it("accepts the 30-day boundary", () => {
+    expect(
+      inviteFormSchema.safeParse({ role: "admin", ttl_hours: String(24 * 30) })
+        .success,
+    ).toBe(true);
   });
 });
 

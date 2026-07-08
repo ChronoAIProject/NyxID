@@ -18,6 +18,8 @@ import { useNodes } from "@/hooks/use-nodes";
 import { DefaultHeadersEditor } from "@/components/shared/default-headers-editor";
 import { WsFrameInjectionsEditor } from "@/components/shared/ws-frame-injections-editor";
 import { defaultRequestHeaderListSchema } from "@/schemas/default-request-headers";
+import { zodIssuesToRowFieldErrors } from "@/lib/form-errors";
+import { isValidHttpUrl } from "@/schemas/http-url";
 import type { DefaultRequestHeader } from "@/schemas/default-request-headers";
 import {
   wsFrameInjectionsSchema,
@@ -200,6 +202,10 @@ function EndpointSection({
 
   function handleSave() {
     if (!url.trim()) return;
+    if (!isValidHttpUrl(url.trim())) {
+      toast.error("Must be a full URL with a domain, e.g. https://api.example.com");
+      return;
+    }
     updateEndpoint.mutate(
       { endpointId, url: url.trim() },
       {
@@ -311,6 +317,12 @@ function OpenApiSpecSection({
 
   function handleSave() {
     const trimmed = draft.trim();
+    if (trimmed !== "" && !isValidHttpUrl(trimmed)) {
+      toast.error(
+        "Must be a full URL with a domain, e.g. https://api.example.com/openapi.json",
+      );
+      return;
+    }
     updateEndpoint.mutate(
       { endpointId, openapi_spec_url: trimmed },
       {
@@ -1666,17 +1678,22 @@ function DefaultHeadersSection({
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<readonly DefaultRequestHeader[]>([]);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [rowErrors, setRowErrors] = useState<
+    Record<number, Record<string, string>>
+  >({});
   const updateService = useUpdateUserService();
 
   function handleEdit() {
     setDraft(userHeaders.map((h) => ({ ...h })));
     setSaveError(null);
+    setRowErrors({});
     setEditing(true);
   }
 
   function handleCancel() {
     setDraft(userHeaders);
     setSaveError(null);
+    setRowErrors({});
     setEditing(false);
   }
 
@@ -1685,8 +1702,10 @@ function DefaultHeadersSection({
     if (!parsed.success) {
       const first = parsed.error.issues[0];
       setSaveError(first?.message ?? "Invalid headers");
+      setRowErrors(zodIssuesToRowFieldErrors(parsed.error.issues));
       return;
     }
+    setRowErrors({});
     const originalEmpty = userHeaders.length === 0;
     const nextEmpty = parsed.data.length === 0;
     // NyxID#356 tri-state: explicit clear when going from non-empty to
@@ -1760,8 +1779,13 @@ function DefaultHeadersSection({
             <div className="space-y-2">
               <DefaultHeadersEditor
                 value={draft}
-                onChange={setDraft}
+                onChange={(next) => {
+                  setDraft(next);
+                  setSaveError(null);
+                  setRowErrors({});
+                }}
                 disabled={updateService.isPending}
+                errors={rowErrors}
               />
               {saveError && (
                 <p className="text-xs text-destructive">{saveError}</p>
@@ -1808,17 +1832,20 @@ function WsFrameInjectionsSection({
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<WsFrameInjection[]>([]);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [rowErrors, setRowErrors] = useState<Record<number, string>>({});
   const updateService = useUpdateUserService();
 
   function handleEdit() {
     setDraft(rules.map((rule) => ({ ...rule })));
     setSaveError(null);
+    setRowErrors({});
     setEditing(true);
   }
 
   function handleCancel() {
     setDraft([]);
     setSaveError(null);
+    setRowErrors({});
     setEditing(false);
   }
 
@@ -1827,8 +1854,18 @@ function WsFrameInjectionsSection({
     if (!parsed.success) {
       const first = parsed.error.issues[0];
       setSaveError(first?.message ?? "Invalid WebSocket auth-frame rules");
+      // The WS editor renders one message per rule card; collapse the
+      // per-field map to the first message of each row.
+      setRowErrors(
+        Object.fromEntries(
+          Object.entries(zodIssuesToRowFieldErrors(parsed.error.issues)).map(
+            ([row, fields]) => [row, Object.values(fields)[0] ?? ""],
+          ),
+        ),
+      );
       return;
     }
+    setRowErrors({});
 
     updateService.mutate(
       {
@@ -1873,8 +1910,13 @@ function WsFrameInjectionsSection({
         <div className="space-y-3 p-4">
           <WsFrameInjectionsEditor
             value={draft}
-            onChange={setDraft}
+            onChange={(next) => {
+              setDraft(next);
+              setSaveError(null);
+              setRowErrors({});
+            }}
             errorMessage={saveError ?? undefined}
+            errors={rowErrors}
           />
           <div className="flex justify-end items-center gap-2">
             <Button

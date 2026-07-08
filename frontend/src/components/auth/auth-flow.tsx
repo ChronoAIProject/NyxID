@@ -1,5 +1,4 @@
 import { useState, useRef } from "react";
-import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useNavigate, Link } from "@tanstack/react-router";
 import {
@@ -13,6 +12,7 @@ import { ApiError } from "@/lib/api-client";
 import { openExternal } from "@/lib/navigation";
 import { isTrustedAuthReturnTo } from "@/lib/return-url";
 import {
+  useAppForm,
   Form,
   FormControl,
   FormField,
@@ -152,12 +152,12 @@ export function AuthFlow({
   const nameInputRef = useRef<HTMLInputElement>(null);
 
   // -- Forms --
-  const loginForm = useForm<LoginFormData>({
+  const loginForm = useAppForm<LoginFormData>({
     resolver: zodResolver(loginSchema),
     defaultValues: { email: "", password: "" },
   });
 
-  const registerForm = useForm<RegisterFormData>({
+  const registerForm = useAppForm<RegisterFormData>({
     resolver: zodResolver(registerSchema),
     defaultValues: {
       inviteCode: normalizedInitialInviteCode,
@@ -693,7 +693,10 @@ export function AuthFlow({
           {/* Email registration form */}
           <Form {...registerForm}>
             <form
-              onSubmit={registerForm.handleSubmit(onRegisterSubmit)}
+              onSubmit={
+                // eslint-disable-next-line react-hooks/refs -- handleSubmit only invokes onRegisterSubmit on submit events, never during render
+                registerForm.handleSubmit(onRegisterSubmit)
+              }
               className="flex flex-col gap-3.5"
             >
               {registerForm.formState.errors.root && (

@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { useParams, useNavigate, useRouterState } from "@tanstack/react-router";
-import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Camera, Check, Copy, Trash2, X } from "lucide-react";
 import { BenchesIcon, MailSendingIcon } from "@/components/icons/empty-state";
@@ -34,6 +33,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
+  useAppForm,
   Form,
   FormControl,
   FormField,
@@ -49,6 +49,7 @@ import { Switch } from "@/components/ui/switch";
 import { PageHeader } from "@/components/shared/page-header";
 import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
 import { ApiError } from "@/lib/api-client";
+import { isValidHttpUrl } from "@/schemas/http-url";
 import { buildOrgInviteJoinUrl } from "@/lib/org-invite-links";
 import {
   copyToClipboard,
@@ -273,14 +274,27 @@ export function OrgDetailPage() {
                     onChange={(e) => setAvatarUrlInput(e.target.value)}
                     placeholder="https://..."
                     className="flex-1"
+                    aria-invalid={
+                      avatarUrlInput.trim() !== "" &&
+                      !isValidHttpUrl(avatarUrlInput.trim())
+                        ? true
+                        : undefined
+                    }
                   />
                   <Button
                     variant="primary"
-                    disabled={avatarUrlInput === (org.avatar_url ?? "")}
+                    disabled={
+                      avatarUrlInput === (org.avatar_url ?? "") ||
+                      (avatarUrlInput.trim() !== "" &&
+                        !isValidHttpUrl(avatarUrlInput.trim()))
+                    }
                     isLoading={avatarUpdateMutation.isPending}
                     onClick={async () => {
                       try {
-                        await avatarUpdateMutation.mutateAsync({ orgId, body: { avatar_url: avatarUrlInput } });
+                        await avatarUpdateMutation.mutateAsync({
+                          orgId,
+                          body: { avatar_url: avatarUrlInput.trim() },
+                        });
                         toast.success("Avatar updated");
                         setAvatarPopoverOpen(false);
                       } catch {
@@ -291,6 +305,13 @@ export function OrgDetailPage() {
                     Save
                   </Button>
                 </div>
+                {avatarUrlInput.trim() !== "" &&
+                  !isValidHttpUrl(avatarUrlInput.trim()) && (
+                    <p className="text-xs text-destructive">
+                      Must be a full URL with a domain, e.g.
+                      https://example.com/avatar.png
+                    </p>
+                  )}
                 {org.avatar_url && (
                   <button
                     type="button"
@@ -1034,7 +1055,7 @@ function SettingsPanel({
 }: SettingsPanelProps) {
   const updateMutation = useUpdateOrg();
 
-  const form = useForm<UpdateOrgRequest>({
+  const form = useAppForm<UpdateOrgRequest>({
     resolver: zodResolver(updateOrgRequestSchema),
     defaultValues: {
       display_name: initialDisplayName,

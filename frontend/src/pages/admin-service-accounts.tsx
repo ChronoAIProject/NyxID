@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
   useServiceAccounts,
@@ -29,6 +28,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
+  useAppForm,
   Form,
   FormControl,
   FormField,
@@ -79,7 +79,7 @@ export function AdminServiceAccountsPage() {
   const total = data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / PER_PAGE));
 
-  const createForm = useForm<CreateServiceAccountFormData>({
+  const createForm = useAppForm<CreateServiceAccountFormData>({
     resolver: zodResolver(createServiceAccountSchema),
     defaultValues: {
       name: "",

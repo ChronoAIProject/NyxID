@@ -7,12 +7,85 @@ import {
   type FieldPath,
   type FieldValues,
   FormProvider,
+  useForm,
+  type UseFormProps,
+  type UseFormReturn,
   useFormContext,
+  useFormState,
 } from "react-hook-form";
 import { cn } from "@/lib/utils";
+import { firstNestedErrorMessage } from "@/lib/form-errors";
 import { Label } from "@/components/ui/label";
 
 const Form = FormProvider;
+
+/**
+ * Drop-in replacement for `useForm`. RHF's `setValue` leaves
+ * `dirtyFields`/`touchedFields` untouched and skips validation unless every
+ * call site remembers `{ shouldDirty, shouldTouch, shouldValidate }` — so
+ * non-text controls wired via `form.watch()` + `form.setValue()` (Radix
+ * Switch/Select/Checkbox, custom editors) never enable dirty-gated submit
+ * buttons. This hook flips those defaults to `true`, matching what a
+ * `Controller`-driven input reports. Programmatic writes (prefill,
+ * normalization in effects) opt out per call with
+ * `{ shouldDirty: false, shouldTouch: false }`.
+ *
+ * Caveats: each defaulted setValue runs one full schema parse (fine for
+ * discrete controls; avoid for per-keystroke writes), and RHF's
+ * useFieldArray branch of setValue ignores shouldTouch/shouldValidate —
+ * no useFieldArray exists in this app today.
+ */
+function useAppForm<
+  TFieldValues extends FieldValues = FieldValues,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- mirrors useForm's own TContext default
+  TContext = any,
+  TTransformedValues = TFieldValues,
+>(
+  props?: UseFormProps<TFieldValues, TContext, TTransformedValues>,
+): UseFormReturn<TFieldValues, TContext, TTransformedValues> {
+  const form = useForm<TFieldValues, TContext, TTransformedValues>(props);
+  // useForm returns a stable object (only its formState property is swapped
+  // each render), so this memo runs once. The Proxy shadows setValue while
+  // every other read — including formState — stays live on the underlying
+  // form; spreading (e.g. <Form {...form}>) also goes through the get trap.
+  return React.useMemo(() => {
+    const setValue: typeof form.setValue = (name, value, options) =>
+      form.setValue(name, value, {
+        shouldDirty: true,
+        shouldTouch: true,
+        shouldValidate: true,
+        ...options,
+      });
+    return new Proxy(form, {
+      get: (target, prop, receiver) =>
+        prop === "setValue" ? setValue : Reflect.get(target, prop, receiver),
+    });
+  }, [form]);
+}
+
+/**
+ * Renders next to a submit button after a blocked submit attempt: says how
+ * many fields failed validation and quotes the first message. Field-level
+ * highlights show WHERE the problem is; this shows WHY the click did
+ * nothing — without it, errors inside collapsed sections or off-screen
+ * rows make Save look broken. Clears automatically as fields revalidate.
+ * Must be rendered inside `<Form {...form}>`.
+ */
+function FormSubmitErrors({ className }: { readonly className?: string }) {
+  // useFormState subscribes independently of the parent page's formState
+  // reads, so this re-renders even if the host never touches errors.
+  const { submitCount, errors } = useFormState();
+  const fieldErrors = Object.entries(errors).filter(([key]) => key !== "root");
+  if (submitCount === 0 || fieldErrors.length === 0) return null;
+  const first = firstNestedErrorMessage(Object.fromEntries(fieldErrors));
+  const count = fieldErrors.length;
+  return (
+    <p role="alert" className={cn("text-xs text-destructive", className)}>
+      Cannot save — {count} {count === 1 ? "field needs" : "fields need"}{" "}
+      attention{first ? `: ${first}` : "."}
+    </p>
+  );
+}
 
 interface FormFieldContextValue<
   TFieldValues extends FieldValues = FieldValues,
@@ -145,7 +218,9 @@ const FormMessage = React.forwardRef<
   React.HTMLAttributes<HTMLParagraphElement>
 >(({ className, children, ...props }, ref) => {
   const { error, formMessageId } = useFormField();
-  const body = error ? String(error.message) : children;
+  // Array-container errors carry only nested per-index errors and no
+  // `message`; String(undefined) would render a literal "undefined".
+  const body = error?.message ? String(error.message) : children;
 
   if (!body) {
     return null;
@@ -165,6 +240,7 @@ const FormMessage = React.forwardRef<
 FormMessage.displayName = "FormMessage";
 
 export {
+  useAppForm,
   useFormField,
   Form,
   FormItem,
@@ -173,4 +249,5 @@ export {
   FormDescription,
   FormMessage,
   FormField,
+  FormSubmitErrors,
 };

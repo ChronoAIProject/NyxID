@@ -42,7 +42,9 @@ export const anonymousEndpointRuleSchema = z.object({
   daily_quota: z.coerce
     .number()
     .int("Daily quota must be a whole number")
-    .min(1, "Daily quota must be at least 1"),
+    .min(1, "Daily quota must be at least 1")
+    // Wire type is u32 on the backend; larger values 422 opaquely.
+    .max(4_294_967_295, "Daily quota is too large"),
 });
 
 /**

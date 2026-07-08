@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { isValidHttpUrl } from "./http-url";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Enums
@@ -154,7 +155,7 @@ export const createOrgRequestSchema = z.object({
     .email("Contact email must be a valid email")
     .optional()
     .or(z.literal("")),
-  avatar_url: z.string().trim().url("Avatar URL must be valid").optional().or(
+  avatar_url: z.string().trim().refine(isValidHttpUrl, "Avatar URL must be valid").optional().or(
     z.literal(""),
   ),
 });
@@ -168,7 +169,7 @@ export const updateOrgRequestSchema = z.object({
     .max(128, "Display name must be at most 128 characters")
     .optional(),
   slug: orgSlugSchema.optional(),
-  avatar_url: z.string().trim().url("Avatar URL must be valid").optional().or(
+  avatar_url: z.string().trim().refine(isValidHttpUrl, "Avatar URL must be valid").optional().or(
     z.literal(""),
   ),
   /**
@@ -220,6 +221,19 @@ export const createInviteRequestSchema = z.object({
     .optional(),
 });
 export type CreateInviteRequest = z.infer<typeof createInviteRequestSchema>;
+
+/** Form-input shape for the invite dialog (TTL as text-field string). */
+export const inviteFormSchema = z.object({
+  role: orgRoleSchema,
+  ttl_hours: z
+    .string()
+    .min(1, "TTL is required")
+    .refine((value) => {
+      const hours = Number(value);
+      return Number.isInteger(hours) && hours >= 1 && hours <= 24 * 30;
+    }, "TTL must be a whole number of hours between 1 and 720"),
+});
+export type InviteFormValues = z.infer<typeof inviteFormSchema>;
 
 export const setPrimaryOrgRequestSchema = z.object({
   primary_org_id: z.string().nullable(),

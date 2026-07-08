@@ -1,7 +1,9 @@
+import { useEffect, useRef } from "react";
 import {
   type WsFrameInjection,
   type WsFrameTrigger,
 } from "@/schemas/services";
+import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -113,12 +115,15 @@ interface WsFrameInjectionsEditorProps {
   readonly value: WsFrameInjection[];
   readonly onChange: (next: WsFrameInjection[]) => void;
   readonly errorMessage?: string;
+  /** Per-rule validation messages keyed by rule index. */
+  readonly errors?: Record<number, string>;
 }
 
 export function WsFrameInjectionsEditor({
   value,
   onChange,
   errorMessage,
+  errors,
 }: WsFrameInjectionsEditorProps) {
   const updateRule = (index: number, patch: Partial<WsFrameInjection>) => {
     onChange(
@@ -126,8 +131,27 @@ export function WsFrameInjectionsEditor({
     );
   };
 
+  const hasErrors =
+    Boolean(errorMessage) || Object.keys(errors ?? {}).length > 0;
+  // Force the section open when it holds validation errors — a blocked
+  // submit pointing into a collapsed <details> is invisible otherwise.
+  // One-way DOM write (never set back to false) so the section doesn't
+  // collapse mid-edit the moment the last error clears.
+  const detailsRef = useRef<HTMLDetailsElement>(null);
+  useEffect(() => {
+    if (hasErrors && detailsRef.current) {
+      detailsRef.current.open = true;
+    }
+  }, [hasErrors]);
+
   return (
-    <details className="rounded-xl border border-border/50 bg-card p-4">
+    <details
+      ref={detailsRef}
+      className={cn(
+        "rounded-xl border bg-card p-4",
+        hasErrors ? "border-destructive" : "border-border/50",
+      )}
+    >
       <summary className="cursor-pointer text-[13px] font-semibold text-foreground">
         WebSocket auth frames
       </summary>
@@ -176,7 +200,10 @@ export function WsFrameInjectionsEditor({
           return (
             <div
               key={index}
-              className="space-y-3 rounded-xl border border-border/50 bg-card p-4"
+              className={cn(
+                "space-y-3 rounded-xl border bg-card p-4",
+                errors?.[index] ? "border-destructive" : "border-border/50",
+              )}
             >
               <div className="flex items-center justify-between gap-3">
                 <p className="text-xs font-medium">Rule {index + 1}</p>
@@ -192,6 +219,10 @@ export function WsFrameInjectionsEditor({
                   <Trash2 className="text-destructive" />
                 </Button>
               </div>
+
+              {errors?.[index] && (
+                <p className="text-xs text-destructive">{errors[index]}</p>
+              )}
 
               <div className="grid gap-3 sm:grid-cols-3">
                 <div className="space-y-1.5">
