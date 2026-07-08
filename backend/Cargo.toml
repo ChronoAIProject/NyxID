@@ -89,6 +89,7 @@ aws-config = { version = "1", optional = true }
 aws-sdk-kms = { version = "1", optional = true }
 google-cloud-kms = { version = "0.6", optional = true }
 tempfile = "3.27.0"
+axum-extra = { version = "0.12.6", features = ["form", "query"] }
 
 [features]
 default = []

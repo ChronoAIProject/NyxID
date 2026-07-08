@@ -1,9 +1,13 @@
 use axum::{
     Json,
-    extract::{Form, Query, State, rejection::QueryRejection},
+    extract::State,
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
+// axum-extra's Form/Query decode repeated keys (`resource=a&resource=b`,
+// `allowed_service_ids=...`) into Vec fields via serde_html_form; axum's
+// built-in serde_urlencoded extractors reject them (#1115).
+use axum_extra::extract::{Form, Query, QueryRejection};
 use base64::Engine as _;
 use chrono::Utc;
 use jsonwebtoken::{Algorithm, Header, Validation, decode, encode};
@@ -2235,7 +2239,7 @@ pub async fn introspect(
 pub async fn list_bindings_by_external_subject(
     State(state): State<AppState>,
     headers: HeaderMap,
-    axum::extract::Query(query): axum::extract::Query<ListBindingsByExternalSubjectQuery>,
+    Query(query): Query<ListBindingsByExternalSubjectQuery>,
 ) -> AppResult<Json<ListBindingsResponse>> {
     let empty = || {
         Json(ListBindingsResponse {
@@ -2306,7 +2310,7 @@ pub async fn get_binding(
     State(state): State<AppState>,
     headers: HeaderMap,
     axum::extract::Path(raw_binding_id): axum::extract::Path<String>,
-    axum::extract::Query(query): axum::extract::Query<GetBindingQuery>,
+    Query(query): Query<GetBindingQuery>,
 ) -> AppResult<Json<GetBindingResponse>> {
     let not_found = || AppError::NotFound("binding not found".to_string());
     let basic = parse_basic_client_credentials(&headers).map_err(|_| not_found())?;
@@ -2356,7 +2360,7 @@ pub async fn delete_binding(
     State(state): State<AppState>,
     headers: HeaderMap,
     axum::extract::Path(raw_binding_id): axum::extract::Path<String>,
-    axum::extract::Query(query): axum::extract::Query<GetBindingQuery>,
+    Query(query): Query<GetBindingQuery>,
 ) -> StatusCode {
     let basic = parse_basic_client_credentials(&headers).ok().flatten();
     let (client_id, client_secret) = match client_credentials_from_basic_or_params(
@@ -2631,6 +2635,117 @@ pub async fn register_client(
             client_id_issued_at: client.created_at.timestamp(),
         }),
     ))
+}
+
+#[cfg(test)]
+mod wire_decoding_tests {
+    //! Regression tests for #1115: the consent decision form and RFC 8707
+    //! `resource` parameters arrive as repeated urlencoded keys
+    //! (`allowed_service_ids=a&allowed_service_ids=b`). axum's built-in
+    //! serde_urlencoded extractors reject repeated keys targeting `Vec`
+    //! fields; these tests decode real wire bodies through the axum-extra
+    //! extractors actually mounted on the handlers.
+    use super::*;
+    use axum::extract::{FromRequest, FromRequestParts};
+
+    fn form_request(body: &str) -> axum::http::Request<axum::body::Body> {
+        axum::http::Request::builder()
+            .method("POST")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn consent_decision_form_decodes_single_and_repeated_service_ids() {
+        // Single selected service: the exact production failure in #1115.
+        let single = "response_type=code&client_id=c1&redirect_uri=http%3A%2F%2Flocalhost%2Fcb\
+             &decision=allow&allow_all_services=false\
+             &allowed_service_ids=a64de078-f99f-4583-aeb0-040dc584d142";
+        let Form(form) = Form::<ConsentDecisionForm>::from_request(form_request(single), &())
+            .await
+            .expect("single allowed_service_ids value must decode");
+        assert_eq!(
+            form.allowed_service_ids,
+            vec!["a64de078-f99f-4583-aeb0-040dc584d142".to_string()]
+        );
+        assert!(!form.allow_all_services);
+
+        let repeated = "response_type=code&client_id=c1&redirect_uri=http%3A%2F%2Flocalhost%2Fcb\
+             &decision=allow&allow_all_services=false\
+             &allowed_service_ids=svc-1&allowed_service_ids=svc-2\
+             &resource=https%3A%2F%2Fnyx.example%2Fapi%2Fv1%2Fproxy%2Fs%2Fopenai\
+             &resource=https%3A%2F%2Fnyx.example%2Fapi%2Fv1%2Fproxy%2Fs%2Fanthropic";
+        let Form(form) = Form::<ConsentDecisionForm>::from_request(form_request(repeated), &())
+            .await
+            .expect("repeated allowed_service_ids and resource values must decode");
+        assert_eq!(form.allowed_service_ids, vec!["svc-1", "svc-2"]);
+        assert_eq!(form.resource.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn consent_decision_form_defaults_absent_vec_fields_to_empty() {
+        let body = "response_type=code&client_id=c1&redirect_uri=http%3A%2F%2Flocalhost%2Fcb\
+             &decision=allow&allow_all_services=true";
+        let Form(form) = Form::<ConsentDecisionForm>::from_request(form_request(body), &())
+            .await
+            .expect("absent vec fields must decode to empty");
+        assert!(form.allowed_service_ids.is_empty());
+        assert!(form.resource.is_empty());
+        assert!(form.allow_all_services);
+    }
+
+    #[tokio::test]
+    async fn authorize_query_decodes_repeated_resource_params() {
+        let uri = "/oauth/authorize?response_type=code&client_id=c1\
+             &redirect_uri=http%3A%2F%2Flocalhost%2Fcb\
+             &resource=https%3A%2F%2Fnyx.example%2Fapi%2Fv1%2Fproxy%2Fs%2Fopenai\
+             &resource=https%3A%2F%2Fnyx.example%2Fapi%2Fv1%2Fproxy%2Fs%2Fanthropic";
+        let request = axum::http::Request::builder()
+            .uri(uri)
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let (mut parts, _) = request.into_parts();
+        let Query(query) = Query::<AuthorizeQuery>::from_request_parts(&mut parts, &())
+            .await
+            .expect("repeated resource query params must decode");
+        assert_eq!(query.resource.len(), 2);
+        assert_eq!(query.client_id, "c1");
+    }
+
+    #[tokio::test]
+    async fn token_request_decodes_repeated_resource_and_plain_grants() {
+        let with_resource = "grant_type=refresh_token&refresh_token=rt-1\
+             &resource=https%3A%2F%2Fnyx.example%2Fapi%2Fv1%2Fproxy%2Fs%2Fopenai\
+             &resource=https%3A%2F%2Fnyx.example%2Fapi%2Fv1%2Fproxy%2Fs%2Fanthropic";
+        let Form(body) = Form::<TokenRequest>::from_request(form_request(with_resource), &())
+            .await
+            .expect("repeated resource values must decode");
+        assert_eq!(body.resource.len(), 2);
+
+        // Scalar-only token request (standard OAuth client shape) is unchanged.
+        let plain = "grant_type=authorization_code&code=abc&client_id=c1\
+             &redirect_uri=http%3A%2F%2Flocalhost%2Fcb&code_verifier=ver";
+        let Form(body) = Form::<TokenRequest>::from_request(form_request(plain), &())
+            .await
+            .expect("scalar-only token request must decode");
+        assert_eq!(body.grant_type, "authorization_code");
+        assert_eq!(body.code.as_deref(), Some("abc"));
+        assert!(body.resource.is_empty());
+    }
+
+    #[tokio::test]
+    async fn par_form_decodes_repeated_resource_params() {
+        let body = "response_type=code&client_id=c1&client_secret=s1\
+             &redirect_uri=http%3A%2F%2Flocalhost%2Fcb\
+             &resource=https%3A%2F%2Fnyx.example%2Fapi%2Fv1%2Fproxy%2Fs%2Fopenai\
+             &resource=https%3A%2F%2Fnyx.example%2Fapi%2Fv1%2Fproxy%2Fs%2Fanthropic";
+        let Form(form) =
+            Form::<PushedAuthorizationRequestForm>::from_request(form_request(body), &())
+                .await
+                .expect("repeated resource values must decode");
+        assert_eq!(form.resource.len(), 2);
+    }
 }
 
 #[cfg(test)]
