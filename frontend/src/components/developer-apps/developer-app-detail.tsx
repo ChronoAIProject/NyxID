@@ -31,6 +31,7 @@ import { PageHeader } from "@/components/shared/page-header";
 import { parseRedirectUris } from "@/lib/oauth";
 import { ApiError } from "@/lib/api-client";
 import { toast } from "sonner";
+import { useCatalog } from "@/hooks/use-keys";
 
 const OIDC_SCOPES = [
   { id: "openid", label: "openid", required: true },
@@ -77,12 +78,17 @@ export function DeveloperAppDetail({
   const deleteMutation = useDeleteDeveloperApp();
   const rotateMutation = useRotateDeveloperAppSecret();
 
+  const { data: catalog } = useCatalog();
+
   const [editOpen, setEditOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [rotateOpen, setRotateOpen] = useState(false);
   const [name, setName] = useState("");
   const [redirectUrisText, setRedirectUrisText] = useState("");
   const [editScopes, setEditScopes] = useState<readonly string[]>([]);
+  const [editDefaultSlugs, setEditDefaultSlugs] = useState<readonly string[]>(
+    [],
+  );
 
   const [secretOpen, setSecretOpen] = useState(false);
   const [rotatedSecret, setRotatedSecret] = useState("");
@@ -92,7 +98,12 @@ export function DeveloperAppDetail({
     setName(app.client_name);
     setRedirectUrisText(app.redirect_uris.join("\n"));
     setEditScopes(app.allowed_scopes.split(/\s+/).filter(Boolean));
+    setEditDefaultSlugs(app.default_service_catalog_slugs ?? []);
     setEditOpen(true);
+  }
+
+  function catalogServiceName(slug: string): string {
+    return (catalog ?? []).find((entry) => entry.slug === slug)?.name ?? slug;
   }
 
   async function handleSave() {
@@ -116,6 +127,7 @@ export function DeveloperAppDetail({
           name: name.trim(),
           redirect_uris: parsedUris.uris,
           allowed_scopes: editScopes,
+          default_service_catalog_slugs: editDefaultSlugs,
         },
       });
       toast.success("Application updated");
@@ -283,6 +295,33 @@ export function DeveloperAppDetail({
         </CardContent>
       </Card>
 
+      <Card>
+        <CardHeader>
+          <CardTitle>Default Services</CardTitle>
+          <CardDescription>
+            Services this app requests by default. The consent screen
+            pre-selects the user&apos;s matching services; users can always
+            adjust before approving.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {(app.default_service_catalog_slugs ?? []).length > 0 ? (
+            <div className="flex flex-wrap gap-2">
+              {(app.default_service_catalog_slugs ?? []).map((slug) => (
+                <Badge key={slug} variant="secondary">
+                  {catalogServiceName(slug)}
+                </Badge>
+              ))}
+            </div>
+          ) : (
+            <p className="text-[12px] text-muted-foreground">
+              No default services declared. Users see a sign-in-only consent
+              unless they customize.
+            </p>
+          )}
+        </CardContent>
+      </Card>
+
       <Dialog open={editOpen} onOpenChange={setEditOpen}>
         <DialogContent>
           <DialogHeader>
@@ -353,6 +392,50 @@ export function DeveloperAppDetail({
                     </div>
                   </div>
                 ))}
+              </div>
+            </div>
+            <div className="space-y-3">
+              <div>
+                <label className="text-[12px] font-medium">
+                  Default Services
+                </label>
+                <p className="text-xs text-muted-foreground">
+                  Catalog services this app requests at consent time. Users
+                  keep the final say.
+                </p>
+              </div>
+              <div className="max-h-48 space-y-2 overflow-y-auto pr-1">
+                {(catalog ?? []).map((entry) => (
+                  <div key={entry.slug} className="flex items-start gap-2">
+                    <Checkbox
+                      id={`default-service-${entry.slug}`}
+                      checked={editDefaultSlugs.includes(entry.slug)}
+                      onCheckedChange={(checked) => {
+                        setEditDefaultSlugs(
+                          checked
+                            ? [...editDefaultSlugs, entry.slug]
+                            : editDefaultSlugs.filter(
+                                (slug) => slug !== entry.slug,
+                              ),
+                        );
+                      }}
+                    />
+                    <label
+                      htmlFor={`default-service-${entry.slug}`}
+                      className="cursor-pointer text-[12px] font-medium leading-none"
+                    >
+                      {entry.name}
+                      <span className="ml-1 text-xs font-normal text-muted-foreground">
+                        {entry.slug}
+                      </span>
+                    </label>
+                  </div>
+                ))}
+                {(catalog ?? []).length === 0 && (
+                  <p className="text-xs text-muted-foreground">
+                    No catalog services available.
+                  </p>
+                )}
               </div>
             </div>
           </div>

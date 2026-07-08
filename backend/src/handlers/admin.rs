@@ -918,6 +918,7 @@ pub async fn create_oauth_client(
         body.broker_capability_enabled.unwrap_or(false),
         revocation_webhook_url,
         revocation_webhook_secret_encrypted,
+        &[],
     )
     .await?;
 

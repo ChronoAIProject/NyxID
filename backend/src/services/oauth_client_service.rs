@@ -124,6 +124,7 @@ pub async fn seed_default_clients(db: &mongodb::Database) -> AppResult<()> {
         client_type: "public".to_string(),
         is_active: true,
         delegation_scopes: String::new(),
+        default_service_catalog_slugs: Vec::new(),
         broker_capability_enabled: false,
         revocation_webhook_url: None,
         revocation_webhook_secret_encrypted: None,
@@ -232,6 +233,7 @@ pub async fn create_client(
     broker_capability_enabled: bool,
     revocation_webhook_url: Option<&str>,
     revocation_webhook_secret_encrypted: Option<Vec<u8>>,
+    default_service_catalog_slugs: &[String],
 ) -> AppResult<(OauthClient, Option<String>)> {
     let client_id = Uuid::new_v4().to_string();
     let now = Utc::now();
@@ -254,6 +256,7 @@ pub async fn create_client(
         client_type: client_type.to_string(),
         is_active: true,
         delegation_scopes: delegation_scopes.to_string(),
+        default_service_catalog_slugs: default_service_catalog_slugs.to_vec(),
         broker_capability_enabled,
         revocation_webhook_url: revocation_webhook_url.map(str::to_string),
         revocation_webhook_secret_encrypted,
@@ -358,6 +361,7 @@ pub async fn update_client_for_creator(
     broker_capability_enabled: Option<bool>,
     revocation_webhook_url: Option<&str>,
     revocation_webhook_secret_encrypted: Option<Vec<u8>>,
+    default_service_catalog_slugs: Option<&[String]>,
 ) -> AppResult<OauthClient> {
     let mut set_doc = doc! {
         "updated_at": bson::DateTime::from_chrono(Utc::now()),
@@ -399,6 +403,17 @@ pub async fn update_client_for_creator(
                 subtype: BinarySubtype::Generic,
                 bytes: secret,
             },
+        );
+    }
+
+    if let Some(slugs) = default_service_catalog_slugs {
+        set_doc.insert(
+            "default_service_catalog_slugs",
+            bson::to_bson(slugs).map_err(|e| {
+                AppError::Internal(format!(
+                    "Failed to convert default_service_catalog_slugs to bson: {e}"
+                ))
+            })?,
         );
     }
 
@@ -667,6 +682,7 @@ mod tests {
                 client_type: "public".to_string(),
                 is_active: true,
                 delegation_scopes: String::new(),
+                default_service_catalog_slugs: Vec::new(),
                 broker_capability_enabled: false,
                 revocation_webhook_url: None,
                 revocation_webhook_secret_encrypted: None,
@@ -698,6 +714,7 @@ mod tests {
                     client_type: "public".to_string(),
                     is_active: true,
                     delegation_scopes: String::new(),
+                    default_service_catalog_slugs: Vec::new(),
                     broker_capability_enabled: false,
                     revocation_webhook_url: None,
                     revocation_webhook_secret_encrypted: None,
@@ -875,6 +892,7 @@ mod tests {
                     client_type: "public".to_string(),
                     is_active: true,
                     delegation_scopes: String::new(),
+                    default_service_catalog_slugs: Vec::new(),
                     broker_capability_enabled: false,
                     revocation_webhook_url: None,
                     revocation_webhook_secret_encrypted: None,

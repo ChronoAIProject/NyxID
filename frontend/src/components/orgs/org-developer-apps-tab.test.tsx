@@ -41,7 +41,8 @@ const oauthClient: OAuthClient = {
   delegation_scopes: "",
   broker_capability_enabled: false,
   is_active: true,
-  client_secret: null,
+  default_service_catalog_slugs: [],
+      client_secret: null,
   created_at: "2026-04-20T00:00:00Z",
 };
 
