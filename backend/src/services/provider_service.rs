@@ -1577,6 +1577,51 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
+    // 24. OpenRouter (API Key)
+    if !slug_exists!("openrouter") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "openrouter".to_string(),
+            name: "OpenRouter".to_string(),
+            description: Some(
+                "Unified API for hundreds of AI models across providers through a \
+                 single OpenAI-compatible endpoint (pay-per-use billing)"
+                    .to_string(),
+            ),
+            provider_type: "api_key".to_string(),
+            authorization_url: None,
+            token_url: None,
+            revocation_url: None,
+            default_scopes: None,
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: Some(
+                "Get your API key from https://openrouter.ai/keys".to_string(),
+            ),
+            api_key_url: Some("https://openrouter.ai/keys".to_string()),
+            icon_url: None,
+            documentation_url: Some("https://openrouter.ai/docs".to_string()),
+            is_active: true,
+            credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            requires_gateway_url: false,
+            created_by: "system".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = "openrouter", "Seeded default provider: OpenRouter");
+        seeded_count += 1;
+    }
+
     // Cloud billing providers (NyxID#716, #778). AWS uses direct sigv4
     // injection (non-delegated). Google Cloud uses the standard OAuth2
     // delegated flow via the new `google-cloud` provider + `api-google-cloud`
@@ -1870,6 +1915,29 @@ const ANTHROPIC_DEFAULT_HEADERS: &[SeededHeader] = &[
     SeededHeader {
         name: "content-type",
         value: "application/json",
+        overridable: true,
+        sensitive: false,
+    },
+];
+
+/// OpenRouter app-attribution headers
+/// (https://openrouter.ai/docs/app-attribution). `HTTP-Referer` is the app
+/// identifier for OpenRouter's public rankings and per-model "Apps" tabs;
+/// `X-OpenRouter-Title` is the display name shown there. Both
+/// `overridable: true` so a client that routes through NyxID but sends its
+/// own attribution keeps the credit -- the defaults only fill the gap.
+const OPENROUTER_DEFAULT_HEADERS: &[SeededHeader] = &[
+    SeededHeader {
+        name: "HTTP-Referer",
+        // Canonical product URL — this is NyxID's permanent app identifier
+        // on OpenRouter's rankings; changing it later resets the app page.
+        value: "https://nyx.chrono-ai.fun",
+        overridable: true,
+        sensitive: false,
+    },
+    SeededHeader {
+        name: "X-OpenRouter-Title",
+        value: "NyxID",
         overridable: true,
         sensitive: false,
     },
@@ -2437,6 +2505,29 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         requires_user_credential: false,
         openapi_spec_path: None,
         homepage_url: None,
+        auth_notes: None,
+        known_limitations: None,
+    },
+    DefaultServiceSeed {
+        provider_slug: "openrouter",
+        service_slug: "llm-openrouter",
+        service_name: "OpenRouter API",
+        base_url: "https://openrouter.ai/api/v1",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: Some(
+            "OpenRouter unified LLM API: one OpenAI-compatible endpoint routing \
+             to hundreds of models across providers (OpenAI, Anthropic, Google, \
+             Meta, Mistral, ...) with automatic fallbacks. Model IDs use the \
+             `vendor/model` form, e.g. `anthropic/claude-sonnet-4`.",
+        ),
+        default_request_headers: Some(OPENROUTER_DEFAULT_HEADERS),
+        service_category: "internal",
+        requires_user_credential: false,
+        openapi_spec_path: None,
+        homepage_url: Some("https://openrouter.ai"),
         auth_notes: None,
         known_limitations: None,
     },
@@ -4136,7 +4227,7 @@ pub async fn delete_provider(db: &mongodb::Database, provider_id: &str) -> AppRe
 #[cfg(test)]
 mod tests {
     use super::{
-        ANTHROPIC_DEFAULT_HEADERS, DEFAULT_SERVICE_SEEDS, SeededHeader,
+        ANTHROPIC_DEFAULT_HEADERS, DEFAULT_SERVICE_SEEDS, OPENROUTER_DEFAULT_HEADERS, SeededHeader,
         normalize_telegram_bot_token, normalize_telegram_bot_username, reconcile_seeded_headers,
         seed_capability_override,
     };
@@ -4304,6 +4395,48 @@ mod tests {
             version.overridable,
             "anthropic-version must be overridable so SDK-supplied versions win"
         );
+    }
+
+    #[test]
+    fn openrouter_seed_carries_attribution_headers() {
+        let seed = DEFAULT_SERVICE_SEEDS
+            .iter()
+            .find(|s| s.service_slug == "llm-openrouter")
+            .expect("llm-openrouter seed should exist");
+
+        assert_eq!(seed.provider_slug, "openrouter");
+        assert_eq!(seed.base_url, "https://openrouter.ai/api/v1");
+        assert_eq!(seed.injection_method, "bearer");
+        assert_eq!(seed.injection_key, "Authorization");
+
+        let headers = seed
+            .default_request_headers
+            .expect("llm-openrouter must carry app-attribution headers");
+        let names: Vec<&str> = headers.iter().map(|h| h.name).collect();
+        assert!(
+            names.contains(&"HTTP-Referer"),
+            "HTTP-Referer identifies NyxID on OpenRouter rankings; got {names:?}"
+        );
+        let referer = headers
+            .iter()
+            .find(|h| h.name == "HTTP-Referer")
+            .expect("HTTP-Referer present");
+        // Pinned: this URL is the permanent app identifier on OpenRouter's
+        // rankings (openrouter.ai/apps?url=...). Changing it fractures the
+        // accumulated usage history — do so only as a deliberate decision.
+        assert_eq!(referer.value, "https://nyx.chrono-ai.fun");
+        assert!(
+            names.contains(&"X-OpenRouter-Title"),
+            "X-OpenRouter-Title sets the display name; got {names:?}"
+        );
+        for header in headers {
+            assert!(
+                header.overridable,
+                "{} must be overridable so clients sending their own \
+                 attribution keep the credit",
+                header.name
+            );
+        }
     }
 
     #[test]
@@ -4529,6 +4662,44 @@ mod tests {
         assert_eq!(headers.len(), ANTHROPIC_DEFAULT_HEADERS.len());
         assert!(headers.iter().any(|h| h.name == "anthropic-version"));
         assert!(headers.iter().any(|h| h.name == "content-type"));
+    }
+
+    #[tokio::test]
+    async fn seed_default_services_seeds_openrouter_attribution_headers() {
+        let Some(db) = seed_default_catalog("prov_seed_openrouter_headers").await else {
+            return;
+        };
+        let service_col = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
+        let openrouter = service_col
+            .find_one(doc! { "slug": "llm-openrouter" })
+            .await
+            .expect("query openrouter")
+            .expect("openrouter service");
+        let headers = openrouter
+            .default_request_headers
+            .expect("openrouter seeded headers");
+        assert_eq!(headers.len(), OPENROUTER_DEFAULT_HEADERS.len());
+        assert!(headers.iter().any(|h| h.name == "HTTP-Referer"));
+        assert!(headers.iter().any(|h| h.name == "X-OpenRouter-Title"));
+        assert!(headers.iter().all(|h| h.overridable));
+    }
+
+    #[tokio::test]
+    async fn seeded_openrouter_resolves_via_llm_gateway_provider_slug() {
+        let Some(db) = seed_default_catalog("prov_seed_openrouter_llm_route").await else {
+            return;
+        };
+        // The docs guide points OpenAI-compatible tools at
+        // /api/v1/llm/openrouter/v1/... — that route resolves by PROVIDER
+        // slug and then finds the linked llm-* service. Guard the whole
+        // chain so a seed rename can't silently break the documented URL.
+        let (service, provider) =
+            crate::services::llm_gateway_service::resolve_llm_service_by_slug(&db, "openrouter")
+                .await
+                .expect("openrouter must resolve on the /llm/{provider_slug} route");
+        assert_eq!(provider.slug, "openrouter");
+        assert_eq!(service.slug, "llm-openrouter");
+        assert_eq!(service.base_url, "https://openrouter.ai/api/v1");
     }
 
     #[tokio::test]

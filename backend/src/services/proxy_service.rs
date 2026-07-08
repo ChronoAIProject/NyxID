@@ -109,6 +109,15 @@ const ALLOWED_FORWARD_HEADERS: &[&str] = &[
     "if-range",
     "if-none-match",
     "if-modified-since",
+    // OpenRouter app-attribution headers. `HTTP-Referer` is OpenRouter's
+    // nonstandard spelling (the standard `Referer` a browser auto-sends
+    // stays blocked); `X-Title` is the legacy attribution name. A caller
+    // only sends these deliberately, to claim its own ranking credit on
+    // openrouter.ai — forwarding them lets that credit stand, and the
+    // seeded `llm-openrouter` defaults (`overridable: true`) fill the gap
+    // when they are absent.
+    "http-referer",
+    "x-title",
 ];
 
 /// Namespaced header prefixes that should be forwarded transparently.
@@ -129,7 +138,13 @@ const ALLOWED_FORWARD_HEADERS: &[&str] = &[
 /// Headers under `x-goog-*` are GCP-namespace headers (e.g.
 /// `X-Goog-User-Project` for billing-quota project selection on BigQuery
 /// calls against the billing-export dataset). NyxID#716.
-const ALLOWED_FORWARD_HEADER_PREFIXES: &[&str] = &["x-openclaw-", "x-amz-", "x-goog-"];
+///
+/// Headers under `x-openrouter-*` are OpenRouter app-attribution /
+/// marketplace headers (`X-OpenRouter-Title`, `X-OpenRouter-Categories`).
+/// Callers set them deliberately; forwarding lets a self-attributing app
+/// keep its ranking credit instead of the seeded NyxID defaults.
+const ALLOWED_FORWARD_HEADER_PREFIXES: &[&str] =
+    &["x-openclaw-", "x-amz-", "x-goog-", "x-openrouter-"];
 
 /// Returns `true` when the header name is in the allowlist or matches an
 /// allowlisted prefix. Caller must lowercase the name before calling.
@@ -2951,6 +2966,17 @@ mod tests {
     }
 
     #[test]
+    fn forward_allowlist_accepts_openrouter_attribution_headers() {
+        // A client that attributes itself to OpenRouter must keep its own
+        // ranking credit; the seeded llm-openrouter defaults only fill the
+        // gap (they are overridable).
+        assert!(is_allowed_forward_header("http-referer"));
+        assert!(is_allowed_forward_header("x-title"));
+        assert!(is_allowed_forward_header("x-openrouter-title"));
+        assert!(is_allowed_forward_header("x-openrouter-categories"));
+    }
+
+    #[test]
     fn forward_allowlist_rejects_sensitive_and_unrelated_headers() {
         // Guard: the prefix rule must not broaden leakage of NyxID or
         // infrastructure headers.
@@ -2959,6 +2985,9 @@ mod tests {
         assert!(!is_allowed_forward_header("x-nyxid-internal"));
         assert!(!is_allowed_forward_header("x-forwarded-for"));
         assert!(!is_allowed_forward_header("host"));
+        // Standard browser `Referer` stays blocked — only OpenRouter's
+        // deliberate `HTTP-Referer` spelling passes.
+        assert!(!is_allowed_forward_header("referer"));
     }
 
     #[derive(Debug)]

@@ -48,6 +48,7 @@ export const DOCS_TABS: readonly DocTab[] = [
         group: "Guides",
         pages: [
           { slug: "ai/guides/claude-code-cursor-codex", title: "Set up Claude Code, Cursor & Codex" },
+          { slug: "ai/guides/openrouter", title: "Use OpenRouter through NyxID" },
           { slug: "ai/guides/mcp-proxy", title: "MCP proxy & tool discovery" },
           { slug: "ai/guides/agent-isolation", title: "Isolate agents with scoped keys" },
           { slug: "ai/guides/wrap-rest-api-as-mcp", title: "Wrap a REST API as MCP tools" },
@@ -73,6 +74,7 @@ export const DOCS_TABS: readonly DocTab[] = [
         group: "Guides",
         pages: [
           { slug: "web/guides/manage-keys", title: "Manage keys & credentials" },
+          { slug: "web/guides/openrouter", title: "Use OpenRouter through NyxID" },
           { slug: "web/guides/approvals", title: "Set up approvals" },
           { slug: "web/guides/organizations", title: "Share credentials across an org" },
           { slug: "web/guides/developer-apps", title: "Register a developer app" },
@@ -99,6 +101,7 @@ export const DOCS_TABS: readonly DocTab[] = [
         group: "Guides",
         pages: [
           { slug: "cli/guides/connect-a-service", title: "Connect an AI service" },
+          { slug: "cli/guides/openrouter", title: "Use OpenRouter through NyxID" },
           { slug: "cli/guides/credential-node", title: "Set up a credential node" },
           { slug: "cli/guides/ssh-node", title: "Set up an SSH node" },
           { slug: "cli/guides/scoped-agent-keys", title: "Create scoped agent keys" },
