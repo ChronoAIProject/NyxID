@@ -1576,9 +1576,9 @@ async fn token_inner(
                         client_id_str,
                         &exchanged.user_id,
                         &exchanged.granted_scope,
-                        &exchanged.resource_uris,
-                        &exchanged.allowed_service_ids,
-                        exchanged.allow_all_services,
+                        &exchanged.refresh_token_resource_uris,
+                        &exchanged.refresh_token_allowed_service_ids,
+                        exchanged.refresh_token_allow_all_services,
                     )
                     .await?
                 } else {
