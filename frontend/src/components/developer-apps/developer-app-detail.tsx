@@ -78,7 +78,7 @@ export function DeveloperAppDetail({
   const deleteMutation = useDeleteDeveloperApp();
   const rotateMutation = useRotateDeveloperAppSecret();
 
-  const { data: catalog } = useCatalog();
+  const { data: catalog } = useCatalog({ includeAll: true });
 
   const [editOpen, setEditOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
