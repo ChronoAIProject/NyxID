@@ -116,22 +116,28 @@ export function DeepSeekGlyph(props: GlyphProps) {
  */
 export function OpenRouterGlyph(props: GlyphProps) {
   return (
-    <svg
-      viewBox="0 0 512 512"
-      fill="currentColor"
-      stroke="currentColor"
-      aria-hidden="true"
-      {...props}
-    >
+    // OpenRouter authors this mark on a 0 0 512 512 canvas where the art
+    // bleeds to the left and right edges. Dropped into ServiceIcon's square
+    // 16-32px box it then reads as a heavy, cramped blob next to every other
+    // glyph (all of which carry their own padding). The viewBox below is the
+    // art's bounding box (x 0..511, y 33..465) re-centred in a 608 square,
+    // giving ~8% side margins — matching OpenRouter's own app icon and our
+    // glyph set. The paths are untouched.
+    //
+    // `stroke` lives on the two route lines rather than the root so the
+    // filled arrowheads don't pick up a stray 1px outline by inheritance.
+    <svg viewBox="-48 -56 608 608" fill="currentColor" aria-hidden="true" {...props}>
       <path
         d="M3 248.945C18 248.945 76 236 106 219C136 202 136 202 198 158C276.497 102.293 332 120.945 423 120.945"
         fill="none"
+        stroke="currentColor"
         strokeWidth="90"
       />
       <path d="M511 121.5L357.25 210.268L357.25 32.7324L511 121.5Z" />
       <path
         d="M0 249C15 249 73 261.945 103 278.945C133 295.945 133 295.945 195 339.945C273.497 395.652 329 377 420 377"
         fill="none"
+        stroke="currentColor"
         strokeWidth="90"
       />
       <path d="M508 376.445L354.25 287.678L354.25 465.213L508 376.445Z" />
