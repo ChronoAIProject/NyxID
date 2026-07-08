@@ -548,6 +548,7 @@ mod tests {
             client_type: client_type.to_string(),
             is_active: true,
             delegation_scopes: String::new(),
+            default_service_catalog_slugs: Vec::new(),
             broker_capability_enabled: false,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: None,

@@ -820,6 +820,8 @@ async fn authorize_inner(
                         return Ok(redirect_302(&redirect_url));
                     }
 
+                    let default_service_hints =
+                        resolve_app_default_service_hints(state, &client, &user_id_str).await?;
                     let consent_url = build_consent_url(
                         &state.config.frontend_url,
                         params,
@@ -831,6 +833,7 @@ async fn authorize_inner(
                             params,
                             &validated_scope,
                         )?),
+                        &default_service_hints,
                     );
                     return Ok(redirect_302(&consent_url));
                 }
@@ -877,6 +880,8 @@ async fn authorize_inner(
             .is_none_or(|grant| grant.allowed_service_ids.is_none() && !grant.allow_all_services)
             || force_consent
         {
+            let default_service_hints =
+                resolve_app_default_service_hints(state, &client, &user_id_str).await?;
             let consent_url = build_consent_url(
                 &state.config.frontend_url,
                 params,
@@ -888,6 +893,7 @@ async fn authorize_inner(
                     params,
                     &validated_scope,
                 )?),
+                &default_service_hints,
             );
             return Err(AppError::ConsentRequired { consent_url });
         }
@@ -1260,12 +1266,84 @@ async fn validate_allowed_service_ids(
     Ok(())
 }
 
+/// Per-user resolution of an app's declared default catalog services,
+/// computed when the consent redirect is built. Pure UI hint: the consent
+/// page seeds its summary/selection from these, but the decision POST is
+/// still ownership-validated server-side.
+#[derive(Debug, Default)]
+struct AppDefaultServiceHints {
+    /// The user's own UserService ids matching the app's declared catalog
+    /// slugs -- pre-selected on the consent screen.
+    preselect_service_ids: Vec<String>,
+    /// Human-readable names of declared catalog services the user has no
+    /// matching service for -- shown as unmatched on the consent screen.
+    unmatched_names: Vec<String>,
+}
+
+/// Resolve `client.default_service_catalog_slugs` against the consenting
+/// user's services: catalog slug -> DownstreamService id -> the user's
+/// UserServices with that `catalog_service_id`.
+async fn resolve_app_default_service_hints(
+    state: &AppState,
+    client: &crate::models::oauth_client::OauthClient,
+    user_id: &str,
+) -> AppResult<AppDefaultServiceHints> {
+    use futures::TryStreamExt as _;
+
+    if client.default_service_catalog_slugs.is_empty() {
+        return Ok(AppDefaultServiceHints::default());
+    }
+
+    let catalog_docs: Vec<crate::models::downstream_service::DownstreamService> = state
+        .db
+        .collection(crate::models::downstream_service::COLLECTION_NAME)
+        .find(doc! {
+            "slug": { "$in": &client.default_service_catalog_slugs },
+            "is_active": true,
+        })
+        .await?
+        .try_collect()
+        .await?;
+
+    let catalog_ids: Vec<String> = catalog_docs.iter().map(|d| d.id.clone()).collect();
+    let user_services: Vec<UserService> = if catalog_ids.is_empty() {
+        Vec::new()
+    } else {
+        state
+            .db
+            .collection(USER_SERVICES)
+            .find(doc! {
+                "user_id": user_id,
+                "catalog_service_id": { "$in": &catalog_ids },
+            })
+            .await?
+            .try_collect()
+            .await?
+    };
+
+    let matched_catalog_ids: std::collections::HashSet<&str> = user_services
+        .iter()
+        .filter_map(|s| s.catalog_service_id.as_deref())
+        .collect();
+    let unmatched_names = catalog_docs
+        .iter()
+        .filter(|d| !matched_catalog_ids.contains(d.id.as_str()))
+        .map(|d| d.name.clone())
+        .collect();
+
+    Ok(AppDefaultServiceHints {
+        preselect_service_ids: user_services.into_iter().map(|s| s.id).collect(),
+        unmatched_names,
+    })
+}
+
 fn build_consent_url(
     frontend_url: &str,
     params: &AuthorizeQuery,
     client_name: &str,
     validated_scope: &str,
     consent_request: Option<&str>,
+    default_service_hints: &AppDefaultServiceHints,
 ) -> String {
     let mut url = format!(
         "{}/oauth-consent?response_type={}&client_id={}&client_name={}&redirect_uri={}",
@@ -1322,6 +1400,18 @@ fn build_consent_url(
     }
     for resource in &params.resource {
         url.push_str(&format!("&resource={}", urlencoding::encode(resource)));
+    }
+    for service_id in &default_service_hints.preselect_service_ids {
+        url.push_str(&format!(
+            "&preselect_service_ids={}",
+            urlencoding::encode(service_id)
+        ));
+    }
+    for name in &default_service_hints.unmatched_names {
+        url.push_str(&format!(
+            "&unmatched_defaults={}",
+            urlencoding::encode(name)
+        ));
     }
     if let Some(consent_request) = consent_request {
         url.push_str(&format!(
@@ -2610,6 +2700,7 @@ pub async fn register_client(
         false,
         None,
         None,
+        &[],
     )
     .await?;
 
@@ -2796,6 +2887,7 @@ mod tests {
             client_type: "public".to_string(),
             is_active: true,
             delegation_scopes: String::new(),
+            default_service_catalog_slugs: Vec::new(),
             broker_capability_enabled: false,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: None,
@@ -3813,6 +3905,7 @@ mod tests {
                 client_type: "public".to_string(),
                 is_active: true,
                 delegation_scopes: String::new(),
+                default_service_catalog_slugs: Vec::new(),
                 broker_capability_enabled: false,
                 revocation_webhook_url: None,
                 revocation_webhook_secret_encrypted: None,
@@ -4127,5 +4220,134 @@ mod tests {
         )
         .await;
         assert!(matches!(wrong_owner, Err(AppError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn resolve_app_default_service_hints_matches_user_services_and_reports_unmatched() {
+        let Some(db) = crate::test_utils::connect_test_database("oauth_default_hints").await else {
+            return;
+        };
+        let state = crate::test_utils::test_app_state(db.clone());
+        let user_id = Uuid::new_v4().to_string();
+        let suffix = Uuid::new_v4().to_string();
+
+        let mut matched_catalog = crate::models::downstream_service::test_helpers::dummy_service();
+        matched_catalog.id = Uuid::new_v4().to_string();
+        matched_catalog.slug = format!("hint-matched-{suffix}");
+        matched_catalog.name = "Matched Service".to_string();
+        let mut unmatched_catalog =
+            crate::models::downstream_service::test_helpers::dummy_service();
+        unmatched_catalog.id = Uuid::new_v4().to_string();
+        unmatched_catalog.slug = format!("hint-unmatched-{suffix}");
+        unmatched_catalog.name = "Unmatched Service".to_string();
+        db.collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .insert_many(vec![&matched_catalog, &unmatched_catalog])
+        .await
+        .expect("insert catalog docs");
+
+        let user_service_id = Uuid::new_v4().to_string();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(crate::test_utils::test_user_service(
+                &user_service_id,
+                &user_id,
+                &format!("mine-{suffix}"),
+                "endpoint-1",
+                Some(&matched_catalog.id),
+                None,
+            ))
+            .await
+            .expect("insert user service");
+
+        let mut client = OauthClient {
+            id: Uuid::new_v4().to_string(),
+            client_name: "Hint App".to_string(),
+            client_secret_hash: "NONE".to_string(),
+            redirect_uris: vec!["http://localhost/cb".to_string()],
+            allowed_scopes: "openid".to_string(),
+            grant_types: "authorization_code".to_string(),
+            client_type: "public".to_string(),
+            is_active: true,
+            delegation_scopes: String::new(),
+            default_service_catalog_slugs: vec![
+                matched_catalog.slug.clone(),
+                unmatched_catalog.slug.clone(),
+            ],
+            broker_capability_enabled: false,
+            revocation_webhook_url: None,
+            revocation_webhook_secret_encrypted: None,
+            created_by: Some("dev".to_string()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        let hints = resolve_app_default_service_hints(&state, &client, &user_id)
+            .await
+            .expect("resolve hints");
+        assert_eq!(hints.preselect_service_ids, vec![user_service_id.clone()]);
+        assert_eq!(hints.unmatched_names, vec!["Unmatched Service".to_string()]);
+
+        // Another user gets no matches -- both catalog names unmatched.
+        let other = Uuid::new_v4().to_string();
+        let other_hints = resolve_app_default_service_hints(&state, &client, &other)
+            .await
+            .expect("resolve hints for other user");
+        assert!(other_hints.preselect_service_ids.is_empty());
+        assert_eq!(other_hints.unmatched_names.len(), 2);
+
+        // No declared defaults -> empty hints, no queries needed.
+        client.default_service_catalog_slugs.clear();
+        let empty = resolve_app_default_service_hints(&state, &client, &user_id)
+            .await
+            .expect("resolve empty hints");
+        assert!(empty.preselect_service_ids.is_empty());
+        assert!(empty.unmatched_names.is_empty());
+    }
+
+    #[test]
+    fn build_consent_url_appends_default_service_hints_as_repeated_params() {
+        let params = AuthorizeQuery {
+            response_type: "code".to_string(),
+            client_id: "c1".to_string(),
+            redirect_uri: "http://localhost/cb".to_string(),
+            scope: Some("openid".to_string()),
+            state: None,
+            code_challenge: None,
+            code_challenge_method: None,
+            nonce: None,
+            external_subject_platform: None,
+            external_subject_tenant: None,
+            external_subject_external_user_id: None,
+            prompt: None,
+            request_uri: None,
+            resource: vec![],
+        };
+        let hints = AppDefaultServiceHints {
+            preselect_service_ids: vec!["svc-1".to_string(), "svc-2".to_string()],
+            unmatched_names: vec!["Lark Bot".to_string()],
+        };
+        let url = build_consent_url(
+            "https://app.example",
+            &params,
+            "Hint App",
+            "openid",
+            None,
+            &hints,
+        );
+        assert!(url.contains("preselect_service_ids=svc-1"));
+        assert!(url.contains("preselect_service_ids=svc-2"));
+        assert!(url.contains("unmatched_defaults=Lark%20Bot"));
+
+        let none = build_consent_url(
+            "https://app.example",
+            &params,
+            "Hint App",
+            "openid",
+            None,
+            &AppDefaultServiceHints::default(),
+        );
+        assert!(!none.contains("preselect_service_ids"));
+        assert!(!none.contains("unmatched_defaults"));
     }
 }

@@ -14,6 +14,7 @@ export interface CreateDeveloperAppRequest {
   readonly broker_capability_enabled?: boolean;
   readonly allowed_scopes?: readonly string[];
   readonly target_org_id?: string;
+  readonly default_service_catalog_slugs?: readonly string[];
 }
 
 export function useDeveloperApps(orgId?: string) {
@@ -69,6 +70,7 @@ export interface UpdateDeveloperAppRequest {
   readonly delegation_scopes?: string;
   readonly broker_capability_enabled?: boolean;
   readonly allowed_scopes?: readonly string[];
+  readonly default_service_catalog_slugs?: readonly string[];
 }
 
 interface RotateSecretResponse {

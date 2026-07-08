@@ -188,6 +188,7 @@ export interface OAuthClient {
   readonly delegation_scopes: string;
   readonly broker_capability_enabled: boolean;
   readonly is_active: boolean;
+  readonly default_service_catalog_slugs: readonly string[];
   readonly client_secret: string | null;
   readonly created_at: string;
 }
