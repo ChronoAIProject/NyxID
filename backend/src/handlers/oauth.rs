@@ -392,6 +392,36 @@ fn intersect_service_ids(left: &[String], right: &[String]) -> Vec<String> {
     out
 }
 
+fn consent_requires_prompt(
+    consent: Option<&Consent>,
+    resolved_resources: Option<&oauth_resource_service::ResolvedOAuthResources>,
+) -> bool {
+    let Some(grant) = consent else {
+        return true;
+    };
+
+    if grant.allowed_service_ids.is_none() && !grant.allow_all_services {
+        return true;
+    }
+
+    if grant.allow_all_services {
+        return false;
+    }
+
+    let Some(resolved) = resolved_resources else {
+        return false;
+    };
+    let Some(consented_ids) = grant.allowed_service_ids.as_ref() else {
+        return true;
+    };
+
+    !resolved.service_ids.iter().all(|service_id| {
+        consented_ids
+            .iter()
+            .any(|consented_id| consented_id == service_id)
+    })
+}
+
 fn params_from_consent_form(form: &ConsentDecisionForm) -> AuthorizeQuery {
     AuthorizeQuery {
         response_type: form.response_type.clone(),
@@ -805,9 +835,17 @@ async fn authorize_inner(
                 )
                 .await?;
 
-                let needs_consent = consent.as_ref().is_none_or(|grant| {
-                    grant.allowed_service_ids.is_none() && !grant.allow_all_services
-                }) || force_consent;
+                let resolved_resources = oauth_resource_service::resolve_requested_resources(
+                    &state.db,
+                    &state.config,
+                    &user_id_str,
+                    non_empty_resources(&params.resource),
+                )
+                .await?;
+
+                let needs_consent =
+                    consent_requires_prompt(consent.as_ref(), resolved_resources.as_ref())
+                        || force_consent;
 
                 if needs_consent {
                     // prompt=none + needs consent → error, not redirect
@@ -872,11 +910,15 @@ async fn authorize_inner(
         )
         .await?;
 
-        if consent
-            .as_ref()
-            .is_none_or(|grant| grant.allowed_service_ids.is_none() && !grant.allow_all_services)
-            || force_consent
-        {
+        let resolved_resources = oauth_resource_service::resolve_requested_resources(
+            &state.db,
+            &state.config,
+            &user_id_str,
+            non_empty_resources(&params.resource),
+        )
+        .await?;
+
+        if consent_requires_prompt(consent.as_ref(), resolved_resources.as_ref()) || force_consent {
             let consent_url = build_consent_url(
                 &state.config.frontend_url,
                 params,
@@ -2764,6 +2806,7 @@ mod tests {
     };
     use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
     use crate::models::refresh_token::{COLLECTION_NAME as REFRESH_TOKENS, RefreshToken};
+    use crate::models::ssh_auth_mode::SshAuthMode;
     use crate::models::user::{COLLECTION_NAME as USERS, UserType};
     use crate::services::oauth_broker_service::BROKER_BINDING_SCOPE;
     use crate::test_utils::{connect_test_database, test_app_state, test_user};
@@ -2940,6 +2983,52 @@ mod tests {
             .expect("insert legacy consent");
     }
 
+    async fn insert_user_service(db: &mongodb::Database, user_id: &str, slug: &str) -> UserService {
+        let now = Utc::now();
+        let service = UserService {
+            id: Uuid::new_v4().to_string(),
+            user_id: user_id.to_string(),
+            slug: slug.to_string(),
+            endpoint_id: Uuid::new_v4().to_string(),
+            api_key_id: None,
+            auth_method: "none".to_string(),
+            auth_key_name: String::new(),
+            catalog_service_id: None,
+            node_id: None,
+            node_priority: 0,
+            service_type: "http".to_string(),
+            ssh_auth_mode: SshAuthMode::ProxyOnly,
+            admin_only: false,
+            ssh_node_keys_stale: false,
+            identity_propagation_mode: "none".to_string(),
+            identity_include_user_id: false,
+            identity_include_email: false,
+            identity_include_name: false,
+            identity_jwt_audience: None,
+            forward_access_token: false,
+            inject_delegation_token: false,
+            delegation_token_scope: "llm:proxy".to_string(),
+            custom_user_agent: None,
+            default_request_headers: None,
+            ws_frame_injections: Vec::new(),
+            is_active: true,
+            source: None,
+            source_id: None,
+            source_app_id: None,
+            created_at: now,
+            updated_at: now,
+        };
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(&service)
+            .await
+            .expect("insert user service");
+        service
+    }
+
+    fn resource_uri(slug: &str) -> String {
+        format!("http://localhost:3001/api/v1/proxy/s/{slug}")
+    }
+
     #[tokio::test]
     async fn authorize_inner_threads_stored_service_consent_into_code() {
         let Some(db) = connect_test_database("oauth_stored_service_consent_code").await else {
@@ -2997,6 +3086,210 @@ mod tests {
             .expect("authorization code exists");
         assert!(!stored.allow_all_services);
         assert_eq!(stored.allowed_service_ids, allowed_service_ids);
+    }
+
+    #[tokio::test]
+    async fn authorize_inner_reprompts_when_resource_exceeds_service_consent() {
+        let Some(db) = connect_test_database("oauth_resource_exceeds_consent").await else {
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let user_id = Uuid::new_v4().to_string();
+        let client_id = "resource-exceeds-consent-client";
+        let service_a = insert_user_service(&db, &user_id, "svc-a").await;
+        let _service_b = insert_user_service(&db, &user_id, "svc-b").await;
+
+        insert_person_user(&db, &user_id).await;
+        insert_public_client(&db, client_id, "openid").await;
+        consent_service::grant_consent_with_services(
+            &db,
+            &user_id,
+            client_id,
+            "openid",
+            Some(vec![service_a.id.clone()]),
+        )
+        .await
+        .expect("grant restricted consent");
+
+        let params = AuthorizeQuery {
+            response_type: "code".to_string(),
+            client_id: client_id.to_string(),
+            redirect_uri: "http://localhost/callback".to_string(),
+            scope: Some("openid".to_string()),
+            state: Some("state-1".to_string()),
+            code_challenge: Some("challenge".to_string()),
+            code_challenge_method: Some("S256".to_string()),
+            nonce: None,
+            external_subject_platform: None,
+            external_subject_tenant: None,
+            external_subject_external_user_id: None,
+            prompt: None,
+            request_uri: None,
+            resource: vec![resource_uri("svc-b")],
+        };
+
+        let response = authorize_inner(
+            &state,
+            OptionalAuthUser(Some(crate::test_utils::test_auth_user(&user_id))),
+            &params,
+            true,
+            None,
+        )
+        .await
+        .expect("uncovered resource redirects to consent page");
+
+        assert_eq!(response.status(), StatusCode::FOUND);
+        let location = response
+            .headers()
+            .get(axum::http::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .expect("redirect location");
+        assert!(location.contains("/oauth-consent?"));
+        assert!(
+            location
+                .contains("resource=http%3A%2F%2Flocalhost%3A3001%2Fapi%2Fv1%2Fproxy%2Fs%2Fsvc-b")
+        );
+
+        let code_count = db
+            .collection::<AuthorizationCode>(AUTH_CODES)
+            .count_documents(doc! { "client_id": client_id, "user_id": &user_id })
+            .await
+            .expect("count authorization codes");
+        assert_eq!(code_count, 0);
+    }
+
+    #[tokio::test]
+    async fn authorize_inner_silent_when_requested_resource_is_consented() {
+        let Some(db) = connect_test_database("oauth_resource_within_consent").await else {
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let user_id = Uuid::new_v4().to_string();
+        let client_id = "resource-within-consent-client";
+        let service_a = insert_user_service(&db, &user_id, "svc-a").await;
+
+        insert_person_user(&db, &user_id).await;
+        insert_public_client(&db, client_id, "openid").await;
+        consent_service::grant_consent_with_services(
+            &db,
+            &user_id,
+            client_id,
+            "openid",
+            Some(vec![service_a.id.clone()]),
+        )
+        .await
+        .expect("grant restricted consent");
+
+        let params = AuthorizeQuery {
+            response_type: "code".to_string(),
+            client_id: client_id.to_string(),
+            redirect_uri: "http://localhost/callback".to_string(),
+            scope: Some("openid".to_string()),
+            state: Some("state-1".to_string()),
+            code_challenge: Some("challenge".to_string()),
+            code_challenge_method: Some("S256".to_string()),
+            nonce: None,
+            external_subject_platform: None,
+            external_subject_tenant: None,
+            external_subject_external_user_id: None,
+            prompt: None,
+            request_uri: None,
+            resource: vec![resource_uri("svc-a")],
+        };
+
+        let response = authorize_inner(
+            &state,
+            OptionalAuthUser(Some(crate::test_utils::test_auth_user(&user_id))),
+            &params,
+            true,
+            None,
+        )
+        .await
+        .expect("covered resource issues code silently");
+
+        assert_eq!(response.status(), StatusCode::FOUND);
+        let location = response
+            .headers()
+            .get(axum::http::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .expect("redirect location");
+        assert!(location.starts_with("http://localhost/callback?code="));
+
+        let stored = db
+            .collection::<AuthorizationCode>(AUTH_CODES)
+            .find_one(doc! { "client_id": client_id, "user_id": &user_id })
+            .await
+            .expect("query authorization code")
+            .expect("authorization code exists");
+        assert!(!stored.allow_all_services);
+        assert_eq!(stored.allowed_service_ids, vec![service_a.id]);
+        assert_eq!(stored.resource_uris, vec![resource_uri("svc-a")]);
+    }
+
+    #[tokio::test]
+    async fn authorize_inner_prompt_none_uncovered_resource_returns_consent_required() {
+        let Some(db) = connect_test_database("oauth_resource_prompt_none").await else {
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let user_id = Uuid::new_v4().to_string();
+        let client_id = "resource-prompt-none-client";
+        let service_a = insert_user_service(&db, &user_id, "svc-a").await;
+        let _service_b = insert_user_service(&db, &user_id, "svc-b").await;
+
+        insert_person_user(&db, &user_id).await;
+        insert_public_client(&db, client_id, "openid").await;
+        consent_service::grant_consent_with_services(
+            &db,
+            &user_id,
+            client_id,
+            "openid",
+            Some(vec![service_a.id]),
+        )
+        .await
+        .expect("grant restricted consent");
+
+        let params = AuthorizeQuery {
+            response_type: "code".to_string(),
+            client_id: client_id.to_string(),
+            redirect_uri: "http://localhost/callback".to_string(),
+            scope: Some("openid".to_string()),
+            state: Some("state-1".to_string()),
+            code_challenge: Some("challenge".to_string()),
+            code_challenge_method: Some("S256".to_string()),
+            nonce: None,
+            external_subject_platform: None,
+            external_subject_tenant: None,
+            external_subject_external_user_id: None,
+            prompt: Some("none".to_string()),
+            request_uri: None,
+            resource: vec![resource_uri("svc-b")],
+        };
+
+        let response = authorize_inner(
+            &state,
+            OptionalAuthUser(Some(crate::test_utils::test_auth_user(&user_id))),
+            &params,
+            true,
+            None,
+        )
+        .await
+        .expect("prompt=none returns OAuth error redirect");
+
+        assert_eq!(response.status(), StatusCode::FOUND);
+        let location = response
+            .headers()
+            .get(axum::http::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .expect("redirect location");
+        assert!(location.contains("error=consent_required"));
+
+        let code_count = db
+            .collection::<AuthorizationCode>(AUTH_CODES)
+            .count_documents(doc! { "client_id": client_id, "user_id": &user_id })
+            .await
+            .expect("count authorization codes");
+        assert_eq!(code_count, 0);
     }
 
     #[tokio::test]
@@ -3154,6 +3447,68 @@ mod tests {
             .expect("authorization code exists");
         assert!(stored.allow_all_services);
         assert!(stored.allowed_service_ids.is_empty());
+    }
+
+    #[tokio::test]
+    async fn authorize_inner_allow_all_consent_silently_narrows_requested_resource() {
+        let Some(db) = connect_test_database("oauth_all_services_resource_narrowing").await else {
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let user_id = Uuid::new_v4().to_string();
+        let client_id = "all-services-resource-narrowing-client";
+        let service_a = insert_user_service(&db, &user_id, "svc-a").await;
+
+        insert_person_user(&db, &user_id).await;
+        insert_public_client(&db, client_id, "openid").await;
+        consent_service::grant_consent_with_services(&db, &user_id, client_id, "openid", None)
+            .await
+            .expect("grant explicit unrestricted consent");
+
+        let params = AuthorizeQuery {
+            response_type: "code".to_string(),
+            client_id: client_id.to_string(),
+            redirect_uri: "http://localhost/callback".to_string(),
+            scope: Some("openid".to_string()),
+            state: Some("state-1".to_string()),
+            code_challenge: Some("challenge".to_string()),
+            code_challenge_method: Some("S256".to_string()),
+            nonce: None,
+            external_subject_platform: None,
+            external_subject_tenant: None,
+            external_subject_external_user_id: None,
+            prompt: None,
+            request_uri: None,
+            resource: vec![resource_uri("svc-a")],
+        };
+
+        let response = authorize_inner(
+            &state,
+            OptionalAuthUser(Some(crate::test_utils::test_auth_user(&user_id))),
+            &params,
+            true,
+            None,
+        )
+        .await
+        .expect("allow-all consent issues narrowed resource code silently");
+
+        assert_eq!(response.status(), StatusCode::FOUND);
+        let location = response
+            .headers()
+            .get(axum::http::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .expect("redirect location");
+        assert!(location.starts_with("http://localhost/callback?code="));
+
+        let stored = db
+            .collection::<AuthorizationCode>(AUTH_CODES)
+            .find_one(doc! { "client_id": client_id, "user_id": &user_id })
+            .await
+            .expect("query authorization code")
+            .expect("authorization code exists");
+        assert!(!stored.allow_all_services);
+        assert_eq!(stored.allowed_service_ids, vec![service_a.id]);
+        assert_eq!(stored.resource_uris, vec![resource_uri("svc-a")]);
     }
 
     #[tokio::test]
