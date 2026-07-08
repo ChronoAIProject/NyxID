@@ -2,8 +2,14 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const mockCopyToClipboard = vi.fn();
-const mockToastSuccess = vi.fn();
+// vi.mock factories are hoisted above const initializers — declare the
+// mocks with vi.hoisted so the factory can't hit the TDZ when another
+// module in the graph imports @/lib/utils first (repo pattern, see
+// key-detail.test.tsx).
+const { mockCopyToClipboard, mockToastSuccess } = vi.hoisted(() => ({
+  mockCopyToClipboard: vi.fn(),
+  mockToastSuccess: vi.fn(),
+}));
 
 vi.mock("@/lib/utils", async () => {
   const actual =
