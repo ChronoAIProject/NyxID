@@ -67,4 +67,30 @@ describe("DocMarkdown — code block copy button", () => {
       screen.getAllByRole("button", { name: /copy code snippet/i }),
     ).toHaveLength(2);
   });
+
+  it("skips untagged fences (ASCII diagrams) and text-family languages", () => {
+    // Mirrors the broker-model concept page: an untagged fence holding a
+    // sequence diagram, plus a ```text block — neither is terminal-paste
+    // material, so neither gets a copy affordance.
+    const markdown = [
+      "```",
+      "Caller ──▶ NyxID Proxy ──▶ Downstream API",
+      "  │            │                │",
+      "```",
+      "",
+      "```text",
+      "plain prose sample",
+      "```",
+      "",
+      "```bash",
+      "nyxid service list",
+      "```",
+    ].join("\n");
+    render(<DocMarkdown markdown={markdown} baseHref="/docs/shared/concepts/" />);
+
+    // Only the bash block is copyable.
+    expect(
+      screen.getAllByRole("button", { name: /copy code snippet/i }),
+    ).toHaveLength(1);
+  });
 });
