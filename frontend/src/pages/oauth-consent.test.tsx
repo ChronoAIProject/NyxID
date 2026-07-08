@@ -1,10 +1,40 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { vi } from "vitest";
 
 import { OAuthConsentPage } from "./oauth-consent";
 
-function setSearch(params: Record<string, string>) {
-  const qs = new URLSearchParams(params).toString();
+const { state } = vi.hoisted(() => ({
+  state: {
+    userServices: [] as Array<{
+      id: string;
+      slug: string;
+      resource_uri: string;
+      auth_method: string;
+      is_active: boolean;
+      credential_source: { type: "personal" } | { type: "org" };
+    }>,
+    userServicesLoading: false,
+  },
+}));
+
+vi.mock("@/hooks/use-user-services", () => ({
+  useUserServices: () => ({
+    data: state.userServices,
+    isLoading: state.userServicesLoading,
+  }),
+}));
+
+function setSearch(params: Record<string, string | readonly string[]>) {
+  const qs = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (typeof value === "string") {
+      qs.set(key, value);
+    } else {
+      for (const item of value) qs.append(key, item);
+    }
+  }
   window.history.pushState({}, "", `/oauth/consent?${qs}`);
 }
 
@@ -16,6 +46,7 @@ const VALID = {
   scope: "openid profile email offline_access custom:thing",
   code_challenge: "challenge-xyz",
   code_challenge_method: "S256",
+  consent_request: "signed-consent-request-token",
   state: "state-123",
   nonce: "nonce-456",
 };
@@ -26,8 +57,43 @@ function hiddenInput(name: string): HTMLInputElement | null {
   );
 }
 
+function hiddenInputs(name: string): HTMLInputElement[] {
+  return Array.from(
+    document.querySelectorAll<HTMLInputElement>(
+      `input[type="hidden"][name="${name}"]`,
+    ),
+  );
+}
+
 beforeEach(() => {
   window.history.pushState({}, "", "/");
+  state.userServices = [
+    {
+      id: "svc-openai",
+      slug: "openai",
+      resource_uri: "https://nyx.example/api/v1/proxy/s/openai",
+      auth_method: "bearer",
+      is_active: true,
+      credential_source: { type: "personal" },
+    },
+    {
+      id: "svc-inactive",
+      slug: "inactive",
+      resource_uri: "https://nyx.example/api/v1/proxy/s/inactive",
+      auth_method: "bearer",
+      is_active: false,
+      credential_source: { type: "personal" },
+    },
+    {
+      id: "svc-org",
+      slug: "org-service",
+      resource_uri: "https://nyx.example/api/v1/proxy/s/org-service",
+      auth_method: "bearer",
+      is_active: true,
+      credential_source: { type: "org" },
+    },
+  ];
+  state.userServicesLoading = false;
 });
 
 afterEach(() => {
@@ -145,7 +211,12 @@ describe("OAuthConsentPage", () => {
     expect(hiddenInput("state")?.value).toBe("state-123");
     expect(hiddenInput("code_challenge")?.value).toBe("challenge-xyz");
     expect(hiddenInput("code_challenge_method")?.value).toBe("S256");
+    expect(hiddenInput("consent_request")?.value).toBe(
+      "signed-consent-request-token",
+    );
     expect(hiddenInput("nonce")?.value).toBe("nonce-456");
+    expect(hiddenInput("allow_all_services")?.value).toBe("false");
+    expect(hiddenInput("allowed_service_ids")).toBeNull();
   });
 
   it("omits optional external-subject hidden inputs unless provided", () => {
@@ -179,6 +250,26 @@ describe("OAuthConsentPage", () => {
     );
   });
 
+  it("submits only the selected requested resources", () => {
+    const resourceA = "https://nyx.example/api/v1/proxy/s/openai";
+    const resourceB = "https://nyx.example/api/v1/proxy/s/anthropic";
+    setSearch({ ...VALID, resource: [resourceA, resourceB] });
+
+    render(<OAuthConsentPage />);
+
+    expect(hiddenInput("resource_selection_present")?.value).toBe("true");
+    expect(hiddenInputs("resource").map((input) => input.value)).toEqual([
+      resourceA,
+      resourceB,
+    ]);
+
+    fireEvent.click(screen.getByRole("checkbox", { name: resourceB }));
+
+    expect(hiddenInputs("resource").map((input) => input.value)).toEqual([
+      resourceA,
+    ]);
+  });
+
   it("renders an Unknown redirect host for an unparseable redirect_uri", () => {
     setSearch({ ...VALID, redirect_uri: "not a url" });
 
@@ -187,5 +278,65 @@ describe("OAuthConsentPage", () => {
     // parseHost() catches the URL error and returns "Unknown" as the host,
     // rendered in the "Redirect host:" line of the verification block.
     expect(screen.getByText("Unknown")).toBeInTheDocument();
+  });
+
+  it("defaults service access to no selected services", () => {
+    setSearch(VALID);
+
+    render(<OAuthConsentPage />);
+
+    const allServices = screen.getByRole("switch", { name: "All services" });
+    expect(allServices).toHaveAttribute("aria-checked", "false");
+    expect(screen.getByText("openai")).toBeInTheDocument();
+    expect(hiddenInput("allow_all_services")?.value).toBe("false");
+    expect(hiddenInput("allowed_service_ids")).toBeNull();
+  });
+
+  it("hides service choices when all-services is enabled", async () => {
+    const user = userEvent.setup();
+    setSearch(VALID);
+
+    render(<OAuthConsentPage />);
+
+    await user.click(screen.getByRole("switch", { name: "All services" }));
+
+    expect(screen.queryByText("openai")).not.toBeInTheDocument();
+    expect(screen.queryByText("inactive")).not.toBeInTheDocument();
+    expect(screen.queryByText("org-service")).not.toBeInTheDocument();
+    expect(hiddenInput("allow_all_services")?.value).toBe("true");
+  });
+
+  it("submits selected service ids only when scoped access is chosen", async () => {
+    const user = userEvent.setup();
+    setSearch(VALID);
+
+    render(<OAuthConsentPage />);
+
+    await user.click(screen.getByRole("checkbox", { name: /openai/i }));
+
+    const selected = document.querySelectorAll<HTMLInputElement>(
+      'input[type="hidden"][name="allowed_service_ids"]',
+    );
+    expect(Array.from(selected).map((input) => input.value)).toEqual([
+      "svc-openai",
+    ]);
+  });
+
+  it("preselects services for requested resource indicators", async () => {
+    const resourceA = "https://nyx.example/api/v1/proxy/s/openai";
+    const resourceB = "https://nyx.example/api/v1/proxy/s/unknown";
+    setSearch({ ...VALID, resource: [resourceA, resourceB] });
+
+    render(<OAuthConsentPage />);
+
+    expect(hiddenInput("allow_all_services")?.value).toBe("false");
+    await waitFor(() => {
+      const selected = document.querySelectorAll<HTMLInputElement>(
+        'input[type="hidden"][name="allowed_service_ids"]',
+      );
+      expect(Array.from(selected).map((input) => input.value)).toEqual([
+        "svc-openai",
+      ]);
+    });
   });
 });

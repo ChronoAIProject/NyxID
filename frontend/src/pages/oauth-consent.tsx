@@ -1,5 +1,7 @@
+import { useMemo, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Card,
   CardContent,
@@ -7,6 +9,8 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import { AlertTriangle, ShieldCheck } from "lucide-react";
 import {
   OAUTH_SCOPE_META,
@@ -15,6 +19,8 @@ import {
 } from "@/lib/constants";
 import { useApplyTheme } from "@/hooks/use-theme";
 import { NyxidLogo } from "@/components/brand/nyxid-logo";
+import { useUserServices } from "@/hooks/use-user-services";
+import { oauthConsentServiceAccessSchema } from "@/schemas/oauth-consent";
 
 function readParam(search: URLSearchParams, key: string): string {
   return search.get(key) ?? "";
@@ -30,6 +36,8 @@ function parseHost(uri: string): string {
 
 export function OAuthConsentPage() {
   useApplyTheme();
+  const { data: userServices, isLoading: userServicesLoading } =
+    useUserServices();
   const search = new URLSearchParams(window.location.search);
 
   const responseType = readParam(search, "response_type");
@@ -42,11 +50,20 @@ export function OAuthConsentPage() {
   const codeChallengeMethod = readParam(search, "code_challenge_method");
   const nonce = search.get("nonce") ?? "";
   const prompt = search.get("prompt") ?? "";
-  const externalSubjectPlatform =
-    search.get("external_subject_platform") ?? "";
+  const externalSubjectPlatform = search.get("external_subject_platform") ?? "";
   const externalSubjectTenant = search.get("external_subject_tenant") ?? "";
   const externalSubjectExternalUserId =
     search.get("external_subject_external_user_id") ?? "";
+  const consentRequest = search.get("consent_request") ?? "";
+  const resources = search.getAll("resource");
+  const [allowAllServices, setAllowAllServices] = useState(false);
+  const [selectedServiceIds, setSelectedServiceIds] = useState<
+    readonly string[]
+  >([]);
+  const [deselectedServiceIds, setDeselectedServiceIds] = useState<
+    readonly string[]
+  >([]);
+  const [selectedResources, setSelectedResources] = useState(resources);
 
   const missing =
     !responseType ||
@@ -54,10 +71,61 @@ export function OAuthConsentPage() {
     !redirectUri ||
     !scope ||
     !codeChallenge ||
-    !codeChallengeMethod;
+    !codeChallengeMethod ||
+    !consentRequest;
 
   const scopes = scope.split(/\s+/).filter(Boolean);
   const redirectHost = parseHost(redirectUri);
+  const selectableServices = useMemo(
+    () =>
+      (userServices ?? [])
+        .filter(
+          (service) =>
+            service.is_active && service.credential_source.type === "personal",
+        )
+        .sort((a, b) => a.slug.localeCompare(b.slug)),
+    [userServices],
+  );
+  const resourceSelectedServiceIds = useMemo(() => {
+    const requested = new Set(selectedResources);
+    return selectableServices
+      .filter((service) => requested.has(service.resource_uri))
+      .map((service) => service.id);
+  }, [selectableServices, selectedResources]);
+  const effectiveSelectedServiceIds = useMemo(
+    () =>
+      Array.from(
+        new Set([...resourceSelectedServiceIds, ...selectedServiceIds]),
+      ).filter((id) => !deselectedServiceIds.includes(id)),
+    [deselectedServiceIds, resourceSelectedServiceIds, selectedServiceIds],
+  );
+  const serviceAccess = oauthConsentServiceAccessSchema.parse({
+    allow_all_services: allowAllServices,
+    allowed_service_ids: effectiveSelectedServiceIds,
+  });
+
+  function toggleService(serviceId: string, checked: boolean) {
+    setSelectedServiceIds((current) => {
+      if (checked) {
+        return current.includes(serviceId) ? current : [...current, serviceId];
+      }
+      return current.filter((id) => id !== serviceId);
+    });
+    setDeselectedServiceIds((current) => {
+      if (checked) {
+        return current.filter((id) => id !== serviceId);
+      }
+      return current.includes(serviceId) ? current : [...current, serviceId];
+    });
+  }
+
+  function toggleResource(resource: string) {
+    setSelectedResources((current) =>
+      current.includes(resource)
+        ? current.filter((item) => item !== resource)
+        : [...current, resource],
+    );
+  }
 
   if (missing) {
     return (
@@ -116,9 +184,7 @@ export function OAuthConsentPage() {
               </p>
               <p>
                 Redirect host:{" "}
-                <span className="text-foreground">
-                  {redirectHost}
-                </span>
+                <span className="text-foreground">{redirectHost}</span>
               </p>
             </div>
           </div>
@@ -135,6 +201,32 @@ export function OAuthConsentPage() {
               ))}
             </div>
           </div>
+
+          {resources.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-xs uppercase tracking-wide text-text-tertiary">
+                Requested resources
+              </p>
+              <div className="space-y-2">
+                {resources.map((resource) => (
+                  <label
+                    key={resource}
+                    className="flex items-start gap-3 rounded-lg border border-border bg-muted/50 px-3 py-2"
+                  >
+                    <Checkbox
+                      className="mt-0.5"
+                      aria-label={resource}
+                      checked={selectedResources.includes(resource)}
+                      onCheckedChange={() => toggleResource(resource)}
+                    />
+                    <p className="break-all text-xs text-foreground">
+                      {resource}
+                    </p>
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
 
           <div className="space-y-2">
             <p className="text-xs uppercase tracking-wide text-text-tertiary">
@@ -176,6 +268,68 @@ export function OAuthConsentPage() {
             </div>
           </div>
 
+          <div className="space-y-3 rounded-lg border border-border bg-muted/30 px-4 py-3">
+            <div className="flex items-center justify-between gap-4">
+              <div className="min-w-0">
+                <p className="text-xs uppercase tracking-wide text-text-tertiary">
+                  Service access
+                </p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Choose which personal services this app can use through the
+                  proxy.
+                </p>
+              </div>
+              <div className="flex shrink-0 items-center gap-2">
+                <Label htmlFor="oauth-allow-all-services">All services</Label>
+                <Switch
+                  id="oauth-allow-all-services"
+                  aria-label="All services"
+                  checked={allowAllServices}
+                  onCheckedChange={setAllowAllServices}
+                />
+              </div>
+            </div>
+
+            {!allowAllServices && (
+              <div className="space-y-2 border-t border-border pt-3">
+                {userServicesLoading ? (
+                  <p className="text-xs text-muted-foreground">
+                    Loading services...
+                  </p>
+                ) : selectableServices.length > 0 ? (
+                  selectableServices.map((service) => (
+                    <div
+                      key={service.id}
+                      className="flex items-start gap-2 rounded-md border border-border bg-background/60 px-3 py-2"
+                    >
+                      <Checkbox
+                        id={`oauth-service-${service.id}`}
+                        checked={effectiveSelectedServiceIds.includes(
+                          service.id,
+                        )}
+                        onCheckedChange={(checked) =>
+                          toggleService(service.id, checked === true)
+                        }
+                      />
+                      <Label
+                        htmlFor={`oauth-service-${service.id}`}
+                        className="min-w-0 cursor-pointer text-xs leading-5 text-foreground"
+                      >
+                        <span className="block break-words font-medium">
+                          {service.slug}
+                        </span>
+                      </Label>
+                    </div>
+                  ))
+                ) : (
+                  <p className="text-xs text-muted-foreground">
+                    No active personal services are available.
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
+
           <div className="space-y-1">
             <p className="text-xs uppercase tracking-wide text-text-tertiary">
               Client ID
@@ -187,9 +341,7 @@ export function OAuthConsentPage() {
             <p className="text-xs uppercase tracking-wide text-text-tertiary">
               Redirect URI
             </p>
-            <p className="break-all text-xs text-foreground">
-              {redirectUri}
-            </p>
+            <p className="break-all text-xs text-foreground">{redirectUri}</p>
           </div>
 
           <div className="rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-4 py-3">
@@ -219,6 +371,11 @@ export function OAuthConsentPage() {
               value={codeChallengeMethod}
             />
             <input type="hidden" name="nonce" value={nonce} />
+            <input
+              type="hidden"
+              name="consent_request"
+              value={consentRequest}
+            />
             {prompt && <input type="hidden" name="prompt" value={prompt} />}
             {externalSubjectPlatform && (
               <input
@@ -241,6 +398,35 @@ export function OAuthConsentPage() {
                 value={externalSubjectExternalUserId}
               />
             )}
+            <input
+              type="hidden"
+              name="allow_all_services"
+              value={serviceAccess.allow_all_services ? "true" : "false"}
+            />
+            {!serviceAccess.allow_all_services &&
+              serviceAccess.allowed_service_ids.map((serviceId) => (
+                <input
+                  key={serviceId}
+                  type="hidden"
+                  name="allowed_service_ids"
+                  value={serviceId}
+                />
+              ))}
+            {resources.length > 0 && (
+              <input
+                type="hidden"
+                name="resource_selection_present"
+                value="true"
+              />
+            )}
+            {selectedResources.map((resource) => (
+              <input
+                key={resource}
+                type="hidden"
+                name="resource"
+                value={resource}
+              />
+            ))}
 
             <Button
               type="submit"
@@ -250,7 +436,12 @@ export function OAuthConsentPage() {
             >
               Deny
             </Button>
-            <Button variant="primary" type="submit" name="decision" value="allow">
+            <Button
+              variant="primary"
+              type="submit"
+              name="decision"
+              value="allow"
+            >
               Allow
             </Button>
           </form>

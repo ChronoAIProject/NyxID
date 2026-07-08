@@ -12,6 +12,15 @@ pub struct Consent {
     pub user_id: String,
     pub client_id: String,
     pub scopes: String,
+    /// Explicitly grants unrestricted service access. Legacy rows lack this
+    /// field and deserialize to false.
+    #[serde(default)]
+    pub allow_all_services: bool,
+    /// None means a legacy pre-default-deny consent. Some(ids), including an
+    /// empty list, is the explicit resource-owner-approved UserService
+    /// allowlist for this client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_service_ids: Option<Vec<String>>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub granted_at: DateTime<Utc>,
     #[serde(default, with = "bson_datetime::optional")]
@@ -33,6 +42,8 @@ mod tests {
             user_id: "user-1".to_string(),
             client_id: "client-1".to_string(),
             scopes: "openid profile email".to_string(),
+            allow_all_services: false,
+            allowed_service_ids: None,
             granted_at: Utc::now(),
             expires_at: None,
         }
@@ -48,6 +59,23 @@ mod tests {
         assert_eq!(consent.id, restored.id);
         assert_eq!(consent.user_id, restored.user_id);
         assert_eq!(consent.scopes, restored.scopes);
+        assert_eq!(consent.allow_all_services, restored.allow_all_services);
+        assert_eq!(consent.allowed_service_ids, restored.allowed_service_ids);
+    }
+
+    #[test]
+    fn bson_defaults_service_grant() {
+        let now = Utc::now();
+        let doc = bson::doc! {
+            "_id": "consent-legacy",
+            "user_id": "user-1",
+            "client_id": "client-1",
+            "scopes": "openid",
+            "granted_at": bson::DateTime::from_chrono(now),
+        };
+        let restored: Consent = bson::from_document(doc).expect("deserialize");
+        assert!(!restored.allow_all_services);
+        assert!(restored.allowed_service_ids.is_none());
     }
 
     #[test]
@@ -57,6 +85,26 @@ mod tests {
         let doc = bson::to_document(&consent).expect("serialize");
         let restored: Consent = bson::from_document(doc).expect("deserialize");
         assert!(restored.expires_at.is_some());
+    }
+
+    #[test]
+    fn bson_roundtrip_with_service_grant() {
+        let mut consent = make_consent();
+        consent.allowed_service_ids = Some(vec!["svc-1".to_string(), "svc-2".to_string()]);
+        let doc = bson::to_document(&consent).expect("serialize");
+        let restored: Consent = bson::from_document(doc).expect("deserialize");
+        assert_eq!(restored.allowed_service_ids, consent.allowed_service_ids);
+    }
+
+    #[test]
+    fn bson_roundtrip_with_explicit_all_services() {
+        let mut consent = make_consent();
+        consent.allow_all_services = true;
+        consent.allowed_service_ids = Some(vec![]);
+        let doc = bson::to_document(&consent).expect("serialize");
+        let restored: Consent = bson::from_document(doc).expect("deserialize");
+        assert!(restored.allow_all_services);
+        assert_eq!(restored.allowed_service_ids, Some(vec![]));
     }
 
     #[test]

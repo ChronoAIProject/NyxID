@@ -97,6 +97,7 @@ Services/connections/providers were unified into 3 user-managed collections plus
 - Collections: `user_endpoints` (target URLs, custom or from catalog), `user_api_keys` (external credentials: API keys, OAuth tokens, bearer tokens), `user_services` (proxy routing config: endpoint + key + auth method + optional node + identity propagation + custom User-Agent override)
 - `unified_key_service` auto-provisions all 3 records from a single `POST /api/v1/keys` request, using catalog defaults or user-provided values
 - Proxy resolution checks `UserService` first (by slug + user_id), then falls back to the legacy `DownstreamService` + `UserProviderToken` path for unmigrated users
+- OAuth resource indicators: RFC 8707 resource URIs for user services are deterministic and not stored. The canonical URI is `{BASE_URL}/api/v1/proxy/s/{slug}` where `{slug}` is `UserService.slug`; catalog and user-services responses expose this as `resource_uri`. OAuth `resource` parameters resolve active `UserService` rows through the same personal/org ACL model used by proxy resolution. Issued JWTs keep the fixed NyxID audience while carrying granted resource URIs in a `resources` claim plus `allowed_service_ids` for enforcement.
 - Proxy User-Agent: client UA is forwarded as-is by default; `UserService.custom_user_agent` / `DownstreamService.custom_user_agent` overrides it in all four proxy paths (direct HTTP, node HTTP, direct WS, node WS). Use for downstreams whose WAFs block SDK UA strings (e.g. `OpenAI/Python`).
 - `ApiKey` scope fields (absorbed from the deleted `AgentGroup` model): `allowed_service_ids`, `allowed_node_ids`, `allow_all_services`, `allow_all_nodes`; enforced at proxy time via `key_service`
 - Frontend: unified "AI Services" page at `/keys` with 2 tabs (External Services; NyxID API Keys with scope). Services/Connections/Providers removed from the normal user sidebar (admin-only); old `/api-keys` page deleted.
@@ -415,14 +416,14 @@ In QA mode, flag any code that doesn't match DESIGN.md.
 - All tests must pass before merge
 
 
-<!-- consensus-rnd:foundational-invariants:start version=1 sha256=f5c24b0c3515993a7b86c4ed78ce7386add665f8c8b84cc7275aedebd6c3e6af -->
-## 共识研发不动点（由 consensus-rnd 管理）
+<!-- consensus-rnd:foundational-invariants:start version=1 sha256=180aef50d385eb24f73e772f75753fa61a2adde8407539bbacd586878d7e2166 -->
+## Consensus R&D Foundational Invariants (managed by consensus-rnd)
 
-- FI-001 AI 产物默认不可信；进入主线前必须经过独立检查，至少包含共识、review 或自动验证中的适用组合。
-- FI-002 Host 事实必须由 host 配置或 host 规则注入；通用 skill / engine 不硬编码具体项目、组织、路径、分支或人员事实；skill-private runtime directories such as `.refactor-loop/` must not become host production configuration or ledger SSOT.
-- FI-003 稳定核心保持小而可审计；高频变化留在 host 规则、prompt、脚本或扩展层，不下沉为核心不变量。
-- FI-004 跨进程、跨 turn 或跨节点的事实必须有权威记录；进程内记忆、cache、临时变量不能冒充事实源。
-- FI-005 边界优先于便利；职责、层级、协议和状态所有权必须清楚，禁止用中间层快捷方式绕过主链路。
-- FI-006 变更必须可验证且基于 evidence；失败、缺口和越界承诺要显式暴露，禁止用静默假设或禁用测试换取通过。
-- FI-007 删除优先；废弃路径直接移除，除非 host 规则明确要求迁移期兼容。
+- FI-001 AI outputs are untrusted by default; before entering the mainline they must pass independent checks, including the applicable mix of consensus, review, or automated verification.
+- FI-002 Host facts must be injected by host configuration or host rules; generic skills / engines must not hardcode project, organization, path, branch, or personnel facts. Skill-private runtime directories such as `.refactor-loop/` must not become host production configuration or ledger SSOT.
+- FI-003 Keep the stable core small and auditable; frequently changing behavior belongs in host rules, prompts, scripts, or extension layers, not in core invariants.
+- FI-004 Facts that cross processes, turns, or nodes must have an authoritative record; in-process memory, caches, and temporary variables cannot pretend to be sources of truth.
+- FI-005 Boundaries take priority over convenience; responsibility, layering, protocols, and state ownership must be clear, and shortcuts through intermediate layers must not bypass the main path.
+- FI-006 Changes must be verifiable and evidence-based; failures, gaps, and out-of-bounds commitments must be surfaced explicitly, not hidden behind silent assumptions or disabled tests.
+- FI-007 Prefer deletion; remove deprecated paths directly unless host rules explicitly require migration-period compatibility.
 <!-- consensus-rnd:foundational-invariants:end -->

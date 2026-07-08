@@ -63,6 +63,8 @@ pub struct AuthUser {
     pub allow_all_nodes: bool,
     /// List of UserService IDs this key can access (only checked when allow_all_services is false).
     pub allowed_service_ids: Vec<String>,
+    /// RFC 8707 resource URI restrictions carried by OAuth bearer tokens.
+    pub resource_uris: Option<Vec<String>>,
     /// List of Node IDs this key can route through (only checked when allow_all_nodes is false).
     pub allowed_node_ids: Vec<String>,
     /// API key ID when auth_method == ApiKey (for agent identity tracking)
@@ -425,6 +427,7 @@ impl FromRequestParts<AppState> for AuthUser {
                                         allow_all_services: api_key.allow_all_services,
                                         allow_all_nodes: api_key.allow_all_nodes,
                                         allowed_service_ids: api_key.allowed_service_ids.clone(),
+                                        resource_uris: None,
                                         allowed_node_ids: api_key.allowed_node_ids.clone(),
                                         api_key_id: Some(api_key.id.clone()),
                                         api_key_name: Some(api_key.name.clone()),
@@ -506,6 +509,7 @@ impl FromRequestParts<AppState> for AuthUser {
                             allow_all_services: true,
                             allow_all_nodes: true,
                             allowed_service_ids: vec![],
+                            resource_uris: None,
                             allowed_node_ids: vec![],
                             api_key_id: None,
                             api_key_name: None,
@@ -556,8 +560,10 @@ impl FromRequestParts<AppState> for AuthUser {
                         ensure_relay_agent_key_active(&state.db, &claims).await?;
                     }
 
-                    // For relay tokens, inherit the agent key's scope restrictions.
-                    // For regular access tokens, allow all (scope enforced at JWT level).
+                    // Relay tokens inherit the originating agent key's scope.
+                    // OAuth access tokens, including delegated tokens, carry
+                    // optional resource/service restrictions in JWT claims;
+                    // absent claims are legacy allow-all.
                     let (
                         allow_all_services,
                         allow_all_nodes,
@@ -567,6 +573,16 @@ impl FromRequestParts<AppState> for AuthUser {
                         api_key_name,
                     ) = if auth_method == AuthMethod::Relay {
                         relay_scope_from_claims(&claims)
+                    } else if matches!(auth_method, AuthMethod::AccessToken | AuthMethod::Delegated)
+                    {
+                        (
+                            claims.allow_all_services.unwrap_or(true),
+                            true,
+                            claims.allowed_service_ids.clone().unwrap_or_default(),
+                            vec![],
+                            None,
+                            None,
+                        )
                     } else {
                         (true, true, vec![], vec![], None, None)
                     };
@@ -581,6 +597,7 @@ impl FromRequestParts<AppState> for AuthUser {
                         allow_all_services,
                         allow_all_nodes,
                         allowed_service_ids,
+                        resource_uris: claims.resources.clone(),
                         allowed_node_ids,
                         api_key_id,
                         api_key_name,
@@ -648,6 +665,7 @@ impl FromRequestParts<AppState> for AuthUser {
                                     allow_all_services: true,
                                     allow_all_nodes: true,
                                     allowed_service_ids: vec![],
+                                    resource_uris: None,
                                     allowed_node_ids: vec![],
                                     api_key_id: None,
                                     api_key_name: None,
@@ -722,6 +740,7 @@ impl FromRequestParts<AppState> for AuthUser {
                     allow_all_services: key.allow_all_services,
                     allow_all_nodes: key.allow_all_nodes,
                     allowed_service_ids: key.allowed_service_ids.clone(),
+                    resource_uris: None,
                     allowed_node_ids: key.allowed_node_ids.clone(),
                     api_key_id: Some(key.id.clone()),
                     api_key_name: Some(key.name.clone()),
@@ -1074,6 +1093,7 @@ mod tests {
             allow_all_services: true,
             allow_all_nodes: true,
             allowed_service_ids: vec![],
+            resource_uris: None,
             allowed_node_ids: vec![],
             api_key_id: None,
             api_key_name: None,
@@ -1227,6 +1247,7 @@ mod tests {
             allow_all_services: false,
             allow_all_nodes: true,
             allowed_service_ids: vec!["svc-1".to_string()],
+            resource_uris: None,
             allowed_node_ids: vec![],
             api_key_id: Some("key-uuid-123".to_string()),
             api_key_name: Some("coding-agent".to_string()),

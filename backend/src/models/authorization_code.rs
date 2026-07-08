@@ -27,11 +27,21 @@ pub struct AuthorizationCode {
     pub nonce: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_subject: Option<ExternalSubjectRef>,
+    #[serde(default)]
+    pub resource_uris: Vec<String>,
+    #[serde(default)]
+    pub allowed_service_ids: Vec<String>,
+    #[serde(default = "default_allow_all_services")]
+    pub allow_all_services: bool,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub expires_at: DateTime<Utc>,
     pub used: bool,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
+}
+
+fn default_allow_all_services() -> bool {
+    true
 }
 
 pub fn validate_external_subject_params(
@@ -122,6 +132,9 @@ mod tests {
                 tenant: Some("t1".to_string()),
                 external_user_id: "u1".to_string(),
             }),
+            resource_uris: vec!["https://nyx.example/api/v1/proxy/s/openai".to_string()],
+            allowed_service_ids: vec!["svc-1".to_string()],
+            allow_all_services: false,
             expires_at: Utc::now(),
             used: false,
             created_at: Utc::now(),
@@ -132,6 +145,9 @@ mod tests {
         assert_eq!(code.scope, restored.scope);
         assert_eq!(code.code_challenge, restored.code_challenge);
         assert_eq!(code.external_subject, restored.external_subject);
+        assert_eq!(code.resource_uris, restored.resource_uris);
+        assert_eq!(code.allowed_service_ids, restored.allowed_service_ids);
+        assert_eq!(code.allow_all_services, restored.allow_all_services);
     }
 
     #[test]
@@ -147,6 +163,9 @@ mod tests {
             code_challenge_method: None,
             nonce: None,
             external_subject: None,
+            resource_uris: Vec::new(),
+            allowed_service_ids: Vec::new(),
+            allow_all_services: true,
             expires_at: Utc::now(),
             used: true,
             created_at: Utc::now(),
@@ -155,6 +174,9 @@ mod tests {
         let restored: AuthorizationCode = bson::from_document(doc).expect("deserialize");
         assert!(restored.code_challenge.is_none());
         assert!(restored.nonce.is_none());
+        assert!(restored.resource_uris.is_empty());
+        assert!(restored.allowed_service_ids.is_empty());
+        assert!(restored.allow_all_services);
         assert!(restored.used);
     }
 
@@ -178,6 +200,9 @@ mod tests {
 
         let restored: AuthorizationCode = bson::from_document(doc).expect("deserialize");
         assert!(restored.external_subject.is_none());
+        assert!(restored.resource_uris.is_empty());
+        assert!(restored.allowed_service_ids.is_empty());
+        assert!(restored.allow_all_services);
     }
 
     #[test]

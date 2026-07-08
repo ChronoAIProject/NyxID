@@ -46,6 +46,7 @@ pub struct IssuedTokens {
     pub refresh_token: String,
     pub session_id: String,
     pub access_expires_in: i64,
+    pub resource_uris: Vec<String>,
 }
 
 /// Session issued for browser-based authentication flows.
@@ -128,6 +129,7 @@ fn build_reused_refresh_response(
     user_id: &Uuid,
     active_token: &RefreshToken,
     access_token: String,
+    resource_uris: Vec<String>,
 ) -> AppResult<IssuedTokens> {
     let refresh_token = jwt::reissue_refresh_token(
         jwt_keys,
@@ -146,6 +148,7 @@ fn build_reused_refresh_response(
             .clone()
             .unwrap_or_else(|| Uuid::nil().to_string()),
         access_expires_in: config.jwt_access_ttl_secs,
+        resource_uris,
     })
 }
 
@@ -215,6 +218,7 @@ pub async fn create_session_and_issue_tokens(
         None,
         None,
         None,
+        None,
     )?;
 
     // Generate refresh token
@@ -231,10 +235,14 @@ pub async fn create_session_and_issue_tokens(
         client_id: Uuid::nil().to_string(), // first-party client
         user_id: user_id.to_string(),
         session_id: Some(session.session_id.clone()),
+        scope: None,
         expires_at: refresh_expires,
         revoked: false,
         replaced_by: None,
         revoked_at: None,
+        resource_uris: Vec::new(),
+        allowed_service_ids: Vec::new(),
+        allow_all_services: true,
         created_at: now,
     };
 
@@ -247,6 +255,7 @@ pub async fn create_session_and_issue_tokens(
         refresh_token: refresh_token_jwt,
         session_id: session.session_id,
         access_expires_in: config.jwt_access_ttl_secs,
+        resource_uris: Vec::new(),
     })
 }
 
@@ -298,6 +307,7 @@ pub async fn refresh_tokens(
     jwt_keys: &JwtKeys,
     refresh_token_str: &str,
     mcp_sessions: Option<&McpSessionStore>,
+    requested_resources: Option<&[String]>,
 ) -> AppResult<IssuedTokens> {
     // Verify the refresh JWT
     let claims = jwt::verify_token(jwt_keys, config, refresh_token_str)?;
@@ -446,8 +456,49 @@ pub async fn refresh_tokens(
     let session_id = active_token.session_id.clone();
     let now = Utc::now();
 
-    // Resolve RBAC data and inject into the refreshed access token
-    let scope = FIRST_PARTY_ACCESS_SCOPES;
+    // Resolve RBAC data and inject into the refreshed access token. OAuth
+    // refresh-token rows persist the originally granted scope; legacy and
+    // first-party rows fall back to the historical first-party scope string.
+    let scope = active_token
+        .scope
+        .as_deref()
+        .unwrap_or(FIRST_PARTY_ACCESS_SCOPES);
+    let resolved_requested_resources = match requested_resources {
+        Some(resources) if active_token.allow_all_services => {
+            crate::services::oauth_resource_service::resolve_requested_resources(
+                db,
+                config,
+                &user_id_str,
+                Some(resources),
+            )
+            .await?
+        }
+        _ => None,
+    };
+    let resource_uris = match (requested_resources, resolved_requested_resources.as_ref()) {
+        (Some(_), Some(resolved)) if active_token.allow_all_services => {
+            resolved.resource_uris.clone()
+        }
+        (Some(resources), _) => crate::services::oauth_resource_service::filter_resource_narrowing(
+            resources,
+            &active_token.resource_uris,
+        )?,
+        (None, _) => active_token.resource_uris.clone(),
+    };
+    let allowed_service_ids = if let Some(resolved) = resolved_requested_resources {
+        resolved.service_ids
+    } else if !resource_uris.is_empty() {
+        crate::services::oauth_resource_service::resolve_resource_service_ids_for_user(
+            db,
+            config,
+            &user_id_str,
+            &resource_uris,
+        )
+        .await?
+    } else {
+        active_token.allowed_service_ids.clone()
+    };
+    let allow_all_services = active_token.allow_all_services && requested_resources.is_none();
     let rbac_data =
         crate::services::rbac_helpers::build_rbac_claim_data(db, &user_id_str, scope).await?;
     let new_access = jwt::generate_access_token(
@@ -459,6 +510,10 @@ pub async fn refresh_tokens(
         None,
         None,
         None,
+        (!allow_all_services).then_some(jwt::AccessTokenRestrictions {
+            resources: &resource_uris,
+            allowed_service_ids: &allowed_service_ids,
+        }),
     )?;
 
     if reuse_existing_refresh_token {
@@ -469,6 +524,7 @@ pub async fn refresh_tokens(
             &user_id,
             &active_token,
             new_access,
+            resource_uris,
         );
     }
 
@@ -519,7 +575,12 @@ pub async fn refresh_tokens(
             );
             touch_session_last_active(db, session_id.as_deref(), now).await?;
             return build_reused_refresh_response(
-                jwt_keys, config, &user_id, &recovered, new_access,
+                jwt_keys,
+                config,
+                &user_id,
+                &recovered,
+                new_access,
+                resource_uris,
             );
         }
 
@@ -535,10 +596,14 @@ pub async fn refresh_tokens(
         client_id: active_token.client_id.clone(),
         user_id: user_id_str,
         session_id: session_id.clone(),
+        scope: active_token.scope.clone(),
         expires_at: refresh_expires,
         revoked: false,
         replaced_by: None,
         revoked_at: None,
+        resource_uris: resource_uris.clone(),
+        allowed_service_ids: allowed_service_ids.clone(),
+        allow_all_services,
         created_at: now,
     };
 
@@ -556,6 +621,7 @@ pub async fn refresh_tokens(
         refresh_token: new_refresh_jwt,
         session_id: session_id.unwrap_or_else(|| Uuid::nil().to_string()),
         access_expires_in: config.jwt_access_ttl_secs,
+        resource_uris,
     })
 }
 
@@ -752,7 +818,7 @@ mod tests {
             .await
             .unwrap();
 
-        let refreshed = refresh_tokens(&db, &config, &jwt_keys, &issued.refresh_token, None)
+        let refreshed = refresh_tokens(&db, &config, &jwt_keys, &issued.refresh_token, None, None)
             .await
             .unwrap();
 
@@ -773,6 +839,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_refresh_tokens_preserves_oauth_service_scope() {
+        let Some(db) = connect_test_database("token_svc_oauth_scope").await else {
+            return;
+        };
+        let config = test_app_config();
+        let jwt_keys = cached_test_jwt_keys();
+        let user_id = Uuid::new_v4().to_string();
+        seed_user(&db, &user_id).await;
+        let client_id = Uuid::new_v4().to_string();
+        let now = Utc::now();
+
+        db.collection::<OauthClient>(OAUTH_CLIENTS)
+            .insert_one(OauthClient {
+                id: client_id.clone(),
+                client_name: "Scoped OAuth Client".to_string(),
+                client_secret_hash: String::new(),
+                redirect_uris: vec!["https://app.example/callback".to_string()],
+                allowed_scopes: "openid proxy".to_string(),
+                grant_types: "authorization_code refresh_token".to_string(),
+                client_type: "public".to_string(),
+                is_active: true,
+                delegation_scopes: String::new(),
+                broker_capability_enabled: false,
+                revocation_webhook_url: None,
+                revocation_webhook_secret_encrypted: None,
+                created_by: Some(user_id.clone()),
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+
+        let user_uuid = Uuid::parse_str(&user_id).unwrap();
+        let (refresh_jwt, refresh_jti) =
+            crate::crypto::jwt::generate_refresh_token(&jwt_keys, &config, &user_uuid).unwrap();
+        let allowed_service_ids = vec!["svc-1".to_string()];
+        db.collection::<RefreshToken>(REFRESH_TOKENS)
+            .insert_one(RefreshToken {
+                id: Uuid::new_v4().to_string(),
+                jti: refresh_jti,
+                client_id: client_id.clone(),
+                user_id: user_id.clone(),
+                session_id: None,
+                scope: Some("openid proxy".to_string()),
+                expires_at: now + Duration::days(7),
+                revoked: false,
+                replaced_by: None,
+                revoked_at: None,
+                resource_uris: Vec::new(),
+                allowed_service_ids: allowed_service_ids.clone(),
+                allow_all_services: false,
+                created_at: now,
+            })
+            .await
+            .unwrap();
+
+        let refreshed = refresh_tokens(&db, &config, &jwt_keys, &refresh_jwt, None, None)
+            .await
+            .unwrap();
+        let access_claims =
+            crate::crypto::jwt::verify_token(&jwt_keys, &config, &refreshed.access_token).unwrap();
+        assert_eq!(access_claims.scope, "openid proxy");
+        assert_eq!(access_claims.allow_all_services, Some(false));
+        assert_eq!(access_claims.allowed_service_ids, Some(allowed_service_ids));
+
+        let new_refresh_claims =
+            crate::crypto::jwt::verify_token(&jwt_keys, &config, &refreshed.refresh_token).unwrap();
+        let new_stored = db
+            .collection::<RefreshToken>(REFRESH_TOKENS)
+            .find_one(doc! { "jti": new_refresh_claims.jti })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(new_stored.scope.as_deref(), Some("openid proxy"));
+        assert!(!new_stored.allow_all_services);
+        assert_eq!(new_stored.allowed_service_ids, vec!["svc-1".to_string()]);
+    }
+
+    #[tokio::test]
     async fn test_refresh_tokens_rejects_non_refresh_token() {
         let Some(db) = connect_test_database("token_svc").await else {
             return;
@@ -782,11 +927,11 @@ mod tests {
         let user_id = Uuid::new_v4();
 
         let access_token = crate::crypto::jwt::generate_access_token(
-            &jwt_keys, &config, &user_id, "openid", None, None, None, None,
+            &jwt_keys, &config, &user_id, "openid", None, None, None, None, None,
         )
         .unwrap();
 
-        let result = refresh_tokens(&db, &config, &jwt_keys, &access_token, None).await;
+        let result = refresh_tokens(&db, &config, &jwt_keys, &access_token, None, None).await;
         assert!(result.is_err());
     }
 
@@ -814,7 +959,8 @@ mod tests {
             .await
             .unwrap();
 
-        let result = refresh_tokens(&db, &config, &jwt_keys, &issued.refresh_token, None).await;
+        let result =
+            refresh_tokens(&db, &config, &jwt_keys, &issued.refresh_token, None, None).await;
         assert!(result.is_err());
     }
 

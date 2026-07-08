@@ -302,6 +302,27 @@ A change under `Cargo.toml` / `Cargo.lock` re-runs both `Backend Test` and `CLI 
 
 All checks must pass before a PR can be merged. If a check fails, fix the issue locally and push -- the workflow re-runs automatically.
 
+### Rollup Health Triage
+
+Rollup-health watchdog issues are incident-routing records, not a second source
+of CI truth. The rollup PR checks, annotations, and uploaded artifacts remain
+authoritative for whether integration is blocked.
+
+When a rollup-health issue is opened, keep the repair scoped to the failing
+check evidence:
+
+- Record the rollup PR, head SHA, failed check names, red-start time, and any
+  immutable artifact or log link used for diagnosis.
+- Reproduce the failing job locally with the same package-level commands where
+  possible, then fix the smallest contract break that restores the check.
+- Open or keep a separate issue only when it adds ownership or durable work that
+  the rollup PR status cannot carry: cross-package coordination, runbook
+  updates, owner routing, bisect/revert tracking, or automation follow-up.
+- If the same rollup-health class recurs for a third time in a quarter, the next
+  repair must include either a class-level guardrail/runbook update or an
+  explicit recurrence waiver explaining why a one-off fix is still the right
+  boundary.
+
 ### Review Process
 
 - PRs target the `main` branch by default

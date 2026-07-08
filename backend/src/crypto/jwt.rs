@@ -87,6 +87,15 @@ pub struct Claims {
     /// Inherited scope: allow all nodes flag from the agent key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_allow_all_nodes: Option<bool>,
+    /// RFC 8707 resource indicators granted to this access token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<Vec<String>>,
+    /// UserService IDs granted to this access token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_service_ids: Option<Vec<String>>,
+    /// False when this access token is restricted to `allowed_service_ids`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_all_services: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -288,6 +297,37 @@ pub struct RbacClaimData {
     pub sid: Option<String>,
 }
 
+pub struct AccessTokenRestrictions<'a> {
+    pub resources: &'a [String],
+    pub allowed_service_ids: &'a [String],
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TokenRestrictionClaims {
+    pub resources: Option<Vec<String>>,
+    pub allowed_service_ids: Option<Vec<String>>,
+    pub allow_all_services: Option<bool>,
+}
+
+impl TokenRestrictionClaims {
+    pub fn from_claims(claims: &Claims) -> Self {
+        Self {
+            resources: claims.resources.clone(),
+            allowed_service_ids: claims.allowed_service_ids.clone(),
+            allow_all_services: claims.allow_all_services,
+        }
+    }
+
+    pub fn from_auth_user(auth_user: &crate::mw::auth::AuthUser) -> Self {
+        Self {
+            resources: auth_user.resource_uris.clone(),
+            allowed_service_ids: (!auth_user.allow_all_services)
+                .then(|| auth_user.allowed_service_ids.clone()),
+            allow_all_services: Some(auth_user.allow_all_services),
+        }
+    }
+}
+
 /// Generate an access token for the given user.
 // Access token issuance carries optional TTL, RBAC, DPoP, and mTLS knobs.
 // Keeping these explicit avoids hiding security-sensitive claim inputs.
@@ -301,6 +341,7 @@ pub fn generate_access_token(
     ttl_override_secs: Option<i64>,
     dpop_jkt: Option<&str>,
     mtls_x5t_s256: Option<&str>,
+    restrictions: Option<AccessTokenRestrictions<'_>>,
 ) -> Result<String, AppError> {
     let now = Utc::now().timestamp();
     let cnf = if dpop_jkt.is_some() || mtls_x5t_s256.is_some() {
@@ -336,6 +377,11 @@ pub fn generate_access_token(
         relay_allowed_node_ids: None,
         relay_allow_all_services: None,
         relay_allow_all_nodes: None,
+        resources: restrictions.as_ref().map(|r| r.resources.to_vec()),
+        allowed_service_ids: restrictions
+            .as_ref()
+            .map(|r| r.allowed_service_ids.to_vec()),
+        allow_all_services: restrictions.as_ref().map(|_| false),
     };
 
     let mut header = Header::new(Algorithm::RS256);
@@ -398,6 +444,9 @@ pub fn generate_relay_access_token(
         relay_allowed_node_ids: Some(agent_scope.allowed_node_ids.clone()),
         relay_allow_all_services: Some(agent_scope.allow_all_services),
         relay_allow_all_nodes: Some(agent_scope.allow_all_nodes),
+        resources: None,
+        allowed_service_ids: None,
+        allow_all_services: None,
     };
 
     let mut header = Header::new(Algorithm::RS256);
@@ -503,6 +552,9 @@ pub fn generate_refresh_token(
         relay_allowed_node_ids: None,
         relay_allow_all_services: None,
         relay_allow_all_nodes: None,
+        resources: None,
+        allowed_service_ids: None,
+        allow_all_services: None,
     };
 
     let mut header = Header::new(Algorithm::RS256);
@@ -550,6 +602,9 @@ pub fn reissue_refresh_token(
         relay_allowed_node_ids: None,
         relay_allow_all_services: None,
         relay_allow_all_nodes: None,
+        resources: None,
+        allowed_service_ids: None,
+        allow_all_services: None,
     };
 
     let mut header = Header::new(Algorithm::RS256);
@@ -581,6 +636,7 @@ pub fn generate_delegated_access_token(
     scope: &str,
     acting_client_id: &str,
     ttl_secs: i64,
+    restrictions: Option<&TokenRestrictionClaims>,
 ) -> Result<String, AppError> {
     let now = Utc::now().timestamp();
 
@@ -610,6 +666,9 @@ pub fn generate_delegated_access_token(
         relay_allowed_node_ids: None,
         relay_allow_all_services: None,
         relay_allow_all_nodes: None,
+        resources: restrictions.and_then(|r| r.resources.as_ref().cloned()),
+        allowed_service_ids: restrictions.and_then(|r| r.allowed_service_ids.as_ref().cloned()),
+        allow_all_services: restrictions.and_then(|r| r.allow_all_services),
     };
 
     let mut header = Header::new(Algorithm::RS256);
@@ -748,6 +807,9 @@ pub fn generate_service_account_token(
         relay_allowed_node_ids: None,
         relay_allow_all_services: None,
         relay_allow_all_nodes: None,
+        resources: None,
+        allowed_service_ids: None,
+        allow_all_services: None,
     };
 
     let mut header = Header::new(Algorithm::RS256);
@@ -1082,6 +1144,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
 
@@ -1105,11 +1168,56 @@ mod tests {
             Some(300),
             None,
             None,
+            None,
         )
         .unwrap();
 
         let claims = verify_token(&keys, &config, &token).unwrap();
         assert_eq!(claims.exp - claims.iat, 300);
+    }
+
+    #[test]
+    fn access_token_can_carry_resource_restrictions_without_changing_audience() {
+        let (keys, config) = test_keys_and_config();
+        let user_id = Uuid::new_v4();
+        let resources = vec!["http://localhost:3001/api/v1/proxy/s/openai".to_string()];
+        let allowed_service_ids = vec!["svc-1".to_string()];
+        let token = generate_access_token(
+            &keys,
+            &config,
+            &user_id,
+            "openid proxy",
+            None,
+            None,
+            None,
+            None,
+            Some(AccessTokenRestrictions {
+                resources: &resources,
+                allowed_service_ids: &allowed_service_ids,
+            }),
+        )
+        .unwrap();
+
+        let claims = verify_token(&keys, &config, &token).unwrap();
+        assert_eq!(claims.aud, config.base_url);
+        assert_eq!(claims.resources, Some(resources));
+        assert_eq!(claims.allowed_service_ids, Some(allowed_service_ids));
+        assert_eq!(claims.allow_all_services, Some(false));
+    }
+
+    #[test]
+    fn access_token_without_restrictions_omits_resource_claims() {
+        let (keys, config) = test_keys_and_config();
+        let user_id = Uuid::new_v4();
+        let token = generate_access_token(
+            &keys, &config, &user_id, "openid", None, None, None, None, None,
+        )
+        .unwrap();
+
+        let claims = verify_token(&keys, &config, &token).unwrap();
+        assert!(claims.resources.is_none());
+        assert!(claims.allow_all_services.is_none());
+        assert!(claims.allowed_service_ids.is_none());
     }
 
     #[test]
@@ -1213,6 +1321,9 @@ mod tests {
             relay_allowed_node_ids: None,
             relay_allow_all_services: None,
             relay_allow_all_nodes: None,
+            resources: None,
+            allowed_service_ids: None,
+            allow_all_services: None,
         };
 
         let mut header = Header::new(Algorithm::RS256);
@@ -1227,9 +1338,10 @@ mod tests {
     fn access_token_has_kid_header() {
         let (keys, config) = test_keys_and_config();
         let user_id = Uuid::new_v4();
-        let token =
-            generate_access_token(&keys, &config, &user_id, "openid", None, None, None, None)
-                .unwrap();
+        let token = generate_access_token(
+            &keys, &config, &user_id, "openid", None, None, None, None, None,
+        )
+        .unwrap();
 
         // Decode header without validation to check kid
         let header = jsonwebtoken::decode_header(&token).unwrap();
@@ -1270,9 +1382,10 @@ mod tests {
     fn generate_id_token_with_at_hash() {
         let (keys, config) = test_keys_and_config();
         let user_id = Uuid::new_v4();
-        let access_token =
-            generate_access_token(&keys, &config, &user_id, "openid", None, None, None, None)
-                .unwrap();
+        let access_token = generate_access_token(
+            &keys, &config, &user_id, "openid", None, None, None, None, None,
+        )
+        .unwrap();
 
         let id_token = generate_id_token(
             &keys,
@@ -1322,6 +1435,9 @@ mod tests {
             relay_allowed_node_ids: None,
             relay_allow_all_services: None,
             relay_allow_all_nodes: None,
+            resources: None,
+            allowed_service_ids: None,
+            allow_all_services: None,
         };
         let json = serde_json::to_string(&claims).unwrap();
         let restored: Claims = serde_json::from_str(&json).unwrap();
@@ -1340,6 +1456,7 @@ mod tests {
             "llm:proxy",
             "test-client-id",
             300,
+            None,
         )
         .unwrap();
 
@@ -1353,11 +1470,72 @@ mod tests {
     }
 
     #[test]
+    fn delegated_token_carries_resource_restrictions() {
+        let (keys, config) = test_keys_and_config();
+        let user_id = Uuid::new_v4();
+        let restrictions = TokenRestrictionClaims {
+            resources: Some(vec![
+                "http://localhost:3001/api/v1/proxy/s/openai".to_string(),
+            ]),
+            allowed_service_ids: Some(vec!["svc-1".to_string()]),
+            allow_all_services: Some(false),
+        };
+        let token = generate_delegated_access_token(
+            &keys,
+            &config,
+            &user_id,
+            "llm:proxy",
+            "test-client-id",
+            300,
+            Some(&restrictions),
+        )
+        .unwrap();
+
+        let claims = verify_token(&keys, &config, &token).unwrap();
+        assert_eq!(claims.resources, restrictions.resources);
+        assert_eq!(claims.allowed_service_ids, restrictions.allowed_service_ids);
+        assert_eq!(claims.allow_all_services, restrictions.allow_all_services);
+    }
+
+    #[test]
+    fn token_restriction_claims_from_auth_user_preserves_resources() {
+        let resources = Some(vec![
+            "http://localhost:3001/api/v1/proxy/s/openai".to_string(),
+        ]);
+        let allowed_service_ids = vec!["svc-1".to_string()];
+        let auth_user = crate::mw::auth::AuthUser {
+            user_id: Uuid::new_v4(),
+            session_id: None,
+            scope: "llm:proxy".to_string(),
+            acting_client_id: Some("test-client-id".to_string()),
+            approval_owner_user_id: None,
+            auth_method: crate::mw::auth::AuthMethod::Delegated,
+            allow_all_services: false,
+            allow_all_nodes: true,
+            allowed_service_ids: allowed_service_ids.clone(),
+            resource_uris: resources.clone(),
+            allowed_node_ids: vec![],
+            api_key_id: None,
+            api_key_name: None,
+            rate_limit_per_second: None,
+            rate_limit_burst: None,
+            ip_address: None,
+            user_agent: None,
+        };
+
+        let restrictions = TokenRestrictionClaims::from_auth_user(&auth_user);
+
+        assert_eq!(restrictions.resources, resources);
+        assert_eq!(restrictions.allowed_service_ids, Some(allowed_service_ids));
+        assert_eq!(restrictions.allow_all_services, Some(false));
+    }
+
+    #[test]
     fn delegated_token_respects_ttl() {
         let (keys, config) = test_keys_and_config();
         let user_id = Uuid::new_v4();
         let token =
-            generate_delegated_access_token(&keys, &config, &user_id, "llm:proxy", "svc", 60)
+            generate_delegated_access_token(&keys, &config, &user_id, "llm:proxy", "svc", 60, None)
                 .unwrap();
 
         let claims = verify_token(&keys, &config, &token).unwrap();
@@ -1371,9 +1549,10 @@ mod tests {
         // Verify that tokens without act/delegated fields still deserialize
         let (keys, config) = test_keys_and_config();
         let user_id = Uuid::new_v4();
-        let token =
-            generate_access_token(&keys, &config, &user_id, "openid", None, None, None, None)
-                .unwrap();
+        let token = generate_access_token(
+            &keys, &config, &user_id, "openid", None, None, None, None, None,
+        )
+        .unwrap();
 
         let claims = verify_token(&keys, &config, &token).unwrap();
         assert!(claims.act.is_none());
@@ -1450,9 +1629,10 @@ mod tests {
     fn sa_claim_skipped_when_none() {
         let (keys, config) = test_keys_and_config();
         let user_id = Uuid::new_v4();
-        let token =
-            generate_access_token(&keys, &config, &user_id, "openid", None, None, None, None)
-                .unwrap();
+        let token = generate_access_token(
+            &keys, &config, &user_id, "openid", None, None, None, None, None,
+        )
+        .unwrap();
 
         let claims = verify_token(&keys, &config, &token).unwrap();
         assert!(claims.sa.is_none());

@@ -314,7 +314,8 @@ async fn try_exchange_once(ctx: &BrokerExchangeContext<'_>) -> AppResult<Exchang
     verify_binding_refresh_jwt(ctx.jwt_keys, ctx.config, &refresh_token_str, &binding)?;
 
     let granted_scope = resolve_binding_scope(ctx.requested_scope, &binding.scopes)?;
-    let access_token = mint_broker_access_token(ctx, &binding.user_id, &granted_scope).await?;
+    let access_token =
+        mint_broker_access_token(ctx, &binding.user_id, &granted_scope, &refresh_token_doc).await?;
 
     let user_uuid = Uuid::parse_str(&binding.user_id)
         .map_err(|e| AppError::Internal(format!("Invalid user_id in broker binding: {e}")))?;
@@ -329,10 +330,14 @@ async fn try_exchange_once(ctx: &BrokerExchangeContext<'_>) -> AppResult<Exchang
         client_id: binding.client_id.clone(),
         user_id: binding.user_id.clone(),
         session_id: None,
+        scope: Some(granted_scope.clone()),
         expires_at: refresh_expires,
         revoked: false,
         replaced_by: None,
         revoked_at: None,
+        resource_uris: refresh_token_doc.resource_uris.clone(),
+        allowed_service_ids: refresh_token_doc.allowed_service_ids.clone(),
+        allow_all_services: refresh_token_doc.allow_all_services,
         created_at: now,
     };
 
@@ -447,7 +452,8 @@ async fn try_chain_follow(
     }
 
     let granted_scope = resolve_binding_scope(ctx.requested_scope, &binding.scopes)?;
-    let access_token = mint_broker_access_token(ctx, &binding.user_id, &granted_scope).await?;
+    let access_token =
+        mint_broker_access_token(ctx, &binding.user_id, &granted_scope, &refresh_token_doc).await?;
 
     ctx.db
         .collection::<OauthBrokerBinding>(OAUTH_BROKER_BINDINGS)
@@ -473,6 +479,7 @@ async fn mint_broker_access_token(
     ctx: &BrokerExchangeContext<'_>,
     user_id: &str,
     granted_scope: &str,
+    refresh_token_doc: &RefreshToken,
 ) -> AppResult<String> {
     let user_uuid = Uuid::parse_str(user_id)
         .map_err(|e| AppError::Internal(format!("Invalid user_id in broker binding: {e}")))?;
@@ -488,6 +495,10 @@ async fn mint_broker_access_token(
         Some(BROKER_ACCESS_TTL_SECS),
         ctx.dpop_jkt,
         ctx.mtls_x5t_s256,
+        (!refresh_token_doc.allow_all_services).then_some(jwt::AccessTokenRestrictions {
+            resources: &refresh_token_doc.resource_uris,
+            allowed_service_ids: &refresh_token_doc.allowed_service_ids,
+        }),
     )
 }
 
@@ -1003,10 +1014,14 @@ mod tests {
             client_id: client_id.to_string(),
             user_id: user_id.to_string(),
             session_id: None,
+            scope: None,
             expires_at: now + Duration::days(7),
             revoked,
             replaced_by: None,
             revoked_at: revoked.then_some(now),
+            resource_uris: Vec::new(),
+            allowed_service_ids: Vec::new(),
+            allow_all_services: true,
             created_at: now,
         }
     }

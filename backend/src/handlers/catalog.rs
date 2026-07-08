@@ -16,13 +16,15 @@ use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoi
 use crate::models::user_service::UserService;
 use crate::mw::auth::AuthUser;
 use crate::services::{
-    api_docs_service, catalog_service, openapi_parser, org_service, user_service_service,
+    api_docs_service, catalog_service, oauth_resource_service, openapi_parser, org_service,
+    user_service_service,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct CatalogEntryResponse {
     pub slug: String,
+    pub resource_uri: String,
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
@@ -192,8 +194,10 @@ pub async fn list_catalog(
     } else {
         catalog_service::list_catalog(&state.db, &state.encryption_keys, &user_id).await?
     };
-    let items: Vec<CatalogEntryResponse> =
-        entries.into_iter().map(catalog_entry_response).collect();
+    let items: Vec<CatalogEntryResponse> = entries
+        .into_iter()
+        .map(|entry| catalog_entry_response(&state.config, entry))
+        .collect();
 
     // Telemetry: catalog.browsed. `filter` is None today because the list
     // endpoint does not yet accept a search/filter query (only
@@ -257,18 +261,24 @@ pub async fn get_catalog_entry(
         },
     );
 
-    Ok(Json(catalog_entry_response(entry)))
+    Ok(Json(catalog_entry_response(&state.config, entry)))
 }
 
-fn catalog_entry_response(entry: catalog_service::CatalogEntry) -> CatalogEntryResponse {
+fn catalog_entry_response(
+    config: &crate::config::AppConfig,
+    entry: catalog_service::CatalogEntry,
+) -> CatalogEntryResponse {
     let supports_pkce = if entry.supports_pkce {
         Some(true)
     } else {
         None
     };
 
+    let resource_uri = oauth_resource_service::user_service_resource_uri(config, &entry.slug);
+
     CatalogEntryResponse {
         slug: entry.slug,
+        resource_uri,
         name: entry.name,
         description: entry.description,
         base_url: entry.base_url,
@@ -881,8 +891,12 @@ mod tests {
     #[test]
     fn catalog_entry_response_maps_basic_fields() {
         let entry = minimal_catalog_entry();
-        let resp = super::catalog_entry_response(entry);
+        let resp = super::catalog_entry_response(&crate::test_utils::test_app_config(), entry);
         assert_eq!(resp.slug, "openai");
+        assert_eq!(
+            resp.resource_uri,
+            "http://localhost:3001/api/v1/proxy/s/openai"
+        );
         assert_eq!(resp.name, "OpenAI");
         assert_eq!(resp.description.as_deref(), Some("AI API"));
         assert_eq!(resp.base_url, "https://api.openai.com");
@@ -895,7 +909,7 @@ mod tests {
     #[test]
     fn catalog_entry_response_supports_pkce_none_when_false() {
         let entry = minimal_catalog_entry();
-        let resp = super::catalog_entry_response(entry);
+        let resp = super::catalog_entry_response(&crate::test_utils::test_app_config(), entry);
         // When supports_pkce is false, the response field should be None
         // (skip_serializing_if suppresses it in JSON output).
         assert!(resp.supports_pkce.is_none());
@@ -905,7 +919,7 @@ mod tests {
     fn catalog_entry_response_supports_pkce_some_when_true() {
         let mut entry = minimal_catalog_entry();
         entry.supports_pkce = true;
-        let resp = super::catalog_entry_response(entry);
+        let resp = super::catalog_entry_response(&crate::test_utils::test_app_config(), entry);
         assert_eq!(resp.supports_pkce, Some(true));
     }
 
@@ -919,7 +933,7 @@ mod tests {
         entry.ssh_allowed_principals = Some(vec!["deploy".to_string(), "admin".to_string()]);
         entry.ssh_certificate_ttl_minutes = Some(60);
 
-        let resp = super::catalog_entry_response(entry);
+        let resp = super::catalog_entry_response(&crate::test_utils::test_app_config(), entry);
         assert_eq!(resp.service_type, "ssh");
         assert_eq!(resp.ssh_host.as_deref(), Some("ssh.example.com"));
         assert_eq!(resp.ssh_port, Some(22));
@@ -941,7 +955,7 @@ mod tests {
         entry.supports_pkce = true;
         entry.token_endpoint_auth_method = Some("client_secret_post".to_string());
 
-        let resp = super::catalog_entry_response(entry);
+        let resp = super::catalog_entry_response(&crate::test_utils::test_app_config(), entry);
         assert_eq!(
             resp.authorization_url.as_deref(),
             Some("https://auth.example.com/authorize")
@@ -988,7 +1002,7 @@ mod tests {
             supports_streaming: true,
         });
 
-        let resp = super::catalog_entry_response(entry);
+        let resp = super::catalog_entry_response(&crate::test_utils::test_app_config(), entry);
         assert_eq!(resp.homepage_url.as_deref(), Some("https://openai.com"));
         assert_eq!(
             resp.repository_url.as_deref(),
@@ -1019,7 +1033,7 @@ mod tests {
         entry.provider_config_id = Some("prov-1".to_string());
         entry.provider_type = Some("api_key".to_string());
 
-        let resp = super::catalog_entry_response(entry);
+        let resp = super::catalog_entry_response(&crate::test_utils::test_app_config(), entry);
         assert!(resp.requires_gateway_url);
         assert_eq!(resp.provider_config_id.as_deref(), Some("prov-1"));
         assert_eq!(resp.provider_type.as_deref(), Some("api_key"));
@@ -1083,7 +1097,7 @@ mod tests {
     #[test]
     fn catalog_entry_response_omits_none_fields_in_json() {
         let entry = minimal_catalog_entry();
-        let resp = super::catalog_entry_response(entry);
+        let resp = super::catalog_entry_response(&crate::test_utils::test_app_config(), entry);
         let json = serde_json::to_value(&resp).unwrap();
         // Fields that are None should not appear in JSON due to skip_serializing_if
         assert!(json.get("description").is_some()); // "AI API" is Some
@@ -1107,7 +1121,7 @@ mod tests {
         entry.homepage_url = Some("https://example.com".to_string());
         entry.supports_pkce = true;
 
-        let resp = super::catalog_entry_response(entry);
+        let resp = super::catalog_entry_response(&crate::test_utils::test_app_config(), entry);
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["homepage_url"], "https://example.com");
         assert_eq!(json["supports_pkce"], true);
