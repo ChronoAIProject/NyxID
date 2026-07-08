@@ -993,6 +993,7 @@ mod tests {
                 revocation_webhook_url: None,
                 revocation_webhook_secret_encrypted: None,
                 created_by: Some(user_id.clone()),
+                default_service_catalog_slugs: Vec::new(),
                 created_at: now,
                 updated_at: now,
             })

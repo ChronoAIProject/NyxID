@@ -2924,7 +2924,14 @@ mod tests {
             id: client_id.to_string(),
             client_name: "Public Broker Test Client".to_string(),
             client_secret_hash: String::new(),
-            redirect_uris: vec!["http://localhost/callback".to_string()],
+            // Register both a loopback callback (served as the 200 success page
+            // for MCP/CLI clients) and a hosted https callback (served as a bare
+            // 302). Silent-issuance tests that assert the canonical 302 redirect
+            // use the hosted URI; loopback-only tests keep using localhost.
+            redirect_uris: vec![
+                "http://localhost/callback".to_string(),
+                "https://app.example/callback".to_string(),
+            ],
             allowed_scopes: allowed_scopes.to_string(),
             grant_types: "authorization_code refresh_token".to_string(),
             client_type: "public".to_string(),
@@ -3275,7 +3282,7 @@ mod tests {
         let params = AuthorizeQuery {
             response_type: "code".to_string(),
             client_id: client_id.to_string(),
-            redirect_uri: "http://localhost/callback".to_string(),
+            redirect_uri: "https://app.example/callback".to_string(),
             scope: Some("openid".to_string()),
             state: Some("state-1".to_string()),
             code_challenge: Some("challenge".to_string()),
@@ -3305,7 +3312,7 @@ mod tests {
             .get(axum::http::header::LOCATION)
             .and_then(|value| value.to_str().ok())
             .expect("redirect location");
-        assert!(location.starts_with("http://localhost/callback?code="));
+        assert!(location.starts_with("https://app.example/callback?code="));
 
         let stored = db
             .collection::<AuthorizationCode>(AUTH_CODES)
@@ -3560,7 +3567,7 @@ mod tests {
         let params = AuthorizeQuery {
             response_type: "code".to_string(),
             client_id: client_id.to_string(),
-            redirect_uri: "http://localhost/callback".to_string(),
+            redirect_uri: "https://app.example/callback".to_string(),
             scope: Some("openid".to_string()),
             state: Some("state-1".to_string()),
             code_challenge: Some("challenge".to_string()),
@@ -3590,7 +3597,7 @@ mod tests {
             .get(axum::http::header::LOCATION)
             .and_then(|value| value.to_str().ok())
             .expect("redirect location");
-        assert!(location.starts_with("http://localhost/callback?code="));
+        assert!(location.starts_with("https://app.example/callback?code="));
 
         let stored = db
             .collection::<AuthorizationCode>(AUTH_CODES)
