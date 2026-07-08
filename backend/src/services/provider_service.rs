@@ -1929,7 +1929,9 @@ const ANTHROPIC_DEFAULT_HEADERS: &[SeededHeader] = &[
 const OPENROUTER_DEFAULT_HEADERS: &[SeededHeader] = &[
     SeededHeader {
         name: "HTTP-Referer",
-        value: "https://nyxid.dev",
+        // Canonical product URL — this is NyxID's permanent app identifier
+        // on OpenRouter's rankings; changing it later resets the app page.
+        value: "https://nyx.chrono-ai.fun",
         overridable: true,
         sensitive: false,
     },
@@ -4415,6 +4417,14 @@ mod tests {
             names.contains(&"HTTP-Referer"),
             "HTTP-Referer identifies NyxID on OpenRouter rankings; got {names:?}"
         );
+        let referer = headers
+            .iter()
+            .find(|h| h.name == "HTTP-Referer")
+            .expect("HTTP-Referer present");
+        // Pinned: this URL is the permanent app identifier on OpenRouter's
+        // rankings (openrouter.ai/apps?url=...). Changing it fractures the
+        // accumulated usage history — do so only as a deliberate decision.
+        assert_eq!(referer.value, "https://nyx.chrono-ai.fun");
         assert!(
             names.contains(&"X-OpenRouter-Title"),
             "X-OpenRouter-Title sets the display name; got {names:?}"
