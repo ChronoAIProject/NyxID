@@ -463,42 +463,17 @@ pub async fn refresh_tokens(
         .scope
         .as_deref()
         .unwrap_or(FIRST_PARTY_ACCESS_SCOPES);
-    let resolved_requested_resources = match requested_resources {
-        Some(resources) if active_token.allow_all_services => {
-            crate::services::oauth_resource_service::resolve_requested_resources(
-                db,
-                config,
-                &user_id_str,
-                Some(resources),
-            )
-            .await?
-        }
-        _ => None,
-    };
-    let resource_uris = match (requested_resources, resolved_requested_resources.as_ref()) {
-        (Some(_), Some(resolved)) if active_token.allow_all_services => {
-            resolved.resource_uris.clone()
-        }
-        (Some(resources), _) => crate::services::oauth_resource_service::filter_resource_narrowing(
-            resources,
-            &active_token.resource_uris,
-        )?,
-        (None, _) => active_token.resource_uris.clone(),
-    };
-    let allowed_service_ids = if let Some(resolved) = resolved_requested_resources {
-        resolved.service_ids
-    } else if !resource_uris.is_empty() {
-        crate::services::oauth_resource_service::resolve_resource_service_ids_for_user(
+    let token_resource_scope =
+        crate::services::oauth_resource_service::resolve_token_resource_scope(
             db,
             config,
             &user_id_str,
-            &resource_uris,
+            requested_resources,
+            &active_token.resource_uris,
+            &active_token.allowed_service_ids,
+            active_token.allow_all_services,
         )
-        .await?
-    } else {
-        active_token.allowed_service_ids.clone()
-    };
-    let allow_all_services = active_token.allow_all_services && requested_resources.is_none();
+        .await?;
     let rbac_data =
         crate::services::rbac_helpers::build_rbac_claim_data(db, &user_id_str, scope).await?;
     let new_access = jwt::generate_access_token(
@@ -510,9 +485,9 @@ pub async fn refresh_tokens(
         None,
         None,
         None,
-        (!allow_all_services).then_some(jwt::AccessTokenRestrictions {
-            resources: &resource_uris,
-            allowed_service_ids: &allowed_service_ids,
+        (!token_resource_scope.allow_all_services).then_some(jwt::AccessTokenRestrictions {
+            resources: &token_resource_scope.resource_uris,
+            allowed_service_ids: &token_resource_scope.allowed_service_ids,
         }),
     )?;
 
@@ -524,7 +499,7 @@ pub async fn refresh_tokens(
             &user_id,
             &active_token,
             new_access,
-            resource_uris,
+            token_resource_scope.resource_uris,
         );
     }
 
@@ -580,7 +555,7 @@ pub async fn refresh_tokens(
                 &user_id,
                 &recovered,
                 new_access,
-                resource_uris,
+                token_resource_scope.resource_uris,
             );
         }
 
@@ -601,9 +576,9 @@ pub async fn refresh_tokens(
         revoked: false,
         replaced_by: None,
         revoked_at: None,
-        resource_uris: resource_uris.clone(),
-        allowed_service_ids: allowed_service_ids.clone(),
-        allow_all_services,
+        resource_uris: active_token.resource_uris.clone(),
+        allowed_service_ids: active_token.allowed_service_ids.clone(),
+        allow_all_services: active_token.allow_all_services,
         created_at: now,
     };
 
@@ -621,7 +596,7 @@ pub async fn refresh_tokens(
         refresh_token: new_refresh_jwt,
         session_id: session_id.unwrap_or_else(|| Uuid::nil().to_string()),
         access_expires_in: config.jwt_access_ttl_secs,
-        resource_uris,
+        resource_uris: token_resource_scope.resource_uris,
     })
 }
 
@@ -915,6 +890,201 @@ mod tests {
         assert_eq!(new_stored.scope.as_deref(), Some("openid proxy"));
         assert!(!new_stored.allow_all_services);
         assert_eq!(new_stored.allowed_service_ids, vec!["svc-1".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_refresh_resource_narrowing_is_per_request() {
+        let Some(db) = connect_test_database("token_svc_resource_per_request").await else {
+            return;
+        };
+        let config = test_app_config();
+        let jwt_keys = cached_test_jwt_keys();
+        let user_id = Uuid::new_v4().to_string();
+        seed_user(&db, &user_id).await;
+
+        let service_id = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user_service::UserService>(
+            crate::models::user_service::COLLECTION_NAME,
+        )
+        .insert_one(test_user_service(
+            &service_id,
+            &user_id,
+            "svc-a",
+            "endpoint-a",
+            None,
+            None,
+        ))
+        .await
+        .unwrap();
+        let resource_a =
+            crate::services::oauth_resource_service::user_service_resource_uri(&config, "svc-a");
+
+        let issued = create_session_and_issue_tokens(&db, &config, &jwt_keys, &user_id, None, None)
+            .await
+            .unwrap();
+
+        let requested = vec![resource_a.clone()];
+        let narrowed = refresh_tokens(
+            &db,
+            &config,
+            &jwt_keys,
+            &issued.refresh_token,
+            None,
+            Some(&requested),
+        )
+        .await
+        .unwrap();
+
+        let access_claims =
+            crate::crypto::jwt::verify_token(&jwt_keys, &config, &narrowed.access_token).unwrap();
+        assert_eq!(access_claims.resources, Some(vec![resource_a.clone()]));
+        assert_eq!(access_claims.allowed_service_ids, Some(vec![service_id]));
+        assert_eq!(access_claims.allow_all_services, Some(false));
+
+        let narrowed_refresh_claims =
+            crate::crypto::jwt::verify_token(&jwt_keys, &config, &narrowed.refresh_token).unwrap();
+        let narrowed_stored = db
+            .collection::<RefreshToken>(REFRESH_TOKENS)
+            .find_one(doc! { "jti": narrowed_refresh_claims.jti })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(narrowed_stored.allow_all_services);
+        assert!(narrowed_stored.resource_uris.is_empty());
+        assert!(narrowed_stored.allowed_service_ids.is_empty());
+
+        let unrestricted =
+            refresh_tokens(&db, &config, &jwt_keys, &narrowed.refresh_token, None, None)
+                .await
+                .unwrap();
+        let unrestricted_claims =
+            crate::crypto::jwt::verify_token(&jwt_keys, &config, &unrestricted.access_token)
+                .unwrap();
+        assert!(unrestricted_claims.resources.is_none());
+        assert!(unrestricted_claims.allowed_service_ids.is_none());
+        assert!(unrestricted_claims.allow_all_services.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_refresh_accepts_resource_within_consent_only_service_grant() {
+        let Some(db) = connect_test_database("token_svc_consent_only_resource").await else {
+            return;
+        };
+        let config = test_app_config();
+        let jwt_keys = cached_test_jwt_keys();
+        let user_id = Uuid::new_v4().to_string();
+        seed_user(&db, &user_id).await;
+        let client_id = Uuid::new_v4().to_string();
+        let now = Utc::now();
+
+        db.collection::<OauthClient>(OAUTH_CLIENTS)
+            .insert_one(OauthClient {
+                id: client_id.clone(),
+                client_name: "Consent Only OAuth Client".to_string(),
+                client_secret_hash: String::new(),
+                redirect_uris: vec!["https://app.example/callback".to_string()],
+                allowed_scopes: "openid proxy".to_string(),
+                grant_types: "authorization_code refresh_token".to_string(),
+                client_type: "public".to_string(),
+                is_active: true,
+                delegation_scopes: String::new(),
+                broker_capability_enabled: false,
+                revocation_webhook_url: None,
+                revocation_webhook_secret_encrypted: None,
+                created_by: Some(user_id.clone()),
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+
+        let service_a_id = Uuid::new_v4().to_string();
+        let service_b_id = Uuid::new_v4().to_string();
+        let services = db.collection::<crate::models::user_service::UserService>(
+            crate::models::user_service::COLLECTION_NAME,
+        );
+        services
+            .insert_many([
+                test_user_service(&service_a_id, &user_id, "svc-a", "endpoint-a", None, None),
+                test_user_service(&service_b_id, &user_id, "svc-b", "endpoint-b", None, None),
+            ])
+            .await
+            .unwrap();
+        let resource_a =
+            crate::services::oauth_resource_service::user_service_resource_uri(&config, "svc-a");
+        let resource_b =
+            crate::services::oauth_resource_service::user_service_resource_uri(&config, "svc-b");
+
+        let user_uuid = Uuid::parse_str(&user_id).unwrap();
+        let (refresh_jwt, refresh_jti) =
+            crate::crypto::jwt::generate_refresh_token(&jwt_keys, &config, &user_uuid).unwrap();
+        db.collection::<RefreshToken>(REFRESH_TOKENS)
+            .insert_one(RefreshToken {
+                id: Uuid::new_v4().to_string(),
+                jti: refresh_jti,
+                client_id: client_id.clone(),
+                user_id: user_id.clone(),
+                session_id: None,
+                scope: Some("openid proxy".to_string()),
+                expires_at: now + Duration::days(7),
+                revoked: false,
+                replaced_by: None,
+                revoked_at: None,
+                resource_uris: Vec::new(),
+                allowed_service_ids: vec![service_a_id.clone()],
+                allow_all_services: false,
+                created_at: now,
+            })
+            .await
+            .unwrap();
+
+        let requested_a = vec![resource_a.clone()];
+        let refreshed = refresh_tokens(
+            &db,
+            &config,
+            &jwt_keys,
+            &refresh_jwt,
+            None,
+            Some(&requested_a),
+        )
+        .await
+        .unwrap();
+        let access_claims =
+            crate::crypto::jwt::verify_token(&jwt_keys, &config, &refreshed.access_token).unwrap();
+        assert_eq!(access_claims.resources, Some(vec![resource_a]));
+        assert_eq!(
+            access_claims.allowed_service_ids,
+            Some(vec![service_a_id.clone()])
+        );
+        assert_eq!(access_claims.allow_all_services, Some(false));
+
+        let new_refresh_claims =
+            crate::crypto::jwt::verify_token(&jwt_keys, &config, &refreshed.refresh_token).unwrap();
+        let new_stored = db
+            .collection::<RefreshToken>(REFRESH_TOKENS)
+            .find_one(doc! { "jti": new_refresh_claims.jti })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!new_stored.allow_all_services);
+        assert!(new_stored.resource_uris.is_empty());
+        assert_eq!(new_stored.allowed_service_ids, vec![service_a_id]);
+
+        let requested_b = vec![resource_b];
+        let err = match refresh_tokens(
+            &db,
+            &config,
+            &jwt_keys,
+            &refreshed.refresh_token,
+            None,
+            Some(&requested_b),
+        )
+        .await
+        {
+            Ok(_) => panic!("resource outside consented services is rejected"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, AppError::InvalidTarget(_)));
     }
 
     #[tokio::test]
