@@ -5,7 +5,7 @@ description: Route hundreds of AI models through one OpenRouter key that NyxID s
 
 [OpenRouter](https://openrouter.ai) exposes hundreds of models from OpenAI, Anthropic, Google, Meta, Mistral, and more behind a single OpenAI-compatible API. Register your OpenRouter key with NyxID once, and every agent or tool reaches all of those models through its own scoped NyxID key — the real OpenRouter key never leaves NyxID.
 
-For the underlying data model, see [Agent isolation](/docs/shared/concepts/agent-isolation).
+For the underlying data model, see [Agent isolation](/docs/shared/concepts/agent-isolation). Prefer clicking through the dashboard? See the [web guide](/docs/web/guides/openrouter). Working purely from the terminal? See the [CLI guide](/docs/cli/guides/openrouter).
 
 ## Prerequisites
 
