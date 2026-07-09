@@ -83,14 +83,21 @@ pub async fn run(command: ProfileCommands) -> Result<()> {
 
                         let mut table = Table::new();
                         table.load_preset(UTF8_FULL_CONDENSED);
-                        table.set_header(["Client ID", "App Name", "Scopes", "Granted"]);
+                        table.set_header([
+                            "Client ID",
+                            "App Name",
+                            "Scopes",
+                            "Service Access",
+                            "Granted",
+                        ]);
 
                         for consent in items {
                             let client_id = consent["client_id"].as_str().unwrap_or("-");
                             let app_name = consent["client_name"].as_str().unwrap_or("-");
                             let scopes = consent["scopes"].as_str().unwrap_or("-");
+                            let service_access = format_consent_service_access(consent);
                             let granted = consent["granted_at"].as_str().unwrap_or("-");
-                            table.add_row([client_id, app_name, scopes, granted]);
+                            table.add_row([client_id, app_name, scopes, &service_access, granted]);
                         }
                         eprintln!("{table}");
                     }
@@ -128,6 +135,37 @@ pub async fn run(command: ProfileCommands) -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn format_consent_service_access(consent: &Value) -> String {
+    if consent["legacy_unrestricted"].as_bool().unwrap_or(false) {
+        return "legacy (unrestricted until next sign-in)".to_string();
+    }
+    if consent["allow_all_services"].as_bool().unwrap_or(false) {
+        return "all services".to_string();
+    }
+
+    let labels = consent["allowed_services"]
+        .as_array()
+        .map(|services| {
+            services
+                .iter()
+                .filter_map(|service| service["label"].as_str())
+                .filter(|label| !label.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    if labels.is_empty() {
+        return "sign-in only".to_string();
+    }
+
+    let visible_count = labels.len().min(3);
+    let mut summary = labels[..visible_count].join(", ");
+    if labels.len() > visible_count {
+        summary.push_str(&format!(" and {} more", labels.len() - visible_count));
+    }
+    format!("{} services: {summary}", labels.len())
 }
 
 #[cfg(test)]
@@ -211,6 +249,8 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "consents": [
                     {"client_id": "c-1", "client_name": "App", "scopes": "openid",
+                     "allow_all_services": false, "allowed_services": [],
+                     "legacy_unrestricted": false,
                      "granted_at": "2026-01-01"}
                 ]
             })))
@@ -262,5 +302,56 @@ mod tests {
         })
         .await;
         assert!(result.is_err(), "5xx should surface as an error");
+    }
+
+    #[test]
+    fn consent_service_access_formats_all_services() {
+        let consent = serde_json::json!({
+            "allow_all_services": true,
+            "allowed_services": [],
+            "legacy_unrestricted": false
+        });
+        assert_eq!(format_consent_service_access(&consent), "all services");
+    }
+
+    #[test]
+    fn consent_service_access_formats_explicit_services_with_deterministic_truncation() {
+        let consent = serde_json::json!({
+            "allow_all_services": false,
+            "allowed_services": [
+                {"label": "OpenAI"},
+                {"label": "GitHub"},
+                {"label": "Lark"},
+                {"label": "Slack"}
+            ],
+            "legacy_unrestricted": false
+        });
+        assert_eq!(
+            format_consent_service_access(&consent),
+            "4 services: OpenAI, GitHub, Lark and 1 more"
+        );
+    }
+
+    #[test]
+    fn consent_service_access_formats_sign_in_only_for_explicit_empty_access() {
+        let consent = serde_json::json!({
+            "allow_all_services": false,
+            "allowed_services": [],
+            "legacy_unrestricted": false
+        });
+        assert_eq!(format_consent_service_access(&consent), "sign-in only");
+    }
+
+    #[test]
+    fn consent_service_access_formats_legacy_unrestricted_first() {
+        let consent = serde_json::json!({
+            "allow_all_services": false,
+            "allowed_services": [],
+            "legacy_unrestricted": true
+        });
+        assert_eq!(
+            format_consent_service_access(&consent),
+            "legacy (unrestricted until next sign-in)"
+        );
     }
 }
