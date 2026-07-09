@@ -7,6 +7,7 @@
 - [Managing API Keys](#managing-api-keys)
   - [Scope requirements for management writes](#scope-requirements-for-management-writes)
   - [Browser wizard for one-time secrets (v2 + v3.0 + v3.1 + v4)](#browser-wizard-for-one-time-secrets-v2--v30--v31--v4)
+- [Managing OAuth Consents](#managing-oauth-consents)
 
 ## Managing Services
 
@@ -180,3 +181,34 @@ When the wizard is bypassed the commands print the raw secret to stdout in the s
 Behavior change to be aware of: `nyxid api-key rotate <name>` now **refuses ambiguous names** — if multiple keys share the same name, the command exits with `Name 'X' matches N keys. Pass the ID instead.` Previously it silently rotated the first match (which could rotate the wrong key). Always prefer ID over name for scripted rotation.
 
 Rotation is **server-atomic** in both modes: the old key is deactivated and a new key is created with a new ID, preserving name + scopes + bindings. Anything that hard-codes the old ID (CI configs, dashboards, prior bindings registered out-of-band) will need updating to the new ID. Existing `AgentServiceBinding` records are cloned to the new key automatically.
+
+## Managing OAuth Consents
+
+OAuth consents are the user's "Authorized Apps" grants. A consent now includes both OIDC scopes and a NyxID service grant. Load [`oauth-consent.md`](oauth-consent.md) for the full model.
+
+To list and revoke from the CLI:
+
+```bash
+nyxid profile consents --output json
+nyxid profile revoke-consent <client_id> --yes
+```
+
+Use JSON when answering service-access questions. The response includes:
+
+- `allow_all_services`
+- `allowed_service_ids`
+- `allowed_services` with resolved labels/catalog names
+- `legacy_unrestricted`
+
+The table view currently shows only client ID, app name, scopes, and grant time.
+
+To answer "which services can this app reach?":
+
+- `allow_all_services: true` means all services available under the token's effective access rules.
+- `legacy_unrestricted: true` means a pre-default-deny grant; treat it as legacy full service access until the app re-prompts and stores an explicit selection.
+- An empty `allowed_service_ids` list with `allow_all_services: false` means sign-in only.
+- Otherwise, use `allowed_services` for the service names.
+
+There is no edit-in-place command for a consent's service allowlist yet. To restrict an app to service X, revoke and have the user sign in again, or re-run the app's OAuth flow with `prompt=consent` and use `Customize` on the consent screen. Direct CLI editing is tracked separately in issue #1126.
+
+Developer-app default service declarations are also not exposed as CLI flags yet. Use the web UI Developer Apps detail page or the developer OAuth client API's `default_service_catalog_slugs` field until CLI parity lands.
