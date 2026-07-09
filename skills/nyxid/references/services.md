@@ -4,6 +4,7 @@
 
 - [Discover Services](#discover-services)
 - [Slug rules for `service add`](#slug-rules-for-service-add)
+- [OAuth consent service grants and resource URIs](#oauth-consent-service-grants-and-resource-uris)
 - [Requesting additional OAuth scopes](#requesting-additional-oauth-scopes)
 - [Scopes with node-routed services (`--via-node`)](#scopes-with-node-routed-services---via-node)
 - [Helping Users Add Services and Credentials](#helping-users-add-services-and-credentials)
@@ -49,6 +50,25 @@ nyxid service add --custom                                # add custom endpoint 
 > For API key services, just run `nyxid service add <slug>` without flags. The CLI securely prompts for the key (input hidden). Never ask the user to paste secrets into chat or set environment variables manually.
 > For automation/scripting only: `--credential-env <VAR>` reads from an environment variable.
 > For multi-field credentials such as AWS access-key JSON: `--credential-file <PATH>` reads the credential bytes from a file. Pass `-` to read from stdin.
+
+## OAuth consent service grants and resource URIs
+
+Catalog and user-service responses expose a `resource_uri` for OAuth clients that use RFC 8707 Resource Indicators. The canonical form is:
+
+```text
+<NYXID_BASE_URL>/api/v1/proxy/s/<service-slug>
+```
+
+Third-party OAuth clients pass one or more repeatable `resource` parameters on authorize, PAR, or token requests to ask for a specific NyxID proxied service. NyxID resolves each URI to a user service and rejects unknown or non-owned targets with OAuth `invalid_target`.
+
+Service access is approved on the NyxID consent screen, not by scopes alone:
+
+- Approving with no service selected grants sign-in only.
+- Selecting services stores an explicit service allowlist.
+- `All services` stores an unrestricted service grant.
+- Refresh-token and token-exchange requests can narrow a token to fewer resources, but cannot widen beyond the stored consent.
+
+For full consent behavior, app-declared default services (`default_service_catalog_slugs`), legacy grants, and management guidance, load [`oauth-consent.md`](oauth-consent.md).
 
 ## Slug rules for `service add`
 
