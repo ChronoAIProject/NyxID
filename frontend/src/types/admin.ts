@@ -129,6 +129,56 @@ export interface AdminAuditLogListResponse {
   readonly per_page: number;
 }
 
+// ── Admin OAuth clients / broker rollout settings ──
+
+export interface AdminOAuthClient {
+  readonly id: string;
+  readonly client_name: string;
+  readonly client_type: "public" | "confidential" | string;
+  readonly created_by: string | null;
+  readonly redirect_uris: readonly string[];
+  readonly allowed_scopes: string;
+  readonly delegation_scopes: string;
+  readonly broker_capability_enabled: boolean;
+  readonly broker_capability_effective: boolean;
+  readonly broker_capability_source: "none" | "flag" | "scope";
+  readonly revocation_webhook_url: string | null;
+  readonly is_active: boolean;
+  readonly client_secret: string | null;
+  readonly created_at: string;
+}
+
+export interface AdminOAuthClientListResponse {
+  readonly clients: readonly AdminOAuthClient[];
+}
+
+export interface UpdateAdminOAuthClientRequest {
+  readonly broker_capability_enabled?: boolean;
+  readonly is_active?: boolean;
+  readonly redirect_uris?: readonly string[];
+  readonly allowed_scopes?: readonly string[];
+  readonly client_name?: string;
+}
+
+export type BrokerPolicySource = "env_default" | "override";
+
+export interface BrokerPolicyField {
+  readonly effective: boolean;
+  readonly env_default: boolean;
+  readonly override: boolean | null;
+  readonly source: BrokerPolicySource;
+}
+
+export interface BrokerSettingsResponse {
+  readonly broker_require_sender_constraint: BrokerPolicyField;
+  readonly broker_require_admin_capability: BrokerPolicyField;
+}
+
+export interface UpdateBrokerSettingsRequest {
+  readonly broker_require_sender_constraint?: boolean | null;
+  readonly broker_require_admin_capability?: boolean | null;
+}
+
 // ── Invite codes ──
 
 export interface InviteCodeUsage {

@@ -296,10 +296,14 @@ MTLS_CLIENT_CERT_HEADER=            # Header carrying a URL-encoded PEM client c
                                     # mTLS-terminating proxy (RFC 8705 cert-bound broker tokens).
                                     # Unset = disabled. The proxy must strip this header from external requests.
 BROKER_REQUIRE_SENDER_CONSTRAINT=false  # Default-off broker hardening: require DPoP/mTLS-pinned
-                                        # broker bindings at create and exchange time. See docs/ENV.md.
+                                        # broker bindings at create and exchange time. Runtime-overridable
+                                        # by platform admins via Admin -> OAuth Clients -> Broker Rollout Policy;
+                                        # DB override wins over this env default; other replicas refresh
+                                        # from MongoDB on a short background interval. See docs/ENV.md.
 BROKER_REQUIRE_ADMIN_CAPABILITY=false   # Default-off broker hardening: require platform-admin
                                         # broker_capability_enabled provisioning; DCR scope and
                                         # non-admin developer-app self-grant no longer confer broker mode.
+                                        # Runtime-overridable by platform admins; DB override wins over env.
 CLI_PAIRING_HMAC_KEY=               # Optional 64 hex; keys CliPairing.code_hash against DB-snapshot
                                     # brute force. Unset = derived from ENCRYPTION_KEY or the JWT key
                                     # (stable per-worker, multi-instance safe).

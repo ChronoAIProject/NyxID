@@ -23,6 +23,7 @@ use crate::services::dpop_jti_cache::{
 };
 use crate::services::event_dedup_cache::EventDedupCache;
 use crate::services::node_ws_manager::NodeWsManager;
+use crate::services::platform_settings_service::BrokerPolicy;
 use crate::services::provider_token_exchange_service::TokenExchangeCache;
 use crate::services::ssh_service::SshSessionManager;
 
@@ -413,6 +414,7 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
             config.public_mcp_rate_limit_per_minute,
             60,
         ),
+        broker_policy: Arc::new(std::sync::RwLock::new(BrokerPolicy::from_config(&config))),
         // Production default from backend/src/main.rs — 5 claims per
         // 60s per IP; mirror here so claim-rate-limit tests see the
         // same shape.

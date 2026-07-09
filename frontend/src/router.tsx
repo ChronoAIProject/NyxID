@@ -45,6 +45,7 @@ import {
   AdminGroupDetailPage,
   AdminServiceAccountsPage,
   AdminServiceAccountDetailPage,
+  AdminOAuthClientsPage,
   ConsentsPage,
   DeveloperAppsPage,
   DeveloperAppDetailPage,
@@ -723,6 +724,12 @@ const adminServiceAccountDetailRoute = createRoute({
   component: AdminServiceAccountDetailPage,
 });
 
+const adminOAuthClientsRoute = createRoute({
+  path: "oauth-clients",
+  getParentRoute: () => adminLayout,
+  component: AdminOAuthClientsPage,
+});
+
 const adminNodesRoute = createRoute({
   path: "nodes",
   getParentRoute: () => adminLayout,
@@ -814,6 +821,7 @@ const routeTree = rootRoute.addChildren([
       adminGroupDetailRoute,
       adminServiceAccountsRoute,
       adminServiceAccountDetailRoute,
+      adminOAuthClientsRoute,
       adminNodesRoute,
       adminAuditLogRoute,
       adminInviteCodesRoute,

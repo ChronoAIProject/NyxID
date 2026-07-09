@@ -61,6 +61,7 @@ export const ALL_ITEMS: readonly CommandItem[] = [
   { icon: Ticket, label: "Invite Codes", to: "/admin/invite-codes", group: "admin" },
   { icon: ClipboardList, label: "Audit Log", to: "/admin/audit-log", group: "admin" },
   { icon: Bot, label: "Service Accounts", to: "/admin/service-accounts", group: "admin" },
+  { icon: KeyRound, label: "OAuth Clients", to: "/admin/oauth-clients", group: "admin" },
   { icon: ShieldCheck, label: "Roles", to: "/admin/roles", group: "admin" },
   { icon: Layers, label: "Groups", to: "/admin/groups", group: "admin" },
   { icon: Server, label: "Services", to: "/services", group: "admin" },

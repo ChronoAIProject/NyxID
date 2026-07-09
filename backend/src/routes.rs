@@ -423,12 +423,18 @@ pub fn build_router(
         .route("/audit-log", get(handlers::admin::list_audit_log))
         .route("/audit-log/verify", get(handlers::admin::verify_audit_log))
         .route(
+            "/settings/broker",
+            get(handlers::admin::get_broker_settings)
+                .patch(handlers::admin::update_broker_settings),
+        )
+        .route(
             "/oauth-clients",
             get(handlers::admin::list_oauth_clients).post(handlers::admin::create_oauth_client),
         )
         .route(
             "/oauth-clients/{client_id}",
-            delete(handlers::admin::delete_oauth_client),
+            patch(handlers::admin::update_oauth_client)
+                .delete(handlers::admin::delete_oauth_client),
         )
         .route(
             "/oauth-clients/{client_id}/consents",

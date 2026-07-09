@@ -177,6 +177,7 @@ const SIDEBAR_ITEMS: Record<string, string> = {
   "/admin/users": "Users",
   "/admin/audit-log": "Audit Log",
   "/admin/service-accounts": "Service Accounts",
+  "/admin/oauth-clients": "OAuth Clients",
   "/admin/roles": "Roles",
   "/admin/groups": "Groups",
   "/admin/invite-codes": "Invite Codes",

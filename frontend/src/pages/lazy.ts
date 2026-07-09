@@ -122,6 +122,11 @@ export const AdminServiceAccountDetailPage = lazy(() =>
     default: m.AdminServiceAccountDetailPage,
   })),
 );
+export const AdminOAuthClientsPage = lazy(() =>
+  import("@/pages/admin-oauth-clients").then((m) => ({
+    default: m.AdminOAuthClientsPage,
+  })),
+);
 export const ConsentsPage = lazy(() =>
   import("@/pages/consents").then((m) => ({ default: m.ConsentsPage })),
 );

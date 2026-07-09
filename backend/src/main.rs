@@ -61,9 +61,12 @@ use models::mcp_session::McpSessionStore;
 use services::dpop_jti_cache::{DPOP_JTI_CACHE_CAPACITY, DPOP_JTI_CACHE_TTL_SECS, DpopJtiCache};
 use services::event_dedup_cache::EventDedupCache;
 use services::node_ws_manager::NodeWsManager;
+use services::platform_settings_service::BrokerPolicy;
 use services::provider_token_exchange_service::TokenExchangeCache;
 use services::push_service::{ApnsAuth, FcmAuth};
 use services::ssh_service::SshSessionManager;
+
+const BROKER_POLICY_REFRESH_INTERVAL_SECS: u64 = 5;
 
 /// Shared application state available to all handlers via Axum's State extractor.
 #[derive(Clone)]
@@ -118,6 +121,11 @@ pub struct AppState {
     pub public_proxy_limiter: mw::rate_limit::SharedPerIpRateLimiter,
     /// Dedicated per-IP limiter for anonymous public MCP requests.
     pub public_mcp_limiter: mw::rate_limit::SharedPerIpRateLimiter,
+    /// Effective broker rollout policy. Loaded from MongoDB at startup with
+    /// env-derived `AppConfig` values as defaults, then refreshed by admin
+    /// settings writes. Enforcement reads this in-memory snapshot, never
+    /// MongoDB, so broker checks do not add per-request database work.
+    pub broker_policy: Arc<std::sync::RwLock<BrokerPolicy>>,
     /// Server-side HMAC key used to derive `CliPairing.code_hash`.
     /// Lives in process memory only (never persisted), so a MongoDB
     /// snapshot alone doesn't let an attacker brute-force the 32^8
@@ -157,6 +165,87 @@ pub struct AppState {
     /// Vendor-neutral telemetry client. `None` when no DSN is configured
     /// (the default hard-off state — see `docs/TELEMETRY.md` §3).
     pub telemetry: Option<Arc<telemetry::TelemetryClient>>,
+}
+
+impl AppState {
+    pub fn broker_policy(&self) -> BrokerPolicy {
+        match self.broker_policy.read() {
+            Ok(policy) => *policy,
+            Err(poisoned) => {
+                tracing::error!("broker policy lock poisoned; using last available snapshot");
+                *poisoned.into_inner()
+            }
+        }
+    }
+
+    pub fn set_broker_policy_if_fresh(&self, policy: BrokerPolicy) -> bool {
+        match self.broker_policy.write() {
+            Ok(mut current) => {
+                if policy.revision < current.revision {
+                    return false;
+                }
+                if *current == policy {
+                    return false;
+                }
+                *current = policy;
+                true
+            }
+            Err(poisoned) => {
+                tracing::error!("broker policy lock poisoned while updating; checking snapshot");
+                let mut current = poisoned.into_inner();
+                if policy.revision < current.revision {
+                    return false;
+                }
+                if *current == policy {
+                    return false;
+                }
+                *current = policy;
+                true
+            }
+        }
+    }
+
+    pub fn broker_require_sender_constraint(&self) -> bool {
+        self.broker_policy().broker_require_sender_constraint
+    }
+
+    pub fn broker_require_admin_capability(&self) -> bool {
+        self.broker_policy().broker_require_admin_capability
+    }
+}
+
+fn spawn_broker_policy_refresh_task(state: AppState) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(
+                BROKER_POLICY_REFRESH_INTERVAL_SECS,
+            ))
+            .await;
+
+            match services::platform_settings_service::load_broker_policy(&state.db, &state.config)
+                .await
+            {
+                Ok(policy) => {
+                    if state.set_broker_policy_if_fresh(policy) {
+                        tracing::info!(
+                            broker_policy_revision = policy.revision,
+                            broker_require_sender_constraint =
+                                policy.broker_require_sender_constraint,
+                            broker_require_admin_capability =
+                                policy.broker_require_admin_capability,
+                            "Refreshed broker rollout policy from platform settings"
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "Failed to refresh broker rollout policy from platform settings"
+                    );
+                }
+            }
+        }
+    });
 }
 
 /// NyxID authentication and SSO platform.
@@ -516,6 +605,17 @@ async fn main() {
             );
         }
     }
+    let broker_policy =
+        match services::platform_settings_service::load_broker_policy(&db, &config).await {
+            Ok(policy) => policy,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "Failed to load platform broker policy; falling back to env defaults"
+                );
+                BrokerPolicy::from_config(&config)
+            }
+        };
     let state = AppState {
         db,
         config: config.clone(),
@@ -548,6 +648,7 @@ async fn main() {
             config.public_mcp_rate_limit_per_minute,
             60,
         ),
+        broker_policy: Arc::new(std::sync::RwLock::new(broker_policy)),
         cli_pairing_hmac_key,
         auth_device_hmac_key,
         audit_chain_hmac_key,
@@ -575,6 +676,7 @@ async fn main() {
         state.billing.reconciler(),
         config.billing_reconcile_interval_secs,
     );
+    spawn_broker_policy_refresh_task(state.clone());
 
     // Create rate limiters
     let global_rate_limiter =

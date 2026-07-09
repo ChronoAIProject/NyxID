@@ -266,6 +266,7 @@ pub async fn exchange_authorization_code(
     db: &mongodb::Database,
     config: &AppConfig,
     jwt_keys: &JwtKeys,
+    broker_require_admin_capability: bool,
     code: &str,
     client_id: &str,
     redirect_uri: &str,
@@ -359,7 +360,7 @@ pub async fn exchange_authorization_code(
     let broker_capability_enabled =
         crate::services::oauth_broker_service::is_broker_client_with_policy(
             &client,
-            config.broker_require_admin_capability(),
+            broker_require_admin_capability,
         );
 
     // PKCE verification (S256 only)
@@ -807,6 +808,7 @@ mod tests {
             &db,
             &config,
             &jwt_keys,
+            config.broker_require_admin_capability(),
             code,
             &client.id,
             "https://app.example/callback",
@@ -898,6 +900,7 @@ mod tests {
             &db,
             &config,
             &jwt_keys,
+            config.broker_require_admin_capability(),
             code,
             &client.id,
             "https://app.example/callback",
@@ -998,6 +1001,7 @@ mod tests {
             &db,
             &config,
             &jwt_keys,
+            config.broker_require_admin_capability(),
             code,
             &client.id,
             "https://app.example/callback",
@@ -1082,6 +1086,7 @@ mod tests {
             &db,
             &config,
             &jwt_keys,
+            config.broker_require_admin_capability(),
             code,
             client_id,
             "https://app.example/callback",

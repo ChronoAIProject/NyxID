@@ -1756,6 +1756,7 @@ async fn token_inner(
                 &state.db,
                 &state.config,
                 &state.jwt_keys,
+                state.broker_require_admin_capability(),
                 code,
                 client_id_str,
                 redirect_uri,
@@ -1774,7 +1775,8 @@ async fn token_inner(
                     .split_whitespace()
                     .map(str::to_string)
                     .collect();
-                if state.config.broker_require_sender_constraint() && sender_constraint.is_none() {
+                let broker_require_sender_constraint = state.broker_require_sender_constraint();
+                if broker_require_sender_constraint && sender_constraint.is_none() {
                     state
                         .db
                         .collection::<crate::models::refresh_token::RefreshToken>(
@@ -1834,7 +1836,7 @@ async fn token_inner(
                     &granted_scopes,
                     exchanged.external_subject.as_ref(),
                     sender_constraint.clone(),
-                    state.config.broker_require_sender_constraint(),
+                    broker_require_sender_constraint,
                 )
                 .await?;
 
@@ -2053,7 +2055,7 @@ async fn token_inner(
                 // uses is_broker_client) but not exchange them.
                 if !oauth_broker_service::is_broker_client_with_policy(
                     &client,
-                    state.config.broker_require_admin_capability(),
+                    state.broker_require_admin_capability(),
                 ) {
                     return Err(AppError::ExternalTokenInvalid("invalid_grant".to_string()));
                 }
@@ -2072,6 +2074,7 @@ async fn token_inner(
                     &state.http_client,
                     &state.jwt_keys,
                     &state.config,
+                    state.broker_require_sender_constraint(),
                     client_id,
                     subject_token,
                     body.scope.as_deref(),
@@ -2797,7 +2800,7 @@ pub async fn register_client(
         Some(scope) if !scope.is_empty() => oauth_client_service::validate_allowed_scopes(scope)?,
         _ => oauth_client_service::DEFAULT_MCP_ALLOWED_SCOPES.to_string(),
     };
-    if state.config.broker_require_admin_capability()
+    if state.broker_require_admin_capability()
         && allowed_scopes
             .split_whitespace()
             .any(|scope| scope == oauth_broker_service::BROKER_BINDING_SCOPE)
