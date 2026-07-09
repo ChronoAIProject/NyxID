@@ -30,6 +30,17 @@ function sameOwner(
   return a?.type === "org" && b?.type === "org" && a.org_id === b.org_id;
 }
 
+function canScopeServiceToApiKey(
+  serviceSource: CredentialSource | undefined,
+  apiKeySource: CredentialSource | undefined,
+): boolean {
+  if (apiKeySource?.type === "org") {
+    return sameOwner(serviceSource, apiKeySource);
+  }
+  if (!serviceSource || serviceSource.type === "personal") return true;
+  return serviceSource.allowed;
+}
+
 export function ServiceScopeCard({
   keyId,
   allowAllServices,
@@ -53,18 +64,15 @@ export function ServiceScopeCard({
   const [selectedIds, setSelectedIds] =
     useState<readonly string[]>(allowedServiceIds);
   const { data: allKeys } = useKeys();
-  // Filter to services owned by the same owner as the API key. Personal
-  // API keys can only scope to personal services; org API keys can only
-  // scope to the same org's services. The backend
-  // (`key_service::validate_service_ids`) enforces this server-side; the
-  // filter here is to avoid offering options that would 400 on save.
+  // Personal API keys may scope to org services the actor can proxy.
+  // Org-owned API keys remain owner-bound to the same org.
   const personalKeys = useMemo(
     () =>
       (allKeys ?? []).filter(
         (k) =>
           !k.auto_connected &&
           k.is_active &&
-          sameOwner(k.credential_source, apiKeySource),
+          canScopeServiceToApiKey(k.credential_source, apiKeySource),
       ),
     [allKeys, apiKeySource],
   );
