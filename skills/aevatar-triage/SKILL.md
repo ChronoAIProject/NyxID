@@ -1,7 +1,7 @@
 ---
 name: aevatar-triage
 description: Use AFTER something goes wrong while using Aevatar — a user hits an error, failure, or confusing behavior and you must find whether it lives in Aevatar, NyxID, or Ornn, then act. Triggers - "aevatar is erroring", "why did my workflow fail", "my scheduled run did not fire", "my bot does not reply", "connector 401/403", "skill won't pull/upload", "is this an aevatar, nyxid, or ornn bug", "file an issue", "am I using this right". It attributes the failure by tracing the request path, pulls that layer's real public source for a code-grounded root cause citing file and line, then branches - draft and, only on explicit user confirmation, file a precise GitHub issue when behavior violates the layer's published contract, or explain the correct usage from the code when it is a usage mistake. The after-it-breaks counterpart to aevatar-feasibility-advisor; never auto-files, de-dups first, never claims a root cause without a code citation. Works locally (git + gh) and server-side (nyxid_proxy + api-github).
-version: "1.2"
+version: "1.3"
 metadata:
   category: plain
   tag:
@@ -113,6 +113,9 @@ reading; the tree evolves.**
   connector adapters in `src/Aevatar.AI.ToolProviders.*` (incl. NyxId, Ornn); readmodels in
   `src/Aevatar.CQRS.Projection.*`; engine + HTTP/OpenAPI in `src/workflow/`; **contract** in
   `src/Aevatar.AI.Abstractions` + `docs/canon/`; errors as workflow exceptions + control-plane 4xx/5xx.
+  **Read the deployed branch: Aevatar currently ships from `feature/integrate` — *not* the repo
+  default and *not* `dev`.** Reading the wrong branch is the fast way to a wrong root cause; confirm
+  the branch against the live image tag (deploy branches move — verify, don't assume).
 - **NyxID** (`ChronoAIProject/NyxID`): endpoint handlers in `backend/src/handlers/` (proxy, auth,
   oauth, approvals, mcp, node/ssh); vault logic in `backend/src/services/`; **all error variants +
   numeric codes in `backend/src/errors/`** (observed ranges — confirm: ~2000 auth, ~3000 approval,
@@ -201,8 +204,9 @@ authoritative side, say so and escalate there (query that layer's own API / stat
 ### Local coding agent — preferred for deep RCA
 ```bash
 # read the suspected layer (shallow clone; reuse an existing clone if present)
-gh repo clone aevatarAI/aevatar        # or ChronoAIProject/NyxID , ChronoAIProject/Ornn
-#   git clone --depth=1 https://github.com/<owner>/<repo>
+# Aevatar ships from feature/integrate (NOT the repo default, NOT dev) — read THAT ref:
+gh repo clone aevatarAI/aevatar -- -b feature/integrate     # NyxID / Ornn: their own deployed branch (confirm)
+#   git clone --depth=1 -b feature/integrate https://github.com/aevatarAI/aevatar
 # is it already fixed but not deployed? (check before drafting a defect)
 git -C <repo> log <deployed-sha>..origin/<branch> --oneline
 # de-dup before drafting
@@ -215,8 +219,9 @@ gh issue create -R <owner>/<repo> --title "[<layer>] ..." --body "..."
 ### Server-side, in an aevatar session — constrained fallback
 Use the runtime **`nyxid_proxy` tool** (not the `nyxid` CLI), `slug=api-github`, base
 `https://api.github.com`:
-- read code: `GET /repos/{owner}/{repo}/contents/{path}` , `GET /search/code?q=...+repo:owner/repo`
-  (repos are public; raw fetch also works).
+- read code at the **deployed ref**: `GET /repos/{owner}/{repo}/contents/{path}?ref=<deployed-branch>`
+  — for `aevatarAI/aevatar` that ref is **`feature/integrate`** (not the default, not `dev`) —
+  `GET /search/code?q=...+repo:owner/repo` (repos are public; raw fetch also works).
 - de-dup: `GET /search/issues?q=repo:owner/repo+is:issue+<keywords>`.
 - file (confirmed only): `POST /repos/{owner}/{repo}/issues`.
 
