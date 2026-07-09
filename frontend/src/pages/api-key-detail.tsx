@@ -108,6 +108,7 @@ export function ApiKeyDetailPage() {
           allowAllNodes={apiKey.allow_all_nodes}
           allowedNodeIds={apiKey.allowed_node_ids}
           allowedNodes={apiKey.allowed_nodes}
+          apiKeySource={apiKey.credential_source}
         />
 
         <RateLimitCard
