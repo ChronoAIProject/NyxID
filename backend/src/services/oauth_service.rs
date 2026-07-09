@@ -197,8 +197,17 @@ pub struct ExchangedTokens {
     pub external_subject: Option<ExternalSubjectRef>,
     pub broker_capability_enabled: bool,
     pub resource_uris: Vec<String>,
+    // Populated by the token exchange for the granted per-service access, but not
+    // yet consumed on the access-token path (only the refresh_token_* siblings are
+    // read today). Allowed rather than removed so the completing work (#1111) can
+    // wire consumption without re-adding them.
+    #[allow(dead_code)]
     pub allowed_service_ids: Vec<String>,
+    #[allow(dead_code)]
     pub allow_all_services: bool,
+    pub refresh_token_resource_uris: Vec<String>,
+    pub refresh_token_allowed_service_ids: Vec<String>,
+    pub refresh_token_allow_all_services: bool,
 }
 
 pub struct IssuedOAuthRefreshToken {
@@ -375,39 +384,16 @@ pub async fn exchange_authorization_code(
     // Parse user_id back to Uuid for JWT generation
     let user_uuid = Uuid::parse_str(&stored.user_id)
         .map_err(|e| AppError::Internal(format!("Invalid user_id in authorization code: {e}")))?;
-    let resolved_requested_resources = match requested_resources {
-        Some(resources) if stored.allow_all_services => {
-            oauth_resource_service::resolve_requested_resources(
-                db,
-                config,
-                &stored.user_id,
-                Some(resources),
-            )
-            .await?
-        }
-        _ => None,
-    };
-    let resource_uris = match (requested_resources, resolved_requested_resources.as_ref()) {
-        (Some(_), Some(resolved)) if stored.allow_all_services => resolved.resource_uris.clone(),
-        (Some(resources), _) => {
-            oauth_resource_service::filter_resource_narrowing(resources, &stored.resource_uris)?
-        }
-        (None, _) => stored.resource_uris.clone(),
-    };
-    let allowed_service_ids = if let Some(resolved) = resolved_requested_resources {
-        resolved.service_ids
-    } else if requested_resources.is_some() {
-        oauth_resource_service::resolve_resource_service_ids_for_user(
-            db,
-            config,
-            &stored.user_id,
-            &resource_uris,
-        )
-        .await?
-    } else {
-        stored.allowed_service_ids.clone()
-    };
-    let allow_all_services = stored.allow_all_services && requested_resources.is_none();
+    let token_resource_scope = oauth_resource_service::resolve_token_resource_scope(
+        db,
+        config,
+        &stored.user_id,
+        requested_resources,
+        &stored.resource_uris,
+        &stored.allowed_service_ids,
+        stored.allow_all_services,
+    )
+    .await?;
 
     // Resolve RBAC data filtered by the granted scope
     let rbac_data =
@@ -426,10 +412,12 @@ pub async fn exchange_authorization_code(
             .flatten(),
         None,
         None,
-        (!allow_all_services).then_some(crate::crypto::jwt::AccessTokenRestrictions {
-            resources: &resource_uris,
-            allowed_service_ids: &allowed_service_ids,
-        }),
+        (!token_resource_scope.allow_all_services).then_some(
+            crate::crypto::jwt::AccessTokenRestrictions {
+                resources: &token_resource_scope.resource_uris,
+                allowed_service_ids: &token_resource_scope.allowed_service_ids,
+            },
+        ),
     )?;
 
     let issued_refresh = issue_oauth_refresh_token(
@@ -439,9 +427,9 @@ pub async fn exchange_authorization_code(
         client_id,
         &stored.user_id,
         &stored.scope,
-        &resource_uris,
-        &allowed_service_ids,
-        allow_all_services,
+        &stored.resource_uris,
+        &stored.allowed_service_ids,
+        stored.allow_all_services,
     )
     .await?;
 
@@ -489,9 +477,12 @@ pub async fn exchange_authorization_code(
         user_id: stored.user_id,
         external_subject: stored.external_subject,
         broker_capability_enabled,
-        resource_uris,
-        allowed_service_ids,
-        allow_all_services,
+        resource_uris: token_resource_scope.resource_uris,
+        allowed_service_ids: token_resource_scope.allowed_service_ids,
+        allow_all_services: token_resource_scope.allow_all_services,
+        refresh_token_resource_uris: stored.resource_uris,
+        refresh_token_allowed_service_ids: stored.allowed_service_ids,
+        refresh_token_allow_all_services: stored.allow_all_services,
     })
 }
 
@@ -533,7 +524,7 @@ mod tests {
     use crate::crypto::token::hash_token;
     use crate::models::oauth_client::OauthClient;
     use crate::models::refresh_token::RefreshToken;
-    use crate::test_utils::connect_test_database;
+    use crate::test_utils::{connect_test_database, test_user_service};
     use mongodb::bson::doc;
 
     fn test_client(client_id: &str, client_type: &str, secret: &str) -> OauthClient {
@@ -838,6 +829,187 @@ mod tests {
             .expect("refresh stored");
         assert!(!stored_refresh.allow_all_services);
         assert!(stored_refresh.allowed_service_ids.is_empty());
+    }
+
+    #[tokio::test]
+    async fn exchange_authorization_code_accepts_resource_within_consent_only_service_grant() {
+        let Some(db) = connect_test_database("oauth_consent_only_resource").await else {
+            return;
+        };
+        let client = test_client("client-consent-only-resource", "public", "");
+        insert_client(&db, &client).await;
+        let user_id = Uuid::new_v4().to_string();
+        let service_a_id = Uuid::new_v4().to_string();
+        let service_b_id = Uuid::new_v4().to_string();
+        let now = Utc::now();
+
+        db.collection::<User>(USERS)
+            .insert_one(crate::test_utils::test_user(
+                &user_id,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .expect("insert user");
+        db.collection::<crate::models::user_service::UserService>(
+            crate::models::user_service::COLLECTION_NAME,
+        )
+        .insert_many([
+            test_user_service(&service_a_id, &user_id, "svc-a", "endpoint-a", None, None),
+            test_user_service(&service_b_id, &user_id, "svc-b", "endpoint-b", None, None),
+        ])
+        .await
+        .expect("insert user services");
+
+        let code = "consent-only-resource-code";
+        db.collection::<AuthorizationCode>(AUTH_CODES)
+            .insert_one(AuthorizationCode {
+                id: Uuid::new_v4().to_string(),
+                code_hash: hash_token(code),
+                client_id: client.id.clone(),
+                user_id: user_id.clone(),
+                redirect_uri: "https://app.example/callback".to_string(),
+                scope: "openid".to_string(),
+                code_challenge: None,
+                code_challenge_method: None,
+                nonce: None,
+                external_subject: None,
+                resource_uris: Vec::new(),
+                allowed_service_ids: vec![service_a_id.clone()],
+                allow_all_services: false,
+                expires_at: now + Duration::minutes(5),
+                used: false,
+                created_at: now,
+            })
+            .await
+            .expect("insert authorization code");
+
+        let config = crate::test_utils::test_app_config();
+        let jwt_keys = crate::test_utils::cached_test_jwt_keys();
+        let resource_a = oauth_resource_service::user_service_resource_uri(&config, "svc-a");
+        let requested = vec![resource_a.clone()];
+        let exchanged = exchange_authorization_code(
+            &db,
+            &config,
+            &jwt_keys,
+            code,
+            &client.id,
+            "https://app.example/callback",
+            None,
+            None,
+            None,
+            Some(&requested),
+        )
+        .await
+        .expect("exchange authorization code");
+
+        assert!(!exchanged.allow_all_services);
+        assert_eq!(exchanged.resource_uris, vec![resource_a.clone()]);
+        assert_eq!(exchanged.allowed_service_ids, vec![service_a_id.clone()]);
+        assert_eq!(exchanged.refresh_token_resource_uris, Vec::<String>::new());
+        assert_eq!(
+            exchanged.refresh_token_allowed_service_ids,
+            vec![service_a_id.clone()]
+        );
+        assert!(!exchanged.refresh_token_allow_all_services);
+
+        let claims = crate::crypto::jwt::verify_token(&jwt_keys, &config, &exchanged.access_token)
+            .expect("verify access token");
+        assert_eq!(claims.resources, Some(vec![resource_a]));
+        assert_eq!(claims.allowed_service_ids, Some(vec![service_a_id.clone()]));
+        assert_eq!(claims.allow_all_services, Some(false));
+
+        let stored_refresh = db
+            .collection::<RefreshToken>(REFRESH_TOKENS)
+            .find_one(doc! { "jti": &exchanged.refresh_token_jti })
+            .await
+            .expect("query refresh")
+            .expect("refresh stored");
+        assert!(!stored_refresh.allow_all_services);
+        assert!(stored_refresh.resource_uris.is_empty());
+        assert_eq!(stored_refresh.allowed_service_ids, vec![service_a_id]);
+    }
+
+    #[tokio::test]
+    async fn exchange_authorization_code_rejects_resource_outside_consent_only_service_grant() {
+        let Some(db) = connect_test_database("oauth_consent_only_resource_reject").await else {
+            return;
+        };
+        let client = test_client("client-consent-only-resource-reject", "public", "");
+        insert_client(&db, &client).await;
+        let user_id = Uuid::new_v4().to_string();
+        let service_a_id = Uuid::new_v4().to_string();
+        let service_b_id = Uuid::new_v4().to_string();
+        let now = Utc::now();
+
+        db.collection::<User>(USERS)
+            .insert_one(crate::test_utils::test_user(
+                &user_id,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .expect("insert user");
+        db.collection::<crate::models::user_service::UserService>(
+            crate::models::user_service::COLLECTION_NAME,
+        )
+        .insert_many([
+            test_user_service(&service_a_id, &user_id, "svc-a", "endpoint-a", None, None),
+            test_user_service(&service_b_id, &user_id, "svc-b", "endpoint-b", None, None),
+        ])
+        .await
+        .expect("insert user services");
+
+        let code = "consent-only-resource-reject-code";
+        db.collection::<AuthorizationCode>(AUTH_CODES)
+            .insert_one(AuthorizationCode {
+                id: Uuid::new_v4().to_string(),
+                code_hash: hash_token(code),
+                client_id: client.id.clone(),
+                user_id: user_id.clone(),
+                redirect_uri: "https://app.example/callback".to_string(),
+                scope: "openid".to_string(),
+                code_challenge: None,
+                code_challenge_method: None,
+                nonce: None,
+                external_subject: None,
+                resource_uris: Vec::new(),
+                allowed_service_ids: vec![service_a_id],
+                allow_all_services: false,
+                expires_at: now + Duration::minutes(5),
+                used: false,
+                created_at: now,
+            })
+            .await
+            .expect("insert authorization code");
+
+        let config = crate::test_utils::test_app_config();
+        let jwt_keys = crate::test_utils::cached_test_jwt_keys();
+        let resource_b = oauth_resource_service::user_service_resource_uri(&config, "svc-b");
+        let requested = vec![resource_b];
+        let err = match exchange_authorization_code(
+            &db,
+            &config,
+            &jwt_keys,
+            code,
+            &client.id,
+            "https://app.example/callback",
+            None,
+            None,
+            None,
+            Some(&requested),
+        )
+        .await
+        {
+            Ok(_) => panic!("resource outside consented services is rejected"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, AppError::InvalidTarget(_)));
+
+        let refresh_count = db
+            .collection::<RefreshToken>(REFRESH_TOKENS)
+            .count_documents(doc! { "client_id": &client.id, "user_id": &user_id })
+            .await
+            .expect("count refresh tokens");
+        assert_eq!(refresh_count, 0);
     }
 
     #[tokio::test]

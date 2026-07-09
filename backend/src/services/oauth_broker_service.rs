@@ -629,6 +629,27 @@ pub async fn revoke_bindings_for_user_client(
         )
         .await?;
 
+    if !bindings.is_empty() {
+        let refresh_jtis: Vec<String> = bindings
+            .iter()
+            .map(|binding| binding.refresh_token_jti.clone())
+            .collect();
+        db.collection::<RefreshToken>(REFRESH_TOKENS)
+            .update_many(
+                doc! {
+                    "jti": { "$in": refresh_jtis },
+                    "client_id": client_id,
+                    "user_id": user_id,
+                    "revoked": false,
+                },
+                doc! { "$set": {
+                    "revoked": true,
+                    "revoked_at": bson::DateTime::from_chrono(now),
+                }},
+            )
+            .await?;
+    }
+
     let revoke_source = revoke_source_for_reason(reason);
     for binding in bindings {
         spawn_revocation_webhook(
@@ -1714,6 +1735,75 @@ mod tests {
         .await
         .expect("wrong client revoke");
         assert!(!wrong_client);
+    }
+
+    #[tokio::test]
+    async fn revoke_bindings_for_user_client_revokes_bindings_and_refresh_tokens() {
+        let Some(db) = connect_test_database("broker_revoke_user_client").await else {
+            return;
+        };
+        let encryption_keys = std::sync::Arc::new(test_encryption_keys());
+        let raw_binding_id = generate_binding_id();
+        let other_raw_binding_id = generate_binding_id();
+        let binding_hash = hash_binding_id(&raw_binding_id);
+        let other_binding_hash = hash_binding_id(&other_raw_binding_id);
+
+        insert_refresh_token(&db, "jti-consent-revoke", "client-1", "user-1", false).await;
+        insert_refresh_token(&db, "jti-other-client", "client-2", "user-1", false).await;
+        insert_binding(
+            &db,
+            &encryption_keys,
+            BindingSeed {
+                raw_binding_id: &raw_binding_id,
+                client_id: "client-1",
+                user_id: "user-1",
+                refresh_token_jti: "jti-consent-revoke",
+                refresh_token: "refresh-consent-revoke",
+                scopes: vec!["openid".to_string()],
+                created_at: Utc::now(),
+                revoked: false,
+                revoke_reason: None,
+            },
+        )
+        .await;
+        insert_binding(
+            &db,
+            &encryption_keys,
+            BindingSeed {
+                raw_binding_id: &other_raw_binding_id,
+                client_id: "client-2",
+                user_id: "user-1",
+                refresh_token_jti: "jti-other-client",
+                refresh_token: "refresh-other-client",
+                scopes: vec!["openid".to_string()],
+                created_at: Utc::now(),
+                revoked: false,
+                revoke_reason: None,
+            },
+        )
+        .await;
+
+        let revoked = revoke_bindings_for_user_client(
+            &db,
+            encryption_keys.clone(),
+            &reqwest::Client::new(),
+            "client-1",
+            "user-1",
+            "user_revoked",
+        )
+        .await
+        .unwrap();
+        assert_eq!(revoked, 1);
+
+        let binding = load_binding(&db, &binding_hash).await;
+        assert!(binding.revoked);
+        assert_eq!(binding.revoke_reason.as_deref(), Some("user_revoked"));
+        let refresh = load_refresh_by_jti(&db, "jti-consent-revoke").await;
+        assert!(refresh.revoked);
+        assert!(refresh.revoked_at.is_some());
+
+        assert!(!load_binding(&db, &other_binding_hash).await.revoked);
+        assert!(!load_refresh_by_jti(&db, "jti-other-client").await.revoked);
     }
 
     #[tokio::test]

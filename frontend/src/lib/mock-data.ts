@@ -729,7 +729,26 @@ const MOCK_ORG_MEMBERS = {
 
 // ── Consents ──
 const MOCK_CONSENTS = [
-  { id: "consent-0001", client_name: "NyxID Dashboard", client_id: "app-0001", scopes: "openid profile email", granted_at: "2026-01-10T09:30:00Z" },
+  {
+    id: "consent-0001",
+    client_name: "NyxID Dashboard",
+    client_id: "app-0001",
+    scopes: "openid profile email",
+    allow_all_services: false,
+    allowed_service_ids: ["svc-openai"],
+    allowed_services: [
+      {
+        id: "svc-openai",
+        slug: "openai",
+        label: "OpenAI",
+        catalog_service_name: "OpenAI",
+        deleted: false,
+      },
+    ],
+    legacy_unrestricted: false,
+    granted_at: "2026-01-10T09:30:00Z",
+    expires_at: null,
+  },
 ];
 
 // ── Broker Bindings ──

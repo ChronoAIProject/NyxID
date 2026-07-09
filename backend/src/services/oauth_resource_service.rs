@@ -9,6 +9,13 @@ pub struct ResolvedOAuthResources {
     pub service_ids: Vec<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OAuthTokenResourceScope {
+    pub resource_uris: Vec<String>,
+    pub allowed_service_ids: Vec<String>,
+    pub allow_all_services: bool,
+}
+
 pub fn user_service_resource_uri(config: &AppConfig, slug: &str) -> String {
     format!(
         "{}/api/v1/proxy/s/{}",
@@ -92,6 +99,81 @@ pub async fn resolve_resource_service_ids_for_user(
 ) -> AppResult<Vec<String>> {
     let resolved = resolve_requested_resources(db, config, actor_user_id, Some(resources)).await?;
     Ok(resolved.map(|r| r.service_ids).unwrap_or_default())
+}
+
+pub async fn resolve_token_resource_scope(
+    db: &mongodb::Database,
+    config: &AppConfig,
+    actor_user_id: &str,
+    requested_resources: Option<&[String]>,
+    grant_resource_uris: &[String],
+    grant_allowed_service_ids: &[String],
+    grant_allow_all_services: bool,
+) -> AppResult<OAuthTokenResourceScope> {
+    let Some(resources) = requested_resources.filter(|resources| !resources.is_empty()) else {
+        let allowed_service_ids = if !grant_allow_all_services && !grant_resource_uris.is_empty() {
+            resolve_resource_service_ids_for_user(db, config, actor_user_id, grant_resource_uris)
+                .await?
+        } else {
+            grant_allowed_service_ids.to_vec()
+        };
+
+        return Ok(OAuthTokenResourceScope {
+            resource_uris: grant_resource_uris.to_vec(),
+            allowed_service_ids,
+            allow_all_services: grant_allow_all_services,
+        });
+    };
+
+    if grant_allow_all_services {
+        let resolved = resolve_requested_resources(db, config, actor_user_id, Some(resources))
+            .await?
+            .unwrap_or(ResolvedOAuthResources {
+                resource_uris: Vec::new(),
+                service_ids: Vec::new(),
+            });
+
+        return Ok(OAuthTokenResourceScope {
+            resource_uris: resolved.resource_uris,
+            allowed_service_ids: resolved.service_ids,
+            allow_all_services: false,
+        });
+    }
+
+    if !grant_resource_uris.is_empty() {
+        let resource_uris = filter_resource_narrowing(resources, grant_resource_uris)?;
+        let allowed_service_ids =
+            resolve_resource_service_ids_for_user(db, config, actor_user_id, &resource_uris)
+                .await?;
+
+        return Ok(OAuthTokenResourceScope {
+            resource_uris,
+            allowed_service_ids,
+            allow_all_services: false,
+        });
+    }
+
+    let resolved = resolve_requested_resources(db, config, actor_user_id, Some(resources))
+        .await?
+        .unwrap_or(ResolvedOAuthResources {
+            resource_uris: Vec::new(),
+            service_ids: Vec::new(),
+        });
+    if !resolved.service_ids.iter().all(|service_id| {
+        grant_allowed_service_ids
+            .iter()
+            .any(|granted| granted == service_id)
+    }) {
+        return Err(AppError::InvalidTarget(
+            "resource cannot expand beyond the previously granted services".to_string(),
+        ));
+    }
+
+    Ok(OAuthTokenResourceScope {
+        resource_uris: resolved.resource_uris,
+        allowed_service_ids: resolved.service_ids,
+        allow_all_services: false,
+    })
 }
 
 async fn resolve_single_resource(
