@@ -498,6 +498,7 @@ fn allowlist_for(kind: FlowKind) -> Vec<ProxyRoute> {
                     "allowed_scopes",
                     "delegation_scopes",
                     "broker_capability_enabled",
+                    "default_service_catalog_slugs",
                     "target_org_id",
                 ],
             },
@@ -1845,6 +1846,11 @@ fn prefill_query(prefill: &PrefillData) -> String {
             if let Some(b) = p.broker_capability {
                 parts.push(format!("broker_capability={}", if b { 1 } else { 0 }));
             }
+            for slug in &p.default_service_catalog_slugs {
+                if !slug.is_empty() {
+                    parts.push(format!("default_service={}", urlencoding::encode(slug)));
+                }
+            }
             push_opt(&mut parts, "org_id", &p.org_id);
         }
         PrefillData::MfaSetup(_) => {
@@ -1959,6 +1965,18 @@ fn prefill_to_json(prefill: &PrefillData) -> serde_json::Value {
             put_opt(&mut obj, "delegation_scopes", &p.delegation_scopes);
             if let Some(b) = p.broker_capability {
                 obj.insert("broker_capability".to_string(), Value::Bool(b));
+            }
+            if !p.default_service_catalog_slugs.is_empty() {
+                obj.insert(
+                    "default_service_catalog_slugs".to_string(),
+                    Value::Array(
+                        p.default_service_catalog_slugs
+                            .iter()
+                            .filter(|s| !s.is_empty())
+                            .map(|s| Value::String(s.clone()))
+                            .collect(),
+                    ),
+                );
             }
             put_opt(&mut obj, "org_id", &p.org_id);
         }
@@ -2988,12 +3006,15 @@ mod tests {
             name: Some("app".into()),
             redirect_uris: vec!["https://x.com/cb".into()],
             broker_capability: Some(true),
+            default_service_catalog_slugs: vec!["llm-openai".into(), "api-github".into()],
             ..Default::default()
         });
         let q = prefill_query(&prefill);
         assert!(q.contains("name=app"));
         assert!(q.contains("redirect_uri="));
         assert!(q.contains("broker_capability=1"));
+        assert!(q.contains("default_service=llm-openai"));
+        assert!(q.contains("default_service=api-github"));
     }
 
     #[test]
@@ -3040,11 +3061,16 @@ mod tests {
     fn prefill_to_json_developer_app_create_includes_uris() {
         let prefill = PrefillData::DeveloperAppCreate(DeveloperAppCreatePrefill {
             redirect_uris: vec!["https://a.com".into()],
+            default_service_catalog_slugs: vec!["llm-openai".into()],
             ..Default::default()
         });
         let json = prefill_to_json(&prefill);
         let uris = json["redirect_uris"].as_array().unwrap();
         assert_eq!(uris.len(), 1);
+        assert_eq!(
+            json["default_service_catalog_slugs"],
+            serde_json::json!(["llm-openai"])
+        );
     }
 
     #[test]

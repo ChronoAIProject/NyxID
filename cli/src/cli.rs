@@ -3722,6 +3722,10 @@ pub enum DeveloperAppCommands {
         delegation_scopes: Option<String>,
         #[arg(long = "broker-capability")]
         broker_capability: Option<bool>,
+        /// Catalog service slug to request by default at consent time.
+        /// Repeat to declare multiple default services.
+        #[arg(long = "default-service", value_name = "CATALOG_SLUG")]
+        default_services: Vec<String>,
         /// Create under the given org (you must be an admin of that org).
         /// Omit to create a personal developer app.
         #[arg(
@@ -3780,6 +3784,17 @@ pub enum DeveloperAppCommands {
         delegation_scopes: Option<String>,
         #[arg(long = "broker-capability")]
         broker_capability: Option<bool>,
+        /// Catalog service slug to request by default at consent time.
+        /// Repeat to replace the full default-service list.
+        #[arg(
+            long = "default-service",
+            value_name = "CATALOG_SLUG",
+            conflicts_with = "clear_default_services"
+        )]
+        default_services: Vec<String>,
+        /// Clear the declared default-service list.
+        #[arg(long = "clear-default-services", conflicts_with = "default_services")]
+        clear_default_services: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },

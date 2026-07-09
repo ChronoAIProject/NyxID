@@ -3,6 +3,7 @@
 ## Table of contents
 
 - [Account Management](#account-management)
+- [Authorized Apps and Consents](#authorized-apps-and-consents)
 - [Admin Operations](#admin-operations)
   - [Platform roles](#platform-roles)
   - [User Management](#user-management)
@@ -20,6 +21,19 @@ nyxid mfa setup                                        # enable MFA (shows QR co
 nyxid mfa verify --code 123456                         # verify MFA setup
 nyxid session list --output json                       # list active sessions
 ```
+
+## Authorized Apps and Consents
+
+`/settings/consents` is the user-facing `Access & Authorizations` page:
+
+- `Authorized Apps` lists OAuth consents.
+- `Authorizations` lists OAuth broker bindings.
+
+Authorized Apps now show service access as well as scopes. Use this page, or `nyxid profile consents --output json`, to answer which services an app can reach. Relevant fields are `allow_all_services`, `allowed_services`, and `legacy_unrestricted`.
+
+Revoking an Authorized App deletes the consent, revokes the client's refresh-token chain for that user, and revokes broker bindings for the same user/client. Already-issued access tokens can keep working until they expire; the UI warns about a tail of up to 15 minutes.
+
+To restrict an app's service access, have the user re-consent with `prompt=consent` and use `Customize`, or revoke the app and sign in again. There is no direct edit-in-place UI or CLI command for service allowlists yet. See [`oauth-consent.md`](oauth-consent.md) for the full consent model and RFC 8707 behavior.
 
 ## Admin Operations
 

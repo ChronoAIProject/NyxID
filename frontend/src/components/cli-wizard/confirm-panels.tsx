@@ -877,6 +877,12 @@ export function DeveloperAppCreateConfirm({
       if (brokerCapability) {
         body.broker_capability_enabled = true;
       }
+      const defaultServices = (prefill.default_service_catalog_slugs ?? [])
+        .map((s) => s.trim())
+        .filter(Boolean);
+      if (defaultServices.length > 0) {
+        body.default_service_catalog_slugs = defaultServices;
+      }
       if (ownerId) body.target_org_id = ownerId;
 
       await reservePairingAction(pairingId);
