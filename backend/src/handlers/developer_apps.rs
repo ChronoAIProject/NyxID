@@ -8,9 +8,10 @@ use url::Url;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
+use crate::handlers::admin_helpers::require_admin;
 use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
 use crate::mw::auth::AuthUser;
-use crate::services::{oauth_client_service, org_service};
+use crate::services::{oauth_broker_service, oauth_client_service, org_service};
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event, hash_short_id};
 use mongodb::bson::doc;
 
@@ -258,6 +259,30 @@ fn normalize_optional_nonempty(input: Option<&str>) -> Option<&str> {
     input.map(str::trim).filter(|value| !value.is_empty())
 }
 
+async fn require_platform_admin_for_broker_capability(
+    state: &AppState,
+    auth_user: &AuthUser,
+    requested_broker_capability: Option<bool>,
+    requested_allowed_scopes: Option<&str>,
+) -> AppResult<()> {
+    let requested_broker_scope = requested_allowed_scopes.is_some_and(|scopes| {
+        scopes
+            .split_whitespace()
+            .any(|scope| scope == oauth_broker_service::BROKER_BINDING_SCOPE)
+    });
+
+    if state.config.broker_require_admin_capability()
+        && (requested_broker_capability == Some(true) || requested_broker_scope)
+    {
+        require_admin(state, auth_user).await.map_err(|_| {
+            AppError::Forbidden(
+                "Broker capability must be provisioned by a platform admin".to_string(),
+            )
+        })?;
+    }
+    Ok(())
+}
+
 // ── Handlers ──
 
 /// POST /api/v1/developer/oauth-clients
@@ -274,6 +299,12 @@ pub async fn create_my_oauth_client(
     }
 
     let validated_uris = validate_redirect_uris(&body.redirect_uris)?;
+    let allowed_scopes = body
+        .allowed_scopes
+        .as_deref()
+        .map(oauth_client_service::validate_allowed_scopes_list)
+        .transpose()?
+        .unwrap_or_else(|| oauth_client_service::DEFAULT_ALLOWED_SCOPES.to_string());
 
     let client_type = body.client_type.as_deref().unwrap_or("public");
     if !matches!(client_type, "confidential" | "public") {
@@ -283,6 +314,13 @@ pub async fn create_my_oauth_client(
     }
 
     let delegation_scopes = body.delegation_scopes.as_deref().unwrap_or("");
+    require_platform_admin_for_broker_capability(
+        &state,
+        &auth_user,
+        body.broker_capability_enabled,
+        Some(&allowed_scopes),
+    )
+    .await?;
     let actor = auth_user.user_id.to_string();
     let user_id = if let Some(target_org_id) = body.target_org_id.as_deref() {
         let access = org_service::resolve_owner_access(&state.db, &actor, target_org_id).await?;
@@ -297,12 +335,6 @@ pub async fn create_my_oauth_client(
         actor
     };
 
-    let allowed_scopes = body
-        .allowed_scopes
-        .as_deref()
-        .map(oauth_client_service::validate_allowed_scopes_list)
-        .transpose()?
-        .unwrap_or_else(|| oauth_client_service::DEFAULT_ALLOWED_SCOPES.to_string());
     let revocation_webhook_url =
         normalize_optional_nonempty(body.revocation_webhook_url.as_deref());
     let revocation_webhook_secret_encrypted =
@@ -408,12 +440,18 @@ pub async fn update_my_oauth_client(
 
     let actor = auth_user.user_id.to_string();
     let user_id = resolve_developer_app_write_owner(&state, &actor, &client_id).await?;
-
     let validated_allowed_scopes = body
         .allowed_scopes
         .as_deref()
         .map(oauth_client_service::validate_allowed_scopes_list)
         .transpose()?;
+    require_platform_admin_for_broker_capability(
+        &state,
+        &auth_user,
+        body.broker_capability_enabled,
+        validated_allowed_scopes.as_deref(),
+    )
+    .await?;
     let revocation_webhook_url =
         normalize_optional_nonempty(body.revocation_webhook_url.as_deref());
     let revocation_webhook_secret_encrypted =
@@ -492,11 +530,35 @@ pub async fn delete_my_oauth_client(
 mod tests {
     use super::*;
     use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
-    use crate::test_utils::{connect_test_database, test_app_state, test_auth_user, test_user};
+    use crate::services::oauth_broker_service::BROKER_BINDING_SCOPE;
+    use crate::services::role_service;
+    use crate::test_utils::{
+        connect_test_database, test_app_state, test_app_state_with_config, test_auth_user,
+        test_user,
+    };
     use axum::extract::State;
 
     fn tele() -> TelemetryContext {
         TelemetryContext::default()
+    }
+
+    async fn insert_platform_user(db: &mongodb::Database, is_admin: bool) -> String {
+        role_service::seed_system_roles(db)
+            .await
+            .expect("seed platform roles");
+        let platform_role_ids = role_service::get_platform_role_ids(db)
+            .await
+            .expect("platform role ids");
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let mut user = test_user(&user_id, UserType::Person);
+        if is_admin {
+            user.role_ids.push(platform_role_ids.admin);
+        }
+        db.collection::<User>(USERS)
+            .insert_one(user)
+            .await
+            .expect("insert platform user");
+        user_id
     }
 
     #[tokio::test]
@@ -644,6 +706,462 @@ mod tests {
 
         assert_eq!(updated.client_name, "After Update");
         assert!(updated.broker_capability_enabled);
+    }
+
+    #[tokio::test]
+    async fn create_broker_capability_rejected_for_non_admin_when_required() {
+        let Some(db) = connect_test_database("h_dev_apps_broker_create_reject").await else {
+            return;
+        };
+        let user_id = insert_platform_user(&db, false).await;
+        let mut config = crate::test_utils::test_app_config();
+        config.broker_require_admin_capability = true;
+        let state = test_app_state_with_config(db, config);
+        let auth = test_auth_user(&user_id);
+
+        let err = create_my_oauth_client(
+            State(state),
+            auth,
+            tele(),
+            Json(CreateDeveloperOAuthClientRequest {
+                name: "Broker App".to_string(),
+                redirect_uris: vec!["https://example.com/callback".to_string()],
+                client_type: Some("public".to_string()),
+                delegation_scopes: None,
+                broker_capability_enabled: Some(true),
+                revocation_webhook_url: None,
+                revocation_webhook_secret: None,
+                allowed_scopes: None,
+                target_org_id: None,
+                default_service_catalog_slugs: None,
+            }),
+        )
+        .await
+        .expect_err("non-admin broker self-grant rejected");
+
+        assert!(matches!(err, AppError::Forbidden(message) if message.contains("platform admin")));
+    }
+
+    #[tokio::test]
+    async fn create_broker_capability_allowed_for_non_admin_when_not_required() {
+        let Some(db) = connect_test_database("h_dev_apps_broker_create_flag_off").await else {
+            return;
+        };
+        let user_id = insert_platform_user(&db, false).await;
+        let state = test_app_state(db);
+        let auth = test_auth_user(&user_id);
+
+        let Json(created) = create_my_oauth_client(
+            State(state),
+            auth,
+            tele(),
+            Json(CreateDeveloperOAuthClientRequest {
+                name: "Broker App".to_string(),
+                redirect_uris: vec!["https://example.com/callback".to_string()],
+                client_type: Some("public".to_string()),
+                delegation_scopes: None,
+                broker_capability_enabled: Some(true),
+                revocation_webhook_url: None,
+                revocation_webhook_secret: None,
+                allowed_scopes: None,
+                target_org_id: None,
+                default_service_catalog_slugs: None,
+            }),
+        )
+        .await
+        .expect("default-off self-service broker flag remains allowed");
+
+        assert!(created.broker_capability_enabled);
+    }
+
+    #[tokio::test]
+    async fn create_broker_capability_allowed_for_admin_when_required() {
+        let Some(db) = connect_test_database("h_dev_apps_broker_create_admin").await else {
+            return;
+        };
+        let user_id = insert_platform_user(&db, true).await;
+        let mut config = crate::test_utils::test_app_config();
+        config.broker_require_admin_capability = true;
+        let state = test_app_state_with_config(db, config);
+        let auth = test_auth_user(&user_id);
+
+        let Json(created) = create_my_oauth_client(
+            State(state),
+            auth,
+            tele(),
+            Json(CreateDeveloperOAuthClientRequest {
+                name: "Broker App".to_string(),
+                redirect_uris: vec!["https://example.com/callback".to_string()],
+                client_type: Some("public".to_string()),
+                delegation_scopes: None,
+                broker_capability_enabled: Some(true),
+                revocation_webhook_url: None,
+                revocation_webhook_secret: None,
+                allowed_scopes: None,
+                target_org_id: None,
+                default_service_catalog_slugs: None,
+            }),
+        )
+        .await
+        .expect("admin may provision broker capability");
+
+        assert!(created.broker_capability_enabled);
+    }
+
+    #[tokio::test]
+    async fn create_broker_scope_rejected_for_non_admin_when_required() {
+        let Some(db) = connect_test_database("h_dev_apps_broker_scope_create_reject").await else {
+            return;
+        };
+        let user_id = insert_platform_user(&db, false).await;
+        let mut config = crate::test_utils::test_app_config();
+        config.broker_require_admin_capability = true;
+        let state = test_app_state_with_config(db, config);
+        let auth = test_auth_user(&user_id);
+
+        let err = create_my_oauth_client(
+            State(state),
+            auth,
+            tele(),
+            Json(CreateDeveloperOAuthClientRequest {
+                name: "Broker Scope App".to_string(),
+                redirect_uris: vec!["https://example.com/callback".to_string()],
+                client_type: Some("public".to_string()),
+                delegation_scopes: None,
+                broker_capability_enabled: None,
+                revocation_webhook_url: None,
+                revocation_webhook_secret: None,
+                allowed_scopes: Some(vec!["openid".to_string(), BROKER_BINDING_SCOPE.to_string()]),
+                target_org_id: None,
+                default_service_catalog_slugs: None,
+            }),
+        )
+        .await
+        .expect_err("non-admin broker scope self-grant rejected");
+
+        assert!(matches!(err, AppError::Forbidden(message) if message.contains("platform admin")));
+    }
+
+    #[tokio::test]
+    async fn create_broker_scope_allowed_for_non_admin_when_not_required() {
+        let Some(db) = connect_test_database("h_dev_apps_broker_scope_create_flag_off").await
+        else {
+            return;
+        };
+        let user_id = insert_platform_user(&db, false).await;
+        let state = test_app_state(db);
+        let auth = test_auth_user(&user_id);
+
+        let Json(created) = create_my_oauth_client(
+            State(state),
+            auth,
+            tele(),
+            Json(CreateDeveloperOAuthClientRequest {
+                name: "Broker Scope App".to_string(),
+                redirect_uris: vec!["https://example.com/callback".to_string()],
+                client_type: Some("public".to_string()),
+                delegation_scopes: None,
+                broker_capability_enabled: None,
+                revocation_webhook_url: None,
+                revocation_webhook_secret: None,
+                allowed_scopes: Some(vec!["openid".to_string(), BROKER_BINDING_SCOPE.to_string()]),
+                target_org_id: None,
+                default_service_catalog_slugs: None,
+            }),
+        )
+        .await
+        .expect("default-off broker scope remains allowed");
+
+        assert!(
+            created
+                .allowed_scopes
+                .split_whitespace()
+                .any(|scope| scope == BROKER_BINDING_SCOPE)
+        );
+    }
+
+    #[tokio::test]
+    async fn create_broker_scope_allowed_for_admin_when_required() {
+        let Some(db) = connect_test_database("h_dev_apps_broker_scope_create_admin").await else {
+            return;
+        };
+        let user_id = insert_platform_user(&db, true).await;
+        let mut config = crate::test_utils::test_app_config();
+        config.broker_require_admin_capability = true;
+        let state = test_app_state_with_config(db, config);
+        let auth = test_auth_user(&user_id);
+
+        let Json(created) = create_my_oauth_client(
+            State(state),
+            auth,
+            tele(),
+            Json(CreateDeveloperOAuthClientRequest {
+                name: "Broker Scope App".to_string(),
+                redirect_uris: vec!["https://example.com/callback".to_string()],
+                client_type: Some("public".to_string()),
+                delegation_scopes: None,
+                broker_capability_enabled: None,
+                revocation_webhook_url: None,
+                revocation_webhook_secret: None,
+                allowed_scopes: Some(vec!["openid".to_string(), BROKER_BINDING_SCOPE.to_string()]),
+                target_org_id: None,
+                default_service_catalog_slugs: None,
+            }),
+        )
+        .await
+        .expect("admin may provision broker scope");
+
+        assert!(
+            created
+                .allowed_scopes
+                .split_whitespace()
+                .any(|scope| scope == BROKER_BINDING_SCOPE)
+        );
+    }
+
+    #[tokio::test]
+    async fn update_broker_capability_gate_respects_admin_requirement() {
+        let Some(db) = connect_test_database("h_dev_apps_broker_update_gate").await else {
+            return;
+        };
+        let user_id = insert_platform_user(&db, false).await;
+        let mut config = crate::test_utils::test_app_config();
+        config.broker_require_admin_capability = true;
+        let state = test_app_state_with_config(db.clone(), config);
+        let auth = test_auth_user(&user_id);
+
+        let Json(created) = create_my_oauth_client(
+            State(state.clone()),
+            auth.clone(),
+            tele(),
+            Json(CreateDeveloperOAuthClientRequest {
+                name: "Broker Update App".to_string(),
+                redirect_uris: vec!["https://example.com/callback".to_string()],
+                client_type: Some("public".to_string()),
+                delegation_scopes: None,
+                broker_capability_enabled: None,
+                revocation_webhook_url: None,
+                revocation_webhook_secret: None,
+                allowed_scopes: None,
+                target_org_id: None,
+                default_service_catalog_slugs: None,
+            }),
+        )
+        .await
+        .expect("create non-broker app");
+
+        let err = update_my_oauth_client(
+            State(state.clone()),
+            auth,
+            Path(created.id.clone()),
+            Json(UpdateDeveloperOAuthClientRequest {
+                name: None,
+                redirect_uris: None,
+                delegation_scopes: None,
+                broker_capability_enabled: Some(true),
+                revocation_webhook_url: None,
+                revocation_webhook_secret: None,
+                allowed_scopes: None,
+                default_service_catalog_slugs: None,
+            }),
+        )
+        .await
+        .expect_err("non-admin update self-grant rejected");
+        assert!(matches!(err, AppError::Forbidden(message) if message.contains("platform admin")));
+
+        let admin_id = insert_platform_user(&db, true).await;
+        let admin_auth = test_auth_user(&admin_id);
+        let Json(admin_created) = create_my_oauth_client(
+            State(state.clone()),
+            admin_auth.clone(),
+            tele(),
+            Json(CreateDeveloperOAuthClientRequest {
+                name: "Admin Broker Update App".to_string(),
+                redirect_uris: vec!["https://example.com/admin-callback".to_string()],
+                client_type: Some("public".to_string()),
+                delegation_scopes: None,
+                broker_capability_enabled: None,
+                revocation_webhook_url: None,
+                revocation_webhook_secret: None,
+                allowed_scopes: None,
+                target_org_id: None,
+                default_service_catalog_slugs: None,
+            }),
+        )
+        .await
+        .expect("admin creates non-broker app");
+        let Json(updated) = update_my_oauth_client(
+            State(state),
+            admin_auth,
+            Path(admin_created.id),
+            Json(UpdateDeveloperOAuthClientRequest {
+                name: None,
+                redirect_uris: None,
+                delegation_scopes: None,
+                broker_capability_enabled: Some(true),
+                revocation_webhook_url: None,
+                revocation_webhook_secret: None,
+                allowed_scopes: None,
+                default_service_catalog_slugs: None,
+            }),
+        )
+        .await
+        .expect("admin update self-grant allowed");
+
+        assert!(updated.broker_capability_enabled);
+    }
+
+    #[tokio::test]
+    async fn update_broker_scope_gate_respects_admin_requirement() {
+        let Some(db) = connect_test_database("h_dev_apps_broker_scope_update_gate").await else {
+            return;
+        };
+        let user_id = insert_platform_user(&db, false).await;
+        let mut config = crate::test_utils::test_app_config();
+        config.broker_require_admin_capability = true;
+        let state = test_app_state_with_config(db.clone(), config);
+        let auth = test_auth_user(&user_id);
+
+        let Json(created) = create_my_oauth_client(
+            State(state.clone()),
+            auth.clone(),
+            tele(),
+            Json(CreateDeveloperOAuthClientRequest {
+                name: "Broker Scope Update App".to_string(),
+                redirect_uris: vec!["https://example.com/callback".to_string()],
+                client_type: Some("public".to_string()),
+                delegation_scopes: None,
+                broker_capability_enabled: None,
+                revocation_webhook_url: None,
+                revocation_webhook_secret: None,
+                allowed_scopes: None,
+                target_org_id: None,
+                default_service_catalog_slugs: None,
+            }),
+        )
+        .await
+        .expect("create non-broker app");
+
+        let err = update_my_oauth_client(
+            State(state.clone()),
+            auth,
+            Path(created.id.clone()),
+            Json(UpdateDeveloperOAuthClientRequest {
+                name: None,
+                redirect_uris: None,
+                delegation_scopes: None,
+                broker_capability_enabled: None,
+                revocation_webhook_url: None,
+                revocation_webhook_secret: None,
+                allowed_scopes: Some(vec!["openid".to_string(), BROKER_BINDING_SCOPE.to_string()]),
+                default_service_catalog_slugs: None,
+            }),
+        )
+        .await
+        .expect_err("non-admin broker scope update rejected");
+        assert!(matches!(err, AppError::Forbidden(message) if message.contains("platform admin")));
+
+        let admin_id = insert_platform_user(&db, true).await;
+        let admin_auth = test_auth_user(&admin_id);
+        let Json(admin_created) = create_my_oauth_client(
+            State(state.clone()),
+            admin_auth.clone(),
+            tele(),
+            Json(CreateDeveloperOAuthClientRequest {
+                name: "Admin Broker Scope Update App".to_string(),
+                redirect_uris: vec!["https://example.com/admin-callback".to_string()],
+                client_type: Some("public".to_string()),
+                delegation_scopes: None,
+                broker_capability_enabled: None,
+                revocation_webhook_url: None,
+                revocation_webhook_secret: None,
+                allowed_scopes: None,
+                target_org_id: None,
+                default_service_catalog_slugs: None,
+            }),
+        )
+        .await
+        .expect("admin creates non-broker app");
+        let Json(updated) = update_my_oauth_client(
+            State(state),
+            admin_auth,
+            Path(admin_created.id),
+            Json(UpdateDeveloperOAuthClientRequest {
+                name: None,
+                redirect_uris: None,
+                delegation_scopes: None,
+                broker_capability_enabled: None,
+                revocation_webhook_url: None,
+                revocation_webhook_secret: None,
+                allowed_scopes: Some(vec!["openid".to_string(), BROKER_BINDING_SCOPE.to_string()]),
+                default_service_catalog_slugs: None,
+            }),
+        )
+        .await
+        .expect("admin broker scope update allowed");
+
+        assert!(
+            updated
+                .allowed_scopes
+                .split_whitespace()
+                .any(|scope| scope == BROKER_BINDING_SCOPE)
+        );
+    }
+
+    #[tokio::test]
+    async fn update_broker_scope_allowed_for_non_admin_when_not_required() {
+        let Some(db) = connect_test_database("h_dev_apps_broker_scope_update_flag_off").await
+        else {
+            return;
+        };
+        let user_id = insert_platform_user(&db, false).await;
+        let state = test_app_state(db);
+        let auth = test_auth_user(&user_id);
+
+        let Json(created) = create_my_oauth_client(
+            State(state.clone()),
+            auth.clone(),
+            tele(),
+            Json(CreateDeveloperOAuthClientRequest {
+                name: "Broker Scope Update App".to_string(),
+                redirect_uris: vec!["https://example.com/callback".to_string()],
+                client_type: Some("public".to_string()),
+                delegation_scopes: None,
+                broker_capability_enabled: None,
+                revocation_webhook_url: None,
+                revocation_webhook_secret: None,
+                allowed_scopes: None,
+                target_org_id: None,
+                default_service_catalog_slugs: None,
+            }),
+        )
+        .await
+        .expect("create non-broker app");
+
+        let Json(updated) = update_my_oauth_client(
+            State(state),
+            auth,
+            Path(created.id),
+            Json(UpdateDeveloperOAuthClientRequest {
+                name: None,
+                redirect_uris: None,
+                delegation_scopes: None,
+                broker_capability_enabled: None,
+                revocation_webhook_url: None,
+                revocation_webhook_secret: None,
+                allowed_scopes: Some(vec!["openid".to_string(), BROKER_BINDING_SCOPE.to_string()]),
+                default_service_catalog_slugs: None,
+            }),
+        )
+        .await
+        .expect("default-off broker scope update remains allowed");
+
+        assert!(
+            updated
+                .allowed_scopes
+                .split_whitespace()
+                .any(|scope| scope == BROKER_BINDING_SCOPE)
+        );
     }
 
     #[tokio::test]

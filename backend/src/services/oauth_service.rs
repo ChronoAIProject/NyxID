@@ -273,6 +273,8 @@ pub async fn exchange_authorization_code(
     client_secret: Option<&str>,
     access_token_ttl_override_secs: Option<i64>,
     requested_resources: Option<&[String]>,
+    dpop_jkt: Option<&str>,
+    mtls_x5t_s256: Option<&str>,
 ) -> AppResult<ExchangedTokens> {
     let code_hash = hash_token(code);
 
@@ -355,7 +357,10 @@ pub async fn exchange_authorization_code(
 
     validate_client_secret(&client, client_secret)?;
     let broker_capability_enabled =
-        crate::services::oauth_broker_service::is_broker_client(&client);
+        crate::services::oauth_broker_service::is_broker_client_with_policy(
+            &client,
+            config.broker_require_admin_capability(),
+        );
 
     // PKCE verification (S256 only)
     if let Some(challenge) = &stored.code_challenge {
@@ -410,8 +415,8 @@ pub async fn exchange_authorization_code(
         broker_capability_enabled
             .then_some(access_token_ttl_override_secs)
             .flatten(),
-        None,
-        None,
+        dpop_jkt,
+        mtls_x5t_s256,
         (!token_resource_scope.allow_all_services).then_some(
             crate::crypto::jwt::AccessTokenRestrictions {
                 resources: &token_resource_scope.resource_uris,
@@ -809,6 +814,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
         )
         .await
         .expect("exchange authorization code");
@@ -898,6 +905,8 @@ mod tests {
             None,
             None,
             Some(&requested),
+            None,
+            None,
         )
         .await
         .expect("exchange authorization code");
@@ -996,6 +1005,8 @@ mod tests {
             None,
             None,
             Some(&requested),
+            None,
+            None,
         )
         .await
         {
@@ -1074,6 +1085,8 @@ mod tests {
             code,
             client_id,
             "https://app.example/callback",
+            None,
+            None,
             None,
             None,
             None,

@@ -104,6 +104,13 @@ pub struct AppConfig {
     /// RFC 8705 certificate-bound broker access tokens. Unset/empty disables
     /// mTLS binding even if a client sends `X-Client-Cert` directly.
     pub mtls_client_cert_header: Option<String>,
+    /// Require DPoP or mTLS sender constraints for OAuth broker bindings.
+    /// Default false keeps existing aevatar broker clients working until
+    /// coordinated rollout flips the hardening gate.
+    pub broker_require_sender_constraint: bool,
+    /// Require the admin-managed OAuth client broker-capability flag, ignoring
+    /// the legacy DCR scope trigger. Default false preserves current behavior.
+    pub broker_require_admin_capability: bool,
 
     /// Explicit HMAC key (64 hex chars = 32 bytes) used to derive
     /// `CliPairing.code_hash`. When unset, the backend derives the
@@ -399,6 +406,14 @@ impl std::fmt::Debug for AppConfig {
             .field("rate_limit_burst", &self.rate_limit_burst)
             .field("trusted_proxy_ips", &self.trusted_proxy_ips)
             .field("mtls_client_cert_header", &self.mtls_client_cert_header)
+            .field(
+                "broker_require_sender_constraint",
+                &self.broker_require_sender_constraint,
+            )
+            .field(
+                "broker_require_admin_capability",
+                &self.broker_require_admin_capability,
+            )
             .field(
                 "cli_pairing_hmac_key",
                 if self.cli_pairing_hmac_key.is_some() {
@@ -764,6 +779,14 @@ impl AppConfig {
                 .ok()
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty()),
+            broker_require_sender_constraint: parse_bool_env(
+                "BROKER_REQUIRE_SENDER_CONSTRAINT",
+                false,
+            ),
+            broker_require_admin_capability: parse_bool_env(
+                "BROKER_REQUIRE_ADMIN_CAPABILITY",
+                false,
+            ),
             cli_pairing_hmac_key: env::var("CLI_PAIRING_HMAC_KEY")
                 .ok()
                 .filter(|s| !s.trim().is_empty()),
@@ -1159,6 +1182,24 @@ impl AppConfig {
         self.cookie_domain.as_deref()
     }
 
+    /// Broker binding sender-constraint enforcement policy.
+    ///
+    /// Backed by `BROKER_REQUIRE_SENDER_CONSTRAINT` in this PR; kept as an
+    /// accessor so a future runtime policy source can be introduced without
+    /// rewriting enforcement sites.
+    pub fn broker_require_sender_constraint(&self) -> bool {
+        self.broker_require_sender_constraint
+    }
+
+    /// Broker capability provisioning policy.
+    ///
+    /// Backed by `BROKER_REQUIRE_ADMIN_CAPABILITY` in this PR; kept as an
+    /// accessor so a future runtime policy source can be introduced without
+    /// rewriting enforcement sites.
+    pub fn broker_require_admin_capability(&self) -> bool {
+        self.broker_require_admin_capability
+    }
+
     /// Returns true if all Apple Sign In credentials are configured.
     pub fn apple_configured(&self) -> bool {
         self.apple_client_id.is_some()
@@ -1284,6 +1325,8 @@ mod tests {
             rate_limit_burst: 30,
             trusted_proxy_ips: vec![],
             mtls_client_cert_header: None,
+            broker_require_sender_constraint: false,
+            broker_require_admin_capability: false,
             cli_pairing_hmac_key: None,
             audit_chain_hmac_key: None,
             sa_token_ttl_secs: 3600,
@@ -1611,6 +1654,18 @@ mod tests {
         assert!(cfg.cookie_domain().is_none());
         cfg.cookie_domain = Some(".example.com".to_string());
         assert_eq!(cfg.cookie_domain(), Some(".example.com"));
+    }
+
+    #[test]
+    fn broker_policy_accessors_default_false_and_reflect_config() {
+        let mut cfg = make_config("http://localhost:3001", "dev", &"ab".repeat(32));
+        assert!(!cfg.broker_require_sender_constraint());
+        assert!(!cfg.broker_require_admin_capability());
+
+        cfg.broker_require_sender_constraint = true;
+        cfg.broker_require_admin_capability = true;
+        assert!(cfg.broker_require_sender_constraint());
+        assert!(cfg.broker_require_admin_capability());
     }
 
     #[test]

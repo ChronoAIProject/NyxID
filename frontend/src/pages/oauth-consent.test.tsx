@@ -177,6 +177,21 @@ describe("OAuthConsentPage", () => {
     expect(screen.getByText("Custom permission")).toBeInTheDocument();
   });
 
+  it("renders broker binding scope as a high-risk durable credential", () => {
+    setSearch({
+      ...VALID,
+      scope: "openid urn:nyxid:scope:broker_binding",
+    });
+
+    render(<OAuthConsentPage />);
+
+    expect(screen.getByText("Durable broker access")).toBeInTheDocument();
+    expect(screen.getAllByText("High").length).toBeGreaterThan(0);
+    expect(
+      screen.getByText(/durable NyxID credential that can act as you/i),
+    ).toBeInTheDocument();
+  });
+
   it("posts the consent decision form to /oauth/authorize/decision", () => {
     setSearch(VALID);
 

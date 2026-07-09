@@ -76,6 +76,9 @@ pub enum AppError {
     #[error("PKCE verification failed")]
     PkceVerificationFailed,
 
+    #[error("Invalid DPoP proof: {0}")]
+    InvalidDpopProof(String),
+
     #[error("Invalid redirect URI")]
     InvalidRedirectUri,
 
@@ -405,6 +408,7 @@ impl AppError {
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::MfaRequired { .. } => StatusCode::FORBIDDEN,
             Self::PkceVerificationFailed
+            | Self::InvalidDpopProof(_)
             | Self::InvalidRedirectUri
             | Self::InvalidScope(_)
             | Self::InvalidTarget(_) => StatusCode::BAD_REQUEST,
@@ -537,6 +541,7 @@ impl AppError {
             Self::InvalidRedirectUri => 3001,
             Self::InvalidScope(_) => 3002,
             Self::InvalidTarget(_) => 3005,
+            Self::InvalidDpopProof(_) => 3006,
             Self::RoleNotFound(_) => 4000,
             Self::GroupNotFound(_) => 4001,
             Self::ConsentNotFound => 4002,
@@ -645,6 +650,7 @@ impl AppError {
         match self {
             Self::UnsupportedGrantType(_) => "unsupported_grant_type",
             Self::PkceVerificationFailed | Self::InvalidRedirectUri => "invalid_grant",
+            Self::InvalidDpopProof(_) => "invalid_dpop_proof",
             Self::InvalidScope(_) => "invalid_scope",
             Self::InvalidTarget(_) => "invalid_target",
             Self::Unauthorized(_)
@@ -694,6 +700,7 @@ impl AppError {
             Self::TokenExpired => "token_expired",
             Self::MfaRequired { .. } => "mfa_required",
             Self::PkceVerificationFailed => "pkce_verification_failed",
+            Self::InvalidDpopProof(_) => "invalid_dpop_proof",
             Self::InvalidRedirectUri => "invalid_redirect_uri",
             Self::InvalidScope(_) => "invalid_scope",
             Self::InvalidTarget(_) => "invalid_target",
@@ -1737,6 +1744,10 @@ mod tests {
         assert_eq!(
             AppError::InvalidRedirectUri.oauth_error_code(),
             "invalid_grant"
+        );
+        assert_eq!(
+            AppError::InvalidDpopProof("x".into()).oauth_error_code(),
+            "invalid_dpop_proof"
         );
         assert_eq!(
             AppError::InvalidScope("x".into()).oauth_error_code(),

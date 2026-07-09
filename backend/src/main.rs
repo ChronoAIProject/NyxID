@@ -910,6 +910,7 @@ async fn main() {
             axum::http::header::ACCEPT,
             axum::http::header::ORIGIN,
             axum::http::header::COOKIE,
+            "DPoP".parse().unwrap(),
             "X-User-Email".parse().unwrap(),
             "X-User-Display-Name".parse().unwrap(),
             "X-API-Key".parse().unwrap(),

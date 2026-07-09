@@ -3,6 +3,8 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::crypto::jwt::Cnf;
+
 use super::authorization_code::ExternalSubjectRef;
 use super::bson_datetime;
 
@@ -42,6 +44,11 @@ pub struct OauthBrokerBinding {
     /// Optional external-subject reference captured at /oauth/authorize time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_subject: Option<ExternalSubjectRef>,
+
+    /// RFC 7800 confirmation material pinned at binding issuance time.
+    /// Legacy broker bindings are unpinned and deserialize with `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cnf: Option<Cnf>,
 
     /// Optimistic-concurrency counter. Increments on each refresh-token rotation.
     /// Concurrent token-exchange callers race on this field via conditional update.
@@ -147,6 +154,10 @@ mod tests {
                 tenant: Some("t1".to_string()),
                 external_user_id: "u1".to_string(),
             }),
+            cnf: Some(Cnf {
+                jkt: Some("dpop-thumbprint".to_string()),
+                x5t_s256: None,
+            }),
             rotation_version: 2,
             revoked: false,
             last_used_at: Some(now),
@@ -159,6 +170,7 @@ mod tests {
         assert_eq!(binding.id, restored.id);
         assert_eq!(binding.scopes, restored.scopes);
         assert_eq!(binding.external_subject, restored.external_subject);
+        assert_eq!(binding.cnf, restored.cnf);
         assert_eq!(binding.rotation_version, restored.rotation_version);
         assert_eq!(
             binding.refresh_token_encrypted,
@@ -182,6 +194,7 @@ mod tests {
         assert!(restored.refresh_token_encrypted.is_none());
         assert!(restored.scopes.is_empty());
         assert!(restored.external_subject.is_none());
+        assert!(restored.cnf.is_none());
         assert_eq!(restored.rotation_version, 0);
         assert!(!restored.revoked);
         assert!(restored.last_used_at.is_none());
