@@ -29,7 +29,7 @@ use crate::mw::auth::{AuthMethod, AuthUser, OptionalAuthUser};
 use crate::services::{
     audit_service, consent_service, oauth_broker_service, oauth_client_service,
     oauth_resource_service, oauth_service, par_service, service_account_service,
-    social_token_exchange_service, token_exchange_service,
+    social_token_exchange_service, token_exchange_service, user_service_service,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event, hash_short_id};
 
@@ -1287,19 +1287,9 @@ async fn validate_allowed_service_ids(
     user_id: &str,
     allowed_service_ids: &[String],
 ) -> AppResult<()> {
-    if allowed_service_ids.is_empty() {
-        return Ok(());
-    }
-
-    let count = db
-        .collection::<UserService>(USER_SERVICES)
-        .count_documents(doc! {
-            "_id": { "$in": allowed_service_ids },
-            "user_id": user_id,
-        })
-        .await?;
-
-    if count != allowed_service_ids.len() as u64 {
+    if !oauth_resource_service::validate_grantable_service_ids(db, user_id, allowed_service_ids)
+        .await?
+    {
         return Err(AppError::BadRequest(
             "Selected service access contains an unknown service".to_string(),
         ));
@@ -1314,8 +1304,8 @@ async fn validate_allowed_service_ids(
 /// still ownership-validated server-side.
 #[derive(Debug, Default)]
 struct AppDefaultServiceHints {
-    /// The user's own UserService ids matching the app's declared catalog
-    /// slugs -- pre-selected on the consent screen.
+    /// Proxyable personal or org-inherited UserService ids matching the
+    /// app's declared catalog slugs -- pre-selected on the consent screen.
     preselect_service_ids: Vec<String>,
     /// Human-readable names of declared catalog services the user has no
     /// matching service for -- shown as unmatched on the consent screen.
@@ -1323,8 +1313,8 @@ struct AppDefaultServiceHints {
 }
 
 /// Resolve `client.default_service_catalog_slugs` against the consenting
-/// user's services: catalog slug -> DownstreamService id -> the user's
-/// UserServices with that `catalog_service_id`.
+/// user's grantable services: catalog slug -> DownstreamService id ->
+/// visible/proxyable UserServices with that `catalog_service_id`.
 async fn resolve_app_default_service_hints(
     state: &AppState,
     client: &crate::models::oauth_client::OauthClient,
@@ -1351,16 +1341,22 @@ async fn resolve_app_default_service_hints(
     let user_services: Vec<UserService> = if catalog_ids.is_empty() {
         Vec::new()
     } else {
-        state
-            .db
-            .collection(USER_SERVICES)
-            .find(doc! {
-                "user_id": user_id,
-                "catalog_service_id": { "$in": &catalog_ids },
+        user_service_service::list_user_services_with_sources(&state.db, user_id)
+            .await?
+            .into_iter()
+            .filter_map(|entry| {
+                let allowed = match &entry.source {
+                    user_service_service::CredentialSource::Personal => true,
+                    user_service_service::CredentialSource::Org { allowed, .. } => *allowed,
+                };
+                let catalog_id = entry.service.catalog_service_id.as_deref()?;
+                if allowed && catalog_ids.iter().any(|id| id == catalog_id) {
+                    Some(entry.service)
+                } else {
+                    None
+                }
             })
-            .await?
-            .try_collect()
-            .await?
+            .collect()
     };
 
     let matched_catalog_ids: std::collections::HashSet<&str> = user_services
@@ -2896,11 +2892,14 @@ mod tests {
         COLLECTION_NAME as OAUTH_BROKER_BINDINGS, OauthBrokerBinding, hash_binding_id,
     };
     use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
+    use crate::models::org_membership::{COLLECTION_NAME as ORG_MEMBERSHIPS, OrgRole};
     use crate::models::refresh_token::{COLLECTION_NAME as REFRESH_TOKENS, RefreshToken};
     use crate::models::ssh_auth_mode::SshAuthMode;
     use crate::models::user::{COLLECTION_NAME as USERS, UserType};
     use crate::services::oauth_broker_service::BROKER_BINDING_SCOPE;
-    use crate::test_utils::{connect_test_database, test_app_state, test_user};
+    use crate::test_utils::{
+        connect_test_database, test_app_state, test_membership, test_user, test_user_service,
+    };
 
     #[test]
     fn consent_decision_form_defaults_service_access_to_deny() {
@@ -3122,6 +3121,117 @@ mod tests {
             .await
             .expect("insert user service");
         service
+    }
+
+    async fn insert_test_service(
+        db: &mongodb::Database,
+        owner_id: &str,
+        service_id: &str,
+        slug: &str,
+    ) -> UserService {
+        let service = test_user_service(
+            service_id,
+            owner_id,
+            slug,
+            &Uuid::new_v4().to_string(),
+            None,
+            None,
+        );
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(&service)
+            .await
+            .expect("insert test service");
+        service
+    }
+
+    #[tokio::test]
+    async fn validate_allowed_service_ids_accepts_proxyable_org_service() {
+        let Some(db) = connect_test_database("oauth_consent_org_service_allowed").await else {
+            return;
+        };
+        let actor_id = Uuid::new_v4().to_string();
+        let org_id = Uuid::new_v4().to_string();
+        let service_id = Uuid::new_v4().to_string();
+
+        db.collection::<User>(USERS)
+            .insert_many([
+                test_user(&actor_id, UserType::Person),
+                test_user(&org_id, UserType::Org),
+            ])
+            .await
+            .expect("insert users");
+        db.collection::<crate::models::org_membership::OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(&org_id, &actor_id, OrgRole::Member, None))
+            .await
+            .expect("insert membership");
+        insert_test_service(&db, &org_id, &service_id, "org-openai").await;
+
+        validate_allowed_service_ids(&db, &actor_id, &[service_id])
+            .await
+            .expect("proxyable org service should be grantable");
+    }
+
+    #[tokio::test]
+    async fn validate_allowed_service_ids_rejects_unproxyable_org_services() {
+        let Some(db) = connect_test_database("oauth_consent_org_service_denied").await else {
+            return;
+        };
+        let member_id = Uuid::new_v4().to_string();
+        let scoped_member_id = Uuid::new_v4().to_string();
+        let viewer_id = Uuid::new_v4().to_string();
+        let outsider_id = Uuid::new_v4().to_string();
+        let org_id = Uuid::new_v4().to_string();
+        let service_id = Uuid::new_v4().to_string();
+        let admin_only_service_id = Uuid::new_v4().to_string();
+
+        db.collection::<User>(USERS)
+            .insert_many([
+                test_user(&member_id, UserType::Person),
+                test_user(&scoped_member_id, UserType::Person),
+                test_user(&viewer_id, UserType::Person),
+                test_user(&outsider_id, UserType::Person),
+                test_user(&org_id, UserType::Org),
+            ])
+            .await
+            .expect("insert users");
+        db.collection::<crate::models::org_membership::OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_many([
+                test_membership(&org_id, &member_id, OrgRole::Member, None),
+                test_membership(
+                    &org_id,
+                    &scoped_member_id,
+                    OrgRole::Member,
+                    Some(vec![Uuid::new_v4().to_string()]),
+                ),
+                test_membership(&org_id, &viewer_id, OrgRole::Viewer, None),
+            ])
+            .await
+            .expect("insert memberships");
+
+        insert_test_service(&db, &org_id, &service_id, "org-openai").await;
+        let mut admin_only =
+            insert_test_service(&db, &org_id, &admin_only_service_id, "org-admin").await;
+        admin_only.admin_only = true;
+        db.collection::<UserService>(USER_SERVICES)
+            .replace_one(doc! { "_id": &admin_only.id }, &admin_only)
+            .await
+            .expect("mark service admin_only");
+
+        for (actor_id, denied_service_id) in [
+            (&viewer_id, &service_id),
+            (&scoped_member_id, &service_id),
+            (&member_id, &admin_only_service_id),
+            (&outsider_id, &service_id),
+        ] {
+            let err = validate_allowed_service_ids(
+                &db,
+                actor_id,
+                std::slice::from_ref(denied_service_id),
+            )
+            .await
+            .expect_err("unproxyable org service should be rejected");
+            assert!(matches!(err, AppError::BadRequest(msg) if msg.contains("unknown service")));
+        }
     }
 
     fn resource_uri(slug: &str) -> String {
