@@ -904,6 +904,17 @@ pub fn prefill_developer_app_create(p: &DeveloperAppCreatePrefill) -> Value {
     if let Some(v) = p.broker_capability {
         obj.insert("broker_capability".into(), Value::Bool(v));
     }
+    if !p.default_service_catalog_slugs.is_empty() {
+        let arr: Vec<Value> = p
+            .default_service_catalog_slugs
+            .iter()
+            .filter(|s| !s.is_empty())
+            .map(|s| Value::String(s.clone()))
+            .collect();
+        if !arr.is_empty() {
+            obj.insert("default_service_catalog_slugs".into(), Value::Array(arr));
+        }
+    }
     if let Some(v) = &p.org_id {
         obj.insert("org_id".into(), Value::String(v.clone()));
     }
@@ -1036,6 +1047,7 @@ mod tests {
         let p = DeveloperAppCreatePrefill {
             name: Some("My App".into()),
             redirect_uris: vec!["https://app.example/cb".into()],
+            default_service_catalog_slugs: vec!["llm-openai".into(), "api-github".into()],
             ..Default::default()
         };
         let v = prefill_developer_app_create(&p);
@@ -1043,6 +1055,10 @@ mod tests {
         let uris = obj.get("redirect_uris").and_then(|x| x.as_array()).unwrap();
         assert_eq!(uris.len(), 1);
         assert_eq!(uris[0].as_str(), Some("https://app.example/cb"));
+        assert_eq!(
+            obj.get("default_service_catalog_slugs"),
+            Some(&serde_json::json!(["llm-openai", "api-github"]))
+        );
     }
 
     #[test]

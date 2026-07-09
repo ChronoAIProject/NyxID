@@ -224,6 +224,7 @@ export interface DeveloperAppCreatePrefill {
   readonly allowed_scopes?: string;
   readonly delegation_scopes?: string;
   readonly broker_capability?: boolean;
+  readonly default_service_catalog_slugs?: readonly string[];
   readonly org_id?: string;
 }
 

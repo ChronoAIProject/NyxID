@@ -167,6 +167,7 @@ pub struct DeveloperAppCreatePrefill {
     pub allowed_scopes: Option<String>,
     pub delegation_scopes: Option<String>,
     pub broker_capability: Option<bool>,
+    pub default_service_catalog_slugs: Vec<String>,
     pub org_id: Option<String>,
 }
 

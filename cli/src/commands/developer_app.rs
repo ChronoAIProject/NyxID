@@ -25,6 +25,7 @@ pub async fn run(command: DeveloperAppCommands) -> Result<()> {
             allowed_scopes,
             delegation_scopes,
             broker_capability,
+            default_services,
             org,
             terminal,
             no_wait,
@@ -59,6 +60,7 @@ pub async fn run(command: DeveloperAppCommands) -> Result<()> {
                     allowed_scopes,
                     delegation_scopes,
                     broker_capability,
+                    default_service_catalog_slugs: default_services.clone(),
                     org_id: org,
                 };
                 return crate::wizard::run_developer_app_create_wizard(&auth, prefill, no_wait)
@@ -88,6 +90,12 @@ pub async fn run(command: DeveloperAppCommands) -> Result<()> {
                 body.insert(
                     "broker_capability_enabled".to_string(),
                     Value::Bool(enabled),
+                );
+            }
+            if !default_services.is_empty() {
+                body.insert(
+                    "default_service_catalog_slugs".to_string(),
+                    Value::Array(default_services.into_iter().map(Value::String).collect()),
                 );
             }
             if let Some(org_id) = org {
@@ -169,6 +177,7 @@ pub async fn run(command: DeveloperAppCommands) -> Result<()> {
                                 "Type",
                                 "Redirect URIs",
                                 "Scopes",
+                                "Default Services",
                                 "Active",
                                 "Created",
                             ]);
@@ -189,13 +198,25 @@ pub async fn run(command: DeveloperAppCommands) -> Result<()> {
                                     })
                                     .unwrap_or_else(|| "-".to_string());
                                 let scopes = c["allowed_scopes"].as_str().unwrap_or("-");
+                                let default_services = format_comma_joined_strings(
+                                    &c["default_service_catalog_slugs"],
+                                );
                                 let active = if c["is_active"].as_bool().unwrap_or(false) {
                                     "yes"
                                 } else {
                                     "no"
                                 };
                                 let created = c["created_at"].as_str().unwrap_or("-");
-                                table.add_row([id, name, ctype, &uris, scopes, active, created]);
+                                table.add_row([
+                                    id,
+                                    name,
+                                    ctype,
+                                    &uris,
+                                    scopes,
+                                    &default_services,
+                                    active,
+                                    created,
+                                ]);
                             }
                             eprintln!("{table}");
                         }
@@ -227,6 +248,8 @@ pub async fn run(command: DeveloperAppCommands) -> Result<()> {
             allowed_scopes,
             delegation_scopes,
             broker_capability,
+            default_services,
+            clear_default_services,
             auth,
         } => {
             let mut api = ApiClient::from_auth_checked(&auth).await?;
@@ -255,6 +278,17 @@ pub async fn run(command: DeveloperAppCommands) -> Result<()> {
                 body.insert(
                     "broker_capability_enabled".to_string(),
                     Value::Bool(enabled),
+                );
+            }
+            if clear_default_services {
+                body.insert(
+                    "default_service_catalog_slugs".to_string(),
+                    Value::Array(vec![]),
+                );
+            } else if !default_services.is_empty() {
+                body.insert(
+                    "default_service_catalog_slugs".to_string(),
+                    Value::Array(default_services.into_iter().map(Value::String).collect()),
                 );
             }
 
@@ -368,6 +402,7 @@ fn print_app_detail(c: &Value) {
     } else {
         "no"
     };
+    let default_services = format_comma_joined_strings(&c["default_service_catalog_slugs"]);
     let active = if c["is_active"].as_bool().unwrap_or(false) {
         "yes"
     } else {
@@ -391,8 +426,28 @@ fn print_app_detail(c: &Value) {
     eprintln!("Allowed scopes:    {scopes}");
     eprintln!("Delegation scopes: {dscopes}");
     eprintln!("Broker capability: {broker_capability}");
+    eprintln!("Default services:  {default_services}");
     eprintln!("Redirect URIs:     {uris}");
     eprintln!("Created:           {created}");
+}
+
+fn format_comma_joined_strings(value: &Value) -> String {
+    let items = value
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    if items.is_empty() {
+        "-".to_string()
+    } else {
+        items.join(", ")
+    }
 }
 
 fn confirm(prompt: &str) -> Result<bool> {
@@ -462,6 +517,7 @@ mod tests {
             allowed_scopes: Some("openid profile email".to_string()),
             delegation_scopes: Some("https://api.test/read".to_string()),
             broker_capability: Some(true),
+            default_services: vec![],
             org: Some(ORG_UUID.to_string()),
             terminal: true,
             no_wait: false,
@@ -497,6 +553,7 @@ mod tests {
             allowed_scopes: None,
             delegation_scopes: None,
             broker_capability: None,
+            default_services: vec![],
             org: None,
             terminal: true,
             no_wait: false,
@@ -504,6 +561,40 @@ mod tests {
         })
         .await
         .expect("minimal create should succeed");
+    }
+
+    #[tokio::test]
+    async fn create_posts_default_service_catalog_slugs_when_provided() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/developer/oauth-clients"))
+            .and(body_json(serde_json::json!({
+                "name": "Defaulted",
+                "redirect_uris": ["https://defaulted.test/cb"],
+                "default_service_catalog_slugs": ["llm-openai", "api-github"]
+            })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "id": "client-3" })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(DeveloperAppCommands::Create {
+            name: "Defaulted".to_string(),
+            redirect_uris: vec!["https://defaulted.test/cb".to_string()],
+            client_type: None,
+            allowed_scopes: None,
+            delegation_scopes: None,
+            broker_capability: None,
+            default_services: vec!["llm-openai".to_string(), "api-github".to_string()],
+            org: None,
+            terminal: true,
+            no_wait: false,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("create with default services should succeed");
     }
 
     #[tokio::test]
@@ -519,6 +610,7 @@ mod tests {
             allowed_scopes: None,
             delegation_scopes: None,
             broker_capability: None,
+            default_services: vec![],
             org: None,
             terminal: true,
             no_wait: false,
@@ -632,6 +724,8 @@ mod tests {
             // exchange) and must be forwarded, not dropped.
             delegation_scopes: Some("".to_string()),
             broker_capability: None,
+            default_services: vec![],
+            clear_default_services: false,
             auth: mock_auth(server.uri()),
         })
         .await
@@ -660,10 +754,68 @@ mod tests {
             allowed_scopes: Some("openid email".to_string()),
             delegation_scopes: None,
             broker_capability: Some(false),
+            default_services: vec![],
+            clear_default_services: false,
             auth: mock_auth(server.uri()),
         })
         .await
         .expect("update should succeed");
+    }
+
+    #[tokio::test]
+    async fn update_replaces_default_service_catalog_slugs_when_flags_present() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/api/v1/developer/oauth-clients/client-1"))
+            .and(body_json(serde_json::json!({
+                "default_service_catalog_slugs": ["llm-openai", "api-github"]
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(DeveloperAppCommands::Update {
+            id: "client-1".to_string(),
+            name: None,
+            redirect_uris: vec![],
+            allowed_scopes: None,
+            delegation_scopes: None,
+            broker_capability: None,
+            default_services: vec!["llm-openai".to_string(), "api-github".to_string()],
+            clear_default_services: false,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("update default services should succeed");
+    }
+
+    #[tokio::test]
+    async fn update_clears_default_service_catalog_slugs_when_requested() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/api/v1/developer/oauth-clients/client-1"))
+            .and(body_json(serde_json::json!({
+                "default_service_catalog_slugs": []
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(DeveloperAppCommands::Update {
+            id: "client-1".to_string(),
+            name: None,
+            redirect_uris: vec![],
+            allowed_scopes: None,
+            delegation_scopes: None,
+            broker_capability: None,
+            default_services: vec![],
+            clear_default_services: true,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("clear default services should succeed");
     }
 
     // --- Delete ---
@@ -838,6 +990,7 @@ mod tests {
             allowed_scopes: None,
             delegation_scopes: None,
             broker_capability: None,
+            default_services: vec![],
             org: None,
             terminal: true,
             no_wait: false,
@@ -883,9 +1036,21 @@ mod tests {
             allowed_scopes: None,
             delegation_scopes: None,
             broker_capability: None,
+            default_services: vec![],
+            clear_default_services: false,
             auth: mock_auth(server.uri()),
         })
         .await;
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn format_comma_joined_strings_renders_defaults_or_dash() {
+        assert_eq!(
+            format_comma_joined_strings(&serde_json::json!(["llm-openai", "api-github"])),
+            "llm-openai, api-github"
+        );
+        assert_eq!(format_comma_joined_strings(&serde_json::json!([])), "-");
+        assert_eq!(format_comma_joined_strings(&serde_json::Value::Null), "-");
     }
 }

@@ -585,6 +585,7 @@ describe("DeveloperAppCreateConfirm", () => {
           redirect_uris: ["https://acme.test/cb"],
           allowed_scopes: "openid profile",
           broker_capability: true,
+          default_service_catalog_slugs: ["llm-openai", "api-github"],
         }}
       />,
       { wrapper: createWrapper() },
@@ -602,6 +603,7 @@ describe("DeveloperAppCreateConfirm", () => {
       client_type: "confidential",
       broker_capability_enabled: true,
       target_org_id: "org-uuid-1",
+      default_service_catalog_slugs: ["llm-openai", "api-github"],
     });
     expect(body.redirect_uris).toEqual(["https://acme.test/cb"]);
     // allowed_scopes is split into a Vec<String>, not a space-string.
