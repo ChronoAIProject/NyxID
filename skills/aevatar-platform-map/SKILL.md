@@ -1,7 +1,7 @@
 ---
 name: aevatar-platform-map
-description: Entry point, panorama, and router for the entire Aevatar skill family — load this FIRST whenever someone wants to build, run, publish, schedule, or operate anything on Aevatar ("create an agent team", "make a workflow / member", "publish or bind a service", "register it with NyxID", "set up a recurring / cron run", "invoke my service"), wants to know whether something is even possible ("can Aevatar do X?", "能不能用 aevatar 实现"), or just wants to know what Aevatar can do. It teaches the object model (scope → team → member[workflow|script|gagent] → service → schedule), how to authenticate as a NyxID-bearer REST client, how to resolve your scope, and the two caller modes (client REST vs in-session server-side tools). It does not do the work itself — it routes you to the right companion skill (feasibility-advisor, workflow-authoring, team-builder, service-publisher, scheduler, plus diagnostics probes and the safety-net fallback), held together by the shared `aevatar` tag.
-version: "1.6"
+description: Entry point, panorama, and router for the entire Aevatar skill family — load this FIRST whenever someone wants to build, run, publish, schedule, externally trigger, or operate anything on Aevatar ("create an agent team", "make a workflow / member", "publish or bind a service", "register it with NyxID", "set up a recurring / cron run", "invoke my service", "let Lark Base trigger my workflow"), wants to know whether something is even possible ("can Aevatar do X?", "能不能用 aevatar 实现"), or just wants to know what Aevatar can do. It teaches the object model (scope → team → member[workflow|script|gagent] → service → schedule/external trigger), how to authenticate as a NyxID-bearer REST client, how to resolve your scope, and the two caller modes (client REST vs in-session server-side tools). It does not do the work itself — it routes you to the right companion skill (feasibility-advisor, workflow-authoring, team-builder, service-publisher, scheduler, plus diagnostics probes and the safety-net fallback), held together by the shared `aevatar` tag.
+version: "1.7"
 metadata:
   category: plain
   tag:
@@ -28,7 +28,7 @@ self-contained, so you can also jump straight in once you know the step.
 subject id), and a request almost always walks one chain:
 
 ```
-scope → team → member (workflow | script | gagent) → service → schedule
+scope → team → member (workflow | script | gagent) → service → schedule / external trigger
 ```
 
 **Settle three things before you route** (each has a full section below — this is the checklist):
@@ -56,7 +56,8 @@ scope  (= your NyxID subject id; your private workspace; everything hangs off it
   │            • script     (an app script)
   │            • gagent     (a hosted agent actor)
   ├── service    a member/team published so it can be invoked + (host-gated) registered to NyxID
-  └── schedule   fires a service on a cron, authenticated as you (NyxID)
+  ├── schedule   fires a service on a cron, authenticated as you (NyxID)
+  └── external trigger  Lark Base / webhook / external cron calls the service invoke path
 ```
 
 The lifecycle the user almost always wants:
@@ -121,6 +122,7 @@ endpoints (they are not).
 | Create a **team**, create **members** (workflow/script/gagent), bind them, set the entry member | `aevatar-team-builder` | `/api/scopes/{id}/teams`, `/members`, `/members/{id}/binding` |
 | **Publish** a member/team **as a service** and **register it to NyxID**; verify it | `aevatar-service-publisher` | `/api/scopes/{id}/binding`, `/api/services/*`, `/members/{id}/published-service` |
 | Run it on a **cron schedule** (authenticated as you) | `aevatar-scheduler` | `/api/schedules`, `:run-now`, `:enable`, `:disable` |
+| Trigger an existing workflow from an external HTTP sender such as **Lark Base** | `aevatar-feasibility-advisor` first, then `aevatar-service-publisher` | NyxID `/api/v1/proxy/s/aevatar/api/scopes/{scopeId}/members/{memberId}/invoke/...`, host-managed `/api/workflow-webhooks/{routeKey}` if configured |
 | **Invoke**, watch **runs**, observe | (this map + service-publisher's invoke section) | `/invoke/{endpointId}`, `/runs/*`, `/api/workflow/observatory/*` |
 
 If a companion skill is not already loaded, find it with an ornn skill search for the
@@ -182,7 +184,9 @@ map is the canonical entry point; the rest are pulled on demand.
 4. **Set the team entry member** — `PUT /api/scopes/{scopeId}/teams/{teamId}/entry-member {memberId}`.
 5. **Publish as a service + register to NyxID**, then verify the NyxID slug —
    `aevatar-service-publisher`.
-6. **Schedule** it on a cron, authenticated as the scope owner — `aevatar-scheduler`.
+6. **Schedule** it on a cron, authenticated as the scope owner — `aevatar-scheduler`; or
+   trigger it from an external HTTP system such as Lark Base by calling NyxID's `aevatar`
+   proxy with a NyxID API key — `aevatar-service-publisher`.
 
 ## Honesty rules (so you never over-promise)
 
@@ -195,6 +199,10 @@ map is the canonical entry point; the rest are pulled on demand.
   the service's `externalExposure` block stays empty, say so: the service is still usable
   in-scope, just not exposed as a NyxID-brokered connector. (Details in
   `aevatar-service-publisher`.)
+- **External HTTP trigger is different from externalExposure.** Lark Base / external cron /
+  webhook senders can often trigger an existing member/team by calling the NyxID proxy for
+  `aevatar` with a NyxID API key and an explicit scope path. Host externalExposure is only
+  for turning the Aevatar service itself into a reusable NyxID connector/slug.
 - **Many steps are async.** Bindings, deployments, and runs settle over time. Read state
   back (binding run status, invocation readiness, run timeline) instead of assuming
   success from a 2xx.
