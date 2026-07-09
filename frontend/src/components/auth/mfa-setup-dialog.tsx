@@ -1,5 +1,4 @@
 import { useState, useEffect, useCallback } from "react";
-import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import QRCode from "qrcode";
 import { mfaVerifySchema, type MfaVerifyFormData } from "@/schemas/auth";
@@ -17,6 +16,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
+  useAppForm,
   Form,
   FormControl,
   FormField,
@@ -45,7 +45,7 @@ export function MfaSetupDialog({ open, onOpenChange }: MfaSetupDialogProps) {
   const setupMutation = useMfaSetup();
   const queryClient = useQueryClient();
 
-  const form = useForm<MfaVerifyFormData>({
+  const form = useAppForm<MfaVerifyFormData>({
     resolver: zodResolver(mfaVerifySchema),
     defaultValues: {
       code: "",

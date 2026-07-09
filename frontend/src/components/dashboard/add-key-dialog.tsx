@@ -55,6 +55,7 @@ import {
 } from "@/components/dashboard/connect-verify-step";
 import type { CatalogEntry, KeyInfo } from "@/types/keys";
 import type { DeviceCodePollResponse } from "@/types/api";
+import { isValidHttpUrl } from "@/schemas/http-url";
 
 type WizardStep =
   | "catalog"
@@ -270,6 +271,17 @@ function composeTokenExchangeCredential(
 // header/query/body field name. `bot_bearer` is a fixed Authorization format,
 // OAuth flows handle their own token storage, and `token_exchange` ignores
 // auth_key_name entirely (the credential is a structured JSON blob).
+function isValidIntInRange(
+  value: string,
+  min: number,
+  max: number,
+): boolean {
+  const trimmed = value.trim();
+  if (!/^\d+$/.test(trimmed)) return false;
+  const parsed = Number(trimmed);
+  return parsed >= min && parsed <= max;
+}
+
 function shouldShowAuthKeyName(authMethod: string): boolean {
   return (
     authMethod !== "none" &&
@@ -608,6 +620,19 @@ function KeyForm({
     form.authMethod,
     form.authKeyName,
   );
+  // Live URL-format errors: only once the user has typed something, so an
+  // untouched optional field stays quiet.
+  const endpointUrlError =
+    endpointEditable &&
+    form.endpointUrl.trim().length > 0 &&
+    !isValidHttpUrl(form.endpointUrl.trim())
+      ? "Must be a full URL with a domain, e.g. https://api.example.com"
+      : null;
+  const openapiSpecUrlError =
+    form.openapiSpecUrl.trim().length > 0 &&
+    !isValidHttpUrl(form.openapiSpecUrl.trim())
+      ? "Must be a full URL with a domain, e.g. https://api.example.com/openapi.json"
+      : null;
 
   return (
     <div className="space-y-4">
@@ -659,6 +684,7 @@ function KeyForm({
                 : "My API Key"
             }
             value={form.label}
+            maxLength={200}
             onChange={(e) => onChange({ label: e.target.value })}
           />
           <p className="text-[11px] text-muted-foreground">
@@ -839,12 +865,16 @@ function KeyForm({
             value={form.endpointUrl}
             onChange={(e) => onChange({ endpointUrl: e.target.value })}
             readOnly={!endpointEditable}
+            aria-invalid={endpointUrlError ? true : undefined}
             className={
               endpointEditable
                 ? ""
                 : "bg-muted text-muted-foreground cursor-default"
             }
           />
+          {endpointUrlError && (
+            <p className="text-xs text-destructive">{endpointUrlError}</p>
+          )}
         </div>
 
         <div className="space-y-1.5">
@@ -857,7 +887,11 @@ function KeyForm({
             value={form.openapiSpecUrl}
             onChange={(e) => onChange({ openapiSpecUrl: e.target.value })}
             type="url"
+            aria-invalid={openapiSpecUrlError ? true : undefined}
           />
+          {openapiSpecUrlError && (
+            <p className="text-xs text-destructive">{openapiSpecUrlError}</p>
+          )}
           <p className="text-[11px] text-muted-foreground">
             When set, AI agents discover concrete operations from the spec instead
             of being limited to a single generic proxy tool.
@@ -925,7 +959,11 @@ function KeyForm({
             isPending ||
             !form.label.trim() ||
             (requiresCredential && !form.credential.trim()) ||
-            (requiresEndpoint && !form.endpointUrl.trim())
+            (requiresEndpoint && !form.endpointUrl.trim()) ||
+            (shouldShowAuthKeyName(form.authMethod) &&
+              !form.authKeyName.trim()) ||
+            Boolean(endpointUrlError) ||
+            Boolean(openapiSpecUrlError)
           }
         >
           {isPending ? "Connecting..." : "Connect Service"}
@@ -963,6 +1001,19 @@ function NodeSetupStep({
   const slug = catalogEntry?.slug ?? (previewSlug || "<slug>");
   const isSsh =
     catalogEntry?.service_type === "ssh" || form.serviceType === "ssh";
+  // Backend types are u16 port / 15-60 min TTL; silent Number(x)||default
+  // coercion would replace typos with defaults the user never chose.
+  const sshPortError =
+    isCustom && isSsh && !isValidIntInRange(form.sshPort, 1, 65535)
+      ? "Port must be an integer between 1 and 65535"
+      : null;
+  const sshTtlError =
+    isCustom &&
+    isSsh &&
+    form.sshCertificateAuth &&
+    !isValidIntInRange(form.sshCertificateTtlMinutes, 15, 60)
+      ? "TTL must be an integer between 15 and 60 minutes"
+      : null;
 
   return (
     <div className="space-y-4">
@@ -983,6 +1034,7 @@ function NodeSetupStep({
           id="node-label"
           placeholder={catalogEntry?.name ?? "My Service"}
           value={form.label}
+          maxLength={200}
           onChange={(e) => onChange({ label: e.target.value })}
         />
       </div>
@@ -1009,7 +1061,11 @@ function NodeSetupStep({
                     placeholder="22"
                     value={form.sshPort}
                     onChange={(e) => onChange({ sshPort: e.target.value })}
+                    aria-invalid={sshPortError ? true : undefined}
                   />
+                  {sshPortError && (
+                    <p className="text-xs text-destructive">{sshPortError}</p>
+                  )}
                 </div>
               </div>
 
@@ -1064,7 +1120,11 @@ function NodeSetupStep({
                       onChange={(e) =>
                         onChange({ sshCertificateTtlMinutes: e.target.value })
                       }
+                      aria-invalid={sshTtlError ? true : undefined}
                     />
+                    {sshTtlError && (
+                      <p className="text-xs text-destructive">{sshTtlError}</p>
+                    )}
                     <p className="text-[11px] text-muted-foreground">
                       15-60 minutes. Shorter is more secure.
                     </p>
@@ -1195,6 +1255,8 @@ function NodeSetupStep({
           disabled={
             isPending ||
             !form.label.trim() ||
+            Boolean(sshPortError) ||
+            Boolean(sshTtlError) ||
             (isCustom &&
               isSsh &&
               form.sshCertificateAuth &&
@@ -2263,7 +2325,7 @@ export function AddKeyDialog({
       targetOrgId && form.adminOnly ? { admin_only: true } : {};
 
     return {
-      label: form.label,
+      label: form.label.trim(),
       service_slug: selectedEntry.slug,
       ...(form.endpointUrl.trim()
         ? { endpoint_url: form.endpointUrl.trim() }
@@ -2358,8 +2420,8 @@ export function AddKeyDialog({
       targetOrgId && form.adminOnly ? { admin_only: true } : {};
     const params = selectedEntry
       ? {
-          credential: form.credential,
-          label: form.label,
+          credential: form.credential.trim(),
+          label: form.label.trim(),
           service_slug: selectedEntry.slug,
           ...(form.endpointUrl.trim()
             ? { endpoint_url: form.endpointUrl.trim() }
@@ -2376,8 +2438,8 @@ export function AddKeyDialog({
           ...accessParam,
         }
       : {
-          credential: form.credential,
-          label: form.label,
+          credential: form.credential.trim(),
+          label: form.label.trim(),
           endpoint_url: form.endpointUrl.trim(),
           auth_method: form.authMethod,
           auth_key_name: form.authKeyName,
@@ -2429,7 +2491,7 @@ export function AddKeyDialog({
       targetOrgId && form.adminOnly ? { admin_only: true } : {};
     const params = selectedEntry
       ? {
-          label: form.label,
+          label: form.label.trim(),
           service_slug: selectedEntry.slug,
           node_id: form.nodeId,
           service_type: selectedEntry.service_type,
@@ -2438,20 +2500,21 @@ export function AddKeyDialog({
         }
       : isSshCustom
         ? {
-            label: form.label,
+            label: form.label.trim(),
             node_id: form.nodeId,
             service_type: "ssh" as const,
             ssh_host: form.sshHost.trim(),
-            ssh_port: Number(form.sshPort) || 22,
+            ssh_port: Number(form.sshPort.trim()),
             ssh_certificate_auth: form.sshCertificateAuth,
             ssh_principals: form.sshPrincipals.trim(),
-            ssh_certificate_ttl_minutes:
-              Number(form.sshCertificateTtlMinutes) || 30,
+            ssh_certificate_ttl_minutes: Number(
+              form.sshCertificateTtlMinutes.trim(),
+            ),
             ...orgParam,
             ...accessParam,
           }
         : {
-            label: form.label,
+            label: form.label.trim(),
             endpoint_url: form.endpointUrl.trim() || undefined,
             auth_method: form.authMethod,
             auth_key_name: form.authKeyName,

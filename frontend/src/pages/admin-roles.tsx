@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useRoles, useCreateRole, useDeleteRole } from "@/hooks/use-rbac";
 import { createRoleSchema, type CreateRoleFormData } from "@/schemas/rbac";
@@ -23,6 +22,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
+  useAppForm,
   Form,
   FormControl,
   FormField,
@@ -56,7 +56,7 @@ export function AdminRolesPage() {
 
   const roles = data?.roles ?? [];
 
-  const createForm = useForm<CreateRoleFormData>({
+  const createForm = useAppForm<CreateRoleFormData>({
     resolver: zodResolver(createRoleSchema),
     defaultValues: {
       name: "",

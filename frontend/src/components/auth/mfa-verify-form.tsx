@@ -1,5 +1,4 @@
 import { useRef, useEffect } from "react";
-import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useNavigate } from "@tanstack/react-router";
 import { mfaVerifySchema, type MfaVerifyFormData } from "@/schemas/auth";
@@ -7,6 +6,7 @@ import { useMfaVerify } from "@/hooks/use-auth";
 import { useAuthStore } from "@/stores/auth-store";
 import { ApiError } from "@/lib/api-client";
 import {
+  useAppForm,
   Form,
   FormControl,
   FormField,
@@ -38,7 +38,7 @@ export function MfaVerifyForm({ returnTo }: MfaVerifyFormProps) {
   const clearMfaState = useAuthStore((s) => s.clearMfaState);
   const codeInputRef = useRef<HTMLInputElement>(null);
 
-  const form = useForm<MfaVerifyFormData>({
+  const form = useAppForm<MfaVerifyFormData>({
     resolver: zodResolver(mfaVerifySchema),
     defaultValues: {
       code: "",

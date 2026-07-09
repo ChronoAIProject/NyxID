@@ -231,7 +231,7 @@ export function ProviderDetailPage() {
 
           <DetailSection title="API Key Configuration">
             {provider.api_key_instructions && (
-              <div className="text-[12px]">
+              <div className="px-4 py-2.5 text-[12px]">
                 <span className="text-muted-foreground block mb-1">
                   Instructions
                 </span>

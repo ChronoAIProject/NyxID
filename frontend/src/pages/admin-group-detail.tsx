@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { useNavigate, useParams } from "@tanstack/react-router";
-import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
   useGroup,
@@ -33,6 +32,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
+  useAppForm,
   Form,
   FormControl,
   FormField,
@@ -78,7 +78,7 @@ export function AdminGroupDetailPage() {
 
   useBreadcrumbLabel(group?.name);
 
-  const form = useForm<UpdateGroupFormData>({
+  const form = useAppForm<UpdateGroupFormData>({
     resolver: zodResolver(updateGroupSchema),
     defaultValues: {
       name: "",

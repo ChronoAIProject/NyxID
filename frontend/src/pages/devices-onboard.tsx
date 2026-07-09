@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { useForm, useWatch } from "react-hook-form";
+import { useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { CheckCircle2, Printer, QrCode, XCircle } from "lucide-react";
 import QRCode from "qrcode";
@@ -28,6 +28,7 @@ import {
 } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
+  useAppForm,
   Form,
   FormControl,
   FormDescription,
@@ -69,7 +70,7 @@ export function DevicesOnboardPage() {
   const qrDataUrl = qrCodeQuery.data ?? null;
 
   const adminOrgs = (orgs ?? []).filter((org) => org.your_role === "admin");
-  const form = useForm<OnboardDeviceFormData, unknown, OnboardDeviceFormValues>({
+  const form = useAppForm<OnboardDeviceFormData, unknown, OnboardDeviceFormValues>({
     resolver: zodResolver(onboardDeviceFormSchema),
     defaultValues: {
       org_id: null,
@@ -105,7 +106,12 @@ export function DevicesOnboardPage() {
     const current = form.getValues("default_services") ?? [];
     const filtered = current.filter((serviceId) => visibleIds.has(serviceId));
     if (filtered.length !== current.length) {
-      form.setValue("default_services", filtered, { shouldValidate: true });
+      // Programmatic normalization, not a user edit: don't dirty the form.
+      form.setValue("default_services", filtered, {
+        shouldValidate: true,
+        shouldDirty: false,
+        shouldTouch: false,
+      });
     }
   }, [form, grantableServices]);
 

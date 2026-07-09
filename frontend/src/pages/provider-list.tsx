@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { useForm, useWatch } from "react-hook-form";
+import { useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useProviders, useCreateProvider } from "@/hooks/use-providers";
 import {
@@ -35,6 +35,7 @@ import {
   
 } from "@/components/ui/dialog";
 import {
+  useAppForm,
   Form,
   FormControl,
   FormField,
@@ -69,7 +70,7 @@ export function ProviderListPage() {
   const navigate = useNavigate();
   const [createOpen, setCreateOpen] = useState(false);
 
-  const form = useForm<CreateProviderFormData>({
+  const form = useAppForm<CreateProviderFormData>({
     resolver: zodResolver(createProviderSchema),
     defaultValues: {
       name: "",
@@ -230,7 +231,11 @@ export function ProviderListPage() {
                             form.setValue(
                               key as keyof CreateProviderFormData,
                               resets[key] as never,
-                              { shouldDirty: false, shouldValidate: false },
+                              {
+                                shouldDirty: false,
+                                shouldValidate: false,
+                                shouldTouch: false,
+                              },
                             );
                           }
 

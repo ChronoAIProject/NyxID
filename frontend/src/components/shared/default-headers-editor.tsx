@@ -45,8 +45,13 @@ export interface DefaultHeadersEditorProps {
   readonly readOnly?: boolean;
   /** When true, appends "(from catalog)" badges to the value badge. */
   readonly fromCatalog?: boolean;
-  /** Per-row error messages, keyed by row index. */
-  readonly errors?: Readonly<Record<number, string>>;
+  /**
+   * Validation messages keyed by row index, then field (`name` / `value`;
+   * `root` for row-level issues). Build with `flattenRowFieldErrors` from
+   * the form's array-field error. The affected input gets a destructive
+   * border plus its message rendered directly beneath it.
+   */
+  readonly errors?: Readonly<Record<number, Readonly<Record<string, string>>>>;
 }
 
 function emptyRow(): DefaultRequestHeader {
@@ -66,7 +71,14 @@ export function DefaultHeadersEditor({
   const rowWarnings = useMemo<ReadonlyArray<string | null>>(() => {
     const seen = new Map<string, number>();
     return value.map((row, idx) => {
-      if (errors?.[idx]) return errors[idx];
+      const rowErrors = errors?.[idx];
+      if (rowErrors) {
+        // Name-column message: the name error, or any row-level issue that
+        // isn't tied to a specific field. Value errors render in their own
+        // column below.
+        const nameMessage = rowErrors.name ?? rowErrors.root;
+        if (nameMessage) return nameMessage;
+      }
       const trimmed = row.name.trim();
       if (trimmed.length === 0) {
         return null;
@@ -131,11 +143,13 @@ export function DefaultHeadersEditor({
             <TableBody>
               {value.map((row, idx) => {
                 const warning = rowWarnings[idx];
+                const valueError = errors?.[idx]?.value;
                 return (
                   <TableRow key={idx}>
                     <TableCell className="align-top">
                       <Input
                         aria-label={`Header ${String(idx + 1)} name`}
+                        aria-invalid={warning ? true : undefined}
                         value={row.name}
                         onChange={(e) => updateRow(idx, { name: e.target.value })}
                         placeholder="X-Api-Version"
@@ -152,6 +166,7 @@ export function DefaultHeadersEditor({
                     <TableCell className="align-top">
                       <Input
                         aria-label={`Header ${String(idx + 1)} value`}
+                        aria-invalid={valueError ? true : undefined}
                         value={row.value}
                         onChange={(e) => updateRow(idx, { value: e.target.value })}
                         placeholder="v2"
@@ -160,6 +175,11 @@ export function DefaultHeadersEditor({
                         type={row.sensitive ? "password" : "text"}
                         className="font-mono text-xs"
                       />
+                      {valueError && (
+                        <p className="mt-1 text-[11px] text-destructive">
+                          {valueError}
+                        </p>
+                      )}
                     </TableCell>
                     <TableCell className="align-top">
                       <div className="flex h-9 items-center">

@@ -1,6 +1,5 @@
 import { useEffect } from "react";
 import { useNavigate, useParams } from "@tanstack/react-router";
-import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useService, useUpdateService } from "@/hooks/use-services";
 import { useDeveloperApps } from "@/hooks/use-developer-apps";
@@ -20,18 +19,21 @@ import {
   VISIBILITY_LABELS,
 } from "@/lib/constants";
 import { parseAllowedPrincipals } from "@/lib/ssh";
+import { flattenRowErrors, flattenRowFieldErrors } from "@/lib/form-errors";
 import { ApiError } from "@/lib/api-client";
 import { useAuthStore } from "@/stores/auth-store";
 import { PageHeader } from "@/components/shared/page-header";
 import { IdentityPropagationConfig } from "@/components/dashboard/identity-propagation-config";
 import { Separator } from "@/components/ui/separator";
 import {
+  useAppForm,
   Form,
   FormControl,
   FormField,
   FormItem,
   FormLabel,
   FormMessage,
+  FormSubmitErrors,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -59,7 +61,7 @@ export function ServiceEditPage() {
   const { data: appsData } = useDeveloperApps();
   const developerApps = appsData?.clients?.filter((c) => c.is_active) ?? [];
 
-  const form = useForm<UpdateServiceFormData>({
+  const form = useAppForm<UpdateServiceFormData>({
     resolver: zodResolver(updateServiceSchema),
     defaultValues: {
       service_type: "http",
@@ -292,8 +294,11 @@ export function ServiceEditPage() {
   const wsFrameRules = form.watch("ws_frame_injections") ?? [];
   const setWsFrameRules = (next: WsFrameInjection[]) =>
     form.setValue("ws_frame_injections", next, {
-      shouldDirty: true,
-      shouldValidate: true,
+      // This fires per keystroke from the editor's text inputs, and the
+      // default shouldValidate would re-parse the whole service schema on
+      // each one. Validate eagerly only while correcting an existing
+      // error (so highlights clear live); otherwise defer to submit.
+      shouldValidate: Boolean(form.formState.errors.ws_frame_injections),
     });
 
   return (
@@ -416,7 +421,6 @@ export function ServiceEditPage() {
                                 v
                                   ? [...current, app.id]
                                   : current.filter((id) => id !== app.id),
-                                { shouldDirty: true, shouldValidate: true },
                               );
                             }}
                           />
@@ -482,10 +486,7 @@ export function ServiceEditPage() {
                     id="edit-ssh-cert-auth"
                     checked={form.watch("certificate_auth_enabled") ?? false}
                     onCheckedChange={(checked) =>
-                      form.setValue("certificate_auth_enabled", checked, {
-                        shouldDirty: true,
-                        shouldValidate: true,
-                      })
+                      form.setValue("certificate_auth_enabled", checked)
                     }
                   />
                 </div>
@@ -595,6 +596,9 @@ export function ServiceEditPage() {
                       ? form.formState.errors.ws_frame_injections.message
                       : undefined
                   }
+                  errors={flattenRowErrors(
+                    form.formState.errors.ws_frame_injections,
+                  )}
                 />
 
                 <div>
@@ -632,32 +636,19 @@ export function ServiceEditPage() {
                           form.setValue(
                             "identity_propagation_mode",
                             v as UpdateServiceFormData["identity_propagation_mode"],
-                            { shouldDirty: true, shouldValidate: true },
                           )
                         }
                         onIncludeUserIdChange={(v) =>
-                          form.setValue("identity_include_user_id", v, {
-                            shouldDirty: true,
-                            shouldValidate: true,
-                          })
+                          form.setValue("identity_include_user_id", v)
                         }
                         onIncludeEmailChange={(v) =>
-                          form.setValue("identity_include_email", v, {
-                            shouldDirty: true,
-                            shouldValidate: true,
-                          })
+                          form.setValue("identity_include_email", v)
                         }
                         onIncludeNameChange={(v) =>
-                          form.setValue("identity_include_name", v, {
-                            shouldDirty: true,
-                            shouldValidate: true,
-                          })
+                          form.setValue("identity_include_name", v)
                         }
                         onJwtAudienceChange={(v) =>
-                          form.setValue("identity_jwt_audience", v, {
-                            shouldDirty: true,
-                            shouldValidate: true,
-                          })
+                          form.setValue("identity_jwt_audience", v)
                         }
                       />
                     </div>
@@ -837,58 +828,26 @@ export function ServiceEditPage() {
                         <FormField
                           control={form.control}
                           name="default_request_headers"
-                          render={({ field, formState }) => {
-                            // RHF stores nested array errors on the
-                            // array field itself (an object with numeric
-                            // keys). Without surfacing them, the editor
-                            // would silently eat blank-name /
-                            // invalid-value submits (see NyxID#356 code
-                            // review P3): Save would block with no red
-                            // state on the offending row. Flatten each
-                            // row's first error into the editor's
-                            // per-row `errors` map.
-                            const rowErrs: Record<number, string> = {};
-                            const nested = formState.errors
-                              .default_request_headers as
-                              | Record<
-                                  string,
-                                  {
-                                    name?: { message?: string };
-                                    value?: { message?: string };
-                                    root?: { message?: string };
-                                    message?: string;
+                          render={({ field, formState }) => (
+                            // Nested array errors (numeric keys on the array
+                            // field) need per-row rendering or blank-name /
+                            // invalid-value submits block silently (NyxID#356
+                            // code review P3).
+                            <FormItem>
+                              <FormControl>
+                                <DefaultHeadersEditor
+                                  value={field.value ?? []}
+                                  onChange={(next) =>
+                                    field.onChange(next.map((h) => ({ ...h })))
                                   }
-                                >
-                              | undefined;
-                            if (nested && typeof nested === "object") {
-                              for (const [key, err] of Object.entries(nested)) {
-                                const idx = Number(key);
-                                if (!Number.isInteger(idx) || !err) continue;
-                                const msg =
-                                  err.name?.message ??
-                                  err.value?.message ??
-                                  err.root?.message ??
-                                  err.message;
-                                if (typeof msg === "string" && msg.length > 0) {
-                                  rowErrs[idx] = msg;
-                                }
-                              }
-                            }
-                            return (
-                              <FormItem>
-                                <FormControl>
-                                  <DefaultHeadersEditor
-                                    value={field.value ?? []}
-                                    onChange={(next) =>
-                                      field.onChange(next.map((h) => ({ ...h })))
-                                    }
-                                    errors={rowErrs}
-                                  />
-                                </FormControl>
-                                <FormMessage />
-                              </FormItem>
-                            );
-                          }}
+                                  errors={flattenRowFieldErrors(
+                                    formState.errors.default_request_headers,
+                                  )}
+                                />
+                              </FormControl>
+                              <FormMessage />
+                            </FormItem>
+                          )}
                         />
                       </div>
 
@@ -924,10 +883,7 @@ export function ServiceEditPage() {
                                 id={`cap-${key}`}
                                 checked={form.watch(key) ?? false}
                                 onCheckedChange={(v) =>
-                                  form.setValue(key, v, {
-                                    shouldDirty: true,
-                                    shouldValidate: true,
-                                  })
+                                  form.setValue(key, v)
                                 }
                               />
                             </div>
@@ -961,10 +917,7 @@ export function ServiceEditPage() {
                             form.watch("forward_access_token") ?? false
                           }
                           onCheckedChange={(v) =>
-                            form.setValue("forward_access_token", v, {
-                              shouldDirty: true,
-                              shouldValidate: true,
-                            })
+                            form.setValue("forward_access_token", v)
                           }
                         />
                       </div>
@@ -998,10 +951,7 @@ export function ServiceEditPage() {
                             form.watch("inject_delegation_token") ?? false
                           }
                           onCheckedChange={(v) =>
-                            form.setValue("inject_delegation_token", v, {
-                              shouldDirty: true,
-                              shouldValidate: true,
-                            })
+                            form.setValue("inject_delegation_token", v)
                           }
                         />
                       </div>
@@ -1032,6 +982,7 @@ export function ServiceEditPage() {
               </>
             )}
 
+            <FormSubmitErrors className="pt-2 text-right" />
             <div className="flex items-center justify-end gap-3 pt-4">
               <Button variant="primary" type="submit" isLoading={updateMutation.isPending} disabled={!form.formState.isDirty}>
                 Save Changes

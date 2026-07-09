@@ -32,12 +32,18 @@ export function RateLimitCard({
     const rpsNum = rps.trim() ? Number(rps) : null;
     const burstNum = burst.trim() ? Number(burst) : null;
 
-    if (rpsNum !== null && (!Number.isInteger(rpsNum) || rpsNum < 1)) {
-      toast.error("Rate limit per second must be a positive integer");
+    if (
+      rpsNum !== null &&
+      (!Number.isInteger(rpsNum) || rpsNum < 1 || rpsNum > 10000)
+    ) {
+      toast.error("Rate limit per second must be an integer between 1 and 10000");
       return;
     }
-    if (burstNum !== null && (!Number.isInteger(burstNum) || burstNum < 1)) {
-      toast.error("Burst limit must be a positive integer");
+    if (
+      burstNum !== null &&
+      (!Number.isInteger(burstNum) || burstNum < 1 || burstNum > 100000)
+    ) {
+      toast.error("Burst limit must be an integer between 1 and 100000");
       return;
     }
 

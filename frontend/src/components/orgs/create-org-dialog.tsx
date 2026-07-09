@@ -1,5 +1,4 @@
 import { useNavigate } from "@tanstack/react-router";
-import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -12,6 +11,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
+  useAppForm,
   Form,
   FormControl,
   FormField,
@@ -36,7 +36,7 @@ export function CreateOrgDialog({ open, onOpenChange }: CreateOrgDialogProps) {
   const navigate = useNavigate();
   const createMutation = useCreateOrg();
 
-  const form = useForm<CreateOrgRequest>({
+  const form = useAppForm<CreateOrgRequest>({
     resolver: zodResolver(createOrgRequestSchema),
     defaultValues: {
       display_name: "",

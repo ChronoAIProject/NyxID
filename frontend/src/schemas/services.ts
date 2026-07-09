@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { isValidHttpUrl } from "./http-url";
 import {
   defaultRequestHeaderListSchema,
   defaultRequestHeaderSchema,
@@ -50,7 +51,10 @@ export type Visibility = (typeof VISIBILITY_OPTIONS)[number];
 export type ServiceCategory = (typeof SERVICE_CATEGORIES)[number];
 
 const optionalString = z.string().optional().or(z.literal(""));
-const urlField = z.string().url("Must be a valid URL");
+
+// Mirrors the backend whitelist in handlers/services.rs validate_delegation_scope.
+const DELEGATION_TOKEN_SCOPES = ["llm:proxy", "proxy:*", "llm:status"];
+const urlField = z.string().refine(isValidHttpUrl, "Must be a valid URL");
 
 export const sshServiceConfigSchema = z
   .object({
@@ -76,7 +80,16 @@ export const sshServiceConfigSchema = z
       }, "Certificate TTL must be an integer between 15 and 60 minutes"),
     allowed_principals: z
       .string()
-      .max(500, "Allowed principals must be at most 500 characters"),
+      .max(500, "Allowed principals must be at most 500 characters")
+      .refine(
+        (v) =>
+          v
+            .split(",")
+            .map((principal) => principal.trim())
+            .filter(Boolean)
+            .every((principal) => /^[A-Za-z0-9_.@-]{1,128}$/.test(principal)),
+        "Each principal may only use letters, digits, _ - . @ (max 128 chars)",
+      ),
   })
   .superRefine((value, ctx) => {
     if (!value.certificate_auth_enabled) {
@@ -264,12 +277,12 @@ export const updateServiceSchema = z
     base_url: optionalString,
     openapi_spec_url: z
       .string()
-      .url("Must be a valid URL")
+      .refine(isValidHttpUrl, "Must be a valid URL")
       .optional()
       .or(z.literal("")),
     asyncapi_spec_url: z
       .string()
-      .url("Must be a valid URL")
+      .refine(isValidHttpUrl, "Must be a valid URL")
       .optional()
       .or(z.literal("")),
     identity_propagation_mode: z.enum(IDENTITY_PROPAGATION_MODES).optional(),
@@ -282,16 +295,32 @@ export const updateServiceSchema = z
     delegation_token_scope: z
       .string()
       .max(200, "Scope must be at most 200 characters")
+      .refine(
+        (v) =>
+          v
+            .split(/\s+/)
+            .filter(Boolean)
+            .every((scope) => DELEGATION_TOKEN_SCOPES.includes(scope)),
+        `Each scope must be one of: ${DELEGATION_TOKEN_SCOPES.join(", ")}`,
+      )
       .optional()
       .or(z.literal("")),
     // Rich metadata
-    homepage_url: z.string().url("Must be a valid URL").optional().or(z.literal("")),
-    repository_url: z.string().url("Must be a valid URL").optional().or(z.literal("")),
-    issues_url: z.string().url("Must be a valid URL").optional().or(z.literal("")),
+    homepage_url: z.string().refine(isValidHttpUrl, "Must be a valid URL").optional().or(z.literal("")),
+    repository_url: z.string().refine(isValidHttpUrl, "Must be a valid URL").optional().or(z.literal("")),
+    issues_url: z.string().refine(isValidHttpUrl, "Must be a valid URL").optional().or(z.literal("")),
     auth_notes: z.string().max(4096, "Must be at most 4096 characters").optional().or(z.literal("")),
     known_limitations: z.string().max(4096, "Must be at most 4096 characters").optional().or(z.literal("")),
-    required_permissions: z.string().max(2000, "Must be at most 2000 characters").optional().or(z.literal("")),
-    examples_url: z.string().url("Must be a valid URL").optional().or(z.literal("")),
+    required_permissions: z
+      .string()
+      .max(2000, "Must be at most 2000 characters")
+      .refine((v) => {
+        const entries = v.split(/[,\n]/).map((e) => e.trim()).filter(Boolean);
+        return entries.length <= 100 && entries.every((e) => e.length <= 256);
+      }, "At most 100 permissions, each at most 256 characters")
+      .optional()
+      .or(z.literal("")),
+    examples_url: z.string().refine(isValidHttpUrl, "Must be a valid URL").optional().or(z.literal("")),
     recommended_skills: z.string().max(2000, "Must be at most 2000 characters").optional().or(z.literal("")),
     // Developer app scoping (admin-only, private services)
     developer_app_ids: z.array(z.string()).optional(),
@@ -364,7 +393,7 @@ export type ServiceResponseDefaultHeaders = z.infer<
 export const redirectUriSchema = z
   .string()
   .min(1, "URI is required")
-  .url("Must be a valid URL")
+  .refine(isValidHttpUrl, "Must be a valid URL")
   .refine(
     (val) => val.startsWith("https://") || val.startsWith("http://"),
     "URI must use https:// or http://",

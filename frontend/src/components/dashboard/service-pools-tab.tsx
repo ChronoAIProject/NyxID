@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useForm, useWatch } from "react-hook-form";
+import { useWatch } from "react-hook-form";
+import { firstNestedErrorMessage } from "@/lib/form-errors";
 import { toast } from "sonner";
 import {
   CheckCircle2,
@@ -31,6 +32,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
+  useAppForm,
   Form,
   FormControl,
   FormField,
@@ -122,7 +124,7 @@ function CreatePoolDialog({
   readonly services: readonly UserServiceResponse[];
 }) {
   const createMutation = useCreateServicePool();
-  const form = useForm<PoolFormValues>({
+  const form = useAppForm<PoolFormValues>({
     resolver: zodResolver(createServicePoolSchema),
     mode: "onChange",
     defaultValues: {
@@ -156,7 +158,7 @@ function CreatePoolDialog({
     const next = checked
       ? [...current, { user_service_id: serviceId, weight: 1, enabled: true }]
       : current.filter((member) => member.user_service_id !== serviceId);
-    form.setValue("members", next, { shouldDirty: true, shouldValidate: true });
+    form.setValue("members", next);
   }
 
   async function onSubmit(values: PoolFormValues) {
@@ -183,6 +185,10 @@ function CreatePoolDialog({
     form.formState.isValid &&
     form.formState.isDirty &&
     !createMutation.isPending;
+  // Member errors live at nested paths (members.{i}.weight) with no
+  // FormField render site; surface the first one or the isValid gate
+  // disables Save with zero feedback.
+  const membersError = firstNestedErrorMessage(form.formState.errors.members);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -322,6 +328,9 @@ function CreatePoolDialog({
                   ))}
                 </div>
               )}
+              {membersError && (
+                <p className="text-xs text-destructive">{membersError}</p>
+              )}
             </div>
             <DialogFooter>
               <Button
@@ -360,7 +369,7 @@ function PoolEditorDialog({
 }) {
   const updateMutation = useUpdateServicePool();
   const setMembersMutation = useSetServicePoolMembers();
-  const form = useForm<PoolFormValues>({
+  const form = useAppForm<PoolFormValues>({
     resolver: zodResolver(createServicePoolSchema),
     mode: "onChange",
     defaultValues: {
@@ -426,7 +435,7 @@ function PoolEditorDialog({
     const next = checked
       ? [...current, { user_service_id: serviceId, weight: 1, enabled: true }]
       : current.filter((member) => member.user_service_id !== serviceId);
-    form.setValue("members", next, { shouldDirty: true, shouldValidate: true });
+    form.setValue("members", next);
   }
 
   function updateMember(
@@ -436,7 +445,7 @@ function PoolEditorDialog({
     const next = form.getValues("members").map((member) =>
       member.user_service_id === serviceId ? { ...member, ...patch } : member,
     );
-    form.setValue("members", next, { shouldDirty: true, shouldValidate: true });
+    form.setValue("members", next);
   }
 
   async function onSubmit(values: PoolFormValues) {
@@ -470,6 +479,7 @@ function PoolEditorDialog({
     form.formState.isValid &&
     form.formState.isDirty &&
     !isPending;
+  const membersError = firstNestedErrorMessage(form.formState.errors.members);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -612,7 +622,15 @@ function PoolEditorDialog({
                         disabled={!checked}
                         onChange={(event) =>
                           updateMember(service.id, {
-                            weight: Math.max(1, Number(event.target.value) || 1),
+                            // Clamp to the schema range (int 1-1000) so typed
+                            // values can't silently disable the isValid gate.
+                            weight: Math.min(
+                              1000,
+                              Math.max(
+                                1,
+                                Math.round(Number(event.target.value) || 1),
+                              ),
+                            ),
                           })
                         }
                         aria-label={`Weight for ${service.slug}`}
@@ -634,6 +652,9 @@ function PoolEditorDialog({
                   );
                 })}
               </div>
+              {membersError && (
+                <p className="text-xs text-destructive">{membersError}</p>
+              )}
             </div>
             <DialogFooter>
               <Button

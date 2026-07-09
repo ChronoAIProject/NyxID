@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useForm } from "react-hook-form";
 import {
   useService,
   useDeleteService,
@@ -82,6 +81,7 @@ import {
   type PushNodeCredentialFormInput,
 } from "@/schemas/nodes";
 import {
+  useAppForm,
   Form,
   FormControl,
   FormField,
@@ -94,6 +94,7 @@ import {
   isWideOpenAnonymousPattern,
   type AnonymousEndpointRuleFormData,
   type AnonymousEndpointRuleFormInput,
+  anonymousEndpointUpdateSchema,
 } from "@/schemas/anonymous-endpoints";
 import type { NodePendingCredentialInjectionMethod } from "@/types/nodes";
 import type { AnonymousEndpointRule } from "@/types/api";
@@ -629,7 +630,7 @@ export function ServiceDetailPage() {
           <DetailSection title="Default request headers">
             {service.default_request_headers &&
             service.default_request_headers.length > 0 ? (
-              <div className="space-y-2">
+              <div className="space-y-2 p-4">
                 <p className="text-xs text-muted-foreground">
                   Injected on every proxied request. Non-overridable entries
                   replace caller-supplied values; overridable ones yield to
@@ -644,7 +645,7 @@ export function ServiceDetailPage() {
                 />
               </div>
             ) : (
-              <div className="rounded-lg bg-white/[0.03] px-4 py-3 text-[12px] text-muted-foreground">
+              <div className="m-4 rounded-lg bg-white/[0.03] px-4 py-3 text-[12px] text-muted-foreground">
                 No default headers configured for this service.
               </div>
             )}
@@ -705,7 +706,7 @@ function ServiceCredentialPushSection({
   const nodeId = service.node_id ?? "";
   const pushCredentialMutation = usePushNodeCredential(nodeId);
   const initialMethod = injectionMethodForService(service);
-  const form = useForm<
+  const form = useAppForm<
     PushNodeCredentialFormInput,
     unknown,
     PushNodeCredentialFormData
@@ -779,7 +780,6 @@ function ServiceCredentialPushSection({
                         form.setValue(
                           "field_name",
                           defaultFieldName(method, service.auth_key_name),
-                          { shouldDirty: true, shouldValidate: true },
                         );
                       }
                     }}
@@ -867,7 +867,7 @@ function AnonymousEndpointsSection({
   const createMutation = useCreateAnonymousEndpoint(serviceId);
   const updateMutation = useUpdateAnonymousEndpoint(serviceId);
   const deleteMutation = useDeleteAnonymousEndpoint(serviceId);
-  const form = useForm<
+  const form = useAppForm<
     AnonymousEndpointRuleFormInput,
     unknown,
     AnonymousEndpointRuleFormData
@@ -1165,13 +1165,22 @@ function AnonymousEndpointRow({
         variant="outline"
         disabled={!dirty || isUpdating}
         isLoading={isUpdating}
-        onClick={() =>
-          void onUpdate(rule, {
+        onClick={() => {
+          // Row edits must pass the same rules as creation — the backend
+          // rejects quota 0 / bad patterns with a bare 400 otherwise.
+          const parsed = anonymousEndpointUpdateSchema.safeParse({
             method,
             path_pattern: pathPattern,
-            daily_quota: Number(dailyQuota),
-          })
-        }
+            daily_quota: dailyQuota,
+          });
+          if (!parsed.success) {
+            toast.error(
+              parsed.error.issues[0]?.message ?? "Invalid endpoint rule",
+            );
+            return;
+          }
+          void onUpdate(rule, parsed.data);
+        }}
       >
         Save
       </Button>

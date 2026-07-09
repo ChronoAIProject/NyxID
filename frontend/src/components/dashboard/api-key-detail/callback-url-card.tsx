@@ -1,3 +1,4 @@
+import { isValidHttpUrl } from "@/schemas/http-url";
 import { useState } from "react";
 import { useUpdateApiKey } from "@/hooks/use-api-keys";
 import { ApiError } from "@/lib/api-client";
@@ -27,6 +28,10 @@ export function CallbackUrlCard({
 
   function handleSave() {
     const trimmed = value.trim();
+    if (trimmed !== "" && !isValidHttpUrl(trimmed)) {
+      toast.error("Must be a full URL with a domain, e.g. https://agent.example.com/callback");
+      return;
+    }
     updateApiKey.mutate(
       { keyId, callback_url: trimmed.length > 0 ? trimmed : null },
       {

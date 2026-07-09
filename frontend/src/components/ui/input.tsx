@@ -10,7 +10,10 @@ const Input = React.forwardRef<
     <input
       type={type}
       className={cn(
-        "flex h-8 w-full rounded-lg border border-input bg-transparent px-3 py-1.5 text-[12px] text-foreground transition-colors duration-200 file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-text-tertiary focus-visible:outline-none focus-visible:border-white/[0.15] disabled:cursor-not-allowed disabled:opacity-50",
+        // aria-invalid keeps the error border while errored — even when
+        // focused — for every consumer that sets it (FormControl does so
+        // automatically for FormField-driven inputs).
+        "flex h-8 w-full rounded-lg border border-input bg-transparent px-3 py-1.5 text-[12px] text-foreground transition-colors duration-200 file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-text-tertiary focus-visible:outline-none focus-visible:border-white/[0.15] aria-invalid:border-destructive aria-invalid:focus-visible:border-destructive disabled:cursor-not-allowed disabled:opacity-50",
         className,
       )}
       ref={ref}

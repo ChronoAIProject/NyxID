@@ -122,6 +122,7 @@ export function SaConnectedProviders({ saId }: SaConnectedProvidersProps) {
   return (
     <>
       <DetailSection title="Connected Providers">
+        <div className="p-4">
         {providersLoading ? (
           <Skeleton className="h-24 w-full" />
         ) : saProviders && saProviders.length > 0 ? (
@@ -194,6 +195,7 @@ export function SaConnectedProviders({ saId }: SaConnectedProvidersProps) {
             />
           </div>
         )}
+        </div>
       </DetailSection>
 
       {connectDialogProvider !== null && (

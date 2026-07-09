@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { useForm, useWatch } from "react-hook-form";
+import { useWatch } from "react-hook-form";
+import { useAppForm } from "@/components/ui/form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useChannelBots, useCreateChannelBot, useDeleteChannelBot } from "@/hooks/use-channel-bots";
 import {
@@ -282,7 +283,7 @@ function CreateBotDialog({
     control,
     reset,
     formState: { errors },
-  } = useForm<CreateChannelBotFormData>({
+  } = useAppForm<CreateChannelBotFormData>({
     resolver: zodResolver(createChannelBotSchema),
     defaultValues: {
       platform: "telegram",
@@ -365,9 +366,7 @@ function CreateBotDialog({
             <OrgScopeSelect
               value={targetOrgId}
               onChange={(next) =>
-                setValue("target_org_id", next ?? undefined, {
-                  shouldDirty: true,
-                })
+                setValue("target_org_id", next ?? undefined)
               }
               label="Scope"
             />
@@ -656,9 +655,10 @@ function CreateDeviceChannelDialog({
     register,
     handleSubmit,
     setValue,
+    watch,
     reset,
     formState: { errors },
-  } = useForm<CreateDeviceConversationFormData>({
+  } = useAppForm<CreateDeviceConversationFormData>({
     resolver: zodResolver(createDeviceConversationSchema),
     defaultValues: {
       platform_conversation_id: "",
@@ -760,6 +760,7 @@ function CreateDeviceChannelDialog({
               </p>
             ) : (
               <Select
+                value={watch("agent_api_key_id") ?? ""}
                 onValueChange={(value) => setValue("agent_api_key_id", value)}
               >
                 <SelectTrigger>
@@ -802,6 +803,11 @@ function CreateDeviceChannelDialog({
               <code className="text-xs">sensor</code>). Defaults to
               <code className="mx-1 text-xs">device</code>.
             </p>
+            {errors.platform_conversation_type && (
+              <p className="text-xs text-destructive">
+                {errors.platform_conversation_type.message}
+              </p>
+            )}
           </div>
 
           <DialogFooter>

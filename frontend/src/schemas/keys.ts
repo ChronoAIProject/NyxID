@@ -62,7 +62,13 @@ export const userServiceResponseSchema = z.object({
   forward_access_token: z.boolean(),
   inject_delegation_token: z.boolean(),
   delegation_token_scope: z.string(),
-  custom_user_agent: z.string().nullable().optional(),
+  custom_user_agent: z
+    .string()
+    .max(256, "User-Agent must be at most 256 characters")
+    // eslint-disable-next-line no-control-regex -- mirrors backend byte check
+    .refine((v) => !/[\x00-\x08\x0a-\x1f]/.test(v), "No control characters")
+    .nullable()
+    .optional(),
   ssh_auth_mode: sshAuthModeSchema.optional(),
   /// NyxID#356: per-user default request headers owned by this user
   /// service. Catalog-level admin defaults are surfaced separately.

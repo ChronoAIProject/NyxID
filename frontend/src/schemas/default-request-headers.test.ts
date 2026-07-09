@@ -113,6 +113,16 @@ describe("defaultRequestHeaderSchema", () => {
     expect(result.success).toBe(false);
   });
 
+  it("rejects empty and blank values (headers must be fully filled)", () => {
+    expect(
+      defaultRequestHeaderSchema.safeParse(row("X-Api-Version", "")).success,
+    ).toBe(false);
+    expect(
+      defaultRequestHeaderSchema.safeParse(row("X-Api-Version", "   "))
+        .success,
+    ).toBe(false);
+  });
+
   it("rejects invalid token characters in name", () => {
     for (const bad of ["bad header", "bad:header", "bad/header", "bad(h)"]) {
       const result = defaultRequestHeaderSchema.safeParse(row(bad, "v"));

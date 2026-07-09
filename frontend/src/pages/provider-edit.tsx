@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { useNavigate, useParams } from "@tanstack/react-router";
-import { useForm, useWatch } from "react-hook-form";
+import { useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useProvider, useUpdateProvider } from "@/hooks/use-providers";
 import {
@@ -11,6 +11,7 @@ import { ApiError } from "@/lib/api-client";
 import { PageHeader } from "@/components/shared/page-header";
 import { Separator } from "@/components/ui/separator";
 import {
+  useAppForm,
   Form,
   FormControl,
   FormField,
@@ -46,7 +47,7 @@ export function ProviderEditPage() {
   const { data: provider, isLoading, error, refetch } = useProvider(providerId);
   const updateMutation = useUpdateProvider(providerId);
 
-  const form = useForm<UpdateProviderFormData>({
+  const form = useAppForm<UpdateProviderFormData>({
     resolver: zodResolver(updateProviderSchema),
     defaultValues: {
       name: "",

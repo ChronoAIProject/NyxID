@@ -44,6 +44,7 @@ Strict separation: `handlers/` -> `services/` -> `models/`
 ### 4. Frontend Patterns
 
 - Zod schemas in `schemas/` (one per domain); React Hook Form + `@hookform/resolvers`
+- Forms use `useAppForm` (`components/ui/form.tsx`), never raw `useForm` (lint-enforced via `no-restricted-imports`): its `setValue` defaults to `shouldDirty/shouldTouch/shouldValidate: true` so non-text controls wired via `watch` + `setValue` (Radix Switch/Select/Checkbox, custom editors) correctly enable dirty-gated submit buttons; programmatic writes (prefill, normalization in effects) opt out per call with `{ shouldDirty: false, shouldTouch: false }`
 - TanStack Query hooks in `hooks/` (one per domain: `use-auth.ts`, `use-services.ts`, ...); auth state in Zustand (`stores/auth-store.ts`)
 - UI components via Radix UI + shadcn/ui pattern (`components/ui/`); no `console.log` in production code
 

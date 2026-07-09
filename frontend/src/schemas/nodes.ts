@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { isValidHttpUrl } from "./http-url";
 import { decodeBase64UrlNoPad, decodeBase64UrlNoPadExact, MAX_CIPHERTEXT_SIZE } from "@/lib/crypto";
 
 export const MAX_REMOTE_CREDENTIAL_PLAINTEXT_SIZE =
@@ -64,7 +65,7 @@ export const pushNodeCredentialSchema = z.object({
       "Field name cannot contain control characters",
     ),
   target_url: optionalTrimmedString.pipe(
-    z.string().url("Target URL must be valid").optional(),
+    z.string().refine(isValidHttpUrl, "Target URL must be valid").optional(),
   ),
   label: optionalTrimmedString.pipe(
     z

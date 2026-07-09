@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { useNavigate, useParams } from "@tanstack/react-router";
-import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
   useRole,
@@ -30,6 +29,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
+  useAppForm,
   Form,
   FormControl,
   FormField,
@@ -59,7 +59,7 @@ export function AdminRoleDetailPage() {
 
   useBreadcrumbLabel(role?.name);
 
-  const form = useForm<UpdateRoleFormData>({
+  const form = useAppForm<UpdateRoleFormData>({
     resolver: zodResolver(updateRoleSchema),
     defaultValues: {
       name: "",

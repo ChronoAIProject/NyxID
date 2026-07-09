@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import type { ProviderConfig, UserProviderCredentials } from "@/types/api";
 import {
@@ -20,6 +19,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
+  useAppForm,
   Form,
   FormControl,
   FormField,
@@ -54,7 +54,7 @@ export function UserCredentialsDialog({
 
   const hasExisting = credentials?.has_credentials === true;
 
-  const form = useForm<UserCredentialsFormData>({
+  const form = useAppForm<UserCredentialsFormData>({
     resolver: zodResolver(userCredentialsSchema),
     defaultValues: {
       client_id: "",
@@ -67,10 +67,10 @@ export function UserCredentialsDialog({
     try {
       await setMutation.mutateAsync({
         providerId: provider.id,
-        client_id: data.client_id,
+        client_id: data.client_id.trim(),
         client_secret:
           data.client_secret && data.client_secret.trim().length > 0
-            ? data.client_secret
+            ? data.client_secret.trim()
             : undefined,
         label:
           data.label && data.label.trim().length > 0

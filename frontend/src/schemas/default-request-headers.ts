@@ -103,10 +103,14 @@ export const defaultRequestHeaderSchema = z
     // Length cap is enforced unconditionally; the byte-level check moves
     // to the object-level superRefine below so it can look at
     // `sensitive` and allow the redaction placeholder to round-trip.
-    value: z.string().max(
-      MAX_HEADER_VALUE_LEN,
-      `Header value must be at most ${String(MAX_HEADER_VALUE_LEN)} characters`,
-    ),
+    value: z
+      .string()
+      .min(1, "Header value is required")
+      .max(
+        MAX_HEADER_VALUE_LEN,
+        `Header value must be at most ${String(MAX_HEADER_VALUE_LEN)} characters`,
+      )
+      .refine((v) => v.trim().length > 0, "Header value must not be blank"),
     overridable: z.boolean(),
     sensitive: z.boolean(),
   })

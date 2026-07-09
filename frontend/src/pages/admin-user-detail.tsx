@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { useNavigate, useParams } from "@tanstack/react-router";
-import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
   useAdminUser,
@@ -41,6 +40,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
+  useAppForm,
   Form,
   FormControl,
   FormField,
@@ -122,7 +122,7 @@ export function AdminUserDetailPage() {
 
   useBreadcrumbLabel(user?.display_name ?? user?.email);
 
-  const form = useForm<UpdateUserFormData>({
+  const form = useAppForm<UpdateUserFormData>({
     resolver: zodResolver(updateUserSchema),
     defaultValues: {
       display_name: "",
