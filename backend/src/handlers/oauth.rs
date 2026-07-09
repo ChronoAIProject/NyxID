@@ -24,7 +24,11 @@ use crate::models::consent::Consent;
 use crate::models::service_account::{COLLECTION_NAME as SERVICE_ACCOUNTS, ServiceAccount};
 use crate::models::service_account_token::{COLLECTION_NAME as SA_TOKENS, ServiceAccountToken};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
-use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
+use crate::models::user_service::UserService;
+// USER_SERVICES collection const is only referenced from the #[cfg(test)] module
+// now that production consent resolution goes through user_service_service.
+#[cfg(test)]
+use crate::models::user_service::COLLECTION_NAME as USER_SERVICES;
 use crate::mw::auth::{AuthMethod, AuthUser, OptionalAuthUser};
 use crate::services::{
     audit_service, consent_service, oauth_broker_service, oauth_client_service,
