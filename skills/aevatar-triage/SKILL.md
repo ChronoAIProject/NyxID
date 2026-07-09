@@ -1,7 +1,7 @@
 ---
 name: aevatar-triage
 description: Use AFTER something goes wrong while using Aevatar — a user hits an error, failure, or confusing behavior and you must find whether it lives in Aevatar, NyxID, or Ornn, then act. Triggers - "aevatar is erroring", "why did my workflow fail", "my scheduled run did not fire", "my bot does not reply", "connector 401/403", "skill won't pull/upload", "is this an aevatar, nyxid, or ornn bug", "file an issue", "am I using this right". It attributes the failure by tracing the request path, pulls that layer's real public source for a code-grounded root cause citing file and line, then branches - draft and, only on explicit user confirmation, file a precise GitHub issue when behavior violates the layer's published contract, or explain the correct usage from the code when it is a usage mistake. The after-it-breaks counterpart to aevatar-feasibility-advisor; never auto-files, de-dups first, never claims a root cause without a code citation. Works locally (git + gh) and server-side (nyxid_proxy + api-github).
-version: "1.1"
+version: "1.2"
 metadata:
   category: plain
   tag:
@@ -73,6 +73,7 @@ typically flows `your agent -> Aevatar runtime -> NyxID proxy -> third-party`, a
 | **scheduled run stopped firing** (fired before; `nextFireAt` frozen in the past, `fireCount` flat, `failureCount=0`, empty `lastError`) | **Aevatar** (scheduler / actor not re-armed across pod churn) | compare to peer schedules; pod `startTime` / `restartCount`; is it still enabled? did a deploy/restart line up with the last good fire? |
 | **scheduled run never fires, or fires but errors on credential** | **Aevatar scheduler ⨯ NyxID** (binding) | is it enabled and is `nextFireAt` computed? `lastError` like "binding not found" / "exactly one credential source" -> the *fired call's* invocation credential (scope-owner broker binding) |
 | **schedule fires (`fireCount` climbs) but the real-world effect never happens** | **Aevatar** (the fired call's path / credential) | dispatch success ≠ effect — check the external side-effect out-of-band; the proxy can hand back `{"error":true}` inside a `200` |
+| **scheduled run starts fine, then late steps hit `token_expired` ~5 min after fire** | **by design (NyxID broker TTL)** | the run's caller credential is minted once at fire and pinned to `BROKER_ACCESS_TTL_SECS = 300` (NyxID `backend/src/services/oauth_broker_service.rs`) — fast-revocation design, not a bug; correlate failure onset with **fire time** (per-run ~5 min mark ⇒ broker TTL) vs a fixed wall-clock time (⇒ something else); fix by shortening the run / front-loading NyxID-authenticated steps, not by retrying |
 | **inbound bot doesn't reply** (Lark/Telegram) | **cross-layer — walk it** | did NyxID relay webhook fire? is the bot connector connected? did the Aevatar channel run start (observatory)? credential = the *sender's* NyxID, present and live? |
 | **`/whoami` says "bound" but tool calls get `credential_denied`** | **NyxID** (grant revoked — false green) | live token-exchange returns `invalid_grant` while the local readmodel still reads "bound"; whoami checks only the local mirror, not the live grant |
 | approval prompt stuck | **NyxID approvals + Aevatar suspension** | NyxID approval request id; Aevatar workflow wait/suspend state |
@@ -80,6 +81,17 @@ typically flows `your agent -> Aevatar runtime -> NyxID proxy -> third-party`, a
 
 **Do not stop at the first match.** Gather the disambiguating evidence and *eliminate* — a plausible
 first guess that you haven't excluded the alternatives for is not an attribution.
+
+**Token lifetimes: read, never recall.** The stack holds several credential classes with wildly
+different TTLs — interactive login access token (`JWT_ACCESS_TTL_SECS`, deployment config; code
+default 900 s, production instances often set hours), broker/delegated tokens (fixed 300 s,
+`oauth_broker_service.rs` / `crypto/jwt.rs`), service-account tokens (`SA_TOKEN_TTL_SECS`, default
+3600 s), non-expiring NyxID API keys. Two statements like "the token lives 8 hours" and "the run
+credential lives 5 minutes" can both be true — about different classes — so a TTL claim that
+doesn't name its token class is not evidence. Before attributing any expiry: decode the JWT
+actually involved and report `exp − iat` (numbers only, never the token), or cite the owning
+repo's constant. A lifetime quoted from memory is the classic source of confident-but-wrong
+attributions here.
 
 ## Step 3 — Pull the repo and reach a code-grounded root cause
 
