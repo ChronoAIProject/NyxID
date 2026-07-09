@@ -1,5 +1,6 @@
 use crate::config::AppConfig;
 use crate::errors::{AppError, AppResult};
+use crate::models::org_membership::OrgMembership;
 use crate::models::user_service::UserService;
 use crate::services::{org_role_scope_service, org_service, user_service_service};
 
@@ -99,6 +100,74 @@ pub async fn resolve_resource_service_ids_for_user(
 ) -> AppResult<Vec<String>> {
     let resolved = resolve_requested_resources(db, config, actor_user_id, Some(resources)).await?;
     Ok(resolved.map(|r| r.service_ids).unwrap_or_default())
+}
+
+pub async fn can_grant_user_service(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+    service: &UserService,
+) -> AppResult<bool> {
+    let access = org_service::resolve_owner_access(db, actor_user_id, &service.user_id).await?;
+    Ok(owner_access_can_grant_user_service(&access, service))
+}
+
+fn owner_access_can_grant_user_service(
+    access: &org_service::OwnerAccess,
+    service: &UserService,
+) -> bool {
+    match access {
+        org_service::OwnerAccess::Direct => true,
+        org_service::OwnerAccess::AsOrgAdmin { .. } => access.allows_resource(&service.id),
+        org_service::OwnerAccess::AsOrgMember { role, .. } => {
+            role.can_proxy()
+                && (!service.admin_only || role.can_admin())
+                && access.allows_resource(&service.id)
+        }
+        org_service::OwnerAccess::Forbidden => false,
+    }
+}
+
+async fn membership_can_grant_user_service(
+    db: &mongodb::Database,
+    membership: &OrgMembership,
+    service: &UserService,
+) -> AppResult<bool> {
+    let effective_scope =
+        org_role_scope_service::effective_scope_for_membership(db, membership).await?;
+    let access = match membership.role {
+        crate::models::org_membership::OrgRole::Admin => org_service::OwnerAccess::AsOrgAdmin {
+            org_user_id: membership.org_user_id.clone(),
+            membership_id: membership.id.clone(),
+            allowed_service_ids: effective_scope,
+        },
+        crate::models::org_membership::OrgRole::Member
+        | crate::models::org_membership::OrgRole::Viewer => org_service::OwnerAccess::AsOrgMember {
+            org_user_id: membership.org_user_id.clone(),
+            membership_id: membership.id.clone(),
+            role: membership.role,
+            allowed_service_ids: effective_scope,
+        },
+    };
+
+    Ok(owner_access_can_grant_user_service(&access, service))
+}
+
+pub async fn validate_grantable_service_ids(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+    service_ids: &[String],
+) -> AppResult<bool> {
+    for service_id in service_ids {
+        let Some(service) = user_service_service::find_user_service_by_id(db, service_id).await?
+        else {
+            return Ok(false);
+        };
+        if !can_grant_user_service(db, actor_user_id, &service).await? {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
 }
 
 pub async fn resolve_token_resource_scope(
@@ -228,13 +297,7 @@ async fn resolve_org_service_by_slug(
             continue;
         };
 
-        if service.admin_only && !membership.role.can_admin() {
-            continue;
-        }
-
-        let effective_scope =
-            org_role_scope_service::effective_scope_for_membership(db, membership).await?;
-        if !org_role_scope_service::scope_allows(&effective_scope, &service.id) {
+        if !membership_can_grant_user_service(db, membership, &service).await? {
             continue;
         }
 
