@@ -1,7 +1,7 @@
 ---
 name: aevatar-scheduler
 description: Create and manage cron schedules that fire an Aevatar service on a recurring basis, authenticated as the scope owner via NyxID — over the REST API. Use when a user wants to "schedule", "run on a cron", "set up a recurring run", "run every day/hour/Monday", "automate this service on a timer", "preview a cron", "pause/resume/disable a schedule", or "run it now" — or hits token_expired on a scheduled run's late steps. It builds the schedule against a published service (identity + endpoint + payload + serving revision), uses scope-owner NyxID auth (which requires the owner's NyxID broker binding), documents the fire-time credential's fixed 5-minute lifetime and how to design runs around it, and covers preview, enable/disable, run-now, update, and delete. Publish the service first with the service-publisher skill.
-version: "1.6"
+version: "1.7"
 metadata:
   category: plain
   tag:
@@ -112,8 +112,12 @@ NYXID_ACCESS_TOKEN="$KEY" nyxid proxy request aevatar \
   -H 'Content-Type: application/json' -d '{"prompt":"poll"}'
 ```
 The member invoke endpoint carries `scopeId` in its path, so it runs even though a bare API
-key reports `scopeResolved:false` on the generic `api/studio/context` call. Trade-off: the
-timer runs on whatever machine you put it on (a cloud cron would live in Aevatar; this does not).
+key reports `scopeResolved:false` on the generic `api/studio/context` call. The same pattern
+works for **event-driven external triggers** such as Lark Base automation's "send HTTP request"
+action: store the NyxID API key as the external system's secret and POST to the explicit
+member/team invoke path. This is not Aevatar `externalExposure`; externalExposure is only
+needed when the workflow must be registered as a reusable NyxID connector/slug. Trade-off:
+the timer or event sender runs outside Aevatar (a cloud cron would live in Aevatar; this does not).
 
 ## The fire-time credential lives 5 minutes — design the run around it
 
