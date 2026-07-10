@@ -1,7 +1,7 @@
 ---
 name: aevatar-feasibility-advisor
-description: Decide — honestly — whether a thing the user wants to build on Aevatar is possible, what its prerequisites are, or why it cannot be done, BEFORE anyone starts building. Use this first whenever a user describes a goal rather than a concrete artifact — "can aevatar do X", "I want a bot that…", "build me something that posts to Twitter / reads my GitHub / replies on Telegram", "is it possible to…", "automate … every day". It teaches the one hard premise (every third-party capability is brokered by NyxID), the two distinct surfaces (outbound connector vs inbound channel), how to check what is actually connectable, the prerequisite for each capability class, what is host-gated (and so not self-serve), and what is genuinely impossible without new NyxID/Aevatar platform work — so you can negotiate scope and give the user a straight answer plus next steps instead of over-promising. It scopes; it does not build (hand off to workflow-authoring / team-builder / service-publisher / scheduler).
-version: "1.0"
+description: Decide — honestly — whether a thing the user wants to build on Aevatar is possible, what its prerequisites are, or why it cannot be done, BEFORE anyone starts building. Use this first whenever a user describes a goal rather than a concrete artifact — "can aevatar do X", "I want a bot that…", "build me something that posts to Twitter / reads my GitHub / replies on Telegram", "is it possible to…", "automate … every day", "let Lark Base trigger a workflow". It teaches the one hard premise (every third-party capability is brokered by NyxID), the two distinct surfaces (outbound connector vs inbound channel), external HTTP trigger options such as Lark Base automation, how to check what is actually connectable, the prerequisite for each capability class, what is host-gated (and so not self-serve), and what is genuinely impossible without new NyxID/Aevatar platform work — so you can negotiate scope and give the user a straight answer plus next steps instead of over-promising. It scopes; it does not build (hand off to workflow-authoring / team-builder / service-publisher / scheduler).
+version: "1.1"
 metadata:
   category: plain
   tag:
@@ -95,6 +95,7 @@ exists or doesn't without checking it.** The examples below are illustrative, no
 | **Inbound bot** that replies in-platform: **Lark / Telegram** | ✅ Yes | Connect the bot connector (`api-lark-bot` / `api-telegram-bot`) **and** register the channel (channel-admin / `channel_registrations`); NyxID provisions the webhook to Aevatar's relay. |
 | **Inbound bot** on a platform with a connector but **no channel module** (Discord, Slack, X, …) | ❌ Not self-serve | Outbound calls work, but inbound-reply needs a new Aevatar **channel module** + relay wiring = Aevatar platform work. Offer the outbound-only version as the alternative. |
 | **Publish** a workflow/team as an **invocable service** in-scope | ✅ Yes | Just bind it (`aevatar-service-publisher`). Usable within the user's scope immediately. |
+| An external automation **triggers an existing Aevatar workflow** (e.g. Lark Base row status changed → HTTP request → run member workflow) | ✅ Usually, without service externalExposure | Use the external system's HTTP action to call the NyxID proxy for the existing `aevatar` service with a NyxID API key (`proxy` scope), targeting an explicit `/api/scopes/{scopeId}/members/{memberId}/invoke/...` or `/teams/{teamId}/invoke/...` path. This is an external trigger, not a NyxID connector registration. See `aevatar-service-publisher`. |
 | Have that service **registered as a NyxID-brokered connector** (callable by others/externally) | ⚠️ Host-gated | The **host** must enable external exposure (`GAgentService:ExternalExposure: Enabled=true` + `RegisterAllPublishedServices` or an opt-in policy). You **cannot** turn this on as a client — verify `externalExposure` on the service and, if empty, tell the user to ask the host. |
 | **Schedule** a recurring run (cron) | ⚠️ Yes, with a binding | The scope owner needs a durable **NyxID broker binding** — i.e. an interactive **console** NyxID login, not just a CLI token. Without it, schedule creation 400s ("Authenticated NyxID owner binding is required"). |
 | A service backed by an **arbitrary custom agent / actor type** | ⚠️ Constrained | Member implementations are `workflow`, `script`, or **registered** `gagent` kinds (`GET /api/scopes/gagent-types`). You can't point a service at an arbitrary actor; wrap custom logic in a workflow or script, or use a registered gagent kind. |
@@ -123,6 +124,12 @@ State these plainly when they bite:
   get it at `<api_key_url>`.>" Then confirm with `GET /api/v1/services` that the slug appears.
 - **Register an inbound channel** (Lark/Telegram) → connect the bot connector, then register the
   channel via the channel-admin tool so NyxID wires the webhook to Aevatar's relay.
+- **External HTTP trigger** (Lark Base / webhook sender / external cron) → do **not** ask for
+  Aevatar `externalExposure` first. If the external system can call a public HTTPS URL with
+  headers and JSON, call NyxID's proxy route for the already-connected `aevatar` service using
+  a NyxID API key with `proxy` scope, and include the real scope/member/team id in the Aevatar
+  path. If the sender cannot tolerate SSE or cannot shape the typed payload, add a small
+  adapter/custom NyxID service or ask the host to configure Aevatar's webhook ingress.
 - **NyxID service registration** → ask the **host** to enable external exposure for the service;
   you can only drive publish + verify the `externalExposure` block.
 - **Scheduling** → "Do an interactive NyxID login in the Aevatar console once (establishes the
@@ -140,6 +147,10 @@ Give the user a straight answer in this shape — never a vague "maybe":
 - ⚠️ **Yes, but it needs an action you can't self-serve** — "The pipeline is fine, but exposing
   it as a NyxID connector for *others* to call requires the **host** to enable external exposure.
   In your own scope it works today without that."
+- ✅ **Yes, no externalExposure needed for this shape** — "Lark Base can trigger your existing
+  member workflow by sending an HTTPS request to NyxID's `aevatar` proxy with a NyxID API key,
+  targeting `/api/scopes/{scopeId}/members/{memberId}/invoke/chat:stream`. ExternalExposure is
+  only needed if you want this workflow registered as a reusable NyxID connector/slug."
 - ❌ **Not as described** — "An auto-replying **Twitter bot** isn't possible: there's no inbound
   Twitter channel on Aevatar (only Lark and Telegram). What *is* possible: a workflow that
   **posts** to X on a schedule (via the `api-twitter` connector), or an inbound bot on **Telegram**

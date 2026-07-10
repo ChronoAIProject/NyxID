@@ -15,12 +15,25 @@ import {
 } from "@/components/ui/card";
 import { HardDrive, Pencil } from "lucide-react";
 import { toast } from "sonner";
+import type { CredentialSource } from "@/schemas/orgs";
+import type { NodeInfo } from "@/types/nodes";
+
+function canScopeNodeToApiKey(
+  node: NodeInfo,
+  apiKeySource: CredentialSource | undefined,
+): boolean {
+  if (apiKeySource?.type === "org") {
+    return node.owner.kind === "org" && node.owner.id === apiKeySource.org_id;
+  }
+  return node.owner.kind === "user" || node.owner.kind === "org";
+}
 
 export function NodeScopeCard({
   keyId,
   allowAllNodes,
   allowedNodeIds,
   allowedNodes,
+  apiKeySource,
 }: {
   readonly keyId: string;
   readonly allowAllNodes: boolean;
@@ -30,12 +43,16 @@ export function NodeScopeCard({
     readonly name: string;
     readonly status: string;
   }[];
+  readonly apiKeySource?: CredentialSource;
 }) {
   const [editing, setEditing] = useState(false);
   const [allowAll, setAllowAll] = useState(allowAllNodes);
   const [selectedIds, setSelectedIds] =
     useState<readonly string[]>(allowedNodeIds);
   const { data: allNodes } = useNodes();
+  const scopedNodes = (allNodes ?? []).filter((node) =>
+    canScopeNodeToApiKey(node, apiKeySource),
+  );
   const updateApiKey = useUpdateApiKey();
 
   function handleSave() {
@@ -103,8 +120,8 @@ export function NodeScopeCard({
                 <p className="text-xs text-muted-foreground">
                   Select allowed nodes:
                 </p>
-                {allNodes && allNodes.length > 0 ? (
-                  allNodes.map((n) => (
+                {scopedNodes.length > 0 ? (
+                  scopedNodes.map((n) => (
                     <div key={n.id} className="flex items-center gap-2">
                       <Checkbox
                         id={`node-${n.id}`}
@@ -126,7 +143,7 @@ export function NodeScopeCard({
                   ))
                 ) : (
                   <p className="text-xs text-muted-foreground">
-                    No nodes registered yet.
+                    No nodes available for this key.
                   </p>
                 )}
               </div>

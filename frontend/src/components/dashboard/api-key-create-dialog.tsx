@@ -43,6 +43,9 @@ import { Copy, Check, Shield, Server } from "lucide-react";
 import { PlatformIcon } from "@/components/platform-icon";
 import { DatePicker } from "@/components/ui/date-picker";
 import { toast } from "sonner";
+import type { CredentialSource } from "@/schemas/orgs";
+import type { KeyInfo } from "@/types/keys";
+import type { NodeInfo } from "@/types/nodes";
 
 function toggleInArray(
   items: readonly string[],
@@ -51,6 +54,35 @@ function toggleInArray(
   return items.includes(item)
     ? items.filter((i) => i !== item)
     : [...items, item];
+}
+
+function sourceMatchesSelectedOwner(
+  source: CredentialSource | undefined,
+  targetOrgId: string | undefined,
+): boolean {
+  if (targetOrgId) {
+    return source?.type === "org" && source.org_id === targetOrgId;
+  }
+  if (!source || source.type === "personal") return true;
+  return source.allowed;
+}
+
+function serviceCanBeScopedToKey(
+  service: KeyInfo,
+  targetOrgId: string | undefined,
+): boolean {
+  if (service.auto_connected || !service.is_active) return false;
+  return sourceMatchesSelectedOwner(service.credential_source, targetOrgId);
+}
+
+function nodeCanBeScopedToKey(
+  node: NodeInfo,
+  targetOrgId: string | undefined,
+): boolean {
+  if (targetOrgId) {
+    return node.owner.kind === "org" && node.owner.id === targetOrgId;
+  }
+  return node.owner.kind === "user" || node.owner.kind === "org";
 }
 
 export function ApiKeyCreateDialog({
@@ -123,6 +155,11 @@ export function ApiKeyCreateDialog({
       (service) => service.id === initialServiceId,
     );
     const serviceSource = initialService?.credential_source;
+    const targetOrgId =
+      serviceSource?.type === "org" &&
+      (serviceSource.role === "admin" || serviceSource.role === "owner")
+        ? serviceSource.org_id
+        : undefined;
     form.reset({
       name: "Claude Code Agent",
       scopes: ["proxy", "services:read"],
@@ -136,9 +173,7 @@ export function ApiKeyCreateDialog({
       allowed_node_ids: [],
       callback_url: null,
       platform: "claude-code",
-      target_org_id: serviceSource?.type === "org"
-        ? serviceSource.org_id
-        : undefined,
+      target_org_id: targetOrgId,
     });
   }, [form, initialServiceId, open, services, setupMode]);
 
@@ -308,11 +343,12 @@ export function ApiKeyCreateDialog({
                             onChange={(next) => {
                               field.onChange(next ?? undefined);
                               // Reset service scope selections when owner
-                              // changes -- the two owners have disjoint
-                              // service lists so a stale selection can't
+                              // changes so stale selections do not
                               // round-trip to the backend.
                               form.setValue("allowed_service_ids", []);
+                              form.setValue("allowed_node_ids", []);
                               form.setValue("allow_all_services", true);
+                              form.setValue("allow_all_nodes", true);
                             }}
                             label="Owner"
                           />
@@ -464,23 +500,8 @@ export function ApiKeyCreateDialog({
                         control={form.control}
                         name="allowed_service_ids"
                         render={({ field }) => {
-                          // Match the selected owner: personal keys can only
-                          // scope to personal services, org keys only to the
-                          // same org's services. Defaults to personal when
-                          // `watchTargetOrg` is undefined.
                           const visibleServices = (services ?? []).filter(
-                            (s) => {
-                              if (s.auto_connected) return false;
-                              if (!s.is_active) return false;
-                              const source = s.credential_source;
-                              if (watchTargetOrg) {
-                                return (
-                                  source?.type === "org" &&
-                                  source.org_id === watchTargetOrg
-                                );
-                              }
-                              return !source || source.type === "personal";
-                            },
+                            (s) => serviceCanBeScopedToKey(s, watchTargetOrg),
                           );
                           return (
                             <FormItem>
@@ -527,7 +548,7 @@ export function ApiKeyCreateDialog({
                                   <p className="text-xs text-muted-foreground">
                                     {watchTargetOrg
                                       ? "This org has no services yet."
-                                      : "No personal services configured yet."}
+                                      : "No services available for this personal key."}
                                   </p>
                                 )}
                               </div>
@@ -575,59 +596,66 @@ export function ApiKeyCreateDialog({
                       <FormField
                         control={form.control}
                         name="allowed_node_ids"
-                        render={({ field }) => (
-                          <FormItem>
-                            <div className="space-y-2 rounded-lg border border-border bg-muted/30 p-3">
-                              <p className="text-xs text-muted-foreground">
-                                Select allowed nodes:
-                              </p>
-                              {nodes && nodes.length > 0 ? (
-                                nodes.map((n) => (
-                                  <div
-                                    key={n.id}
-                                    className="flex items-center gap-2"
-                                  >
-                                    <Checkbox
-                                      id={`create-node-${n.id}`}
-                                      checked={(
-                                        field.value as readonly string[]
-                                      ).includes(n.id)}
-                                      onCheckedChange={() =>
-                                        field.onChange(
-                                          toggleInArray(
-                                            field.value as readonly string[],
-                                            n.id,
-                                          ),
-                                        )
-                                      }
-                                    />
-                                    <Label
-                                      htmlFor={`create-node-${n.id}`}
-                                      className="text-xs"
-                                    >
-                                      {n.name}
-                                      <Badge
-                                        variant={
-                                          n.status === "Online"
-                                            ? "default"
-                                            : "secondary"
-                                        }
-                                        className="ml-1 text-[10px]"
-                                      >
-                                        {n.status}
-                                      </Badge>
-                                    </Label>
-                                  </div>
-                                ))
-                              ) : (
+                        render={({ field }) => {
+                          const visibleNodes = (nodes ?? []).filter((node) =>
+                            nodeCanBeScopedToKey(node, watchTargetOrg),
+                          );
+                          return (
+                            <FormItem>
+                              <div className="space-y-2 rounded-lg border border-border bg-muted/30 p-3">
                                 <p className="text-xs text-muted-foreground">
-                                  No nodes registered yet.
+                                  Select allowed nodes:
                                 </p>
-                              )}
-                            </div>
-                            <FormMessage />
-                          </FormItem>
-                        )}
+                                {visibleNodes.length > 0 ? (
+                                  visibleNodes.map((n) => (
+                                    <div
+                                      key={n.id}
+                                      className="flex items-center gap-2"
+                                    >
+                                      <Checkbox
+                                        id={`create-node-${n.id}`}
+                                        checked={(
+                                          field.value as readonly string[]
+                                        ).includes(n.id)}
+                                        onCheckedChange={() =>
+                                          field.onChange(
+                                            toggleInArray(
+                                              field.value as readonly string[],
+                                              n.id,
+                                            ),
+                                          )
+                                        }
+                                      />
+                                      <Label
+                                        htmlFor={`create-node-${n.id}`}
+                                        className="text-xs"
+                                      >
+                                        {n.name}
+                                        <Badge
+                                          variant={
+                                            n.status === "Online"
+                                              ? "default"
+                                              : "secondary"
+                                          }
+                                          className="ml-1 text-[10px]"
+                                        >
+                                          {n.status}
+                                        </Badge>
+                                      </Label>
+                                    </div>
+                                  ))
+                                ) : (
+                                  <p className="text-xs text-muted-foreground">
+                                    {watchTargetOrg
+                                      ? "This org has no nodes yet."
+                                      : "No nodes available for this personal key."}
+                                  </p>
+                                )}
+                              </div>
+                              <FormMessage />
+                            </FormItem>
+                          );
+                        }}
                       />
                     )}
                   </div>

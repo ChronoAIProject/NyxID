@@ -1,7 +1,7 @@
 ---
 name: aevatar-scheduler
-description: Create and manage cron schedules that fire an Aevatar service on a recurring basis, authenticated as the scope owner via NyxID — over the REST API. Use when a user wants to "schedule", "run on a cron", "set up a recurring run", "run every day/hour/Monday", "automate this service on a timer", "preview a cron", "pause/resume/disable a schedule", or "run it now". It builds the schedule against a published service (identity + endpoint + payload + serving revision), uses scope-owner NyxID auth (which requires the owner's NyxID broker binding), and covers preview, enable/disable, run-now, update, and delete. Publish the service first with the service-publisher skill.
-version: "1.5"
+description: Create and manage cron schedules that fire an Aevatar service on a recurring basis, authenticated as the scope owner via NyxID — over the REST API. Use when a user wants to "schedule", "run on a cron", "set up a recurring run", "run every day/hour/Monday", "automate this service on a timer", "preview a cron", "pause/resume/disable a schedule", or "run it now" — or hits token_expired on a scheduled run's late steps. It builds the schedule against a published service (identity + endpoint + payload + serving revision), uses scope-owner NyxID auth (which requires the owner's NyxID broker binding), documents the fire-time credential's fixed 5-minute lifetime and how to design runs around it, and covers preview, enable/disable, run-now, update, and delete. Publish the service first with the service-publisher skill.
+version: "1.7"
 metadata:
   category: plain
   tag:
@@ -112,8 +112,35 @@ NYXID_ACCESS_TOKEN="$KEY" nyxid proxy request aevatar \
   -H 'Content-Type: application/json' -d '{"prompt":"poll"}'
 ```
 The member invoke endpoint carries `scopeId` in its path, so it runs even though a bare API
-key reports `scopeResolved:false` on the generic `api/studio/context` call. Trade-off: the
-timer runs on whatever machine you put it on (a cloud cron would live in Aevatar; this does not).
+key reports `scopeResolved:false` on the generic `api/studio/context` call. The same pattern
+works for **event-driven external triggers** such as Lark Base automation's "send HTTP request"
+action: store the NyxID API key as the external system's secret and POST to the explicit
+member/team invoke path. This is not Aevatar `externalExposure`; externalExposure is only
+needed when the workflow must be registered as a reusable NyxID connector/slug. Trade-off:
+the timer or event sender runs outside Aevatar (a cloud cron would live in Aevatar; this does not).
+
+## The fire-time credential lives 5 minutes — design the run around it
+
+At every fire, Aevatar exchanges the stored broker binding for a **fresh access token** (OAuth
+token-exchange, `subject_token_type=urn:nyxid:params:oauth:token-type:binding-id`) and projects
+that **one** token into the run as its caller credential — minted once, shared by the whole run
+(aevatar: `agents/Aevatar.GAgents.Channel.Identity/Broker/NyxIdRemoteCapabilityBroker.cs`,
+`src/platform/Aevatar.GAgentService.Infrastructure/Schedules/ScheduledServiceInvocationDispatchPort.cs`).
+Broker-issued tokens are pinned to **`BROKER_ACCESS_TTL_SECS = 300`** (NyxID
+`backend/src/services/oauth_broker_service.rs`) so a revoked binding stops working within
+5 minutes without introspection. Deliberate design, not a bug.
+
+**Consequence:** every NyxID-authenticated step in the fired run must complete within ~5 minutes
+of fire. In a longer run, late steps failing with `token_expired` is the **expected** platform
+behavior — keep scheduled runs short, front-load the NyxID-authenticated steps, or split long
+pipelines into separate schedules. Do not "fix" it by retrying the same run shape.
+
+**Token classes are not interchangeable — never quote one class's TTL for another.** Your
+interactive login token lives for hours (`JWT_ACCESS_TTL_SECS`, a deployment config — code
+default is 900 s); the scheduled run's credential lives 300 s (fixed constant); NyxID API keys
+(`nyxid api-key create`) don't expire at all. When diagnosing any expiry, read the lifetime
+instead of recalling it: decode the JWT actually in hand and report `exp − iat` (numbers only —
+never print the token), or cite the owning repo's constant.
 
 ## Create the schedule
 

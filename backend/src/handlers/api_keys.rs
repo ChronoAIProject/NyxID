@@ -1167,12 +1167,18 @@ pub async fn create_key(
         }
         target_org_id.to_string()
     } else {
-        actor
+        actor.clone()
     };
 
-    let created = key_service::create_api_key(
+    let scope_actor = if user_id_str == actor {
+        Some(actor.as_str())
+    } else {
+        None
+    };
+    let created = key_service::create_api_key_with_scope_authorization(
         &state.db,
         &user_id_str,
+        scope_actor,
         &body.name,
         scopes,
         expires_at,
@@ -1252,23 +1258,49 @@ pub async fn update_key(
     let actor = auth_user.user_id.to_string();
     let user_id_str = resolve_api_key_write_owner(&state, &actor, &key_id).await?;
 
-    let updated = key_service::update_api_key_scope(
-        &state.db,
-        &user_id_str,
-        &key_id,
-        body.name.as_deref(),
-        body.description.as_deref(),
-        body.scopes.as_deref(),
-        body.allowed_service_ids.as_deref(),
-        body.allowed_node_ids.as_deref(),
-        body.allow_all_services,
-        body.allow_all_nodes,
-        body.rate_limit_per_second,
-        body.rate_limit_burst,
-        body.platform.as_ref().map(|platform| platform.as_deref()),
-        body.callback_url.as_ref().map(|url| url.as_deref()),
-    )
-    .await?;
+    let scope_actor = if user_id_str == actor {
+        Some(actor.as_str())
+    } else {
+        None
+    };
+    let updated = if let Some(scope_actor) = scope_actor {
+        key_service::update_api_key_scope_with_scope_authorization(
+            &state.db,
+            &user_id_str,
+            Some(scope_actor),
+            &key_id,
+            body.name.as_deref(),
+            body.description.as_deref(),
+            body.scopes.as_deref(),
+            body.allowed_service_ids.as_deref(),
+            body.allowed_node_ids.as_deref(),
+            body.allow_all_services,
+            body.allow_all_nodes,
+            body.rate_limit_per_second,
+            body.rate_limit_burst,
+            body.platform.as_ref().map(|platform| platform.as_deref()),
+            body.callback_url.as_ref().map(|url| url.as_deref()),
+        )
+        .await?
+    } else {
+        key_service::update_api_key_scope(
+            &state.db,
+            &user_id_str,
+            &key_id,
+            body.name.as_deref(),
+            body.description.as_deref(),
+            body.scopes.as_deref(),
+            body.allowed_service_ids.as_deref(),
+            body.allowed_node_ids.as_deref(),
+            body.allow_all_services,
+            body.allow_all_nodes,
+            body.rate_limit_per_second,
+            body.rate_limit_burst,
+            body.platform.as_ref().map(|platform| platform.as_deref()),
+            body.callback_url.as_ref().map(|url| url.as_deref()),
+        )
+        .await?
+    };
 
     let enriched = enrich_api_keys_batch(&state, &actor, &[updated]).await?;
     Ok(Json(enriched.into_iter().next().unwrap()))
@@ -1349,7 +1381,17 @@ pub async fn rotate_key(
 
     let actor = auth_user.user_id.to_string();
     let user_id_str = resolve_api_key_write_owner(&state, &actor, &key_id).await?;
-    let created = key_service::rotate_api_key(&state.db, &user_id_str, &key_id).await?;
+    let created = if user_id_str == actor {
+        key_service::rotate_api_key_with_scope_authorization(
+            &state.db,
+            &user_id_str,
+            Some(&actor),
+            &key_id,
+        )
+        .await?
+    } else {
+        key_service::rotate_api_key(&state.db, &user_id_str, &key_id).await?
+    };
 
     // Telemetry: api_key.rotated.
     emit_event(
