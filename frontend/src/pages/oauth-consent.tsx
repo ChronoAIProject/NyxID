@@ -38,19 +38,30 @@ interface ConsentServiceDisplay {
   readonly label?: string | null;
   readonly slug: string;
   readonly catalog_service_name?: string | null;
+  readonly credential_source: {
+    readonly type: "personal" | "org";
+    readonly org_name?: string;
+  };
 }
 
 /// Human-readable primary text for a service row. Never render the raw
 /// user slug as the primary label (issue #1121).
 function serviceDisplayName(service: ConsentServiceDisplay): string {
-  return service.label || service.slug;
+  return service.label || service.catalog_service_name || service.slug;
 }
 
 function serviceSecondaryText(service: ConsentServiceDisplay): string {
   const parts = [service.catalog_service_name, service.slug].filter(
-    (part): part is string => Boolean(part) && part !== serviceDisplayName(service),
+    (part): part is string =>
+      Boolean(part) && part !== serviceDisplayName(service),
   );
   return parts.join(" · ");
+}
+
+function serviceOrgName(service: ConsentServiceDisplay): string | null {
+  return service.credential_source.type === "org"
+    ? (service.credential_source.org_name ?? "Organization")
+    : null;
 }
 
 export function OAuthConsentPage() {
@@ -91,9 +102,8 @@ export function OAuthConsentPage() {
   );
   const [allowAllServices, setAllowAllServices] = useState(false);
   const [customize, setCustomize] = useState(false);
-  const [selectedServiceIds, setSelectedServiceIds] = useState<
-    readonly string[]
-  >(preselectServiceIds);
+  const [selectedServiceIds, setSelectedServiceIds] =
+    useState<readonly string[]>(preselectServiceIds);
   const [deselectedServiceIds, setDeselectedServiceIds] = useState<
     readonly string[]
   >([]);
@@ -115,12 +125,18 @@ export function OAuthConsentPage() {
       (userServices ?? [])
         .filter(
           (service) =>
-            service.is_active && service.credential_source.type === "personal",
+            service.is_active &&
+            (service.credential_source.type === "personal" ||
+              service.credential_source.allowed),
         )
         .sort((a, b) =>
-          serviceDisplayName(a).localeCompare(serviceDisplayName(b), undefined, {
-            sensitivity: "base",
-          }),
+          serviceDisplayName(a).localeCompare(
+            serviceDisplayName(b),
+            undefined,
+            {
+              sensitivity: "base",
+            },
+          ),
         ),
     [userServices],
   );
@@ -152,6 +168,7 @@ export function OAuthConsentPage() {
           id,
           primary: service ? serviceDisplayName(service) : id,
           secondary: service ? serviceSecondaryText(service) : "",
+          orgName: service ? serviceOrgName(service) : null,
           requestedByApp:
             preselectServiceIds.includes(id) ||
             resourceSelectedServiceIds.includes(id),
@@ -337,7 +354,7 @@ export function OAuthConsentPage() {
                 </p>
                 <p className="mt-1 text-xs text-muted-foreground">
                   {serviceAccess.allow_all_services
-                    ? "This app will be able to use all of your personal services through the proxy."
+                    ? "This app will be able to use all of your available services through the proxy."
                     : summaryServices.length > 0
                       ? "This app will be able to use these services through the proxy:"
                       : "No service access requested. This app only signs you in."}
@@ -372,9 +389,22 @@ export function OAuthConsentPage() {
                             {item.secondary}
                           </p>
                         )}
+                        {item.orgName && (
+                          <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                            <Badge variant="secondary" className="text-[10px]">
+                              Org
+                            </Badge>
+                            <span className="break-words text-[11px] text-muted-foreground">
+                              {item.orgName}
+                            </span>
+                          </div>
+                        )}
                       </div>
                       {item.requestedByApp && (
-                        <Badge variant="secondary" className="shrink-0 text-[10px]">
+                        <Badge
+                          variant="secondary"
+                          className="shrink-0 text-[10px]"
+                        >
                           Requested by app
                         </Badge>
                       )}
@@ -416,38 +446,56 @@ export function OAuthConsentPage() {
                         Loading services...
                       </p>
                     ) : selectableServices.length > 0 ? (
-                      selectableServices.map((service) => (
-                        <div
-                          key={service.id}
-                          className="flex items-start gap-2 rounded-md border border-border bg-background/60 px-3 py-2"
-                        >
-                          <Checkbox
-                            id={`oauth-service-${service.id}`}
-                            checked={effectiveSelectedServiceIds.includes(
-                              service.id,
-                            )}
-                            onCheckedChange={(checked) =>
-                              toggleService(service.id, checked === true)
-                            }
-                          />
-                          <Label
-                            htmlFor={`oauth-service-${service.id}`}
-                            className="min-w-0 cursor-pointer text-xs leading-5 text-foreground"
+                      selectableServices.map((service) => {
+                        const orgName = serviceOrgName(service);
+                        return (
+                          <div
+                            key={service.id}
+                            className="flex items-start gap-2 rounded-md border border-border bg-background/60 px-3 py-2"
                           >
-                            <span className="block break-words font-medium">
-                              {serviceDisplayName(service)}
-                            </span>
-                            {serviceSecondaryText(service) && (
-                              <span className="block break-words text-[11px] font-normal text-muted-foreground">
-                                {serviceSecondaryText(service)}
-                              </span>
-                            )}
-                          </Label>
-                        </div>
-                      ))
+                            <Checkbox
+                              id={`oauth-service-${service.id}`}
+                              checked={effectiveSelectedServiceIds.includes(
+                                service.id,
+                              )}
+                              onCheckedChange={(checked) =>
+                                toggleService(service.id, checked === true)
+                              }
+                            />
+                            <div className="min-w-0">
+                              <Label
+                                htmlFor={`oauth-service-${service.id}`}
+                                className="cursor-pointer text-xs leading-5 text-foreground"
+                              >
+                                <span className="block break-words font-medium">
+                                  {serviceDisplayName(service)}
+                                </span>
+                                {serviceSecondaryText(service) && (
+                                  <span className="block break-words text-[11px] font-normal text-muted-foreground">
+                                    {serviceSecondaryText(service)}
+                                  </span>
+                                )}
+                              </Label>
+                              {orgName && (
+                                <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                                  <Badge
+                                    variant="secondary"
+                                    className="text-[10px]"
+                                  >
+                                    Org
+                                  </Badge>
+                                  <span className="break-words text-[11px] font-normal text-muted-foreground">
+                                    {orgName}
+                                  </span>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })
                     ) : (
                       <p className="text-xs text-muted-foreground">
-                        No active personal services are available.
+                        No active services are available.
                       </p>
                     )}
                   </div>

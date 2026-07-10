@@ -15,7 +15,15 @@ const { state } = vi.hoisted(() => ({
       resource_uri: string;
       auth_method: string;
       is_active: boolean;
-      credential_source: { type: "personal" } | { type: "org" };
+      credential_source:
+        | { type: "personal" }
+        | {
+            type: "org";
+            org_id: string;
+            org_name: string;
+            role: "admin" | "member" | "viewer";
+            allowed: boolean;
+          };
     }>,
     userServicesLoading: false,
   },
@@ -98,7 +106,29 @@ beforeEach(() => {
       resource_uri: "https://nyx.example/api/v1/proxy/s/org-service",
       auth_method: "bearer",
       is_active: true,
-      credential_source: { type: "org" },
+      credential_source: {
+        type: "org",
+        org_id: "org-1",
+        org_name: "Acme Research",
+        role: "member",
+        allowed: true,
+      },
+    },
+    {
+      id: "svc-viewer-org",
+      label: "Viewer Org Service",
+      slug: "viewer-org-service",
+      catalog_service_name: null,
+      resource_uri: "https://nyx.example/api/v1/proxy/s/viewer-org-service",
+      auth_method: "bearer",
+      is_active: true,
+      credential_source: {
+        type: "org",
+        org_id: "org-2",
+        org_name: "Read Only Org",
+        role: "viewer",
+        allowed: false,
+      },
     },
   ];
   state.userServicesLoading = false;
@@ -328,6 +358,9 @@ describe("OAuthConsentPage", () => {
 
     await user.click(screen.getByRole("button", { name: "Customize" }));
     expect(screen.getByText("My OpenAI")).toBeInTheDocument();
+    expect(screen.getByText("Org Service")).toBeInTheDocument();
+    expect(screen.getByText("Acme Research")).toBeInTheDocument();
+    expect(screen.queryByText("Viewer Org Service")).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("switch", { name: "All services" }));
 
@@ -351,6 +384,37 @@ describe("OAuthConsentPage", () => {
     );
     expect(Array.from(selected).map((input) => input.value)).toEqual([
       "svc-openai",
+    ]);
+  });
+
+  it("renders proxyable org services with org provenance and submits their ids", async () => {
+    const user = userEvent.setup();
+    setSearch(VALID);
+
+    render(<OAuthConsentPage />);
+
+    await user.click(screen.getByRole("button", { name: "Customize" }));
+    await user.click(screen.getByRole("checkbox", { name: /Org Service/i }));
+
+    expect(screen.getByText("Acme Research")).toBeInTheDocument();
+    expect(screen.getByText("Org")).toBeInTheDocument();
+    expect(hiddenInputs("allowed_service_ids").map((i) => i.value)).toEqual([
+      "svc-org",
+    ]);
+  });
+
+  it("preselects requested org resource indicators and labels them in the summary", () => {
+    setSearch({
+      ...VALID,
+      resource: ["https://nyx.example/api/v1/proxy/s/org-service"],
+    });
+
+    render(<OAuthConsentPage />);
+
+    expect(screen.getByText("Org Service")).toBeInTheDocument();
+    expect(screen.getByText("Acme Research")).toBeInTheDocument();
+    expect(hiddenInputs("allowed_service_ids").map((i) => i.value)).toEqual([
+      "svc-org",
     ]);
   });
 

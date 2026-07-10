@@ -1,7 +1,7 @@
 ---
 name: aevatar-service-publisher
-description: Publish an Aevatar member, team, or workflow as an invocable service and (host permitting) register it with NyxID, then verify and invoke it — all over the REST API. Use when a user wants to "publish/bind a service", "expose my workflow/team as a service", "register it with NyxID", "make it callable", "get the service slug/URL", "invoke my service", or "version/deploy/roll out a service". It covers the simple scope binding, reading back a member's published service, the full account-level service lifecycle (revision → publish → deploy → rollout), how to confirm the NyxID registration (slug + status), and how to invoke an endpoint. Build the team/member first with the team-builder skill.
-version: "1.4"
+description: Publish an Aevatar member, team, or workflow as an invocable service and (host permitting) register it with NyxID, then verify, invoke, or wire external HTTP triggers such as Lark Base automation — all over the REST API. Use when a user wants to "publish/bind a service", "expose my workflow/team as a service", "register it with NyxID", "make it callable", "get the service slug/URL", "invoke my service", "let Lark Base call my workflow", "trigger this workflow from an external webhook", or "version/deploy/roll out a service". It covers the simple scope binding, reading back a member's published service, the full account-level service lifecycle (revision → publish → deploy → rollout), how to confirm the NyxID registration (slug + status), how to invoke an endpoint, and how to distinguish direct NyxID proxy triggering from host-gated externalExposure. Build the team/member first with the team-builder skill.
+version: "1.5"
 metadata:
   category: plain
   tag:
@@ -52,6 +52,13 @@ enabled and the service is in scope of that policy. You can drive publish + acti
 read the result, but you cannot turn host exposure on from the client. So always **verify**
 (below) and report honestly: if no NyxID slug appears, the service is still usable
 in-scope, it just is not a NyxID-brokered connector.
+
+Do not confuse that with an **external trigger**. An external system such as Lark Base does
+not need the workflow itself registered as a NyxID connector if it is only triggering the
+owner's existing member/team/service. It can call the already-connected NyxID `aevatar`
+proxy with a NyxID API key, using an explicit Aevatar scope/member/team invoke path. Ask
+for host `externalExposure` only when the requirement is "make this Aevatar service a
+reusable NyxID connector/slug for other callers."
 
 ## Path A — A member you already bound (from team-builder)
 
@@ -158,6 +165,74 @@ Teams and account-level services invoke the same way:
 Watch runs: `GET /api/scopes/{scopeId}/services/{serviceId}/runs` and `…/runs/{runId}`
 (and `:resume` / `:stop` / `:signal`). For a visual timeline use the observatory:
 `GET /api/workflow/observatory/runs`.
+
+## External HTTP triggers (Lark Base, webhook sender, external cron)
+
+Feasibility rule: if the external system can send an HTTPS request to a public URL with
+headers and a JSON body, it can usually trigger an Aevatar member/team workflow through
+NyxID without Aevatar service `externalExposure`. Lark Base automation's "send HTTP
+request" action fits this class: it is an outbound HTTP action to a specified URL, not an
+Aevatar inbound chat channel.
+
+### Direct NyxID proxy trigger
+
+Create a non-expiring NyxID API key with `proxy` scope and store it as the external
+system's secret:
+
+```bash
+nyxid api-key create --name "lark-base-aevatar-trigger" --scopes proxy
+```
+
+Then configure the external HTTP action as:
+
+```http
+POST https://nyx-api.chrono-ai.fun/api/v1/proxy/s/aevatar/api/scopes/{scopeId}/members/{memberId}/invoke/chat:stream
+Authorization: Bearer <NYXID_API_KEY>
+Content-Type: application/json
+Accept: text/event-stream
+
+{"prompt":"Apply Lark email approval for {{record_id}} / {{email}}"}
+```
+
+Use the **member** or **team** invoke path that already carries `scopeId`; do not rely on
+`api/studio/context` from a bare API key, because that generic context can report
+`scopeResolved:false`. For a team entry member:
+
+```http
+POST /api/v1/proxy/s/aevatar/api/scopes/{scopeId}/teams/{teamId}/invoke/chat:stream
+```
+
+Trade-offs:
+- `.../invoke/chat:stream` accepts the prompt shorthand but returns SSE. Use it when the
+  external sender can ignore/accept a streaming response and you only need to trigger the run.
+- Non-stream `.../invoke/{endpointId}` returns a JSON receipt, but it expects a typed
+  request envelope (`payloadTypeUrl` plus `payloadBase64`, or `payloadJson` only when the
+  serving revision has a descriptor). A bare `{ "prompt": "..." }` is invalid.
+- If the external tool cannot set headers, cannot keep secrets safely, cannot tolerate SSE,
+  or cannot build the typed envelope, use an adapter path below instead of forcing it.
+
+### Adapter path
+
+Use a small webhook/HTTP adapter (or a custom NyxID service) when you need a normal JSON
+ACK, body transformation, request signing, idempotency, or Lark-specific payload cleanup.
+The adapter receives the Lark Base request, validates its own secret, maps the record fields
+to an Aevatar prompt or typed payload, calls the NyxID proxy, and returns a simple 2xx/JSON
+response to Lark Base.
+
+### Host-managed webhook ingress
+
+Aevatar also has a host-configured workflow webhook ingress at:
+
+```http
+POST /api/workflow-webhooks/{routeKey}
+```
+
+It supports binding-level `RouteKey`, `SourceId`, `WorkflowName`, `ScopeId`,
+`PromptTemplate` or `PromptJsonPath`, delivery-id extraction, replay dedupe, and HMAC-SHA256
+auth (`X-Aevatar-Timestamp` plus `X-Aevatar-Signature` over `timestamp.body` by default).
+This is a good first-class bridge for Lark Base-style webhooks **if the host configures the
+binding and secret** (`WorkflowWebhookIngress:Enabled` + binding + replay store). It is not
+currently a normal client self-serve operation, so report it as host-managed.
 
 ## Next
 

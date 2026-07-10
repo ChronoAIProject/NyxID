@@ -13,6 +13,7 @@ use crate::models::api_key::{ApiKey, COLLECTION_NAME as API_KEYS};
 use crate::models::node::{COLLECTION_NAME as NODES, Node};
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
 use crate::redaction::RedactedLen;
+use crate::services::{node_service, org_service, user_service_service};
 
 /// Result returned when a new API key is created.
 /// The `full_key` is shown once and never stored.
@@ -113,44 +114,126 @@ fn validate_api_key_scopes(scopes: &str) -> AppResult<()> {
     Ok(())
 }
 
-/// Validate that all service IDs belong to the user and are active.
+#[derive(Clone, Copy)]
+enum ApiKeyScopeAuthorization<'a> {
+    OwnerOnly,
+    ActorPermissions { actor_user_id: &'a str },
+}
+
+impl<'a> ApiKeyScopeAuthorization<'a> {
+    fn for_actor(actor_user_id: Option<&'a str>) -> Self {
+        match actor_user_id {
+            Some(actor_user_id) => Self::ActorPermissions { actor_user_id },
+            None => Self::OwnerOnly,
+        }
+    }
+}
+
+fn service_scope_error(service_id: &str) -> AppError {
+    AppError::ValidationError(format!(
+        "UserService '{}' not found or not permitted for this API key",
+        service_id
+    ))
+}
+
+fn node_scope_error(node_id: &str) -> AppError {
+    AppError::ValidationError(format!(
+        "Node '{}' not found or not permitted for this API key",
+        node_id
+    ))
+}
+
+fn service_is_scopeable_for_actor(
+    service_id: &str,
+    entry: &user_service_service::UserServiceWithSource,
+) -> bool {
+    if entry.service.id != service_id || !entry.service.is_active {
+        return false;
+    }
+
+    match &entry.source {
+        user_service_service::CredentialSource::Personal => true,
+        user_service_service::CredentialSource::Org { allowed, .. } => *allowed,
+    }
+}
+
+/// Validate that all service IDs are active and permitted for this API key.
+///
+/// `OwnerOnly` preserves the legacy storage-owner check used by provisioning
+/// flows and org-owned keys. `ActorPermissions` is for personal key
+/// management: the key remains owned by the actor, but explicit allow-lists
+/// may include org services that `list_user_services_with_sources` already
+/// exposes as proxyable for that actor.
 async fn validate_service_ids(
     db: &mongodb::Database,
-    user_id: &str,
+    key_owner_user_id: &str,
     service_ids: &[String],
+    authorization: ApiKeyScopeAuthorization<'_>,
 ) -> AppResult<()> {
+    if let ApiKeyScopeAuthorization::ActorPermissions { actor_user_id } = authorization
+        && actor_user_id == key_owner_user_id
+    {
+        let visible_services =
+            user_service_service::list_user_services_with_sources(db, actor_user_id).await?;
+        for sid in service_ids {
+            if !visible_services
+                .iter()
+                .any(|entry| service_is_scopeable_for_actor(sid, entry))
+            {
+                return Err(service_scope_error(sid));
+            }
+        }
+        return Ok(());
+    }
+
     for sid in service_ids {
         let exists = db
             .collection::<UserService>(USER_SERVICES)
-            .find_one(doc! { "_id": sid, "user_id": user_id, "is_active": true })
+            .find_one(doc! { "_id": sid, "user_id": key_owner_user_id, "is_active": true })
             .await?;
         if exists.is_none() {
-            return Err(AppError::ValidationError(format!(
-                "UserService '{}' not found or not owned by user",
-                sid
-            )));
+            return Err(service_scope_error(sid));
         }
     }
     Ok(())
 }
 
-/// Validate that all node IDs belong to the user.
+/// Validate that all node IDs are active and permitted for this API key.
+///
+/// Node access has no per-node membership scope in NyxID today; org node
+/// reachability follows the existing node ACL (`node_access_can_read`),
+/// which admits direct owners, org admins, and org members with proxy rights.
 async fn validate_node_ids(
     db: &mongodb::Database,
-    user_id: &str,
+    key_owner_user_id: &str,
     node_ids: &[String],
+    authorization: ApiKeyScopeAuthorization<'_>,
 ) -> AppResult<()> {
     for nid in node_ids {
-        let exists = db
+        let node = db
             .collection::<Node>(NODES)
-            .find_one(doc! { "_id": nid, "user_id": user_id, "is_active": true })
+            .find_one(doc! { "_id": nid, "is_active": true })
             .await?;
-        if exists.is_none() {
-            return Err(AppError::ValidationError(format!(
-                "Node '{}' not found or not owned by user",
-                nid
-            )));
-        }
+        let Some(node) = node else {
+            return Err(node_scope_error(nid));
+        };
+
+        match authorization {
+            ApiKeyScopeAuthorization::ActorPermissions { actor_user_id }
+                if actor_user_id == key_owner_user_id =>
+            {
+                let access =
+                    org_service::resolve_owner_access(db, actor_user_id, &node.user_id).await?;
+                if !node_service::node_access_can_read(&access) {
+                    return Err(node_scope_error(nid));
+                }
+            }
+            _ => {
+                if node.user_id != key_owner_user_id {
+                    return Err(node_scope_error(nid));
+                }
+            }
+        };
     }
     Ok(())
 }
@@ -196,6 +279,51 @@ pub async fn create_api_key(
     platform: Option<&str>,
     callback_url: Option<&str>,
 ) -> AppResult<CreatedApiKey> {
+    create_api_key_with_scope_authorization(
+        db,
+        user_id,
+        None,
+        name,
+        scopes,
+        expires_at,
+        description,
+        allowed_service_ids,
+        allowed_node_ids,
+        allow_all_services,
+        allow_all_nodes,
+        rate_limit_per_second,
+        rate_limit_burst,
+        platform,
+        callback_url,
+    )
+    .await
+}
+
+/// Create a new API key while validating explicit scope IDs against the
+/// permissions of `scope_actor_user_id`.
+///
+/// Use this for personal key management where the storage owner is the
+/// actor and a key may be scoped to org resources that actor can already
+/// proxy. Passing an actor different from the key owner intentionally falls
+/// back to owner-only validation, preserving org-owned key isolation.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_api_key_with_scope_authorization(
+    db: &mongodb::Database,
+    user_id: &str,
+    scope_actor_user_id: Option<&str>,
+    name: &str,
+    scopes: &str,
+    expires_at: Option<chrono::DateTime<Utc>>,
+    description: Option<&str>,
+    allowed_service_ids: Option<&[String]>,
+    allowed_node_ids: Option<&[String]>,
+    allow_all_services: Option<bool>,
+    allow_all_nodes: Option<bool>,
+    rate_limit_per_second: Option<u32>,
+    rate_limit_burst: Option<u32>,
+    platform: Option<&str>,
+    callback_url: Option<&str>,
+) -> AppResult<CreatedApiKey> {
     if name.is_empty() || name.len() > 200 {
         return Err(AppError::ValidationError(
             "API key name must be between 1 and 200 characters".to_string(),
@@ -212,10 +340,22 @@ pub async fn create_api_key(
 
     // Validate service/node IDs if restricted
     if !all_svcs {
-        validate_service_ids(db, user_id, &svc_ids).await?;
+        validate_service_ids(
+            db,
+            user_id,
+            &svc_ids,
+            ApiKeyScopeAuthorization::for_actor(scope_actor_user_id),
+        )
+        .await?;
     }
     if !all_nodes {
-        validate_node_ids(db, user_id, &node_ids).await?;
+        validate_node_ids(
+            db,
+            user_id,
+            &node_ids,
+            ApiKeyScopeAuthorization::for_actor(scope_actor_user_id),
+        )
+        .await?;
     }
 
     let scoped = is_scoped_key(all_svcs, all_nodes);
@@ -326,6 +466,15 @@ pub async fn rotate_api_key(
     user_id: &str,
     key_id: &str,
 ) -> AppResult<CreatedApiKey> {
+    rotate_api_key_with_scope_authorization(db, user_id, None, key_id).await
+}
+
+pub async fn rotate_api_key_with_scope_authorization(
+    db: &mongodb::Database,
+    user_id: &str,
+    scope_actor_user_id: Option<&str>,
+    key_id: &str,
+) -> AppResult<CreatedApiKey> {
     let old_key = db
         .collection::<ApiKey>(API_KEYS)
         .find_one(doc! { "_id": key_id, "user_id": user_id })
@@ -349,9 +498,10 @@ pub async fn rotate_api_key(
         .await?;
 
     // Create new key preserving all fields
-    let new_key = create_api_key(
+    let new_key = create_api_key_with_scope_authorization(
         db,
         user_id,
+        scope_actor_user_id,
         &old_key.name,
         &old_key.scopes,
         old_key.expires_at,
@@ -422,6 +572,46 @@ pub async fn update_api_key_scope(
     platform: Option<Option<&str>>,
     callback_url: Option<Option<&str>>,
 ) -> AppResult<ApiKey> {
+    update_api_key_scope_with_scope_authorization(
+        db,
+        user_id,
+        None,
+        key_id,
+        name,
+        description,
+        scopes,
+        allowed_service_ids,
+        allowed_node_ids,
+        allow_all_services,
+        allow_all_nodes,
+        rate_limit_per_second,
+        rate_limit_burst,
+        platform,
+        callback_url,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+/// Update scope fields on an existing API key while validating explicit
+/// service/node IDs against an optional actor permission context.
+pub async fn update_api_key_scope_with_scope_authorization(
+    db: &mongodb::Database,
+    user_id: &str,
+    scope_actor_user_id: Option<&str>,
+    key_id: &str,
+    name: Option<&str>,
+    description: Option<&str>,
+    scopes: Option<&str>,
+    allowed_service_ids: Option<&[String]>,
+    allowed_node_ids: Option<&[String]>,
+    allow_all_services: Option<bool>,
+    allow_all_nodes: Option<bool>,
+    rate_limit_per_second: Option<Option<u32>>,
+    rate_limit_burst: Option<Option<u32>>,
+    platform: Option<Option<&str>>,
+    callback_url: Option<Option<&str>>,
+) -> AppResult<ApiKey> {
     let existing = db
         .collection::<ApiKey>(API_KEYS)
         .find_one(doc! { "_id": key_id, "user_id": user_id, "is_active": true })
@@ -445,12 +635,24 @@ pub async fn update_api_key_scope(
     if let Some(sids) = allowed_service_ids
         && !effective_all_svcs
     {
-        validate_service_ids(db, user_id, sids).await?;
+        validate_service_ids(
+            db,
+            user_id,
+            sids,
+            ApiKeyScopeAuthorization::for_actor(scope_actor_user_id),
+        )
+        .await?;
     }
     if let Some(nids) = allowed_node_ids
         && !effective_all_nodes
     {
-        validate_node_ids(db, user_id, nids).await?;
+        validate_node_ids(
+            db,
+            user_id,
+            nids,
+            ApiKeyScopeAuthorization::for_actor(scope_actor_user_id),
+        )
+        .await?;
     }
 
     let mut update = doc! {};
@@ -571,7 +773,57 @@ pub async fn validate_api_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::node::{NodeMetrics, NodeStatus};
+    use crate::models::org_membership::{
+        COLLECTION_NAME as ORG_MEMBERSHIPS, OrgMembership, OrgRole,
+    };
+    use crate::models::user::{COLLECTION_NAME as USERS, UserType};
     use crate::test_utils::connect_test_database;
+    use crate::test_utils::{test_membership, test_user, test_user_service};
+
+    fn test_node(owner_id: &str, name: &str) -> Node {
+        let now = Utc::now();
+        Node {
+            id: Uuid::new_v4().to_string(),
+            user_id: owner_id.to_string(),
+            name: name.to_string(),
+            status: NodeStatus::Online,
+            auth_token_hash: "auth-hash".to_string(),
+            signing_secret_encrypted: None,
+            signing_secret_hash: "signing-hash".to_string(),
+            last_heartbeat_at: Some(now),
+            connected_at: Some(now),
+            metadata: None,
+            metrics: NodeMetrics::default(),
+            is_active: true,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    async fn insert_scope_fixture_user(db: &mongodb::Database, user_id: &str, user_type: UserType) {
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_one(test_user(user_id, user_type))
+            .await
+            .expect("insert user");
+    }
+
+    async fn insert_scope_fixture_service(
+        db: &mongodb::Database,
+        owner_id: &str,
+        slug: &str,
+        admin_only: bool,
+    ) -> UserService {
+        let service_id = Uuid::new_v4().to_string();
+        let endpoint_id = Uuid::new_v4().to_string();
+        let mut service = test_user_service(&service_id, owner_id, slug, &endpoint_id, None, None);
+        service.admin_only = admin_only;
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(&service)
+            .await
+            .expect("insert service");
+        service
+    }
 
     // ---------------------------------------------------------------
     // Pure function tests (no MongoDB needed)
@@ -788,6 +1040,197 @@ mod tests {
         assert!(created.allow_all_services);
         assert!(created.allow_all_nodes);
         assert!(!created.full_key.is_empty());
+    }
+
+    #[tokio::test]
+    async fn personal_api_key_scope_accepts_member_permitted_org_service_and_node() {
+        let Some(db) = connect_test_database("key_svc_scope_org_member_ok").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+
+        let actor_id = Uuid::new_v4().to_string();
+        let org_id = Uuid::new_v4().to_string();
+        insert_scope_fixture_user(&db, &actor_id, UserType::Person).await;
+        insert_scope_fixture_user(&db, &org_id, UserType::Org).await;
+
+        let org_service = insert_scope_fixture_service(&db, &org_id, "org-proxyable", false).await;
+        let org_node = test_node(&org_id, "org-node");
+        db.collection::<Node>(NODES)
+            .insert_one(&org_node)
+            .await
+            .expect("insert node");
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(
+                &org_id,
+                &actor_id,
+                OrgRole::Member,
+                Some(vec![org_service.id.clone()]),
+            ))
+            .await
+            .expect("insert membership");
+
+        let service_ids = [org_service.id.clone()];
+        let node_ids = [org_node.id.clone()];
+        let created = create_api_key_with_scope_authorization(
+            &db,
+            &actor_id,
+            Some(&actor_id),
+            "member-org-scope",
+            "proxy",
+            None,
+            None,
+            Some(&service_ids),
+            Some(&node_ids),
+            Some(false),
+            Some(false),
+            None,
+            None,
+            Some("codex"),
+            None,
+        )
+        .await
+        .expect("member can scope personal key to permitted org resources");
+
+        assert_eq!(created.allowed_service_ids, vec![org_service.id]);
+        assert_eq!(created.allowed_node_ids, vec![org_node.id]);
+        assert!(!created.allow_all_services);
+        assert!(!created.allow_all_nodes);
+    }
+
+    #[tokio::test]
+    async fn personal_api_key_scope_rejects_member_admin_only_org_service() {
+        let Some(db) = connect_test_database("key_svc_scope_org_admin_only_reject").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+
+        let actor_id = Uuid::new_v4().to_string();
+        let org_id = Uuid::new_v4().to_string();
+        insert_scope_fixture_user(&db, &actor_id, UserType::Person).await;
+        insert_scope_fixture_user(&db, &org_id, UserType::Org).await;
+
+        let org_service = insert_scope_fixture_service(&db, &org_id, "admin-only", true).await;
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(
+                &org_id,
+                &actor_id,
+                OrgRole::Member,
+                Some(vec![org_service.id.clone()]),
+            ))
+            .await
+            .expect("insert membership");
+
+        let service_ids = [org_service.id];
+        let err = create_api_key_with_scope_authorization(
+            &db,
+            &actor_id,
+            Some(&actor_id),
+            "blocked-admin-only",
+            "proxy",
+            None,
+            None,
+            Some(&service_ids),
+            None,
+            Some(false),
+            Some(true),
+            None,
+            None,
+            Some("codex"),
+            None,
+        )
+        .await
+        .expect_err("members cannot scope to admin-only org services");
+
+        assert!(matches!(err, AppError::ValidationError(_)));
+    }
+
+    #[tokio::test]
+    async fn personal_api_key_scope_rejects_viewer_org_node() {
+        let Some(db) = connect_test_database("key_svc_scope_viewer_node_reject").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+
+        let actor_id = Uuid::new_v4().to_string();
+        let org_id = Uuid::new_v4().to_string();
+        insert_scope_fixture_user(&db, &actor_id, UserType::Person).await;
+        insert_scope_fixture_user(&db, &org_id, UserType::Org).await;
+
+        let org_node = test_node(&org_id, "viewer-org-node");
+        db.collection::<Node>(NODES)
+            .insert_one(&org_node)
+            .await
+            .expect("insert node");
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(&org_id, &actor_id, OrgRole::Viewer, None))
+            .await
+            .expect("insert membership");
+
+        let node_ids = [org_node.id];
+        let err = create_api_key_with_scope_authorization(
+            &db,
+            &actor_id,
+            Some(&actor_id),
+            "blocked-viewer-node",
+            "proxy",
+            None,
+            None,
+            None,
+            Some(&node_ids),
+            Some(true),
+            Some(false),
+            None,
+            None,
+            Some("codex"),
+            None,
+        )
+        .await
+        .expect_err("viewers cannot scope personal keys to org nodes");
+
+        assert!(matches!(err, AppError::ValidationError(_)));
+    }
+
+    #[tokio::test]
+    async fn org_owned_api_key_scope_stays_owner_bound() {
+        let Some(db) = connect_test_database("key_svc_scope_org_owner_bound").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+
+        let actor_id = Uuid::new_v4().to_string();
+        let org_id = Uuid::new_v4().to_string();
+        insert_scope_fixture_user(&db, &actor_id, UserType::Person).await;
+        insert_scope_fixture_user(&db, &org_id, UserType::Org).await;
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(&org_id, &actor_id, OrgRole::Admin, None))
+            .await
+            .expect("insert membership");
+
+        let personal_service =
+            insert_scope_fixture_service(&db, &actor_id, "personal-service", false).await;
+        let service_ids = [personal_service.id];
+        let err = create_api_key_with_scope_authorization(
+            &db,
+            &org_id,
+            None,
+            "org-owned-cross-scope",
+            "proxy",
+            None,
+            None,
+            Some(&service_ids),
+            None,
+            Some(false),
+            Some(true),
+            None,
+            None,
+            Some("codex"),
+            None,
+        )
+        .await
+        .expect_err("org-owned keys must not scope to personal resources");
+
+        assert!(matches!(err, AppError::ValidationError(_)));
     }
 
     #[tokio::test]
