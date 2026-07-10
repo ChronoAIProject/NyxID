@@ -2573,7 +2573,7 @@ async fn migrate_provider_tokens(db: &Database) -> Result<(), Box<dyn std::error
         let provider_slug = provider
             .as_ref()
             .map(|p| p.slug.clone())
-            .unwrap_or_else(|| format!("provider-{}", &token.provider_config_id));
+            .unwrap_or_else(|| format!("provider-{}", token.provider_config_id));
 
         let now = Utc::now();
         let endpoint_id = uuid::Uuid::new_v4().to_string();

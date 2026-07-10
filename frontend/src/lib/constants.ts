@@ -62,6 +62,12 @@ export const OAUTH_SCOPE_META: Readonly<Record<string, OAuthScopeMeta>> = {
       "Lets the app refresh tokens without asking you to log in every time.",
     risk: "high",
   },
+  "urn:nyxid:scope:broker_binding": {
+    title: "Durable broker access",
+    description:
+      "Lets the app hold a durable NyxID credential that can act as you.",
+    risk: "high",
+  },
 };
 
 export function scopeRiskClass(risk: OAuthScopeRisk): string {

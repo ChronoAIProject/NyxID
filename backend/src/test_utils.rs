@@ -197,6 +197,8 @@ pub(crate) fn test_app_config() -> AppConfig {
         rate_limit_burst: 30,
         trusted_proxy_ips: vec![],
         mtls_client_cert_header: None,
+        broker_require_sender_constraint: false,
+        broker_require_admin_capability: false,
         cli_pairing_hmac_key: None,
         audit_chain_hmac_key: None,
         sa_token_ttl_secs: 3600,
@@ -642,7 +644,7 @@ pub(crate) fn test_user(user_id: &str, user_type: UserType) -> User {
             UserType::Person => None,
             UserType::Org => Some(format!(
                 "test-org-{}",
-                &user_id.replace('-', "").chars().take(8).collect::<String>()
+                user_id.replace('-', "").chars().take(8).collect::<String>()
             )),
         },
         avatar_url: None,

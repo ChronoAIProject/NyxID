@@ -1,6 +1,7 @@
 use axum::{
     Router,
     extract::DefaultBodyLimit,
+    http::HeaderName,
     middleware,
     routing::{delete, get, patch, post, put},
 };
@@ -29,6 +30,7 @@ fn oauth_public_cors() -> CorsLayer {
             axum::http::header::CONTENT_TYPE,
             axum::http::header::AUTHORIZATION,
             axum::http::header::ACCEPT,
+            HeaderName::from_static("dpop"),
         ]))
 }
 

@@ -98,7 +98,7 @@ pub struct Claims {
     pub allow_all_services: Option<bool>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cnf {
     /// SHA-256 thumbprint of the DPoP proof JWK (RFC 7638).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1050,6 +1050,8 @@ mod tests {
             rate_limit_burst: 30,
             trusted_proxy_ips: vec![],
             mtls_client_cert_header: None,
+            broker_require_sender_constraint: false,
+            broker_require_admin_capability: false,
             cli_pairing_hmac_key: None,
             audit_chain_hmac_key: None,
             sa_token_ttl_secs: 3600,

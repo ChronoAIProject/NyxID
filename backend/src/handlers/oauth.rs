@@ -386,6 +386,69 @@ fn response_resources(resources: Vec<String>) -> Option<Vec<String>> {
     (!resources.is_empty()).then_some(resources)
 }
 
+fn dpop_token_error(err: AppError) -> AppError {
+    match err {
+        AppError::Unauthorized(message) => AppError::InvalidDpopProof(message),
+        other => other,
+    }
+}
+
+fn sender_constraint_from_headers(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> AppResult<Option<crate::crypto::jwt::Cnf>> {
+    let dpop_jkt = match headers.get("dpop") {
+        Some(value) => {
+            let proof = value
+                .to_str()
+                .map_err(|_| AppError::InvalidDpopProof("invalid DPoP proof".to_string()))?;
+            let htu =
+                crate::crypto::dpop::htu_from_base_and_path(&state.config.base_url, "/oauth/token")
+                    .map_err(dpop_token_error)?;
+            Some(
+                crate::crypto::dpop::validate_proof(proof, "POST", &htu, &state.dpop_jti_cache)
+                    .map_err(dpop_token_error)?,
+            )
+        }
+        None => None,
+    };
+
+    let mtls_header_name = state
+        .config
+        .mtls_client_cert_header
+        .as_deref()
+        .filter(|header| !header.trim().is_empty());
+    let mtls_x5t_s256 = match (dpop_jkt.as_ref(), mtls_header_name) {
+        (Some(_), Some(header_name)) => {
+            if headers.get(header_name).is_some() {
+                tracing::debug!(
+                    "DPoP and mTLS client certificate headers both present; using DPoP binding"
+                );
+            }
+            None
+        }
+        (None, Some(header_name)) => match headers.get(header_name) {
+            Some(value) => {
+                let cert = value.to_str().map_err(|_| {
+                    AppError::Unauthorized("invalid mTLS client certificate header".to_string())
+                })?;
+                if cert.trim().is_empty() {
+                    None
+                } else {
+                    Some(crate::crypto::mtls::cert_thumbprint_from_header(cert)?)
+                }
+            }
+            None => None,
+        },
+        (_, None) => None,
+    };
+
+    Ok(oauth_broker_service::sender_constraint_from_proofs(
+        dpop_jkt.as_deref(),
+        mtls_x5t_s256.as_deref(),
+    ))
+}
+
 fn intersect_service_ids(left: &[String], right: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     for id in left {
@@ -1681,6 +1744,14 @@ async fn token_inner(
                 .as_deref()
                 .ok_or_else(|| AppError::BadRequest("Missing client_id parameter".to_string()))?;
 
+            let sender_constraint = sender_constraint_from_headers(state, headers)?;
+            let dpop_jkt = sender_constraint
+                .as_ref()
+                .and_then(|cnf| cnf.jkt.as_deref());
+            let mtls_x5t_s256 = sender_constraint
+                .as_ref()
+                .and_then(|cnf| cnf.x5t_s256.as_deref());
+
             let exchanged = oauth_service::exchange_authorization_code(
                 &state.db,
                 &state.config,
@@ -1692,6 +1763,8 @@ async fn token_inner(
                 body.client_secret.as_deref(),
                 Some(oauth_broker_service::BROKER_ACCESS_TTL_SECS),
                 non_empty_resources(&body.resource),
+                dpop_jkt,
+                mtls_x5t_s256,
             )
             .await?;
 
@@ -1701,6 +1774,34 @@ async fn token_inner(
                     .split_whitespace()
                     .map(str::to_string)
                     .collect();
+                if state.config.broker_require_sender_constraint() && sender_constraint.is_none() {
+                    state
+                        .db
+                        .collection::<crate::models::refresh_token::RefreshToken>(
+                            crate::models::refresh_token::COLLECTION_NAME,
+                        )
+                        .delete_one(doc! {
+                            "jti": &exchanged.refresh_token_jti,
+                            "client_id": client_id_str,
+                            "user_id": &exchanged.user_id,
+                        })
+                        .await?;
+                    audit_service::log_async(
+                        state.db.clone(),
+                        Some(exchanged.user_id.clone()),
+                        "oauth_broker_binding_unpinned_create_rejected".to_string(),
+                        Some(serde_json::json!({
+                            "client_id": client_id_str,
+                            "reason": "sender_constraint_required",
+                            "scope_count": granted_scopes.len(),
+                        })),
+                        None,
+                        None,
+                        None,
+                        None,
+                    );
+                    return Err(AppError::ExternalTokenInvalid("invalid_grant".to_string()));
+                }
                 let return_refresh_token = granted_scopes
                     .iter()
                     .any(|scope| scope == oauth_client_service::OFFLINE_ACCESS_SCOPE);
@@ -1732,6 +1833,8 @@ async fn token_inner(
                     &binding_refresh.refresh_token_jti,
                     &granted_scopes,
                     exchanged.external_subject.as_ref(),
+                    sender_constraint.clone(),
+                    state.config.broker_require_sender_constraint(),
                 )
                 .await?;
 
@@ -1745,6 +1848,9 @@ async fn token_inner(
                         "client_id": client_id_str,
                         "binding_hash": oauth_broker_service::binding_hash_prefix(&binding_hash),
                         "scope": &exchanged.granted_scope,
+                        "sender_constraint": oauth_broker_service::sender_constraint_kind(
+                            sender_constraint.as_ref(),
+                        ),
                         "external_subject_platform": exchanged
                             .external_subject
                             .as_ref()
@@ -1758,7 +1864,7 @@ async fn token_inner(
 
                 return Ok(Json(TokenResponse {
                     access_token: exchanged.access_token,
-                    token_type: "Bearer".to_string(),
+                    token_type: if dpop_jkt.is_some() { "DPoP" } else { "Bearer" }.to_string(),
                     expires_in: oauth_broker_service::BROKER_ACCESS_TTL_SECS,
                     refresh_token: return_refresh_token.then_some(exchanged.refresh_token),
                     id_token: exchanged.id_token,
@@ -1771,7 +1877,7 @@ async fn token_inner(
 
             Ok(Json(TokenResponse {
                 access_token: exchanged.access_token,
-                token_type: "Bearer".to_string(),
+                token_type: if dpop_jkt.is_some() { "DPoP" } else { "Bearer" }.to_string(),
                 expires_in: state.config.jwt_access_ttl_secs,
                 refresh_token: Some(exchanged.refresh_token),
                 id_token: exchanged.id_token,
@@ -1945,59 +2051,20 @@ async fn token_inner(
                 // and the urn:nyxid:scope:broker_binding scope. Otherwise a
                 // scope-opted-in client could issue bindings (commit #4 path
                 // uses is_broker_client) but not exchange them.
-                if !oauth_broker_service::is_broker_client(&client) {
+                if !oauth_broker_service::is_broker_client_with_policy(
+                    &client,
+                    state.config.broker_require_admin_capability(),
+                ) {
                     return Err(AppError::ExternalTokenInvalid("invalid_grant".to_string()));
                 }
 
-                let dpop_jkt = match headers.get("dpop") {
-                    Some(value) => {
-                        let proof = value.to_str().map_err(|_| {
-                            AppError::Unauthorized("invalid DPoP proof".to_string())
-                        })?;
-                        let htu = crate::crypto::dpop::htu_from_base_and_path(
-                            &state.config.base_url,
-                            "/oauth/token",
-                        )?;
-                        Some(crate::crypto::dpop::validate_proof(
-                            proof,
-                            "POST",
-                            &htu,
-                            &state.dpop_jti_cache,
-                        )?)
-                    }
-                    None => None,
-                };
-                let mtls_header_name = state
-                    .config
-                    .mtls_client_cert_header
-                    .as_deref()
-                    .filter(|header| !header.trim().is_empty());
-                let mtls_x5t_s256 = match (dpop_jkt.as_ref(), mtls_header_name) {
-                    (Some(_), Some(header_name)) => {
-                        if headers.get(header_name).is_some() {
-                            tracing::debug!(
-                                "DPoP and mTLS client certificate headers both present; using DPoP binding"
-                            );
-                        }
-                        None
-                    }
-                    (None, Some(header_name)) => match headers.get(header_name) {
-                        Some(value) => {
-                            let cert = value.to_str().map_err(|_| {
-                                AppError::Unauthorized(
-                                    "invalid mTLS client certificate header".to_string(),
-                                )
-                            })?;
-                            if cert.trim().is_empty() {
-                                None
-                            } else {
-                                Some(crate::crypto::mtls::cert_thumbprint_from_header(cert)?)
-                            }
-                        }
-                        None => None,
-                    },
-                    (_, None) => None,
-                };
+                let sender_constraint = sender_constraint_from_headers(state, headers)?;
+                let dpop_jkt = sender_constraint
+                    .as_ref()
+                    .and_then(|cnf| cnf.jkt.as_deref());
+                let mtls_x5t_s256 = sender_constraint
+                    .as_ref()
+                    .and_then(|cnf| cnf.x5t_s256.as_deref());
 
                 let result = oauth_broker_service::exchange_via_binding(
                     &state.db,
@@ -2008,8 +2075,8 @@ async fn token_inner(
                     client_id,
                     subject_token,
                     body.scope.as_deref(),
-                    dpop_jkt.as_deref(),
-                    mtls_x5t_s256.as_deref(),
+                    dpop_jkt,
+                    mtls_x5t_s256,
                 )
                 .await?;
 
@@ -2024,9 +2091,9 @@ async fn token_inner(
                         "binding_hash": oauth_broker_service::binding_hash_prefix(&binding_hash),
                         "scope": &result.granted_scope,
                         "via_chain_follow": result.via_chain_follow,
-                        "dpop_jkt": dpop_jkt
-                            .as_deref()
-                            .map(|jkt| jkt.chars().take(16).collect::<String>()),
+                        "sender_constraint": oauth_broker_service::sender_constraint_kind(
+                            sender_constraint.as_ref(),
+                        ),
                     })),
                     crate::handlers::admin_helpers::extract_ip(headers),
                     crate::handlers::admin_helpers::extract_user_agent(headers),
@@ -2730,6 +2797,15 @@ pub async fn register_client(
         Some(scope) if !scope.is_empty() => oauth_client_service::validate_allowed_scopes(scope)?,
         _ => oauth_client_service::DEFAULT_MCP_ALLOWED_SCOPES.to_string(),
     };
+    if state.config.broker_require_admin_capability()
+        && allowed_scopes
+            .split_whitespace()
+            .any(|scope| scope == oauth_broker_service::BROKER_BINDING_SCOPE)
+    {
+        return Err(AppError::Forbidden(
+            "Broker capability must be provisioned by a platform admin".to_string(),
+        ));
+    }
 
     let (client, _secret) = oauth_client_service::create_client(
         &state.db,
@@ -2886,7 +2962,9 @@ mod tests {
     use super::*;
     use axum::extract::Path;
     use chrono::{Duration, Utc};
+    use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
     use mongodb::bson::doc;
+    use serde::Serialize;
     use uuid::Uuid;
 
     use crate::crypto::jwt;
@@ -2902,7 +2980,8 @@ mod tests {
     use crate::models::user::{COLLECTION_NAME as USERS, UserType};
     use crate::services::oauth_broker_service::BROKER_BINDING_SCOPE;
     use crate::test_utils::{
-        connect_test_database, test_app_state, test_membership, test_user, test_user_service,
+        connect_test_database, test_app_state, test_app_state_with_config, test_membership,
+        test_user, test_user_service,
     };
 
     #[test]
@@ -2919,6 +2998,35 @@ mod tests {
 
         assert!(!form.allow_all_services);
         assert!(form.allowed_service_ids.is_empty());
+    }
+
+    #[derive(Serialize)]
+    struct TestDpopClaims {
+        htm: String,
+        htu: String,
+        iat: i64,
+        jti: String,
+    }
+
+    fn sign_test_dpop_proof(
+        encoding_key: &EncodingKey,
+        jwk: &jsonwebtoken::jwk::Jwk,
+        htu: &str,
+    ) -> String {
+        let mut header = Header::new(Algorithm::ES256);
+        header.typ = Some("dpop+jwt".to_string());
+        header.jwk = Some(jwk.clone());
+        encode(
+            &header,
+            &TestDpopClaims {
+                htm: "POST".to_string(),
+                htu: htu.to_string(),
+                iat: Utc::now().timestamp(),
+                jti: Uuid::new_v4().to_string(),
+            },
+            encoding_key,
+        )
+        .expect("sign DPoP proof")
     }
 
     async fn insert_public_client(db: &mongodb::Database, client_id: &str, allowed_scopes: &str) {
@@ -3003,6 +3111,7 @@ mod tests {
             refresh_token_encrypted: Some(refresh_token_encrypted),
             scopes,
             external_subject: None,
+            cnf: None,
             rotation_version: 0,
             revoked: false,
             last_used_at: None,
@@ -3839,7 +3948,35 @@ mod tests {
             .expect("query client")
             .expect("client exists");
         assert_eq!(client.allowed_scopes, response.scope);
-        assert!(oauth_broker_service::is_broker_client(&client));
+        assert!(oauth_broker_service::is_broker_client_with_policy(
+            &client, false
+        ));
+    }
+
+    #[tokio::test]
+    async fn register_client_rejects_broker_scope_when_admin_capability_required() {
+        let Some(db) = connect_test_database("oauth_dcr_broker_scope_strict").await else {
+            return;
+        };
+        let mut config = crate::test_utils::test_app_config();
+        config.broker_require_admin_capability = true;
+        let state = test_app_state_with_config(db, config);
+
+        let err = register_client(
+            State(state),
+            Json(RegisterClientRequest {
+                client_name: Some("Aevatar".to_string()),
+                redirect_uris: Some(vec!["http://localhost/callback".to_string()]),
+                grant_types: None,
+                response_types: None,
+                token_endpoint_auth_method: Some("none".to_string()),
+                scope: Some(format!("openid {BROKER_BINDING_SCOPE}")),
+            }),
+        )
+        .await
+        .expect_err("strict DCR rejects broker scope");
+
+        assert!(matches!(err, AppError::Forbidden(message) if message.contains("platform admin")));
     }
 
     #[tokio::test]
@@ -4017,6 +4154,119 @@ mod tests {
         assert_eq!(binding_exchange.token_type, "Bearer");
         assert!(!binding_exchange.access_token.is_empty());
         assert_eq!(binding_exchange.scope.as_deref(), Some("openid"));
+    }
+
+    #[tokio::test]
+    async fn broker_authorization_code_strict_unpinned_reject_leaves_no_refresh_token() {
+        let Some(db) = connect_test_database("oauth_broker_strict_unpinned_no_refresh").await
+        else {
+            return;
+        };
+        let mut config = crate::test_utils::test_app_config();
+        config.broker_require_sender_constraint = true;
+        let state = test_app_state_with_config(db.clone(), config);
+        let client_id = "public-broker-strict-unpinned";
+        let user_id = Uuid::new_v4().to_string();
+        let scope = format!("openid profile offline_access proxy {BROKER_BINDING_SCOPE}");
+        let code = "broker-strict-unpinned-code";
+
+        insert_person_user(&db, &user_id).await;
+        insert_public_client(&db, client_id, &scope).await;
+        insert_authorization_code(&db, code, client_id, &user_id, &scope).await;
+
+        let err = token_inner(
+            &state,
+            &TelemetryContext::default(),
+            &HeaderMap::new(),
+            TokenRequest {
+                grant_type: "authorization_code".to_string(),
+                code: Some(code.to_string()),
+                redirect_uri: Some("http://localhost/callback".to_string()),
+                client_id: Some(client_id.to_string()),
+                client_secret: None,
+                code_verifier: None,
+                refresh_token: None,
+                subject_token: None,
+                subject_token_type: None,
+                scope: None,
+                provider: None,
+                resource: Vec::new(),
+            },
+        )
+        .await
+        .expect_err("strict broker binding create requires sender proof");
+
+        assert!(
+            matches!(err, AppError::ExternalTokenInvalid(message) if message == "invalid_grant")
+        );
+
+        let refresh_count = db
+            .collection::<RefreshToken>(REFRESH_TOKENS)
+            .count_documents(doc! { "client_id": client_id, "user_id": &user_id })
+            .await
+            .expect("count refresh tokens");
+        assert_eq!(refresh_count, 0);
+
+        let binding_count = db
+            .collection::<OauthBrokerBinding>(OAUTH_BROKER_BINDINGS)
+            .count_documents(doc! { "client_id": client_id, "user_id": &user_id })
+            .await
+            .expect("count bindings");
+        assert_eq!(binding_count, 0);
+    }
+
+    #[tokio::test]
+    async fn broker_authorization_code_pins_dpop_sender_constraint_on_binding() {
+        let Some(db) = connect_test_database("oauth_broker_code_pins_dpop").await else {
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let client_id = "public-broker-dpop-code";
+        let user_id = Uuid::new_v4().to_string();
+        let scope = format!("openid profile {BROKER_BINDING_SCOPE}");
+        let code = "broker-dpop-code";
+
+        insert_person_user(&db, &user_id).await;
+        insert_public_client(&db, client_id, &scope).await;
+        insert_authorization_code(&db, code, client_id, &user_id, &scope).await;
+
+        let (encoding_key, jwk) = crate::crypto::dpop::test_dpop_keypair();
+        let htu =
+            crate::crypto::dpop::htu_from_base_and_path(&state.config.base_url, "/oauth/token")
+                .expect("token htu");
+        let proof = sign_test_dpop_proof(&encoding_key, &jwk, &htu);
+        let expected_jkt = crate::crypto::dpop::jwk_thumbprint(&jwk);
+        let mut headers = HeaderMap::new();
+        headers.insert("dpop", proof.parse().expect("dpop header value"));
+
+        let Json(response) = token_inner(
+            &state,
+            &TelemetryContext::default(),
+            &headers,
+            TokenRequest {
+                grant_type: "authorization_code".to_string(),
+                code: Some(code.to_string()),
+                redirect_uri: Some("http://localhost/callback".to_string()),
+                client_id: Some(client_id.to_string()),
+                client_secret: None,
+                code_verifier: None,
+                refresh_token: None,
+                subject_token: None,
+                subject_token_type: None,
+                scope: None,
+                provider: None,
+                resource: Vec::new(),
+            },
+        )
+        .await
+        .expect("exchange authorization code with DPoP proof");
+
+        assert_eq!(response.token_type, "DPoP");
+        let binding_id = response.binding_id.expect("binding_id returned");
+        let binding = load_binding(&db, &binding_id).await;
+        let cnf = binding.cnf.expect("binding cnf");
+        assert_eq!(cnf.jkt.as_deref(), Some(expected_jkt.as_str()));
+        assert!(cnf.x5t_s256.is_none());
     }
 
     #[tokio::test]

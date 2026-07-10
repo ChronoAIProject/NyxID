@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use crate::config::AppConfig;
 use crate::crypto::aes::EncryptionKeys;
-use crate::crypto::jwt::{self, JwtKeys};
+use crate::crypto::jwt::{self, Cnf, JwtKeys};
 use crate::errors::{AppError, AppResult};
 use crate::models::authorization_code::ExternalSubjectRef;
 use crate::models::oauth_broker_binding::{
@@ -43,10 +43,18 @@ pub const ISSUED_TOKEN_TYPE_ACCESS_TOKEN: &str = "urn:ietf:params:oauth:token-ty
 /// `broker_capability_enabled` flag — both triggers are honored.
 pub const BROKER_BINDING_SCOPE: &str = "urn:nyxid:scope:broker_binding";
 
-/// Returns true if the OAuth client should be treated as broker-capable.
-/// Either the admin flag is set, or the broker-binding scope is in the
-/// client's allowed_scopes (admin still controls scope assignment).
-pub fn is_broker_client(client: &crate::models::oauth_client::OauthClient) -> bool {
+/// Returns true if the OAuth client should be treated as broker-capable under
+/// the configured rollout policy. When `require_admin_capability` is true, the
+/// self-service scope trigger is ignored and only the admin-managed client flag
+/// grants broker capability.
+pub fn is_broker_client_with_policy(
+    client: &crate::models::oauth_client::OauthClient,
+    require_admin_capability: bool,
+) -> bool {
+    if require_admin_capability {
+        return client.broker_capability_enabled;
+    }
+
     client.broker_capability_enabled
         || client
             .allowed_scopes
@@ -71,6 +79,40 @@ pub struct BindingExchangeResult {
 }
 
 const MAX_BROKER_ROTATION_RETRIES: usize = 3;
+
+/// Build persisted confirmation material from the sender proofs presented on a
+/// token request. DPoP takes precedence over mTLS, matching token minting.
+pub fn sender_constraint_from_proofs(
+    dpop_jkt: Option<&str>,
+    mtls_x5t_s256: Option<&str>,
+) -> Option<Cnf> {
+    if let Some(jkt) = dpop_jkt.filter(|value| !value.trim().is_empty()) {
+        return Some(Cnf {
+            jkt: Some(jkt.to_string()),
+            x5t_s256: None,
+        });
+    }
+
+    mtls_x5t_s256
+        .filter(|value| !value.trim().is_empty())
+        .map(|x5t| Cnf {
+            jkt: None,
+            x5t_s256: Some(x5t.to_string()),
+        })
+}
+
+fn cnf_has_sender_constraint(cnf: Option<&Cnf>) -> bool {
+    cnf.is_some_and(|cnf| cnf.jkt.is_some() || cnf.x5t_s256.is_some())
+}
+
+pub fn sender_constraint_kind(cnf: Option<&Cnf>) -> &'static str {
+    match cnf {
+        Some(cnf) if cnf.jkt.is_some() && cnf.x5t_s256.is_some() => "dpop+mtls",
+        Some(cnf) if cnf.jkt.is_some() => "dpop",
+        Some(cnf) if cnf.x5t_s256.is_some() => "mtls",
+        _ => "none",
+    }
+}
 
 struct BrokerExchangeContext<'a> {
     db: &'a mongodb::Database,
@@ -108,7 +150,28 @@ pub async fn create_binding(
     refresh_token_jti: &str,
     scopes: &[String],
     external_subject: Option<&ExternalSubjectRef>,
+    sender_constraint: Option<Cnf>,
+    require_sender_constraint: bool,
 ) -> AppResult<(String, String)> {
+    let sender_constraint = sender_constraint.filter(|cnf| cnf_has_sender_constraint(Some(cnf)));
+    if require_sender_constraint && sender_constraint.is_none() {
+        crate::services::audit_service::log_async(
+            db.clone(),
+            Some(user_id.to_string()),
+            "oauth_broker_binding_unpinned_create_rejected".to_string(),
+            Some(serde_json::json!({
+                "client_id": client_id,
+                "reason": "sender_constraint_required",
+                "scope_count": scopes.len(),
+            })),
+            None,
+            None,
+            None,
+            None,
+        );
+        return Err(invalid_grant());
+    }
+
     let raw_binding_id = generate_binding_id();
     let binding_hash = hash_binding_id(&raw_binding_id);
 
@@ -126,6 +189,7 @@ pub async fn create_binding(
         refresh_token_encrypted: Some(refresh_token_encrypted),
         scopes: scopes.to_vec(),
         external_subject: external_subject.cloned(),
+        cnf: sender_constraint,
         rotation_version: 0,
         revoked: false,
         last_used_at: None,
@@ -280,6 +344,7 @@ async fn try_exchange_once(ctx: &BrokerExchangeContext<'_>) -> AppResult<Exchang
     if binding.client_id != ctx.client_id || binding.revoked {
         return Err(invalid_grant());
     }
+    verify_binding_sender_constraint(ctx, &binding)?;
 
     let encrypted_refresh = binding
         .refresh_token_encrypted
@@ -421,6 +486,7 @@ async fn try_chain_follow(
     if binding.client_id != ctx.client_id || binding.revoked {
         return Ok(None);
     }
+    verify_binding_sender_constraint(ctx, &binding)?;
 
     let encrypted_refresh = binding
         .refresh_token_encrypted
@@ -473,6 +539,133 @@ async fn try_chain_follow(
         issued_token_type: ISSUED_TOKEN_TYPE_ACCESS_TOKEN.to_string(),
         via_chain_follow: true,
     }))
+}
+
+fn verify_binding_sender_constraint(
+    ctx: &BrokerExchangeContext<'_>,
+    binding: &OauthBrokerBinding,
+) -> AppResult<()> {
+    let pinned = binding
+        .cnf
+        .as_ref()
+        .filter(|cnf| cnf_has_sender_constraint(Some(cnf)));
+
+    let Some(pinned) = pinned else {
+        if ctx.config.broker_require_sender_constraint() {
+            audit_sender_constraint_rejection(
+                ctx,
+                binding,
+                "oauth_broker_binding_bearer_rejected",
+                "binding_unpinned",
+            );
+            tracing::warn!(
+                client_id = %binding.client_id,
+                binding_hash = %binding_hash_prefix(ctx.binding_hash),
+                "broker binding exchange rejected because sender constraints are required"
+            );
+            return Err(invalid_grant());
+        }
+        return Ok(());
+    };
+
+    if let Some(expected_jkt) = pinned.jkt.as_deref() {
+        match ctx.dpop_jkt {
+            Some(presented_jkt) if presented_jkt == expected_jkt => {}
+            Some(_) => {
+                audit_sender_constraint_rejection(
+                    ctx,
+                    binding,
+                    "oauth_broker_binding_sender_constraint_mismatch",
+                    "dpop_jkt_mismatch",
+                );
+                tracing::warn!(
+                    client_id = %binding.client_id,
+                    binding_hash = %binding_hash_prefix(ctx.binding_hash),
+                    "broker binding exchange rejected because DPoP thumbprint did not match pin"
+                );
+                return Err(invalid_grant());
+            }
+            None => {
+                audit_sender_constraint_rejection(
+                    ctx,
+                    binding,
+                    "oauth_broker_binding_sender_constraint_mismatch",
+                    "dpop_required",
+                );
+                tracing::warn!(
+                    client_id = %binding.client_id,
+                    binding_hash = %binding_hash_prefix(ctx.binding_hash),
+                    "broker binding exchange rejected because DPoP proof was missing"
+                );
+                return Err(invalid_grant());
+            }
+        }
+    }
+
+    if let Some(expected_x5t) = pinned.x5t_s256.as_deref() {
+        match ctx.mtls_x5t_s256 {
+            Some(presented_x5t) if presented_x5t == expected_x5t => {}
+            Some(_) => {
+                audit_sender_constraint_rejection(
+                    ctx,
+                    binding,
+                    "oauth_broker_binding_sender_constraint_mismatch",
+                    "mtls_x5t_s256_mismatch",
+                );
+                tracing::warn!(
+                    client_id = %binding.client_id,
+                    binding_hash = %binding_hash_prefix(ctx.binding_hash),
+                    "broker binding exchange rejected because mTLS certificate thumbprint did not match pin"
+                );
+                return Err(invalid_grant());
+            }
+            None => {
+                audit_sender_constraint_rejection(
+                    ctx,
+                    binding,
+                    "oauth_broker_binding_sender_constraint_mismatch",
+                    "mtls_required",
+                );
+                tracing::warn!(
+                    client_id = %binding.client_id,
+                    binding_hash = %binding_hash_prefix(ctx.binding_hash),
+                    "broker binding exchange rejected because mTLS client certificate was missing"
+                );
+                return Err(invalid_grant());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn audit_sender_constraint_rejection(
+    ctx: &BrokerExchangeContext<'_>,
+    binding: &OauthBrokerBinding,
+    event_type: &'static str,
+    reason: &'static str,
+) {
+    crate::services::audit_service::log_async(
+        ctx.db.clone(),
+        Some(binding.user_id.clone()),
+        event_type.to_string(),
+        Some(serde_json::json!({
+            "client_id": binding.client_id,
+            "binding_hash": binding_hash_prefix(ctx.binding_hash),
+            "reason": reason,
+            "pinned_cnf": sender_constraint_kind(binding.cnf.as_ref()),
+            "presented_cnf": sender_constraint_kind(sender_constraint_from_proofs(
+                ctx.dpop_jkt,
+                ctx.mtls_x5t_s256,
+            ).as_ref()),
+            "has_dpop": ctx.dpop_jkt.is_some(),
+            "has_mtls": ctx.mtls_x5t_s256.is_some(),
+        })),
+        None,
+        None,
+        None,
+        None,
+    );
 }
 
 async fn mint_broker_access_token(
@@ -987,20 +1180,30 @@ mod tests {
     #[test]
     fn is_broker_client_honors_admin_flag() {
         let client = oauth_client_for_broker_test(true, "openid");
-        assert!(is_broker_client(&client));
+        assert!(is_broker_client_with_policy(&client, false));
     }
 
     #[test]
     fn is_broker_client_honors_broker_binding_scope() {
         let client =
             oauth_client_for_broker_test(false, &format!("openid profile {BROKER_BINDING_SCOPE}"));
-        assert!(is_broker_client(&client));
+        assert!(is_broker_client_with_policy(&client, false));
+    }
+
+    #[test]
+    fn is_broker_client_with_policy_ignores_scope_when_admin_capability_required() {
+        let scope_only =
+            oauth_client_for_broker_test(false, &format!("openid profile {BROKER_BINDING_SCOPE}"));
+        assert!(!is_broker_client_with_policy(&scope_only, true));
+
+        let admin_enabled = oauth_client_for_broker_test(true, "openid profile");
+        assert!(is_broker_client_with_policy(&admin_enabled, true));
     }
 
     #[test]
     fn is_broker_client_false_without_either_trigger() {
         let client = oauth_client_for_broker_test(false, "openid profile email");
-        assert!(!is_broker_client(&client));
+        assert!(!is_broker_client_with_policy(&client, false));
     }
 
     #[test]
@@ -1008,7 +1211,7 @@ mod tests {
         // Make sure naive substring match doesn't accidentally trigger.
         let client =
             oauth_client_for_broker_test(false, "openid urn:nyxid:scope:broker_binding_NOPE");
-        assert!(!is_broker_client(&client));
+        assert!(!is_broker_client_with_policy(&client, false));
     }
 
     fn unused_jwt_keys() -> JwtKeys {
@@ -1117,6 +1320,23 @@ mod tests {
         seed: BindingSeed<'_>,
         external_subject: Option<ExternalSubjectRef>,
     ) -> OauthBrokerBinding {
+        insert_binding_with_external_subject_and_cnf(
+            db,
+            encryption_keys,
+            seed,
+            external_subject,
+            None,
+        )
+        .await
+    }
+
+    async fn insert_binding_with_external_subject_and_cnf(
+        db: &mongodb::Database,
+        encryption_keys: &EncryptionKeys,
+        seed: BindingSeed<'_>,
+        external_subject: Option<ExternalSubjectRef>,
+        cnf: Option<Cnf>,
+    ) -> OauthBrokerBinding {
         let binding_hash = hash_binding_id(seed.raw_binding_id);
         let refresh_token_encrypted = encryption_keys
             .encrypt_with_aad(seed.refresh_token.as_bytes(), binding_hash.as_bytes())
@@ -1130,6 +1350,7 @@ mod tests {
             refresh_token_encrypted: Some(refresh_token_encrypted),
             scopes: seed.scopes,
             external_subject,
+            cnf,
             rotation_version: 0,
             revoked: seed.revoked,
             last_used_at: None,
@@ -1292,6 +1513,10 @@ mod tests {
             tenant: Some("tenant-1".to_string()),
             external_user_id: "external-user-1".to_string(),
         };
+        let cnf = Cnf {
+            jkt: Some("issuer-dpop-jkt".to_string()),
+            x5t_s256: None,
+        };
 
         let (raw_binding_id, binding_hash) = create_binding(
             &db,
@@ -1302,6 +1527,8 @@ mod tests {
             "refresh-jti-1",
             &["openid".to_string(), "profile".to_string()],
             Some(&external_subject),
+            Some(cnf.clone()),
+            false,
         )
         .await
         .expect("create binding");
@@ -1314,6 +1541,7 @@ mod tests {
         assert_eq!(restored.rotation_version, 0);
         assert!(!restored.revoked);
         assert_eq!(restored.external_subject, Some(external_subject));
+        assert_eq!(restored.cnf, Some(cnf));
         let decrypted = encryption_keys
             .decrypt_with_aad(
                 restored
@@ -1325,6 +1553,39 @@ mod tests {
             .await
             .expect("decrypt refresh token");
         assert_eq!(decrypted, b"test-refresh-token-123");
+    }
+
+    #[tokio::test]
+    async fn create_binding_rejects_unpinned_when_required() {
+        let Some(db) = connect_test_database("broker_create_requires_cnf").await else {
+            return;
+        };
+        let encryption_keys = std::sync::Arc::new(test_encryption_keys());
+
+        let result = create_binding(
+            &db,
+            &encryption_keys,
+            "client-1",
+            "user-1",
+            "test-refresh-token-123",
+            "refresh-jti-1",
+            &["openid".to_string()],
+            None,
+            None,
+            true,
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(AppError::ExternalTokenInvalid(message)) if message == "invalid_grant"
+        ));
+        let count = db
+            .collection::<OauthBrokerBinding>(OAUTH_BROKER_BINDINGS)
+            .count_documents(doc! {})
+            .await
+            .expect("count bindings");
+        assert_eq!(count, 0);
     }
 
     #[tokio::test]
@@ -2272,6 +2533,414 @@ mod tests {
         let cnf = claims.cnf.expect("cnf claim");
         assert!(cnf.jkt.is_none());
         assert_eq!(cnf.x5t_s256.as_deref(), Some(x5t.as_str()));
+    }
+
+    #[tokio::test]
+    async fn exchange_via_binding_requires_matching_pinned_dpop() {
+        let encryption_keys = std::sync::Arc::new(test_encryption_keys());
+        let (jwt_keys, config) = real_jwt_keys_and_config();
+        let Some(db) = connect_test_database("broker_pinned_dpop_match").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let raw_binding_id = generate_binding_id();
+        let (refresh_jwt, refresh) =
+            insert_refresh_token_jwt(&db, &jwt_keys, &config, "client-pinned", &user_id).await;
+        let jkt = "pinned-dpop-jkt";
+
+        insert_binding_with_external_subject_and_cnf(
+            &db,
+            &encryption_keys,
+            BindingSeed {
+                raw_binding_id: &raw_binding_id,
+                client_id: "client-pinned",
+                user_id: &user_id,
+                refresh_token_jti: &refresh.jti,
+                refresh_token: &refresh_jwt,
+                scopes: vec!["openid".to_string(), "profile".to_string()],
+                created_at: Utc::now(),
+                revoked: false,
+                revoke_reason: None,
+            },
+            None,
+            Some(Cnf {
+                jkt: Some(jkt.to_string()),
+                x5t_s256: None,
+            }),
+        )
+        .await;
+
+        let result = exchange_via_binding(
+            &db,
+            encryption_keys.clone(),
+            &reqwest::Client::new(),
+            &jwt_keys,
+            &config,
+            "client-pinned",
+            &raw_binding_id,
+            Some("openid"),
+            Some(jkt),
+            None,
+        )
+        .await
+        .expect("exchange with matching DPoP pin");
+
+        assert_eq!(result.token_type, "DPoP");
+        let claims = jwt::verify_token(&jwt_keys, &config, &result.access_token)
+            .expect("valid access token");
+        assert_eq!(claims.cnf.expect("cnf").jkt.as_deref(), Some(jkt));
+    }
+
+    #[tokio::test]
+    async fn exchange_via_binding_rejects_pinned_dpop_mismatch_and_audits() {
+        let Some(db) = connect_test_database("broker_pinned_dpop_mismatch").await else {
+            return;
+        };
+        let encryption_keys = std::sync::Arc::new(test_encryption_keys());
+        let config = test_app_config();
+        let jwt_keys = unused_jwt_keys();
+        let user_id = Uuid::new_v4().to_string();
+        let raw_binding_id = generate_binding_id();
+        let binding_hash = hash_binding_id(&raw_binding_id);
+        let audit_rx = crate::services::audit_service::notify_on_audit_write_for_user(
+            "oauth_broker_binding_sender_constraint_mismatch",
+            &user_id,
+        );
+
+        insert_binding_with_external_subject_and_cnf(
+            &db,
+            &encryption_keys,
+            BindingSeed {
+                raw_binding_id: &raw_binding_id,
+                client_id: "client-pinned",
+                user_id: &user_id,
+                refresh_token_jti: "jti-pinned",
+                refresh_token: "refresh-pinned",
+                scopes: vec!["openid".to_string()],
+                created_at: Utc::now(),
+                revoked: false,
+                revoke_reason: None,
+            },
+            None,
+            Some(Cnf {
+                jkt: Some("expected-jkt".to_string()),
+                x5t_s256: None,
+            }),
+        )
+        .await;
+
+        let result = exchange_via_binding(
+            &db,
+            encryption_keys.clone(),
+            &reqwest::Client::new(),
+            &jwt_keys,
+            &config,
+            "client-pinned",
+            &raw_binding_id,
+            None,
+            Some("other-jkt"),
+            None,
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(AppError::ExternalTokenInvalid(message)) if message == "invalid_grant"
+        ));
+        let binding = load_binding(&db, &binding_hash).await;
+        assert_eq!(binding.rotation_version, 0);
+        assert_eq!(binding.refresh_token_jti, "jti-pinned");
+
+        let audit_id = tokio::time::timeout(std::time::Duration::from_secs(5), audit_rx)
+            .await
+            .expect("audit write")
+            .expect("audit id");
+        let audit = db
+            .collection::<crate::models::audit_log::AuditLog>(
+                crate::models::audit_log::COLLECTION_NAME,
+            )
+            .find_one(doc! { "_id": audit_id })
+            .await
+            .expect("query audit")
+            .expect("audit exists");
+        let event_data = audit.event_data.expect("audit event data");
+        assert_eq!(event_data["client_id"], "client-pinned");
+        assert_eq!(
+            event_data["binding_hash"],
+            binding_hash_prefix(&binding_hash)
+        );
+        assert_eq!(event_data["reason"], "dpop_jkt_mismatch");
+        assert_eq!(event_data["pinned_cnf"], "dpop");
+        assert_eq!(event_data["presented_cnf"], "dpop");
+        assert!(event_data.get("expected_jkt").is_none());
+        assert!(event_data.get("presented_jkt").is_none());
+    }
+
+    #[tokio::test]
+    async fn exchange_via_binding_rejects_pinned_dpop_without_proof() {
+        let Some(db) = connect_test_database("broker_pinned_dpop_bearer").await else {
+            return;
+        };
+        let encryption_keys = std::sync::Arc::new(test_encryption_keys());
+        let config = test_app_config();
+        let jwt_keys = unused_jwt_keys();
+        let user_id = Uuid::new_v4().to_string();
+        let raw_binding_id = generate_binding_id();
+
+        insert_binding_with_external_subject_and_cnf(
+            &db,
+            &encryption_keys,
+            BindingSeed {
+                raw_binding_id: &raw_binding_id,
+                client_id: "client-pinned",
+                user_id: &user_id,
+                refresh_token_jti: "jti-pinned",
+                refresh_token: "refresh-pinned",
+                scopes: vec!["openid".to_string()],
+                created_at: Utc::now(),
+                revoked: false,
+                revoke_reason: None,
+            },
+            None,
+            Some(Cnf {
+                jkt: Some("expected-jkt".to_string()),
+                x5t_s256: None,
+            }),
+        )
+        .await;
+
+        let result = exchange_via_binding(
+            &db,
+            encryption_keys.clone(),
+            &reqwest::Client::new(),
+            &jwt_keys,
+            &config,
+            "client-pinned",
+            &raw_binding_id,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(AppError::ExternalTokenInvalid(message)) if message == "invalid_grant"
+        ));
+    }
+
+    #[tokio::test]
+    async fn exchange_via_binding_requires_matching_pinned_mtls() {
+        let encryption_keys = std::sync::Arc::new(test_encryption_keys());
+        let (jwt_keys, config) = real_jwt_keys_and_config();
+        let Some(db) = connect_test_database("broker_pinned_mtls_match").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let raw_binding_id = generate_binding_id();
+        let (refresh_jwt, refresh) =
+            insert_refresh_token_jwt(&db, &jwt_keys, &config, "client-pinned-mtls", &user_id).await;
+        let x5t = "pinned-mtls-x5t";
+
+        insert_binding_with_external_subject_and_cnf(
+            &db,
+            &encryption_keys,
+            BindingSeed {
+                raw_binding_id: &raw_binding_id,
+                client_id: "client-pinned-mtls",
+                user_id: &user_id,
+                refresh_token_jti: &refresh.jti,
+                refresh_token: &refresh_jwt,
+                scopes: vec!["openid".to_string(), "profile".to_string()],
+                created_at: Utc::now(),
+                revoked: false,
+                revoke_reason: None,
+            },
+            None,
+            Some(Cnf {
+                jkt: None,
+                x5t_s256: Some(x5t.to_string()),
+            }),
+        )
+        .await;
+
+        let result = exchange_via_binding(
+            &db,
+            encryption_keys.clone(),
+            &reqwest::Client::new(),
+            &jwt_keys,
+            &config,
+            "client-pinned-mtls",
+            &raw_binding_id,
+            Some("openid"),
+            None,
+            Some(x5t),
+        )
+        .await
+        .expect("exchange with matching mTLS pin");
+
+        assert_eq!(result.token_type, "Bearer");
+        let claims = jwt::verify_token(&jwt_keys, &config, &result.access_token)
+            .expect("valid access token");
+        let cnf = claims.cnf.expect("cnf");
+        assert!(cnf.jkt.is_none());
+        assert_eq!(cnf.x5t_s256.as_deref(), Some(x5t));
+    }
+
+    #[tokio::test]
+    async fn exchange_via_binding_rejects_pinned_mtls_mismatch() {
+        let Some(db) = connect_test_database("broker_pinned_mtls_mismatch").await else {
+            return;
+        };
+        let encryption_keys = std::sync::Arc::new(test_encryption_keys());
+        let config = test_app_config();
+        let jwt_keys = unused_jwt_keys();
+        let user_id = Uuid::new_v4().to_string();
+        let raw_binding_id = generate_binding_id();
+        let binding_hash = hash_binding_id(&raw_binding_id);
+
+        insert_binding_with_external_subject_and_cnf(
+            &db,
+            &encryption_keys,
+            BindingSeed {
+                raw_binding_id: &raw_binding_id,
+                client_id: "client-pinned-mtls",
+                user_id: &user_id,
+                refresh_token_jti: "jti-pinned-mtls",
+                refresh_token: "refresh-pinned-mtls",
+                scopes: vec!["openid".to_string()],
+                created_at: Utc::now(),
+                revoked: false,
+                revoke_reason: None,
+            },
+            None,
+            Some(Cnf {
+                jkt: None,
+                x5t_s256: Some("expected-x5t".to_string()),
+            }),
+        )
+        .await;
+
+        let result = exchange_via_binding(
+            &db,
+            encryption_keys.clone(),
+            &reqwest::Client::new(),
+            &jwt_keys,
+            &config,
+            "client-pinned-mtls",
+            &raw_binding_id,
+            None,
+            None,
+            Some("other-x5t"),
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(AppError::ExternalTokenInvalid(message)) if message == "invalid_grant"
+        ));
+        let binding = load_binding(&db, &binding_hash).await;
+        assert_eq!(binding.rotation_version, 0);
+        assert_eq!(binding.refresh_token_jti, "jti-pinned-mtls");
+    }
+
+    #[tokio::test]
+    async fn exchange_via_binding_allows_unpinned_bearer_when_flag_off() {
+        let encryption_keys = std::sync::Arc::new(test_encryption_keys());
+        let (jwt_keys, config) = real_jwt_keys_and_config();
+        let Some(db) = connect_test_database("broker_unpinned_flag_off").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let raw_binding_id = generate_binding_id();
+        let (refresh_jwt, refresh) =
+            insert_refresh_token_jwt(&db, &jwt_keys, &config, "client-unpinned", &user_id).await;
+
+        insert_binding(
+            &db,
+            &encryption_keys,
+            BindingSeed {
+                raw_binding_id: &raw_binding_id,
+                client_id: "client-unpinned",
+                user_id: &user_id,
+                refresh_token_jti: &refresh.jti,
+                refresh_token: &refresh_jwt,
+                scopes: vec!["openid".to_string()],
+                created_at: Utc::now(),
+                revoked: false,
+                revoke_reason: None,
+            },
+        )
+        .await;
+
+        let result = exchange_via_binding(
+            &db,
+            encryption_keys.clone(),
+            &reqwest::Client::new(),
+            &jwt_keys,
+            &config,
+            "client-unpinned",
+            &raw_binding_id,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("legacy unpinned binding remains valid while flag is off");
+
+        assert_eq!(result.token_type, "Bearer");
+        let claims = jwt::verify_token(&jwt_keys, &config, &result.access_token)
+            .expect("valid access token");
+        assert!(claims.cnf.is_none());
+    }
+
+    #[tokio::test]
+    async fn exchange_via_binding_rejects_unpinned_when_flag_on() {
+        let Some(db) = connect_test_database("broker_unpinned_flag_on").await else {
+            return;
+        };
+        let encryption_keys = std::sync::Arc::new(test_encryption_keys());
+        let mut config = test_app_config();
+        config.broker_require_sender_constraint = true;
+        let jwt_keys = unused_jwt_keys();
+        let user_id = Uuid::new_v4().to_string();
+        let raw_binding_id = generate_binding_id();
+
+        insert_binding(
+            &db,
+            &encryption_keys,
+            BindingSeed {
+                raw_binding_id: &raw_binding_id,
+                client_id: "client-unpinned",
+                user_id: &user_id,
+                refresh_token_jti: "jti-unpinned",
+                refresh_token: "refresh-unpinned",
+                scopes: vec!["openid".to_string()],
+                created_at: Utc::now(),
+                revoked: false,
+                revoke_reason: None,
+            },
+        )
+        .await;
+
+        let result = exchange_via_binding(
+            &db,
+            encryption_keys.clone(),
+            &reqwest::Client::new(),
+            &jwt_keys,
+            &config,
+            "client-unpinned",
+            &raw_binding_id,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(AppError::ExternalTokenInvalid(message)) if message == "invalid_grant"
+        ));
     }
 
     #[tokio::test]

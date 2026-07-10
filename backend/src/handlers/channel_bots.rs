@@ -489,7 +489,7 @@ pub async fn create_bot(
     // Build the per-bot webhook URL (platform-specific path)
     let webhook_url = format!(
         "{}/api/v1/webhooks/channel/{}/{}",
-        state.config.base_url, &body.platform, &bot_id
+        state.config.base_url, body.platform, bot_id
     );
 
     // Register the webhook with the platform
@@ -836,7 +836,7 @@ pub async fn verify_bot(
     // stored hash accordingly.
     let webhook_url = format!(
         "{}/api/v1/webhooks/channel/{}/{}",
-        state.config.base_url, &bot.platform, &bot.id
+        state.config.base_url, bot.platform, bot.id
     );
 
     let raw_secret = {

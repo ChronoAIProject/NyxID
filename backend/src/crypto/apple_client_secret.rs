@@ -158,6 +158,8 @@ ci0O2dgc19c2/sLtanU7P2KAzhEo8O0tIc0Dwe/nMqKfue82eGVL3DqM\n\
             rate_limit_burst: 30,
             trusted_proxy_ips: vec![],
             mtls_client_cert_header: None,
+            broker_require_sender_constraint: false,
+            broker_require_admin_capability: false,
             cli_pairing_hmac_key: None,
             audit_chain_hmac_key: None,
             sa_token_ttl_secs: 3600,
