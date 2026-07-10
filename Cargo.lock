@@ -4010,6 +4010,7 @@ dependencies = [
  "hmac",
  "http 1.4.0",
  "jsonwebtoken 10.3.0",
+ "libc",
  "mongodb",
  "nyxid-cloud-auth",
  "open",

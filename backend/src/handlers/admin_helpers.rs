@@ -251,19 +251,31 @@ mod tests {
             .await
             .expect("operator read should succeed");
 
-        // The audit write is fire-and-forget on a tokio::spawn; give it a
-        // moment to land before asserting. 250ms is generous in practice.
-        tokio::time::sleep(Duration::from_millis(250)).await;
-
-        let entry = db
-            .collection::<AuditLog>(AUDIT_LOG)
-            .find_one(doc! {
-                "user_id": &user_id,
-                "event_type": "admin.read.by_operator",
-            })
-            .await
-            .expect("query audit log")
-            .expect("operator read should leave an admin.read.by_operator audit entry");
+        // The audit write is fire-and-forget on a tokio::spawn, so poll for it
+        // to land instead of racing a single fixed sleep. A fixed 250ms delay
+        // flaked in CI under nextest's parallelism against a shared, loaded
+        // mongod (the spawned write occasionally needed longer to become
+        // queryable); polling up to ~5s is deterministic and returns as soon as
+        // the row appears, so the happy path stays fast.
+        let audit_logs = db.collection::<AuditLog>(AUDIT_LOG);
+        let query = doc! {
+            "user_id": &user_id,
+            "event_type": "admin.read.by_operator",
+        };
+        let mut entry = None;
+        for _ in 0..50 {
+            if let Some(found) = audit_logs
+                .find_one(query.clone())
+                .await
+                .expect("query audit log")
+            {
+                entry = Some(found);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let entry =
+            entry.expect("operator read should leave an admin.read.by_operator audit entry");
 
         // The audit row must carry the endpoint marker so the audit trail
         // can answer "operator X read endpoint Y at time T". Without this,
