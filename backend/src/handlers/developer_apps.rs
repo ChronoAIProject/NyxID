@@ -4,7 +4,6 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use url::Url;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
@@ -213,46 +212,7 @@ async fn validate_default_service_catalog_slugs(
 }
 
 fn validate_redirect_uris(redirect_uris: &[String]) -> AppResult<Vec<String>> {
-    if redirect_uris.is_empty() {
-        return Err(AppError::ValidationError(
-            "At least one redirect_uri is required".to_string(),
-        ));
-    }
-
-    let mut unique = HashSet::new();
-    let mut validated = Vec::new();
-
-    for raw_uri in redirect_uris {
-        let uri = raw_uri.trim();
-        if uri.is_empty() {
-            return Err(AppError::ValidationError(
-                "redirect_uri cannot be empty".to_string(),
-            ));
-        }
-
-        let parsed = Url::parse(uri).map_err(|_| {
-            AppError::ValidationError(format!("Invalid redirect_uri format: {uri}"))
-        })?;
-
-        if matches!(parsed.scheme(), "javascript" | "data" | "file") {
-            return Err(AppError::ValidationError(format!(
-                "Unsupported redirect_uri scheme: {uri}"
-            )));
-        }
-
-        if parsed.fragment().is_some() {
-            return Err(AppError::ValidationError(format!(
-                "redirect_uri must not contain fragment: {uri}"
-            )));
-        }
-
-        let normalized = parsed.to_string();
-        if unique.insert(normalized.clone()) {
-            validated.push(normalized);
-        }
-    }
-
-    Ok(validated)
+    oauth_client_service::validate_redirect_uris(redirect_uris)
 }
 
 fn normalize_optional_nonempty(input: Option<&str>) -> Option<&str> {
@@ -271,7 +231,7 @@ async fn require_platform_admin_for_broker_capability(
             .any(|scope| scope == oauth_broker_service::BROKER_BINDING_SCOPE)
     });
 
-    if state.config.broker_require_admin_capability()
+    if state.broker_require_admin_capability()
         && (requested_broker_capability == Some(true) || requested_broker_scope)
     {
         require_admin(state, auth_user).await.map_err(|_| {

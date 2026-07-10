@@ -15,7 +15,7 @@ use crate::models::user::{COLLECTION_NAME as USERS, PlatformRole, User};
 use crate::mw::auth::AuthUser;
 use crate::services::{
     admin_user_service, audit_chain_service, audit_service, consent_service, oauth_client_service,
-    role_service,
+    platform_settings_service, role_service,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
@@ -808,6 +808,70 @@ pub async fn verify_audit_log(
     }))
 }
 
+// --- Broker Runtime Settings ---
+
+/// GET /api/v1/admin/settings/broker
+///
+/// Read the effective runtime broker policy. Requires full platform-admin
+/// access because the values are security rollout controls.
+pub async fn get_broker_settings(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+) -> AppResult<Json<BrokerSettingsResponse>> {
+    require_admin(&state, &auth_user).await?;
+
+    Ok(Json(broker_settings_response(&state)))
+}
+
+/// PATCH /api/v1/admin/settings/broker
+///
+/// Set or clear runtime broker-policy overrides. `null` clears an override and
+/// returns the setting to its env-derived default.
+pub async fn update_broker_settings(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Json(body): Json<UpdateBrokerSettingsRequest>,
+) -> AppResult<Json<BrokerSettingsResponse>> {
+    require_admin(&state, &auth_user).await?;
+
+    let changed_fields = broker_settings_changed_fields(&body);
+    let settings = platform_settings_service::update_broker_settings(
+        &state.db,
+        platform_settings_service::BrokerSettingsPatch {
+            broker_require_sender_constraint: body.broker_require_sender_constraint,
+            broker_require_admin_capability: body.broker_require_admin_capability,
+        },
+    )
+    .await?;
+    let policy = platform_settings_service::BrokerPolicy::from_settings(&state.config, &settings);
+    state.set_broker_policy_if_fresh(policy);
+
+    if !changed_fields.is_empty() {
+        audit_service::log_for_user(
+            state.db.clone(),
+            &auth_user,
+            "admin_broker_settings_updated",
+            Some(serde_json::json!({
+                "actor_user_id": auth_user.user_id.to_string(),
+                "changed_fields": changed_fields,
+            })),
+        );
+    }
+
+    Ok(Json(broker_settings_response(&state)))
+}
+
+fn broker_settings_changed_fields(body: &UpdateBrokerSettingsRequest) -> Vec<&'static str> {
+    let mut changed = Vec::new();
+    if body.broker_require_sender_constraint.is_some() {
+        changed.push("broker_require_sender_constraint");
+    }
+    if body.broker_require_admin_capability.is_some() {
+        changed.push("broker_require_admin_capability");
+    }
+    changed
+}
+
 // --- OAuth Client Admin ---
 
 #[derive(Debug, Deserialize)]
@@ -825,15 +889,27 @@ pub struct CreateOAuthClientRequest {
     pub allowed_scopes: Option<Vec<String>>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct UpdateOAuthClientRequest {
+    pub broker_capability_enabled: Option<bool>,
+    pub is_active: Option<bool>,
+    pub redirect_uris: Option<Vec<String>>,
+    pub allowed_scopes: Option<Vec<String>>,
+    pub client_name: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct OAuthClientResponse {
     pub id: String,
     pub client_name: String,
     pub client_type: String,
+    pub created_by: Option<String>,
     pub redirect_uris: Vec<String>,
     pub allowed_scopes: String,
     pub delegation_scopes: String,
     pub broker_capability_enabled: bool,
+    pub broker_capability_effective: bool,
+    pub broker_capability_source: BrokerCapabilitySource,
     pub revocation_webhook_url: Option<String>,
     pub is_active: bool,
     /// Raw client secret -- only returned at creation time.
@@ -844,6 +920,134 @@ pub struct OAuthClientResponse {
 #[derive(Debug, Serialize)]
 pub struct OAuthClientListResponse {
     pub clients: Vec<OAuthClientResponse>,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BrokerCapabilitySource {
+    None,
+    Flag,
+    Scope,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrokerPolicySource {
+    EnvDefault,
+    Override,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BrokerPolicyFieldResponse {
+    pub effective: bool,
+    pub env_default: bool,
+    #[serde(rename = "override")]
+    pub override_value: Option<bool>,
+    pub source: BrokerPolicySource,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BrokerSettingsResponse {
+    pub broker_require_sender_constraint: BrokerPolicyFieldResponse,
+    pub broker_require_admin_capability: BrokerPolicyFieldResponse,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateBrokerSettingsRequest {
+    /// Omit to leave unchanged, pass `true`/`false` to override, pass `null`
+    /// to clear back to the env default.
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize"
+    )]
+    pub broker_require_sender_constraint: Option<Option<bool>>,
+    /// Omit to leave unchanged, pass `true`/`false` to override, pass `null`
+    /// to clear back to the env default.
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize"
+    )]
+    pub broker_require_admin_capability: Option<Option<bool>>,
+}
+
+fn oauth_client_response(
+    client: crate::models::oauth_client::OauthClient,
+    client_secret: Option<String>,
+    broker_require_admin_capability: bool,
+) -> OAuthClientResponse {
+    let broker_capability_source =
+        broker_capability_source(&client, broker_require_admin_capability);
+    let broker_capability_effective =
+        !matches!(broker_capability_source, BrokerCapabilitySource::None);
+
+    OAuthClientResponse {
+        id: client.id,
+        client_name: client.client_name,
+        client_type: client.client_type,
+        created_by: client.created_by,
+        redirect_uris: client.redirect_uris,
+        allowed_scopes: client.allowed_scopes,
+        delegation_scopes: client.delegation_scopes,
+        broker_capability_enabled: client.broker_capability_enabled,
+        broker_capability_effective,
+        broker_capability_source,
+        revocation_webhook_url: client.revocation_webhook_url,
+        is_active: client.is_active,
+        client_secret,
+        created_at: client.created_at.to_rfc3339(),
+    }
+}
+
+fn broker_capability_source(
+    client: &crate::models::oauth_client::OauthClient,
+    broker_require_admin_capability: bool,
+) -> BrokerCapabilitySource {
+    if client.broker_capability_enabled {
+        return BrokerCapabilitySource::Flag;
+    }
+
+    let has_legacy_scope = client
+        .allowed_scopes
+        .split_whitespace()
+        .any(|scope| scope == crate::services::oauth_broker_service::BROKER_BINDING_SCOPE);
+    if !broker_require_admin_capability && has_legacy_scope {
+        BrokerCapabilitySource::Scope
+    } else {
+        BrokerCapabilitySource::None
+    }
+}
+
+fn broker_settings_response(state: &AppState) -> BrokerSettingsResponse {
+    let policy = state.broker_policy();
+    BrokerSettingsResponse {
+        broker_require_sender_constraint: broker_policy_field_response(
+            policy.broker_require_sender_constraint,
+            policy.broker_require_sender_constraint_env_default,
+            policy.broker_require_sender_constraint_override,
+        ),
+        broker_require_admin_capability: broker_policy_field_response(
+            policy.broker_require_admin_capability,
+            policy.broker_require_admin_capability_env_default,
+            policy.broker_require_admin_capability_override,
+        ),
+    }
+}
+
+fn broker_policy_field_response(
+    effective: bool,
+    env_default: bool,
+    override_value: Option<bool>,
+) -> BrokerPolicyFieldResponse {
+    BrokerPolicyFieldResponse {
+        effective,
+        env_default,
+        override_value,
+        source: if override_value.is_some() {
+            BrokerPolicySource::Override
+        } else {
+            BrokerPolicySource::EnvDefault
+        },
+    }
 }
 
 /// POST /api/v1/admin/oauth-clients
@@ -863,11 +1067,7 @@ pub async fn create_oauth_client(
         ));
     }
 
-    if body.redirect_uris.is_empty() {
-        return Err(AppError::ValidationError(
-            "At least one redirect_uri is required".to_string(),
-        ));
-    }
+    let redirect_uris = oauth_client_service::validate_redirect_uris(&body.redirect_uris)?;
 
     let client_type = body.client_type.as_deref().unwrap_or("confidential");
     if client_type != "confidential" && client_type != "public" {
@@ -910,7 +1110,7 @@ pub async fn create_oauth_client(
     let (client, raw_secret) = oauth_client_service::create_client(
         &state.db,
         &body.name,
-        &body.redirect_uris,
+        &redirect_uris,
         client_type,
         &user_id,
         delegation_scopes,
@@ -937,19 +1137,11 @@ pub async fn create_oauth_client(
         TelemetryEvent::AdminOauthClientRegistered,
     );
 
-    Ok(Json(OAuthClientResponse {
-        id: client.id.clone(),
-        client_name: client.client_name,
-        client_type: client.client_type,
-        redirect_uris: client.redirect_uris,
-        allowed_scopes: client.allowed_scopes,
-        delegation_scopes: client.delegation_scopes,
-        broker_capability_enabled: client.broker_capability_enabled,
-        revocation_webhook_url: client.revocation_webhook_url,
-        is_active: client.is_active,
-        client_secret: raw_secret,
-        created_at: client.created_at.to_rfc3339(),
-    }))
+    Ok(Json(oauth_client_response(
+        client,
+        raw_secret,
+        state.broker_require_admin_capability(),
+    )))
 }
 
 /// GET /api/v1/admin/oauth-clients
@@ -965,24 +1157,94 @@ pub async fn list_oauth_clients(
 
     let items: Vec<OAuthClientResponse> = clients
         .into_iter()
-        .map(|c| {
-            OAuthClientResponse {
-                id: c.id,
-                client_name: c.client_name,
-                client_type: c.client_type,
-                redirect_uris: c.redirect_uris,
-                allowed_scopes: c.allowed_scopes,
-                delegation_scopes: c.delegation_scopes,
-                broker_capability_enabled: c.broker_capability_enabled,
-                revocation_webhook_url: c.revocation_webhook_url,
-                is_active: c.is_active,
-                client_secret: None, // never expose secret in list
-                created_at: c.created_at.to_rfc3339(),
-            }
-        })
+        .map(|client| oauth_client_response(client, None, state.broker_require_admin_capability()))
         .collect();
 
     Ok(Json(OAuthClientListResponse { clients: items }))
+}
+
+/// PATCH /api/v1/admin/oauth-clients/:client_id
+///
+/// Update admin-managed OAuth-client fields by client ID. Requires full
+/// platform-admin write privileges; operators are intentionally rejected.
+pub async fn update_oauth_client(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(client_id): Path<String>,
+    Json(body): Json<UpdateOAuthClientRequest>,
+) -> AppResult<Json<OAuthClientResponse>> {
+    require_admin(&state, &auth_user).await?;
+
+    let client_name = body.client_name.as_deref().map(str::trim);
+    if client_name == Some("") {
+        return Err(AppError::ValidationError(
+            "Client name cannot be empty".to_string(),
+        ));
+    }
+
+    let redirect_uris = body
+        .redirect_uris
+        .as_ref()
+        .map(|uris| oauth_client_service::validate_redirect_uris(uris))
+        .transpose()?;
+    let allowed_scopes = body
+        .allowed_scopes
+        .as_deref()
+        .map(oauth_client_service::validate_allowed_scopes_list)
+        .transpose()?;
+
+    let changed_fields = oauth_client_update_changed_fields(&body);
+    let updated = oauth_client_service::admin_update_client(
+        &state.db,
+        &client_id,
+        oauth_client_service::AdminUpdateClient {
+            client_name,
+            redirect_uris: redirect_uris.as_deref(),
+            allowed_scopes: allowed_scopes.as_deref(),
+            broker_capability_enabled: body.broker_capability_enabled,
+            is_active: body.is_active,
+        },
+    )
+    .await?;
+
+    if !changed_fields.is_empty() {
+        audit_service::log_for_user(
+            state.db.clone(),
+            &auth_user,
+            "admin_oauth_client_updated",
+            Some(serde_json::json!({
+                "actor_user_id": auth_user.user_id.to_string(),
+                "client_id": client_id,
+                "changed_fields": changed_fields,
+            })),
+        );
+    }
+
+    Ok(Json(oauth_client_response(
+        updated,
+        None,
+        state.broker_require_admin_capability(),
+    )))
+}
+
+fn oauth_client_update_changed_fields(body: &UpdateOAuthClientRequest) -> Vec<&'static str> {
+    let mut changed = Vec::new();
+    if body.broker_capability_enabled.is_some() {
+        changed.push("broker_capability_enabled");
+    }
+    if body.is_active.is_some() {
+        changed.push("is_active");
+    }
+    if body.redirect_uris.is_some() {
+        changed.push("redirect_uris");
+    }
+    if body.allowed_scopes.is_some() {
+        changed.push("allowed_scopes");
+    }
+    if body.client_name.is_some() {
+        changed.push("client_name");
+    }
+    changed
 }
 
 /// DELETE /api/v1/admin/oauth-clients/:client_id
@@ -1286,8 +1548,11 @@ mod operator_route_tests {
     //! representative write handler (`set_user_role`) and 200 from a
     //! representative read handler (`list_users`).
     use super::*;
+    use crate::models::authorization_code::{AuthorizationCode, COLLECTION_NAME as AUTH_CODES};
+    use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
+    use crate::models::platform_settings::COLLECTION_NAME as PLATFORM_SETTINGS;
     use crate::models::user::UserType;
-    use crate::services::role_service;
+    use crate::services::{audit_service, role_service};
     use crate::test_utils::{connect_test_database, test_app_state, test_auth_user, test_user};
     use uuid::Uuid;
 
@@ -1524,5 +1789,503 @@ mod operator_route_tests {
             .expect("target exists");
         assert!(!target.role_ids.contains(&platform_role_ids.admin));
         assert!(!target.role_ids.contains(&platform_role_ids.operator));
+    }
+
+    fn test_oauth_client(id: &str) -> OauthClient {
+        let now = chrono::Utc::now();
+        OauthClient {
+            id: id.to_string(),
+            client_name: "Aevatar DCR".to_string(),
+            client_secret_hash: "NONE".to_string(),
+            redirect_uris: vec!["https://aevatar.example/callback".to_string()],
+            allowed_scopes: oauth_client_service::DEFAULT_MCP_ALLOWED_SCOPES.to_string(),
+            grant_types: "authorization_code".to_string(),
+            client_type: "public".to_string(),
+            is_active: true,
+            delegation_scopes: String::new(),
+            default_service_catalog_slugs: Vec::new(),
+            broker_capability_enabled: false,
+            revocation_webhook_url: None,
+            revocation_webhook_secret_encrypted: None,
+            created_by: Some("dynamic_registration".to_string()),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn oauth_client_response_reports_effective_scope_triggered_broker_capability() {
+        let mut client = test_oauth_client("scope-triggered-client");
+        client.allowed_scopes = format!(
+            "openid {}",
+            crate::services::oauth_broker_service::BROKER_BINDING_SCOPE
+        );
+        client.broker_capability_enabled = false;
+
+        let legacy_policy_response = oauth_client_response(client.clone(), None, false);
+        assert!(legacy_policy_response.broker_capability_effective);
+        assert_eq!(
+            legacy_policy_response.broker_capability_source,
+            BrokerCapabilitySource::Scope
+        );
+
+        let admin_policy_response = oauth_client_response(client, None, true);
+        assert!(!admin_policy_response.broker_capability_effective);
+        assert_eq!(
+            admin_policy_response.broker_capability_source,
+            BrokerCapabilitySource::None
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_patch_oauth_client_updates_ownerless_dynamic_registration_client() {
+        let Some(db) = connect_test_database("admin_oauth_client_patch_dcr").await else {
+            eprintln!("skipping admin oauth-client patch test: no local MongoDB available");
+            return;
+        };
+        let admin_id = insert_user(&db, true, false).await;
+        let client_id = "dcr-aevatar-client";
+        db.collection::<OauthClient>(OAUTH_CLIENTS)
+            .insert_one(test_oauth_client(client_id))
+            .await
+            .expect("insert dcr client");
+        let now = chrono::Utc::now();
+        db.collection::<AuthorizationCode>(AUTH_CODES)
+            .insert_one(AuthorizationCode {
+                id: "pending-auth-code".to_string(),
+                code_hash: "pending-auth-code-hash".to_string(),
+                client_id: client_id.to_string(),
+                user_id: admin_id.clone(),
+                redirect_uri: "https://aevatar.example/callback".to_string(),
+                scope: "openid".to_string(),
+                code_challenge: None,
+                code_challenge_method: None,
+                nonce: None,
+                external_subject: None,
+                resource_uris: Vec::new(),
+                allowed_service_ids: Vec::new(),
+                allow_all_services: true,
+                expires_at: now + chrono::Duration::minutes(5),
+                used: false,
+                created_at: now,
+            })
+            .await
+            .expect("insert pending auth code");
+        let state = test_app_state(db.clone());
+        let audit_rx =
+            audit_service::notify_on_audit_write_for_user("admin_oauth_client_updated", &admin_id);
+
+        let response = update_oauth_client(
+            State(state),
+            test_auth_user(&admin_id),
+            Path(client_id.to_string()),
+            Json(UpdateOAuthClientRequest {
+                broker_capability_enabled: Some(true),
+                is_active: Some(false),
+                redirect_uris: Some(vec![
+                    " https://aevatar.example/new-callback ".to_string(),
+                    "https://aevatar.example/new-callback".to_string(),
+                ]),
+                allowed_scopes: Some(vec![
+                    "openid".to_string(),
+                    "urn:nyxid:scope:broker_binding".to_string(),
+                ]),
+                client_name: Some("Aevatar Broker".to_string()),
+            }),
+        )
+        .await
+        .expect("admin can patch DCR client");
+
+        assert_eq!(response.0.id, client_id);
+        assert_eq!(
+            response.0.created_by.as_deref(),
+            Some("dynamic_registration")
+        );
+        assert!(response.0.broker_capability_enabled);
+        assert!(!response.0.is_active);
+        assert!(response.0.client_secret.is_none());
+        assert_eq!(
+            response.0.redirect_uris,
+            vec!["https://aevatar.example/new-callback".to_string()]
+        );
+        assert_eq!(
+            response.0.allowed_scopes,
+            "openid urn:nyxid:scope:broker_binding"
+        );
+        let pending_codes = db
+            .collection::<AuthorizationCode>(AUTH_CODES)
+            .count_documents(doc! { "client_id": client_id, "used": false })
+            .await
+            .expect("count pending authorization codes");
+        assert_eq!(pending_codes, 0);
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), audit_rx)
+            .await
+            .expect("audit write should finish")
+            .expect("audit watcher should receive id");
+    }
+
+    #[tokio::test]
+    async fn oauth_client_patch_rejects_operator_and_plain_user() {
+        let Some(db) = connect_test_database("admin_oauth_client_patch_reject").await else {
+            eprintln!("skipping admin oauth-client rejection test: no local MongoDB available");
+            return;
+        };
+        let operator_id = insert_user(&db, false, true).await;
+        let plain_id = insert_user(&db, false, false).await;
+        let client_id = "dcr-reject-client";
+        db.collection::<OauthClient>(OAUTH_CLIENTS)
+            .insert_one(test_oauth_client(client_id))
+            .await
+            .expect("insert dcr client");
+        let state = test_app_state(db);
+
+        for actor_id in [operator_id, plain_id] {
+            let err = update_oauth_client(
+                State(state.clone()),
+                test_auth_user(&actor_id),
+                Path(client_id.to_string()),
+                Json(UpdateOAuthClientRequest {
+                    broker_capability_enabled: Some(true),
+                    is_active: None,
+                    redirect_uris: None,
+                    allowed_scopes: None,
+                    client_name: None,
+                }),
+            )
+            .await
+            .expect_err("non-admin must not patch OAuth clients");
+            assert!(
+                matches!(err, AppError::Forbidden(_)),
+                "expected Forbidden for actor {actor_id}, got {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn oauth_client_patch_validates_scopes_and_redirect_uris() {
+        let Some(db) = connect_test_database("admin_oauth_client_patch_validation").await else {
+            eprintln!("skipping admin oauth-client validation test: no local MongoDB available");
+            return;
+        };
+        let admin_id = insert_user(&db, true, false).await;
+        let client_id = "dcr-validation-client";
+        db.collection::<OauthClient>(OAUTH_CLIENTS)
+            .insert_one(test_oauth_client(client_id))
+            .await
+            .expect("insert dcr client");
+        let state = test_app_state(db);
+
+        let scope_err = update_oauth_client(
+            State(state.clone()),
+            test_auth_user(&admin_id),
+            Path(client_id.to_string()),
+            Json(UpdateOAuthClientRequest {
+                broker_capability_enabled: None,
+                is_active: None,
+                redirect_uris: None,
+                allowed_scopes: Some(vec!["admin".to_string()]),
+                client_name: None,
+            }),
+        )
+        .await
+        .expect_err("invalid scope must be rejected");
+        assert!(matches!(scope_err, AppError::ValidationError(_)));
+
+        let uri_err = update_oauth_client(
+            State(state),
+            test_auth_user(&admin_id),
+            Path(client_id.to_string()),
+            Json(UpdateOAuthClientRequest {
+                broker_capability_enabled: None,
+                is_active: None,
+                redirect_uris: Some(vec!["javascript:alert(1)".to_string()]),
+                allowed_scopes: None,
+                client_name: None,
+            }),
+        )
+        .await
+        .expect_err("invalid redirect_uri must be rejected");
+        assert!(matches!(uri_err, AppError::ValidationError(_)));
+    }
+
+    #[test]
+    fn broker_settings_request_distinguishes_omitted_null_and_bool() {
+        let omitted: UpdateBrokerSettingsRequest = serde_json::from_str("{}").unwrap();
+        assert_eq!(omitted.broker_require_sender_constraint, None);
+        assert_eq!(omitted.broker_require_admin_capability, None);
+
+        let cleared: UpdateBrokerSettingsRequest = serde_json::from_str(
+            r#"{
+                "broker_require_sender_constraint": null,
+                "broker_require_admin_capability": null
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(cleared.broker_require_sender_constraint, Some(None));
+        assert_eq!(cleared.broker_require_admin_capability, Some(None));
+
+        let overridden: UpdateBrokerSettingsRequest = serde_json::from_str(
+            r#"{
+                "broker_require_sender_constraint": true,
+                "broker_require_admin_capability": false
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            overridden.broker_require_sender_constraint,
+            Some(Some(true))
+        );
+        assert_eq!(
+            overridden.broker_require_admin_capability,
+            Some(Some(false))
+        );
+    }
+
+    #[tokio::test]
+    async fn broker_settings_get_set_and_clear_refreshes_runtime_policy() {
+        let Some(db) = connect_test_database("admin_broker_settings").await else {
+            eprintln!("skipping broker settings test: no local MongoDB available");
+            return;
+        };
+        let admin_id = insert_user(&db, true, false).await;
+        let mut config = crate::test_utils::test_app_config();
+        config.broker_require_sender_constraint = false;
+        config.broker_require_admin_capability = true;
+        let state = crate::test_utils::test_app_state_with_config(db.clone(), config);
+
+        let initial = get_broker_settings(State(state.clone()), test_auth_user(&admin_id))
+            .await
+            .expect("admin can read broker settings");
+        assert!(!initial.0.broker_require_sender_constraint.effective);
+        assert!(initial.0.broker_require_admin_capability.effective);
+        assert!(matches!(
+            initial.0.broker_require_sender_constraint.source,
+            BrokerPolicySource::EnvDefault
+        ));
+
+        let audit_rx = audit_service::notify_on_audit_write_for_user(
+            "admin_broker_settings_updated",
+            &admin_id,
+        );
+        let updated = update_broker_settings(
+            State(state.clone()),
+            test_auth_user(&admin_id),
+            Json(UpdateBrokerSettingsRequest {
+                broker_require_sender_constraint: Some(Some(true)),
+                broker_require_admin_capability: Some(Some(false)),
+            }),
+        )
+        .await
+        .expect("admin can update broker settings");
+        assert!(updated.0.broker_require_sender_constraint.effective);
+        assert!(!updated.0.broker_require_admin_capability.effective);
+        assert!(state.broker_require_sender_constraint());
+        assert!(!state.broker_require_admin_capability());
+        let current_policy = state.broker_policy();
+        let stale_policy = platform_settings_service::BrokerPolicy {
+            revision: current_policy.revision - 1,
+            broker_require_sender_constraint: !current_policy.broker_require_sender_constraint,
+            broker_require_sender_constraint_env_default: current_policy
+                .broker_require_sender_constraint_env_default,
+            broker_require_sender_constraint_override: Some(
+                !current_policy.broker_require_sender_constraint,
+            ),
+            broker_require_admin_capability: !current_policy.broker_require_admin_capability,
+            broker_require_admin_capability_env_default: current_policy
+                .broker_require_admin_capability_env_default,
+            broker_require_admin_capability_override: Some(
+                !current_policy.broker_require_admin_capability,
+            ),
+        };
+        assert!(!state.set_broker_policy_if_fresh(stale_policy));
+        assert_eq!(state.broker_policy(), current_policy);
+        tokio::time::timeout(std::time::Duration::from_secs(2), audit_rx)
+            .await
+            .expect("audit write should finish")
+            .expect("audit watcher should receive id");
+
+        let cleared = update_broker_settings(
+            State(state.clone()),
+            test_auth_user(&admin_id),
+            Json(UpdateBrokerSettingsRequest {
+                broker_require_sender_constraint: Some(None),
+                broker_require_admin_capability: Some(None),
+            }),
+        )
+        .await
+        .expect("admin can clear broker settings");
+        assert!(!cleared.0.broker_require_sender_constraint.effective);
+        assert!(cleared.0.broker_require_admin_capability.effective);
+        assert!(!state.broker_require_sender_constraint());
+        assert!(state.broker_require_admin_capability());
+
+        let stored = db
+            .collection::<mongodb::bson::Document>(PLATFORM_SETTINGS)
+            .find_one(doc! { "_id": "platform" })
+            .await
+            .expect("query settings")
+            .expect("settings doc exists");
+        assert!(!stored.contains_key("broker_require_sender_constraint"));
+        assert!(!stored.contains_key("broker_require_admin_capability"));
+        assert_eq!(stored.get_i64("broker_policy_revision").unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn broker_settings_rejects_operator_and_plain_user() {
+        let Some(db) = connect_test_database("admin_broker_settings_reject").await else {
+            eprintln!("skipping broker settings rejection test: no local MongoDB available");
+            return;
+        };
+        let operator_id = insert_user(&db, false, true).await;
+        let plain_id = insert_user(&db, false, false).await;
+        let state = test_app_state(db);
+
+        for actor_id in [operator_id, plain_id] {
+            let get_err = get_broker_settings(State(state.clone()), test_auth_user(&actor_id))
+                .await
+                .expect_err("non-admin must not read broker settings");
+            assert!(matches!(get_err, AppError::Forbidden(_)));
+
+            let patch_err = update_broker_settings(
+                State(state.clone()),
+                test_auth_user(&actor_id),
+                Json(UpdateBrokerSettingsRequest {
+                    broker_require_sender_constraint: Some(Some(true)),
+                    broker_require_admin_capability: None,
+                }),
+            )
+            .await
+            .expect_err("non-admin must not patch broker settings");
+            assert!(matches!(patch_err, AppError::Forbidden(_)));
+        }
+    }
+
+    #[tokio::test]
+    async fn broker_settings_runtime_override_flips_dcr_gate_without_restart() {
+        let Some(db) = connect_test_database("admin_broker_settings_dcr_flip").await else {
+            eprintln!("skipping broker settings DCR flip test: no local MongoDB available");
+            return;
+        };
+        let admin_id = insert_user(&db, true, false).await;
+        let mut config = crate::test_utils::test_app_config();
+        config.broker_require_admin_capability = false;
+        let state = crate::test_utils::test_app_state_with_config(db, config);
+        let broker_scope = format!(
+            "openid {}",
+            crate::services::oauth_broker_service::BROKER_BINDING_SCOPE
+        );
+
+        let (_status, _body) = crate::handlers::oauth::register_client(
+            State(state.clone()),
+            Json(crate::handlers::oauth::RegisterClientRequest {
+                client_name: Some("Allowed Before Override".to_string()),
+                redirect_uris: Some(vec!["http://localhost:8080/callback".to_string()]),
+                grant_types: None,
+                response_types: None,
+                token_endpoint_auth_method: Some("none".to_string()),
+                scope: Some(broker_scope.clone()),
+            }),
+        )
+        .await
+        .expect("env-default false allows broker scope in DCR");
+
+        let _updated = update_broker_settings(
+            State(state.clone()),
+            test_auth_user(&admin_id),
+            Json(UpdateBrokerSettingsRequest {
+                broker_require_sender_constraint: None,
+                broker_require_admin_capability: Some(Some(true)),
+            }),
+        )
+        .await
+        .expect("admin can enable runtime admin-capability requirement");
+        assert!(state.broker_require_admin_capability());
+
+        let err = crate::handlers::oauth::register_client(
+            State(state),
+            Json(crate::handlers::oauth::RegisterClientRequest {
+                client_name: Some("Rejected After Override".to_string()),
+                redirect_uris: Some(vec!["http://localhost:8081/callback".to_string()]),
+                grant_types: None,
+                response_types: None,
+                token_endpoint_auth_method: Some("none".to_string()),
+                scope: Some(broker_scope),
+            }),
+        )
+        .await
+        .expect_err("runtime override should reject broker DCR without restart");
+        assert!(matches!(err, AppError::Forbidden(_)));
+    }
+
+    #[tokio::test]
+    async fn broker_settings_runtime_override_flips_developer_app_gate_without_restart() {
+        let Some(db) = connect_test_database("admin_broker_settings_dev_app_flip").await else {
+            eprintln!(
+                "skipping broker settings developer app flip test: no local MongoDB available"
+            );
+            return;
+        };
+        let admin_id = insert_user(&db, true, false).await;
+        let plain_id = insert_user(&db, false, false).await;
+        let mut config = crate::test_utils::test_app_config();
+        config.broker_require_admin_capability = false;
+        let state = crate::test_utils::test_app_state_with_config(db, config);
+
+        let _created = crate::handlers::developer_apps::create_my_oauth_client(
+            State(state.clone()),
+            test_auth_user(&plain_id),
+            TelemetryContext::default(),
+            Json(
+                crate::handlers::developer_apps::CreateDeveloperOAuthClientRequest {
+                    name: "Allowed broker app".to_string(),
+                    redirect_uris: vec!["https://app.example/allowed".to_string()],
+                    client_type: Some("public".to_string()),
+                    delegation_scopes: None,
+                    broker_capability_enabled: Some(true),
+                    revocation_webhook_url: None,
+                    revocation_webhook_secret: None,
+                    allowed_scopes: None,
+                    target_org_id: None,
+                    default_service_catalog_slugs: None,
+                },
+            ),
+        )
+        .await
+        .expect("env-default false allows self-service broker flag");
+
+        let _updated = update_broker_settings(
+            State(state.clone()),
+            test_auth_user(&admin_id),
+            Json(UpdateBrokerSettingsRequest {
+                broker_require_sender_constraint: None,
+                broker_require_admin_capability: Some(Some(true)),
+            }),
+        )
+        .await
+        .expect("admin can enable runtime admin-capability requirement");
+
+        let err = crate::handlers::developer_apps::create_my_oauth_client(
+            State(state),
+            test_auth_user(&plain_id),
+            TelemetryContext::default(),
+            Json(
+                crate::handlers::developer_apps::CreateDeveloperOAuthClientRequest {
+                    name: "Rejected broker app".to_string(),
+                    redirect_uris: vec!["https://app.example/rejected".to_string()],
+                    client_type: Some("public".to_string()),
+                    delegation_scopes: None,
+                    broker_capability_enabled: Some(true),
+                    revocation_webhook_url: None,
+                    revocation_webhook_secret: None,
+                    allowed_scopes: None,
+                    target_org_id: None,
+                    default_service_catalog_slugs: None,
+                },
+            ),
+        )
+        .await
+        .expect_err("runtime override should reject non-admin broker app provisioning");
+        assert!(matches!(err, AppError::Forbidden(_)));
     }
 }

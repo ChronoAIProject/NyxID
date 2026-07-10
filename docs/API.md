@@ -4920,6 +4920,43 @@ curl http://localhost:3001/api/v1/admin/oauth-clients \
 
 ---
 
+#### PATCH /api/v1/admin/oauth-clients/{client_id}
+
+Update an OAuth client by `_id` as a platform admin, including ownerless Dynamic Client Registration rows (`created_by = "dynamic_registration"`). Client secrets are never returned. Changing `redirect_uris`, `allowed_scopes`, `broker_capability_enabled`, or deactivating the client clears unused pending authorization codes for that client.
+
+**Auth:** Admin
+
+**Path Parameters:**
+
+| Parameter   | Type | Description        |
+|-------------|------|--------------------|
+| `client_id` | UUID | The OAuth client ID |
+
+**Request Body:** all fields are optional.
+
+| Field                       | Type     | Description                                                  |
+|-----------------------------|----------|--------------------------------------------------------------|
+| `broker_capability_enabled` | boolean  | Grants or removes admin-provisioned OAuth broker capability  |
+| `is_active`                 | boolean  | Activates or deactivates the client                          |
+| `redirect_uris`             | string[] | Replacement redirect URI list                                |
+| `allowed_scopes`            | string[] | Replacement allowed scope list                               |
+| `client_name`               | string   | Replacement display name                                     |
+
+```json
+{
+  "broker_capability_enabled": true
+}
+```
+
+**Response (200):** updated OAuth client metadata. `client_secret` is always `null`.
+
+**Errors:**
+- `1002 forbidden` -- User is not an admin
+- `1003 not_found` -- Client does not exist
+- `1008 validation_error` -- Invalid redirect URI, scope, or client name
+
+---
+
 #### DELETE /api/v1/admin/oauth-clients/{client_id}
 
 Deactivate an OAuth client. The client can no longer be used for authorization after this operation.
@@ -4950,6 +4987,54 @@ Deactivate an OAuth client. The client can no longer be used for authorization a
 curl -X DELETE http://localhost:3001/api/v1/admin/oauth-clients/a1b2c3d4-e5f6-7890-abcd-ef1234567890 \
   -H "Authorization: Bearer <admin_access_token>"
 ```
+
+---
+
+#### GET /api/v1/admin/settings/broker
+
+Read the effective OAuth broker rollout policy. Each field reports the env default, optional DB override, effective value, and source. DB overrides win over env defaults; absent overrides fall back to env.
+
+**Auth:** Admin
+
+**Response (200):**
+
+```json
+{
+  "broker_require_sender_constraint": {
+    "effective": true,
+    "env_default": false,
+    "override": true,
+    "source": "override"
+  },
+  "broker_require_admin_capability": {
+    "effective": false,
+    "env_default": false,
+    "override": null,
+    "source": "env_default"
+  }
+}
+```
+
+---
+
+#### PATCH /api/v1/admin/settings/broker
+
+Set or clear runtime OAuth broker rollout overrides. Use `true`/`false` to set a DB override; use `null` to clear an override and return to the env default. Changes update the in-memory policy cache without a restart.
+
+**Auth:** Admin
+
+```json
+{
+  "broker_require_sender_constraint": true,
+  "broker_require_admin_capability": null
+}
+```
+
+**Response (200):** same shape as `GET /api/v1/admin/settings/broker`.
+
+**Errors:**
+- `1002 forbidden` -- User is not an admin
+- `1008 validation_error` -- Request body is malformed
 
 ---
 

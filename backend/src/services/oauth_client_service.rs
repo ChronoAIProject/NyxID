@@ -1,10 +1,13 @@
 use chrono::Utc;
 use futures::TryStreamExt;
 use mongodb::bson::{self, Binary, doc, spec::BinarySubtype};
+use std::collections::HashSet;
+use url::Url;
 use uuid::Uuid;
 
 use crate::crypto::token::{generate_random_token, hash_token};
 use crate::errors::{AppError, AppResult};
+use crate::models::authorization_code::COLLECTION_NAME as AUTH_CODES;
 use crate::models::consent::COLLECTION_NAME as CONSENTS;
 use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
 use crate::models::refresh_token::COLLECTION_NAME as REFRESH_TOKENS;
@@ -79,6 +82,56 @@ pub fn validate_allowed_scopes(scopes: &str) -> AppResult<String> {
 /// [`DEFAULT_ALLOWED_SCOPES`].
 pub fn validate_allowed_scopes_list(scopes: &[String]) -> AppResult<String> {
     validate_allowed_scopes(&scopes.join(" "))
+}
+
+/// Validate, trim, and deduplicate registered OAuth redirect URIs.
+///
+/// Allows HTTPS, localhost HTTP, loopback/custom app schemes, and other
+/// schemes historically accepted by NyxID developer apps, but rejects obvious
+/// browser execution/local-file schemes and fragments. Returns the exact
+/// trimmed URI strings rather than `url`-serialized strings because OAuth
+/// redirect URI matching is exact.
+pub fn validate_redirect_uris(redirect_uris: &[String]) -> AppResult<Vec<String>> {
+    if redirect_uris.is_empty() {
+        return Err(AppError::ValidationError(
+            "At least one redirect_uri is required".to_string(),
+        ));
+    }
+
+    let mut unique = HashSet::new();
+    let mut validated = Vec::new();
+
+    for raw_uri in redirect_uris {
+        let uri = raw_uri.trim();
+        if uri.is_empty() {
+            return Err(AppError::ValidationError(
+                "redirect_uri cannot be empty".to_string(),
+            ));
+        }
+
+        let parsed = Url::parse(uri).map_err(|_| {
+            AppError::ValidationError(format!("Invalid redirect_uri format: {uri}"))
+        })?;
+
+        if matches!(parsed.scheme(), "javascript" | "data" | "file") {
+            return Err(AppError::ValidationError(format!(
+                "Unsupported redirect_uri scheme: {uri}"
+            )));
+        }
+
+        if parsed.fragment().is_some() {
+            return Err(AppError::ValidationError(format!(
+                "redirect_uri must not contain fragment: {uri}"
+            )));
+        }
+
+        let trimmed = uri.to_string();
+        if unique.insert(trimmed.clone()) {
+            validated.push(trimmed);
+        }
+    }
+
+    Ok(validated)
 }
 
 /// Well-known client ID for native MCP clients (Cursor, Claude Code, etc.).
@@ -432,6 +485,77 @@ pub async fn update_client_for_creator(
     get_client_for_creator(db, client_id, created_by).await
 }
 
+#[derive(Debug, Default)]
+pub struct AdminUpdateClient<'a> {
+    pub client_name: Option<&'a str>,
+    pub redirect_uris: Option<&'a [String]>,
+    pub allowed_scopes: Option<&'a str>,
+    pub broker_capability_enabled: Option<bool>,
+    pub is_active: Option<bool>,
+}
+
+/// Update mutable fields on any OAuth client by `_id`.
+///
+/// Unlike [`update_client_for_creator`], this deliberately does not filter by
+/// `created_by` or `is_active`: platform admins must be able to provision
+/// ownerless Dynamic Client Registration rows (`created_by =
+/// "dynamic_registration"`) and reactivate/deactivate clients operationally.
+pub async fn admin_update_client(
+    db: &mongodb::Database,
+    client_id: &str,
+    update: AdminUpdateClient<'_>,
+) -> AppResult<OauthClient> {
+    let mut set_doc = doc! {
+        "updated_at": bson::DateTime::from_chrono(Utc::now()),
+    };
+
+    if let Some(name) = update.client_name {
+        set_doc.insert("client_name", name);
+    }
+
+    if let Some(uris) = update.redirect_uris {
+        set_doc.insert(
+            "redirect_uris",
+            bson::to_bson(uris).map_err(|e| {
+                AppError::Internal(format!("Failed to convert redirect_uris to bson: {e}"))
+            })?,
+        );
+    }
+
+    if let Some(scopes) = update.allowed_scopes {
+        set_doc.insert("allowed_scopes", scopes);
+    }
+
+    if let Some(enabled) = update.broker_capability_enabled {
+        set_doc.insert("broker_capability_enabled", enabled);
+    }
+
+    if let Some(active) = update.is_active {
+        set_doc.insert("is_active", active);
+    }
+
+    let result = db
+        .collection::<OauthClient>(OAUTH_CLIENTS)
+        .update_one(doc! { "_id": client_id }, doc! { "$set": set_doc })
+        .await?;
+
+    if result.matched_count == 0 {
+        return Err(AppError::NotFound("OAuth client not found".to_string()));
+    }
+
+    let clears_pending_auth_codes = update.redirect_uris.is_some()
+        || update.allowed_scopes.is_some()
+        || update.broker_capability_enabled.is_some();
+
+    if update.is_active == Some(false) {
+        cascade_client_deactivation(db, client_id).await?;
+    } else if clears_pending_auth_codes {
+        delete_unused_authorization_codes(db, client_id).await?;
+    }
+
+    get_client(db, client_id).await
+}
+
 /// Soft-delete an OAuth client by marking it inactive.
 pub async fn delete_client(db: &mongodb::Database, client_id: &str) -> AppResult<()> {
     let now = Utc::now();
@@ -491,6 +615,17 @@ async fn cascade_client_deactivation(db: &mongodb::Database, client_id: &str) ->
         .await?;
     db.collection::<bson::Document>(REFRESH_TOKENS)
         .delete_many(doc! { "client_id": client_id })
+        .await?;
+    delete_unused_authorization_codes(db, client_id).await?;
+    Ok(())
+}
+
+async fn delete_unused_authorization_codes(
+    db: &mongodb::Database,
+    client_id: &str,
+) -> AppResult<()> {
+    db.collection::<bson::Document>(AUTH_CODES)
+        .delete_many(doc! { "client_id": client_id, "used": false })
         .await?;
     Ok(())
 }
@@ -660,8 +795,27 @@ mod tests {
         assert_eq!(parts.len(), unique.len(), "merge must dedupe");
     }
 
+    #[test]
+    fn validate_redirect_uris_preserves_exact_trimmed_strings() {
+        let uris = validate_redirect_uris(&[
+            " https://app.example ".to_string(),
+            "https://app.example".to_string(),
+            "https://app.example/callback".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            uris,
+            vec![
+                "https://app.example".to_string(),
+                "https://app.example/callback".to_string(),
+            ]
+        );
+    }
+
     mod mongo {
         use super::*;
+        use crate::models::authorization_code::AuthorizationCode;
         use crate::models::consent::Consent;
         use crate::models::refresh_token::RefreshToken;
         use crate::test_utils::connect_test_database;
@@ -774,6 +928,47 @@ mod tests {
                 .expect("count refresh tokens")
         }
 
+        async fn insert_authorization_code(
+            db: &mongodb::Database,
+            client_id: &str,
+            code_id: &str,
+            used: bool,
+        ) {
+            let now = Utc::now();
+            db.collection::<AuthorizationCode>(AUTH_CODES)
+                .insert_one(&AuthorizationCode {
+                    id: code_id.to_string(),
+                    code_hash: format!("hash-{code_id}"),
+                    client_id: client_id.to_string(),
+                    user_id: "user-with-auth-code".to_string(),
+                    redirect_uri: "http://localhost:3000/callback".to_string(),
+                    scope: DEFAULT_ALLOWED_SCOPES.to_string(),
+                    code_challenge: None,
+                    code_challenge_method: None,
+                    nonce: None,
+                    external_subject: None,
+                    resource_uris: Vec::new(),
+                    allowed_service_ids: Vec::new(),
+                    allow_all_services: true,
+                    expires_at: now + chrono::Duration::minutes(5),
+                    used,
+                    created_at: now,
+                })
+                .await
+                .expect("insert authorization code fixture");
+        }
+
+        async fn count_authorization_codes(
+            db: &mongodb::Database,
+            client_id: &str,
+            used: bool,
+        ) -> u64 {
+            db.collection::<AuthorizationCode>(AUTH_CODES)
+                .count_documents(doc! { "client_id": client_id, "used": used })
+                .await
+                .expect("count authorization codes")
+        }
+
         async fn assert_client_deactivated_and_cascaded(db: &mongodb::Database, client_id: &str) {
             let client = get_client(db, client_id)
                 .await
@@ -838,6 +1033,36 @@ mod tests {
                 .expect("admin delete client");
 
             assert_client_deactivated_and_cascaded(&db, client_id).await;
+        }
+
+        #[tokio::test]
+        async fn admin_update_client_policy_edit_deletes_unused_authorization_codes() {
+            let Some(db) = connect_test_database("oc_admin_policy_auth_codes").await else {
+                eprintln!("skipping oc_admin_policy_auth_codes test: no local MongoDB available");
+                return;
+            };
+
+            let client_id = "admin-policy-edit-client";
+            insert_client_with_consent_and_refresh_token(&db, client_id, "dynamic_registration")
+                .await;
+            insert_authorization_code(&db, client_id, "unused-code", false).await;
+            insert_authorization_code(&db, client_id, "used-code", true).await;
+
+            admin_update_client(
+                &db,
+                client_id,
+                AdminUpdateClient {
+                    allowed_scopes: Some("openid"),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("admin policy edit succeeds");
+
+            assert_eq!(count_authorization_codes(&db, client_id, false).await, 0);
+            assert_eq!(count_authorization_codes(&db, client_id, true).await, 1);
+            assert_eq!(count_consents(&db, client_id).await, 1);
+            assert_eq!(count_refresh_tokens(&db, client_id).await, 1);
         }
 
         #[tokio::test]
