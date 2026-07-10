@@ -166,7 +166,7 @@ pub async fn run(cli: SshCli) -> Result<()> {
             } else {
                 // Try to get default principal from the service
                 let svc: Value = api
-                    .get_value(&format!("/keys/{}", &service_id))
+                    .get_value(&format!("/keys/{}", service_id))
                     .await
                     .or_else(|_| -> Result<Value> { Ok(Value::Null) })?;
                 let principals = svc

@@ -234,7 +234,7 @@ pub async fn initiate_oauth_for_sa(
     }
 
     let admin_id = auth_user.user_id.to_string();
-    let redirect_path = format!("/admin/service-accounts/{}", &sa_id);
+    let redirect_path = format!("/admin/service-accounts/{}", sa_id);
 
     let auth_url = user_token_service::initiate_oauth_connect(
         &state.db,

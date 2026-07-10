@@ -644,7 +644,7 @@ pub(crate) fn test_user(user_id: &str, user_type: UserType) -> User {
             UserType::Person => None,
             UserType::Org => Some(format!(
                 "test-org-{}",
-                &user_id.replace('-', "").chars().take(8).collect::<String>()
+                user_id.replace('-', "").chars().take(8).collect::<String>()
             )),
         },
         avatar_url: None,

@@ -1268,7 +1268,7 @@ mod tests {
 
     #[test]
     fn code_alphabet_excludes_confusable_chars() {
-        for bad in [b'I', b'L', b'O', b'U'] {
+        for bad in *b"ILOU" {
             assert!(
                 !CODE_ALPHABET.contains(&bad),
                 "alphabet should not contain confusable {}",
