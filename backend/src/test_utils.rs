@@ -31,6 +31,17 @@ const TEST_DB_NAME_PREFIX: &str = "nyxid_test_";
 const TEST_DB_UUID_LEN: usize = 36;
 const MAX_TEST_DB_PREFIX_LEN: usize = 63 - TEST_DB_NAME_PREFIX.len() - 1 - TEST_DB_UUID_LEN;
 
+/// Single shared database used by every probe to check write-readiness. Reusing
+/// one fixed name (instead of a per-call UUID database) keeps the probe from
+/// creating one throwaway database per `connect_test_database` call — historically
+/// a major source of the leaked-`nyxid_test_*`-database pile that hammered
+/// WiredTiger's file count. It stays within the `nyxid_test_` prefix (so a manual
+/// "drop all nyxid_test_*" sweep still catches it) and is intentionally left in
+/// place rather than dropped at exit: it is a single harmless database, and not
+/// dropping it avoids a cross-process drop/insert race under per-test-process
+/// runners such as cargo-nextest.
+const TEST_DB_PROBE_NAME: &str = "nyxid_test_probe";
+
 /// Connect to a fresh per-test MongoDB database.
 ///
 /// Probes the dev docker-compose mongod on `127.0.0.1:27018` first (published by
@@ -46,13 +57,19 @@ const MAX_TEST_DB_PREFIX_LEN: usize = 63 - TEST_DB_NAME_PREFIX.len() - 1 - TEST_
 /// Deliberately NOT cached: a per-test client is required for correct llvm-cov
 /// coverage measurement — a shared client broke under the runtime-per-test
 /// harness (see #864). The TCP pre-check keeps per-test connects cheap.
+///
+/// Each database created here is registered for teardown and dropped when the
+/// test process exits (see `register_test_db_for_cleanup`), so a full test run
+/// no longer leaves thousands of orphaned `nyxid_test_*` databases behind.
 pub(crate) async fn connect_test_database(prefix: &str) -> Option<mongodb::Database> {
-    let client = probe_test_mongo_client().await?;
+    let (client, cleanup_uri) = probe_test_mongo_client().await?;
     let db_name = format!(
         "{TEST_DB_NAME_PREFIX}{}_{}",
         sanitize_test_db_prefix(prefix),
         uuid::Uuid::new_v4()
     );
+
+    register_test_db_for_cleanup(&cleanup_uri, &db_name);
 
     Some(client.database(&db_name))
 }
@@ -73,21 +90,25 @@ async fn test_mongo_port_reachable(addr: &str) -> bool {
     )
 }
 
-async fn probe_test_mongo_client() -> Option<mongodb::Client> {
-    let db_name = format!("nyxid_test_probe_{}", uuid::Uuid::new_v4());
+/// Probe both candidate mongods and return a connected client plus the URI that
+/// won, so callers can register a fresh-client teardown that survives the test's
+/// own tokio runtime being torn down (see `drop_test_databases_at_exit`).
+async fn probe_test_mongo_client() -> Option<(mongodb::Client, String)> {
     // (tcp address, client URI). 27018 is the dev docker-compose port; 27017 is
     // the CI service-container port. Probe order is no longer load-bearing — the
-    // TCP pre-check below skips whichever candidate has no listener.
+    // TCP pre-check below skips whichever candidate has no listener. Every probe
+    // shares one fixed `TEST_DB_PROBE_NAME` database (unique doc id per call
+    // below) instead of a per-call throwaway database.
     let candidates = [
         (
             "127.0.0.1:27018",
             format!(
-                "mongodb://nyxid:nyxid_dev_password@127.0.0.1:27018/{db_name}?authSource=admin&directConnection=true"
+                "mongodb://nyxid:nyxid_dev_password@127.0.0.1:27018/{TEST_DB_PROBE_NAME}?authSource=admin&directConnection=true"
             ),
         ),
         (
             "127.0.0.1:27017",
-            format!("mongodb://127.0.0.1:27017/{db_name}?directConnection=true"),
+            format!("mongodb://127.0.0.1:27017/{TEST_DB_PROBE_NAME}?directConnection=true"),
         ),
     ];
 
@@ -113,28 +134,137 @@ async fn probe_test_mongo_client() -> Option<mongodb::Client> {
         let Ok(client) = mongodb::Client::with_options(options) else {
             continue;
         };
-        let db = client.database(&db_name);
+        let db = client.database(TEST_DB_PROBE_NAME);
         if db.run_command(doc! { "ping": 1 }).await.is_err() {
             continue;
         }
 
+        // Unique doc id per call so concurrent probes against the shared probe
+        // database don't collide on a duplicate `_id` (which would fail the
+        // write check and silently skip the test).
         let probe = db.collection::<mongodb::bson::Document>("__probe");
+        let probe_id = uuid::Uuid::new_v4().to_string();
         let write_ready = tokio::time::timeout(
             Duration::from_secs(5),
-            probe.insert_one(doc! { "_id": "probe" }),
+            probe.insert_one(doc! { "_id": probe_id.clone() }),
         )
         .await;
         if matches!(write_ready, Ok(Ok(_))) {
             let _ = tokio::time::timeout(
                 Duration::from_secs(5),
-                probe.delete_one(doc! { "_id": "probe" }),
+                probe.delete_one(doc! { "_id": probe_id }),
             )
             .await;
-            return Some(client);
+            return Some((client, uri));
         }
     }
 
     None
+}
+
+/// Per-process registry of the databases created by `connect_test_database`,
+/// drained once at process exit by `drop_test_databases_at_exit`.
+///
+/// Cleaning up at process exit — rather than after each individual test — is
+/// correct precisely because the registry is drained only after *every* test in
+/// the binary has finished, so no still-running test can be using a database
+/// that gets dropped. It also composes with per-test-process runners such as
+/// cargo-nextest: each process registers and drops only the single database it
+/// created.
+static TEST_DB_CLEANUP: OnceLock<std::sync::Mutex<TestDbCleanup>> = OnceLock::new();
+
+struct TestDbCleanup {
+    /// Connection URI (with credentials) of the mongod that owns the test
+    /// databases, captured from the first successful probe. Every test database
+    /// in a run lives on the same server, so one URI is enough to reconnect a
+    /// fresh client at exit.
+    uri: Option<String>,
+    /// Databases created this run, dropped at process exit.
+    db_names: Vec<String>,
+    /// Guards one-time `atexit` registration.
+    hook_installed: bool,
+}
+
+fn register_test_db_for_cleanup(uri: &str, db_name: &str) {
+    let cell = TEST_DB_CLEANUP.get_or_init(|| {
+        std::sync::Mutex::new(TestDbCleanup {
+            uri: None,
+            db_names: Vec::new(),
+            hook_installed: false,
+        })
+    });
+    let mut guard = cell.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if guard.uri.is_none() {
+        guard.uri = Some(uri.to_string());
+    }
+    guard.db_names.push(db_name.to_string());
+    if !guard.hook_installed {
+        guard.hook_installed = true;
+        // SAFETY: `atexit` registers a C callback invoked once at normal process
+        // termination (the Rust test harness exits via `process::exit`). The
+        // callback only reads this global registry and performs best-effort,
+        // panic-guarded, time-bounded cleanup; it never unwinds across the FFI
+        // boundary and touches no other process state.
+        unsafe {
+            libc::atexit(drop_test_databases_at_exit);
+        }
+    }
+}
+
+/// Drop every database this test process created. Best-effort: connection or
+/// drop failures are swallowed so a flaky or absent mongod never blocks or
+/// aborts process exit, and each operation is bounded by a short timeout.
+extern "C" fn drop_test_databases_at_exit() {
+    // Never unwind across the FFI boundary — a panic escaping an `atexit`
+    // callback would abort the process.
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let Some(cell) = TEST_DB_CLEANUP.get() else {
+            return;
+        };
+        let (uri, db_names) = {
+            let mut guard = cell.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            (guard.uri.clone(), std::mem::take(&mut guard.db_names))
+        };
+        if db_names.is_empty() {
+            return;
+        }
+        let Some(uri) = uri else {
+            return;
+        };
+        // Run the teardown on a freshly spawned OS thread and join it. `atexit`
+        // fires *after* the main thread's thread-local storage has been
+        // destroyed, so building or driving a tokio runtime on the main thread
+        // panics inside `std::thread::current()`. A new thread has intact
+        // thread-local state; joining keeps the process alive until cleanup
+        // finishes (bounded by the per-drop timeouts below).
+        let _ = std::thread::spawn(move || {
+            // A fresh single-threaded runtime + client, independent of whatever
+            // runtime the tests used (already torn down by now).
+            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                return;
+            };
+            runtime.block_on(async move {
+                let Ok(mut options) = mongodb::options::ClientOptions::parse(&uri).await else {
+                    return;
+                };
+                options.server_selection_timeout = Some(Duration::from_secs(3));
+                options.connect_timeout = Some(Duration::from_secs(3));
+                options.max_pool_size = Some(2);
+                let Ok(client) = mongodb::Client::with_options(options) else {
+                    return;
+                };
+                for name in db_names {
+                    let _ =
+                        tokio::time::timeout(Duration::from_secs(3), client.database(&name).drop())
+                            .await;
+                }
+            });
+        })
+        .join();
+    }));
 }
 
 fn sanitize_test_db_prefix(prefix: &str) -> String {
