@@ -11,6 +11,7 @@ import type {
 const {
   mockUpdateClient,
   mockUpdateSettings,
+  mockUseBrokerSettings,
   clientsResponse,
   brokerSettings,
 } = vi.hoisted(() => {
@@ -51,6 +52,7 @@ const {
   return {
     mockUpdateClient: vi.fn(),
     mockUpdateSettings: vi.fn(),
+    mockUseBrokerSettings: vi.fn(),
     clientsResponse,
     brokerSettings,
   };
@@ -62,11 +64,7 @@ vi.mock("@/hooks/use-admin-oauth-clients", () => ({
     isLoading: false,
     error: null,
   }),
-  useBrokerSettings: () => ({
-    data: brokerSettings,
-    isLoading: false,
-    error: null,
-  }),
+  useBrokerSettings: mockUseBrokerSettings,
   useUpdateAdminOAuthClient: () => ({
     mutateAsync: mockUpdateClient,
     isPending: false,
@@ -101,10 +99,27 @@ function adminUser(): User {
   };
 }
 
+function operatorUser(): User {
+  return {
+    ...adminUser(),
+    id: "operator-1",
+    email: "operator@example.com",
+    display_name: "Operator",
+    is_admin: false,
+    is_operator: true,
+    role: "operator",
+  };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   mockUpdateClient.mockResolvedValue(clientsResponse.clients[0]);
   mockUpdateSettings.mockResolvedValue(brokerSettings);
+  mockUseBrokerSettings.mockReturnValue({
+    data: brokerSettings,
+    isLoading: false,
+    error: null,
+  });
   useAuthStore.setState({
     user: adminUser(),
     isAuthenticated: true,
@@ -138,7 +153,9 @@ describe("AdminOAuthClientsPage", () => {
       screen.getByText(/removes the legacy broker-binding scope/i),
     ).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Disable capability" }));
+    await user.click(
+      screen.getByRole("button", { name: "Disable capability" }),
+    );
 
     expect(mockUpdateClient).toHaveBeenCalledWith({
       clientId: "dcr-aevatar",
@@ -149,15 +166,52 @@ describe("AdminOAuthClientsPage", () => {
     });
   });
 
-  it("shows broker setting effective values and source labels", () => {
+  it("shows every write control and the broker policy card to admins", () => {
     render(<AdminOAuthClientsPage />);
 
     expect(screen.getByText("Broker Rollout Policy")).toBeInTheDocument();
+    expect(
+      screen.getByRole("switch", {
+        name: "Toggle broker capability for Aevatar",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("switch", {
+        name: "Toggle active status for Aevatar",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("switch", {
+        name: "Toggle Require sender constraint",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("switch", {
+        name: "Toggle Require admin broker capability",
+      }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Reset" })).toBeInTheDocument();
     expect(screen.getByText("Overridden")).toBeInTheDocument();
     expect(screen.getByText("Env default")).toBeInTheDocument();
     expect(screen.getByText("Scope")).toBeInTheDocument();
     expect(screen.getAllByText("Enabled").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Disabled").length).toBeGreaterThan(0);
+    expect(mockUseBrokerSettings).toHaveBeenCalledWith(true);
+  });
+
+  it("shows operators a read-only client list without broker policy controls", () => {
+    useAuthStore.setState({ user: operatorUser() });
+
+    render(<AdminOAuthClientsPage />);
+
+    expect(screen.getByText("Aevatar")).toBeInTheDocument();
+    expect(screen.getByText("Scope")).toBeInTheDocument();
+    expect(screen.queryByText("Broker Rollout Policy")).not.toBeInTheDocument();
+    expect(screen.queryAllByRole("switch")).toHaveLength(0);
+    expect(
+      screen.queryByRole("button", { name: "Reset" }),
+    ).not.toBeInTheDocument();
+    expect(mockUseBrokerSettings).toHaveBeenCalledWith(false);
   });
 
   it("resets an overridden broker setting to the env default", async () => {

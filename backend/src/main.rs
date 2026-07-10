@@ -178,6 +178,8 @@ impl AppState {
         }
     }
 
+    /// Rejects revision rollbacks to preserve the last-known-good policy. An
+    /// intentional DB reset to a lower revision therefore requires a restart.
     pub fn set_broker_policy_if_fresh(&self, policy: BrokerPolicy) -> bool {
         match self.broker_policy.write() {
             Ok(mut current) => {
@@ -605,17 +607,9 @@ async fn main() {
             );
         }
     }
-    let broker_policy =
-        match services::platform_settings_service::load_broker_policy(&db, &config).await {
-            Ok(policy) => policy,
-            Err(error) => {
-                tracing::warn!(
-                    error = %error,
-                    "Failed to load platform broker policy; falling back to env defaults"
-                );
-                BrokerPolicy::from_config(&config)
-            }
-        };
+    let broker_policy = services::platform_settings_service::load_broker_policy(&db, &config)
+        .await
+        .expect("Failed to load platform broker policy");
     let state = AppState {
         db,
         config: config.clone(),

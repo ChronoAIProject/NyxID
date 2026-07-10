@@ -93,7 +93,8 @@ export function AdminOAuthClientsPage() {
 
   function stageBrokerCapability(client: AdminOAuthClient, enabled: boolean) {
     const removingLegacyScope =
-      !enabled && client.allowed_scopes.split(/\s+/).includes(BROKER_BINDING_SCOPE);
+      !enabled &&
+      client.allowed_scopes.split(/\s+/).includes(BROKER_BINDING_SCOPE);
     const data: UpdateAdminOAuthClientRequest = enabled
       ? { broker_capability_enabled: true }
       : {
@@ -109,7 +110,7 @@ export function AdminOAuthClientsPage() {
         ? "This grants this app durable act-as-user broker capability. Only enable it for a reviewed OAuth client."
         : removingLegacyScope
           ? "This clears the admin broker flag and removes the legacy broker-binding scope so this app no longer remains broker-capable through scope-triggered compatibility."
-        : "This removes durable act-as-user broker capability from this OAuth client.",
+          : "This removes durable act-as-user broker capability from this OAuth client.",
       confirmLabel: enabled ? "Enable capability" : "Disable capability",
     });
   }
@@ -176,7 +177,9 @@ export function AdminOAuthClientsPage() {
       setPendingSettingAction(null);
     } catch (err) {
       toast.error(
-        err instanceof ApiError ? err.message : "Failed to update broker settings",
+        err instanceof ApiError
+          ? err.message
+          : "Failed to update broker settings",
       );
     }
   }
@@ -201,7 +204,10 @@ export function AdminOAuthClientsPage() {
       {isLoading ? (
         <div className="space-y-2">
           {Array.from({ length: 5 }).map((_, i) => (
-            <Skeleton key={`oauth-client-skel-${String(i)}`} className="h-12 w-full" />
+            <Skeleton
+              key={`oauth-client-skel-${String(i)}`}
+              className="h-12 w-full"
+            />
           ))}
         </div>
       ) : error ? (
@@ -269,12 +275,16 @@ export function AdminOAuthClientsPage() {
                             stageBrokerCapability(client, checked)
                           }
                         />
-                        <BrokerSourceBadge source={client.broker_capability_source} />
+                        <BrokerSourceBadge
+                          source={client.broker_capability_source}
+                        />
                       </div>
                     ) : (
                       <div className="flex items-center gap-2">
                         <BoolBadge value={client.broker_capability_effective} />
-                        <BrokerSourceBadge source={client.broker_capability_source} />
+                        <BrokerSourceBadge
+                          source={client.broker_capability_source}
+                        />
                       </div>
                     )}
                   </TableCell>
@@ -284,7 +294,9 @@ export function AdminOAuthClientsPage() {
                         aria-label={`Toggle active status for ${client.client_name}`}
                         checked={client.is_active}
                         disabled={updateClient.isPending}
-                        onCheckedChange={(checked) => stageActive(client, checked)}
+                        onCheckedChange={(checked) =>
+                          stageActive(client, checked)
+                        }
                       />
                     ) : (
                       <BoolBadge value={client.is_active} />
@@ -304,7 +316,7 @@ export function AdminOAuthClientsPage() {
       )}
 
       <Dialog
-        open={pendingClientAction !== null}
+        open={canWrite && pendingClientAction !== null}
         onOpenChange={(open) => {
           if (!open) setPendingClientAction(null);
         }}
@@ -346,7 +358,7 @@ export function AdminOAuthClientsPage() {
       </Dialog>
 
       <Dialog
-        open={pendingSettingAction !== null}
+        open={canWrite && pendingSettingAction !== null}
         onOpenChange={(open) => {
           if (!open) setPendingSettingAction(null);
         }}
@@ -398,7 +410,8 @@ function BrokerSettingsSection({
       <CardHeader>
         <CardTitle>Broker Rollout Policy</CardTitle>
         <CardDescription>
-          Runtime overrides are applied immediately and fall back to env defaults when reset.
+          Runtime overrides are applied immediately and fall back to env
+          defaults when reset.
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -523,7 +536,11 @@ function ScopeList({ scopes }: { readonly scopes: string }) {
   return (
     <div className="flex flex-wrap gap-1.5">
       {items.map((scope) => (
-        <Badge key={scope} variant="secondary" className="font-mono text-[10px]">
+        <Badge
+          key={scope}
+          variant="secondary"
+          className="font-mono text-[10px]"
+        >
           {scope}
         </Badge>
       ))}

@@ -61,13 +61,12 @@ describe("admin OAuth client hooks", () => {
       data: { broker_capability_enabled: true },
     });
 
-    expect(mockPatch).toHaveBeenCalledWith(
-      "/admin/oauth-clients/client%2F1",
-      { broker_capability_enabled: true },
-    );
+    expect(mockPatch).toHaveBeenCalledWith("/admin/oauth-clients/client%2F1", {
+      broker_capability_enabled: true,
+    });
   });
 
-  it("fetches broker settings only when enabled", async () => {
+  it("skips the admin-only broker settings request when disabled", async () => {
     mockGet.mockResolvedValue({
       broker_require_sender_constraint: {
         effective: false,
@@ -93,6 +92,7 @@ describe("admin OAuth client hooks", () => {
     });
     await waitFor(() => expect(active.result.current.isSuccess).toBe(true));
     expect(mockGet).toHaveBeenCalledWith("/admin/settings/broker");
+    expect(mockGet).toHaveBeenCalledTimes(1);
   });
 
   it("patches broker settings with boolean and null overrides", async () => {
