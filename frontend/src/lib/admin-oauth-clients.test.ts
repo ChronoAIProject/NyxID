@@ -657,7 +657,7 @@ describe("custom text filters", () => {
         },
       ],
     });
-    expect(fields[0].supports_custom_text).toBe(true);
+    expect(fields[0]).toMatchObject({ supports_custom_text: true });
 
     const applied = getAppliedAdminOAuthClientFilters(
       fields,
@@ -670,11 +670,13 @@ describe("custom text filters", () => {
       (chip) => chip.field.key === "client_type",
     );
     expect(clientTypeChips).toHaveLength(2);
-    expect(clientTypeChips[0].custom).toBeUndefined();
-    expect(clientTypeChips[0].valueLabels).toEqual(["Public"]);
-    expect(clientTypeChips[1].custom).toBe(true);
-    expect(clientTypeChips[1].operatorLabel).toBe("contains");
-    expect(clientTypeChips[1].valueLabels).toEqual(["acme"]);
+    expect(clientTypeChips[0]).toMatchObject({ valueLabels: ["Public"] });
+    expect(clientTypeChips[0]).not.toHaveProperty("custom");
+    expect(clientTypeChips[1]).toMatchObject({
+      valueLabels: ["acme"],
+      operatorLabel: "contains",
+      custom: true,
+    });
   });
 
   it("ignores custom text when the server does not advertise support", () => {
@@ -697,6 +699,6 @@ describe("custom text filters", () => {
         },
       ],
     });
-    expect(fields[0].supports_custom_text).toBe(false);
+    expect(fields[0]).toMatchObject({ supports_custom_text: false });
   });
 });
