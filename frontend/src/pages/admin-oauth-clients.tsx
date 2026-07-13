@@ -14,6 +14,7 @@ import type {
   AdminOAuthClientFilterKey,
   AdminOAuthClientFilterSelections,
   AdminOAuthClientListParams,
+  AdminOAuthClientPerPage,
   AdminOAuthClientSearchFieldKey,
   AdminOAuthClientSearchState,
   AdminOAuthClientSort,
@@ -80,6 +81,8 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import {
+  ADMIN_OAUTH_CLIENT_DEFAULT_PER_PAGE,
+  ADMIN_OAUTH_CLIENT_PER_PAGE_OPTIONS,
   adminOAuthClientCustomFilterPatch,
   adminOAuthClientFilterPatch,
   getAppliedAdminOAuthClientFilters,
@@ -124,7 +127,6 @@ const SETTING_LABELS: Record<BrokerSettingKey, string> = {
 };
 
 const BROKER_BINDING_SCOPE = "urn:nyxid:scope:broker_binding";
-const DEFAULT_PER_PAGE = 25;
 const DEFAULT_SORT: AdminOAuthClientSort = "-created_at";
 
 const FALLBACK_SORTS: readonly AdminOAuthClientSort[] = [
@@ -221,6 +223,16 @@ type ColumnDropTarget = {
   readonly field: OAuthClientSortField;
   readonly position: "before" | "after";
 };
+
+/**
+ * Divider marking the frozen edge, drawn as a pseudo-element rather than a
+ * `border-r`. A collapsed border belongs to the table's border grid, not to the
+ * cell, so it stays behind with the grid when a sticky cell is offset -- the
+ * frozen edge would lose its line as soon as the table scrolls horizontally.
+ * What the sticky cell paints itself travels with it at every scroll offset.
+ */
+const FROZEN_EDGE_CLASS =
+  "shadow-[3px_0_6px_-4px_rgba(0,0,0,0.35)] before:pointer-events-none before:absolute before:inset-y-0 before:right-0 before:z-10 before:w-0.5 before:bg-border before:content-['']";
 
 function getColumn(field: OAuthClientSortField): OAuthClientColumn {
   const column = OAUTH_CLIENT_COLUMNS.find((item) => item.field === field);
@@ -378,14 +390,14 @@ function ReorderableTableHead({
       data-dragging={dragging || undefined}
       data-drop-position={dropPosition}
       data-frozen={frozen || undefined}
+      data-frozen-edge={lastFrozen || undefined}
       style={frozen ? { left: stickyLeft } : undefined}
       onDragOver={(event) => onDragOver(field, event)}
       onDrop={(event) => onDrop(field, event)}
       className={cn(
         "group/header relative h-10 p-0 transition-colors",
         frozen && "sticky z-30 bg-card",
-        lastFrozen &&
-          "border-r-2 border-border shadow-[3px_0_6px_-4px_rgba(0,0,0,0.35)]",
+        lastFrozen && FROZEN_EDGE_CLASS,
         direction && "text-foreground",
       )}
     >
@@ -525,7 +537,7 @@ export function AdminOAuthClientsPage() {
 
   const listParams: AdminOAuthClientListParams = {
     page: routeSearch.page ?? 1,
-    per_page: routeSearch.per_page ?? DEFAULT_PER_PAGE,
+    per_page: routeSearch.per_page ?? ADMIN_OAUTH_CLIENT_DEFAULT_PER_PAGE,
     search: routeSearch.search,
     search_filters: routeSearch.search_filters,
     custom_filters: routeSearch.custom_filters,
@@ -1353,6 +1365,9 @@ export function AdminOAuthClientsPage() {
                             key={field}
                             data-column={field}
                             data-frozen={frozen || undefined}
+                            data-frozen-edge={
+                              frozenThrough === field || undefined
+                            }
                             style={
                               frozen
                                 ? { left: stickyOffsets.get(field) }
@@ -1365,8 +1380,7 @@ export function AdminOAuthClientsPage() {
                               // reads the same as the rest of its row.
                               frozen &&
                                 "sticky z-20 bg-card after:pointer-events-none after:absolute after:inset-0 after:transition-colors after:duration-300 after:content-[''] group-hover/row:after:bg-muted/45",
-                              frozenThrough === field &&
-                                "border-r-2 border-border shadow-[3px_0_6px_-4px_rgba(0,0,0,0.35)]",
+                              frozenThrough === field && FROZEN_EDGE_CLASS,
                             )}
                           >
                             {renderOAuthClientCell(client, field)}
@@ -1389,15 +1403,16 @@ export function AdminOAuthClientsPage() {
                 <Select
                   value={String(listParams.per_page)}
                   disabled={isFetching}
-                  onValueChange={(value) =>
+                  onValueChange={(value) => {
+                    const rows = Number(value) as AdminOAuthClientPerPage;
                     updateListSearch({
                       page: undefined,
                       per_page:
-                        Number(value) === DEFAULT_PER_PAGE
+                        rows === ADMIN_OAUTH_CLIENT_DEFAULT_PER_PAGE
                           ? undefined
-                          : (Number(value) as 50 | 100),
-                    })
-                  }
+                          : rows,
+                    });
+                  }}
                 >
                   <SelectTrigger
                     aria-label="Rows per page"
@@ -1406,9 +1421,11 @@ export function AdminOAuthClientsPage() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="25">25 rows</SelectItem>
-                    <SelectItem value="50">50 rows</SelectItem>
-                    <SelectItem value="100">100 rows</SelectItem>
+                    {ADMIN_OAUTH_CLIENT_PER_PAGE_OPTIONS.map((rows) => (
+                      <SelectItem key={rows} value={String(rows)}>
+                        {String(rows)} rows
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
                 <Button

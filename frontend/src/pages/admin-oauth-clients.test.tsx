@@ -766,6 +766,23 @@ describe("AdminOAuthClientsPage", () => {
     expect(resolveLastNavigationSearch()).toEqual({ sort: "-broker" });
   });
 
+  it("pages by 10 rows and keeps the default page size out of the URL", async () => {
+    const user = userEvent.setup();
+    routeSearch.page = 4;
+    const { rerender } = render(<AdminOAuthClientsPage />);
+
+    await user.click(screen.getByRole("combobox", { name: "Rows per page" }));
+    await user.click(screen.getByRole("option", { name: "10 rows" }));
+    expect(resolveLastNavigationSearch({ page: 4 })).toEqual({ per_page: 10 });
+
+    routeSearch.per_page = 10;
+    rerender(<AdminOAuthClientsPage />);
+
+    await user.click(screen.getByRole("combobox", { name: "Rows per page" }));
+    await user.click(screen.getByRole("option", { name: "25 rows" }));
+    expect(resolveLastNavigationSearch({ per_page: 10 })).toEqual({});
+  });
+
   it("reorders headers and row cells from a dedicated drag handle", () => {
     render(<AdminOAuthClientsPage />);
 
@@ -911,7 +928,12 @@ describe("AdminOAuthClientsPage", () => {
     expect(clientHeader).toHaveStyle({ left: "0px" });
     expect(typeHeader).toHaveStyle({ left: "260px" });
     expect(creatorHeader).toHaveStyle({ left: "400px" });
-    expect(creatorHeader).toHaveClass("border-r-2");
+    // The frozen edge has to be painted by the sticky cell itself. A collapsed
+    // `border-r` belongs to the table's border grid, so it would slide out from
+    // under the frozen column as soon as the table scrolls horizontally.
+    expect(creatorHeader).toHaveAttribute("data-frozen-edge", "true");
+    expect(creatorHeader).not.toHaveClass("border-r-2");
+    expect(creatorHeader).toHaveClass("before:w-0.5", "before:bg-border");
     expect(
       screen.getByRole("button", {
         name: "Unfreeze columns through Created By",
@@ -922,9 +944,10 @@ describe("AdminOAuthClientsPage", () => {
     expect(
       table.querySelector('tbody td[data-column="client_name"]'),
     ).toHaveClass("sticky", "z-20", "bg-card");
-    expect(
-      table.querySelector('tbody td[data-column="created_by"]'),
-    ).toHaveClass("border-r-2");
+    const edgeCell = table.querySelector('tbody td[data-column="created_by"]');
+    expect(edgeCell).toHaveAttribute("data-frozen-edge", "true");
+    expect(edgeCell).not.toHaveClass("border-r-2");
+    expect(edgeCell).toHaveClass("before:w-0.5", "before:bg-border");
 
     const clientHandle = screen.getByRole("button", {
       name: "Move Client column",
@@ -944,6 +967,8 @@ describe("AdminOAuthClientsPage", () => {
     expect(clientHeader).not.toHaveAttribute("data-frozen");
     expect(typeHeader).not.toHaveAttribute("data-frozen");
     expect(creatorHeader).not.toHaveAttribute("data-frozen");
+    expect(creatorHeader).not.toHaveAttribute("data-frozen-edge");
+    expect(edgeCell).not.toHaveAttribute("data-frozen-edge");
     expect(
       table.querySelector('tbody td[data-column="client_name"]'),
     ).not.toHaveClass("sticky");

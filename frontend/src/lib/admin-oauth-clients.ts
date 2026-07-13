@@ -4,6 +4,7 @@ import type {
   AdminOAuthClientFilterField,
   AdminOAuthClientFilterKey,
   AdminOAuthClientFilterOptions,
+  AdminOAuthClientPerPage,
   AdminOAuthClientSearchField,
   AdminOAuthClientSearchFieldKey,
   AdminOAuthClientSearchFilter,
@@ -23,6 +24,12 @@ export const ADMIN_OAUTH_CLIENT_SCOPES = [
   "proxy",
   "urn:nyxid:scope:broker_binding",
 ] as const;
+
+export const ADMIN_OAUTH_CLIENT_PER_PAGE_OPTIONS = [
+  10, 25, 50, 100,
+] as const satisfies readonly AdminOAuthClientPerPage[];
+
+export const ADMIN_OAUTH_CLIENT_DEFAULT_PER_PAGE: AdminOAuthClientPerPage = 25;
 
 const CLIENT_TYPES = ["public", "confidential", "other"] as const;
 const CREATOR_TYPES = [
@@ -781,6 +788,13 @@ export function isAdminOAuthClientDateFilterValid(
   return adminOAuthClientFilterPatch("created_at", values) !== undefined;
 }
 
+function perPage(value: unknown): AdminOAuthClientPerPage | undefined {
+  const parsed = positiveInteger(value);
+  return ADMIN_OAUTH_CLIENT_PER_PAGE_OPTIONS.find(
+    (option) => option === parsed,
+  );
+}
+
 function positiveInteger(value: unknown): number | undefined {
   const parsed =
     typeof value === "number"
@@ -871,7 +885,7 @@ export function normalizeAdminOAuthClientSearch(
   raw: Record<string, unknown>,
 ): AdminOAuthClientSearchState {
   const page = positiveInteger(raw.page);
-  const perPage = positiveInteger(raw.per_page);
+  const rowsPerPage = perPage(raw.per_page);
   const search = typeof raw.search === "string" ? raw.search.trim() : "";
   const searchFilters = parseAdminOAuthClientSearchFilters(raw.search_filters);
   const customFilters = parseAdminOAuthClientCustomFilters(raw.custom_filters);
@@ -897,7 +911,10 @@ export function normalizeAdminOAuthClientSearch(
 
   return {
     ...(page !== undefined && page > 1 ? { page } : {}),
-    ...(perPage === 50 || perPage === 100 ? { per_page: perPage } : {}),
+    ...(rowsPerPage !== undefined &&
+    rowsPerPage !== ADMIN_OAUTH_CLIENT_DEFAULT_PER_PAGE
+      ? { per_page: rowsPerPage }
+      : {}),
     ...(search !== "" && [...search].length <= 256 ? { search } : {}),
     ...(searchFilters !== undefined
       ? { search_filters: JSON.stringify(searchFilters) }
