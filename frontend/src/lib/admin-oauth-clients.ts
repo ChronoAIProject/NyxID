@@ -224,6 +224,12 @@ export function getAdminOAuthClientFilterFields(
     );
     if (!isDateField && options.length === 0) continue;
 
+    // Only offer a text box when the server says the filter takes custom text
+    // AND we know how to encode it: an older server in a rolling deploy sends no
+    // flag and would reject `custom_filters` outright.
+    const supportsCustomText =
+      field.supports_custom_text === true && isCustomTextFilterKey(field.key);
+
     seen.add(field.key);
     fields.push(
       isDateField
@@ -233,7 +239,7 @@ export function getAdminOAuthClientFilterFields(
             date_modes: ["dates", "range"],
             max_values: MAX_MULTI_FILTER_VALUES,
           }
-        : { ...field, options },
+        : { ...field, options, supports_custom_text: supportsCustomText },
     );
   }
 
@@ -402,6 +408,104 @@ export function updateAdminOAuthClientSearchFilters(
   return encodeAdminOAuthClientSearchFilters([...remaining, { field, values }]);
 }
 
+/**
+ * Filters that accept free text, and stay in lockstep with the backend's
+ * `ADMIN_CUSTOM_TEXT_FILTERS`. A filter can only take custom text when it maps
+ * to a single string column the server can run a `contains` against, which
+ * rules out `is_active` (boolean), `broker` (derived), and `created_at` (date).
+ */
+export const ADMIN_OAUTH_CLIENT_CUSTOM_TEXT_FILTERS = [
+  "client_type",
+  "creator_type",
+  "scope",
+] as const satisfies readonly AdminOAuthClientFilterKey[];
+
+export type AdminOAuthClientCustomFilters = Partial<
+  Record<AdminOAuthClientFilterKey, readonly string[]>
+>;
+
+function isCustomTextFilterKey(value: unknown): value is AdminOAuthClientFilterKey {
+  return (ADMIN_OAUTH_CLIENT_CUSTOM_TEXT_FILTERS as readonly string[]).includes(
+    value as string,
+  );
+}
+
+function normalizeCustomFilters(
+  value: unknown,
+): AdminOAuthClientCustomFilters | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length === 0 || entries.length > MAX_SEARCH_GROUPS) return undefined;
+
+  const normalized: Record<string, readonly string[]> = {};
+  let totalValues = 0;
+
+  // Emit keys in a fixed order so the same selection always encodes to the same
+  // URL, whatever order the user filled the filters in.
+  for (const key of ADMIN_OAUTH_CLIENT_CUSTOM_TEXT_FILTERS) {
+    const raw = entries.find(([entryKey]) => entryKey === key)?.[1];
+    if (raw === undefined) continue;
+    const values = normalizeSearchValues(raw);
+    if (!values) return undefined;
+    totalValues += values.length;
+    if (totalValues > MAX_SEARCH_VALUES) return undefined;
+    normalized[key] = values;
+  }
+
+  if (entries.some(([key]) => !isCustomTextFilterKey(key))) return undefined;
+  if (Object.keys(normalized).length === 0) return undefined;
+  return normalized;
+}
+
+/** Parses and canonicalizes the custom-text URL state. */
+export function parseAdminOAuthClientCustomFilters(
+  raw: unknown,
+): AdminOAuthClientCustomFilters | undefined {
+  if (typeof raw === "object" && raw !== null) return normalizeCustomFilters(raw);
+  if (typeof raw !== "string" || raw === "") return undefined;
+  try {
+    return normalizeCustomFilters(JSON.parse(raw));
+  } catch {
+    return undefined;
+  }
+}
+
+/** Encodes validated custom text as the canonical API/URL JSON value. */
+export function encodeAdminOAuthClientCustomFilters(
+  filters: AdminOAuthClientCustomFilters,
+): string | undefined {
+  const normalized = normalizeCustomFilters(filters);
+  return normalized ? JSON.stringify(normalized) : undefined;
+}
+
+export function getAdminOAuthClientCustomValues(
+  search: AdminOAuthClientSearchState,
+  key: AdminOAuthClientFilterKey,
+): readonly string[] {
+  return parseAdminOAuthClientCustomFilters(search.custom_filters)?.[key] ?? [];
+}
+
+/**
+ * Replaces every filter's custom text and returns canonical URL state.
+ *
+ * The UI hands back a draft keyed by every filter it rendered, so prune the ones
+ * that carry no text (and any filter that takes none) before encoding: the URL
+ * form is strict and would reject the padded shape wholesale.
+ */
+export function adminOAuthClientCustomFilterPatch(
+  filters: AdminOAuthClientCustomFilters,
+): Partial<AdminOAuthClientSearchState> {
+  const populated: AdminOAuthClientCustomFilters = {};
+  for (const key of ADMIN_OAUTH_CLIENT_CUSTOM_TEXT_FILTERS) {
+    const values = filters[key];
+    if (values && values.length > 0) populated[key] = values;
+  }
+  return { custom_filters: encodeAdminOAuthClientCustomFilters(populated) };
+}
+
 function getAdminOAuthClientFilterCsv(
   search: AdminOAuthClientSearchState,
   key: AdminOAuthClientFilterKey,
@@ -524,22 +628,39 @@ export function getAppliedAdminOAuthClientFilters(
   search: AdminOAuthClientSearchState,
 ): readonly AppliedAdminOAuthClientFilter[] {
   return fields.flatMap((field) => {
+    const applied: AppliedAdminOAuthClientFilter[] = [];
     const values = getAdminOAuthClientFilterValues(search, field.key);
-    if (values.length === 0) return [];
+
     if (field.key === "created_at") {
-      const applied = appliedDateFilter(field, values);
-      return applied ? [applied] : [];
+      const dateFilter = values.length > 0 && appliedDateFilter(field, values);
+      return dateFilter ? [dateFilter] : [];
     }
-    return [
-      {
+
+    if (values.length > 0) {
+      applied.push({
         field,
         values,
         valueLabels: values.map(
           (value) =>
             field.options.find((item) => item.value === value)?.label ?? value,
         ),
-      },
-    ];
+      });
+    }
+
+    // Custom text is its own chip: it reads as `contains`, and clearing it must
+    // not also clear the options the user checked on the same filter.
+    const customValues = getAdminOAuthClientCustomValues(search, field.key);
+    if (customValues.length > 0) {
+      applied.push({
+        field,
+        values: customValues,
+        valueLabels: customValues,
+        operatorLabel: customValues.length === 1 ? "contains" : "contains any of",
+        custom: true,
+      });
+    }
+
+    return applied;
   });
 }
 
@@ -753,6 +874,7 @@ export function normalizeAdminOAuthClientSearch(
   const perPage = positiveInteger(raw.per_page);
   const search = typeof raw.search === "string" ? raw.search.trim() : "";
   const searchFilters = parseAdminOAuthClientSearchFilters(raw.search_filters);
+  const customFilters = parseAdminOAuthClientCustomFilters(raw.custom_filters);
   const clientType = canonicalKnownCsv(raw.client_type, CLIENT_TYPES);
   const creatorType = canonicalKnownCsv(raw.creator_type, CREATOR_TYPES);
   const broker = canonicalKnownCsv(raw.broker, BROKER_FILTERS);
@@ -779,6 +901,9 @@ export function normalizeAdminOAuthClientSearch(
     ...(search !== "" && [...search].length <= 256 ? { search } : {}),
     ...(searchFilters !== undefined
       ? { search_filters: JSON.stringify(searchFilters) }
+      : {}),
+    ...(customFilters !== undefined
+      ? { custom_filters: JSON.stringify(customFilters) }
       : {}),
     ...(clientType !== undefined ? { client_type: clientType } : {}),
     ...(creatorType !== undefined ? { creator_type: creatorType } : {}),

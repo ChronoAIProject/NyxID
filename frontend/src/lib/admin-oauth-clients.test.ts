@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  adminOAuthClientCustomFilterPatch,
   adminOAuthClientFilterPatch,
+  encodeAdminOAuthClientCustomFilters,
   encodeAdminOAuthClientSearchFilters,
+  getAdminOAuthClientCustomValues,
   getAppliedAdminOAuthClientFilters,
   getAdminOAuthClientFilterFields,
   getAdminOAuthClientSearchFields,
@@ -568,5 +571,132 @@ describe("normalizeAdminOAuthClientSearch", () => {
       { key: "client", label: "Application" },
       { key: "created_by", label: "Provisioned by" },
     ]);
+  });
+});
+
+describe("custom text filters", () => {
+  it("canonicalizes custom text into stable, deduplicated URL state", () => {
+    // Keys are emitted in a fixed order and values trimmed + deduped
+    // case-insensitively, so the same selection always encodes identically.
+    expect(
+      encodeAdminOAuthClientCustomFilters({
+        scope: ["  urn:acme:read  ", "URN:ACME:READ"],
+        client_type: ["machine"],
+      }),
+    ).toBe('{"client_type":["machine"],"scope":["urn:acme:read"]}');
+
+    expect(
+      normalizeAdminOAuthClientSearch({
+        custom_filters: '{"creator_type":["d0d7b72a"]}',
+      }),
+    ).toEqual({ custom_filters: '{"creator_type":["d0d7b72a"]}' });
+  });
+
+  it("drops custom text for filters with no column to search", () => {
+    // is_active is boolean, broker is derived, created_at is a date: the server
+    // rejects all three, so they must never reach the URL.
+    for (const key of ["is_active", "broker", "created_at", "bogus"]) {
+      expect(
+        normalizeAdminOAuthClientSearch({
+          custom_filters: JSON.stringify({ [key]: ["x"] }),
+        }),
+      ).toEqual({});
+    }
+  });
+
+  it("drops malformed, empty, oversized, and over-long custom text", () => {
+    for (const raw of [
+      "not json",
+      "[]",
+      "{}",
+      '{"scope":[]}',
+      '{"scope":["  "]}',
+      '{"scope":[7]}',
+      `{"scope":["${"a".repeat(257)}"]}`,
+      '{"scope":["a","b","c","d","e","f","g","h","i"]}',
+    ]) {
+      expect(normalizeAdminOAuthClientSearch({ custom_filters: raw })).toEqual(
+        {},
+      );
+    }
+  });
+
+  it("reads a filter's custom values back out of URL state", () => {
+    const search = normalizeAdminOAuthClientSearch({
+      custom_filters: '{"scope":["urn:acme:read"]}',
+    });
+    expect(getAdminOAuthClientCustomValues(search, "scope")).toEqual([
+      "urn:acme:read",
+    ]);
+    expect(getAdminOAuthClientCustomValues(search, "client_type")).toEqual([]);
+  });
+
+  it("clears the param entirely when the last custom value goes away", () => {
+    expect(adminOAuthClientCustomFilterPatch({ scope: [] })).toEqual({
+      custom_filters: undefined,
+    });
+  });
+
+  it("gives a filter's custom text its own chip so clearing one keeps the other", () => {
+    const fields = getAdminOAuthClientFilterFields({
+      client_types: ["public", "confidential"],
+      creator_types: ["system"],
+      broker_filters: ["enabled"],
+      statuses: [true, false],
+      allowed_scopes: ["openid"],
+      sorts: ["-created_at"],
+      fields: [
+        {
+          key: "client_type",
+          label: "Client type",
+          value_type: "enum",
+          operator: "is",
+          multiple: true,
+          options: [{ value: "public", label: "Public" }],
+          supports_custom_text: true,
+        },
+      ],
+    });
+    expect(fields[0].supports_custom_text).toBe(true);
+
+    const applied = getAppliedAdminOAuthClientFilters(
+      fields,
+      normalizeAdminOAuthClientSearch({
+        client_type: "public",
+        custom_filters: '{"client_type":["acme"]}',
+      }),
+    );
+    const clientTypeChips = applied.filter(
+      (chip) => chip.field.key === "client_type",
+    );
+    expect(clientTypeChips).toHaveLength(2);
+    expect(clientTypeChips[0].custom).toBeUndefined();
+    expect(clientTypeChips[0].valueLabels).toEqual(["Public"]);
+    expect(clientTypeChips[1].custom).toBe(true);
+    expect(clientTypeChips[1].operatorLabel).toBe("contains");
+    expect(clientTypeChips[1].valueLabels).toEqual(["acme"]);
+  });
+
+  it("ignores custom text when the server does not advertise support", () => {
+    // Rolling deploy: an older backend sends no flag and would 400 on the param.
+    const fields = getAdminOAuthClientFilterFields({
+      client_types: ["public"],
+      creator_types: ["system"],
+      broker_filters: ["enabled"],
+      statuses: [true],
+      allowed_scopes: ["openid"],
+      sorts: ["-created_at"],
+      fields: [
+        {
+          key: "client_type",
+          label: "Client type",
+          value_type: "enum",
+          operator: "is",
+          multiple: true,
+          options: [{ value: "public", label: "Public" }],
+        },
+      ],
+    });
+    expect(fields[0].supports_custom_text).toBe(false);
   });
 });

@@ -25,6 +25,11 @@ export interface DataTableFilterField<Key extends string> {
   readonly options: readonly DataTableFilterOption[];
   readonly max_values?: number;
   readonly date_modes?: readonly ("dates" | "range")[];
+  /**
+   * Whether the filter also takes free text, matched server-side as a
+   * `contains` and OR'd with whichever options are checked.
+   */
+  readonly supports_custom_text?: boolean;
 }
 
 export type DataTableFilterSelections<Key extends string> = Partial<
@@ -37,6 +42,8 @@ export interface AppliedDataTableFilter<Key extends string> {
   readonly valueLabels: readonly string[];
   readonly operatorLabel?: string;
   readonly valueSummary?: string;
+  /** Set on the chip carrying a filter's custom text, not its checked options. */
+  readonly custom?: boolean;
 }
 
 export type DataTableSearchApplyMode = "submit" | "blur";

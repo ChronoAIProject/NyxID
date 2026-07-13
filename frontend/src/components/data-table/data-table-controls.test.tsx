@@ -82,6 +82,11 @@ const SEVERITY_FIELD: DataTableFilterField<FilterKey> = {
   ],
 };
 
+const CUSTOM_TEXT_FIELD: DataTableFilterField<FilterKey> = {
+  ...SEVERITY_FIELD,
+  supports_custom_text: true,
+};
+
 const REVIEW_STATE_FIELD: DataTableFilterField<FilterKey> = {
   key: "review_state",
   label: "Review state",
@@ -160,18 +165,24 @@ function FilterHarness({
   fields,
   initialKey,
   values = {},
+  customValues = {},
   onApply,
 }: {
   readonly fields: readonly DataTableFilterField<FilterKey>[];
   readonly initialKey: FilterKey;
   readonly values?: DataTableFilterSelections<FilterKey>;
-  readonly onApply: (selections: DataTableFilterSelections<FilterKey>) => void;
+  readonly customValues?: DataTableFilterSelections<FilterKey>;
+  readonly onApply: (
+    selections: DataTableFilterSelections<FilterKey>,
+    customSelections: DataTableFilterSelections<FilterKey>,
+  ) => void;
 }) {
   const [selectedKey, setSelectedKey] = useState(initialKey);
   return (
     <DataTableFilterPopover
       fields={fields}
       values={values}
+      customValues={customValues}
       open
       selectedKey={selectedKey}
       activeCount={0}
@@ -291,7 +302,93 @@ describe("DataTableFilterPopover", () => {
     expect(screen.getByRole("checkbox", { name: "Critical" })).toBeChecked();
 
     await user.click(screen.getByRole("button", { name: "Apply filters" }));
-    expect(onApply).toHaveBeenCalledWith({ severity: ["critical"] });
+    expect(onApply).toHaveBeenCalledWith({ severity: ["critical"] }, {});
+  });
+
+  it("applies custom text alongside the checked options, only where the field allows it", async () => {
+    const user = userEvent.setup();
+    const onApply = vi.fn();
+    render(
+      <FilterHarness
+        fields={[CUSTOM_TEXT_FIELD, REVIEW_STATE_FIELD]}
+        initialKey="severity"
+        values={{ severity: ["info"] }}
+        onApply={onApply}
+      />,
+    );
+
+    const input = screen.getByRole("textbox", { name: "Custom Severity value" });
+    const add = screen.getByRole("button", { name: "Add" });
+    expect(add).toBeDisabled();
+
+    // Whitespace-only text is not a value, and neither is a duplicate.
+    await user.type(input, "   ");
+    expect(add).toBeDisabled();
+    await user.clear(input);
+
+    await user.type(input, "  acme  ");
+    await user.click(add);
+    expect(input).toHaveValue("");
+    await user.type(input, "ACME");
+    expect(add).toBeDisabled();
+    await user.clear(input);
+
+    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+    expect(onApply).toHaveBeenCalledWith(
+      { severity: ["info"] },
+      { severity: ["acme"] },
+    );
+
+    // A field that does not declare custom text gets no input at all.
+    await user.click(screen.getByRole("button", { name: /Review state/ }));
+    expect(
+      screen.queryByRole("textbox", { name: /Custom .* value/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("removes a custom value and counts it toward the field's selection count", async () => {
+    const user = userEvent.setup();
+    const onApply = vi.fn();
+    render(
+      <FilterHarness
+        fields={[CUSTOM_TEXT_FIELD]}
+        initialKey="severity"
+        values={{ severity: ["info"] }}
+        customValues={{ severity: ["acme", "widgets"] }}
+        onApply={onApply}
+      />,
+    );
+
+    expect(screen.getByText("3 selected")).toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: "Remove custom Severity value acme" }),
+    );
+    expect(screen.getByText("2 selected")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+    expect(onApply).toHaveBeenCalledWith(
+      { severity: ["info"] },
+      { severity: ["widgets"] },
+    );
+  });
+
+  it("clears a field's options and its custom text together", async () => {
+    const user = userEvent.setup();
+    const onApply = vi.fn();
+    render(
+      <FilterHarness
+        fields={[CUSTOM_TEXT_FIELD]}
+        initialKey="severity"
+        values={{ severity: ["info"] }}
+        customValues={{ severity: ["acme"] }}
+        onApply={onApply}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Clear all" }));
+    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+    expect(onApply).toHaveBeenCalledWith({ severity: [] }, { severity: [] });
   });
 
   it("treats Select all as a distinct tri-state option and conditionally shows Clear all", async () => {
@@ -345,9 +442,12 @@ describe("DataTableFilterPopover", () => {
     );
 
     await user.click(screen.getByRole("button", { name: "Apply filters" }));
-    expect(onApply).toHaveBeenCalledWith({
-      review_state: ["unreviewed"],
-    });
+    expect(onApply).toHaveBeenCalledWith(
+      {
+        review_state: ["unreviewed"],
+      },
+      {},
+    );
   });
 
   it("uses configured date labels and limits while applying multiple exact dates", async () => {
@@ -381,9 +481,12 @@ describe("DataTableFilterPopover", () => {
     fireEvent.change(picker, { target: { value: "2026-07-08" } });
     await user.click(screen.getByRole("button", { name: "Apply filters" }));
 
-    expect(onApply).toHaveBeenCalledWith({
-      occurred_at: ["dates", "2026-07-03", "2026-07-08"],
-    });
+    expect(onApply).toHaveBeenCalledWith(
+      {
+        occurred_at: ["dates", "2026-07-03", "2026-07-08"],
+      },
+      {},
+    );
   });
 
   it("supports an inclusive date range and blocks an inverted range", async () => {
@@ -405,9 +508,12 @@ describe("DataTableFilterPopover", () => {
       target: { value: "2026-07-31" },
     });
     await user.click(screen.getByRole("button", { name: "Apply filters" }));
-    expect(onApply).toHaveBeenLastCalledWith({
-      occurred_at: ["range", "2026-07-01", "2026-07-31"],
-    });
+    expect(onApply).toHaveBeenLastCalledWith(
+      {
+        occurred_at: ["range", "2026-07-01", "2026-07-31"],
+      },
+      {},
+    );
 
     fireEvent.change(screen.getByLabelText("Occurred from date"), {
       target: { value: "2026-08-01" },
