@@ -1,6 +1,7 @@
-use chrono::Utc;
+use chrono::{NaiveDate, Utc};
 use futures::TryStreamExt;
-use mongodb::bson::{self, Binary, doc, spec::BinarySubtype};
+use mongodb::bson::{self, Binary, Bson, Document, doc, spec::BinarySubtype};
+use serde::Deserialize;
 use std::collections::HashSet;
 use url::Url;
 use uuid::Uuid;
@@ -44,6 +45,41 @@ pub const DEFAULT_ALLOWED_SCOPES: &str = "openid profile email";
 /// still gated by what the client requests at `/oauth/authorize` and what the
 /// user consents to.
 pub const DEFAULT_MCP_ALLOWED_SCOPES: &str = "openid profile email roles groups proxy";
+
+pub const ADMIN_CLIENT_TYPE_FILTERS: &[&str] = &["public", "confidential", "other"];
+pub const ADMIN_CREATOR_TYPE_FILTERS: &[&str] =
+    &["dynamic_registration", "system", "owned", "ownerless"];
+pub const ADMIN_BROKER_FILTERS: &[&str] = &["enabled", "disabled", "flag", "scope"];
+pub const ADMIN_SEARCH_FIELDS: &[(&str, &str)] = &[
+    ("client", "Client"),
+    ("client_type", "Client type"),
+    ("created_by", "Created by"),
+    ("allowed_scopes", "Allowed scopes"),
+];
+const ADMIN_STATUS_FILTERS: &[&str] = &["true", "false"];
+pub const ADMIN_SORT_OPTIONS: &[&str] = &[
+    "-created_at",
+    "created_at",
+    "client_name",
+    "-client_name",
+    "client_type",
+    "-client_type",
+    "created_by",
+    "-created_by",
+    "broker",
+    "-broker",
+    "-is_active",
+    "is_active",
+    "allowed_scopes",
+    "-allowed_scopes",
+];
+
+const ADMIN_SEARCH_MAX_CHARS: usize = 256;
+const ADMIN_SEARCH_FILTER_MAX_GROUPS: usize = 5;
+const ADMIN_SEARCH_FILTER_MAX_VALUES_PER_GROUP: usize = 8;
+const ADMIN_SEARCH_FILTER_MAX_TOTAL_VALUES: usize = 32;
+const ADMIN_CREATED_DATES_MAX_VALUES: usize = 32;
+const ADMIN_BROKER_SORT_FIELD: &str = "__nyxid_admin_broker_sort";
 
 /// Validate and canonicalize `allowed_scopes`.
 ///
@@ -325,17 +361,587 @@ pub async fn create_client(
     Ok((client, raw_secret))
 }
 
-/// List all OAuth clients (active and inactive).
-pub async fn list_clients(db: &mongodb::Database) -> AppResult<Vec<OauthClient>> {
-    let clients: Vec<OauthClient> = db
+/// Validated filters for the platform-admin OAuth-client list.
+pub struct AdminOAuthClientListParams<'a> {
+    pub page: u64,
+    pub per_page: u64,
+    pub search: Option<&'a str>,
+    pub search_filters: Option<&'a str>,
+    pub client_type: Option<&'a str>,
+    pub creator_type: Option<&'a str>,
+    pub broker: Option<&'a str>,
+    pub is_active: Option<&'a str>,
+    pub scope: Option<&'a str>,
+    pub created_dates: Option<&'a str>,
+    pub created_from: Option<&'a str>,
+    pub created_to: Option<&'a str>,
+    pub sort: &'a str,
+    pub broker_require_admin_capability: bool,
+}
+
+/// List every OAuth client using the legacy newest-first ordering.
+pub async fn list_clients_legacy(db: &mongodb::Database) -> AppResult<Vec<OauthClient>> {
+    Ok(db
         .collection::<OauthClient>(OAUTH_CLIENTS)
         .find(doc! {})
         .sort(doc! { "created_at": -1 })
         .await?
         .try_collect()
-        .await?;
+        .await?)
+}
 
-    Ok(clients)
+/// List OAuth clients using bounded, server-side admin-table controls.
+pub async fn list_clients(
+    db: &mongodb::Database,
+    params: AdminOAuthClientListParams<'_>,
+) -> AppResult<(Vec<OauthClient>, u64)> {
+    if params.page == 0 || !(1..=100).contains(&params.per_page) {
+        return Err(AppError::ValidationError(
+            "page must be at least 1 and per_page must be between 1 and 100".to_string(),
+        ));
+    }
+
+    let offset = params
+        .page
+        .checked_sub(1)
+        .and_then(|page| page.checked_mul(params.per_page))
+        .ok_or_else(|| AppError::ValidationError("page is too large".to_string()))?;
+    let filter = admin_oauth_client_filter(&params)?;
+    let sort = admin_oauth_client_sort(params.sort)?;
+    let collection = db.collection::<OauthClient>(OAUTH_CLIENTS);
+
+    let total = collection.count_documents(filter.clone()).await?;
+    if offset >= total {
+        return Ok((Vec::new(), total));
+    }
+    if i64::try_from(offset).is_err() {
+        return Err(AppError::ValidationError("page is too large".to_string()));
+    }
+
+    let clients: Vec<OauthClient> = if sort.contains_key(ADMIN_BROKER_SORT_FIELD) {
+        let offset = i64::try_from(offset)
+            .map_err(|_| AppError::ValidationError("page is too large".to_string()))?;
+        let pipeline = admin_broker_sort_pipeline(
+            filter,
+            sort,
+            offset,
+            params.per_page as i64,
+            params.broker_require_admin_capability,
+        );
+        collection
+            .aggregate(pipeline)
+            .with_type::<OauthClient>()
+            .allow_disk_use(true)
+            .await?
+            .try_collect()
+            .await?
+    } else {
+        collection
+            .find(filter)
+            .sort(sort)
+            .skip(offset)
+            .limit(params.per_page as i64)
+            .await?
+            .try_collect()
+            .await?
+    };
+
+    Ok((clients, total))
+}
+
+fn admin_oauth_client_filter(params: &AdminOAuthClientListParams<'_>) -> AppResult<Document> {
+    let mut clauses = Vec::new();
+
+    if let Some(search) = params
+        .search
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if search.chars().count() > ADMIN_SEARCH_MAX_CHARS {
+            return Err(AppError::ValidationError(format!(
+                "search must be {ADMIN_SEARCH_MAX_CHARS} characters or less"
+            )));
+        }
+        let escaped = regex::escape(search);
+        clauses.push(doc! {
+            "$or": [
+                { "client_name": { "$regex": &escaped, "$options": "i" } },
+                { "_id": { "$regex": &escaped, "$options": "i" } },
+                { "client_type": { "$regex": &escaped, "$options": "i" } },
+                { "created_by": { "$regex": &escaped, "$options": "i" } },
+                { "allowed_scopes": { "$regex": &escaped, "$options": "i" } },
+            ]
+        });
+    }
+
+    if let Some(search_filters) = params.search_filters {
+        clauses.extend(admin_search_filter_clauses(search_filters)?);
+    }
+
+    if let Some(client_type) = params.client_type {
+        let values =
+            admin_csv_filter_values("client_type", client_type, ADMIN_CLIENT_TYPE_FILTERS)?;
+        clauses.push(one_or_many(
+            values
+                .into_iter()
+                .map(|value| match value {
+                    "public" | "confidential" => doc! { "client_type": value },
+                    "other" => {
+                        doc! { "client_type": { "$nin": ["public", "confidential"] } }
+                    }
+                    _ => unreachable!("client_type was validated against its fixed domain"),
+                })
+                .collect(),
+        ));
+    }
+
+    if let Some(creator_type) = params.creator_type {
+        let values =
+            admin_csv_filter_values("creator_type", creator_type, ADMIN_CREATOR_TYPE_FILTERS)?;
+        clauses.push(one_or_many(
+            values
+                .into_iter()
+                .map(|value| match value {
+                    "dynamic_registration" | "system" => doc! { "created_by": value },
+                    "owned" => doc! {
+                        "created_by": {
+                            "$exists": true,
+                            "$nin": [
+                                Bson::Null,
+                                Bson::String("dynamic_registration".to_string()),
+                                Bson::String("system".to_string()),
+                            ]
+                        }
+                    },
+                    "ownerless" => doc! { "created_by": Bson::Null },
+                    _ => unreachable!("creator_type was validated against its fixed domain"),
+                })
+                .collect(),
+        ));
+    }
+
+    if let Some(broker) = params.broker {
+        let values = admin_csv_filter_values("broker", broker, ADMIN_BROKER_FILTERS)?;
+        let branches = values
+            .into_iter()
+            .map(|value| admin_broker_filter(value, params.broker_require_admin_capability))
+            .collect::<AppResult<Vec<_>>>()?;
+        clauses.push(one_or_many(branches));
+    }
+
+    if let Some(is_active) = params.is_active {
+        let values = admin_csv_filter_values("is_active", is_active, ADMIN_STATUS_FILTERS)?;
+        if values.len() == 1 {
+            clauses.push(doc! { "is_active": values[0] == "true" });
+        }
+    }
+
+    if let Some(scope) = params.scope {
+        let values = admin_csv_filter_values("scope", scope, KNOWN_OIDC_SCOPES)?;
+        clauses.push(one_or_many(
+            values
+                .into_iter()
+                .map(|value| scope_token_filter(value, true))
+                .collect(),
+        ));
+    }
+
+    if let Some(created_at) =
+        admin_created_at_filter(params.created_dates, params.created_from, params.created_to)?
+    {
+        clauses.push(created_at);
+    }
+
+    Ok(match clauses.len() {
+        0 => doc! {},
+        1 => clauses.remove(0),
+        _ => doc! { "$and": clauses },
+    })
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AdminSearchFilterInput {
+    field: String,
+    values: Vec<String>,
+}
+
+fn admin_search_filter_clauses(raw: &str) -> AppResult<Vec<Document>> {
+    let groups: Vec<AdminSearchFilterInput> = serde_json::from_str(raw).map_err(|_| {
+        AppError::ValidationError(
+            "search_filters must be a JSON array of field and values objects".to_string(),
+        )
+    })?;
+
+    if groups.is_empty() {
+        return Err(AppError::ValidationError(
+            "search_filters must contain at least one field group".to_string(),
+        ));
+    }
+    if groups.len() > ADMIN_SEARCH_FILTER_MAX_GROUPS {
+        return Err(AppError::ValidationError(format!(
+            "search_filters must contain at most {ADMIN_SEARCH_FILTER_MAX_GROUPS} field groups"
+        )));
+    }
+
+    let mut seen_fields = HashSet::new();
+    let mut total_values = 0usize;
+    let mut clauses = Vec::with_capacity(groups.len());
+
+    for group in groups {
+        let stored_field = match group.field.as_str() {
+            "client" => None,
+            "client_type" => Some("client_type"),
+            "created_by" => Some("created_by"),
+            "allowed_scopes" => Some("allowed_scopes"),
+            _ => {
+                return Err(AppError::ValidationError(format!(
+                    "search_filters field must be one of: {}",
+                    ADMIN_SEARCH_FIELDS
+                        .iter()
+                        .map(|(key, _)| *key)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )));
+            }
+        };
+
+        if !seen_fields.insert(group.field.clone()) {
+            return Err(AppError::ValidationError(format!(
+                "search_filters must not repeat field {}",
+                group.field
+            )));
+        }
+        if group.values.is_empty() {
+            return Err(AppError::ValidationError(format!(
+                "search_filters values for {} must not be empty",
+                group.field
+            )));
+        }
+        if group.values.len() > ADMIN_SEARCH_FILTER_MAX_VALUES_PER_GROUP {
+            return Err(AppError::ValidationError(format!(
+                "search_filters values for {} must contain at most {ADMIN_SEARCH_FILTER_MAX_VALUES_PER_GROUP} entries",
+                group.field
+            )));
+        }
+
+        total_values = total_values
+            .checked_add(group.values.len())
+            .ok_or_else(|| {
+                AppError::ValidationError("search_filters contains too many values".to_string())
+            })?;
+        if total_values > ADMIN_SEARCH_FILTER_MAX_TOTAL_VALUES {
+            return Err(AppError::ValidationError(format!(
+                "search_filters must contain at most {ADMIN_SEARCH_FILTER_MAX_TOTAL_VALUES} values"
+            )));
+        }
+
+        let mut value_clauses = Vec::with_capacity(group.values.len());
+        for raw_value in group.values {
+            let value = raw_value.trim();
+            if value.is_empty() {
+                return Err(AppError::ValidationError(format!(
+                    "search_filters values for {} must not be empty",
+                    group.field
+                )));
+            }
+            if value.chars().count() > ADMIN_SEARCH_MAX_CHARS {
+                return Err(AppError::ValidationError(format!(
+                    "search_filters values must be {ADMIN_SEARCH_MAX_CHARS} characters or less"
+                )));
+            }
+
+            let regex = doc! {
+                "$regex": regex::escape(value),
+                "$options": "i",
+            };
+            value_clauses.push(match stored_field {
+                Some(field) => doc! { field: regex },
+                None => doc! {
+                    "$or": [
+                        { "client_name": regex.clone() },
+                        { "_id": regex },
+                    ]
+                },
+            });
+        }
+        clauses.push(one_or_many(value_clauses));
+    }
+
+    Ok(clauses)
+}
+
+fn admin_created_at_filter(
+    created_dates: Option<&str>,
+    created_from: Option<&str>,
+    created_to: Option<&str>,
+) -> AppResult<Option<Document>> {
+    if let Some(created_dates) = created_dates {
+        if created_from.is_some() || created_to.is_some() {
+            return Err(AppError::ValidationError(
+                "created_dates cannot be combined with created_from or created_to".to_string(),
+            ));
+        }
+
+        let raw_dates = created_dates.split(',').collect::<Vec<_>>();
+        if raw_dates.len() > ADMIN_CREATED_DATES_MAX_VALUES {
+            return Err(AppError::ValidationError(format!(
+                "created_dates must contain at most {ADMIN_CREATED_DATES_MAX_VALUES} values"
+            )));
+        }
+
+        let mut seen = HashSet::new();
+        let mut date_filters = Vec::new();
+        for raw_date in raw_dates {
+            let value = raw_date.trim();
+            if value.is_empty() {
+                return Err(AppError::ValidationError(
+                    "created_dates must not contain empty values".to_string(),
+                ));
+            }
+            let date = parse_admin_calendar_date("created_dates", value)?;
+            if !seen.insert(date) {
+                continue;
+            }
+            let exclusive_to = date.succ_opt().ok_or_else(|| {
+                AppError::ValidationError(
+                    "created_dates contains a date outside the supported range".to_string(),
+                )
+            })?;
+            date_filters.push(doc! {
+                "created_at": {
+                    "$gte": midnight_utc(date),
+                    "$lt": midnight_utc(exclusive_to),
+                }
+            });
+        }
+
+        return Ok(Some(one_or_many(date_filters)));
+    }
+
+    let created_from = created_from
+        .map(|value| parse_admin_calendar_date("created_from", value))
+        .transpose()?;
+    let created_to = created_to
+        .map(|value| parse_admin_calendar_date("created_to", value))
+        .transpose()?;
+
+    if created_from.is_some_and(|from| created_to.is_some_and(|to| from > to)) {
+        return Err(AppError::ValidationError(
+            "created_from must be on or before created_to".to_string(),
+        ));
+    }
+
+    let mut bounds = Document::new();
+    if let Some(from) = created_from {
+        bounds.insert("$gte", midnight_utc(from));
+    }
+    if let Some(to) = created_to {
+        let exclusive_to = to.succ_opt().ok_or_else(|| {
+            AppError::ValidationError("created_to is outside the supported date range".to_string())
+        })?;
+        bounds.insert("$lt", midnight_utc(exclusive_to));
+    }
+
+    Ok((!bounds.is_empty()).then(|| doc! { "created_at": bounds }))
+}
+
+fn parse_admin_calendar_date(field: &str, value: &str) -> AppResult<NaiveDate> {
+    let bytes = value.as_bytes();
+    let has_exact_format = bytes.len() == 10
+        && bytes.iter().enumerate().all(|(index, byte)| match index {
+            4 | 7 => *byte == b'-',
+            _ => byte.is_ascii_digit(),
+        });
+    if !has_exact_format {
+        return Err(AppError::ValidationError(format!(
+            "{field} must be a valid date in YYYY-MM-DD format"
+        )));
+    }
+
+    NaiveDate::parse_from_str(value, "%Y-%m-%d").map_err(|_| {
+        AppError::ValidationError(format!("{field} must be a valid date in YYYY-MM-DD format"))
+    })
+}
+
+fn midnight_utc(date: NaiveDate) -> bson::DateTime {
+    bson::DateTime::from_chrono(
+        date.and_hms_opt(0, 0, 0)
+            .expect("midnight is valid for every calendar date")
+            .and_utc(),
+    )
+}
+
+fn admin_csv_filter_values<'a>(
+    field: &str,
+    raw: &'a str,
+    allowed: &[&str],
+) -> AppResult<Vec<&'a str>> {
+    let mut seen = HashSet::new();
+    let mut values = Vec::new();
+
+    for raw_value in raw.split(',') {
+        let value = raw_value.trim();
+        if value.is_empty() {
+            return Err(AppError::ValidationError(format!(
+                "{field} must not contain empty values"
+            )));
+        }
+        if !allowed.contains(&value) {
+            return Err(AppError::ValidationError(format!(
+                "{field} must contain only: {}",
+                allowed.join(", ")
+            )));
+        }
+        if seen.insert(value) {
+            values.push(value);
+        }
+    }
+
+    Ok(values)
+}
+
+fn one_or_many(mut filters: Vec<Document>) -> Document {
+    if filters.len() == 1 {
+        filters.remove(0)
+    } else {
+        doc! { "$or": filters }
+    }
+}
+
+fn admin_broker_filter(broker: &str, broker_require_admin_capability: bool) -> AppResult<Document> {
+    let flag_enabled = doc! { "broker_capability_enabled": true };
+    let flag_not_enabled = doc! { "broker_capability_enabled": { "$ne": true } };
+    let has_scope = scope_token_filter(
+        crate::services::oauth_broker_service::BROKER_BINDING_SCOPE,
+        true,
+    );
+    let lacks_scope = scope_token_filter(
+        crate::services::oauth_broker_service::BROKER_BINDING_SCOPE,
+        false,
+    );
+
+    let filter = match broker {
+        "flag" => flag_enabled,
+        "scope" if broker_require_admin_capability => doc! { "_id": { "$exists": false } },
+        "scope" => doc! { "$and": [flag_not_enabled, has_scope] },
+        "enabled" if broker_require_admin_capability => flag_enabled,
+        "enabled" => doc! { "$or": [flag_enabled, has_scope] },
+        "disabled" if broker_require_admin_capability => flag_not_enabled,
+        "disabled" => doc! { "$and": [flag_not_enabled, lacks_scope] },
+        _ => {
+            return Err(AppError::ValidationError(format!(
+                "broker must be one of: {}",
+                ADMIN_BROKER_FILTERS.join(", ")
+            )));
+        }
+    };
+
+    Ok(filter)
+}
+
+fn scope_token_filter(scope: &str, present: bool) -> Document {
+    let pattern = scope_token_pattern(scope);
+    if present {
+        doc! { "allowed_scopes": { "$regex": pattern } }
+    } else {
+        doc! { "allowed_scopes": { "$not": { "$regex": pattern } } }
+    }
+}
+
+fn scope_token_pattern(scope: &str) -> String {
+    format!(r"(^|\s){}(\s|$)", regex::escape(scope))
+}
+
+fn admin_oauth_client_sort(sort: &str) -> AppResult<Document> {
+    let (field, direction) = match sort.strip_prefix('-') {
+        Some(field) => (field, -1),
+        None => (sort, 1),
+    };
+    if !matches!(
+        field,
+        "created_at"
+            | "client_name"
+            | "client_type"
+            | "created_by"
+            | "broker"
+            | "is_active"
+            | "allowed_scopes"
+    ) {
+        return Err(AppError::ValidationError(
+            "sort must target created_at, client_name, client_type, created_by, broker, is_active, or allowed_scopes".to_string(),
+        ));
+    }
+
+    let mut sort_doc = Document::new();
+    let stored_field = if field == "broker" {
+        ADMIN_BROKER_SORT_FIELD
+    } else {
+        field
+    };
+    sort_doc.insert(stored_field, direction);
+    if field != "created_at" {
+        sort_doc.insert("created_at", direction);
+    }
+    sort_doc.insert("_id", direction);
+    Ok(sort_doc)
+}
+
+fn admin_broker_sort_pipeline(
+    filter: Document,
+    sort: Document,
+    offset: i64,
+    per_page: i64,
+    broker_require_admin_capability: bool,
+) -> Vec<Document> {
+    let mut computed_fields = Document::new();
+    computed_fields.insert(
+        ADMIN_BROKER_SORT_FIELD,
+        admin_broker_sort_expression(broker_require_admin_capability),
+    );
+
+    vec![
+        doc! { "$match": filter },
+        doc! { "$set": computed_fields },
+        doc! { "$sort": sort },
+        doc! { "$skip": offset },
+        doc! { "$limit": per_page },
+        doc! { "$unset": ADMIN_BROKER_SORT_FIELD },
+    ]
+}
+
+/// Match the response's broker source ordering: none, legacy scope, explicit flag.
+fn admin_broker_sort_expression(broker_require_admin_capability: bool) -> Document {
+    let mut branches = vec![doc! {
+        "case": {
+            "$eq": [
+                { "$ifNull": ["$broker_capability_enabled", false] },
+                true,
+            ]
+        },
+        "then": 2,
+    }];
+
+    if !broker_require_admin_capability {
+        branches.push(doc! {
+            "case": {
+                "$regexMatch": {
+                    "input": { "$ifNull": ["$allowed_scopes", ""] },
+                    "regex": scope_token_pattern(
+                        crate::services::oauth_broker_service::BROKER_BINDING_SCOPE,
+                    ),
+                }
+            },
+            "then": 1,
+        });
+    }
+
+    doc! {
+        "$switch": {
+            "branches": branches,
+            "default": 0,
+        }
+    }
 }
 
 /// List OAuth clients created by a specific user.
@@ -665,6 +1271,650 @@ pub async fn rotate_client_secret_for_creator(
 mod tests {
     use super::*;
 
+    fn admin_list_params() -> AdminOAuthClientListParams<'static> {
+        AdminOAuthClientListParams {
+            page: 1,
+            per_page: 25,
+            search: None,
+            search_filters: None,
+            client_type: None,
+            creator_type: None,
+            broker: None,
+            is_active: None,
+            scope: None,
+            created_dates: None,
+            created_from: None,
+            created_to: None,
+            sort: "-created_at",
+            broker_require_admin_capability: false,
+        }
+    }
+
+    #[test]
+    fn admin_list_filter_composes_search_and_broker_or_clauses() {
+        let params = AdminOAuthClientListParams {
+            search: Some("aevatar.*"),
+            broker: Some("enabled"),
+            is_active: Some("true"),
+            ..admin_list_params()
+        };
+
+        let filter = admin_oauth_client_filter(&params).expect("valid filters");
+        let clauses = filter.get_array("$and").expect("combined filter");
+        assert_eq!(clauses.len(), 3);
+
+        let search = clauses[0].as_document().expect("search clause");
+        let search_branches = search.get_array("$or").expect("search branches");
+        assert_eq!(search_branches.len(), 5);
+        let client_name = search_branches[0]
+            .as_document()
+            .and_then(|branch| branch.get_document("client_name").ok())
+            .expect("client-name regex");
+        assert_eq!(client_name.get_str("$regex").unwrap(), r"aevatar\.\*");
+        assert!(
+            search_branches[1]
+                .as_document()
+                .is_some_and(|branch| branch.contains_key("_id"))
+        );
+        assert!(
+            search_branches[2]
+                .as_document()
+                .is_some_and(|branch| branch.contains_key("client_type"))
+        );
+        assert!(
+            search_branches[3]
+                .as_document()
+                .is_some_and(|branch| branch.contains_key("created_by"))
+        );
+        assert!(
+            search_branches[4]
+                .as_document()
+                .is_some_and(|branch| branch.contains_key("allowed_scopes"))
+        );
+
+        let broker = clauses[1].as_document().expect("broker clause");
+        assert_eq!(broker.get_array("$or").unwrap().len(), 2);
+        assert_eq!(clauses[2], Bson::Document(doc! { "is_active": true }));
+    }
+
+    #[test]
+    fn admin_field_search_ors_values_and_ands_fields_and_legacy_search() {
+        let params = AdminOAuthClientListParams {
+            search: Some("legacy"),
+            search_filters: Some(
+                r#"[
+                    {"field":"client","values":[" console.* ","Portal"]},
+                    {"field":"client_type","values":["public"]}
+                ]"#,
+            ),
+            ..admin_list_params()
+        };
+
+        let filter = admin_oauth_client_filter(&params).expect("valid field search");
+        let clauses = filter.get_array("$and").expect("search groups use AND");
+        assert_eq!(clauses.len(), 3);
+
+        let global_search = clauses[0]
+            .as_document()
+            .and_then(|clause| clause.get_array("$or").ok())
+            .expect("legacy global search remains its own OR group");
+        assert_eq!(global_search.len(), 5);
+
+        let names = clauses[1]
+            .as_document()
+            .and_then(|clause| clause.get_array("$or").ok())
+            .expect("values in one search field use OR");
+        assert_eq!(names.len(), 2);
+        let first_client_branches = names[0]
+            .as_document()
+            .and_then(|branch| branch.get_array("$or").ok())
+            .expect("each Client value matches name or ID");
+        let first_name_regex = first_client_branches[0]
+            .as_document()
+            .and_then(|branch| branch.get_document("client_name").ok())
+            .expect("client-name condition");
+        assert_eq!(first_name_regex.get_str("$regex").unwrap(), r"console\.\*");
+        assert_eq!(first_name_regex.get_str("$options").unwrap(), "i");
+        let first_id_regex = first_client_branches[1]
+            .as_document()
+            .and_then(|branch| branch.get_document("_id").ok())
+            .expect("client-ID condition");
+        assert_eq!(first_id_regex, first_name_regex);
+
+        assert_eq!(
+            clauses[2],
+            Bson::Document(doc! {
+                "client_type": { "$regex": "public", "$options": "i" }
+            })
+        );
+    }
+
+    #[test]
+    fn admin_client_field_searches_name_and_id_with_escaped_literals() {
+        let clauses =
+            admin_search_filter_clauses(r#"[{"field":"client","values":["client[01]+$"]}]"#)
+                .expect("valid Client-column search");
+
+        let client_branches = clauses[0].get_array("$or").expect("name-or-ID search");
+        assert_eq!(client_branches.len(), 2);
+        for field in ["client_name", "_id"] {
+            let condition = client_branches
+                .iter()
+                .find_map(|branch| branch.as_document()?.get_document(field).ok())
+                .expect("Client search field");
+            assert_eq!(condition.get_str("$regex").unwrap(), r"client\[01\]\+\$");
+            assert_eq!(condition.get_str("$options").unwrap(), "i");
+        }
+    }
+
+    #[test]
+    fn admin_field_search_rejects_malformed_shape_fields_and_values() {
+        let overlong_value = "x".repeat(ADMIN_SEARCH_MAX_CHARS + 1);
+        let too_many_values = serde_json::json!([{
+            "field": "client",
+            "values": (0..=ADMIN_SEARCH_FILTER_MAX_VALUES_PER_GROUP)
+                .map(|index| format!("value-{index}"))
+                .collect::<Vec<_>>(),
+        }])
+        .to_string();
+        let overlong_json = serde_json::json!([{
+            "field": "client",
+            "values": [overlong_value],
+        }])
+        .to_string();
+
+        let invalid = [
+            "{".to_string(),
+            "{}".to_string(),
+            "[]".to_string(),
+            r#"[{"field":"unknown","values":["value"]}]"#.to_string(),
+            r#"[{"field":"client_name","values":["value"]}]"#.to_string(),
+            r#"[{"field":"client","values":["one"]},{"field":"client","values":["two"]}]"#
+                .to_string(),
+            r#"[{"field":"client","values":[]}]"#.to_string(),
+            r#"[{"field":"client","values":["   "]}]"#.to_string(),
+            r#"[{"field":"client","values":["value"],"extra":true}]"#.to_string(),
+            too_many_values,
+            overlong_json,
+        ];
+
+        for raw in invalid {
+            assert!(
+                matches!(
+                    admin_search_filter_clauses(&raw),
+                    Err(AppError::ValidationError(_))
+                ),
+                "expected invalid search_filters to fail: {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn admin_list_scalar_filters_keep_single_value_semantics() {
+        assert_eq!(
+            admin_oauth_client_filter(&AdminOAuthClientListParams {
+                client_type: Some("public"),
+                ..admin_list_params()
+            })
+            .unwrap(),
+            doc! { "client_type": "public" }
+        );
+        assert_eq!(
+            admin_oauth_client_filter(&AdminOAuthClientListParams {
+                creator_type: Some("system"),
+                ..admin_list_params()
+            })
+            .unwrap(),
+            doc! { "created_by": "system" }
+        );
+        assert_eq!(
+            admin_oauth_client_filter(&AdminOAuthClientListParams {
+                is_active: Some("false"),
+                ..admin_list_params()
+            })
+            .unwrap(),
+            doc! { "is_active": false }
+        );
+    }
+
+    #[test]
+    fn admin_list_multi_value_filters_or_within_fields_and_and_across_fields() {
+        let filter = admin_oauth_client_filter(&AdminOAuthClientListParams {
+            client_type: Some(" public, confidential,public "),
+            creator_type: Some("system, ownerless"),
+            is_active: Some("true,false"),
+            scope: Some("profile, email"),
+            ..admin_list_params()
+        })
+        .unwrap();
+
+        let field_clauses = filter.get_array("$and").expect("different fields use AND");
+        assert_eq!(field_clauses.len(), 3, "both statuses add no restriction");
+
+        let client_types = field_clauses[0]
+            .as_document()
+            .and_then(|condition| condition.get_array("$or").ok())
+            .expect("client types use OR");
+        assert_eq!(client_types.len(), 2, "duplicates are canonicalized");
+        assert_eq!(
+            client_types,
+            &vec![
+                Bson::Document(doc! { "client_type": "public" }),
+                Bson::Document(doc! { "client_type": "confidential" }),
+            ]
+        );
+
+        let creator_types = field_clauses[1]
+            .as_document()
+            .and_then(|condition| condition.get_array("$or").ok())
+            .expect("creator types use OR");
+        assert_eq!(creator_types.len(), 2);
+
+        let scopes = field_clauses[2]
+            .as_document()
+            .and_then(|condition| condition.get_array("$or").ok())
+            .expect("scopes use OR");
+        assert_eq!(scopes.len(), 2);
+        assert_eq!(
+            scopes[0]
+                .as_document()
+                .and_then(|condition| condition.get_document("allowed_scopes").ok())
+                .and_then(|condition| condition.get_str("$regex").ok()),
+            Some(r"(^|\s)profile(\s|$)")
+        );
+        assert_eq!(
+            scopes[1]
+                .as_document()
+                .and_then(|condition| condition.get_document("allowed_scopes").ok())
+                .and_then(|condition| condition.get_str("$regex").ok()),
+            Some(r"(^|\s)email(\s|$)")
+        );
+    }
+
+    #[test]
+    fn admin_csv_filters_trim_dedupe_and_reject_invalid_values() {
+        assert_eq!(
+            admin_csv_filter_values(
+                "client_type",
+                " public, confidential,public ",
+                ADMIN_CLIENT_TYPE_FILTERS,
+            )
+            .unwrap(),
+            ["public", "confidential"]
+        );
+
+        for raw in ["", ",", "public,", ",public", "public,,confidential"] {
+            assert!(matches!(
+                admin_csv_filter_values("client_type", raw, ADMIN_CLIENT_TYPE_FILTERS),
+                Err(AppError::ValidationError(_))
+            ));
+        }
+        assert!(matches!(
+            admin_csv_filter_values("client_type", "public,native", ADMIN_CLIENT_TYPE_FILTERS,),
+            Err(AppError::ValidationError(_))
+        ));
+    }
+
+    #[test]
+    fn admin_broker_filters_match_runtime_policy_semantics() {
+        assert_eq!(
+            admin_broker_filter("flag", false).unwrap(),
+            doc! { "broker_capability_enabled": true }
+        );
+        assert_eq!(
+            admin_broker_filter("scope", true).unwrap(),
+            doc! { "_id": { "$exists": false } }
+        );
+        assert_eq!(
+            admin_broker_filter("enabled", true).unwrap(),
+            doc! { "broker_capability_enabled": true }
+        );
+        assert_eq!(
+            admin_broker_filter("disabled", true).unwrap(),
+            doc! { "broker_capability_enabled": { "$ne": true } }
+        );
+
+        let scope = admin_broker_filter("scope", false).unwrap();
+        let scope_clauses = scope.get_array("$and").unwrap();
+        assert_eq!(
+            scope_clauses[0],
+            Bson::Document(doc! { "broker_capability_enabled": { "$ne": true } })
+        );
+        let scope_regex = scope_clauses[1]
+            .as_document()
+            .and_then(|clause| clause.get_document("allowed_scopes").ok())
+            .and_then(|condition| condition.get_str("$regex").ok())
+            .expect("scope regex");
+        assert!(scope_regex.starts_with(r"(^|\s)"));
+        assert!(scope_regex.ends_with(r"(\s|$)"));
+
+        let disabled = admin_broker_filter("disabled", false).unwrap();
+        let disabled_clauses = disabled.get_array("$and").unwrap();
+        let absent_scope = disabled_clauses[1]
+            .as_document()
+            .and_then(|clause| clause.get_document("allowed_scopes").ok())
+            .and_then(|condition| condition.get_document("$not").ok())
+            .expect("negative scope condition");
+        assert!(absent_scope.contains_key("$regex"));
+    }
+
+    #[test]
+    fn admin_multi_broker_filters_union_policy_aware_branches() {
+        let legacy = admin_oauth_client_filter(&AdminOAuthClientListParams {
+            broker: Some("scope, flag,scope"),
+            broker_require_admin_capability: false,
+            ..admin_list_params()
+        })
+        .unwrap();
+        let legacy_branches = legacy.get_array("$or").expect("broker values use OR");
+        assert_eq!(legacy_branches.len(), 2, "duplicates are canonicalized");
+        assert!(
+            legacy_branches[0]
+                .as_document()
+                .is_some_and(|branch| branch.contains_key("$and"))
+        );
+        assert_eq!(
+            legacy_branches[1],
+            Bson::Document(doc! { "broker_capability_enabled": true })
+        );
+
+        let strict = admin_oauth_client_filter(&AdminOAuthClientListParams {
+            broker: Some("scope,flag"),
+            broker_require_admin_capability: true,
+            ..admin_list_params()
+        })
+        .unwrap();
+        let strict_branches = strict.get_array("$or").expect("broker values use OR");
+        assert_eq!(
+            strict_branches[0],
+            Bson::Document(doc! { "_id": { "$exists": false } })
+        );
+        assert_eq!(
+            strict_branches[1],
+            Bson::Document(doc! { "broker_capability_enabled": true })
+        );
+    }
+
+    #[test]
+    fn admin_scope_filter_is_exact_and_validated() {
+        let params = AdminOAuthClientListParams {
+            scope: Some("profile"),
+            ..admin_list_params()
+        };
+        let filter = admin_oauth_client_filter(&params).unwrap();
+        let condition = filter.get_document("allowed_scopes").unwrap();
+        assert_eq!(condition.get_str("$regex").unwrap(), r"(^|\s)profile(\s|$)");
+
+        let invalid = AdminOAuthClientListParams {
+            scope: Some("profile:write"),
+            ..admin_list_params()
+        };
+        assert!(matches!(
+            admin_oauth_client_filter(&invalid),
+            Err(AppError::ValidationError(_))
+        ));
+
+        let multi = admin_oauth_client_filter(&AdminOAuthClientListParams {
+            scope: Some("profile,email"),
+            ..admin_list_params()
+        })
+        .unwrap();
+        assert_eq!(multi.get_array("$or").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn admin_created_at_filter_uses_inclusive_utc_calendar_days() {
+        let range = admin_oauth_client_filter(&AdminOAuthClientListParams {
+            created_from: Some("2026-07-03"),
+            created_to: Some("2026-07-10"),
+            ..admin_list_params()
+        })
+        .expect("valid date range");
+        let bounds = range.get_document("created_at").expect("created-at bounds");
+        assert_eq!(
+            bounds.get_datetime("$gte").unwrap().to_chrono(),
+            chrono::DateTime::parse_from_rfc3339("2026-07-03T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc)
+        );
+        assert_eq!(
+            bounds.get_datetime("$lt").unwrap().to_chrono(),
+            chrono::DateTime::parse_from_rfc3339("2026-07-11T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc)
+        );
+
+        let from_only = admin_oauth_client_filter(&AdminOAuthClientListParams {
+            created_from: Some("2026-07-03"),
+            ..admin_list_params()
+        })
+        .expect("valid lower bound");
+        let from_bounds = from_only.get_document("created_at").unwrap();
+        assert!(from_bounds.contains_key("$gte"));
+        assert!(!from_bounds.contains_key("$lt"));
+
+        let to_only = admin_oauth_client_filter(&AdminOAuthClientListParams {
+            created_to: Some("2026-07-10"),
+            ..admin_list_params()
+        })
+        .expect("valid upper bound");
+        let to_bounds = to_only.get_document("created_at").unwrap();
+        assert!(!to_bounds.contains_key("$gte"));
+        assert!(to_bounds.contains_key("$lt"));
+    }
+
+    #[test]
+    fn admin_created_dates_filter_ors_trimmed_deduplicated_utc_days() {
+        let filter = admin_oauth_client_filter(&AdminOAuthClientListParams {
+            search: Some("console"),
+            created_dates: Some("2026-07-03, 2026-07-10,2026-07-03"),
+            ..admin_list_params()
+        })
+        .expect("valid exact dates");
+        let clauses = filter
+            .get_array("$and")
+            .expect("dates are ANDed with search");
+        assert_eq!(clauses.len(), 2);
+
+        let dates = clauses[1]
+            .as_document()
+            .and_then(|clause| clause.get_array("$or").ok())
+            .expect("exact dates use OR");
+        assert_eq!(dates.len(), 2, "duplicate dates are removed");
+
+        for (date_filter, expected_from, expected_to) in [
+            (&dates[0], "2026-07-03T00:00:00Z", "2026-07-04T00:00:00Z"),
+            (&dates[1], "2026-07-10T00:00:00Z", "2026-07-11T00:00:00Z"),
+        ] {
+            let bounds = date_filter
+                .as_document()
+                .and_then(|filter| filter.get_document("created_at").ok())
+                .expect("full-day bounds");
+            assert_eq!(
+                bounds.get_datetime("$gte").unwrap().to_chrono(),
+                chrono::DateTime::parse_from_rfc3339(expected_from)
+                    .unwrap()
+                    .with_timezone(&Utc)
+            );
+            assert_eq!(
+                bounds.get_datetime("$lt").unwrap().to_chrono(),
+                chrono::DateTime::parse_from_rfc3339(expected_to)
+                    .unwrap()
+                    .with_timezone(&Utc)
+            );
+        }
+    }
+
+    #[test]
+    fn admin_created_dates_filter_rejects_conflicts_invalid_values_and_excess() {
+        for params in [
+            AdminOAuthClientListParams {
+                created_dates: Some("2026-07-03"),
+                created_from: Some("2026-07-01"),
+                ..admin_list_params()
+            },
+            AdminOAuthClientListParams {
+                created_dates: Some("2026-07-03"),
+                created_to: Some("2026-07-10"),
+                ..admin_list_params()
+            },
+            AdminOAuthClientListParams {
+                created_dates: Some(""),
+                ..admin_list_params()
+            },
+            AdminOAuthClientListParams {
+                created_dates: Some("2026-07-03,"),
+                ..admin_list_params()
+            },
+            AdminOAuthClientListParams {
+                created_dates: Some("2026-02-30"),
+                ..admin_list_params()
+            },
+            AdminOAuthClientListParams {
+                created_dates: Some("07/03/2026"),
+                ..admin_list_params()
+            },
+        ] {
+            assert!(matches!(
+                admin_oauth_client_filter(&params),
+                Err(AppError::ValidationError(_))
+            ));
+        }
+
+        let too_many = vec!["2026-07-03"; ADMIN_CREATED_DATES_MAX_VALUES + 1].join(",");
+        assert!(matches!(
+            admin_oauth_client_filter(&AdminOAuthClientListParams {
+                created_dates: Some(&too_many),
+                ..admin_list_params()
+            }),
+            Err(AppError::ValidationError(_))
+        ));
+    }
+
+    #[test]
+    fn admin_created_at_filter_rejects_invalid_and_inverted_dates() {
+        for params in [
+            AdminOAuthClientListParams {
+                created_from: Some("2026-02-30"),
+                ..admin_list_params()
+            },
+            AdminOAuthClientListParams {
+                created_to: Some("07/10/2026"),
+                ..admin_list_params()
+            },
+            AdminOAuthClientListParams {
+                created_from: Some(" 2026-07-10"),
+                ..admin_list_params()
+            },
+            AdminOAuthClientListParams {
+                created_to: Some("2026-０7-10"),
+                ..admin_list_params()
+            },
+            AdminOAuthClientListParams {
+                created_from: Some("2026-07-11"),
+                created_to: Some("2026-07-10"),
+                ..admin_list_params()
+            },
+        ] {
+            assert!(matches!(
+                admin_oauth_client_filter(&params),
+                Err(AppError::ValidationError(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn admin_sort_is_allowlisted_and_stable() {
+        assert_eq!(
+            admin_oauth_client_sort("-created_at").unwrap(),
+            doc! { "created_at": -1, "_id": -1 }
+        );
+        assert_eq!(
+            admin_oauth_client_sort("client_name").unwrap(),
+            doc! { "client_name": 1, "created_at": 1, "_id": 1 }
+        );
+        assert_eq!(
+            admin_oauth_client_sort("allowed_scopes").unwrap(),
+            doc! { "allowed_scopes": 1, "created_at": 1, "_id": 1 }
+        );
+        let broker_sort = admin_oauth_client_sort("-broker").unwrap();
+        assert_eq!(broker_sort.get_i32(ADMIN_BROKER_SORT_FIELD).unwrap(), -1);
+        assert_eq!(broker_sort.get_i32("created_at").unwrap(), -1);
+        assert_eq!(broker_sort.get_i32("_id").unwrap(), -1);
+        assert!(matches!(
+            admin_oauth_client_sort("client_secret_hash"),
+            Err(AppError::ValidationError(_))
+        ));
+        assert!(matches!(
+            admin_oauth_client_sort("created_at,-client_name"),
+            Err(AppError::ValidationError(_))
+        ));
+    }
+
+    #[test]
+    fn admin_broker_sort_expression_tracks_runtime_policy() {
+        let legacy = admin_broker_sort_expression(false);
+        let legacy_branches = legacy
+            .get_document("$switch")
+            .and_then(|switch| switch.get_array("branches"))
+            .expect("legacy broker sort branches");
+        assert_eq!(legacy_branches.len(), 2);
+        let scope_regex = legacy_branches[1]
+            .as_document()
+            .and_then(|branch| branch.get_document("case").ok())
+            .and_then(|case| case.get_document("$regexMatch").ok())
+            .and_then(|regex_match| regex_match.get_str("regex").ok())
+            .expect("exact broker-scope expression");
+        assert_eq!(
+            scope_regex,
+            scope_token_pattern(crate::services::oauth_broker_service::BROKER_BINDING_SCOPE)
+        );
+
+        let strict = admin_broker_sort_expression(true);
+        let strict_branches = strict
+            .get_document("$switch")
+            .and_then(|switch| switch.get_array("branches"))
+            .expect("strict broker sort branches");
+        assert_eq!(strict_branches.len(), 1);
+    }
+
+    #[test]
+    fn admin_list_filter_rejects_unknown_domains_and_long_search() {
+        for params in [
+            AdminOAuthClientListParams {
+                client_type: Some("native"),
+                ..admin_list_params()
+            },
+            AdminOAuthClientListParams {
+                creator_type: Some("robot"),
+                ..admin_list_params()
+            },
+            AdminOAuthClientListParams {
+                broker: Some("maybe"),
+                ..admin_list_params()
+            },
+            AdminOAuthClientListParams {
+                is_active: Some("yes"),
+                ..admin_list_params()
+            },
+            AdminOAuthClientListParams {
+                scope: Some("openid,"),
+                ..admin_list_params()
+            },
+            AdminOAuthClientListParams {
+                search: Some(
+                    "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                ),
+                ..admin_list_params()
+            },
+        ] {
+            assert!(matches!(
+                admin_oauth_client_filter(&params),
+                Err(AppError::ValidationError(_))
+            ));
+        }
+    }
+
     #[test]
     fn valid_default_scopes() {
         let result = validate_allowed_scopes("openid profile email").unwrap();
@@ -820,6 +2070,75 @@ mod tests {
         use crate::models::refresh_token::RefreshToken;
         use crate::test_utils::connect_test_database;
 
+        fn list_fixture(
+            id: &str,
+            name: &str,
+            created_by: &str,
+            allowed_scopes: &str,
+            broker_capability_enabled: bool,
+            is_active: bool,
+            created_at: chrono::DateTime<Utc>,
+        ) -> OauthClient {
+            OauthClient {
+                id: id.to_string(),
+                client_name: name.to_string(),
+                client_secret_hash: "NONE".to_string(),
+                redirect_uris: vec![],
+                allowed_scopes: allowed_scopes.to_string(),
+                grant_types: "authorization_code".to_string(),
+                client_type: "public".to_string(),
+                is_active,
+                delegation_scopes: String::new(),
+                default_service_catalog_slugs: Vec::new(),
+                broker_capability_enabled,
+                revocation_webhook_url: None,
+                revocation_webhook_secret_encrypted: None,
+                created_by: Some(created_by.to_string()),
+                created_at,
+                updated_at: created_at,
+            }
+        }
+
+        #[tokio::test]
+        async fn admin_legacy_list_returns_complete_collection_newest_first() {
+            let Some(db) = connect_test_database("oauth_admin_legacy_list").await else {
+                eprintln!("skipping oauth_admin_legacy_list test: no local MongoDB available");
+                return;
+            };
+            let now = Utc::now();
+            let clients = (0..30)
+                .map(|index| {
+                    list_fixture(
+                        &format!("legacy-{index:02}"),
+                        &format!("Legacy {index:02}"),
+                        "system",
+                        "openid",
+                        false,
+                        true,
+                        now + chrono::Duration::seconds(index),
+                    )
+                })
+                .collect::<Vec<_>>();
+            db.collection::<OauthClient>(OAUTH_CLIENTS)
+                .insert_many(clients)
+                .await
+                .expect("insert legacy list fixtures");
+
+            let listed = list_clients_legacy(&db).await.expect("list legacy clients");
+            assert_eq!(listed.len(), 30, "legacy reads are not page-limited");
+            assert_eq!(
+                listed
+                    .iter()
+                    .map(|client| client.id.clone())
+                    .collect::<Vec<_>>(),
+                (0..30)
+                    .rev()
+                    .map(|index| format!("legacy-{index:02}"))
+                    .collect::<Vec<_>>(),
+                "legacy reads preserve the original newest-first order"
+            );
+        }
+
         async fn insert_dcr_client(
             db: &mongodb::Database,
             id: &str,
@@ -849,6 +2168,497 @@ mod tests {
                 .await
                 .expect("insert dcr fixture");
             client
+        }
+
+        #[tokio::test]
+        async fn admin_list_combines_filters_and_paginates_stably() {
+            let Some(db) = connect_test_database("oauth_admin_list").await else {
+                eprintln!("skipping oauth_admin_list test: no local MongoDB available");
+                return;
+            };
+            let now = Utc::now();
+            let broker_scope = crate::services::oauth_broker_service::BROKER_BINDING_SCOPE;
+            let clients = vec![
+                list_fixture(
+                    "aevatar-new",
+                    "Aevatar Console",
+                    "dynamic_registration",
+                    &format!("openid offline_access {broker_scope}"),
+                    false,
+                    true,
+                    now,
+                ),
+                list_fixture(
+                    "aevatar-old",
+                    "Aevatar Console",
+                    "dynamic_registration",
+                    &format!("openid offline_access {broker_scope}"),
+                    false,
+                    true,
+                    now,
+                ),
+                list_fixture(
+                    "aevatar-flag",
+                    "Aevatar Console",
+                    "dynamic_registration",
+                    "openid offline_access",
+                    true,
+                    true,
+                    now - chrono::Duration::minutes(2),
+                ),
+                list_fixture(
+                    "system-inactive",
+                    "NyxID MCP Client",
+                    "system",
+                    DEFAULT_MCP_ALLOWED_SCOPES,
+                    false,
+                    false,
+                    now - chrono::Duration::minutes(3),
+                ),
+            ];
+            db.collection::<OauthClient>(OAUTH_CLIENTS)
+                .insert_many(clients)
+                .await
+                .expect("insert list fixtures");
+
+            let list_page = |page| AdminOAuthClientListParams {
+                page,
+                per_page: 1,
+                search: Some("aevatar"),
+                search_filters: None,
+                client_type: Some("public"),
+                creator_type: Some("dynamic_registration"),
+                broker: Some("scope"),
+                is_active: Some("true"),
+                scope: Some("offline_access"),
+                created_dates: None,
+                created_from: None,
+                created_to: None,
+                sort: "-created_at",
+                broker_require_admin_capability: false,
+            };
+
+            let (first, first_total) = list_clients(&db, list_page(1)).await.unwrap();
+            let (second, second_total) = list_clients(&db, list_page(2)).await.unwrap();
+            assert_eq!(first_total, 2);
+            assert_eq!(second_total, 2);
+            assert_eq!(
+                first
+                    .iter()
+                    .map(|client| client.id.as_str())
+                    .collect::<Vec<_>>(),
+                ["aevatar-old"]
+            );
+            assert_eq!(
+                second
+                    .iter()
+                    .map(|client| client.id.as_str())
+                    .collect::<Vec<_>>(),
+                ["aevatar-new"]
+            );
+
+            let (past_end, past_end_total) = list_clients(&db, list_page(u64::MAX))
+                .await
+                .expect("out-of-range pages should not reach MongoDB skip serialization");
+            assert!(past_end.is_empty());
+            assert_eq!(past_end_total, 2);
+        }
+
+        #[tokio::test]
+        async fn admin_list_multi_filters_use_or_with_exact_scopes_and_stable_pages() {
+            let Some(db) = connect_test_database("oauth_admin_multi_list").await else {
+                eprintln!("skipping oauth_admin_multi_list test: no local MongoDB available");
+                return;
+            };
+            let now = Utc::now();
+
+            let alpha = list_fixture(
+                "alpha-profile",
+                "Alpha",
+                "dynamic_registration",
+                "openid profile",
+                false,
+                true,
+                now,
+            );
+            let mut beta = list_fixture(
+                "beta-email",
+                "Beta",
+                "system",
+                "openid email",
+                false,
+                false,
+                now,
+            );
+            beta.client_type = "confidential".to_string();
+            let lookalike = list_fixture(
+                "profile-lookalike",
+                "Lookalike",
+                "system",
+                "openid profile_extra",
+                false,
+                true,
+                now,
+            );
+            let mut no_selected_scope = list_fixture(
+                "no-selected-scope",
+                "No selected scope",
+                "dynamic_registration",
+                "openid groups",
+                false,
+                true,
+                now,
+            );
+            no_selected_scope.client_type = "confidential".to_string();
+            let owned = list_fixture(
+                "owned-email",
+                "Owned",
+                "user-id",
+                "openid email",
+                false,
+                true,
+                now,
+            );
+
+            db.collection::<OauthClient>(OAUTH_CLIENTS)
+                .insert_many([alpha, beta, lookalike, no_selected_scope, owned])
+                .await
+                .expect("insert multi-filter fixtures");
+
+            let list_page = |page| AdminOAuthClientListParams {
+                page,
+                per_page: 1,
+                search: None,
+                search_filters: None,
+                client_type: Some("public, confidential"),
+                creator_type: Some("dynamic_registration, system"),
+                broker: None,
+                is_active: Some("true,false"),
+                scope: Some("profile,email"),
+                created_dates: None,
+                created_from: None,
+                created_to: None,
+                sort: "client_name",
+                broker_require_admin_capability: false,
+            };
+
+            let (first, first_total) = list_clients(&db, list_page(1)).await.unwrap();
+            let (second, second_total) = list_clients(&db, list_page(2)).await.unwrap();
+            assert_eq!(first_total, 2);
+            assert_eq!(second_total, 2);
+            assert_eq!(first[0].id, "alpha-profile");
+            assert_eq!(second[0].id, "beta-email");
+        }
+
+        #[tokio::test]
+        async fn admin_list_filters_inclusive_dates_and_searches_all_visible_text() {
+            let Some(db) = connect_test_database("oauth_admin_date_search").await else {
+                eprintln!("skipping oauth_admin_date_search test: no local MongoDB available");
+                return;
+            };
+            let at = |value: &str| {
+                chrono::DateTime::parse_from_rfc3339(value)
+                    .unwrap()
+                    .with_timezone(&Utc)
+            };
+            let mut confidential = list_fixture(
+                "date-start",
+                "First boundary",
+                "system",
+                "openid",
+                false,
+                true,
+                at("2026-07-03T00:00:00Z"),
+            );
+            confidential.client_type = "confidential".to_string();
+            let scope_match = list_fixture(
+                "date-end",
+                "Last boundary",
+                "system",
+                "openid needle-scope",
+                false,
+                true,
+                at("2026-07-10T23:59:59Z"),
+            );
+            let outside = list_fixture(
+                "date-outside",
+                "Outside",
+                "system",
+                "openid needle-scope",
+                false,
+                true,
+                at("2026-07-11T00:00:00Z"),
+            );
+            db.collection::<OauthClient>(OAUTH_CLIENTS)
+                .insert_many([confidential, scope_match, outside])
+                .await
+                .expect("insert date-search fixtures");
+
+            let range = AdminOAuthClientListParams {
+                per_page: 100,
+                created_from: Some("2026-07-03"),
+                created_to: Some("2026-07-10"),
+                sort: "created_at",
+                ..admin_list_params()
+            };
+            let (clients, total) = list_clients(&db, range).await.expect("filter date range");
+            assert_eq!(total, 2);
+            assert_eq!(
+                clients
+                    .iter()
+                    .map(|client| client.id.as_str())
+                    .collect::<Vec<_>>(),
+                ["date-start", "date-end"]
+            );
+
+            for (search, expected_id) in
+                [("CONFIDENTIAL", "date-start"), ("NEEDLE-SCOPE", "date-end")]
+            {
+                let (clients, total) = list_clients(
+                    &db,
+                    AdminOAuthClientListParams {
+                        per_page: 100,
+                        search: Some(search),
+                        created_from: Some("2026-07-03"),
+                        created_to: Some("2026-07-10"),
+                        ..admin_list_params()
+                    },
+                )
+                .await
+                .expect("search within date range");
+                assert_eq!(total, 1);
+                assert_eq!(clients[0].id, expected_id);
+            }
+        }
+
+        #[tokio::test]
+        async fn admin_list_multi_broker_filter_respects_runtime_policy_and_overlap() {
+            let Some(db) = connect_test_database("oauth_admin_multi_broker").await else {
+                eprintln!("skipping oauth_admin_multi_broker test: no local MongoDB available");
+                return;
+            };
+            let now = Utc::now();
+            let broker_scope = crate::services::oauth_broker_service::BROKER_BINDING_SCOPE;
+            db.collection::<OauthClient>(OAUTH_CLIENTS)
+                .insert_many([
+                    list_fixture(
+                        "scope",
+                        "Scope",
+                        "system",
+                        &format!("openid {broker_scope}"),
+                        false,
+                        true,
+                        now,
+                    ),
+                    list_fixture("disabled", "Disabled", "system", "openid", false, true, now),
+                    list_fixture("flag", "Flag", "system", "openid", true, true, now),
+                    list_fixture(
+                        "flag-and-scope",
+                        "Flag and scope",
+                        "system",
+                        &format!("openid {broker_scope}"),
+                        true,
+                        true,
+                        now,
+                    ),
+                ])
+                .await
+                .expect("insert multi-broker fixtures");
+
+            let list = |broker, strict| AdminOAuthClientListParams {
+                per_page: 100,
+                broker: Some(broker),
+                broker_require_admin_capability: strict,
+                sort: "client_name",
+                ..admin_list_params()
+            };
+
+            let (legacy, legacy_total) =
+                list_clients(&db, list("scope,flag", false)).await.unwrap();
+            assert_eq!(legacy_total, 3);
+            assert_eq!(
+                legacy
+                    .iter()
+                    .map(|client| client.id.as_str())
+                    .collect::<HashSet<_>>(),
+                HashSet::from(["scope", "flag", "flag-and-scope"])
+            );
+
+            let (strict, strict_total) = list_clients(&db, list("scope,flag", true)).await.unwrap();
+            assert_eq!(strict_total, 2);
+            assert_eq!(
+                strict
+                    .iter()
+                    .map(|client| client.id.as_str())
+                    .collect::<HashSet<_>>(),
+                HashSet::from(["flag", "flag-and-scope"])
+            );
+
+            let (_, overlap_total) = list_clients(&db, list("enabled,flag", false))
+                .await
+                .unwrap();
+            assert_eq!(
+                overlap_total, 3,
+                "overlapping branches must not duplicate rows"
+            );
+
+            let (_, exhaustive_total) = list_clients(&db, list("enabled,disabled", false))
+                .await
+                .unwrap();
+            assert_eq!(exhaustive_total, 4);
+        }
+
+        #[tokio::test]
+        async fn admin_list_sorts_broker_sources_with_runtime_policy() {
+            let Some(db) = connect_test_database("oauth_admin_broker_sort").await else {
+                eprintln!("skipping oauth_admin_broker_sort test: no local MongoDB available");
+                return;
+            };
+            let now = Utc::now();
+            let broker_scope = crate::services::oauth_broker_service::BROKER_BINDING_SCOPE;
+            db.collection::<OauthClient>(OAUTH_CLIENTS)
+                .insert_many(vec![
+                    list_fixture(
+                        "scope",
+                        "Scope",
+                        "dynamic_registration",
+                        &format!("openid {broker_scope}"),
+                        false,
+                        true,
+                        now - chrono::Duration::minutes(4),
+                    ),
+                    list_fixture(
+                        "disabled",
+                        "Disabled",
+                        "dynamic_registration",
+                        "openid",
+                        false,
+                        true,
+                        now - chrono::Duration::minutes(3),
+                    ),
+                    list_fixture(
+                        "scope-lookalike",
+                        "Scope lookalike",
+                        "dynamic_registration",
+                        &format!("openid {broker_scope}_extra"),
+                        false,
+                        true,
+                        now - chrono::Duration::minutes(2),
+                    ),
+                    list_fixture(
+                        "flag",
+                        "Flag",
+                        "dynamic_registration",
+                        "openid email",
+                        true,
+                        true,
+                        now - chrono::Duration::minutes(1),
+                    ),
+                ])
+                .await
+                .expect("insert broker-sort fixtures");
+
+            let (legacy, total) = list_clients(
+                &db,
+                AdminOAuthClientListParams {
+                    per_page: 100,
+                    sort: "broker",
+                    broker_require_admin_capability: false,
+                    ..admin_list_params()
+                },
+            )
+            .await
+            .expect("sort legacy broker sources");
+            assert_eq!(total, 4);
+            assert_eq!(
+                legacy
+                    .iter()
+                    .map(|client| client.id.as_str())
+                    .collect::<Vec<_>>(),
+                ["disabled", "scope-lookalike", "scope", "flag"]
+            );
+
+            let (descending, _) = list_clients(
+                &db,
+                AdminOAuthClientListParams {
+                    per_page: 100,
+                    sort: "-broker",
+                    broker_require_admin_capability: false,
+                    ..admin_list_params()
+                },
+            )
+            .await
+            .expect("sort broker sources descending");
+            assert_eq!(
+                descending
+                    .iter()
+                    .map(|client| client.id.as_str())
+                    .collect::<Vec<_>>(),
+                ["flag", "scope", "scope-lookalike", "disabled"]
+            );
+
+            let (strict, _) = list_clients(
+                &db,
+                AdminOAuthClientListParams {
+                    per_page: 100,
+                    sort: "broker",
+                    broker_require_admin_capability: true,
+                    ..admin_list_params()
+                },
+            )
+            .await
+            .expect("sort broker sources under strict policy");
+            assert_eq!(
+                strict
+                    .iter()
+                    .map(|client| client.id.as_str())
+                    .collect::<Vec<_>>(),
+                ["scope", "disabled", "scope-lookalike", "flag"]
+            );
+        }
+
+        #[tokio::test]
+        async fn admin_list_sorts_allowed_scopes_as_displayed() {
+            let Some(db) = connect_test_database("oauth_admin_scope_sort").await else {
+                eprintln!("skipping oauth_admin_scope_sort test: no local MongoDB available");
+                return;
+            };
+            let now = Utc::now();
+            db.collection::<OauthClient>(OAUTH_CLIENTS)
+                .insert_many(vec![
+                    list_fixture(
+                        "profile",
+                        "Profile",
+                        "system",
+                        "openid profile",
+                        false,
+                        true,
+                        now,
+                    ),
+                    list_fixture("minimal", "Minimal", "system", "openid", false, true, now),
+                    list_fixture("email", "Email", "system", "openid email", false, true, now),
+                ])
+                .await
+                .expect("insert scope-sort fixtures");
+
+            let (clients, total) = list_clients(
+                &db,
+                AdminOAuthClientListParams {
+                    per_page: 100,
+                    sort: "allowed_scopes",
+                    ..admin_list_params()
+                },
+            )
+            .await
+            .expect("sort allowed scopes");
+            assert_eq!(total, 3);
+            assert_eq!(
+                clients
+                    .iter()
+                    .map(|client| client.id.as_str())
+                    .collect::<Vec<_>>(),
+                ["minimal", "email", "profile"]
+            );
         }
 
         async fn insert_client_with_consent_and_refresh_token(

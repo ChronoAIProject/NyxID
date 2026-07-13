@@ -4887,11 +4887,45 @@ curl -X POST http://localhost:3001/api/v1/admin/oauth-clients \
 
 #### GET /api/v1/admin/oauth-clients
 
-List all registered OAuth clients. Client secrets are never included in the list response.
+List registered OAuth clients. Client secrets are never included in either response mode.
 
-**Auth:** Admin
+For backward compatibility, a request with none of the recognized table query parameters returns the complete unfiltered collection in the original `created_at` descending order using the legacy response shape `{ "clients": [...] }`. Unknown query parameters do not opt into table mode. Supplying any recognized table parameter, including `page=1`, opts into the bounded paginated response with filtering, sorting, and `filter_options` metadata described below.
 
-**Response (200):**
+`filter_options` is independent of the rows on the current page. Its additive `fields` array describes the field identifier, display label, value type, fixed operator, multi-select support, and labeled choices for each filter-builder field; the legacy domain arrays remain available for existing clients. The `created_at` field supports either exact multi-date selection through `created_dates` or a range through `created_from` and `created_to`.
+
+**Auth:** Admin or operator
+
+**Query Parameters:**
+
+| Parameter      | Type    | Default       | Description |
+|----------------|---------|---------------|-------------|
+| `page`         | integer | `1`           | One-based page number |
+| `per_page`     | integer | `25`          | Rows per page, clamped to `1..=100` |
+| `search`       | string  | --            | Literal case-insensitive search over client name, client ID, client type, creator, and allowed scopes; maximum 256 characters |
+| `search_filters` | JSON string | --         | URL-encoded field-scoped search groups; see the search semantics and limits below |
+| `client_type`  | string  | --            | One or more of `public`, `confidential`, or `other` |
+| `creator_type` | string  | --            | One or more of `dynamic_registration`, `system`, `owned`, or `ownerless` |
+| `broker`       | string  | --            | One or more of `enabled`, `disabled`, `flag`, or `scope`; evaluated against the current broker rollout policy |
+| `is_active`    | string  | --            | `true`, `false`, or both |
+| `scope`        | string  | --            | One or more exact allowed-scope tokens from `filter_options.allowed_scopes` |
+| `created_dates` | string | --             | One or more exact UTC creation dates as comma-separated `YYYY-MM-DD` values; maximum 32 |
+| `created_from` | date    | --            | Earliest creation date to include, as a UTC calendar date in `YYYY-MM-DD` format |
+| `created_to`   | date    | --            | Latest creation date to include, as a UTC calendar date in `YYYY-MM-DD` format |
+| `sort`         | string  | `-created_at` | Allowlisted field; prefix `-` for descending. Fields: `client_name`, `client_type`, `created_by`, `broker`, `is_active`, `allowed_scopes`, `created_at` |
+
+The five structured filter parameters accept comma-separated values, for example `client_type=public,confidential&scope=openid,email`. Values within one field are combined with OR; separate fields are combined with AND. Tokens are trimmed, duplicate values are canonicalized, and empty or unknown values return `400 validation_error`. Scalar requests such as `is_active=true` retain their existing behavior. `is_active=true,false` is equivalent to omitting the status filter. A multi-value `scope` filter matches a client containing any selected exact whitespace-delimited scope token; it does not require every selected scope and does not match lookalike prefixes or suffixes.
+
+`search_filters` is a URL-encoded JSON array of field groups. Supported fields are `client`, `client_type`, `created_by`, and `allowed_scopes`; the response advertises the same set in `filter_options.search_fields`. Each group has the shape `{"field":"client","values":["console","portal"]}`. The `client` field corresponds to the visible Client column and matches both client name and client ID. Values within the same field are literal case-insensitive matches combined with OR. Different field groups are combined with AND. A simultaneously supplied legacy `search` is another AND group, while retaining its OR-across-all-fields behavior.
+
+The array permits at most five unique field groups, eight values per group, and 32 values in total. Every value is trimmed, must be non-empty, and may contain at most 256 Unicode characters. Unknown or duplicate fields, empty arrays or values, extra object properties, malformed JSON, and exceeded limits return `400 validation_error`. Search values are treated literally; regular-expression metacharacters have no special meaning.
+
+`created_dates` accepts up to 32 comma-separated UTC calendar dates. Values are trimmed and deduplicated, but empty or malformed values are rejected. Each selected date matches its complete UTC day, and selected dates are combined with OR. `created_dates` cannot be combined with `created_from` or `created_to`; doing so returns `400 validation_error`.
+
+`created_from` and `created_to` may be supplied independently or together. Both are interpreted as UTC calendar dates. The lower bound is inclusive at `00:00:00Z`; the upper bound includes the entire selected day and is implemented as an exclusive comparison against the following day's `00:00:00Z`. Invalid dates and ranges where `created_from` is after `created_to` return `400 validation_error`. The selected exact-date or range group is ANDed with search and every structured filter.
+
+`broker` sorting uses the effective source shown in the table: ascending order is disabled (`none`), enabled by legacy scope (`scope`), then enabled by explicit flag (`flag`). Descending order reverses it. When the runtime policy requires explicit admin capability, scope-only clients sort as disabled. `allowed_scopes` sorts the stored canonical space-separated scope string. Every sort adds `created_at` and `_id` tie-breakers (or just `_id` when sorting by `created_at`) in the requested direction, so pagination order is deterministic.
+
+**Legacy response (200, no recognized table parameters):**
 
 ```json
 {
@@ -4900,9 +4934,14 @@ List all registered OAuth clients. Client secrets are never included in the list
       "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
       "client_name": "My Web App",
       "client_type": "confidential",
+      "created_by": "550e8400-e29b-41d4-a716-446655440000",
       "redirect_uris": ["https://app.example.com/callback"],
       "allowed_scopes": "openid profile email",
       "delegation_scopes": "",
+      "broker_capability_enabled": false,
+      "broker_capability_effective": false,
+      "broker_capability_source": "none",
+      "revocation_webhook_url": null,
       "is_active": true,
       "client_secret": null,
       "created_at": "2025-06-01T10:00:00+00:00"
@@ -4911,10 +4950,184 @@ List all registered OAuth clients. Client secrets are never included in the list
 }
 ```
 
+**Paginated response (200, any recognized table parameter):**
+
+```json
+{
+  "clients": [
+    {
+      "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      "client_name": "My Web App",
+      "client_type": "confidential",
+      "created_by": "550e8400-e29b-41d4-a716-446655440000",
+      "redirect_uris": ["https://app.example.com/callback"],
+      "allowed_scopes": "openid profile email",
+      "delegation_scopes": "",
+      "broker_capability_enabled": false,
+      "broker_capability_effective": false,
+      "broker_capability_source": "none",
+      "revocation_webhook_url": null,
+      "is_active": true,
+      "client_secret": null,
+      "created_at": "2025-06-01T10:00:00+00:00"
+    }
+  ],
+  "total": 142,
+  "page": 1,
+  "per_page": 25,
+  "filter_options": {
+    "client_types": ["public", "confidential", "other"],
+    "creator_types": ["dynamic_registration", "system", "owned", "ownerless"],
+    "broker_filters": ["enabled", "disabled", "flag", "scope"],
+    "statuses": [true, false],
+    "allowed_scopes": [
+      "openid",
+      "profile",
+      "email",
+      "roles",
+      "groups",
+      "offline_access",
+      "proxy",
+      "urn:nyxid:scope:broker_binding"
+    ],
+    "sorts": [
+      "-created_at",
+      "created_at",
+      "client_name",
+      "-client_name",
+      "client_type",
+      "-client_type",
+      "created_by",
+      "-created_by",
+      "broker",
+      "-broker",
+      "-is_active",
+      "is_active",
+      "allowed_scopes",
+      "-allowed_scopes"
+    ],
+    "search_fields": [
+      { "key": "client", "label": "Client" },
+      { "key": "client_type", "label": "Client type" },
+      { "key": "created_by", "label": "Created by" },
+      { "key": "allowed_scopes", "label": "Allowed scopes" }
+    ],
+    "fields": [
+      {
+        "key": "is_active",
+        "label": "Status",
+        "value_type": "boolean",
+        "operator": "is",
+        "multiple": true,
+        "options": [
+          { "value": "true", "label": "Active" },
+          { "value": "false", "label": "Inactive" }
+        ]
+      },
+      {
+        "key": "client_type",
+        "label": "Client type",
+        "value_type": "enum",
+        "operator": "is",
+        "multiple": true,
+        "options": [
+          { "value": "public", "label": "Public" },
+          { "value": "confidential", "label": "Confidential" },
+          { "value": "other", "label": "Other" }
+        ]
+      },
+      {
+        "key": "creator_type",
+        "label": "Creator",
+        "value_type": "enum",
+        "operator": "is",
+        "multiple": true,
+        "options": [
+          { "value": "dynamic_registration", "label": "Dynamic registration" },
+          { "value": "system", "label": "System" },
+          { "value": "owned", "label": "User / org" },
+          { "value": "ownerless", "label": "Ownerless" }
+        ]
+      },
+      {
+        "key": "broker",
+        "label": "Broker capability",
+        "value_type": "enum",
+        "operator": "is",
+        "multiple": true,
+        "options": [
+          { "value": "enabled", "label": "Enabled" },
+          { "value": "disabled", "label": "Disabled" },
+          { "value": "flag", "label": "Enabled by admin grant" },
+          { "value": "scope", "label": "Enabled by broker scope" }
+        ]
+      },
+      {
+        "key": "scope",
+        "label": "Allowed scope",
+        "value_type": "enum",
+        "operator": "includes",
+        "multiple": true,
+        "options": [
+          { "value": "openid", "label": "OpenID" },
+          { "value": "profile", "label": "Profile" },
+          { "value": "email", "label": "Email" },
+          { "value": "roles", "label": "Roles" },
+          { "value": "groups", "label": "Groups" },
+          { "value": "offline_access", "label": "Offline access" },
+          { "value": "proxy", "label": "Proxy" },
+          {
+            "value": "urn:nyxid:scope:broker_binding",
+            "label": "Broker binding"
+          }
+        ]
+      },
+      {
+        "key": "created_at",
+        "label": "Created",
+        "value_type": "date",
+        "operator": "between",
+        "multiple": true,
+        "options": []
+      }
+    ]
+  }
+}
+```
+
 **Example:**
 
 ```bash
-curl http://localhost:3001/api/v1/admin/oauth-clients \
+curl "http://localhost:3001/api/v1/admin/oauth-clients?page=1&per_page=25&client_type=public&sort=-created_at" \
+  -H "Authorization: Bearer <admin_access_token>"
+```
+
+Multi-select filters use one comma-separated query value per field:
+
+```bash
+curl "http://localhost:3001/api/v1/admin/oauth-clients?page=1&per_page=25&client_type=public,confidential&scope=openid,email&is_active=true&sort=client_name" \
+  -H "Authorization: Bearer <admin_access_token>"
+```
+
+Date bounds select complete UTC days and can be combined with search and other filters:
+
+```bash
+curl "http://localhost:3001/api/v1/admin/oauth-clients?search=openid&created_from=2026-07-01&created_to=2026-07-10&sort=-created_at" \
+  -H "Authorization: Bearer <admin_access_token>"
+```
+
+Exact dates use OR within the Created field and cannot be combined with range bounds:
+
+```bash
+curl "http://localhost:3001/api/v1/admin/oauth-clients?created_dates=2026-07-01,2026-07-10&sort=-created_at" \
+  -H "Authorization: Bearer <admin_access_token>"
+```
+
+Field-scoped search values in one field use OR, while separate fields use AND:
+
+```bash
+curl --get "http://localhost:3001/api/v1/admin/oauth-clients" \
+  --data-urlencode 'search_filters=[{"field":"client","values":["console","portal"]},{"field":"client_type","values":["public"]}]' \
   -H "Authorization: Bearer <admin_access_token>"
 ```
 

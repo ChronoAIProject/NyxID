@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useNavigate, useSearch } from "@tanstack/react-router";
 import {
   useAdminOAuthClients,
   useBrokerSettings,
@@ -6,20 +7,39 @@ import {
   useUpdateBrokerSettings,
 } from "@/hooks/use-admin-oauth-clients";
 import { ApiError } from "@/lib/api-client";
-import { formatDate } from "@/lib/utils";
+import { cn, formatDate } from "@/lib/utils";
 import { canAdminWrite } from "@/types/api";
 import type {
   AdminOAuthClient,
+  AdminOAuthClientFilterKey,
+  AdminOAuthClientFilterSelections,
+  AdminOAuthClientListParams,
+  AdminOAuthClientSearchFieldKey,
+  AdminOAuthClientSearchState,
+  AdminOAuthClientSort,
   BrokerSettingsResponse,
   BrokerPolicyField,
   UpdateAdminOAuthClientRequest,
   UpdateBrokerSettingsRequest,
 } from "@/types/admin";
+import type { DataTableSearchApplyMode } from "@/types/data-table";
 import { useAuthStore } from "@/stores/auth-store";
 import { PageHeader } from "@/components/shared/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import {
   Card,
   CardContent,
@@ -44,8 +64,39 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { AlertTriangle, KeyRound, RotateCcw } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowDown,
+  ArrowUp,
+  ArrowUpDown,
+  ChevronLeft,
+  ChevronRight,
+  GripVertical,
+  KeyRound,
+  Loader2,
+  Pin,
+  PinOff,
+  RotateCcw,
+} from "lucide-react";
 import { toast } from "sonner";
+import {
+  adminOAuthClientFilterPatch,
+  getAppliedAdminOAuthClientFilters,
+  getAdminOAuthClientFilterFields,
+  getAdminOAuthClientFilterValues,
+  getAdminOAuthClientSearchFields,
+  getAdminOAuthClientSearchFilters,
+  isAdminOAuthClientDateFilterValid,
+  normalizeAdminOAuthClientSearch,
+  parseAdminOAuthClientSearchFilters,
+  updateAdminOAuthClientSearchFilters,
+} from "@/lib/admin-oauth-clients";
+import {
+  DataTableControls,
+  DataTableFilterChips,
+  DataTableFilterPopover,
+  DataTableSearch,
+} from "@/components/data-table/data-table-controls";
 
 type ClientAction = {
   readonly client: AdminOAuthClient;
@@ -71,16 +122,459 @@ const SETTING_LABELS: Record<BrokerSettingKey, string> = {
 };
 
 const BROKER_BINDING_SCOPE = "urn:nyxid:scope:broker_binding";
+const DEFAULT_PER_PAGE = 25;
+const DEFAULT_SORT: AdminOAuthClientSort = "-created_at";
+
+const FALLBACK_SORTS: readonly AdminOAuthClientSort[] = [
+  "-created_at",
+  "created_at",
+  "client_name",
+  "-client_name",
+  "client_type",
+  "-client_type",
+  "created_by",
+  "-created_by",
+  "broker",
+  "-broker",
+  "allowed_scopes",
+  "-allowed_scopes",
+  "-is_active",
+  "is_active",
+];
+
+type OAuthClientSortField =
+  | "client_name"
+  | "client_type"
+  | "created_by"
+  | "broker"
+  | "is_active"
+  | "allowed_scopes"
+  | "created_at";
+
+type OAuthClientColumn = {
+  readonly field: OAuthClientSortField;
+  readonly label: string;
+  readonly width: number;
+  readonly cellClassName?: string;
+};
+
+const OAUTH_CLIENT_COLUMNS: readonly OAuthClientColumn[] = [
+  {
+    field: "client_name",
+    label: "Client",
+    width: 260,
+  },
+  {
+    field: "client_type",
+    label: "Type",
+    width: 140,
+  },
+  {
+    field: "created_by",
+    label: "Created By",
+    width: 200,
+    cellClassName: "font-mono text-[11px] text-muted-foreground",
+  },
+  {
+    field: "broker",
+    label: "Broker",
+    width: 280,
+  },
+  {
+    field: "is_active",
+    label: "Status",
+    width: 170,
+  },
+  {
+    field: "allowed_scopes",
+    label: "Allowed Scopes",
+    width: 320,
+    cellClassName: "max-w-[320px]",
+  },
+  {
+    field: "created_at",
+    label: "Created",
+    width: 190,
+    cellClassName: "whitespace-nowrap text-sm text-muted-foreground",
+  },
+];
+
+const DEFAULT_COLUMN_ORDER = OAUTH_CLIENT_COLUMNS.map((column) => column.field);
+const OAUTH_CLIENT_TABLE_WIDTH = OAUTH_CLIENT_COLUMNS.reduce(
+  (width, column) => width + column.width,
+  0,
+);
+const COLUMN_PREFERENCES_VERSION = 1;
+
+type ColumnPreferences = {
+  readonly version: typeof COLUMN_PREFERENCES_VERSION;
+  readonly order: readonly OAuthClientSortField[];
+  readonly frozenThrough: OAuthClientSortField | null;
+};
+
+type ColumnDropTarget = {
+  readonly field: OAuthClientSortField;
+  readonly position: "before" | "after";
+};
+
+function getColumn(field: OAuthClientSortField): OAuthClientColumn {
+  const column = OAUTH_CLIENT_COLUMNS.find((item) => item.field === field);
+  if (!column) throw new Error(`Unknown OAuth client column: ${field}`);
+  return column;
+}
+
+function isColumnField(value: unknown): value is OAuthClientSortField {
+  return OAUTH_CLIENT_COLUMNS.some((column) => column.field === value);
+}
+
+function isCompleteColumnOrder(
+  value: unknown,
+): value is OAuthClientSortField[] {
+  return (
+    Array.isArray(value) &&
+    value.length === OAUTH_CLIENT_COLUMNS.length &&
+    value.every(isColumnField) &&
+    new Set(value).size === OAUTH_CLIENT_COLUMNS.length
+  );
+}
+
+function columnPreferencesKey(userId: string | undefined): string | null {
+  return userId
+    ? `nyxid:admin-oauth-clients:columns:v${String(COLUMN_PREFERENCES_VERSION)}:${userId}`
+    : null;
+}
+
+function readColumnPreferences(userId: string | undefined): ColumnPreferences {
+  const fallback: ColumnPreferences = {
+    version: COLUMN_PREFERENCES_VERSION,
+    order: DEFAULT_COLUMN_ORDER,
+    frozenThrough: null,
+  };
+  const key = columnPreferencesKey(userId);
+  if (!key || typeof window === "undefined") return fallback;
+
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(key) ?? "null") as {
+      version?: unknown;
+      order?: unknown;
+      frozenThrough?: unknown;
+    } | null;
+    if (
+      parsed?.version !== COLUMN_PREFERENCES_VERSION ||
+      !isCompleteColumnOrder(parsed.order) ||
+      (parsed.frozenThrough !== null && !isColumnField(parsed.frozenThrough))
+    ) {
+      return fallback;
+    }
+    return {
+      version: COLUMN_PREFERENCES_VERSION,
+      order: parsed.order,
+      frozenThrough: parsed.frozenThrough,
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+function moveColumnToIndex(
+  order: readonly OAuthClientSortField[],
+  field: OAuthClientSortField,
+  targetIndex: number,
+): OAuthClientSortField[] {
+  const sourceIndex = order.indexOf(field);
+  if (sourceIndex < 0) return [...order];
+  const next = order.filter((item) => item !== field);
+  next.splice(Math.max(0, Math.min(targetIndex, next.length)), 0, field);
+  return next;
+}
+
+function reorderColumnsForDrop(
+  order: readonly OAuthClientSortField[],
+  source: OAuthClientSortField,
+  target: OAuthClientSortField,
+  position: ColumnDropTarget["position"],
+): OAuthClientSortField[] {
+  if (source === target) return [...order];
+  const withoutSource = order.filter((field) => field !== source);
+  const targetIndex = withoutSource.indexOf(target);
+  if (targetIndex < 0) return [...order];
+  const insertionIndex = targetIndex + (position === "after" ? 1 : 0);
+  withoutSource.splice(insertionIndex, 0, source);
+  return withoutSource;
+}
+
+function frozenColumnOffsets(
+  order: readonly OAuthClientSortField[],
+  frozenThrough: OAuthClientSortField | null,
+): ReadonlyMap<OAuthClientSortField, number> {
+  const offsets = new Map<OAuthClientSortField, number>();
+  if (!frozenThrough) return offsets;
+
+  let left = 0;
+  for (const field of order) {
+    offsets.set(field, left);
+    left += getColumn(field).width;
+    if (field === frozenThrough) break;
+  }
+  return offsets;
+}
+
+const DEFAULT_COLUMN_SORT: Record<OAuthClientSortField, AdminOAuthClientSort> =
+  {
+    client_name: "client_name",
+    client_type: "client_type",
+    created_by: "created_by",
+    broker: "-broker",
+    is_active: "-is_active",
+    allowed_scopes: "allowed_scopes",
+    created_at: "-created_at",
+  };
+
+type OAuthClientSearchEditTarget =
+  | { readonly kind: "all"; readonly value: string }
+  | {
+      readonly kind: "field";
+      readonly field: AdminOAuthClientSearchFieldKey;
+      readonly value: string;
+    };
+
+function sortDirection(
+  sort: AdminOAuthClientSort,
+  field: OAuthClientSortField,
+): "ascending" | "descending" | undefined {
+  if (sort === field) return "ascending";
+  if (sort === `-${field}`) return "descending";
+  return undefined;
+}
+
+function nextColumnSort(
+  sort: AdminOAuthClientSort,
+  field: OAuthClientSortField,
+): AdminOAuthClientSort {
+  const ascending = field as AdminOAuthClientSort;
+  const descending = `-${field}` as AdminOAuthClientSort;
+  if (sort === ascending) return descending;
+  if (sort === descending) return ascending;
+  return DEFAULT_COLUMN_SORT[field];
+}
+
+function ReorderableTableHead({
+  column,
+  sort,
+  disabled,
+  frozen,
+  lastFrozen,
+  stickyLeft,
+  dragging,
+  dropPosition,
+  onSort,
+  onDragStart,
+  onDragOver,
+  onDrop,
+  onDragEnd,
+  onMoveByKeyboard,
+  onToggleFreeze,
+}: {
+  readonly column: OAuthClientColumn;
+  readonly sort: AdminOAuthClientSort;
+  readonly disabled: boolean;
+  readonly frozen: boolean;
+  readonly lastFrozen: boolean;
+  readonly stickyLeft: number | undefined;
+  readonly dragging: boolean;
+  readonly dropPosition: ColumnDropTarget["position"] | undefined;
+  readonly onSort: (sort: AdminOAuthClientSort) => void;
+  readonly onDragStart: (
+    field: OAuthClientSortField,
+    event: React.DragEvent<HTMLButtonElement>,
+  ) => void;
+  readonly onDragOver: (
+    field: OAuthClientSortField,
+    event: React.DragEvent<HTMLTableCellElement>,
+  ) => void;
+  readonly onDrop: (
+    field: OAuthClientSortField,
+    event: React.DragEvent<HTMLTableCellElement>,
+  ) => void;
+  readonly onDragEnd: () => void;
+  readonly onMoveByKeyboard: (
+    field: OAuthClientSortField,
+    key: "ArrowLeft" | "ArrowRight" | "Home" | "End",
+  ) => void;
+  readonly onToggleFreeze: (field: OAuthClientSortField) => void;
+}) {
+  const { field, label } = column;
+  const direction = sortDirection(sort, field);
+  const Icon =
+    direction === "ascending"
+      ? ArrowUp
+      : direction === "descending"
+        ? ArrowDown
+        : ArrowUpDown;
+  const next = nextColumnSort(sort, field);
+  const nextDirection = next.startsWith("-") ? "descending" : "ascending";
+
+  return (
+    <TableHead
+      aria-label={label}
+      aria-sort={direction ?? "none"}
+      data-column={field}
+      data-dragging={dragging || undefined}
+      data-drop-position={dropPosition}
+      data-frozen={frozen || undefined}
+      style={frozen ? { left: stickyLeft } : undefined}
+      onDragOver={(event) => onDragOver(field, event)}
+      onDrop={(event) => onDrop(field, event)}
+      className={cn(
+        "group/header relative h-10 p-0 transition-colors hover:bg-accent focus-within:bg-accent",
+        dragging && "opacity-55",
+        frozen && "sticky z-30 bg-card",
+        lastFrozen &&
+          "border-r-2 border-border shadow-[3px_0_6px_-4px_rgba(0,0,0,0.35)]",
+        direction && "text-foreground",
+      )}
+    >
+      {direction && (
+        <span
+          className="pointer-events-none absolute inset-0 bg-primary/[0.07]"
+          aria-hidden="true"
+        />
+      )}
+      {dropPosition && (
+        <span
+          data-testid={`column-drop-indicator-${field}`}
+          className={cn(
+            "pointer-events-none absolute inset-y-0 z-30 w-0.5 bg-primary",
+            dropPosition === "before" ? "left-0" : "right-0",
+          )}
+          aria-hidden="true"
+        />
+      )}
+      <div className="flex h-full min-w-0 items-center">
+        <button
+          type="button"
+          draggable
+          aria-label={`Move ${label} column`}
+          title={`Move ${label} column`}
+          onDragStart={(event) => onDragStart(field, event)}
+          onDragEnd={onDragEnd}
+          onKeyDown={(event) => {
+            if (
+              event.key === "ArrowLeft" ||
+              event.key === "ArrowRight" ||
+              event.key === "Home" ||
+              event.key === "End"
+            ) {
+              event.preventDefault();
+              onMoveByKeyboard(field, event.key);
+            }
+          }}
+          className="flex h-full w-7 shrink-0 cursor-grab items-center justify-center text-muted-foreground opacity-0 outline-none transition-opacity hover:text-foreground focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring active:cursor-grabbing group-hover/header:opacity-100 group-focus-within/header:opacity-100"
+        >
+          <GripVertical className="h-3.5 w-3.5" aria-hidden="true" />
+        </button>
+        <button
+          type="button"
+          className={cn(
+            "group/sort flex h-full min-w-0 flex-1 items-center gap-1.5 text-left text-[10px] font-semibold uppercase tracking-normal outline-none transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50",
+            direction && "text-foreground",
+          )}
+          disabled={disabled}
+          aria-label={`Sort by ${label}, ${nextDirection}`}
+          title={`Sort by ${label}, ${nextDirection}`}
+          onClick={() => onSort(next)}
+        >
+          <span className="truncate">{label}</span>
+          <Icon
+            className={cn(
+              "h-3.5 w-3.5 shrink-0",
+              direction
+                ? "text-primary"
+                : "text-muted-foreground/55 group-hover/sort:text-muted-foreground",
+            )}
+            aria-hidden="true"
+          />
+        </button>
+        <button
+          type="button"
+          aria-label={
+            lastFrozen
+              ? `Unfreeze columns through ${label}`
+              : `Freeze columns through ${label}`
+          }
+          title={lastFrozen ? "Unfreeze columns" : "Freeze through this column"}
+          aria-pressed={lastFrozen}
+          onClick={() => onToggleFreeze(field)}
+          className={cn(
+            "flex h-full w-7 shrink-0 items-center justify-center outline-none transition-opacity hover:text-foreground focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring group-hover/header:opacity-100 group-focus-within/header:opacity-100",
+            lastFrozen
+              ? "text-primary opacity-100"
+              : "text-muted-foreground opacity-0",
+          )}
+        >
+          {lastFrozen ? (
+            <PinOff className="h-3.5 w-3.5" aria-hidden="true" />
+          ) : (
+            <Pin className="h-3.5 w-3.5" aria-hidden="true" />
+          )}
+        </button>
+      </div>
+    </TableHead>
+  );
+}
 
 export function AdminOAuthClientsPage() {
+  const navigate = useNavigate();
+  const routeSearch = useSearch({
+    strict: false,
+  }) as AdminOAuthClientSearchState;
   const currentUser = useAuthStore((s) => s.user);
   const canWrite = canAdminWrite(currentUser);
+  const [columnPreferences, setColumnPreferences] = useState(() =>
+    readColumnPreferences(currentUser?.id),
+  );
+  const [draggingColumn, setDraggingColumn] =
+    useState<OAuthClientSortField | null>(null);
+  const [columnDropTarget, setColumnDropTarget] =
+    useState<ColumnDropTarget | null>(null);
+  const [columnAnnouncement, setColumnAnnouncement] = useState("");
+  const draggingColumnRef = useRef<OAuthClientSortField | null>(null);
+  const appliedSearch = routeSearch.search ?? "";
+  const [searchDraft, setSearchDraft] = useState("");
+  const [selectedSearchField, setSelectedSearchField] =
+    useState<AdminOAuthClientSearchFieldKey | null>(null);
+  const [editingSearch, setEditingSearch] =
+    useState<OAuthClientSearchEditTarget | null>(null);
+  const previousSearchRouteRef = useRef(
+    `${routeSearch.search ?? ""}\u0000${routeSearch.search_filters ?? ""}`,
+  );
   const [pendingClientAction, setPendingClientAction] =
     useState<ClientAction | null>(null);
   const [pendingSettingAction, setPendingSettingAction] =
     useState<SettingAction | null>(null);
+  const [filterPopoverOpen, setFilterPopoverOpen] = useState(false);
+  const [selectedFilterKey, setSelectedFilterKey] =
+    useState<AdminOAuthClientFilterKey>("is_active");
+  const searchInputRef = useRef<HTMLInputElement>(null);
 
-  const { data, isLoading, error } = useAdminOAuthClients();
+  const listParams: AdminOAuthClientListParams = {
+    page: routeSearch.page ?? 1,
+    per_page: routeSearch.per_page ?? DEFAULT_PER_PAGE,
+    search: routeSearch.search,
+    search_filters: routeSearch.search_filters,
+    client_type: routeSearch.client_type,
+    creator_type: routeSearch.creator_type,
+    broker: routeSearch.broker,
+    is_active: routeSearch.is_active,
+    scope: routeSearch.scope,
+    created_dates: routeSearch.created_dates,
+    created_from: routeSearch.created_from,
+    created_to: routeSearch.created_to,
+    sort: routeSearch.sort ?? DEFAULT_SORT,
+  };
+
+  const { data, isLoading, isFetching, isPlaceholderData, error, refetch } =
+    useAdminOAuthClients(listParams);
   const {
     data: brokerSettings,
     isLoading: settingsLoading,
@@ -90,6 +584,374 @@ export function AdminOAuthClientsPage() {
   const updateSettings = useUpdateBrokerSettings();
 
   const clients = data?.clients ?? [];
+  const total = data?.total ?? 0;
+  const totalPages = Math.max(1, Math.ceil(total / listParams.per_page));
+  const displayedPage = data?.page ?? listParams.page;
+  const displayedPerPage = data?.per_page ?? listParams.per_page;
+  const displayedTotalPages = Math.max(1, Math.ceil(total / displayedPerPage));
+  const filterOptions = data?.filter_options;
+  const filterFields = getAdminOAuthClientFilterFields(filterOptions);
+  const searchFields = getAdminOAuthClientSearchFields(filterOptions);
+  const appliedSearchFilters = getAdminOAuthClientSearchFilters(listParams);
+  const appliedStructuredFilters = getAppliedAdminOAuthClientFilters(
+    filterFields,
+    listParams,
+  );
+  const filterSelections: AdminOAuthClientFilterSelections = {};
+  for (const field of filterFields) {
+    filterSelections[field.key] = getAdminOAuthClientFilterValues(
+      listParams,
+      field.key,
+    );
+  }
+  const availableSorts = new Set(filterOptions?.sorts ?? FALLBACK_SORTS);
+  const hasActiveFilters = Boolean(
+    listParams.search ||
+    appliedSearchFilters.length > 0 ||
+    appliedStructuredFilters.length > 0,
+  );
+  const columnOrder = columnPreferences.order;
+  const frozenThrough = columnPreferences.frozenThrough;
+  const stickyOffsets = frozenColumnOffsets(columnOrder, frozenThrough);
+
+  const updateListSearch = useCallback(
+    (patch: Partial<AdminOAuthClientSearchState>, replace = false) => {
+      void navigate({
+        to: "/admin/oauth-clients",
+        search: (previous) =>
+          normalizeAdminOAuthClientSearch({ ...previous, ...patch }),
+        replace,
+      });
+    },
+    [navigate],
+  );
+
+  useEffect(() => {
+    if (!isPlaceholderData && total > 0 && listParams.page > totalPages) {
+      updateListSearch({ page: totalPages }, true);
+    }
+  }, [isPlaceholderData, listParams.page, total, totalPages, updateListSearch]);
+
+  useEffect(() => {
+    const nextRoute = `${routeSearch.search ?? ""}\u0000${
+      routeSearch.search_filters ?? ""
+    }`;
+    if (nextRoute === previousSearchRouteRef.current) return;
+    previousSearchRouteRef.current = nextRoute;
+    const resetTimer = window.setTimeout(() => {
+      setSearchDraft("");
+      setEditingSearch(null);
+    }, 0);
+    return () => window.clearTimeout(resetTimer);
+  }, [routeSearch.search, routeSearch.search_filters]);
+
+  useEffect(() => {
+    const key = columnPreferencesKey(currentUser?.id);
+    if (!key || typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(key, JSON.stringify(columnPreferences));
+    } catch {
+      // Table preferences are non-critical when storage is unavailable.
+    }
+  }, [columnPreferences, currentUser?.id]);
+
+  function clearSearchAndFilters() {
+    updateListSearch({
+      page: undefined,
+      search: undefined,
+      search_filters: undefined,
+      client_type: undefined,
+      creator_type: undefined,
+      broker: undefined,
+      is_active: undefined,
+      scope: undefined,
+      created_dates: undefined,
+      created_from: undefined,
+      created_to: undefined,
+    });
+  }
+
+  function focusSearchInput() {
+    window.requestAnimationFrame(() => {
+      searchInputRef.current?.focus();
+      searchInputRef.current?.select();
+    });
+  }
+
+  function cancelSearchDraft() {
+    setSearchDraft("");
+    setEditingSearch(null);
+  }
+
+  function removeScopedSearchValue(
+    field: AdminOAuthClientSearchFieldKey,
+    value: string,
+    navigate = true,
+  ): string | undefined {
+    const current = parseAdminOAuthClientSearchFilters(
+      listParams.search_filters,
+    );
+    const values =
+      current
+        ?.find((group) => group.field === field)
+        ?.values.filter(
+          (item) => item.toLocaleLowerCase() !== value.toLocaleLowerCase(),
+        ) ?? [];
+    const next = updateAdminOAuthClientSearchFilters(
+      listParams.search_filters,
+      field,
+      values.length > 0 ? values : undefined,
+    );
+    if (navigate) {
+      updateListSearch({ page: undefined, search_filters: next });
+      if (
+        editingSearch?.kind === "field" &&
+        editingSearch.field === field &&
+        editingSearch.value.toLocaleLowerCase() === value.toLocaleLowerCase()
+      ) {
+        cancelSearchDraft();
+      }
+    }
+    return next;
+  }
+
+  function applySearchDraft(mode: DataTableSearchApplyMode) {
+    const term = searchDraft.trim();
+    if (!term) return;
+
+    let nextLegacySearch = listParams.search;
+    let nextScopedSearch = listParams.search_filters;
+    if (editingSearch?.kind === "all") {
+      nextLegacySearch = undefined;
+    } else if (editingSearch?.kind === "field") {
+      const current = parseAdminOAuthClientSearchFilters(nextScopedSearch);
+      const remaining =
+        current
+          ?.find((group) => group.field === editingSearch.field)
+          ?.values.filter(
+            (value) =>
+              value.toLocaleLowerCase() !==
+              editingSearch.value.toLocaleLowerCase(),
+          ) ?? [];
+      nextScopedSearch = updateAdminOAuthClientSearchFilters(
+        nextScopedSearch,
+        editingSearch.field,
+        remaining.length > 0 ? remaining : undefined,
+      );
+    }
+
+    if (selectedSearchField === null) {
+      nextLegacySearch = term;
+    } else {
+      const current =
+        parseAdminOAuthClientSearchFilters(nextScopedSearch) ?? [];
+      const values =
+        current.find((group) => group.field === selectedSearchField)?.values ??
+        [];
+      const duplicate = values.some(
+        (value) => value.toLocaleLowerCase() === term.toLocaleLowerCase(),
+      );
+      const nextValues = duplicate ? values : [...values, term];
+      const encoded = updateAdminOAuthClientSearchFilters(
+        nextScopedSearch,
+        selectedSearchField,
+        nextValues,
+      );
+      if (!encoded) {
+        toast.error("Search supports up to 8 values per field and 32 overall");
+        return;
+      }
+      nextScopedSearch = encoded;
+    }
+
+    updateListSearch({
+      page: undefined,
+      search: nextLegacySearch,
+      search_filters: nextScopedSearch,
+    });
+    cancelSearchDraft();
+    if (mode === "submit") {
+      setSelectedSearchField(null);
+      focusSearchInput();
+    }
+  }
+
+  function editLegacySearch() {
+    setSelectedSearchField(null);
+    setSearchDraft(appliedSearch);
+    setEditingSearch({ kind: "all", value: appliedSearch });
+    focusSearchInput();
+  }
+
+  function editScopedSearchValue(
+    field: AdminOAuthClientSearchFieldKey,
+    value: string,
+  ) {
+    setSelectedSearchField(field);
+    setSearchDraft(value);
+    setEditingSearch({ kind: "field", field, value });
+    focusSearchInput();
+  }
+
+  function applyStructuredFilters(
+    selections: AdminOAuthClientFilterSelections,
+  ) {
+    const patch: Partial<AdminOAuthClientSearchState> = { page: undefined };
+    for (const field of filterFields) {
+      const fieldPatch = adminOAuthClientFilterPatch(
+        field.key,
+        selections[field.key],
+      );
+      if (!fieldPatch) return;
+      Object.assign(patch, fieldPatch);
+    }
+    updateListSearch(patch);
+  }
+
+  function removeStructuredFilter(key: AdminOAuthClientFilterKey) {
+    const patch = adminOAuthClientFilterPatch(key, undefined);
+    if (patch) updateListSearch({ page: undefined, ...patch });
+  }
+
+  function editStructuredFilter(key: AdminOAuthClientFilterKey) {
+    setSelectedFilterKey(key);
+    setFilterPopoverOpen(true);
+  }
+
+  function updateSort(sort: AdminOAuthClientSort) {
+    updateListSearch({
+      page: undefined,
+      sort: sort === DEFAULT_SORT ? undefined : sort,
+    });
+  }
+
+  function canSortColumn(field: OAuthClientSortField) {
+    return (
+      availableSorts.has(field as AdminOAuthClientSort) &&
+      availableSorts.has(`-${field}` as AdminOAuthClientSort)
+    );
+  }
+
+  function announceColumnPosition(
+    field: OAuthClientSortField,
+    order: readonly OAuthClientSortField[],
+  ) {
+    setColumnAnnouncement(
+      `${getColumn(field).label} column moved to position ${String(
+        order.indexOf(field) + 1,
+      )} of ${String(order.length)}`,
+    );
+  }
+
+  function updateColumnOrder(
+    nextOrder: readonly OAuthClientSortField[],
+    movedField: OAuthClientSortField,
+  ) {
+    setColumnPreferences((previous) => ({
+      ...previous,
+      order: nextOrder,
+    }));
+    announceColumnPosition(movedField, nextOrder);
+  }
+
+  function handleColumnDragStart(
+    field: OAuthClientSortField,
+    event: React.DragEvent<HTMLButtonElement>,
+  ) {
+    draggingColumnRef.current = field;
+    setDraggingColumn(field);
+    setColumnDropTarget(null);
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", field);
+  }
+
+  function dropPositionForEvent(
+    event: React.DragEvent<HTMLTableCellElement>,
+  ): ColumnDropTarget["position"] {
+    const bounds = event.currentTarget.getBoundingClientRect();
+    return event.clientX < bounds.left + bounds.width / 2 ? "before" : "after";
+  }
+
+  function handleColumnDragOver(
+    field: OAuthClientSortField,
+    event: React.DragEvent<HTMLTableCellElement>,
+  ) {
+    const source = draggingColumnRef.current;
+    if (!source || source === field) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    const nextTarget: ColumnDropTarget = {
+      field,
+      position: dropPositionForEvent(event),
+    };
+    setColumnDropTarget((current) =>
+      current?.field === nextTarget.field &&
+      current.position === nextTarget.position
+        ? current
+        : nextTarget,
+    );
+  }
+
+  function clearColumnDragState() {
+    draggingColumnRef.current = null;
+    setDraggingColumn(null);
+    setColumnDropTarget(null);
+  }
+
+  function handleColumnDrop(
+    field: OAuthClientSortField,
+    event: React.DragEvent<HTMLTableCellElement>,
+  ) {
+    const transferredField = event.dataTransfer.getData("text/plain");
+    const source =
+      draggingColumnRef.current ??
+      (isColumnField(transferredField) ? transferredField : null);
+    if (!source || source === field) {
+      clearColumnDragState();
+      return;
+    }
+
+    event.preventDefault();
+    const position =
+      columnDropTarget?.field === field
+        ? columnDropTarget.position
+        : dropPositionForEvent(event);
+    const nextOrder = reorderColumnsForDrop(
+      columnOrder,
+      source,
+      field,
+      position,
+    );
+    updateColumnOrder(nextOrder, source);
+    clearColumnDragState();
+  }
+
+  function handleColumnKeyboardMove(
+    field: OAuthClientSortField,
+    key: "ArrowLeft" | "ArrowRight" | "Home" | "End",
+  ) {
+    const sourceIndex = columnOrder.indexOf(field);
+    const targetIndex =
+      key === "Home"
+        ? 0
+        : key === "End"
+          ? columnOrder.length - 1
+          : key === "ArrowLeft"
+            ? Math.max(0, sourceIndex - 1)
+            : Math.min(columnOrder.length - 1, sourceIndex + 1);
+    if (sourceIndex < 0 || sourceIndex === targetIndex) return;
+    updateColumnOrder(
+      moveColumnToIndex(columnOrder, field, targetIndex),
+      field,
+    );
+  }
+
+  function toggleFrozenColumns(field: OAuthClientSortField) {
+    setColumnPreferences((previous) => ({
+      ...previous,
+      frozenThrough: previous.frozenThrough === field ? null : field,
+    }));
+  }
 
   function stageBrokerCapability(client: AdminOAuthClient, enabled: boolean) {
     const removingLegacyScope =
@@ -184,6 +1046,91 @@ export function AdminOAuthClientsPage() {
     }
   }
 
+  function renderOAuthClientCell(
+    client: AdminOAuthClient,
+    field: OAuthClientSortField,
+  ): React.ReactNode {
+    switch (field) {
+      case "client_name":
+        return (
+          <div className="min-w-0 space-y-1">
+            <p className="truncate text-sm font-medium text-foreground">
+              {client.client_name}
+            </p>
+            <p className="truncate font-mono text-[11px] text-muted-foreground">
+              {client.id}
+            </p>
+          </div>
+        );
+      case "client_type":
+        return <Badge variant="secondary">{client.client_type}</Badge>;
+      case "created_by":
+        return (
+          <span className="break-all">{client.created_by ?? "ownerless"}</span>
+        );
+      case "broker":
+        return canWrite ? (
+          <div className="flex items-center gap-2.5">
+            <Switch
+              aria-label={`Toggle broker capability for ${client.client_name} (${client.id})`}
+              checked={client.broker_capability_effective}
+              disabled={
+                isFetching ||
+                (updateClient.isPending &&
+                  updateClient.variables?.clientId === client.id)
+              }
+              onCheckedChange={(checked) =>
+                stageBrokerCapability(client, checked)
+              }
+            />
+            <span className="whitespace-nowrap text-[11px] font-medium text-foreground">
+              {client.broker_capability_effective
+                ? "Broker enabled"
+                : "No broker"}
+            </span>
+            <BrokerSourceBadge source={client.broker_capability_source} />
+          </div>
+        ) : (
+          <div className="flex items-center gap-2">
+            <ClientStateBadge
+              active={client.broker_capability_effective}
+              activeLabel="Broker enabled"
+              inactiveLabel="No broker"
+            />
+            <BrokerSourceBadge source={client.broker_capability_source} />
+          </div>
+        );
+      case "is_active":
+        return canWrite ? (
+          <div className="flex items-center gap-2.5">
+            <Switch
+              aria-label={`Toggle active status for ${client.client_name} (${client.id})`}
+              checked={client.is_active}
+              disabled={
+                isFetching ||
+                (updateClient.isPending &&
+                  updateClient.variables?.clientId === client.id)
+              }
+              onCheckedChange={(checked) => stageActive(client, checked)}
+            />
+            <span className="whitespace-nowrap text-[11px] font-medium text-foreground">
+              {client.is_active ? "Active" : "Inactive"}
+            </span>
+          </div>
+        ) : (
+          <ClientStateBadge
+            active={client.is_active}
+            activeLabel="Active"
+            inactiveLabel="Inactive"
+          />
+        );
+      case "allowed_scopes":
+        return <ScopeList scopes={client.allowed_scopes} />;
+      case "created_at":
+        return formatDate(client.created_at);
+    }
+  }
+
   return (
     <div className="space-y-8">
       <PageHeader
@@ -201,119 +1148,323 @@ export function AdminOAuthClientsPage() {
         />
       )}
 
-      {isLoading ? (
-        <div className="space-y-2">
-          {Array.from({ length: 5 }).map((_, i) => (
-            <Skeleton
-              key={`oauth-client-skel-${String(i)}`}
-              className="h-12 w-full"
+      <section
+        className="m-0 overflow-hidden rounded-lg border border-border/60 bg-card"
+        aria-label="OAuth clients"
+      >
+        <DataTableControls
+          search={
+            <DataTableSearch
+              fields={searchFields}
+              value={searchDraft}
+              selectedField={selectedSearchField}
+              inputRef={searchInputRef}
+              ariaLabel="Search OAuth clients"
+              onValueChange={setSearchDraft}
+              onFieldChange={setSelectedSearchField}
+              onApply={applySearchDraft}
+              onCancel={cancelSearchDraft}
             />
-          ))}
-        </div>
-      ) : error ? (
-        <div className="flex flex-col items-center justify-center gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-12 text-center">
-          <AlertTriangle className="h-8 w-8 text-destructive" />
-          <p className="text-sm font-medium text-destructive">
-            Failed to load OAuth clients
-          </p>
-        </div>
-      ) : clients.length === 0 ? (
-        <div className="flex flex-col items-center justify-center gap-3 rounded-lg border border-border/50 bg-card px-4 py-14 text-center">
-          <KeyRound className="h-10 w-10 text-muted-foreground" />
-          <div>
-            <p className="text-sm font-medium text-foreground">
-              No OAuth clients
-            </p>
-            <p className="text-xs text-muted-foreground">
-              Registered clients will appear here.
-            </p>
+          }
+          filter={
+            <DataTableFilterPopover
+              fields={filterFields}
+              values={filterSelections}
+              open={filterPopoverOpen}
+              selectedKey={selectedFilterKey}
+              activeCount={
+                appliedStructuredFilters.length +
+                appliedSearchFilters.length +
+                (appliedSearch ? 1 : 0)
+              }
+              validateValues={(field, values) =>
+                field.value_type !== "date" ||
+                isAdminOAuthClientDateFilterValid(values)
+              }
+              onOpenChange={setFilterPopoverOpen}
+              onSelectField={setSelectedFilterKey}
+              onApply={applyStructuredFilters}
+            />
+          }
+          status={
+            isFetching && !isLoading ? (
+              <div
+                role="status"
+                aria-live="polite"
+                className="flex items-center gap-1.5 text-xs text-muted-foreground"
+              >
+                <Loader2
+                  className="h-3.5 w-3.5 animate-spin"
+                  aria-hidden="true"
+                />
+                <span>Updating results</span>
+              </div>
+            ) : null
+          }
+          chips={
+            <DataTableFilterChips
+              search={appliedSearch}
+              searchFields={searchFields}
+              searchFilters={appliedSearchFilters}
+              filters={appliedStructuredFilters}
+              onEditSearch={editLegacySearch}
+              onRemoveSearch={() =>
+                updateListSearch({ page: undefined, search: undefined })
+              }
+              onEditSearchValue={editScopedSearchValue}
+              onRemoveSearchValue={removeScopedSearchValue}
+              onEdit={editStructuredFilter}
+              onRemove={removeStructuredFilter}
+              onClear={clearSearchAndFilters}
+            />
+          }
+        />
+
+        {error && data && (
+          <div
+            role="alert"
+            className="flex flex-col gap-3 border-b border-destructive/25 bg-destructive/5 px-3 py-2.5 text-sm sm:flex-row sm:items-center sm:justify-between"
+          >
+            <div className="flex items-center gap-2 text-destructive">
+              <AlertTriangle className="h-4 w-4 shrink-0" aria-hidden="true" />
+              <span>
+                Results may be out of date because the refresh failed.
+              </span>
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={isFetching}
+              onClick={() => void refetch()}
+            >
+              Retry
+            </Button>
           </div>
-        </div>
-      ) : (
-        <div className="overflow-x-auto rounded-xl border border-border/50 bg-card">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Client</TableHead>
-                <TableHead>Type</TableHead>
-                <TableHead>Created By</TableHead>
-                <TableHead>Broker</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead>Allowed Scopes</TableHead>
-                <TableHead>Created</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {clients.map((client) => (
-                <TableRow key={client.id}>
-                  <TableCell className="min-w-[220px]">
-                    <div className="space-y-1">
-                      <p className="text-sm font-medium text-foreground">
-                        {client.client_name}
-                      </p>
-                      <p className="font-mono text-[11px] text-muted-foreground">
-                        {client.id}
-                      </p>
-                    </div>
-                  </TableCell>
-                  <TableCell>
-                    <Badge variant="secondary">{client.client_type}</Badge>
-                  </TableCell>
-                  <TableCell className="min-w-[170px]">
-                    <span className="font-mono text-[11px] text-muted-foreground">
-                      {client.created_by ?? "ownerless"}
-                    </span>
-                  </TableCell>
-                  <TableCell>
-                    {canWrite ? (
-                      <div className="flex items-center gap-2">
-                        <Switch
-                          aria-label={`Toggle broker capability for ${client.client_name}`}
-                          checked={client.broker_capability_effective}
-                          disabled={updateClient.isPending}
-                          onCheckedChange={(checked) =>
-                            stageBrokerCapability(client, checked)
+        )}
+
+        {isLoading || (isPlaceholderData && clients.length === 0) ? (
+          <div
+            className="space-y-2 p-3"
+            role="status"
+            aria-live="polite"
+            aria-label={
+              isLoading ? "Loading OAuth clients" : "Updating OAuth clients"
+            }
+          >
+            {Array.from({ length: 5 }).map((_, i) => (
+              <Skeleton
+                key={`oauth-client-skel-${String(i)}`}
+                className="h-12 w-full"
+              />
+            ))}
+          </div>
+        ) : error && !data ? (
+          <div
+            role="alert"
+            className="flex min-h-56 flex-col items-center justify-center gap-2 bg-destructive/5 px-4 py-12 text-center"
+          >
+            <AlertTriangle
+              className="h-8 w-8 text-destructive"
+              aria-hidden="true"
+            />
+            <p className="text-sm font-medium text-destructive">
+              Failed to load OAuth clients
+            </p>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => void refetch()}
+            >
+              Retry
+            </Button>
+          </div>
+        ) : clients.length === 0 ? (
+          <div className="flex min-h-56 flex-col items-center justify-center gap-3 px-4 py-14 text-center">
+            <KeyRound className="h-10 w-10 text-muted-foreground" />
+            <div>
+              <p className="text-sm font-medium text-foreground">
+                {hasActiveFilters
+                  ? "No clients match these filters"
+                  : "No OAuth clients"}
+              </p>
+              <p className="text-xs text-muted-foreground">
+                {hasActiveFilters
+                  ? "Adjust or clear the current filters."
+                  : "Registered clients will appear here."}
+              </p>
+              {hasActiveFilters && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="mt-3"
+                  onClick={clearSearchAndFilters}
+                >
+                  Clear search and filters
+                </Button>
+              )}
+            </div>
+          </div>
+        ) : (
+          <>
+            <div
+              className={`transition-opacity motion-reduce:transition-none ${
+                isPlaceholderData ? "opacity-60" : ""
+              }`}
+              aria-busy={isFetching}
+            >
+              <p className="sr-only" aria-live="polite" aria-atomic="true">
+                {columnAnnouncement}
+              </p>
+              <Table
+                containerClassName="overscroll-x-none"
+                className="table-fixed [&_td]:py-1.5"
+                style={{ minWidth: OAUTH_CLIENT_TABLE_WIDTH }}
+              >
+                <colgroup>
+                  {columnOrder.map((field) => (
+                    <col
+                      key={field}
+                      style={{ width: getColumn(field).width }}
+                    />
+                  ))}
+                </colgroup>
+                <TableHeader>
+                  <TableRow>
+                    {columnOrder.map((field) => {
+                      const column = getColumn(field);
+                      return (
+                        <ReorderableTableHead
+                          key={field}
+                          column={column}
+                          sort={listParams.sort}
+                          disabled={!canSortColumn(field)}
+                          frozen={stickyOffsets.has(field)}
+                          lastFrozen={frozenThrough === field}
+                          stickyLeft={stickyOffsets.get(field)}
+                          dragging={draggingColumn === field}
+                          dropPosition={
+                            columnDropTarget?.field === field
+                              ? columnDropTarget.position
+                              : undefined
                           }
+                          onSort={updateSort}
+                          onDragStart={handleColumnDragStart}
+                          onDragOver={handleColumnDragOver}
+                          onDrop={handleColumnDrop}
+                          onDragEnd={clearColumnDragState}
+                          onMoveByKeyboard={handleColumnKeyboardMove}
+                          onToggleFreeze={toggleFrozenColumns}
                         />
-                        <BrokerSourceBadge
-                          source={client.broker_capability_source}
-                        />
-                      </div>
-                    ) : (
-                      <div className="flex items-center gap-2">
-                        <BoolBadge value={client.broker_capability_effective} />
-                        <BrokerSourceBadge
-                          source={client.broker_capability_source}
-                        />
-                      </div>
-                    )}
-                  </TableCell>
-                  <TableCell>
-                    {canWrite ? (
-                      <Switch
-                        aria-label={`Toggle active status for ${client.client_name}`}
-                        checked={client.is_active}
-                        disabled={updateClient.isPending}
-                        onCheckedChange={(checked) =>
-                          stageActive(client, checked)
-                        }
-                      />
-                    ) : (
-                      <BoolBadge value={client.is_active} />
-                    )}
-                  </TableCell>
-                  <TableCell className="min-w-[260px] max-w-[360px]">
-                    <ScopeList scopes={client.allowed_scopes} />
-                  </TableCell>
-                  <TableCell className="whitespace-nowrap text-sm text-muted-foreground">
-                    {formatDate(client.created_at)}
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </div>
-      )}
+                      );
+                    })}
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {clients.map((client) => (
+                    <TableRow
+                      key={client.id}
+                      className="group/row hover:bg-muted/45"
+                    >
+                      {columnOrder.map((field) => {
+                        const column = getColumn(field);
+                        const frozen = stickyOffsets.has(field);
+                        return (
+                          <TableCell
+                            key={field}
+                            data-column={field}
+                            data-frozen={frozen || undefined}
+                            style={
+                              frozen
+                                ? { left: stickyOffsets.get(field) }
+                                : undefined
+                            }
+                            className={cn(
+                              column.cellClassName,
+                              frozen &&
+                                "sticky z-20 bg-card group-hover/row:bg-muted",
+                              frozenThrough === field &&
+                                "border-r-2 border-border shadow-[3px_0_6px_-4px_rgba(0,0,0,0.35)]",
+                            )}
+                          >
+                            {renderOAuthClientCell(client, field)}
+                          </TableCell>
+                        );
+                      })}
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+
+            <div className="flex flex-col gap-3 border-t border-border/60 px-3 py-3 sm:flex-row sm:items-center sm:justify-between">
+              <p className="text-[11px] text-text-tertiary">
+                Showing {String((displayedPage - 1) * displayedPerPage + 1)}-
+                {String(Math.min(displayedPage * displayedPerPage, total))} of{" "}
+                {String(total)} clients
+              </p>
+              <div className="flex flex-wrap items-center gap-2">
+                <Select
+                  value={String(listParams.per_page)}
+                  disabled={isFetching}
+                  onValueChange={(value) =>
+                    updateListSearch({
+                      page: undefined,
+                      per_page:
+                        Number(value) === DEFAULT_PER_PAGE
+                          ? undefined
+                          : (Number(value) as 50 | 100),
+                    })
+                  }
+                >
+                  <SelectTrigger
+                    aria-label="Rows per page"
+                    className="w-[112px]"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="25">25 rows</SelectItem>
+                    <SelectItem value="50">50 rows</SelectItem>
+                    <SelectItem value="100">100 rows</SelectItem>
+                  </SelectContent>
+                </Select>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon"
+                  className="h-11 w-11 md:h-8 md:w-8"
+                  disabled={listParams.page <= 1 || isFetching}
+                  onClick={() =>
+                    updateListSearch({ page: Math.max(1, listParams.page - 1) })
+                  }
+                  aria-label="Previous page"
+                >
+                  <ChevronLeft />
+                </Button>
+                <span className="min-w-[84px] text-center text-[11px] text-text-tertiary">
+                  Page {String(displayedPage)} of {String(displayedTotalPages)}
+                </span>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon"
+                  className="h-11 w-11 md:h-8 md:w-8"
+                  disabled={listParams.page >= totalPages || isFetching}
+                  onClick={() =>
+                    updateListSearch({ page: listParams.page + 1 })
+                  }
+                  aria-label="Next page"
+                >
+                  <ChevronRight />
+                </Button>
+              </div>
+            </div>
+          </>
+        )}
+      </section>
 
       <Dialog
         open={canWrite && pendingClientAction !== null}
@@ -515,7 +1666,23 @@ function BrokerSourceBadge({
   if (source === "none") return null;
   return (
     <Badge variant="secondary" className="whitespace-nowrap">
-      {source === "flag" ? "Flag" : "Scope"}
+      {source === "flag" ? "Admin grant" : "Broker scope"}
+    </Badge>
+  );
+}
+
+function ClientStateBadge({
+  active,
+  activeLabel,
+  inactiveLabel,
+}: {
+  readonly active: boolean;
+  readonly activeLabel: string;
+  readonly inactiveLabel: string;
+}) {
+  return (
+    <Badge variant={active ? "success" : "secondary"}>
+      {active ? activeLabel : inactiveLabel}
     </Badge>
   );
 }
@@ -533,18 +1700,50 @@ function ScopeList({ scopes }: { readonly scopes: string }) {
   if (items.length === 0) {
     return <span className="text-sm text-muted-foreground">None</span>;
   }
+  const visibleItems = items.slice(0, 3);
+  const hiddenItems = items.slice(3);
+
   return (
-    <div className="flex flex-wrap gap-1.5">
-      {items.map((scope) => (
-        <Badge
-          key={scope}
-          variant="secondary"
-          className="font-mono text-[10px]"
+    <Popover>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          className="flex max-w-full items-center gap-1.5 rounded-md text-left outline-none transition-colors hover:bg-muted/50 focus-visible:ring-2 focus-visible:ring-ring"
+          aria-label={`View all ${String(items.length)} allowed scopes: ${items.join(", ")}`}
+          title={items.join("\n")}
         >
-          {scope}
-        </Badge>
-      ))}
-    </div>
+          {visibleItems.map((scope) => (
+            <span
+              key={scope}
+              className="inline-flex max-w-[112px] truncate rounded-md bg-muted px-2 py-0.5 font-mono text-[10px] font-medium text-muted-foreground"
+            >
+              {scope}
+            </span>
+          ))}
+          {hiddenItems.length > 0 && (
+            <span className="inline-flex h-6 shrink-0 items-center rounded-md border border-border/80 bg-muted px-2 text-[10px] font-medium text-muted-foreground">
+              +{String(hiddenItems.length)} more
+            </span>
+          )}
+        </button>
+      </PopoverTrigger>
+      <PopoverContent align="end" className="w-80 rounded-lg p-3">
+        <p className="mb-2 text-xs font-semibold text-foreground">
+          Allowed scopes
+        </p>
+        <div className="flex max-h-56 flex-wrap gap-1.5 overflow-y-auto">
+          {items.map((scope) => (
+            <Badge
+              key={scope}
+              variant="secondary"
+              className="max-w-full break-all font-mono text-[10px]"
+            >
+              {scope}
+            </Badge>
+          ))}
+        </div>
+      </PopoverContent>
+    </Popover>
   );
 }
 

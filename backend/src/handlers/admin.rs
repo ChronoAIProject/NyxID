@@ -898,6 +898,41 @@ pub struct UpdateOAuthClientRequest {
     pub client_name: Option<String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub struct OAuthClientListQuery {
+    pub page: Option<u64>,
+    pub per_page: Option<u64>,
+    pub search: Option<String>,
+    pub search_filters: Option<String>,
+    pub client_type: Option<String>,
+    pub creator_type: Option<String>,
+    pub broker: Option<String>,
+    pub is_active: Option<String>,
+    pub scope: Option<String>,
+    pub created_dates: Option<String>,
+    pub created_from: Option<String>,
+    pub created_to: Option<String>,
+    pub sort: Option<String>,
+}
+
+impl OAuthClientListQuery {
+    fn has_table_controls(&self) -> bool {
+        self.page.is_some()
+            || self.per_page.is_some()
+            || self.search.is_some()
+            || self.search_filters.is_some()
+            || self.client_type.is_some()
+            || self.creator_type.is_some()
+            || self.broker.is_some()
+            || self.is_active.is_some()
+            || self.scope.is_some()
+            || self.created_dates.is_some()
+            || self.created_from.is_some()
+            || self.created_to.is_some()
+            || self.sort.is_some()
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct OAuthClientResponse {
     pub id: String,
@@ -918,8 +953,74 @@ pub struct OAuthClientResponse {
 }
 
 #[derive(Debug, Serialize)]
-pub struct OAuthClientListResponse {
+#[serde(untagged)]
+pub enum OAuthClientListResponse {
+    Legacy(OAuthClientLegacyListResponse),
+    Paginated(Box<OAuthClientPaginatedListResponse>),
+}
+
+#[derive(Debug, Serialize)]
+pub struct OAuthClientLegacyListResponse {
     pub clients: Vec<OAuthClientResponse>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OAuthClientPaginatedListResponse {
+    pub clients: Vec<OAuthClientResponse>,
+    pub total: u64,
+    pub page: u64,
+    pub per_page: u64,
+    pub filter_options: OAuthClientFilterOptions,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OAuthClientFilterOptions {
+    pub client_types: Vec<&'static str>,
+    pub creator_types: Vec<&'static str>,
+    pub broker_filters: Vec<&'static str>,
+    pub statuses: Vec<bool>,
+    pub allowed_scopes: Vec<&'static str>,
+    pub sorts: Vec<&'static str>,
+    pub search_fields: Vec<OAuthClientSearchField>,
+    pub fields: Vec<OAuthClientFilterField>,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct OAuthClientSearchField {
+    pub key: &'static str,
+    pub label: &'static str,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OAuthClientFilterValueType {
+    Enum,
+    Boolean,
+    Date,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OAuthClientFilterOperator {
+    Is,
+    Includes,
+    Between,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct OAuthClientFilterOption {
+    pub value: &'static str,
+    pub label: &'static str,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct OAuthClientFilterField {
+    pub key: &'static str,
+    pub label: &'static str,
+    pub value_type: OAuthClientFilterValueType,
+    pub operator: OAuthClientFilterOperator,
+    pub multiple: bool,
+    pub options: Vec<OAuthClientFilterOption>,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -1030,6 +1131,109 @@ fn broker_settings_response(state: &AppState) -> BrokerSettingsResponse {
             policy.broker_require_admin_capability_env_default,
             policy.broker_require_admin_capability_override,
         ),
+    }
+}
+
+fn oauth_client_filter_option(value: &'static str, label: &'static str) -> OAuthClientFilterOption {
+    OAuthClientFilterOption { value, label }
+}
+
+fn oauth_scope_label(scope: &'static str) -> &'static str {
+    match scope {
+        "openid" => "OpenID",
+        "profile" => "Profile",
+        "email" => "Email",
+        "roles" => "Roles",
+        "groups" => "Groups",
+        "offline_access" => "Offline access",
+        "proxy" => "Proxy",
+        "urn:nyxid:scope:broker_binding" => "Broker binding",
+        _ => scope,
+    }
+}
+
+fn oauth_client_filter_options() -> OAuthClientFilterOptions {
+    OAuthClientFilterOptions {
+        client_types: oauth_client_service::ADMIN_CLIENT_TYPE_FILTERS.to_vec(),
+        creator_types: oauth_client_service::ADMIN_CREATOR_TYPE_FILTERS.to_vec(),
+        broker_filters: oauth_client_service::ADMIN_BROKER_FILTERS.to_vec(),
+        statuses: vec![true, false],
+        allowed_scopes: oauth_client_service::KNOWN_OIDC_SCOPES.to_vec(),
+        sorts: oauth_client_service::ADMIN_SORT_OPTIONS.to_vec(),
+        search_fields: oauth_client_service::ADMIN_SEARCH_FIELDS
+            .iter()
+            .map(|(key, label)| OAuthClientSearchField { key, label })
+            .collect(),
+        fields: vec![
+            OAuthClientFilterField {
+                key: "is_active",
+                label: "Status",
+                value_type: OAuthClientFilterValueType::Boolean,
+                operator: OAuthClientFilterOperator::Is,
+                multiple: true,
+                options: vec![
+                    oauth_client_filter_option("true", "Active"),
+                    oauth_client_filter_option("false", "Inactive"),
+                ],
+            },
+            OAuthClientFilterField {
+                key: "client_type",
+                label: "Client type",
+                value_type: OAuthClientFilterValueType::Enum,
+                operator: OAuthClientFilterOperator::Is,
+                multiple: true,
+                options: vec![
+                    oauth_client_filter_option("public", "Public"),
+                    oauth_client_filter_option("confidential", "Confidential"),
+                    oauth_client_filter_option("other", "Other"),
+                ],
+            },
+            OAuthClientFilterField {
+                key: "creator_type",
+                label: "Creator",
+                value_type: OAuthClientFilterValueType::Enum,
+                operator: OAuthClientFilterOperator::Is,
+                multiple: true,
+                options: vec![
+                    oauth_client_filter_option("dynamic_registration", "Dynamic registration"),
+                    oauth_client_filter_option("system", "System"),
+                    oauth_client_filter_option("owned", "User / org"),
+                    oauth_client_filter_option("ownerless", "Ownerless"),
+                ],
+            },
+            OAuthClientFilterField {
+                key: "broker",
+                label: "Broker capability",
+                value_type: OAuthClientFilterValueType::Enum,
+                operator: OAuthClientFilterOperator::Is,
+                multiple: true,
+                options: vec![
+                    oauth_client_filter_option("enabled", "Enabled"),
+                    oauth_client_filter_option("disabled", "Disabled"),
+                    oauth_client_filter_option("flag", "Enabled by admin grant"),
+                    oauth_client_filter_option("scope", "Enabled by broker scope"),
+                ],
+            },
+            OAuthClientFilterField {
+                key: "scope",
+                label: "Allowed scope",
+                value_type: OAuthClientFilterValueType::Enum,
+                operator: OAuthClientFilterOperator::Includes,
+                multiple: true,
+                options: oauth_client_service::KNOWN_OIDC_SCOPES
+                    .iter()
+                    .map(|scope| oauth_client_filter_option(scope, oauth_scope_label(scope)))
+                    .collect(),
+            },
+            OAuthClientFilterField {
+                key: "created_at",
+                label: "Created",
+                value_type: OAuthClientFilterValueType::Date,
+                operator: OAuthClientFilterOperator::Between,
+                multiple: true,
+                options: vec![],
+            },
+        ],
     }
 }
 
@@ -1150,17 +1354,64 @@ pub async fn create_oauth_client(
 pub async fn list_oauth_clients(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    Query(query): Query<OAuthClientListQuery>,
 ) -> AppResult<Json<OAuthClientListResponse>> {
     require_admin_or_operator(&state, &auth_user, "admin.oauth_clients.list").await?;
 
-    let clients = oauth_client_service::list_clients(&state.db).await?;
+    let broker_policy = state.broker_policy();
+    if !query.has_table_controls() {
+        let clients = oauth_client_service::list_clients_legacy(&state.db).await?;
+        let items = clients
+            .into_iter()
+            .map(|client| {
+                oauth_client_response(client, None, broker_policy.broker_require_admin_capability)
+            })
+            .collect();
+        return Ok(Json(OAuthClientListResponse::Legacy(
+            OAuthClientLegacyListResponse { clients: items },
+        )));
+    }
+
+    let page = query.page.unwrap_or(1).max(1);
+    let per_page = query.per_page.unwrap_or(25).clamp(1, 100);
+    let sort = query.sort.as_deref().unwrap_or("-created_at");
+    let (clients, total) = oauth_client_service::list_clients(
+        &state.db,
+        oauth_client_service::AdminOAuthClientListParams {
+            page,
+            per_page,
+            search: query.search.as_deref(),
+            search_filters: query.search_filters.as_deref(),
+            client_type: query.client_type.as_deref(),
+            creator_type: query.creator_type.as_deref(),
+            broker: query.broker.as_deref(),
+            is_active: query.is_active.as_deref(),
+            scope: query.scope.as_deref(),
+            created_dates: query.created_dates.as_deref(),
+            created_from: query.created_from.as_deref(),
+            created_to: query.created_to.as_deref(),
+            sort,
+            broker_require_admin_capability: broker_policy.broker_require_admin_capability,
+        },
+    )
+    .await?;
 
     let items: Vec<OAuthClientResponse> = clients
         .into_iter()
-        .map(|client| oauth_client_response(client, None, state.broker_require_admin_capability()))
+        .map(|client| {
+            oauth_client_response(client, None, broker_policy.broker_require_admin_capability)
+        })
         .collect();
 
-    Ok(Json(OAuthClientListResponse { clients: items }))
+    Ok(Json(OAuthClientListResponse::Paginated(Box::new(
+        OAuthClientPaginatedListResponse {
+            clients: items,
+            total,
+            page,
+            per_page,
+            filter_options: oauth_client_filter_options(),
+        },
+    ))))
 }
 
 /// PATCH /api/v1/admin/oauth-clients/:client_id
@@ -1538,6 +1789,176 @@ mod tests {
         let json = serde_json::to_value(&resp).expect("serialize");
         assert_eq!(json["message"], "done");
     }
+
+    #[test]
+    fn oauth_client_list_query_accepts_scalar_multi_status_and_date_values() {
+        let scalar_uri: http::Uri = "/api/v1/admin/oauth-clients?is_active=true"
+            .parse()
+            .unwrap();
+        let Query(scalar) = Query::<OAuthClientListQuery>::try_from_uri(&scalar_uri).unwrap();
+        assert_eq!(scalar.is_active.as_deref(), Some("true"));
+
+        let multi_uri: http::Uri = "/api/v1/admin/oauth-clients?is_active=true%2Cfalse&client_type=public%2Cconfidential&created_from=2026-07-03&created_to=2026-07-10&created_dates=2026-06-01%2C2026-06-15"
+            .parse()
+            .unwrap();
+        let Query(multi) = Query::<OAuthClientListQuery>::try_from_uri(&multi_uri).unwrap();
+        assert_eq!(multi.is_active.as_deref(), Some("true,false"));
+        assert_eq!(multi.client_type.as_deref(), Some("public,confidential"));
+        assert_eq!(multi.created_from.as_deref(), Some("2026-07-03"));
+        assert_eq!(multi.created_to.as_deref(), Some("2026-07-10"));
+        assert_eq!(
+            multi.created_dates.as_deref(),
+            Some("2026-06-01,2026-06-15")
+        );
+
+        let search_uri: http::Uri = "/api/v1/admin/oauth-clients?search_filters=%5B%7B%22field%22%3A%22client%22%2C%22values%22%3A%5B%22console%22%2C%22portal%22%5D%7D%5D"
+            .parse()
+            .unwrap();
+        let Query(search) = Query::<OAuthClientListQuery>::try_from_uri(&search_uri).unwrap();
+        assert_eq!(
+            search.search_filters.as_deref(),
+            Some(r#"[{"field":"client","values":["console","portal"]}]"#)
+        );
+    }
+
+    #[test]
+    fn oauth_client_list_query_only_opts_in_for_recognized_table_controls() {
+        let unknown_uri: http::Uri = "/api/v1/admin/oauth-clients?future_parameter=value"
+            .parse()
+            .unwrap();
+        let Query(unknown) = Query::<OAuthClientListQuery>::try_from_uri(&unknown_uri).unwrap();
+        assert!(!unknown.has_table_controls());
+
+        for query in [
+            "page=1",
+            "per_page=25",
+            "search=client",
+            "search_filters=%5B%7B%22field%22%3A%22client%22%2C%22values%22%3A%5B%22console%22%5D%7D%5D",
+            "client_type=public",
+            "creator_type=system",
+            "broker=enabled",
+            "is_active=true",
+            "scope=openid",
+            "created_dates=2026-07-03",
+            "created_from=2026-07-01",
+            "created_to=2026-07-31",
+            "sort=-created_at",
+        ] {
+            let uri: http::Uri = format!("/api/v1/admin/oauth-clients?{query}")
+                .parse()
+                .unwrap();
+            let Query(parsed) = Query::<OAuthClientListQuery>::try_from_uri(&uri).unwrap();
+            assert!(
+                parsed.has_table_controls(),
+                "recognized parameter must opt into table behavior: {query}"
+            );
+        }
+    }
+
+    #[test]
+    fn oauth_client_filter_metadata_describes_every_supported_field() {
+        let metadata = oauth_client_filter_options();
+        assert_eq!(
+            metadata
+                .search_fields
+                .iter()
+                .map(|field| (field.key, field.label))
+                .collect::<Vec<_>>(),
+            [
+                ("client", "Client"),
+                ("client_type", "Client type"),
+                ("created_by", "Created by"),
+                ("allowed_scopes", "Allowed scopes"),
+            ]
+        );
+        assert_eq!(
+            metadata
+                .fields
+                .iter()
+                .filter(|field| field.multiple)
+                .count(),
+            6
+        );
+        assert_eq!(
+            metadata
+                .fields
+                .iter()
+                .map(|field| field.key)
+                .collect::<Vec<_>>(),
+            [
+                "is_active",
+                "client_type",
+                "creator_type",
+                "broker",
+                "scope",
+                "created_at",
+            ]
+        );
+
+        let status = metadata
+            .fields
+            .iter()
+            .find(|field| field.key == "is_active")
+            .expect("status metadata");
+        assert_eq!(status.value_type, OAuthClientFilterValueType::Boolean);
+        assert_eq!(status.operator, OAuthClientFilterOperator::Is);
+        assert!(status.multiple);
+        assert_eq!(
+            status
+                .options
+                .iter()
+                .map(|option| (option.value, option.label))
+                .collect::<Vec<_>>(),
+            [("true", "Active"), ("false", "Inactive")]
+        );
+
+        let scopes = metadata
+            .fields
+            .iter()
+            .find(|field| field.key == "scope")
+            .expect("scope metadata");
+        assert_eq!(scopes.value_type, OAuthClientFilterValueType::Enum);
+        assert_eq!(scopes.operator, OAuthClientFilterOperator::Includes);
+        assert!(scopes.multiple);
+        assert_eq!(
+            scopes.options.len(),
+            oauth_client_service::KNOWN_OIDC_SCOPES.len()
+        );
+        assert!(scopes.options.iter().any(|option| {
+            option.value == crate::services::oauth_broker_service::BROKER_BINDING_SCOPE
+                && option.label == "Broker binding"
+        }));
+
+        let created_at = metadata
+            .fields
+            .iter()
+            .find(|field| field.key == "created_at")
+            .expect("created-at metadata");
+        assert_eq!(created_at.value_type, OAuthClientFilterValueType::Date);
+        assert_eq!(created_at.operator, OAuthClientFilterOperator::Between);
+        assert_eq!(created_at.label, "Created");
+        assert!(created_at.multiple);
+        assert!(created_at.options.is_empty());
+
+        for sort in [
+            "client_name",
+            "client_type",
+            "created_by",
+            "broker",
+            "is_active",
+            "allowed_scopes",
+            "created_at",
+        ] {
+            assert!(
+                metadata.sorts.contains(&sort),
+                "missing ascending {sort} sort"
+            );
+            assert!(
+                metadata.sorts.contains(&format!("-{sort}").as_str()),
+                "missing descending {sort} sort"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1834,6 +2255,116 @@ mod operator_route_tests {
         assert_eq!(
             admin_policy_response.broker_capability_source,
             BrokerCapabilitySource::None
+        );
+    }
+
+    #[tokio::test]
+    async fn operator_lists_paginated_oauth_clients_with_metadata_and_no_secret() {
+        let Some(db) = connect_test_database("admin_oauth_client_list_operator").await else {
+            eprintln!("skipping admin oauth-client list test: no local MongoDB available");
+            return;
+        };
+        let operator_id = insert_user(&db, false, true).await;
+        db.collection::<OauthClient>(OAUTH_CLIENTS)
+            .insert_one(test_oauth_client("operator-visible-client"))
+            .await
+            .expect("insert OAuth client");
+
+        let response = list_oauth_clients(
+            State(test_app_state(db)),
+            test_auth_user(&operator_id),
+            Query(OAuthClientListQuery {
+                page: Some(1),
+                ..OAuthClientListQuery::default()
+            }),
+        )
+        .await
+        .expect("operator can list OAuth clients")
+        .0;
+
+        let OAuthClientListResponse::Paginated(response) = response else {
+            panic!("explicit page must select paginated response");
+        };
+        assert_eq!(response.total, 1);
+        assert_eq!(response.page, 1);
+        assert_eq!(response.per_page, 25);
+        assert_eq!(response.clients.len(), 1);
+        assert!(response.clients[0].client_secret.is_none());
+        assert_eq!(
+            response.filter_options.client_types,
+            oauth_client_service::ADMIN_CLIENT_TYPE_FILTERS
+        );
+        assert_eq!(
+            response.filter_options.allowed_scopes,
+            oauth_client_service::KNOWN_OIDC_SCOPES
+        );
+        assert_eq!(response.filter_options.fields.len(), 6);
+        assert_eq!(
+            response
+                .filter_options
+                .fields
+                .iter()
+                .map(|field| field.key)
+                .collect::<Vec<_>>(),
+            [
+                "is_active",
+                "client_type",
+                "creator_type",
+                "broker",
+                "scope",
+                "created_at",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn operator_no_query_gets_complete_legacy_shape_without_secrets() {
+        let Some(db) = connect_test_database("admin_oauth_client_list_legacy_operator").await
+        else {
+            eprintln!("skipping admin OAuth-client legacy list test: no local MongoDB available");
+            return;
+        };
+        let operator_id = insert_user(&db, false, true).await;
+        let now = chrono::Utc::now();
+        let mut older = test_oauth_client("legacy-first");
+        older.created_at = now - chrono::Duration::days(1);
+        older.updated_at = older.created_at;
+        let mut newer = test_oauth_client("legacy-second");
+        newer.created_at = now;
+        newer.updated_at = newer.created_at;
+        db.collection::<OauthClient>(OAUTH_CLIENTS)
+            .insert_many([older, newer])
+            .await
+            .expect("insert legacy OAuth clients");
+
+        let response = list_oauth_clients(
+            State(test_app_state(db)),
+            test_auth_user(&operator_id),
+            Query(OAuthClientListQuery::default()),
+        )
+        .await
+        .expect("operator can use legacy OAuth-client list")
+        .0;
+        let json = serde_json::to_value(&response).expect("serialize legacy response");
+        assert_eq!(
+            json.as_object()
+                .expect("legacy response object")
+                .keys()
+                .collect::<Vec<_>>(),
+            ["clients"]
+        );
+
+        let OAuthClientListResponse::Legacy(response) = response else {
+            panic!("no-query request must select legacy response");
+        };
+        assert_eq!(response.clients.len(), 2);
+        assert_eq!(response.clients[0].id, "legacy-second");
+        assert_eq!(response.clients[1].id, "legacy-first");
+        assert!(
+            response
+                .clients
+                .iter()
+                .all(|client| client.client_secret.is_none())
         );
     }
 
