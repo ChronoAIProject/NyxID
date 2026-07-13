@@ -51,6 +51,30 @@ export default defineConfig([
     },
   },
   {
+    files: ['src/components/data-table/**/*.{ts,tsx}'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          paths: [
+            {
+              name: '@/types/admin',
+              message: 'Keep reusable data-table controls domain-neutral.',
+            },
+            {
+              name: '@/lib/admin-oauth-clients',
+              message: 'Keep OAuth query encoding in the page adapter.',
+            },
+            {
+              name: '@/hooks/use-admin-oauth-clients',
+              message: 'Keep data fetching outside reusable table controls.',
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
     files: ['src/main.tsx'],
     rules: {
       'react-refresh/only-export-components': 'off',

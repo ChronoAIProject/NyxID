@@ -377,7 +377,92 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
-    // ── oauth_clients ── (no special indexes beyond _id)
+    // ── oauth_clients ──
+    let oauth_clients = db.collection::<mongodb::bson::Document>("oauth_clients");
+    oauth_clients
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "created_at": 1, "_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("oauth_clients_created_at_id".to_string())
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    oauth_clients
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "created_by": 1, "created_at": 1, "_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("oauth_clients_creator_created_at".to_string())
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    oauth_clients
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "client_type": 1, "created_at": 1, "_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("oauth_clients_type_created_at".to_string())
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    oauth_clients
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "is_active": 1, "created_at": 1, "_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("oauth_clients_active_created_at".to_string())
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    oauth_clients
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "client_name": 1, "created_at": 1, "_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("oauth_clients_name_created_at".to_string())
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    oauth_clients
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "broker_capability_enabled": 1, "created_at": 1, "_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("oauth_clients_broker_created_at".to_string())
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    oauth_clients
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "allowed_scopes": 1, "created_at": 1, "_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("oauth_clients_allowed_scopes_created_at".to_string())
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
 
     // ── oauth_broker_bindings ──
     let oauth_broker_bindings = db.collection::<OauthBrokerBinding>(OAUTH_BROKER_BINDINGS);

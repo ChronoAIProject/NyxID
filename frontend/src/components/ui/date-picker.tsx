@@ -46,23 +46,41 @@ function parseDate(value: string): Date | null {
   return new Date(y, m - 1, d);
 }
 
-interface DatePickerProps {
-  readonly value: string | null;
-  readonly onChange: (value: string | null) => void;
+interface CommonDatePickerProps {
   readonly minDate?: string;
   readonly placeholder?: string;
+  readonly ariaLabel?: string;
   readonly disabled?: boolean;
 }
 
-export function DatePicker({
-  value,
-  onChange,
-  minDate,
-  placeholder = "Select date",
-  disabled = false,
-}: DatePickerProps) {
+type DatePickerProps = CommonDatePickerProps &
+  (
+    | {
+        readonly mode?: "single";
+        readonly value: string | null;
+        readonly onChange: (value: string | null) => void;
+      }
+    | {
+        readonly mode: "multiple";
+        readonly values: readonly string[];
+        readonly onValuesChange: (values: readonly string[]) => void;
+        readonly maxSelections?: number;
+      }
+  );
+
+export function DatePicker(props: DatePickerProps) {
+  const {
+    minDate,
+    placeholder = "Select date",
+    ariaLabel,
+    disabled = false,
+  } = props;
+  const multiple = props.mode === "multiple";
+  const values = multiple ? props.values : props.value ? [props.value] : [];
+  const maxSelections = multiple ? (props.maxSelections ?? 32) : 1;
   const [open, setOpen] = useState(false);
-  const selected = useMemo(() => (value ? parseDate(value) : null), [value]);
+  const selected = values[0] ? parseDate(values[0]) : null;
+  const selectedValues = new Set(values);
   const min = useMemo(() => (minDate ? parseDate(minDate) : null), [minDate]);
 
   const today = useMemo(() => new Date(), []);
@@ -126,7 +144,8 @@ export function DatePicker({
     for (let d = 1; d <= daysInMonth; d++) {
       const date = new Date(viewYear, viewMonth, d);
       const isBeforeMin =
-        min !== null && date < new Date(min.getFullYear(), min.getMonth(), min.getDate());
+        min !== null &&
+        date < new Date(min.getFullYear(), min.getMonth(), min.getDate());
       result.push({ day: d, current: true, disabled: isBeforeMin, date });
     }
 
@@ -144,12 +163,7 @@ export function DatePicker({
   }, [viewYear, viewMonth, firstDay, prevMonthDays, daysInMonth, min]);
 
   function isSelected(date: Date): boolean {
-    if (!selected) return false;
-    return (
-      date.getFullYear() === selected.getFullYear() &&
-      date.getMonth() === selected.getMonth() &&
-      date.getDate() === selected.getDate()
-    );
+    return selectedValues.has(toDateString(date));
   }
 
   function isToday(date: Date): boolean {
@@ -161,13 +175,25 @@ export function DatePicker({
   }
 
   function selectDay(date: Date) {
-    onChange(toDateString(date));
+    const nextDate = toDateString(date);
+    if (multiple) {
+      props.onValuesChange(
+        selectedValues.has(nextDate)
+          ? values.filter((value) => value !== nextDate)
+          : [...values, nextDate].sort(),
+      );
+      return;
+    }
+    props.onChange(nextDate);
     setOpen(false);
   }
 
-  const displayValue = selected
-    ? `${MONTHS[selected.getMonth()]} ${selected.getDate()}, ${selected.getFullYear()}`
-    : null;
+  const displayValue =
+    multiple && values.length > 1
+      ? `${String(values.length)} dates selected`
+      : selected
+        ? `${MONTHS[selected.getMonth()]} ${selected.getDate()}, ${selected.getFullYear()}`
+        : null;
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
@@ -175,6 +201,7 @@ export function DatePicker({
         <button
           type="button"
           disabled={disabled}
+          aria-label={ariaLabel}
           className={cn(
             "flex h-8 w-full items-center justify-between rounded-lg border border-input bg-transparent px-3 text-[12px] transition-colors",
             "hover:border-white/[0.15] focus-visible:outline-none focus-visible:border-white/[0.15]",
@@ -192,20 +219,22 @@ export function DatePicker({
           <div className="flex items-center justify-between">
             <button
               type="button"
+              aria-label="Previous month"
               onClick={prevMonth}
               className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-white/[0.06] hover:text-foreground"
             >
-              <ChevronLeft className="h-4 w-4" />
+              <ChevronLeft className="h-4 w-4" aria-hidden="true" />
             </button>
             <span className="text-[12px] font-medium">
               {MONTHS[viewMonth]} {viewYear}
             </span>
             <button
               type="button"
+              aria-label="Next month"
               onClick={nextMonth}
               className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-white/[0.06] hover:text-foreground"
             >
-              <ChevronRight className="h-4 w-4" />
+              <ChevronRight className="h-4 w-4" aria-hidden="true" />
             </button>
           </div>
 
@@ -226,11 +255,15 @@ export function DatePicker({
             {cells.map((cell, i) => {
               const sel = isSelected(cell.date);
               const tod = isToday(cell.date);
+              const selectionLimitReached =
+                multiple && !sel && values.length >= maxSelections;
               return (
                 <button
                   key={i}
                   type="button"
-                  disabled={cell.disabled}
+                  disabled={cell.disabled || selectionLimitReached}
+                  aria-label={toDateString(cell.date)}
+                  aria-pressed={sel}
                   onClick={() => selectDay(cell.date)}
                   className={cn(
                     "flex h-8 w-full items-center justify-center rounded-md text-[12px] transition-colors",
@@ -239,9 +272,9 @@ export function DatePicker({
                       !sel &&
                       !cell.disabled &&
                       "text-foreground hover:bg-white/[0.06]",
-                    cell.disabled && "cursor-not-allowed opacity-30",
-                    sel &&
-                      "bg-primary text-primary-foreground font-medium",
+                    (cell.disabled || selectionLimitReached) &&
+                      "cursor-not-allowed opacity-30",
+                    sel && "bg-primary text-primary-foreground font-medium",
                     tod && !sel && "font-medium text-primary",
                   )}
                 >
@@ -257,27 +290,54 @@ export function DatePicker({
               type="button"
               variant="ghost"
               className="h-7 text-[11px]"
+              disabled={values.length === 0}
               onClick={() => {
-                onChange(null);
-                setOpen(false);
+                if (multiple) {
+                  props.onValuesChange([]);
+                } else {
+                  props.onChange(null);
+                  setOpen(false);
+                }
               }}
             >
-              Clear
+              {multiple ? "Clear all" : "Clear"}
             </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              className="h-7 text-[11px]"
-              onClick={() => {
-                const t = new Date();
-                setViewYear(t.getFullYear());
-                setViewMonth(t.getMonth());
-                onChange(toDateString(t));
-                setOpen(false);
-              }}
-            >
-              Today
-            </Button>
+            <div className="flex items-center gap-1">
+              <Button
+                type="button"
+                variant="ghost"
+                className="h-7 text-[11px]"
+                onClick={() => {
+                  const t = new Date();
+                  const todayValue = toDateString(t);
+                  setViewYear(t.getFullYear());
+                  setViewMonth(t.getMonth());
+                  if (multiple) {
+                    if (
+                      !selectedValues.has(todayValue) &&
+                      values.length < maxSelections
+                    ) {
+                      props.onValuesChange([...values, todayValue].sort());
+                    }
+                  } else {
+                    props.onChange(todayValue);
+                    setOpen(false);
+                  }
+                }}
+              >
+                Today
+              </Button>
+              {multiple && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  className="h-7 text-[11px]"
+                  onClick={() => setOpen(false)}
+                >
+                  Done
+                </Button>
+              )}
+            </div>
           </div>
         </div>
       </PopoverContent>

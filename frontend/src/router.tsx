@@ -16,6 +16,7 @@ import { BillingRouteGuard } from "@/components/billing-route-guard";
 import { useAuthStore } from "@/stores/auth-store";
 import { hasAdminRead } from "@/types/api";
 import { shouldRedirectFromBilling } from "@/lib/billing-availability";
+import { normalizeAdminOAuthClientSearch } from "@/lib/admin-oauth-clients";
 
 import {
   LandingPage,
@@ -728,6 +729,7 @@ const adminOAuthClientsRoute = createRoute({
   path: "oauth-clients",
   getParentRoute: () => adminLayout,
   component: AdminOAuthClientsPage,
+  validateSearch: normalizeAdminOAuthClientSearch,
 });
 
 const adminNodesRoute = createRoute({

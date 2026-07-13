@@ -1,19 +1,49 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  keepPreviousData,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import type {
   AdminOAuthClient,
+  AdminOAuthClientListParams,
   AdminOAuthClientListResponse,
   BrokerSettingsResponse,
   UpdateAdminOAuthClientRequest,
   UpdateBrokerSettingsRequest,
 } from "@/types/admin";
 
-export function useAdminOAuthClients() {
+export function useAdminOAuthClients(params: AdminOAuthClientListParams) {
   return useQuery({
-    queryKey: ["admin", "oauth-clients"],
+    queryKey: ["admin", "oauth-clients", params],
     queryFn: async (): Promise<AdminOAuthClientListResponse> => {
-      return api.get<AdminOAuthClientListResponse>("/admin/oauth-clients");
+      const query = new URLSearchParams({
+        page: String(params.page),
+        per_page: String(params.per_page),
+        sort: params.sort,
+      });
+      if (params.search) query.set("search", params.search);
+      if (params.search_filters) {
+        query.set("search_filters", params.search_filters);
+      }
+      if (params.client_type) query.set("client_type", params.client_type);
+      if (params.creator_type) query.set("creator_type", params.creator_type);
+      if (params.broker) query.set("broker", params.broker);
+      if (params.is_active !== undefined) {
+        query.set("is_active", String(params.is_active));
+      }
+      if (params.scope) query.set("scope", params.scope);
+      if (params.created_dates) {
+        query.set("created_dates", params.created_dates);
+      }
+      if (params.created_from) query.set("created_from", params.created_from);
+      if (params.created_to) query.set("created_to", params.created_to);
+      return api.get<AdminOAuthClientListResponse>(
+        `/admin/oauth-clients?${query.toString()}`,
+      );
     },
+    placeholderData: keepPreviousData,
   });
 }
 

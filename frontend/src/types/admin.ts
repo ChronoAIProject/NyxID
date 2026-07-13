@@ -1,4 +1,13 @@
 import type { PlatformRole } from "./api";
+import type {
+  DataTableFilterField,
+  DataTableFilterOperator,
+  DataTableFilterOption,
+  DataTableFilterSelections,
+  DataTableFilterValueType,
+  DataTableSearchField,
+  DataTableSearchGroup,
+} from "./data-table";
 
 export interface AdminUser {
   readonly id: string;
@@ -148,8 +157,111 @@ export interface AdminOAuthClient {
   readonly created_at: string;
 }
 
+export type AdminOAuthClientTypeFilter = "public" | "confidential" | "other";
+export type AdminOAuthClientCreatorType =
+  | "dynamic_registration"
+  | "system"
+  | "owned"
+  | "ownerless";
+export type AdminOAuthClientBrokerFilter =
+  | "enabled"
+  | "disabled"
+  | "flag"
+  | "scope";
+export type AdminOAuthClientSort =
+  | "-created_at"
+  | "created_at"
+  | "client_name"
+  | "-client_name"
+  | "client_type"
+  | "-client_type"
+  | "created_by"
+  | "-created_by"
+  | "broker"
+  | "-broker"
+  | "allowed_scopes"
+  | "-allowed_scopes"
+  | "-is_active"
+  | "is_active";
+
+export type AdminOAuthClientFilterKey =
+  | "is_active"
+  | "client_type"
+  | "creator_type"
+  | "broker"
+  | "scope"
+  | "created_at";
+
+export type AdminOAuthClientFilterSelections =
+  DataTableFilterSelections<AdminOAuthClientFilterKey>;
+export type AdminOAuthClientFilterValueType = DataTableFilterValueType;
+export type AdminOAuthClientFilterOperator = DataTableFilterOperator;
+export type AdminOAuthClientFilterOption = DataTableFilterOption;
+export type AdminOAuthClientFilterField =
+  DataTableFilterField<AdminOAuthClientFilterKey>;
+
+export type AdminOAuthClientSearchFieldKey =
+  | "client"
+  | "client_type"
+  | "created_by"
+  | "allowed_scopes";
+
+export type AdminOAuthClientSearchField =
+  DataTableSearchField<AdminOAuthClientSearchFieldKey>;
+export type AdminOAuthClientSearchFilter =
+  DataTableSearchGroup<AdminOAuthClientSearchFieldKey>;
+
+export interface AdminOAuthClientFilterOptions {
+  readonly client_types: readonly AdminOAuthClientTypeFilter[];
+  readonly creator_types: readonly AdminOAuthClientCreatorType[];
+  readonly broker_filters: readonly AdminOAuthClientBrokerFilter[];
+  readonly statuses: readonly boolean[];
+  readonly allowed_scopes: readonly string[];
+  readonly sorts: readonly AdminOAuthClientSort[];
+  /** Optional while older backend instances remain in a rolling deployment. */
+  readonly fields?: readonly AdminOAuthClientFilterField[];
+  /** Optional while older backend instances remain in a rolling deployment. */
+  readonly search_fields?: readonly AdminOAuthClientSearchField[];
+}
+
 export interface AdminOAuthClientListResponse {
   readonly clients: readonly AdminOAuthClient[];
+  readonly total: number;
+  readonly page: number;
+  readonly per_page: number;
+  readonly filter_options: AdminOAuthClientFilterOptions;
+}
+
+export interface AdminOAuthClientListParams {
+  readonly page: number;
+  readonly per_page: 25 | 50 | 100;
+  readonly search?: string;
+  readonly search_filters?: string;
+  readonly client_type?: string;
+  readonly creator_type?: string;
+  readonly broker?: string;
+  readonly is_active?: boolean | string;
+  readonly scope?: string;
+  readonly created_dates?: string;
+  readonly created_from?: string;
+  readonly created_to?: string;
+  readonly sort: AdminOAuthClientSort;
+}
+
+export interface AdminOAuthClientSearchState {
+  readonly page?: number;
+  readonly per_page?: 25 | 50 | 100;
+  readonly search?: string;
+  readonly search_filters?: string;
+  readonly client_type?: string;
+  readonly creator_type?: string;
+  readonly broker?: string;
+  readonly is_active?: boolean | string;
+  readonly scope?: string;
+  readonly created_dates?: string;
+  readonly created_from?: string;
+  readonly created_to?: string;
+  readonly sort?: AdminOAuthClientSort;
 }
 
 export interface UpdateAdminOAuthClientRequest {
