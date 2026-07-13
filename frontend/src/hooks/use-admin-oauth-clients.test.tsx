@@ -46,6 +46,96 @@ const defaultParams: AdminOAuthClientListParams = {
   sort: "-created_at",
 };
 
+const refetchCases: ReadonlyArray<{
+  readonly label: string;
+  readonly patch: Partial<AdminOAuthClientListParams>;
+  readonly queryKey: string;
+  readonly expected: string;
+}> = [
+  {
+    label: "page",
+    patch: { page: 2 },
+    queryKey: "page",
+    expected: "2",
+  },
+  {
+    label: "page size",
+    patch: { per_page: 50 },
+    queryKey: "per_page",
+    expected: "50",
+  },
+  {
+    label: "all-fields search",
+    patch: { search: "console" },
+    queryKey: "search",
+    expected: "console",
+  },
+  {
+    label: "scoped search",
+    patch: {
+      search_filters: JSON.stringify([
+        { field: "client", values: ["console"] },
+      ]),
+    },
+    queryKey: "search_filters",
+    expected: JSON.stringify([{ field: "client", values: ["console"] }]),
+  },
+  {
+    label: "client type filter",
+    patch: { client_type: "public,confidential" },
+    queryKey: "client_type",
+    expected: "public,confidential",
+  },
+  {
+    label: "creator filter",
+    patch: { creator_type: "dynamic_registration,system" },
+    queryKey: "creator_type",
+    expected: "dynamic_registration,system",
+  },
+  {
+    label: "broker filter",
+    patch: { broker: "enabled,scope" },
+    queryKey: "broker",
+    expected: "enabled,scope",
+  },
+  {
+    label: "status filter",
+    patch: { is_active: "true,false" },
+    queryKey: "is_active",
+    expected: "true,false",
+  },
+  {
+    label: "scope filter",
+    patch: { scope: "openid,urn:nyxid:scope:broker_binding" },
+    queryKey: "scope",
+    expected: "openid,urn:nyxid:scope:broker_binding",
+  },
+  {
+    label: "exact-date filter",
+    patch: { created_dates: "2026-07-03,2026-07-08" },
+    queryKey: "created_dates",
+    expected: "2026-07-03,2026-07-08",
+  },
+  {
+    label: "date-range start",
+    patch: { created_from: "2026-07-01" },
+    queryKey: "created_from",
+    expected: "2026-07-01",
+  },
+  {
+    label: "date-range end",
+    patch: { created_to: "2026-07-31" },
+    queryKey: "created_to",
+    expected: "2026-07-31",
+  },
+  {
+    label: "sort",
+    patch: { sort: "client_name" },
+    queryKey: "sort",
+    expected: "client_name",
+  },
+];
+
 describe("admin OAuth client hooks", () => {
   it("fetches the admin OAuth clients list", async () => {
     mockGet.mockResolvedValue({
@@ -62,6 +152,114 @@ describe("admin OAuth client hooks", () => {
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(mockGet).toHaveBeenCalledWith(
       "/admin/oauth-clients?page=1&per_page=25&sort=-created_at",
+    );
+  });
+
+  it.each(refetchCases)(
+    "refetches when the applied $label changes",
+    async ({ patch, queryKey, expected }) => {
+      mockGet.mockResolvedValue({
+        clients: [],
+        total: 0,
+        page: 1,
+        per_page: 25,
+        filter_options: {},
+      });
+      const { result, rerender } = renderHook(
+        ({ params }: { readonly params: AdminOAuthClientListParams }) =>
+          useAdminOAuthClients(params),
+        {
+          initialProps: { params: defaultParams },
+          wrapper: createWrapper(),
+        },
+      );
+
+      await waitFor(() => expect(result.current.isSuccess).toBe(true));
+      expect(mockGet).toHaveBeenCalledTimes(1);
+      mockGet.mockClear();
+
+      rerender({ params: { ...defaultParams, ...patch } });
+
+      await waitFor(() => expect(mockGet).toHaveBeenCalledTimes(1));
+      const request = mockGet.mock.calls[0]?.[0] as string;
+      expect(new URLSearchParams(request.split("?")[1]).get(queryKey)).toBe(
+        expected,
+      );
+    },
+  );
+
+  it("refetches when an applied filter is removed", async () => {
+    mockGet.mockResolvedValue({
+      clients: [],
+      total: 0,
+      page: 1,
+      per_page: 25,
+      filter_options: {},
+    });
+    const initialParams: AdminOAuthClientListParams = {
+      ...defaultParams,
+      client_type: "public",
+    };
+    const { result, rerender } = renderHook(
+      ({ params }: { readonly params: AdminOAuthClientListParams }) =>
+        useAdminOAuthClients(params),
+      {
+        initialProps: { params: initialParams },
+        wrapper: createWrapper(),
+      },
+    );
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(mockGet).toHaveBeenCalledTimes(1);
+    mockGet.mockClear();
+
+    rerender({ params: defaultParams });
+
+    await waitFor(() => expect(mockGet).toHaveBeenCalledTimes(1));
+    const request = mockGet.mock.calls[0]?.[0] as string;
+    expect(new URLSearchParams(request.split("?")[1]).has("client_type")).toBe(
+      false,
+    );
+  });
+
+  it("refetches when returning to a previously cached filter state", async () => {
+    mockGet.mockResolvedValue({
+      clients: [],
+      total: 0,
+      page: 1,
+      per_page: 25,
+      filter_options: {},
+    });
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        mutations: { retry: false },
+        queries: { retry: false, staleTime: 60_000 },
+      },
+    });
+    const publicClients: AdminOAuthClientListParams = {
+      ...defaultParams,
+      client_type: "public",
+    };
+    const { result, rerender } = renderHook(
+      ({ params }: { readonly params: AdminOAuthClientListParams }) =>
+        useAdminOAuthClients(params),
+      {
+        initialProps: { params: defaultParams },
+        wrapper: createWrapper(queryClient),
+      },
+    );
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(mockGet).toHaveBeenCalledTimes(1);
+
+    rerender({ params: publicClients });
+    await waitFor(() => expect(mockGet).toHaveBeenCalledTimes(2));
+
+    rerender({ params: defaultParams });
+    await waitFor(() => expect(mockGet).toHaveBeenCalledTimes(3));
+    const request = mockGet.mock.calls.at(-1)?.[0] as string;
+    expect(new URLSearchParams(request.split("?")[1]).has("client_type")).toBe(
+      false,
     );
   });
 
