@@ -29,8 +29,8 @@ use crate::services::{
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 use super::services_helpers::{
-    DeleteServiceResponse, compute_viewer_routing, fetch_service, require_admin_or_creator,
-    service_to_response_with_viewer, validate_developer_app_ids,
+    DeleteServiceResponse, compute_viewer_routing, fetch_service, require_admin,
+    require_admin_or_creator, service_to_response_with_viewer, validate_developer_app_ids,
 };
 
 // --- Request / Response types ---
@@ -673,6 +673,8 @@ pub async fn create_service(
     tele: TelemetryContext,
     Json(body): Json<CreateServiceRequest>,
 ) -> AppResult<Json<ServiceResponse>> {
+    require_admin(&state, &auth_user).await?;
+
     if body.name.is_empty() {
         return Err(AppError::ValidationError("name is required".to_string()));
     }
@@ -2243,9 +2245,162 @@ pub async fn regenerate_oidc_secret(
 #[cfg(test)]
 mod tests {
     use super::{
-        UpdateServiceRequest, derive_http_service_category, derive_ssh_service_category,
-        derive_visibility, normalize_service_type, resolve_spec_url_update,
+        CreateServiceRequest, UpdateServiceRequest, create_service, derive_http_service_category,
+        derive_ssh_service_category, derive_visibility, normalize_service_type,
+        resolve_spec_url_update,
     };
+    use crate::errors::AppError;
+    use crate::models::downstream_service::{
+        COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
+    };
+    use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+    use crate::services::role_service;
+    use crate::test_utils::{connect_test_database, test_app_state, test_auth_user, test_user};
+    use axum::Json;
+    use axum::extract::State;
+    use mongodb::bson::doc;
+    use uuid::Uuid;
+
+    async fn seed_user(db: &mongodb::Database, is_admin: bool) -> String {
+        role_service::seed_system_roles(db)
+            .await
+            .expect("seed platform roles");
+
+        let id = Uuid::new_v4().to_string();
+        let mut user = test_user(&id, UserType::Person);
+        if is_admin {
+            let role_ids = role_service::get_platform_role_ids(db)
+                .await
+                .expect("platform role ids");
+            user.role_ids.push(role_ids.admin);
+        }
+
+        db.collection::<User>(USERS)
+            .insert_one(&user)
+            .await
+            .expect("insert test user");
+        id
+    }
+
+    async fn spawn_empty_docs_server() -> (String, tokio::task::JoinHandle<()>) {
+        let app = axum::Router::new().fallback(|| async { axum::http::StatusCode::NOT_FOUND });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test docs server");
+        let addr = listener.local_addr().expect("test docs server addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve test docs server");
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    fn create_http_service_request(
+        name: &str,
+        slug: &str,
+        base_url: String,
+    ) -> CreateServiceRequest {
+        CreateServiceRequest {
+            name: name.to_string(),
+            slug: Some(slug.to_string()),
+            description: None,
+            service_type: Some("http".to_string()),
+            base_url: Some(base_url),
+            auth_method: Some("none".to_string()),
+            auth_key_name: None,
+            credential: None,
+            service_category: None,
+            visibility: None,
+            ssh_config: None,
+            homepage_url: None,
+            repository_url: None,
+            issues_url: None,
+            capabilities: None,
+            billing: None,
+            auth_notes: None,
+            known_limitations: None,
+            required_permissions: None,
+            examples_url: None,
+            recommended_skills: None,
+            developer_app_ids: None,
+            forward_access_token: false,
+            token_exchange_config: None,
+            default_request_headers: None,
+            ws_frame_injections: vec![],
+            anonymous_endpoints: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn create_service_rejects_non_admin_without_writing_service() {
+        let Some(db) = connect_test_database("h_services_create_non_admin").await else {
+            eprintln!("skipping create_service non-admin test: no local MongoDB available");
+            return;
+        };
+        let user_id = seed_user(&db, false).await;
+        let state = test_app_state(db.clone());
+        let auth = test_auth_user(&user_id);
+        let (base_url, server) = spawn_empty_docs_server().await;
+
+        let err = create_service(
+            State(state),
+            auth,
+            crate::telemetry::TelemetryContext::default(),
+            Json(create_http_service_request(
+                "Non Admin Service",
+                "non-admin-service",
+                base_url,
+            )),
+        )
+        .await
+        .expect_err("non-admin should be rejected");
+        server.abort();
+
+        assert!(matches!(err, AppError::Forbidden(_)));
+        let service_count = db
+            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .count_documents(doc! {})
+            .await
+            .expect("count downstream services");
+        assert_eq!(service_count, 0);
+    }
+
+    #[tokio::test]
+    async fn create_service_allows_admin() {
+        let Some(db) = connect_test_database("h_services_create_admin").await else {
+            eprintln!("skipping create_service admin test: no local MongoDB available");
+            return;
+        };
+        let admin_id = seed_user(&db, true).await;
+        let state = test_app_state(db.clone());
+        let auth = test_auth_user(&admin_id);
+        let (base_url, server) = spawn_empty_docs_server().await;
+
+        let Json(response) = create_service(
+            State(state),
+            auth,
+            crate::telemetry::TelemetryContext::default(),
+            Json(create_http_service_request(
+                "Admin Service",
+                "admin-service",
+                base_url,
+            )),
+        )
+        .await
+        .expect("admin should create service");
+        server.abort();
+
+        assert_eq!(response.name, "Admin Service");
+        assert_eq!(response.slug, "admin-service");
+        assert_eq!(response.visibility, "public");
+        let service_count = db
+            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .count_documents(doc! { "_id": &response.id })
+            .await
+            .expect("count created downstream service");
+        assert_eq!(service_count, 1);
+    }
 
     // Three wire shapes on the update request need to stay distinguishable
     // so the admin can clear the field without an empty-array workaround:
