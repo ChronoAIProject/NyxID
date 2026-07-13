@@ -237,6 +237,7 @@ export interface AdminOAuthClientListParams {
   readonly per_page: 25 | 50 | 100;
   readonly search?: string;
   readonly search_filters?: string;
+  readonly custom_filters?: string;
   readonly client_type?: string;
   readonly creator_type?: string;
   readonly broker?: string;
@@ -253,6 +254,7 @@ export interface AdminOAuthClientSearchState {
   readonly per_page?: 25 | 50 | 100;
   readonly search?: string;
   readonly search_filters?: string;
+  readonly custom_filters?: string;
   readonly client_type?: string;
   readonly creator_type?: string;
   readonly broker?: string;

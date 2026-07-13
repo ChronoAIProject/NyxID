@@ -96,6 +96,7 @@ const {
             { value: "confidential", label: "Confidential" },
             { value: "other", label: "Other" },
           ],
+          supports_custom_text: true,
         },
         {
           key: "creator_type",
@@ -789,8 +790,7 @@ describe("AdminOAuthClientsPage", () => {
     }
     expect(screen.getByRole("columnheader", { name: "Client" })).toHaveClass(
       "p-0",
-      "hover:bg-accent",
-      "focus-within:bg-accent",
+      "group/header",
     );
 
     const source = screen.getByRole("button", {
@@ -947,6 +947,99 @@ describe("AdminOAuthClientsPage", () => {
     expect(
       table.querySelector('tbody td[data-column="client_name"]'),
     ).not.toHaveClass("sticky");
+  });
+
+  it("sends a filter's custom text as a contains search beside its checked options", async () => {
+    const user = userEvent.setup();
+    render(<AdminOAuthClientsPage />);
+
+    await user.click(screen.getByRole("button", { name: "Filters" }));
+    await user.click(screen.getByRole("button", { name: /Client type/ }));
+    await user.click(screen.getByRole("checkbox", { name: "Public" }));
+    await user.type(
+      screen.getByRole("textbox", { name: "Custom Client type value" }),
+      "acme",
+    );
+    await user.click(screen.getByRole("button", { name: "Add" }));
+    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+
+    expect(resolveLastNavigationSearch({ page: 4 })).toEqual({
+      client_type: "public",
+      custom_filters: '{"client_type":["acme"]}',
+    });
+  });
+
+  it("clears a filter's custom text without dropping its checked options", async () => {
+    routeSearch.client_type = "public";
+    routeSearch.custom_filters = '{"client_type":["acme"]}';
+    const user = userEvent.setup();
+    render(<AdminOAuthClientsPage />);
+
+    // The custom text is its own chip, and reads as a contains.
+    expect(
+      screen.getByRole("button", {
+        name: "Edit Client type custom text: contains acme",
+      }),
+    ).toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: "Remove Client type custom text" }),
+    );
+    expect(resolveLastNavigationSearch(routeSearch)).toEqual({
+      client_type: "public",
+    });
+  });
+
+  it("keeps frozen cells opaque and leaves no highlight behind after a drop", async () => {
+    const user = userEvent.setup();
+    render(<AdminOAuthClientsPage />);
+
+    await user.click(
+      screen.getByRole("button", { name: "Freeze columns through Type" }),
+    );
+
+    // A frozen cell must never swap its opaque background for the translucent
+    // accent/muted tints, or the columns scrolled underneath bleed through it.
+    const typeHeader = screen.getByRole("columnheader", { name: "Type" });
+    expect(typeHeader).toHaveClass("bg-card");
+    expect(typeHeader).not.toHaveClass(
+      "hover:bg-accent",
+      "focus-within:bg-accent",
+    );
+    const typeCell = screen
+      .getByRole("table")
+      .querySelector('tbody td[data-column="client_type"]');
+    expect(typeCell).toHaveClass("bg-card");
+    expect(typeCell).not.toHaveClass("group-hover/row:bg-muted");
+
+    // The header tint is a hover-only overlay, so focus left on the pin button
+    // after a click does not strand the column in a highlighted state.
+    const tint = typeHeader.querySelector("span[aria-hidden]");
+    expect(tint).toHaveClass("opacity-0", "group-hover/header:opacity-100");
+
+    const source = screen.getByRole("button", { name: "Move Client column" });
+    const target = screen.getByRole("columnheader", { name: "Status" });
+    let transferredColumn = "";
+    const dataTransfer = {
+      effectAllowed: "none",
+      dropEffect: "none",
+      setData: (_type: string, value: string) => {
+        transferredColumn = value;
+      },
+      getData: () => transferredColumn,
+    } as unknown as DataTransfer;
+
+    fireEvent.dragStart(source, { dataTransfer });
+    fireEvent.dragOver(target, { clientX: 160, dataTransfer });
+    fireEvent.drop(target, { clientX: 160, dataTransfer });
+
+    for (const header of screen.getAllByRole("columnheader")) {
+      expect(header).not.toHaveAttribute("data-dragging");
+      expect(header).not.toHaveAttribute("data-drop-position");
+    }
+    expect(
+      screen.queryByTestId("column-drop-indicator-is_active"),
+    ).not.toBeInTheDocument();
   });
 
   it("marks retained rows as updating and prevents stale row mutations", () => {

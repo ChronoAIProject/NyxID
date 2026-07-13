@@ -80,8 +80,10 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import {
+  adminOAuthClientCustomFilterPatch,
   adminOAuthClientFilterPatch,
   getAppliedAdminOAuthClientFilters,
+  getAdminOAuthClientCustomValues,
   getAdminOAuthClientFilterFields,
   getAdminOAuthClientFilterValues,
   getAdminOAuthClientSearchFields,
@@ -380,14 +382,19 @@ function ReorderableTableHead({
       onDragOver={(event) => onDragOver(field, event)}
       onDrop={(event) => onDrop(field, event)}
       className={cn(
-        "group/header relative h-10 p-0 transition-colors hover:bg-accent focus-within:bg-accent",
-        dragging && "opacity-55",
+        "group/header relative h-10 p-0 transition-colors",
         frozen && "sticky z-30 bg-card",
         lastFrozen &&
           "border-r-2 border-border shadow-[3px_0_6px_-4px_rgba(0,0,0,0.35)]",
         direction && "text-foreground",
       )}
     >
+      {/* Tint overlays, never a background swap: a frozen header must keep an
+          opaque background or the columns scrolling underneath show through. */}
+      <span
+        className="pointer-events-none absolute inset-0 bg-accent opacity-0 transition-opacity group-hover/header:opacity-100"
+        aria-hidden="true"
+      />
       {direction && (
         <span
           className="pointer-events-none absolute inset-0 bg-primary/[0.07]"
@@ -404,7 +411,12 @@ function ReorderableTableHead({
           aria-hidden="true"
         />
       )}
-      <div className="flex h-full min-w-0 items-center">
+      <div
+        className={cn(
+          "flex h-full min-w-0 items-center",
+          dragging && "opacity-55",
+        )}
+      >
         <button
           type="button"
           draggable
@@ -516,6 +528,7 @@ export function AdminOAuthClientsPage() {
     per_page: routeSearch.per_page ?? DEFAULT_PER_PAGE,
     search: routeSearch.search,
     search_filters: routeSearch.search_filters,
+    custom_filters: routeSearch.custom_filters,
     client_type: routeSearch.client_type,
     creator_type: routeSearch.creator_type,
     broker: routeSearch.broker,
@@ -552,8 +565,13 @@ export function AdminOAuthClientsPage() {
     listParams,
   );
   const filterSelections: AdminOAuthClientFilterSelections = {};
+  const customFilterSelections: AdminOAuthClientFilterSelections = {};
   for (const field of filterFields) {
     filterSelections[field.key] = getAdminOAuthClientFilterValues(
+      listParams,
+      field.key,
+    );
+    customFilterSelections[field.key] = getAdminOAuthClientCustomValues(
       listParams,
       field.key,
     );
@@ -604,6 +622,7 @@ export function AdminOAuthClientsPage() {
       page: undefined,
       search: undefined,
       search_filters: undefined,
+      custom_filters: undefined,
       client_type: undefined,
       creator_type: undefined,
       broker: undefined,
@@ -739,6 +758,7 @@ export function AdminOAuthClientsPage() {
 
   function applyStructuredFilters(
     selections: AdminOAuthClientFilterSelections,
+    customSelections: AdminOAuthClientFilterSelections,
   ) {
     const patch: Partial<AdminOAuthClientSearchState> = { page: undefined };
     for (const field of filterFields) {
@@ -749,10 +769,22 @@ export function AdminOAuthClientsPage() {
       if (!fieldPatch) return;
       Object.assign(patch, fieldPatch);
     }
+    Object.assign(patch, adminOAuthClientCustomFilterPatch(customSelections));
     updateListSearch(patch);
   }
 
-  function removeStructuredFilter(key: AdminOAuthClientFilterKey) {
+  function removeStructuredFilter(
+    key: AdminOAuthClientFilterKey,
+    custom: boolean,
+  ) {
+    if (custom) {
+      const remaining = { ...customFilterSelections, [key]: undefined };
+      updateListSearch({
+        page: undefined,
+        ...adminOAuthClientCustomFilterPatch(remaining),
+      });
+      return;
+    }
     const patch = adminOAuthClientFilterPatch(key, undefined);
     if (patch) updateListSearch({ page: undefined, ...patch });
   }
@@ -1114,6 +1146,7 @@ export function AdminOAuthClientsPage() {
             <DataTableFilterPopover
               fields={filterFields}
               values={filterSelections}
+              customValues={customFilterSelections}
               open={filterPopoverOpen}
               selectedKey={selectedFilterKey}
               activeCount={
@@ -1327,8 +1360,11 @@ export function AdminOAuthClientsPage() {
                             }
                             className={cn(
                               column.cellClassName,
+                              // Opaque base so scrolled columns stay hidden; the row
+                              // hover tint rides on top as an overlay so a frozen cell
+                              // reads the same as the rest of its row.
                               frozen &&
-                                "sticky z-20 bg-card group-hover/row:bg-muted",
+                                "sticky z-20 bg-card after:pointer-events-none after:absolute after:inset-0 after:transition-colors after:duration-300 after:content-[''] group-hover/row:after:bg-muted/45",
                               frozenThrough === field &&
                                 "border-r-2 border-border shadow-[3px_0_6px_-4px_rgba(0,0,0,0.35)]",
                             )}

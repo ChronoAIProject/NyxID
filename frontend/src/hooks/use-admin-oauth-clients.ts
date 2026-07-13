@@ -27,6 +27,9 @@ export function useAdminOAuthClients(params: AdminOAuthClientListParams) {
       if (params.search_filters) {
         query.set("search_filters", params.search_filters);
       }
+      if (params.custom_filters) {
+        query.set("custom_filters", params.custom_filters);
+      }
       if (params.client_type) query.set("client_type", params.client_type);
       if (params.creator_type) query.set("creator_type", params.creator_type);
       if (params.broker) query.set("broker", params.broker);

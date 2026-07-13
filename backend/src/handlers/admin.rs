@@ -904,6 +904,7 @@ pub struct OAuthClientListQuery {
     pub per_page: Option<u64>,
     pub search: Option<String>,
     pub search_filters: Option<String>,
+    pub custom_filters: Option<String>,
     pub client_type: Option<String>,
     pub creator_type: Option<String>,
     pub broker: Option<String>,
@@ -921,6 +922,7 @@ impl OAuthClientListQuery {
             || self.per_page.is_some()
             || self.search.is_some()
             || self.search_filters.is_some()
+            || self.custom_filters.is_some()
             || self.client_type.is_some()
             || self.creator_type.is_some()
             || self.broker.is_some()
@@ -1021,6 +1023,9 @@ pub struct OAuthClientFilterField {
     pub operator: OAuthClientFilterOperator,
     pub multiple: bool,
     pub options: Vec<OAuthClientFilterOption>,
+    /// Whether the filter also accepts free text, matched as a case-insensitive
+    /// `contains` against the field's stored column and OR'd with its options.
+    pub supports_custom_text: bool,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -1138,6 +1143,12 @@ fn oauth_client_filter_option(value: &'static str, label: &'static str) -> OAuth
     OAuthClientFilterOption { value, label }
 }
 
+/// Single source of truth: a filter offers a custom-text box exactly when the
+/// service can map it to a stored column to run the `contains` against.
+fn oauth_client_filter_takes_custom_text(key: &str) -> bool {
+    oauth_client_service::admin_custom_text_field(key).is_some()
+}
+
 fn oauth_scope_label(scope: &'static str) -> &'static str {
     match scope {
         "openid" => "OpenID",
@@ -1175,6 +1186,7 @@ fn oauth_client_filter_options() -> OAuthClientFilterOptions {
                     oauth_client_filter_option("true", "Active"),
                     oauth_client_filter_option("false", "Inactive"),
                 ],
+                supports_custom_text: oauth_client_filter_takes_custom_text("is_active"),
             },
             OAuthClientFilterField {
                 key: "client_type",
@@ -1187,6 +1199,7 @@ fn oauth_client_filter_options() -> OAuthClientFilterOptions {
                     oauth_client_filter_option("confidential", "Confidential"),
                     oauth_client_filter_option("other", "Other"),
                 ],
+                supports_custom_text: oauth_client_filter_takes_custom_text("client_type"),
             },
             OAuthClientFilterField {
                 key: "creator_type",
@@ -1200,6 +1213,7 @@ fn oauth_client_filter_options() -> OAuthClientFilterOptions {
                     oauth_client_filter_option("owned", "User / org"),
                     oauth_client_filter_option("ownerless", "Ownerless"),
                 ],
+                supports_custom_text: oauth_client_filter_takes_custom_text("creator_type"),
             },
             OAuthClientFilterField {
                 key: "broker",
@@ -1213,6 +1227,7 @@ fn oauth_client_filter_options() -> OAuthClientFilterOptions {
                     oauth_client_filter_option("flag", "Enabled by admin grant"),
                     oauth_client_filter_option("scope", "Enabled by broker scope"),
                 ],
+                supports_custom_text: oauth_client_filter_takes_custom_text("broker"),
             },
             OAuthClientFilterField {
                 key: "scope",
@@ -1224,6 +1239,7 @@ fn oauth_client_filter_options() -> OAuthClientFilterOptions {
                     .iter()
                     .map(|scope| oauth_client_filter_option(scope, oauth_scope_label(scope)))
                     .collect(),
+                supports_custom_text: oauth_client_filter_takes_custom_text("scope"),
             },
             OAuthClientFilterField {
                 key: "created_at",
@@ -1232,6 +1248,7 @@ fn oauth_client_filter_options() -> OAuthClientFilterOptions {
                 operator: OAuthClientFilterOperator::Between,
                 multiple: true,
                 options: vec![],
+                supports_custom_text: oauth_client_filter_takes_custom_text("created_at"),
             },
         ],
     }
@@ -1382,6 +1399,7 @@ pub async fn list_oauth_clients(
             per_page,
             search: query.search.as_deref(),
             search_filters: query.search_filters.as_deref(),
+            custom_filters: query.custom_filters.as_deref(),
             client_type: query.client_type.as_deref(),
             creator_type: query.creator_type.as_deref(),
             broker: query.broker.as_deref(),
