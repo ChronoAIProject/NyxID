@@ -4709,19 +4709,32 @@ curl -X DELETE http://localhost:3001/api/v1/admin/users/550e8400-e29b-41d4-a716-
 
 #### GET /api/v1/admin/audit-log
 
-Query the audit log with pagination. Entries are returned in reverse chronological order. Supports filtering by user ID.
+Query the audit log with server-side pagination, sorting, scoped search, and filtering. Entries default to reverse chronological order.
 
-**Auth:** Admin
+**Auth:** Admin or operator
 
 **Query Parameters:**
 
-| Parameter  | Type    | Default | Description                              |
-|------------|---------|---------|------------------------------------------|
-| `page`     | integer | `1`     | Page number (1-indexed)                  |
-| `per_page` | integer | `50`    | Items per page (max 100)                 |
-| `user_id`  | string  | --      | Filter entries by acting user ID         |
+| Parameter        | Type    | Default       | Description                                                                                     |
+|------------------|---------|---------------|-------------------------------------------------------------------------------------------------|
+| `page`           | integer | `1`           | Page number (1-indexed)                                                                          |
+| `per_page`       | integer | `50`          | Items per page (1--100)                                                                          |
+| `sort`           | string  | `-created_at` | `created_at`, `event_type`, `api_key_name`, `api_key_id`, `user_id`, `ip_address`, `user_agent`, or `status`; prefix with `-` for descending |
+| `search`         | string  | --            | Case-insensitive `contains` across event type, user ID, API key ID/name, IP, User-Agent, and entry ID (max 256 chars) |
+| `search_filters` | string  | --            | Field-scoped search as JSON: `[{"field":"user_id","values":["..."]}]`. Fields: `event_type`, `user_id`, `api_key` (spans key ID and name), `ip_address`, `user_agent`. Max 5 groups, 8 values per group, 32 values overall |
+| `event_type`     | string  | --            | Comma-separated event types, matched exactly (max 32)                                            |
+| `custom_filters` | string  | --            | Free text OR'd into a filter, as JSON: `{"event_type":["mfa"]}`. Only `event_type` accepts text  |
+| `status`         | string  | --            | Comma-separated response-status buckets: `2xx`, `3xx`, `4xx`, `5xx`, `none` (no `response_status` recorded) |
+| `actor`          | string  | --            | Comma-separated: `user` (session), `agent` (API key), `anonymous`                                |
+| `created_dates`  | string  | --            | Comma-separated `YYYY-MM-DD` days (UTC, max 32). Cannot combine with `created_from` / `created_to` |
+| `created_from`   | string  | --            | Inclusive `YYYY-MM-DD` lower bound (UTC)                                                          |
+| `created_to`     | string  | --            | Inclusive `YYYY-MM-DD` upper bound (UTC)                                                          |
+| `user_id`        | string  | --            | Legacy exact-match filter on the acting user ID                                                   |
+| `api_key_id`     | string  | --            | Legacy exact-match filter on the agent API key ID                                                 |
 
 **Response (200):**
+
+`filter_options` describes the controls the server accepts, so clients never hardcode a domain it would reject. `event_type` options are discovered from the data (capped at 200); anything past the cap stays reachable through `custom_filters`.
 
 ```json
 {
@@ -4730,6 +4743,8 @@ Query the audit log with pagination. Entries are returned in reverse chronologic
       "id": "entry-uuid-here",
       "seq": 123,
       "user_id": "550e8400-e29b-41d4-a716-446655440000",
+      "api_key_id": null,
+      "api_key_name": null,
       "event_type": "admin.user.deleted",
       "event_data": {
         "target_user_id": "660e8400-e29b-41d4-a716-446655440000",
@@ -4742,7 +4757,22 @@ Query the audit log with pagination. Entries are returned in reverse chronologic
   ],
   "total": 1024,
   "page": 1,
-  "per_page": 50
+  "per_page": 50,
+  "filter_options": {
+    "sorts": ["-created_at", "created_at", "event_type", "..."],
+    "search_fields": [{ "key": "user_id", "label": "User ID" }],
+    "fields": [
+      {
+        "key": "status",
+        "label": "Status",
+        "value_type": "enum",
+        "operator": "is",
+        "multiple": true,
+        "options": [{ "value": "5xx", "label": "5xx Server error" }],
+        "supports_custom_text": false
+      }
+    ]
+  }
 }
 ```
 

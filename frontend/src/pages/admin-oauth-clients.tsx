@@ -7,7 +7,7 @@ import {
   useUpdateBrokerSettings,
 } from "@/hooks/use-admin-oauth-clients";
 import { ApiError } from "@/lib/api-client";
-import { cn, formatDate } from "@/lib/utils";
+import { formatDate } from "@/lib/utils";
 import { canAdminWrite } from "@/types/api";
 import type {
   AdminOAuthClient,
@@ -60,22 +60,15 @@ import {
   Table,
   TableBody,
   TableCell,
-  TableHead,
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
 import {
   AlertTriangle,
-  ArrowDown,
-  ArrowUp,
-  ArrowUpDown,
   ChevronLeft,
   ChevronRight,
-  GripVertical,
   KeyRound,
   Loader2,
-  Pin,
-  PinOff,
   RotateCcw,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -99,6 +92,12 @@ import {
   DataTableFilterPopover,
   DataTableSearch,
 } from "@/components/data-table/data-table-controls";
+import {
+  DataTableColumnHeader,
+  nextDataTableSort,
+  useDataTableColumns,
+  type DataTableColumn,
+} from "@/components/data-table/data-table-columns";
 
 type ClientAction = {
   readonly client: AdminOAuthClient;
@@ -153,14 +152,7 @@ type OAuthClientSortField =
   | "allowed_scopes"
   | "created_at";
 
-type OAuthClientColumn = {
-  readonly field: OAuthClientSortField;
-  readonly label: string;
-  readonly width: number;
-  readonly cellClassName?: string;
-};
-
-const OAUTH_CLIENT_COLUMNS: readonly OAuthClientColumn[] = [
+const OAUTH_CLIENT_COLUMNS: readonly DataTableColumn<OAuthClientSortField>[] = [
   {
     field: "client_name",
     label: "Client",
@@ -201,80 +193,6 @@ const OAUTH_CLIENT_COLUMNS: readonly OAuthClientColumn[] = [
   },
 ];
 
-const DEFAULT_COLUMN_ORDER = OAUTH_CLIENT_COLUMNS.map((column) => column.field);
-const OAUTH_CLIENT_TABLE_WIDTH = OAUTH_CLIENT_COLUMNS.reduce(
-  (width, column) => width + column.width,
-  0,
-);
-
-type ColumnPreferences = {
-  readonly order: readonly OAuthClientSortField[];
-  readonly frozenThrough: OAuthClientSortField | null;
-};
-
-const DEFAULT_COLUMN_PREFERENCES: ColumnPreferences = {
-  order: DEFAULT_COLUMN_ORDER,
-  frozenThrough: null,
-};
-
-type ColumnDropTarget = {
-  readonly field: OAuthClientSortField;
-  readonly position: "before" | "after";
-};
-
-function getColumn(field: OAuthClientSortField): OAuthClientColumn {
-  const column = OAUTH_CLIENT_COLUMNS.find((item) => item.field === field);
-  if (!column) throw new Error(`Unknown OAuth client column: ${field}`);
-  return column;
-}
-
-function isColumnField(value: unknown): value is OAuthClientSortField {
-  return OAUTH_CLIENT_COLUMNS.some((column) => column.field === value);
-}
-
-function moveColumnToIndex(
-  order: readonly OAuthClientSortField[],
-  field: OAuthClientSortField,
-  targetIndex: number,
-): OAuthClientSortField[] {
-  const sourceIndex = order.indexOf(field);
-  if (sourceIndex < 0) return [...order];
-  const next = order.filter((item) => item !== field);
-  next.splice(Math.max(0, Math.min(targetIndex, next.length)), 0, field);
-  return next;
-}
-
-function reorderColumnsForDrop(
-  order: readonly OAuthClientSortField[],
-  source: OAuthClientSortField,
-  target: OAuthClientSortField,
-  position: ColumnDropTarget["position"],
-): OAuthClientSortField[] {
-  if (source === target) return [...order];
-  const withoutSource = order.filter((field) => field !== source);
-  const targetIndex = withoutSource.indexOf(target);
-  if (targetIndex < 0) return [...order];
-  const insertionIndex = targetIndex + (position === "after" ? 1 : 0);
-  withoutSource.splice(insertionIndex, 0, source);
-  return withoutSource;
-}
-
-function frozenColumnOffsets(
-  order: readonly OAuthClientSortField[],
-  frozenThrough: OAuthClientSortField | null,
-): ReadonlyMap<OAuthClientSortField, number> {
-  const offsets = new Map<OAuthClientSortField, number>();
-  if (!frozenThrough) return offsets;
-
-  let left = 0;
-  for (const field of order) {
-    offsets.set(field, left);
-    left += getColumn(field).width;
-    if (field === frozenThrough) break;
-  }
-  return offsets;
-}
-
 const DEFAULT_COLUMN_SORT: Record<OAuthClientSortField, AdminOAuthClientSort> =
   {
     client_name: "client_name",
@@ -294,201 +212,6 @@ type OAuthClientSearchEditTarget =
       readonly value: string;
     };
 
-function sortDirection(
-  sort: AdminOAuthClientSort,
-  field: OAuthClientSortField,
-): "ascending" | "descending" | undefined {
-  if (sort === field) return "ascending";
-  if (sort === `-${field}`) return "descending";
-  return undefined;
-}
-
-function nextColumnSort(
-  sort: AdminOAuthClientSort,
-  field: OAuthClientSortField,
-): AdminOAuthClientSort {
-  const ascending = field as AdminOAuthClientSort;
-  const descending = `-${field}` as AdminOAuthClientSort;
-  if (sort === ascending) return descending;
-  if (sort === descending) return ascending;
-  return DEFAULT_COLUMN_SORT[field];
-}
-
-function ReorderableTableHead({
-  column,
-  sort,
-  disabled,
-  frozen,
-  lastFrozen,
-  stickyLeft,
-  dragging,
-  dropPosition,
-  onSort,
-  onDragStart,
-  onDragOver,
-  onDrop,
-  onDragEnd,
-  onMoveByKeyboard,
-  onToggleFreeze,
-}: {
-  readonly column: OAuthClientColumn;
-  readonly sort: AdminOAuthClientSort;
-  readonly disabled: boolean;
-  readonly frozen: boolean;
-  readonly lastFrozen: boolean;
-  readonly stickyLeft: number | undefined;
-  readonly dragging: boolean;
-  readonly dropPosition: ColumnDropTarget["position"] | undefined;
-  readonly onSort: (sort: AdminOAuthClientSort) => void;
-  readonly onDragStart: (
-    field: OAuthClientSortField,
-    event: React.DragEvent<HTMLButtonElement>,
-  ) => void;
-  readonly onDragOver: (
-    field: OAuthClientSortField,
-    event: React.DragEvent<HTMLTableCellElement>,
-  ) => void;
-  readonly onDrop: (
-    field: OAuthClientSortField,
-    event: React.DragEvent<HTMLTableCellElement>,
-  ) => void;
-  readonly onDragEnd: () => void;
-  readonly onMoveByKeyboard: (
-    field: OAuthClientSortField,
-    key: "ArrowLeft" | "ArrowRight" | "Home" | "End",
-  ) => void;
-  readonly onToggleFreeze: (field: OAuthClientSortField) => void;
-}) {
-  const { field, label } = column;
-  const direction = sortDirection(sort, field);
-  const Icon =
-    direction === "ascending"
-      ? ArrowUp
-      : direction === "descending"
-        ? ArrowDown
-        : ArrowUpDown;
-  const next = nextColumnSort(sort, field);
-  const nextDirection = next.startsWith("-") ? "descending" : "ascending";
-
-  return (
-    <TableHead
-      aria-label={label}
-      aria-sort={direction ?? "none"}
-      data-column={field}
-      data-dragging={dragging || undefined}
-      data-drop-position={dropPosition}
-      data-frozen={frozen || undefined}
-      style={frozen ? { left: stickyLeft } : undefined}
-      onDragOver={(event) => onDragOver(field, event)}
-      onDrop={(event) => onDrop(field, event)}
-      className={cn(
-        "group/header relative h-10 p-0 transition-colors",
-        frozen && "sticky z-30 bg-card",
-        lastFrozen &&
-          "border-r-2 border-border shadow-[3px_0_6px_-4px_rgba(0,0,0,0.35)]",
-        direction && "text-foreground",
-      )}
-    >
-      {/* Tint overlays, never a background swap: a frozen header must keep an
-          opaque background or the columns scrolling underneath show through. */}
-      <span
-        className="pointer-events-none absolute inset-0 bg-accent opacity-0 transition-opacity group-hover/header:opacity-100"
-        aria-hidden="true"
-      />
-      {direction && (
-        <span
-          className="pointer-events-none absolute inset-0 bg-primary/[0.07]"
-          aria-hidden="true"
-        />
-      )}
-      {dropPosition && (
-        <span
-          data-testid={`column-drop-indicator-${field}`}
-          className={cn(
-            "pointer-events-none absolute inset-y-0 z-30 w-0.5 bg-primary",
-            dropPosition === "before" ? "left-0" : "right-0",
-          )}
-          aria-hidden="true"
-        />
-      )}
-      <div
-        className={cn(
-          "flex h-full min-w-0 items-center",
-          dragging && "opacity-55",
-        )}
-      >
-        <button
-          type="button"
-          draggable
-          aria-label={`Move ${label} column`}
-          title={`Move ${label} column`}
-          onDragStart={(event) => onDragStart(field, event)}
-          onDragEnd={onDragEnd}
-          onKeyDown={(event) => {
-            if (
-              event.key === "ArrowLeft" ||
-              event.key === "ArrowRight" ||
-              event.key === "Home" ||
-              event.key === "End"
-            ) {
-              event.preventDefault();
-              onMoveByKeyboard(field, event.key);
-            }
-          }}
-          className="flex h-full w-7 shrink-0 cursor-grab items-center justify-center text-muted-foreground opacity-0 outline-none transition-opacity hover:text-foreground focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring active:cursor-grabbing group-hover/header:opacity-100 group-focus-within/header:opacity-100"
-        >
-          <GripVertical className="h-3.5 w-3.5" aria-hidden="true" />
-        </button>
-        <button
-          type="button"
-          className={cn(
-            "group/sort flex h-full min-w-0 flex-1 items-center gap-1.5 text-left text-[10px] font-semibold uppercase tracking-normal outline-none transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50",
-            direction && "text-foreground",
-          )}
-          disabled={disabled}
-          aria-label={`Sort by ${label}, ${nextDirection}`}
-          title={`Sort by ${label}, ${nextDirection}`}
-          onClick={() => onSort(next)}
-        >
-          <span className="truncate">{label}</span>
-          <Icon
-            className={cn(
-              "h-3.5 w-3.5 shrink-0",
-              direction
-                ? "text-primary"
-                : "text-muted-foreground/55 group-hover/sort:text-muted-foreground",
-            )}
-            aria-hidden="true"
-          />
-        </button>
-        <button
-          type="button"
-          aria-label={
-            lastFrozen
-              ? `Unfreeze columns through ${label}`
-              : `Freeze columns through ${label}`
-          }
-          title={lastFrozen ? "Unfreeze columns" : "Freeze through this column"}
-          aria-pressed={lastFrozen}
-          onClick={() => onToggleFreeze(field)}
-          className={cn(
-            "flex h-full w-7 shrink-0 items-center justify-center outline-none transition-opacity hover:text-foreground focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring group-hover/header:opacity-100 group-focus-within/header:opacity-100",
-            lastFrozen
-              ? "text-primary opacity-100"
-              : "text-muted-foreground opacity-0",
-          )}
-        >
-          {lastFrozen ? (
-            <PinOff className="h-3.5 w-3.5" aria-hidden="true" />
-          ) : (
-            <Pin className="h-3.5 w-3.5" aria-hidden="true" />
-          )}
-        </button>
-      </div>
-    </TableHead>
-  );
-}
-
 export function AdminOAuthClientsPage() {
   const navigate = useNavigate();
   const routeSearch = useSearch({
@@ -496,15 +219,7 @@ export function AdminOAuthClientsPage() {
   }) as AdminOAuthClientSearchState;
   const currentUser = useAuthStore((s) => s.user);
   const canWrite = canAdminWrite(currentUser);
-  const [columnPreferences, setColumnPreferences] = useState(
-    DEFAULT_COLUMN_PREFERENCES,
-  );
-  const [draggingColumn, setDraggingColumn] =
-    useState<OAuthClientSortField | null>(null);
-  const [columnDropTarget, setColumnDropTarget] =
-    useState<ColumnDropTarget | null>(null);
-  const [columnAnnouncement, setColumnAnnouncement] = useState("");
-  const draggingColumnRef = useRef<OAuthClientSortField | null>(null);
+  const columns = useDataTableColumns(OAUTH_CLIENT_COLUMNS);
   const appliedSearch = routeSearch.search ?? "";
   const [searchDraft, setSearchDraft] = useState("");
   const [selectedSearchField, setSelectedSearchField] =
@@ -582,10 +297,6 @@ export function AdminOAuthClientsPage() {
     appliedSearchFilters.length > 0 ||
     appliedStructuredFilters.length > 0,
   );
-  const columnOrder = columnPreferences.order;
-  const frozenThrough = columnPreferences.frozenThrough;
-  const stickyOffsets = frozenColumnOffsets(columnOrder, frozenThrough);
-
   const updateListSearch = useCallback(
     (patch: Partial<AdminOAuthClientSearchState>, replace = false) => {
       void navigate({
@@ -806,127 +517,6 @@ export function AdminOAuthClientsPage() {
       availableSorts.has(field as AdminOAuthClientSort) &&
       availableSorts.has(`-${field}` as AdminOAuthClientSort)
     );
-  }
-
-  function announceColumnPosition(
-    field: OAuthClientSortField,
-    order: readonly OAuthClientSortField[],
-  ) {
-    setColumnAnnouncement(
-      `${getColumn(field).label} column moved to position ${String(
-        order.indexOf(field) + 1,
-      )} of ${String(order.length)}`,
-    );
-  }
-
-  function updateColumnOrder(
-    nextOrder: readonly OAuthClientSortField[],
-    movedField: OAuthClientSortField,
-  ) {
-    setColumnPreferences((previous) => ({
-      ...previous,
-      order: nextOrder,
-    }));
-    announceColumnPosition(movedField, nextOrder);
-  }
-
-  function handleColumnDragStart(
-    field: OAuthClientSortField,
-    event: React.DragEvent<HTMLButtonElement>,
-  ) {
-    draggingColumnRef.current = field;
-    setDraggingColumn(field);
-    setColumnDropTarget(null);
-    event.dataTransfer.effectAllowed = "move";
-    event.dataTransfer.setData("text/plain", field);
-  }
-
-  function dropPositionForEvent(
-    event: React.DragEvent<HTMLTableCellElement>,
-  ): ColumnDropTarget["position"] {
-    const bounds = event.currentTarget.getBoundingClientRect();
-    return event.clientX < bounds.left + bounds.width / 2 ? "before" : "after";
-  }
-
-  function handleColumnDragOver(
-    field: OAuthClientSortField,
-    event: React.DragEvent<HTMLTableCellElement>,
-  ) {
-    const source = draggingColumnRef.current;
-    if (!source || source === field) return;
-    event.preventDefault();
-    event.dataTransfer.dropEffect = "move";
-    const nextTarget: ColumnDropTarget = {
-      field,
-      position: dropPositionForEvent(event),
-    };
-    setColumnDropTarget((current) =>
-      current?.field === nextTarget.field &&
-      current.position === nextTarget.position
-        ? current
-        : nextTarget,
-    );
-  }
-
-  function clearColumnDragState() {
-    draggingColumnRef.current = null;
-    setDraggingColumn(null);
-    setColumnDropTarget(null);
-  }
-
-  function handleColumnDrop(
-    field: OAuthClientSortField,
-    event: React.DragEvent<HTMLTableCellElement>,
-  ) {
-    const transferredField = event.dataTransfer.getData("text/plain");
-    const source =
-      draggingColumnRef.current ??
-      (isColumnField(transferredField) ? transferredField : null);
-    if (!source || source === field) {
-      clearColumnDragState();
-      return;
-    }
-
-    event.preventDefault();
-    const position =
-      columnDropTarget?.field === field
-        ? columnDropTarget.position
-        : dropPositionForEvent(event);
-    const nextOrder = reorderColumnsForDrop(
-      columnOrder,
-      source,
-      field,
-      position,
-    );
-    updateColumnOrder(nextOrder, source);
-    clearColumnDragState();
-  }
-
-  function handleColumnKeyboardMove(
-    field: OAuthClientSortField,
-    key: "ArrowLeft" | "ArrowRight" | "Home" | "End",
-  ) {
-    const sourceIndex = columnOrder.indexOf(field);
-    const targetIndex =
-      key === "Home"
-        ? 0
-        : key === "End"
-          ? columnOrder.length - 1
-          : key === "ArrowLeft"
-            ? Math.max(0, sourceIndex - 1)
-            : Math.min(columnOrder.length - 1, sourceIndex + 1);
-    if (sourceIndex < 0 || sourceIndex === targetIndex) return;
-    updateColumnOrder(
-      moveColumnToIndex(columnOrder, field, targetIndex),
-      field,
-    );
-  }
-
-  function toggleFrozenColumns(field: OAuthClientSortField) {
-    setColumnPreferences((previous) => ({
-      ...previous,
-      frozenThrough: previous.frozenThrough === field ? null : field,
-    }));
   }
 
   function stageBrokerCapability(client: AdminOAuthClient, enabled: boolean) {
@@ -1293,50 +883,37 @@ export function AdminOAuthClientsPage() {
               aria-busy={isFetching}
             >
               <p className="sr-only" aria-live="polite" aria-atomic="true">
-                {columnAnnouncement}
+                {columns.announcement}
               </p>
               <Table
                 containerClassName="overscroll-x-none"
                 className="table-fixed [&_td]:py-1.5"
-                style={{ minWidth: OAUTH_CLIENT_TABLE_WIDTH }}
+                style={{ minWidth: columns.totalWidth }}
               >
                 <colgroup>
-                  {columnOrder.map((field) => (
+                  {columns.order.map((field) => (
                     <col
                       key={field}
-                      style={{ width: getColumn(field).width }}
+                      style={{ width: columns.getColumn(field).width }}
                     />
                   ))}
                 </colgroup>
                 <TableHeader>
                   <TableRow>
-                    {columnOrder.map((field) => {
-                      const column = getColumn(field);
-                      return (
-                        <ReorderableTableHead
-                          key={field}
-                          column={column}
-                          sort={listParams.sort}
-                          disabled={!canSortColumn(field)}
-                          frozen={stickyOffsets.has(field)}
-                          lastFrozen={frozenThrough === field}
-                          stickyLeft={stickyOffsets.get(field)}
-                          dragging={draggingColumn === field}
-                          dropPosition={
-                            columnDropTarget?.field === field
-                              ? columnDropTarget.position
-                              : undefined
-                          }
-                          onSort={updateSort}
-                          onDragStart={handleColumnDragStart}
-                          onDragOver={handleColumnDragOver}
-                          onDrop={handleColumnDrop}
-                          onDragEnd={clearColumnDragState}
-                          onMoveByKeyboard={handleColumnKeyboardMove}
-                          onToggleFreeze={toggleFrozenColumns}
-                        />
-                      );
-                    })}
+                    {columns.order.map((field) => (
+                      <DataTableColumnHeader
+                        key={field}
+                        {...columns.headerProps(field)}
+                        sort={listParams.sort}
+                        nextSort={nextDataTableSort(
+                          listParams.sort,
+                          field,
+                          DEFAULT_COLUMN_SORT,
+                        )}
+                        disabled={!canSortColumn(field)}
+                        onSort={updateSort}
+                      />
+                    ))}
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -1345,34 +922,11 @@ export function AdminOAuthClientsPage() {
                       key={client.id}
                       className="group/row hover:bg-muted/45"
                     >
-                      {columnOrder.map((field) => {
-                        const column = getColumn(field);
-                        const frozen = stickyOffsets.has(field);
-                        return (
-                          <TableCell
-                            key={field}
-                            data-column={field}
-                            data-frozen={frozen || undefined}
-                            style={
-                              frozen
-                                ? { left: stickyOffsets.get(field) }
-                                : undefined
-                            }
-                            className={cn(
-                              column.cellClassName,
-                              // Opaque base so scrolled columns stay hidden; the row
-                              // hover tint rides on top as an overlay so a frozen cell
-                              // reads the same as the rest of its row.
-                              frozen &&
-                                "sticky z-20 bg-card after:pointer-events-none after:absolute after:inset-0 after:transition-colors after:duration-300 after:content-[''] group-hover/row:after:bg-muted/45",
-                              frozenThrough === field &&
-                                "border-r-2 border-border shadow-[3px_0_6px_-4px_rgba(0,0,0,0.35)]",
-                            )}
-                          >
-                            {renderOAuthClientCell(client, field)}
-                          </TableCell>
-                        );
-                      })}
+                      {columns.order.map((field) => (
+                        <TableCell key={field} {...columns.cellProps(field)}>
+                          {renderOAuthClientCell(client, field)}
+                        </TableCell>
+                      ))}
                     </TableRow>
                   ))}
                 </TableBody>

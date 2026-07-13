@@ -10,12 +10,11 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::handlers::admin_helpers::{require_admin, require_admin_or_operator};
-use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};
 use crate::models::user::{COLLECTION_NAME as USERS, PlatformRole, User};
 use crate::mw::auth::AuthUser;
 use crate::services::{
-    admin_user_service, audit_chain_service, audit_service, consent_service, oauth_client_service,
-    platform_settings_service, role_service,
+    admin_audit_service, admin_user_service, audit_chain_service, audit_service, consent_service,
+    oauth_client_service, platform_settings_service, role_service,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
@@ -28,12 +27,23 @@ pub struct UserListQuery {
     pub search: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct AuditLogQuery {
     pub page: Option<u64>,
     pub per_page: Option<u64>,
+    /// Legacy exact-match filters, predating the admin table controls.
     pub user_id: Option<String>,
     pub api_key_id: Option<String>,
+    pub search: Option<String>,
+    pub search_filters: Option<String>,
+    pub custom_filters: Option<String>,
+    pub event_type: Option<String>,
+    pub status: Option<String>,
+    pub actor: Option<String>,
+    pub created_dates: Option<String>,
+    pub created_from: Option<String>,
+    pub created_to: Option<String>,
+    pub sort: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -88,6 +98,61 @@ pub struct AuditLogListResponse {
     pub total: u64,
     pub page: u64,
     pub per_page: u64,
+    pub filter_options: AuditLogFilterOptions,
+}
+
+/// Describes the audit table's controls to the client, so the UI never hardcodes
+/// a domain the server would reject.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct AuditLogFilterOptions {
+    pub sorts: Vec<&'static str>,
+    pub search_fields: Vec<AuditLogSearchField>,
+    pub fields: Vec<AuditLogFilterField>,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct AuditLogSearchField {
+    pub key: &'static str,
+    pub label: &'static str,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditLogFilterValueType {
+    Enum,
+    Date,
+    /// Free-text only: the column is too high-cardinality to enumerate as
+    /// options (UUIDs, IPs, User-Agent strings).
+    Text,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditLogFilterOperator {
+    Is,
+    Between,
+    Contains,
+}
+
+/// Owned rather than `&'static str` because the event-type options are
+/// discovered from the data at request time.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct AuditLogFilterOption {
+    pub value: String,
+    pub label: String,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct AuditLogFilterField {
+    pub key: &'static str,
+    pub label: &'static str,
+    pub value_type: AuditLogFilterValueType,
+    pub operator: AuditLogFilterOperator,
+    pub multiple: bool,
+    pub options: Vec<AuditLogFilterOption>,
+    /// Whether the filter also accepts free text, matched as a case-insensitive
+    /// `contains` against the field's stored column and OR'd with its options.
+    pub supports_custom_text: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -689,7 +754,9 @@ pub async fn revoke_user_sessions(
 
 /// GET /api/v1/admin/audit-log
 ///
-/// Query the audit log (admin only). Supports pagination and user_id filter.
+/// Query the audit log (admin only). Supports server-side pagination, sorting,
+/// scoped search, and filtering; the legacy `user_id` / `api_key_id` exact-match
+/// params still work alongside the table controls.
 pub async fn list_audit_log(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -699,50 +766,33 @@ pub async fn list_audit_log(
     require_admin_or_operator(&state, &auth_user, "admin.audit_log.list").await?;
 
     let page = query.page.unwrap_or(1).max(1);
-    let per_page = query.per_page.unwrap_or(50).min(100);
-    let offset = (page - 1) * per_page;
+    let per_page = query.per_page.unwrap_or(50).clamp(1, 100);
+    let sort = query.sort.as_deref().unwrap_or("-created_at");
 
-    let mut filter = doc! {};
-    if let Some(ref uid) = query.user_id {
-        filter.insert("user_id", uid);
-    }
-    if let Some(ref api_key_id) = query.api_key_id {
-        filter.insert("api_key_id", api_key_id);
-    }
+    // Summarize the applied controls as an opaque marker list rather than the raw
+    // values (which are PII-adjacent). `None` when nothing was applied.
+    let filter_marker = audit_log_filter_marker(&query);
 
-    // Summarize filters as an opaque marker list rather than the raw IDs
-    // (which are PII-adjacent). `None` when no filter was applied.
-    let filter_marker: Option<String> = {
-        let mut parts: Vec<&str> = Vec::new();
-        if query.user_id.is_some() {
-            parts.push("user_id");
-        }
-        if query.api_key_id.is_some() {
-            parts.push("api_key_id");
-        }
-        if parts.is_empty() {
-            None
-        } else {
-            Some(parts.join(","))
-        }
-    };
-
-    let total = state
-        .db
-        .collection::<AuditLog>(AUDIT_LOG)
-        .count_documents(filter.clone())
-        .await?;
-
-    let entries: Vec<AuditLog> = state
-        .db
-        .collection::<AuditLog>(AUDIT_LOG)
-        .find(filter)
-        .sort(doc! { "created_at": -1 })
-        .skip(offset)
-        .limit(per_page as i64)
-        .await?
-        .try_collect()
-        .await?;
+    let (entries, total) = admin_audit_service::list_entries(
+        &state.db,
+        admin_audit_service::AdminAuditLogListParams {
+            page,
+            per_page,
+            search: query.search.as_deref(),
+            search_filters: query.search_filters.as_deref(),
+            custom_filters: query.custom_filters.as_deref(),
+            event_type: query.event_type.as_deref(),
+            status: query.status.as_deref(),
+            actor: query.actor.as_deref(),
+            user_id: query.user_id.as_deref(),
+            api_key_id: query.api_key_id.as_deref(),
+            created_dates: query.created_dates.as_deref(),
+            created_from: query.created_from.as_deref(),
+            created_to: query.created_to.as_deref(),
+            sort,
+        },
+    )
+    .await?;
 
     let items: Vec<AuditLogItem> = entries
         .into_iter()
@@ -760,6 +810,8 @@ pub async fn list_audit_log(
         })
         .collect();
 
+    let event_types = admin_audit_service::distinct_event_types(&state.db).await?;
+
     emit_event(
         state.telemetry.as_deref(),
         &auth_user.user_id.to_string(),
@@ -775,7 +827,148 @@ pub async fn list_audit_log(
         total,
         page,
         per_page,
+        filter_options: audit_log_filter_options(event_types),
     }))
+}
+
+/// Names the controls that were applied, never their values.
+fn audit_log_filter_marker(query: &AuditLogQuery) -> Option<String> {
+    let applied = [
+        ("user_id", query.user_id.is_some()),
+        ("api_key_id", query.api_key_id.is_some()),
+        ("search", query.search.is_some()),
+        ("search_filters", query.search_filters.is_some()),
+        ("custom_filters", query.custom_filters.is_some()),
+        ("event_type", query.event_type.is_some()),
+        ("status", query.status.is_some()),
+        ("actor", query.actor.is_some()),
+        (
+            "created_at",
+            query.created_dates.is_some()
+                || query.created_from.is_some()
+                || query.created_to.is_some(),
+        ),
+    ];
+
+    let parts: Vec<&str> = applied
+        .iter()
+        .filter_map(|(name, applied)| applied.then_some(*name))
+        .collect();
+    (!parts.is_empty()).then(|| parts.join(","))
+}
+
+fn audit_log_filter_option(value: &str, label: &str) -> AuditLogFilterOption {
+    AuditLogFilterOption {
+        value: value.to_string(),
+        label: label.to_string(),
+    }
+}
+
+/// Single source of truth: a filter offers a custom-text box exactly when the
+/// service can map it to a stored column to run the `contains` against.
+fn audit_log_filter_takes_custom_text(key: &str) -> bool {
+    admin_audit_service::admin_custom_text_field(key).is_some()
+}
+
+fn audit_log_status_label(bucket: &str) -> &'static str {
+    match bucket {
+        "2xx" => "2xx Success",
+        "3xx" => "3xx Redirect",
+        "4xx" => "4xx Client error",
+        "5xx" => "5xx Server error",
+        _ => "No status",
+    }
+}
+
+fn audit_log_actor_label(actor: &str) -> &'static str {
+    match actor {
+        "user" => "User session",
+        "agent" => "Agent API key",
+        _ => "Anonymous",
+    }
+}
+
+fn audit_log_filter_options(event_types: Vec<String>) -> AuditLogFilterOptions {
+    AuditLogFilterOptions {
+        sorts: admin_audit_service::ADMIN_SORT_OPTIONS.to_vec(),
+        search_fields: admin_audit_service::ADMIN_SEARCH_FIELDS
+            .iter()
+            .map(|(key, label)| AuditLogSearchField { key, label })
+            .collect(),
+        fields: vec![
+            AuditLogFilterField {
+                key: "event_type",
+                label: "Event type",
+                value_type: AuditLogFilterValueType::Enum,
+                operator: AuditLogFilterOperator::Is,
+                multiple: true,
+                options: event_types
+                    .iter()
+                    .map(|event_type| audit_log_filter_option(event_type, event_type))
+                    .collect(),
+                supports_custom_text: audit_log_filter_takes_custom_text("event_type"),
+            },
+            AuditLogFilterField {
+                key: "status",
+                label: "Status",
+                value_type: AuditLogFilterValueType::Enum,
+                operator: AuditLogFilterOperator::Is,
+                multiple: true,
+                options: admin_audit_service::ADMIN_STATUS_FILTERS
+                    .iter()
+                    .map(|bucket| audit_log_filter_option(bucket, audit_log_status_label(bucket)))
+                    .collect(),
+                supports_custom_text: audit_log_filter_takes_custom_text("status"),
+            },
+            AuditLogFilterField {
+                key: "actor",
+                label: "Actor",
+                value_type: AuditLogFilterValueType::Enum,
+                operator: AuditLogFilterOperator::Is,
+                multiple: true,
+                options: admin_audit_service::ADMIN_ACTOR_FILTERS
+                    .iter()
+                    .map(|actor| audit_log_filter_option(actor, audit_log_actor_label(actor)))
+                    .collect(),
+                supports_custom_text: audit_log_filter_takes_custom_text("actor"),
+            },
+            AuditLogFilterField {
+                key: "created_at",
+                label: "Created",
+                value_type: AuditLogFilterValueType::Date,
+                operator: AuditLogFilterOperator::Between,
+                multiple: true,
+                options: vec![],
+                supports_custom_text: audit_log_filter_takes_custom_text("created_at"),
+            },
+            audit_log_text_filter_field("api_key_name", "Agent"),
+            audit_log_text_filter_field("user_id", "User ID"),
+            audit_log_text_filter_field("api_key_id", "API Key ID"),
+            audit_log_text_filter_field("ip_address", "IP address"),
+            audit_log_text_filter_field("user_agent", "User agent"),
+        ],
+    }
+}
+
+/// A column filtered only by free text, because its values are unbounded
+/// (UUIDs, IPs, User-Agent strings) and cannot be offered as checkboxes.
+fn audit_log_text_filter_field(
+    key: &'static str,
+    label: &'static str,
+) -> AuditLogFilterField {
+    debug_assert!(
+        audit_log_filter_takes_custom_text(key),
+        "a text filter must map to a stored column the server can match against",
+    );
+    AuditLogFilterField {
+        key,
+        label,
+        value_type: AuditLogFilterValueType::Text,
+        operator: AuditLogFilterOperator::Contains,
+        multiple: false,
+        options: vec![],
+        supports_custom_text: true,
+    }
 }
 
 /// GET /api/v1/admin/audit-log/verify

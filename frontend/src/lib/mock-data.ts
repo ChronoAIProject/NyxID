@@ -1029,6 +1029,94 @@ const MOCK_AUDIT_LOG = [
   { id: "aud-010", user_id: MOCK_ADMIN_USERS[0]!.id, api_key_id: null, api_key_name: null, event_type: "user.status_change", event_data: { target_user: "deactivated@example.com", is_active: false }, ip_address: "192.168.1.10", user_agent: "Mozilla/5.0 (Macintosh)", created_at: "2026-05-09T10:00:00Z" },
 ];
 
+// Mirrors the shape the backend advertises so the mock table offers the same
+// sorts, scoped-search fields, and filters as a live one.
+const MOCK_AUDIT_LOG_FILTER_OPTIONS = {
+  sorts: [
+    "-created_at", "created_at",
+    "event_type", "-event_type",
+    "api_key_name", "-api_key_name",
+    "api_key_id", "-api_key_id",
+    "user_id", "-user_id",
+    "ip_address", "-ip_address",
+    "user_agent", "-user_agent",
+    "status", "-status",
+  ],
+  search_fields: [
+    { key: "event_type", label: "Event type" },
+    { key: "user_id", label: "User ID" },
+    { key: "api_key", label: "Agent / API key" },
+    { key: "ip_address", label: "IP address" },
+    { key: "user_agent", label: "User agent" },
+  ],
+  fields: [
+    {
+      key: "event_type",
+      label: "Event type",
+      value_type: "enum",
+      operator: "is",
+      multiple: true,
+      supports_custom_text: true,
+      options: [...new Set(MOCK_AUDIT_LOG.map((entry) => entry.event_type))]
+        .sort()
+        .map((event_type) => ({ value: event_type, label: event_type })),
+    },
+    {
+      key: "status",
+      label: "Status",
+      value_type: "enum",
+      operator: "is",
+      multiple: true,
+      supports_custom_text: false,
+      options: [
+        { value: "2xx", label: "2xx Success" },
+        { value: "3xx", label: "3xx Redirect" },
+        { value: "4xx", label: "4xx Client error" },
+        { value: "5xx", label: "5xx Server error" },
+        { value: "none", label: "No status" },
+      ],
+    },
+    {
+      key: "actor",
+      label: "Actor",
+      value_type: "enum",
+      operator: "is",
+      multiple: true,
+      supports_custom_text: false,
+      options: [
+        { value: "user", label: "User session" },
+        { value: "agent", label: "Agent API key" },
+        { value: "anonymous", label: "Anonymous" },
+      ],
+    },
+    {
+      key: "created_at",
+      label: "Created",
+      value_type: "date",
+      operator: "between",
+      multiple: true,
+      supports_custom_text: false,
+      options: [],
+    },
+    // Text-only filters: unbounded columns, matched as a `contains`.
+    ...[
+      { key: "api_key_name", label: "Agent" },
+      { key: "user_id", label: "User ID" },
+      { key: "api_key_id", label: "API Key ID" },
+      { key: "ip_address", label: "IP address" },
+      { key: "user_agent", label: "User agent" },
+    ].map(({ key, label }) => ({
+      key,
+      label,
+      value_type: "text",
+      operator: "contains",
+      multiple: false,
+      supports_custom_text: true,
+      options: [],
+    })),
+  ],
+};
+
 // ── Admin Invite Codes ──
 const MOCK_INVITE_CODES = [
   {
@@ -1422,7 +1510,7 @@ const MOCK_HANDLERS: MockHandler[] = [
   (p) => p.match(/^\/admin\/users$/) ? { users: MOCK_ADMIN_USERS, total: MOCK_ADMIN_USERS.length, page: 1, per_page: 20 } : undefined,
 
   // Admin audit log
-  (p) => p.match(/^\/admin\/audit-log/) ? { entries: MOCK_AUDIT_LOG, total: MOCK_AUDIT_LOG.length, page: 1, per_page: 50 } : undefined,
+  (p) => p.match(/^\/admin\/audit-log/) ? { entries: MOCK_AUDIT_LOG, total: MOCK_AUDIT_LOG.length, page: 1, per_page: 50, filter_options: MOCK_AUDIT_LOG_FILTER_OPTIONS } : undefined,
 
   // Admin invite codes
   (p) => p.match(/^\/admin\/invite-codes$/) ? { invite_codes: MOCK_INVITE_CODES } : undefined,

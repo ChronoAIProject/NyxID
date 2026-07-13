@@ -427,6 +427,9 @@ function DataTableFilterEditor<FilterKey extends string>({
     field.options.length > 0 && values.length === field.options.length;
   const partiallySelected = values.length > 0 && !allSelected;
   const selectedCount = values.length + customValues.length;
+  // A text filter has nothing to check: its column is too high-cardinality to
+  // enumerate, so the free-text box is the whole editor.
+  const textOnly = field.options.length === 0;
 
   return (
     <div className="flex min-w-0 flex-col">
@@ -450,6 +453,7 @@ function DataTableFilterEditor<FilterKey extends string>({
           onValuesChange={onCustomValuesChange}
         />
       )}
+      {!textOnly && (
       <div
         role="group"
         aria-label={`${field.label} values`}
@@ -538,6 +542,7 @@ function DataTableFilterEditor<FilterKey extends string>({
           );
         })}
       </div>
+      )}
       <DataTableFilterActions
         hasValue={selectedCount > 0}
         onClear={() => {
