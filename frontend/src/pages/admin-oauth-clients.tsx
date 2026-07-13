@@ -572,12 +572,7 @@ export function AdminOAuthClientsPage() {
   const draggingColumnRef = useRef<OAuthClientSortField | null>(null);
   const [resizingColumn, setResizingColumn] =
     useState<OAuthClientSortField | null>(null);
-  const resizeRef = useRef<{
-    field: OAuthClientSortField;
-    startX: number;
-    startWidth: number;
-    width: number;
-  } | null>(null);
+  const detachResizeRef = useRef<(() => void) | null>(null);
   const tableRef = useRef<HTMLTableElement>(null);
   const appliedSearch = routeSearch.search ?? "";
   const [searchDraft, setSearchDraft] = useState("");
@@ -1014,6 +1009,17 @@ export function AdminOAuthClientsPage() {
     );
   }
 
+  /**
+   * The drag is tracked on the window, so it survives the pointer leaving the
+   * handle, and it writes the column's width variable straight to the table
+   * rather than through state -- the browser then reflows the columns, the
+   * table width, and any frozen offsets without re-rendering a single row.
+   *
+   * The listeners go on at pointerdown rather than in an effect keyed on the
+   * resizing column: an effect does not run until after the next commit, and a
+   * pointer event landing in that gap would be dropped -- a `pointerup` there
+   * would strand the table mid-resize.
+   */
   function handleResizeStart(
     field: OAuthClientSortField,
     event: React.PointerEvent<HTMLDivElement>,
@@ -1022,60 +1028,42 @@ export function AdminOAuthClientsPage() {
     // Keep the pointer press off the header's sort button and drag handle.
     event.preventDefault();
     event.stopPropagation();
+
     const startWidth = columnWidths[field];
-    resizeRef.current = {
-      field,
-      startX: event.clientX,
-      startWidth,
-      width: startWidth,
-    };
+    const resize = { startX: event.clientX, width: startWidth };
     setResizingColumn(field);
-  }
 
-  // The drag is tracked on the window so it survives the pointer leaving the
-  // handle, and it writes the column's width variable straight to the table
-  // rather than through state -- the browser then reflows the columns, the
-  // table width, and any frozen offsets without React re-rendering the rows.
-  useEffect(() => {
-    if (!resizingColumn) return;
-
-    function handleMove(event: PointerEvent) {
-      const resize = resizeRef.current;
-      if (!resize) return;
+    function handleMove(moveEvent: PointerEvent) {
       resize.width = resizeColumnWidth(
-        resize.startWidth + event.clientX - resize.startX,
+        startWidth + moveEvent.clientX - resize.startX,
       );
       tableRef.current?.style.setProperty(
-        columnWidthVar(resize.field),
+        columnWidthVar(field),
         `${String(resize.width)}px`,
       );
     }
 
     function handleEnd() {
-      const resize = resizeRef.current;
-      resizeRef.current = null;
+      detachResize();
       setResizingColumn(null);
-      if (!resize) return;
-      setColumnPreferences((previous) => ({
-        ...previous,
-        widths: { ...previous.widths, [resize.field]: resize.width },
-      }));
-      setColumnAnnouncement(
-        `${getColumn(resize.field).label} column resized to ${String(
-          resize.width,
-        )} pixels`,
-      );
+      if (resize.width !== startWidth) commitColumnWidth(field, resize.width);
     }
 
-    window.addEventListener("pointermove", handleMove);
-    window.addEventListener("pointerup", handleEnd);
-    window.addEventListener("pointercancel", handleEnd);
-    return () => {
+    function detachResize() {
+      detachResizeRef.current = null;
       window.removeEventListener("pointermove", handleMove);
       window.removeEventListener("pointerup", handleEnd);
       window.removeEventListener("pointercancel", handleEnd);
-    };
-  }, [resizingColumn]);
+    }
+
+    detachResizeRef.current = detachResize;
+    window.addEventListener("pointermove", handleMove);
+    window.addEventListener("pointerup", handleEnd);
+    window.addEventListener("pointercancel", handleEnd);
+  }
+
+  // Drop a drag still in flight if the table unmounts under it.
+  useEffect(() => () => detachResizeRef.current?.(), []);
 
   function handleResizeKeyboard(
     field: OAuthClientSortField,

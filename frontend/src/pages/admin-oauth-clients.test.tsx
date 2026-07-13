@@ -1001,6 +1001,26 @@ describe("AdminOAuthClientsPage", () => {
     ).toBeInTheDocument();
   });
 
+  it("tracks a drag that starts and ends before React can re-render", () => {
+    render(<AdminOAuthClientsPage />);
+
+    const table = screen.getByRole("table");
+    const clientHeader = screen.getByRole("columnheader", { name: "Client" });
+    const handle = screen.getByRole("separator", {
+      name: "Resize Client column",
+    });
+
+    // A whole drag inside one task: the listeners have to be live from the
+    // pointerdown, or the move is lost and the pointerup strands the table in
+    // its resizing state.
+    fireEvent.pointerDown(handle, { button: 0, clientX: 260 });
+    fireEvent.pointerMove(window, { clientX: 330 });
+    fireEvent.pointerUp(window, { clientX: 330 });
+
+    expect(table.style.getPropertyValue("--col-w-client_name")).toBe("330px");
+    expect(clientHeader).not.toHaveAttribute("data-resizing");
+  });
+
   it("clamps a drag to the min and max column width", () => {
     render(<AdminOAuthClientsPage />);
 
