@@ -244,7 +244,6 @@ function resolveLastNavigationSearch(previous: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  window.localStorage.clear();
   for (const key of Object.keys(routeSearch)) delete routeSearch[key];
   mockUseAdminOAuthClients.mockReturnValue({
     data: clientsResponse,
@@ -948,40 +947,6 @@ describe("AdminOAuthClientsPage", () => {
     expect(
       table.querySelector('tbody td[data-column="client_name"]'),
     ).not.toHaveClass("sticky");
-  });
-
-  it("restores versioned column preferences only for the same user", async () => {
-    const user = userEvent.setup();
-    const { unmount } = render(<AdminOAuthClientsPage />);
-
-    const clientHandle = screen.getByRole("button", {
-      name: "Move Client column",
-    });
-    clientHandle.focus();
-    await user.keyboard("{End}");
-    await user.click(
-      screen.getByRole("button", { name: "Freeze columns through Type" }),
-    );
-    unmount();
-
-    const restored = render(<AdminOAuthClientsPage />);
-    expect(screen.getAllByRole("columnheader").at(-1)).toHaveAccessibleName(
-      "Client",
-    );
-    expect(screen.getByRole("columnheader", { name: "Type" })).toHaveAttribute(
-      "data-frozen",
-      "true",
-    );
-
-    useAuthStore.setState({ user: operatorUser() });
-    restored.unmount();
-    render(<AdminOAuthClientsPage />);
-    expect(screen.getAllByRole("columnheader").at(0)).toHaveAccessibleName(
-      "Client",
-    );
-    expect(
-      screen.getByRole("columnheader", { name: "Type" }),
-    ).not.toHaveAttribute("data-frozen");
   });
 
   it("marks retained rows as updating and prevents stale row mutations", () => {

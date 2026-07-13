@@ -204,12 +204,15 @@ const OAUTH_CLIENT_TABLE_WIDTH = OAUTH_CLIENT_COLUMNS.reduce(
   (width, column) => width + column.width,
   0,
 );
-const COLUMN_PREFERENCES_VERSION = 1;
 
 type ColumnPreferences = {
-  readonly version: typeof COLUMN_PREFERENCES_VERSION;
   readonly order: readonly OAuthClientSortField[];
   readonly frozenThrough: OAuthClientSortField | null;
+};
+
+const DEFAULT_COLUMN_PREFERENCES: ColumnPreferences = {
+  order: DEFAULT_COLUMN_ORDER,
+  frozenThrough: null,
 };
 
 type ColumnDropTarget = {
@@ -225,55 +228,6 @@ function getColumn(field: OAuthClientSortField): OAuthClientColumn {
 
 function isColumnField(value: unknown): value is OAuthClientSortField {
   return OAUTH_CLIENT_COLUMNS.some((column) => column.field === value);
-}
-
-function isCompleteColumnOrder(
-  value: unknown,
-): value is OAuthClientSortField[] {
-  return (
-    Array.isArray(value) &&
-    value.length === OAUTH_CLIENT_COLUMNS.length &&
-    value.every(isColumnField) &&
-    new Set(value).size === OAUTH_CLIENT_COLUMNS.length
-  );
-}
-
-function columnPreferencesKey(userId: string | undefined): string | null {
-  return userId
-    ? `nyxid:admin-oauth-clients:columns:v${String(COLUMN_PREFERENCES_VERSION)}:${userId}`
-    : null;
-}
-
-function readColumnPreferences(userId: string | undefined): ColumnPreferences {
-  const fallback: ColumnPreferences = {
-    version: COLUMN_PREFERENCES_VERSION,
-    order: DEFAULT_COLUMN_ORDER,
-    frozenThrough: null,
-  };
-  const key = columnPreferencesKey(userId);
-  if (!key || typeof window === "undefined") return fallback;
-
-  try {
-    const parsed = JSON.parse(window.localStorage.getItem(key) ?? "null") as {
-      version?: unknown;
-      order?: unknown;
-      frozenThrough?: unknown;
-    } | null;
-    if (
-      parsed?.version !== COLUMN_PREFERENCES_VERSION ||
-      !isCompleteColumnOrder(parsed.order) ||
-      (parsed.frozenThrough !== null && !isColumnField(parsed.frozenThrough))
-    ) {
-      return fallback;
-    }
-    return {
-      version: COLUMN_PREFERENCES_VERSION,
-      order: parsed.order,
-      frozenThrough: parsed.frozenThrough,
-    };
-  } catch {
-    return fallback;
-  }
 }
 
 function moveColumnToIndex(
@@ -530,8 +484,8 @@ export function AdminOAuthClientsPage() {
   }) as AdminOAuthClientSearchState;
   const currentUser = useAuthStore((s) => s.user);
   const canWrite = canAdminWrite(currentUser);
-  const [columnPreferences, setColumnPreferences] = useState(() =>
-    readColumnPreferences(currentUser?.id),
+  const [columnPreferences, setColumnPreferences] = useState(
+    DEFAULT_COLUMN_PREFERENCES,
   );
   const [draggingColumn, setDraggingColumn] =
     useState<OAuthClientSortField | null>(null);
@@ -644,16 +598,6 @@ export function AdminOAuthClientsPage() {
     }, 0);
     return () => window.clearTimeout(resetTimer);
   }, [routeSearch.search, routeSearch.search_filters]);
-
-  useEffect(() => {
-    const key = columnPreferencesKey(currentUser?.id);
-    if (!key || typeof window === "undefined") return;
-    try {
-      window.localStorage.setItem(key, JSON.stringify(columnPreferences));
-    } catch {
-      // Table preferences are non-critical when storage is unavailable.
-    }
-  }, [columnPreferences, currentUser?.id]);
 
   function clearSearchAndFilters() {
     updateListSearch({
