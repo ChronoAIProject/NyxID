@@ -24,6 +24,7 @@ import type {
   UpdateBrokerSettingsRequest,
 } from "@/types/admin";
 import type { DataTableSearchApplyMode } from "@/types/data-table";
+import type { DataTableColumnPreferences } from "@/lib/data-table-preferences";
 import { useAuthStore } from "@/stores/auth-store";
 import { PageHeader } from "@/components/shared/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -110,6 +111,11 @@ import {
   stickyColumnLeft,
   sumOfColumnWidths,
 } from "@/lib/data-table-columns";
+import {
+  isDefaultColumnLayout,
+  loadColumnPreferences,
+  saveColumnPreferences,
+} from "@/lib/data-table-preferences";
 
 type ClientAction = {
   readonly client: AdminOAuthClient;
@@ -223,17 +229,18 @@ const DEFAULT_COLUMN_WIDTHS = Object.fromEntries(
   OAUTH_CLIENT_COLUMNS.map((column) => [column.field, column.defaultWidth]),
 ) as ColumnWidths;
 
-type ColumnPreferences = {
-  readonly order: readonly OAuthClientSortField[];
-  readonly frozenThrough: OAuthClientSortField | null;
-  readonly widths: ColumnWidths;
-};
+type ColumnPreferences = DataTableColumnPreferences<OAuthClientSortField>;
 
 const DEFAULT_COLUMN_PREFERENCES: ColumnPreferences = {
   order: DEFAULT_COLUMN_ORDER,
   frozenThrough: null,
   widths: DEFAULT_COLUMN_WIDTHS,
 };
+
+const COLUMN_WIDTH_BOUNDS = { min: MIN_COLUMN_WIDTH, max: MAX_COLUMN_WIDTH };
+
+/** Bump the version suffix when a change makes stored layouts unreadable. */
+const COLUMN_PREFERENCES_KEY = "nyxid.table.admin-oauth-clients.columns.v1";
 
 type ColumnDropTarget = {
   readonly field: OAuthClientSortField;
@@ -561,8 +568,12 @@ export function AdminOAuthClientsPage() {
   }) as AdminOAuthClientSearchState;
   const currentUser = useAuthStore((s) => s.user);
   const canWrite = canAdminWrite(currentUser);
-  const [columnPreferences, setColumnPreferences] = useState(
-    DEFAULT_COLUMN_PREFERENCES,
+  const [columnPreferences, setColumnPreferences] = useState(() =>
+    loadColumnPreferences(
+      COLUMN_PREFERENCES_KEY,
+      DEFAULT_COLUMN_PREFERENCES,
+      COLUMN_WIDTH_BOUNDS,
+    ),
   );
   const [draggingColumn, setDraggingColumn] =
     useState<OAuthClientSortField | null>(null);
@@ -1065,6 +1076,19 @@ export function AdminOAuthClientsPage() {
   // Drop a drag still in flight if the table unmounts under it.
   useEffect(() => () => detachResizeRef.current?.(), []);
 
+  useEffect(() => {
+    saveColumnPreferences(
+      COLUMN_PREFERENCES_KEY,
+      columnPreferences,
+      DEFAULT_COLUMN_PREFERENCES,
+    );
+  }, [columnPreferences]);
+
+  function resetColumnLayout() {
+    setColumnPreferences(DEFAULT_COLUMN_PREFERENCES);
+    setColumnAnnouncement("Column layout reset");
+  }
+
   function handleResizeKeyboard(
     field: OAuthClientSortField,
     key: "ArrowLeft" | "ArrowRight" | "Home",
@@ -1560,6 +1584,23 @@ export function AdminOAuthClientsPage() {
                 {String(total)} clients
               </p>
               <div className="flex flex-wrap items-center gap-2">
+                {!isDefaultColumnLayout(
+                  columnPreferences,
+                  DEFAULT_COLUMN_PREFERENCES,
+                ) && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={resetColumnLayout}
+                  >
+                    <RotateCcw
+                      className="mr-2 h-3.5 w-3.5"
+                      aria-hidden="true"
+                    />
+                    Reset columns
+                  </Button>
+                )}
                 <Select
                   value={String(listParams.per_page)}
                   disabled={isFetching}

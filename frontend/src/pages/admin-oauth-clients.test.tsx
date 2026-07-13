@@ -246,6 +246,9 @@ function resolveLastNavigationSearch(previous: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // The column layout persists, so a test that reorders or resizes would
+  // otherwise seed the layout of every test that runs after it.
+  localStorage.clear();
   for (const key of Object.keys(routeSearch)) delete routeSearch[key];
   mockUseAdminOAuthClients.mockReturnValue({
     data: clientsResponse,
@@ -1082,6 +1085,128 @@ describe("AdminOAuthClientsPage", () => {
     expect(
       stickyColumnLeft(["client_name", "client_type"], "client_type"),
     ).toBe("calc(var(--col-w-client_name))");
+  });
+
+  it("persists a resize, a reorder and a freeze across a remount", () => {
+    const { unmount } = render(<AdminOAuthClientsPage />);
+
+    const handle = screen.getByRole("separator", {
+      name: "Resize Client column",
+    });
+    fireEvent.pointerDown(handle, { button: 0, clientX: 260 });
+    fireEvent.pointerMove(window, { clientX: 340 });
+    fireEvent.pointerUp(window, { clientX: 340 });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Freeze columns through Type" }),
+    );
+    const clientGrip = screen.getByRole("button", {
+      name: "Move Client column",
+    });
+    clientGrip.focus();
+    fireEvent.keyDown(clientGrip, { key: "ArrowRight" });
+
+    expect(
+      JSON.parse(
+        localStorage.getItem("nyxid.table.admin-oauth-clients.columns.v1") ??
+          "{}",
+      ),
+    ).toMatchObject({
+      order: [
+        "client_type",
+        "client_name",
+        "created_by",
+        "broker",
+        "is_active",
+        "allowed_scopes",
+        "created_at",
+      ],
+      frozenThrough: "client_type",
+      widths: expect.objectContaining({ client_name: 340 }),
+    });
+
+    unmount();
+    render(<AdminOAuthClientsPage />);
+
+    const table = screen.getByRole("table");
+    expect(table.style.getPropertyValue("--col-w-client_name")).toBe("340px");
+    expect(
+      [...table.querySelectorAll("thead th")].map((th) =>
+        th.getAttribute("data-column"),
+      ),
+    ).toEqual([
+      "client_type",
+      "client_name",
+      "created_by",
+      "broker",
+      "is_active",
+      "allowed_scopes",
+      "created_at",
+    ]);
+    expect(screen.getByRole("columnheader", { name: "Type" })).toHaveAttribute(
+      "data-frozen-edge",
+      "true",
+    );
+  });
+
+  it("restores the defaults from the reset control and forgets the stored layout", () => {
+    render(<AdminOAuthClientsPage />);
+
+    expect(
+      screen.queryByRole("button", { name: /Reset columns/ }),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Freeze columns through Type" }),
+    );
+    expect(
+      localStorage.getItem("nyxid.table.admin-oauth-clients.columns.v1"),
+    ).not.toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /Reset columns/ }));
+
+    expect(
+      screen.getByRole("columnheader", { name: "Type" }),
+    ).not.toHaveAttribute("data-frozen");
+    expect(
+      screen.queryByRole("button", { name: /Reset columns/ }),
+    ).not.toBeInTheDocument();
+    expect(
+      localStorage.getItem("nyxid.table.admin-oauth-clients.columns.v1"),
+    ).toBeNull();
+  });
+
+  it("ignores a stored layout that no longer matches the table", () => {
+    localStorage.setItem(
+      "nyxid.table.admin-oauth-clients.columns.v1",
+      JSON.stringify({
+        order: ["client_secret", "client_name"],
+        frozenThrough: "client_secret",
+        widths: { client_name: 9000 },
+      }),
+    );
+
+    render(<AdminOAuthClientsPage />);
+
+    const table = screen.getByRole("table");
+    // A column that no longer exists cannot survive as a freeze point, and a
+    // width from other bounds falls back rather than rendering a broken table.
+    expect(table.style.getPropertyValue("--col-w-client_name")).toBe("260px");
+    expect(
+      screen.getByRole("columnheader", { name: "Client" }),
+    ).not.toHaveAttribute("data-frozen");
+    expect(
+      [...table.querySelectorAll("thead th")].map((th) =>
+        th.getAttribute("data-column"),
+      ),
+    ).toEqual([
+      "client_name",
+      "client_type",
+      "created_by",
+      "broker",
+      "is_active",
+      "allowed_scopes",
+      "created_at",
+    ]);
   });
 
   it("sends a filter's custom text as a contains search beside its checked options", async () => {
