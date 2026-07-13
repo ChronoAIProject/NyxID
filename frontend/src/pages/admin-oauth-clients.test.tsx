@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { stickyColumnLeft } from "@/lib/data-table-columns";
 import { useAuthStore } from "@/stores/auth-store";
 import type { User } from "@/types/api";
 import type {
@@ -923,11 +924,17 @@ describe("AdminOAuthClientsPage", () => {
     const creatorHeader = screen.getByRole("columnheader", {
       name: "Created By",
     });
+    const table = screen.getByRole("table");
     expect(clientHeader).toHaveAttribute("data-frozen", "true");
+    expect(typeHeader).toHaveAttribute("data-frozen", "true");
+    expect(creatorHeader).toHaveAttribute("data-frozen", "true");
     expect(clientHeader).toHaveClass("z-30", "bg-card");
+    // Widths live in a CSS variable per column; the frozen offsets are sums of
+    // those variables, unit-tested in lib/data-table-columns.test.ts (happy-dom
+    // drops `calc(var(...))` from a length, so it can't be read back here).
+    expect(table.style.getPropertyValue("--col-w-client_name")).toBe("260px");
+    expect(table.style.getPropertyValue("--col-w-client_type")).toBe("140px");
     expect(clientHeader).toHaveStyle({ left: "0px" });
-    expect(typeHeader).toHaveStyle({ left: "260px" });
-    expect(creatorHeader).toHaveStyle({ left: "400px" });
     // The frozen edge has to be painted by the sticky cell itself. A collapsed
     // `border-r` belongs to the table's border grid, so it would slide out from
     // under the frozen column as soon as the table scrolls horizontally.
@@ -940,7 +947,6 @@ describe("AdminOAuthClientsPage", () => {
       }),
     ).toHaveClass("opacity-100", "text-primary");
 
-    const table = screen.getByRole("table");
     expect(
       table.querySelector('tbody td[data-column="client_name"]'),
     ).toHaveClass("sticky", "z-20", "bg-card");
@@ -956,8 +962,8 @@ describe("AdminOAuthClientsPage", () => {
     await user.keyboard("{ArrowRight}");
 
     expect(typeHeader).toHaveStyle({ left: "0px" });
-    expect(clientHeader).toHaveStyle({ left: "140px" });
-    expect(creatorHeader).toHaveStyle({ left: "400px" });
+    expect(clientHeader).toHaveAttribute("data-frozen", "true");
+    expect(creatorHeader).toHaveAttribute("data-frozen", "true");
 
     await user.click(
       screen.getByRole("button", {
@@ -972,6 +978,90 @@ describe("AdminOAuthClientsPage", () => {
     expect(
       table.querySelector('tbody td[data-column="client_name"]'),
     ).not.toHaveClass("sticky");
+  });
+
+  it("resizes a column by dragging its handle", () => {
+    render(<AdminOAuthClientsPage />);
+
+    const table = screen.getByRole("table");
+    const handle = screen.getByRole("separator", {
+      name: "Resize Client column",
+    });
+
+    fireEvent.pointerDown(handle, { button: 0, clientX: 260 });
+    fireEvent.pointerMove(window, { clientX: 340 });
+    // The drag writes straight to the width variable so the rows never re-render.
+    expect(table.style.getPropertyValue("--col-w-client_name")).toBe("340px");
+
+    fireEvent.pointerUp(window, { clientX: 340 });
+    expect(table.style.getPropertyValue("--col-w-client_name")).toBe("340px");
+    expect(handle).toHaveAttribute("aria-valuenow", "340");
+    expect(
+      screen.getByText("Client column resized to 340 pixels"),
+    ).toBeInTheDocument();
+  });
+
+  it("clamps a drag to the min and max column width", () => {
+    render(<AdminOAuthClientsPage />);
+
+    const table = screen.getByRole("table");
+    const handle = screen.getByRole("separator", {
+      name: "Resize Client column",
+    });
+
+    fireEvent.pointerDown(handle, { button: 0, clientX: 260 });
+    fireEvent.pointerMove(window, { clientX: -500 });
+    expect(table.style.getPropertyValue("--col-w-client_name")).toBe("96px");
+    fireEvent.pointerMove(window, { clientX: 2000 });
+    expect(table.style.getPropertyValue("--col-w-client_name")).toBe("640px");
+    fireEvent.pointerUp(window, { clientX: 2000 });
+
+    expect(handle).toHaveAttribute("aria-valuenow", "640");
+  });
+
+  it("resizes from the keyboard and restores the default width on double-click", async () => {
+    const user = userEvent.setup();
+    render(<AdminOAuthClientsPage />);
+
+    const table = screen.getByRole("table");
+    const handle = screen.getByRole("separator", {
+      name: "Resize Client column",
+    });
+
+    handle.focus();
+    await user.keyboard("{ArrowRight}{ArrowRight}");
+    expect(table.style.getPropertyValue("--col-w-client_name")).toBe("292px");
+    await user.keyboard("{ArrowLeft}");
+    expect(table.style.getPropertyValue("--col-w-client_name")).toBe("276px");
+
+    await user.dblClick(handle);
+    expect(table.style.getPropertyValue("--col-w-client_name")).toBe("260px");
+    expect(handle).toHaveAttribute("aria-valuenow", "260");
+  });
+
+  it("keeps a frozen column's offset in step with a resize of the column before it", () => {
+    render(<AdminOAuthClientsPage />);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Freeze columns through Type" }),
+    );
+    const table = screen.getByRole("table");
+    const typeHeader = screen.getByRole("columnheader", { name: "Type" });
+    expect(typeHeader).toHaveAttribute("data-frozen", "true");
+
+    const handle = screen.getByRole("separator", {
+      name: "Resize Client column",
+    });
+    fireEvent.pointerDown(handle, { button: 0, clientX: 260 });
+    fireEvent.pointerMove(window, { clientX: 300 });
+    fireEvent.pointerUp(window, { clientX: 300 });
+
+    // Type's sticky offset resolves the same variable the drag rewrote, so it
+    // stays pinned to Client's right edge instead of detaching mid-drag.
+    expect(table.style.getPropertyValue("--col-w-client_name")).toBe("300px");
+    expect(
+      stickyColumnLeft(["client_name", "client_type"], "client_type"),
+    ).toBe("calc(var(--col-w-client_name))");
   });
 
   it("sends a filter's custom text as a contains search beside its checked options", async () => {
