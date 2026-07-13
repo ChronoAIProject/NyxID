@@ -1,6 +1,20 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import { TableHead } from "@/components/ui/table";
+import {
+  clampColumnWidth,
+  columnWidthVar,
+  columnWidthVars,
+  frozenColumnFields,
+  stickyColumnLeft,
+  sumOfColumnWidths,
+} from "@/lib/data-table-columns";
+import {
+  isDefaultColumnLayout,
+  loadColumnPreferences,
+  saveColumnPreferences,
+  type DataTableColumnPreferences,
+} from "@/lib/data-table-preferences";
 import {
   ArrowDown,
   ArrowUp,
@@ -11,15 +25,17 @@ import {
 } from "lucide-react";
 
 /**
- * Reorderable, freezable, sortable column headers for the admin data tables.
+ * Reorderable, resizable, freezable columns for the admin data tables.
  *
- * Sort strings follow the server's convention throughout: `field` ascending,
- * `-field` descending.
+ * Sort strings follow the server's convention: `field` ascending, `-field`
+ * descending. Layout (order, widths, freeze point) is per-table user state and
+ * persists to localStorage; sorting is not -- that lives in the URL.
  */
 export interface DataTableColumn<Field extends string> {
   readonly field: Field;
   readonly label: string;
-  readonly width: number;
+  /** Starting width, and the width a double-click on the resize handle restores. */
+  readonly defaultWidth: number;
   readonly cellClassName?: string;
 }
 
@@ -31,6 +47,22 @@ interface ColumnDropTarget<Field extends string> {
 }
 
 type ColumnMoveKey = "ArrowLeft" | "ArrowRight" | "Home" | "End";
+type ColumnResizeKey = "ArrowLeft" | "ArrowRight" | "Home";
+
+export const MIN_COLUMN_WIDTH = 96;
+export const MAX_COLUMN_WIDTH = 640;
+const COLUMN_RESIZE_STEP = 16;
+const COLUMN_WIDTH_BOUNDS = { min: MIN_COLUMN_WIDTH, max: MAX_COLUMN_WIDTH };
+
+/**
+ * Divider marking the frozen edge, drawn as a pseudo-element rather than a
+ * `border-r`. A collapsed border belongs to the table's border grid, not to the
+ * cell, so it stays behind with the grid when a sticky cell is offset -- the
+ * frozen edge would lose its line as soon as the table scrolls horizontally.
+ * What the sticky cell paints itself travels with it at every scroll offset.
+ */
+const FROZEN_EDGE_CLASS =
+  "shadow-[3px_0_6px_-4px_rgba(0,0,0,0.35)] before:pointer-events-none before:absolute before:inset-y-0 before:right-0 before:z-10 before:w-0.5 before:bg-border before:content-['']";
 
 export function dataTableSortDirection<Field extends string>(
   sort: string,
@@ -85,33 +117,45 @@ function reorderColumnsForDrop<Field extends string>(
 }
 
 /**
- * Owns column order, the freeze boundary, and the drag interaction. Sorting
- * stays with the caller: it lives in the URL, not in component state.
+ * Owns column order, widths, and the freeze boundary, plus the drag and resize
+ * interactions. `storageKey` scopes the persisted layout to one table; bump its
+ * version suffix when a change makes stored layouts unreadable.
  */
 export function useDataTableColumns<Field extends string>(
   columns: readonly DataTableColumn<Field>[],
+  storageKey: string,
 ) {
   const byField = useMemo(
     () => new Map(columns.map((column) => [column.field, column])),
     [columns],
   );
-  const defaultOrder = useMemo(
-    () => columns.map((column) => column.field),
-    [columns],
-  );
-  const totalWidth = useMemo(
-    () => columns.reduce((width, column) => width + column.width, 0),
+
+  const defaults = useMemo<DataTableColumnPreferences<Field>>(
+    () => ({
+      order: columns.map((column) => column.field),
+      frozenThrough: null,
+      widths: Object.fromEntries(
+        columns.map((column) => [column.field, column.defaultWidth]),
+      ) as Readonly<Record<Field, number>>,
+    }),
     [columns],
   );
 
-  const [order, setOrder] = useState<readonly Field[]>(defaultOrder);
-  const [frozenThrough, setFrozenThrough] = useState<Field | null>(null);
+  const [preferences, setPreferences] = useState(() =>
+    loadColumnPreferences(storageKey, defaults, COLUMN_WIDTH_BOUNDS),
+  );
   const [draggingColumn, setDraggingColumn] = useState<Field | null>(null);
   const [dropTarget, setDropTarget] = useState<ColumnDropTarget<Field> | null>(
     null,
   );
+  const [resizingColumn, setResizingColumn] = useState<Field | null>(null);
   const [announcement, setAnnouncement] = useState("");
   const draggingRef = useRef<Field | null>(null);
+  const detachResizeRef = useRef<(() => void) | null>(null);
+  const tableRef = useRef<HTMLTableElement>(null);
+
+  const { order, frozenThrough, widths } = preferences;
+  const frozenFields = frozenColumnFields(order, frozenThrough);
 
   const getColumn = useCallback(
     (field: Field): DataTableColumn<Field> => {
@@ -127,27 +171,33 @@ export function useDataTableColumns<Field extends string>(
     [byField],
   );
 
-  // Left offset of every frozen column, accumulated in render order so each one
-  // sticks flush against the previous.
-  const stickyOffsets = useMemo(() => {
-    const offsets = new Map<Field, number>();
-    if (!frozenThrough) return offsets;
-    let left = 0;
-    for (const field of order) {
-      offsets.set(field, left);
-      left += getColumn(field).width;
-      if (field === frozenThrough) break;
-    }
-    return offsets;
-  }, [frozenThrough, getColumn, order]);
+  useEffect(() => {
+    saveColumnPreferences(storageKey, preferences, defaults);
+  }, [defaults, preferences, storageKey]);
+
+  // Drop a resize still in flight if the table unmounts under it.
+  useEffect(() => () => detachResizeRef.current?.(), []);
 
   const applyOrder = useCallback(
     (nextOrder: readonly Field[], movedField: Field) => {
-      setOrder(nextOrder);
+      setPreferences((previous) => ({ ...previous, order: nextOrder }));
       setAnnouncement(
         `${getColumn(movedField).label} column moved to position ${String(
           nextOrder.indexOf(movedField) + 1,
         )} of ${String(nextOrder.length)}`,
+      );
+    },
+    [getColumn],
+  );
+
+  const commitWidth = useCallback(
+    (field: Field, width: number) => {
+      setPreferences((previous) => ({
+        ...previous,
+        widths: { ...previous.widths, [field]: width },
+      }));
+      setAnnouncement(
+        `${getColumn(field).label} column resized to ${String(width)} pixels`,
       );
     },
     [getColumn],
@@ -235,16 +285,108 @@ export function useDataTableColumns<Field extends string>(
   );
 
   const onToggleFreeze = useCallback((field: Field) => {
-    setFrozenThrough((current) => (current === field ? null : field));
+    setPreferences((previous) => ({
+      ...previous,
+      frozenThrough: previous.frozenThrough === field ? null : field,
+    }));
   }, []);
 
-  /** Reorder/freeze/drag props for one header; the caller adds the sort props. */
+  /**
+   * The drag is tracked on the window, so it survives the pointer leaving the
+   * handle, and it writes the column's width variable straight to the table
+   * rather than through state -- the browser then reflows the columns, the
+   * table width, and any frozen offsets without re-rendering a single row.
+   *
+   * The listeners go on at pointerdown rather than in an effect keyed on the
+   * resizing column: an effect does not run until after the next commit, and a
+   * pointer event landing in that gap would be dropped -- a `pointerup` there
+   * would strand the table mid-resize.
+   */
+  const onResizeStart = useCallback(
+    (field: Field, event: React.PointerEvent<HTMLDivElement>) => {
+      if (event.button !== 0) return;
+      // Keep the pointer press off the header's sort button and drag handle.
+      event.preventDefault();
+      event.stopPropagation();
+
+      const startWidth = widths[field];
+      const resize = { startX: event.clientX, width: startWidth };
+      setResizingColumn(field);
+
+      function handleMove(moveEvent: PointerEvent) {
+        resize.width = clampColumnWidth(
+          startWidth + moveEvent.clientX - resize.startX,
+          MIN_COLUMN_WIDTH,
+          MAX_COLUMN_WIDTH,
+        );
+        tableRef.current?.style.setProperty(
+          columnWidthVar(field),
+          `${String(resize.width)}px`,
+        );
+      }
+
+      function handleEnd() {
+        detachResize();
+        setResizingColumn(null);
+        if (resize.width !== startWidth) commitWidth(field, resize.width);
+      }
+
+      function detachResize() {
+        detachResizeRef.current = null;
+        window.removeEventListener("pointermove", handleMove);
+        window.removeEventListener("pointerup", handleEnd);
+        window.removeEventListener("pointercancel", handleEnd);
+      }
+
+      detachResizeRef.current = detachResize;
+      window.addEventListener("pointermove", handleMove);
+      window.addEventListener("pointerup", handleEnd);
+      window.addEventListener("pointercancel", handleEnd);
+    },
+    [commitWidth, widths],
+  );
+
+  const onResizeByKeyboard = useCallback(
+    (field: Field, key: ColumnResizeKey) => {
+      const current = widths[field];
+      const next =
+        key === "Home"
+          ? getColumn(field).defaultWidth
+          : clampColumnWidth(
+              current +
+                (key === "ArrowRight" ? COLUMN_RESIZE_STEP : -COLUMN_RESIZE_STEP),
+              MIN_COLUMN_WIDTH,
+              MAX_COLUMN_WIDTH,
+            );
+      if (next === current) return;
+      commitWidth(field, next);
+    },
+    [commitWidth, getColumn, widths],
+  );
+
+  const onResizeReset = useCallback(
+    (field: Field) => {
+      const { defaultWidth } = getColumn(field);
+      if (widths[field] === defaultWidth) return;
+      commitWidth(field, defaultWidth);
+    },
+    [commitWidth, getColumn, widths],
+  );
+
+  const resetLayout = useCallback(() => {
+    setPreferences(defaults);
+    setAnnouncement("Column layout reset");
+  }, [defaults]);
+
+  /** Reorder/resize/freeze props for one header; the caller adds the sort props. */
   const headerProps = useCallback(
     (field: Field) => ({
       column: getColumn(field),
-      frozen: stickyOffsets.has(field),
+      frozen: frozenFields.includes(field),
       lastFrozen: frozenThrough === field,
-      stickyLeft: stickyOffsets.get(field),
+      stickyLeft: stickyColumnLeft(frozenFields, field),
+      width: widths[field],
+      resizing: resizingColumn === field,
       dragging: draggingColumn === field,
       dropPosition:
         dropTarget?.field === field ? dropTarget.position : undefined,
@@ -254,19 +396,27 @@ export function useDataTableColumns<Field extends string>(
       onDragEnd: clearDragState,
       onMoveByKeyboard,
       onToggleFreeze,
+      onResizeStart,
+      onResizeByKeyboard,
+      onResizeReset,
     }),
     [
       clearDragState,
       draggingColumn,
       dropTarget,
+      frozenFields,
       frozenThrough,
       getColumn,
       onDragOver,
       onDragStart,
       onDrop,
       onMoveByKeyboard,
+      onResizeByKeyboard,
+      onResizeReset,
+      onResizeStart,
       onToggleFreeze,
-      stickyOffsets,
+      resizingColumn,
+      widths,
     ],
   );
 
@@ -274,11 +424,14 @@ export function useDataTableColumns<Field extends string>(
   const cellProps = useCallback(
     (field: Field) => {
       const column = getColumn(field);
-      const frozen = stickyOffsets.has(field);
+      const frozen = frozenFields.includes(field);
       return {
         "data-column": field,
         "data-frozen": frozen || undefined,
-        style: frozen ? { left: stickyOffsets.get(field) } : undefined,
+        "data-frozen-edge": (frozenThrough === field) || undefined,
+        style: frozen
+          ? { left: stickyColumnLeft(frozenFields, field) }
+          : undefined,
         className: cn(
           column.cellClassName,
           // Opaque base so scrolled columns stay hidden; the row hover tint
@@ -286,18 +439,27 @@ export function useDataTableColumns<Field extends string>(
           // rest of its row.
           frozen &&
             "sticky z-20 bg-card after:pointer-events-none after:absolute after:inset-0 after:transition-colors after:duration-300 after:content-[''] group-hover/row:after:bg-muted/45",
-          frozenThrough === field &&
-            "border-r-2 border-border shadow-[3px_0_6px_-4px_rgba(0,0,0,0.35)]",
+          frozenThrough === field && FROZEN_EDGE_CLASS,
         ),
       };
     },
-    [frozenThrough, getColumn, stickyOffsets],
+    [frozenFields, frozenThrough, getColumn],
   );
 
   return {
     order,
+    widths,
     announcement,
-    totalWidth,
+    resizingColumn,
+    tableRef,
+    /** `min-width` + the per-column width variables the table lays itself out on. */
+    tableStyle: {
+      minWidth: sumOfColumnWidths(order),
+      ...columnWidthVars(order, widths),
+    } as React.CSSProperties,
+    columnStyle: (field: Field) => ({ width: `var(${columnWidthVar(field)})` }),
+    isDefaultLayout: isDefaultColumnLayout(preferences, defaults),
+    resetLayout,
     getColumn,
     headerProps,
     cellProps,
@@ -314,7 +476,9 @@ export interface DataTableColumnHeaderProps<
   readonly disabled: boolean;
   readonly frozen: boolean;
   readonly lastFrozen: boolean;
-  readonly stickyLeft: number | undefined;
+  readonly stickyLeft: string | undefined;
+  readonly width: number;
+  readonly resizing: boolean;
   readonly dragging: boolean;
   readonly dropPosition: DataTableColumnDropPosition | undefined;
   readonly onSort: (sort: Sort) => void;
@@ -333,6 +497,12 @@ export interface DataTableColumnHeaderProps<
   readonly onDragEnd: () => void;
   readonly onMoveByKeyboard: (field: Field, key: ColumnMoveKey) => void;
   readonly onToggleFreeze: (field: Field) => void;
+  readonly onResizeStart: (
+    field: Field,
+    event: React.PointerEvent<HTMLDivElement>,
+  ) => void;
+  readonly onResizeByKeyboard: (field: Field, key: ColumnResizeKey) => void;
+  readonly onResizeReset: (field: Field) => void;
 }
 
 export function DataTableColumnHeader<
@@ -346,6 +516,8 @@ export function DataTableColumnHeader<
   frozen,
   lastFrozen,
   stickyLeft,
+  width,
+  resizing,
   dragging,
   dropPosition,
   onSort,
@@ -355,6 +527,9 @@ export function DataTableColumnHeader<
   onDragEnd,
   onMoveByKeyboard,
   onToggleFreeze,
+  onResizeStart,
+  onResizeByKeyboard,
+  onResizeReset,
 }: DataTableColumnHeaderProps<Field, Sort>) {
   const { field, label } = column;
   const direction = dataTableSortDirection(sort, field);
@@ -374,14 +549,15 @@ export function DataTableColumnHeader<
       data-dragging={dragging || undefined}
       data-drop-position={dropPosition}
       data-frozen={frozen || undefined}
+      data-frozen-edge={lastFrozen || undefined}
+      data-resizing={resizing || undefined}
       style={frozen ? { left: stickyLeft } : undefined}
       onDragOver={(event) => onDragOver(field, event)}
       onDrop={(event) => onDrop(field, event)}
       className={cn(
         "group/header relative h-10 p-0 transition-colors",
         frozen && "sticky z-30 bg-card",
-        lastFrozen &&
-          "border-r-2 border-border shadow-[3px_0_6px_-4px_rgba(0,0,0,0.35)]",
+        lastFrozen && FROZEN_EDGE_CLASS,
         direction && "text-foreground",
       )}
     >
@@ -409,7 +585,8 @@ export function DataTableColumnHeader<
       )}
       <div
         className={cn(
-          "flex h-full min-w-0 items-center",
+          // Right padding keeps the pin button clear of the resize handle.
+          "flex h-full min-w-0 items-center pr-1.5",
           dragging && "opacity-55",
         )}
       >
@@ -480,6 +657,37 @@ export function DataTableColumnHeader<
             <Pin className="h-3.5 w-3.5" aria-hidden="true" />
           )}
         </button>
+      </div>
+      <div
+        role="separator"
+        aria-orientation="vertical"
+        aria-label={`Resize ${label} column`}
+        aria-valuenow={width}
+        aria-valuemin={MIN_COLUMN_WIDTH}
+        aria-valuemax={MAX_COLUMN_WIDTH}
+        tabIndex={0}
+        title={`Drag to resize ${label}, double-click to reset`}
+        onPointerDown={(event) => onResizeStart(field, event)}
+        onDoubleClick={() => onResizeReset(field)}
+        onKeyDown={(event) => {
+          if (
+            event.key === "ArrowLeft" ||
+            event.key === "ArrowRight" ||
+            event.key === "Home"
+          ) {
+            event.preventDefault();
+            onResizeByKeyboard(field, event.key);
+          }
+        }}
+        className="group/resize absolute inset-y-0 right-0 z-40 flex w-1.5 cursor-col-resize touch-none justify-center outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+      >
+        <span
+          aria-hidden="true"
+          className={cn(
+            "h-full w-0.5 transition-colors group-hover/resize:bg-primary",
+            resizing && "bg-primary",
+          )}
+        />
       </div>
     </TableHead>
   );

@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { stickyColumnLeft } from "@/lib/data-table-columns";
 import { useAuthStore } from "@/stores/auth-store";
 import type { User } from "@/types/api";
 import type {
@@ -245,6 +246,9 @@ function resolveLastNavigationSearch(previous: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // The column layout persists, so a test that reorders or resizes would
+  // otherwise seed the layout of every test that runs after it.
+  localStorage.clear();
   for (const key of Object.keys(routeSearch)) delete routeSearch[key];
   mockUseAdminOAuthClients.mockReturnValue({
     data: clientsResponse,
@@ -766,6 +770,23 @@ describe("AdminOAuthClientsPage", () => {
     expect(resolveLastNavigationSearch()).toEqual({ sort: "-broker" });
   });
 
+  it("pages by 10 rows and keeps the default page size out of the URL", async () => {
+    const user = userEvent.setup();
+    routeSearch.page = 4;
+    const { rerender } = render(<AdminOAuthClientsPage />);
+
+    await user.click(screen.getByRole("combobox", { name: "Rows per page" }));
+    await user.click(screen.getByRole("option", { name: "10 rows" }));
+    expect(resolveLastNavigationSearch({ page: 4 })).toEqual({ per_page: 10 });
+
+    routeSearch.per_page = 10;
+    rerender(<AdminOAuthClientsPage />);
+
+    await user.click(screen.getByRole("combobox", { name: "Rows per page" }));
+    await user.click(screen.getByRole("option", { name: "25 rows" }));
+    expect(resolveLastNavigationSearch({ per_page: 10 })).toEqual({});
+  });
+
   it("reorders headers and row cells from a dedicated drag handle", () => {
     render(<AdminOAuthClientsPage />);
 
@@ -906,25 +927,36 @@ describe("AdminOAuthClientsPage", () => {
     const creatorHeader = screen.getByRole("columnheader", {
       name: "Created By",
     });
+    const table = screen.getByRole("table");
     expect(clientHeader).toHaveAttribute("data-frozen", "true");
+    expect(typeHeader).toHaveAttribute("data-frozen", "true");
+    expect(creatorHeader).toHaveAttribute("data-frozen", "true");
     expect(clientHeader).toHaveClass("z-30", "bg-card");
+    // Widths live in a CSS variable per column; the frozen offsets are sums of
+    // those variables, unit-tested in lib/data-table-columns.test.ts (happy-dom
+    // drops `calc(var(...))` from a length, so it can't be read back here).
+    expect(table.style.getPropertyValue("--col-w-client_name")).toBe("260px");
+    expect(table.style.getPropertyValue("--col-w-client_type")).toBe("140px");
     expect(clientHeader).toHaveStyle({ left: "0px" });
-    expect(typeHeader).toHaveStyle({ left: "260px" });
-    expect(creatorHeader).toHaveStyle({ left: "400px" });
-    expect(creatorHeader).toHaveClass("border-r-2");
+    // The frozen edge has to be painted by the sticky cell itself. A collapsed
+    // `border-r` belongs to the table's border grid, so it would slide out from
+    // under the frozen column as soon as the table scrolls horizontally.
+    expect(creatorHeader).toHaveAttribute("data-frozen-edge", "true");
+    expect(creatorHeader).not.toHaveClass("border-r-2");
+    expect(creatorHeader).toHaveClass("before:w-0.5", "before:bg-border");
     expect(
       screen.getByRole("button", {
         name: "Unfreeze columns through Created By",
       }),
     ).toHaveClass("opacity-100", "text-primary");
 
-    const table = screen.getByRole("table");
     expect(
       table.querySelector('tbody td[data-column="client_name"]'),
     ).toHaveClass("sticky", "z-20", "bg-card");
-    expect(
-      table.querySelector('tbody td[data-column="created_by"]'),
-    ).toHaveClass("border-r-2");
+    const edgeCell = table.querySelector('tbody td[data-column="created_by"]');
+    expect(edgeCell).toHaveAttribute("data-frozen-edge", "true");
+    expect(edgeCell).not.toHaveClass("border-r-2");
+    expect(edgeCell).toHaveClass("before:w-0.5", "before:bg-border");
 
     const clientHandle = screen.getByRole("button", {
       name: "Move Client column",
@@ -933,8 +965,8 @@ describe("AdminOAuthClientsPage", () => {
     await user.keyboard("{ArrowRight}");
 
     expect(typeHeader).toHaveStyle({ left: "0px" });
-    expect(clientHeader).toHaveStyle({ left: "140px" });
-    expect(creatorHeader).toHaveStyle({ left: "400px" });
+    expect(clientHeader).toHaveAttribute("data-frozen", "true");
+    expect(creatorHeader).toHaveAttribute("data-frozen", "true");
 
     await user.click(
       screen.getByRole("button", {
@@ -944,9 +976,237 @@ describe("AdminOAuthClientsPage", () => {
     expect(clientHeader).not.toHaveAttribute("data-frozen");
     expect(typeHeader).not.toHaveAttribute("data-frozen");
     expect(creatorHeader).not.toHaveAttribute("data-frozen");
+    expect(creatorHeader).not.toHaveAttribute("data-frozen-edge");
+    expect(edgeCell).not.toHaveAttribute("data-frozen-edge");
     expect(
       table.querySelector('tbody td[data-column="client_name"]'),
     ).not.toHaveClass("sticky");
+  });
+
+  it("resizes a column by dragging its handle", () => {
+    render(<AdminOAuthClientsPage />);
+
+    const table = screen.getByRole("table");
+    const handle = screen.getByRole("separator", {
+      name: "Resize Client column",
+    });
+
+    fireEvent.pointerDown(handle, { button: 0, clientX: 260 });
+    fireEvent.pointerMove(window, { clientX: 340 });
+    // The drag writes straight to the width variable so the rows never re-render.
+    expect(table.style.getPropertyValue("--col-w-client_name")).toBe("340px");
+
+    fireEvent.pointerUp(window, { clientX: 340 });
+    expect(table.style.getPropertyValue("--col-w-client_name")).toBe("340px");
+    expect(handle).toHaveAttribute("aria-valuenow", "340");
+    expect(
+      screen.getByText("Client column resized to 340 pixels"),
+    ).toBeInTheDocument();
+  });
+
+  it("tracks a drag that starts and ends before React can re-render", () => {
+    render(<AdminOAuthClientsPage />);
+
+    const table = screen.getByRole("table");
+    const clientHeader = screen.getByRole("columnheader", { name: "Client" });
+    const handle = screen.getByRole("separator", {
+      name: "Resize Client column",
+    });
+
+    // A whole drag inside one task: the listeners have to be live from the
+    // pointerdown, or the move is lost and the pointerup strands the table in
+    // its resizing state.
+    fireEvent.pointerDown(handle, { button: 0, clientX: 260 });
+    fireEvent.pointerMove(window, { clientX: 330 });
+    fireEvent.pointerUp(window, { clientX: 330 });
+
+    expect(table.style.getPropertyValue("--col-w-client_name")).toBe("330px");
+    expect(clientHeader).not.toHaveAttribute("data-resizing");
+  });
+
+  it("clamps a drag to the min and max column width", () => {
+    render(<AdminOAuthClientsPage />);
+
+    const table = screen.getByRole("table");
+    const handle = screen.getByRole("separator", {
+      name: "Resize Client column",
+    });
+
+    fireEvent.pointerDown(handle, { button: 0, clientX: 260 });
+    fireEvent.pointerMove(window, { clientX: -500 });
+    expect(table.style.getPropertyValue("--col-w-client_name")).toBe("96px");
+    fireEvent.pointerMove(window, { clientX: 2000 });
+    expect(table.style.getPropertyValue("--col-w-client_name")).toBe("640px");
+    fireEvent.pointerUp(window, { clientX: 2000 });
+
+    expect(handle).toHaveAttribute("aria-valuenow", "640");
+  });
+
+  it("resizes from the keyboard and restores the default width on double-click", async () => {
+    const user = userEvent.setup();
+    render(<AdminOAuthClientsPage />);
+
+    const table = screen.getByRole("table");
+    const handle = screen.getByRole("separator", {
+      name: "Resize Client column",
+    });
+
+    handle.focus();
+    await user.keyboard("{ArrowRight}{ArrowRight}");
+    expect(table.style.getPropertyValue("--col-w-client_name")).toBe("292px");
+    await user.keyboard("{ArrowLeft}");
+    expect(table.style.getPropertyValue("--col-w-client_name")).toBe("276px");
+
+    await user.dblClick(handle);
+    expect(table.style.getPropertyValue("--col-w-client_name")).toBe("260px");
+    expect(handle).toHaveAttribute("aria-valuenow", "260");
+  });
+
+  it("keeps a frozen column's offset in step with a resize of the column before it", () => {
+    render(<AdminOAuthClientsPage />);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Freeze columns through Type" }),
+    );
+    const table = screen.getByRole("table");
+    const typeHeader = screen.getByRole("columnheader", { name: "Type" });
+    expect(typeHeader).toHaveAttribute("data-frozen", "true");
+
+    const handle = screen.getByRole("separator", {
+      name: "Resize Client column",
+    });
+    fireEvent.pointerDown(handle, { button: 0, clientX: 260 });
+    fireEvent.pointerMove(window, { clientX: 300 });
+    fireEvent.pointerUp(window, { clientX: 300 });
+
+    // Type's sticky offset resolves the same variable the drag rewrote, so it
+    // stays pinned to Client's right edge instead of detaching mid-drag.
+    expect(table.style.getPropertyValue("--col-w-client_name")).toBe("300px");
+    expect(
+      stickyColumnLeft(["client_name", "client_type"], "client_type"),
+    ).toBe("calc(var(--col-w-client_name))");
+  });
+
+  it("persists a resize, a reorder and a freeze across a remount", () => {
+    const { unmount } = render(<AdminOAuthClientsPage />);
+
+    const handle = screen.getByRole("separator", {
+      name: "Resize Client column",
+    });
+    fireEvent.pointerDown(handle, { button: 0, clientX: 260 });
+    fireEvent.pointerMove(window, { clientX: 340 });
+    fireEvent.pointerUp(window, { clientX: 340 });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Freeze columns through Type" }),
+    );
+    const clientGrip = screen.getByRole("button", {
+      name: "Move Client column",
+    });
+    clientGrip.focus();
+    fireEvent.keyDown(clientGrip, { key: "ArrowRight" });
+
+    expect(
+      JSON.parse(
+        localStorage.getItem("nyxid.table.admin-oauth-clients.columns.v1") ??
+          "{}",
+      ),
+    ).toMatchObject({
+      order: [
+        "client_type",
+        "client_name",
+        "created_by",
+        "broker",
+        "is_active",
+        "allowed_scopes",
+        "created_at",
+      ],
+      frozenThrough: "client_type",
+      widths: expect.objectContaining({ client_name: 340 }),
+    });
+
+    unmount();
+    render(<AdminOAuthClientsPage />);
+
+    const table = screen.getByRole("table");
+    expect(table.style.getPropertyValue("--col-w-client_name")).toBe("340px");
+    expect(
+      [...table.querySelectorAll("thead th")].map((th) =>
+        th.getAttribute("data-column"),
+      ),
+    ).toEqual([
+      "client_type",
+      "client_name",
+      "created_by",
+      "broker",
+      "is_active",
+      "allowed_scopes",
+      "created_at",
+    ]);
+    expect(screen.getByRole("columnheader", { name: "Type" })).toHaveAttribute(
+      "data-frozen-edge",
+      "true",
+    );
+  });
+
+  it("restores the defaults from the reset control and forgets the stored layout", () => {
+    render(<AdminOAuthClientsPage />);
+
+    expect(
+      screen.queryByRole("button", { name: /Reset columns/ }),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Freeze columns through Type" }),
+    );
+    expect(
+      localStorage.getItem("nyxid.table.admin-oauth-clients.columns.v1"),
+    ).not.toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /Reset columns/ }));
+
+    expect(
+      screen.getByRole("columnheader", { name: "Type" }),
+    ).not.toHaveAttribute("data-frozen");
+    expect(
+      screen.queryByRole("button", { name: /Reset columns/ }),
+    ).not.toBeInTheDocument();
+    expect(
+      localStorage.getItem("nyxid.table.admin-oauth-clients.columns.v1"),
+    ).toBeNull();
+  });
+
+  it("ignores a stored layout that no longer matches the table", () => {
+    localStorage.setItem(
+      "nyxid.table.admin-oauth-clients.columns.v1",
+      JSON.stringify({
+        order: ["client_secret", "client_name"],
+        frozenThrough: "client_secret",
+        widths: { client_name: 9000 },
+      }),
+    );
+
+    render(<AdminOAuthClientsPage />);
+
+    const table = screen.getByRole("table");
+    // A column that no longer exists cannot survive as a freeze point, and a
+    // width from other bounds falls back rather than rendering a broken table.
+    expect(table.style.getPropertyValue("--col-w-client_name")).toBe("260px");
+    expect(
+      screen.getByRole("columnheader", { name: "Client" }),
+    ).not.toHaveAttribute("data-frozen");
+    expect(
+      [...table.querySelectorAll("thead th")].map((th) =>
+        th.getAttribute("data-column"),
+      ),
+    ).toEqual([
+      "client_name",
+      "client_type",
+      "created_by",
+      "broker",
+      "is_active",
+      "allowed_scopes",
+      "created_at",
+    ]);
   });
 
   it("sends a filter's custom text as a contains search beside its checked options", async () => {

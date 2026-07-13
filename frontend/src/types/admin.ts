@@ -196,9 +196,11 @@ export interface AdminAuditLogListResponse {
   readonly filter_options?: AdminAuditLogFilterOptions;
 }
 
+export type AdminAuditLogPerPage = 10 | 25 | 50 | 100;
+
 export interface AdminAuditLogListParams {
   readonly page: number;
-  readonly per_page: 25 | 50 | 100;
+  readonly per_page: AdminAuditLogPerPage;
   readonly search?: string;
   readonly search_filters?: string;
   readonly custom_filters?: string;
@@ -214,7 +216,7 @@ export interface AdminAuditLogListParams {
 /** Canonical URL state for the audit-log table. */
 export interface AdminAuditLogSearchState {
   readonly page?: number;
-  readonly per_page?: 25 | 50 | 100;
+  readonly per_page?: AdminAuditLogPerPage;
   readonly search?: string;
   readonly search_filters?: string;
   readonly custom_filters?: string;
@@ -321,9 +323,11 @@ export interface AdminOAuthClientListResponse {
   readonly filter_options: AdminOAuthClientFilterOptions;
 }
 
+export type AdminOAuthClientPerPage = 10 | 25 | 50 | 100;
+
 export interface AdminOAuthClientListParams {
   readonly page: number;
-  readonly per_page: 25 | 50 | 100;
+  readonly per_page: AdminOAuthClientPerPage;
   readonly search?: string;
   readonly search_filters?: string;
   readonly custom_filters?: string;
@@ -340,7 +344,7 @@ export interface AdminOAuthClientListParams {
 
 export interface AdminOAuthClientSearchState {
   readonly page?: number;
-  readonly per_page?: 25 | 50 | 100;
+  readonly per_page?: AdminOAuthClientPerPage;
   readonly search?: string;
   readonly search_filters?: string;
   readonly custom_filters?: string;

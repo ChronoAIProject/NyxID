@@ -6,11 +6,19 @@ import type {
   AdminAuditLogSearchField,
   AdminAuditLogSearchFieldKey,
   AdminAuditLogSearchFilter,
+  AdminAuditLogPerPage,
   AdminAuditLogSearchState,
   AdminAuditLogSort,
   AdminAuditLogStatusFilter,
 } from "@/types/admin";
 import type { AppliedDataTableFilter } from "@/types/data-table";
+
+/** Page sizes offered by the table; the backend accepts any per_page in 1..=100. */
+export const ADMIN_AUDIT_LOG_PER_PAGE_OPTIONS = [
+  10, 25, 50, 100,
+] as const satisfies readonly AdminAuditLogPerPage[];
+
+export const ADMIN_AUDIT_LOG_DEFAULT_PER_PAGE: AdminAuditLogPerPage = 25;
 
 const STATUS_FILTERS = ["2xx", "3xx", "4xx", "5xx", "none"] as const;
 const ACTOR_FILTERS = ["user", "agent", "anonymous"] as const;
@@ -864,7 +872,11 @@ export function normalizeAdminAuditLogSearch(
 
   return {
     ...(page !== undefined && page > 1 ? { page } : {}),
-    ...(perPage === 50 || perPage === 100 ? { per_page: perPage } : {}),
+    ...(perPage !== undefined &&
+    perPage !== ADMIN_AUDIT_LOG_DEFAULT_PER_PAGE &&
+    (ADMIN_AUDIT_LOG_PER_PAGE_OPTIONS as readonly number[]).includes(perPage)
+      ? { per_page: perPage as AdminAuditLogPerPage }
+      : {}),
     ...(search !== "" && [...search].length <= 256 ? { search } : {}),
     ...(searchFilters !== undefined
       ? { search_filters: JSON.stringify(searchFilters) }

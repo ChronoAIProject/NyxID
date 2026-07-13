@@ -7,13 +7,14 @@ import {
   useUpdateBrokerSettings,
 } from "@/hooks/use-admin-oauth-clients";
 import { ApiError } from "@/lib/api-client";
-import { formatDate } from "@/lib/utils";
+import { cn, formatDate } from "@/lib/utils";
 import { canAdminWrite } from "@/types/api";
 import type {
   AdminOAuthClient,
   AdminOAuthClientFilterKey,
   AdminOAuthClientFilterSelections,
   AdminOAuthClientListParams,
+  AdminOAuthClientPerPage,
   AdminOAuthClientSearchFieldKey,
   AdminOAuthClientSearchState,
   AdminOAuthClientSort,
@@ -73,6 +74,8 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import {
+  ADMIN_OAUTH_CLIENT_DEFAULT_PER_PAGE,
+  ADMIN_OAUTH_CLIENT_PER_PAGE_OPTIONS,
   adminOAuthClientCustomFilterPatch,
   adminOAuthClientFilterPatch,
   getAppliedAdminOAuthClientFilters,
@@ -123,7 +126,6 @@ const SETTING_LABELS: Record<BrokerSettingKey, string> = {
 };
 
 const BROKER_BINDING_SCOPE = "urn:nyxid:scope:broker_binding";
-const DEFAULT_PER_PAGE = 25;
 const DEFAULT_SORT: AdminOAuthClientSort = "-created_at";
 
 const FALLBACK_SORTS: readonly AdminOAuthClientSort[] = [
@@ -156,42 +158,44 @@ const OAUTH_CLIENT_COLUMNS: readonly DataTableColumn<OAuthClientSortField>[] = [
   {
     field: "client_name",
     label: "Client",
-    width: 260,
+    defaultWidth: 260,
   },
   {
     field: "client_type",
     label: "Type",
-    width: 140,
+    defaultWidth: 140,
   },
   {
     field: "created_by",
     label: "Created By",
-    width: 200,
+    defaultWidth: 200,
     cellClassName: "font-mono text-[11px] text-muted-foreground",
   },
   {
     field: "broker",
     label: "Broker",
-    width: 280,
+    defaultWidth: 280,
   },
   {
     field: "is_active",
     label: "Status",
-    width: 170,
+    defaultWidth: 170,
   },
   {
     field: "allowed_scopes",
     label: "Allowed Scopes",
-    width: 320,
-    cellClassName: "max-w-[320px]",
+    defaultWidth: 320,
   },
   {
     field: "created_at",
     label: "Created",
-    width: 190,
+    defaultWidth: 190,
     cellClassName: "whitespace-nowrap text-sm text-muted-foreground",
   },
 ];
+
+/** Bump the version suffix when a change makes stored layouts unreadable. */
+const COLUMN_PREFERENCES_KEY = "nyxid.table.admin-oauth-clients.columns.v1";
 
 const DEFAULT_COLUMN_SORT: Record<OAuthClientSortField, AdminOAuthClientSort> =
   {
@@ -219,7 +223,18 @@ export function AdminOAuthClientsPage() {
   }) as AdminOAuthClientSearchState;
   const currentUser = useAuthStore((s) => s.user);
   const canWrite = canAdminWrite(currentUser);
-  const columns = useDataTableColumns(OAUTH_CLIENT_COLUMNS);
+  const {
+    order: columnOrder,
+    announcement: columnAnnouncement,
+    resizingColumn,
+    tableRef,
+    tableStyle,
+    columnStyle,
+    isDefaultLayout: isDefaultColumnLayout,
+    resetLayout: resetColumnLayout,
+    headerProps: columnHeaderProps,
+    cellProps: columnCellProps,
+  } = useDataTableColumns(OAUTH_CLIENT_COLUMNS, COLUMN_PREFERENCES_KEY);
   const appliedSearch = routeSearch.search ?? "";
   const [searchDraft, setSearchDraft] = useState("");
   const [selectedSearchField, setSelectedSearchField] =
@@ -240,7 +255,7 @@ export function AdminOAuthClientsPage() {
 
   const listParams: AdminOAuthClientListParams = {
     page: routeSearch.page ?? 1,
-    per_page: routeSearch.per_page ?? DEFAULT_PER_PAGE,
+    per_page: routeSearch.per_page ?? ADMIN_OAUTH_CLIENT_DEFAULT_PER_PAGE,
     search: routeSearch.search,
     search_filters: routeSearch.search_filters,
     custom_filters: routeSearch.custom_filters,
@@ -297,6 +312,7 @@ export function AdminOAuthClientsPage() {
     appliedSearchFilters.length > 0 ||
     appliedStructuredFilters.length > 0,
   );
+
   const updateListSearch = useCallback(
     (patch: Partial<AdminOAuthClientSearchState>, replace = false) => {
       void navigate({
@@ -877,33 +893,34 @@ export function AdminOAuthClientsPage() {
         ) : (
           <>
             <div
-              className={`transition-opacity motion-reduce:transition-none ${
-                isPlaceholderData ? "opacity-60" : ""
-              }`}
+              className={cn(
+                "transition-opacity motion-reduce:transition-none",
+                isPlaceholderData && "opacity-60",
+                // Hold the resize cursor for the whole drag, wherever it lands.
+                resizingColumn && "cursor-col-resize select-none",
+              )}
               aria-busy={isFetching}
             >
               <p className="sr-only" aria-live="polite" aria-atomic="true">
-                {columns.announcement}
+                {columnAnnouncement}
               </p>
               <Table
+                ref={tableRef}
                 containerClassName="overscroll-x-none"
-                className="table-fixed [&_td]:py-1.5"
-                style={{ minWidth: columns.totalWidth }}
+                className="table-fixed [&_td]:overflow-hidden [&_td]:py-1.5"
+                style={tableStyle}
               >
                 <colgroup>
-                  {columns.order.map((field) => (
-                    <col
-                      key={field}
-                      style={{ width: columns.getColumn(field).width }}
-                    />
+                  {columnOrder.map((field) => (
+                    <col key={field} style={columnStyle(field)} />
                   ))}
                 </colgroup>
                 <TableHeader>
                   <TableRow>
-                    {columns.order.map((field) => (
+                    {columnOrder.map((field) => (
                       <DataTableColumnHeader
                         key={field}
-                        {...columns.headerProps(field)}
+                        {...columnHeaderProps(field)}
                         sort={listParams.sort}
                         nextSort={nextDataTableSort(
                           listParams.sort,
@@ -922,8 +939,8 @@ export function AdminOAuthClientsPage() {
                       key={client.id}
                       className="group/row hover:bg-muted/45"
                     >
-                      {columns.order.map((field) => (
-                        <TableCell key={field} {...columns.cellProps(field)}>
+                      {columnOrder.map((field) => (
+                        <TableCell key={field} {...columnCellProps(field)}>
                           {renderOAuthClientCell(client, field)}
                         </TableCell>
                       ))}
@@ -940,18 +957,33 @@ export function AdminOAuthClientsPage() {
                 {String(total)} clients
               </p>
               <div className="flex flex-wrap items-center gap-2">
+                {!isDefaultColumnLayout && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={resetColumnLayout}
+                  >
+                    <RotateCcw
+                      className="mr-2 h-3.5 w-3.5"
+                      aria-hidden="true"
+                    />
+                    Reset columns
+                  </Button>
+                )}
                 <Select
                   value={String(listParams.per_page)}
                   disabled={isFetching}
-                  onValueChange={(value) =>
+                  onValueChange={(value) => {
+                    const rows = Number(value) as AdminOAuthClientPerPage;
                     updateListSearch({
                       page: undefined,
                       per_page:
-                        Number(value) === DEFAULT_PER_PAGE
+                        rows === ADMIN_OAUTH_CLIENT_DEFAULT_PER_PAGE
                           ? undefined
-                          : (Number(value) as 50 | 100),
-                    })
-                  }
+                          : rows,
+                    });
+                  }}
                 >
                   <SelectTrigger
                     aria-label="Rows per page"
@@ -960,9 +992,11 @@ export function AdminOAuthClientsPage() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="25">25 rows</SelectItem>
-                    <SelectItem value="50">50 rows</SelectItem>
-                    <SelectItem value="100">100 rows</SelectItem>
+                    {ADMIN_OAUTH_CLIENT_PER_PAGE_OPTIONS.map((rows) => (
+                      <SelectItem key={rows} value={String(rows)}>
+                        {String(rows)} rows
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
                 <Button
