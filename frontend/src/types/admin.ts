@@ -232,9 +232,11 @@ export interface AdminOAuthClientListResponse {
   readonly filter_options: AdminOAuthClientFilterOptions;
 }
 
+export type AdminOAuthClientPerPage = 10 | 25 | 50 | 100;
+
 export interface AdminOAuthClientListParams {
   readonly page: number;
-  readonly per_page: 25 | 50 | 100;
+  readonly per_page: AdminOAuthClientPerPage;
   readonly search?: string;
   readonly search_filters?: string;
   readonly custom_filters?: string;
@@ -251,7 +253,7 @@ export interface AdminOAuthClientListParams {
 
 export interface AdminOAuthClientSearchState {
   readonly page?: number;
-  readonly per_page?: 25 | 50 | 100;
+  readonly per_page?: AdminOAuthClientPerPage;
   readonly search?: string;
   readonly search_filters?: string;
   readonly custom_filters?: string;

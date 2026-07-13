@@ -63,6 +63,16 @@ describe("normalizeAdminOAuthClientSearch", () => {
     ).toEqual({});
   });
 
+  it("keeps every supported page size and rejects unsupported ones", () => {
+    for (const perPage of [10, 50, 100]) {
+      expect(normalizeAdminOAuthClientSearch({ per_page: perPage })).toEqual({
+        per_page: perPage,
+      });
+    }
+    expect(normalizeAdminOAuthClientSearch({ per_page: "30" })).toEqual({});
+    expect(normalizeAdminOAuthClientSearch({ per_page: "1000" })).toEqual({});
+  });
+
   it("keeps scalar status values boolean-compatible and caps search length", () => {
     expect(normalizeAdminOAuthClientSearch({ is_active: false })).toEqual({
       is_active: false,
