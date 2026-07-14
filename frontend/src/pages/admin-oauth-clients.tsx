@@ -14,6 +14,7 @@ import type {
   AdminOAuthClientFilterKey,
   AdminOAuthClientFilterSelections,
   AdminOAuthClientListParams,
+  AdminOAuthClientPerPage,
   AdminOAuthClientSearchFieldKey,
   AdminOAuthClientSearchState,
   AdminOAuthClientSort,
@@ -23,6 +24,7 @@ import type {
   UpdateBrokerSettingsRequest,
 } from "@/types/admin";
 import type { DataTableSearchApplyMode } from "@/types/data-table";
+import type { DataTableColumnPreferences } from "@/lib/data-table-preferences";
 import { useAuthStore } from "@/stores/auth-store";
 import { PageHeader } from "@/components/shared/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -80,8 +82,12 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import {
+  ADMIN_OAUTH_CLIENT_DEFAULT_PER_PAGE,
+  ADMIN_OAUTH_CLIENT_PER_PAGE_OPTIONS,
+  adminOAuthClientCustomFilterPatch,
   adminOAuthClientFilterPatch,
   getAppliedAdminOAuthClientFilters,
+  getAdminOAuthClientCustomValues,
   getAdminOAuthClientFilterFields,
   getAdminOAuthClientFilterValues,
   getAdminOAuthClientSearchFields,
@@ -97,6 +103,19 @@ import {
   DataTableFilterPopover,
   DataTableSearch,
 } from "@/components/data-table/data-table-controls";
+import {
+  clampColumnWidth,
+  columnWidthVar,
+  columnWidthVars,
+  frozenColumnFields,
+  stickyColumnLeft,
+  sumOfColumnWidths,
+} from "@/lib/data-table-columns";
+import {
+  isDefaultColumnLayout,
+  loadColumnPreferences,
+  saveColumnPreferences,
+} from "@/lib/data-table-preferences";
 
 type ClientAction = {
   readonly client: AdminOAuthClient;
@@ -122,7 +141,6 @@ const SETTING_LABELS: Record<BrokerSettingKey, string> = {
 };
 
 const BROKER_BINDING_SCOPE = "urn:nyxid:scope:broker_binding";
-const DEFAULT_PER_PAGE = 25;
 const DEFAULT_SORT: AdminOAuthClientSort = "-created_at";
 
 const FALLBACK_SORTS: readonly AdminOAuthClientSort[] = [
@@ -154,7 +172,8 @@ type OAuthClientSortField =
 type OAuthClientColumn = {
   readonly field: OAuthClientSortField;
   readonly label: string;
-  readonly width: number;
+  /** Starting width, and the width a double-click on the resize handle restores. */
+  readonly defaultWidth: number;
   readonly cellClassName?: string;
 };
 
@@ -162,63 +181,81 @@ const OAUTH_CLIENT_COLUMNS: readonly OAuthClientColumn[] = [
   {
     field: "client_name",
     label: "Client",
-    width: 260,
+    defaultWidth: 260,
   },
   {
     field: "client_type",
     label: "Type",
-    width: 140,
+    defaultWidth: 140,
   },
   {
     field: "created_by",
     label: "Created By",
-    width: 200,
+    defaultWidth: 200,
     cellClassName: "font-mono text-[11px] text-muted-foreground",
   },
   {
     field: "broker",
     label: "Broker",
-    width: 280,
+    defaultWidth: 280,
   },
   {
     field: "is_active",
     label: "Status",
-    width: 170,
+    defaultWidth: 170,
   },
   {
     field: "allowed_scopes",
     label: "Allowed Scopes",
-    width: 320,
-    cellClassName: "max-w-[320px]",
+    defaultWidth: 320,
   },
   {
     field: "created_at",
     label: "Created",
-    width: 190,
+    defaultWidth: 190,
     cellClassName: "whitespace-nowrap text-sm text-muted-foreground",
   },
 ];
 
 const DEFAULT_COLUMN_ORDER = OAUTH_CLIENT_COLUMNS.map((column) => column.field);
-const OAUTH_CLIENT_TABLE_WIDTH = OAUTH_CLIENT_COLUMNS.reduce(
-  (width, column) => width + column.width,
-  0,
-);
 
-type ColumnPreferences = {
-  readonly order: readonly OAuthClientSortField[];
-  readonly frozenThrough: OAuthClientSortField | null;
-};
+const MIN_COLUMN_WIDTH = 96;
+const MAX_COLUMN_WIDTH = 640;
+const COLUMN_RESIZE_STEP = 16;
+
+type ColumnWidths = Readonly<Record<OAuthClientSortField, number>>;
+
+const DEFAULT_COLUMN_WIDTHS = Object.fromEntries(
+  OAUTH_CLIENT_COLUMNS.map((column) => [column.field, column.defaultWidth]),
+) as ColumnWidths;
+
+type ColumnPreferences = DataTableColumnPreferences<OAuthClientSortField>;
 
 const DEFAULT_COLUMN_PREFERENCES: ColumnPreferences = {
   order: DEFAULT_COLUMN_ORDER,
   frozenThrough: null,
+  widths: DEFAULT_COLUMN_WIDTHS,
 };
+
+const COLUMN_WIDTH_BOUNDS = { min: MIN_COLUMN_WIDTH, max: MAX_COLUMN_WIDTH };
+
+/** Bump the version suffix when a change makes stored layouts unreadable. */
+const COLUMN_PREFERENCES_KEY = "nyxid.table.admin-oauth-clients.columns.v1";
 
 type ColumnDropTarget = {
   readonly field: OAuthClientSortField;
   readonly position: "before" | "after";
 };
+
+/**
+ * Divider marking the frozen edge, drawn as a pseudo-element rather than a
+ * `border-r`. A collapsed border belongs to the table's border grid, not to the
+ * cell, so it stays behind with the grid when a sticky cell is offset -- the
+ * frozen edge would lose its line as soon as the table scrolls horizontally.
+ * What the sticky cell paints itself travels with it at every scroll offset.
+ */
+const FROZEN_EDGE_CLASS =
+  "shadow-[3px_0_6px_-4px_rgba(0,0,0,0.35)] before:pointer-events-none before:absolute before:inset-y-0 before:right-0 before:z-10 before:w-0.5 before:bg-border before:content-['']";
 
 function getColumn(field: OAuthClientSortField): OAuthClientColumn {
   const column = OAUTH_CLIENT_COLUMNS.find((item) => item.field === field);
@@ -257,20 +294,8 @@ function reorderColumnsForDrop(
   return withoutSource;
 }
 
-function frozenColumnOffsets(
-  order: readonly OAuthClientSortField[],
-  frozenThrough: OAuthClientSortField | null,
-): ReadonlyMap<OAuthClientSortField, number> {
-  const offsets = new Map<OAuthClientSortField, number>();
-  if (!frozenThrough) return offsets;
-
-  let left = 0;
-  for (const field of order) {
-    offsets.set(field, left);
-    left += getColumn(field).width;
-    if (field === frozenThrough) break;
-  }
-  return offsets;
+function resizeColumnWidth(width: number): number {
+  return clampColumnWidth(width, MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH);
 }
 
 const DEFAULT_COLUMN_SORT: Record<OAuthClientSortField, AdminOAuthClientSort> =
@@ -319,6 +344,8 @@ function ReorderableTableHead({
   frozen,
   lastFrozen,
   stickyLeft,
+  width,
+  resizing,
   dragging,
   dropPosition,
   onSort,
@@ -328,13 +355,18 @@ function ReorderableTableHead({
   onDragEnd,
   onMoveByKeyboard,
   onToggleFreeze,
+  onResizeStart,
+  onResizeByKeyboard,
+  onResizeReset,
 }: {
   readonly column: OAuthClientColumn;
   readonly sort: AdminOAuthClientSort;
   readonly disabled: boolean;
   readonly frozen: boolean;
   readonly lastFrozen: boolean;
-  readonly stickyLeft: number | undefined;
+  readonly stickyLeft: string | undefined;
+  readonly width: number;
+  readonly resizing: boolean;
   readonly dragging: boolean;
   readonly dropPosition: ColumnDropTarget["position"] | undefined;
   readonly onSort: (sort: AdminOAuthClientSort) => void;
@@ -356,6 +388,15 @@ function ReorderableTableHead({
     key: "ArrowLeft" | "ArrowRight" | "Home" | "End",
   ) => void;
   readonly onToggleFreeze: (field: OAuthClientSortField) => void;
+  readonly onResizeStart: (
+    field: OAuthClientSortField,
+    event: React.PointerEvent<HTMLDivElement>,
+  ) => void;
+  readonly onResizeByKeyboard: (
+    field: OAuthClientSortField,
+    key: "ArrowLeft" | "ArrowRight" | "Home",
+  ) => void;
+  readonly onResizeReset: (field: OAuthClientSortField) => void;
 }) {
   const { field, label } = column;
   const direction = sortDirection(sort, field);
@@ -376,18 +417,24 @@ function ReorderableTableHead({
       data-dragging={dragging || undefined}
       data-drop-position={dropPosition}
       data-frozen={frozen || undefined}
+      data-frozen-edge={lastFrozen || undefined}
+      data-resizing={resizing || undefined}
       style={frozen ? { left: stickyLeft } : undefined}
       onDragOver={(event) => onDragOver(field, event)}
       onDrop={(event) => onDrop(field, event)}
       className={cn(
-        "group/header relative h-10 p-0 transition-colors hover:bg-accent focus-within:bg-accent",
-        dragging && "opacity-55",
+        "group/header relative h-10 p-0 transition-colors",
         frozen && "sticky z-30 bg-card",
-        lastFrozen &&
-          "border-r-2 border-border shadow-[3px_0_6px_-4px_rgba(0,0,0,0.35)]",
+        lastFrozen && FROZEN_EDGE_CLASS,
         direction && "text-foreground",
       )}
     >
+      {/* Tint overlays, never a background swap: a frozen header must keep an
+          opaque background or the columns scrolling underneath show through. */}
+      <span
+        className="pointer-events-none absolute inset-0 bg-accent opacity-0 transition-opacity group-hover/header:opacity-100"
+        aria-hidden="true"
+      />
       {direction && (
         <span
           className="pointer-events-none absolute inset-0 bg-primary/[0.07]"
@@ -404,7 +451,13 @@ function ReorderableTableHead({
           aria-hidden="true"
         />
       )}
-      <div className="flex h-full min-w-0 items-center">
+      <div
+        className={cn(
+          // Right padding keeps the pin button clear of the resize handle.
+          "flex h-full min-w-0 items-center pr-1.5",
+          dragging && "opacity-55",
+        )}
+      >
         <button
           type="button"
           draggable
@@ -473,6 +526,37 @@ function ReorderableTableHead({
           )}
         </button>
       </div>
+      <div
+        role="separator"
+        aria-orientation="vertical"
+        aria-label={`Resize ${label} column`}
+        aria-valuenow={width}
+        aria-valuemin={MIN_COLUMN_WIDTH}
+        aria-valuemax={MAX_COLUMN_WIDTH}
+        tabIndex={0}
+        title={`Drag to resize ${label}, double-click to reset`}
+        onPointerDown={(event) => onResizeStart(field, event)}
+        onDoubleClick={() => onResizeReset(field)}
+        onKeyDown={(event) => {
+          if (
+            event.key === "ArrowLeft" ||
+            event.key === "ArrowRight" ||
+            event.key === "Home"
+          ) {
+            event.preventDefault();
+            onResizeByKeyboard(field, event.key);
+          }
+        }}
+        className="group/resize absolute inset-y-0 right-0 z-40 flex w-1.5 cursor-col-resize touch-none justify-center outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+      >
+        <span
+          aria-hidden="true"
+          className={cn(
+            "h-full w-0.5 transition-colors group-hover/resize:bg-primary",
+            resizing && "bg-primary",
+          )}
+        />
+      </div>
     </TableHead>
   );
 }
@@ -484,8 +568,12 @@ export function AdminOAuthClientsPage() {
   }) as AdminOAuthClientSearchState;
   const currentUser = useAuthStore((s) => s.user);
   const canWrite = canAdminWrite(currentUser);
-  const [columnPreferences, setColumnPreferences] = useState(
-    DEFAULT_COLUMN_PREFERENCES,
+  const [columnPreferences, setColumnPreferences] = useState(() =>
+    loadColumnPreferences(
+      COLUMN_PREFERENCES_KEY,
+      DEFAULT_COLUMN_PREFERENCES,
+      COLUMN_WIDTH_BOUNDS,
+    ),
   );
   const [draggingColumn, setDraggingColumn] =
     useState<OAuthClientSortField | null>(null);
@@ -493,6 +581,10 @@ export function AdminOAuthClientsPage() {
     useState<ColumnDropTarget | null>(null);
   const [columnAnnouncement, setColumnAnnouncement] = useState("");
   const draggingColumnRef = useRef<OAuthClientSortField | null>(null);
+  const [resizingColumn, setResizingColumn] =
+    useState<OAuthClientSortField | null>(null);
+  const detachResizeRef = useRef<(() => void) | null>(null);
+  const tableRef = useRef<HTMLTableElement>(null);
   const appliedSearch = routeSearch.search ?? "";
   const [searchDraft, setSearchDraft] = useState("");
   const [selectedSearchField, setSelectedSearchField] =
@@ -513,9 +605,10 @@ export function AdminOAuthClientsPage() {
 
   const listParams: AdminOAuthClientListParams = {
     page: routeSearch.page ?? 1,
-    per_page: routeSearch.per_page ?? DEFAULT_PER_PAGE,
+    per_page: routeSearch.per_page ?? ADMIN_OAUTH_CLIENT_DEFAULT_PER_PAGE,
     search: routeSearch.search,
     search_filters: routeSearch.search_filters,
+    custom_filters: routeSearch.custom_filters,
     client_type: routeSearch.client_type,
     creator_type: routeSearch.creator_type,
     broker: routeSearch.broker,
@@ -552,8 +645,13 @@ export function AdminOAuthClientsPage() {
     listParams,
   );
   const filterSelections: AdminOAuthClientFilterSelections = {};
+  const customFilterSelections: AdminOAuthClientFilterSelections = {};
   for (const field of filterFields) {
     filterSelections[field.key] = getAdminOAuthClientFilterValues(
+      listParams,
+      field.key,
+    );
+    customFilterSelections[field.key] = getAdminOAuthClientCustomValues(
       listParams,
       field.key,
     );
@@ -566,7 +664,8 @@ export function AdminOAuthClientsPage() {
   );
   const columnOrder = columnPreferences.order;
   const frozenThrough = columnPreferences.frozenThrough;
-  const stickyOffsets = frozenColumnOffsets(columnOrder, frozenThrough);
+  const columnWidths = columnPreferences.widths;
+  const frozenFields = frozenColumnFields(columnOrder, frozenThrough);
 
   const updateListSearch = useCallback(
     (patch: Partial<AdminOAuthClientSearchState>, replace = false) => {
@@ -604,6 +703,7 @@ export function AdminOAuthClientsPage() {
       page: undefined,
       search: undefined,
       search_filters: undefined,
+      custom_filters: undefined,
       client_type: undefined,
       creator_type: undefined,
       broker: undefined,
@@ -739,6 +839,7 @@ export function AdminOAuthClientsPage() {
 
   function applyStructuredFilters(
     selections: AdminOAuthClientFilterSelections,
+    customSelections: AdminOAuthClientFilterSelections,
   ) {
     const patch: Partial<AdminOAuthClientSearchState> = { page: undefined };
     for (const field of filterFields) {
@@ -749,10 +850,22 @@ export function AdminOAuthClientsPage() {
       if (!fieldPatch) return;
       Object.assign(patch, fieldPatch);
     }
+    Object.assign(patch, adminOAuthClientCustomFilterPatch(customSelections));
     updateListSearch(patch);
   }
 
-  function removeStructuredFilter(key: AdminOAuthClientFilterKey) {
+  function removeStructuredFilter(
+    key: AdminOAuthClientFilterKey,
+    custom: boolean,
+  ) {
+    if (custom) {
+      const remaining = { ...customFilterSelections, [key]: undefined };
+      updateListSearch({
+        page: undefined,
+        ...adminOAuthClientCustomFilterPatch(remaining),
+      });
+      return;
+    }
     const patch = adminOAuthClientFilterPatch(key, undefined);
     if (patch) updateListSearch({ page: undefined, ...patch });
   }
@@ -895,6 +1008,107 @@ export function AdminOAuthClientsPage() {
       ...previous,
       frozenThrough: previous.frozenThrough === field ? null : field,
     }));
+  }
+
+  function commitColumnWidth(field: OAuthClientSortField, width: number) {
+    setColumnPreferences((previous) => ({
+      ...previous,
+      widths: { ...previous.widths, [field]: width },
+    }));
+    setColumnAnnouncement(
+      `${getColumn(field).label} column resized to ${String(width)} pixels`,
+    );
+  }
+
+  /**
+   * The drag is tracked on the window, so it survives the pointer leaving the
+   * handle, and it writes the column's width variable straight to the table
+   * rather than through state -- the browser then reflows the columns, the
+   * table width, and any frozen offsets without re-rendering a single row.
+   *
+   * The listeners go on at pointerdown rather than in an effect keyed on the
+   * resizing column: an effect does not run until after the next commit, and a
+   * pointer event landing in that gap would be dropped -- a `pointerup` there
+   * would strand the table mid-resize.
+   */
+  function handleResizeStart(
+    field: OAuthClientSortField,
+    event: React.PointerEvent<HTMLDivElement>,
+  ) {
+    if (event.button !== 0) return;
+    // Keep the pointer press off the header's sort button and drag handle.
+    event.preventDefault();
+    event.stopPropagation();
+
+    const startWidth = columnWidths[field];
+    const resize = { startX: event.clientX, width: startWidth };
+    setResizingColumn(field);
+
+    function handleMove(moveEvent: PointerEvent) {
+      resize.width = resizeColumnWidth(
+        startWidth + moveEvent.clientX - resize.startX,
+      );
+      tableRef.current?.style.setProperty(
+        columnWidthVar(field),
+        `${String(resize.width)}px`,
+      );
+    }
+
+    function handleEnd() {
+      detachResize();
+      setResizingColumn(null);
+      if (resize.width !== startWidth) commitColumnWidth(field, resize.width);
+    }
+
+    function detachResize() {
+      detachResizeRef.current = null;
+      window.removeEventListener("pointermove", handleMove);
+      window.removeEventListener("pointerup", handleEnd);
+      window.removeEventListener("pointercancel", handleEnd);
+    }
+
+    detachResizeRef.current = detachResize;
+    window.addEventListener("pointermove", handleMove);
+    window.addEventListener("pointerup", handleEnd);
+    window.addEventListener("pointercancel", handleEnd);
+  }
+
+  // Drop a drag still in flight if the table unmounts under it.
+  useEffect(() => () => detachResizeRef.current?.(), []);
+
+  useEffect(() => {
+    saveColumnPreferences(
+      COLUMN_PREFERENCES_KEY,
+      columnPreferences,
+      DEFAULT_COLUMN_PREFERENCES,
+    );
+  }, [columnPreferences]);
+
+  function resetColumnLayout() {
+    setColumnPreferences(DEFAULT_COLUMN_PREFERENCES);
+    setColumnAnnouncement("Column layout reset");
+  }
+
+  function handleResizeKeyboard(
+    field: OAuthClientSortField,
+    key: "ArrowLeft" | "ArrowRight" | "Home",
+  ) {
+    const current = columnWidths[field];
+    const next =
+      key === "Home"
+        ? getColumn(field).defaultWidth
+        : resizeColumnWidth(
+            current +
+              (key === "ArrowRight" ? COLUMN_RESIZE_STEP : -COLUMN_RESIZE_STEP),
+          );
+    if (next === current) return;
+    commitColumnWidth(field, next);
+  }
+
+  function resetColumnWidth(field: OAuthClientSortField) {
+    const { defaultWidth } = getColumn(field);
+    if (columnWidths[field] === defaultWidth) return;
+    commitColumnWidth(field, defaultWidth);
   }
 
   function stageBrokerCapability(client: AdminOAuthClient, enabled: boolean) {
@@ -1114,6 +1328,7 @@ export function AdminOAuthClientsPage() {
             <DataTableFilterPopover
               fields={filterFields}
               values={filterSelections}
+              customValues={customFilterSelections}
               open={filterPopoverOpen}
               selectedKey={selectedFilterKey}
               activeCount={
@@ -1257,6 +1472,8 @@ export function AdminOAuthClientsPage() {
               className={cn(
                 "relative transition-opacity motion-reduce:transition-none",
                 isPlaceholderData && "pointer-events-none opacity-60",
+                // Hold the resize cursor for the whole drag, wherever it lands.
+                resizingColumn && "cursor-col-resize select-none",
               )}
               aria-busy={isFetching}
             >
@@ -1275,15 +1492,19 @@ export function AdminOAuthClientsPage() {
                 </div>
               )}
               <Table
+                ref={tableRef}
                 containerClassName="overscroll-x-none"
-                className="table-fixed [&_td]:py-1.5"
-                style={{ minWidth: OAUTH_CLIENT_TABLE_WIDTH }}
+                className="table-fixed [&_td]:overflow-hidden [&_td]:py-1.5"
+                style={{
+                  minWidth: sumOfColumnWidths(columnOrder),
+                  ...columnWidthVars(columnOrder, columnWidths),
+                }}
               >
                 <colgroup>
                   {columnOrder.map((field) => (
                     <col
                       key={field}
-                      style={{ width: getColumn(field).width }}
+                      style={{ width: `var(${columnWidthVar(field)})` }}
                     />
                   ))}
                 </colgroup>
@@ -1297,9 +1518,11 @@ export function AdminOAuthClientsPage() {
                           column={column}
                           sort={listParams.sort}
                           disabled={!canSortColumn(field)}
-                          frozen={stickyOffsets.has(field)}
+                          frozen={frozenFields.includes(field)}
                           lastFrozen={frozenThrough === field}
-                          stickyLeft={stickyOffsets.get(field)}
+                          stickyLeft={stickyColumnLeft(frozenFields, field)}
+                          width={columnWidths[field]}
+                          resizing={resizingColumn === field}
                           dragging={draggingColumn === field}
                           dropPosition={
                             columnDropTarget?.field === field
@@ -1313,6 +1536,9 @@ export function AdminOAuthClientsPage() {
                           onDragEnd={clearColumnDragState}
                           onMoveByKeyboard={handleColumnKeyboardMove}
                           onToggleFreeze={toggleFrozenColumns}
+                          onResizeStart={handleResizeStart}
+                          onResizeByKeyboard={handleResizeKeyboard}
+                          onResizeReset={resetColumnWidth}
                         />
                       );
                     })}
@@ -1326,23 +1552,30 @@ export function AdminOAuthClientsPage() {
                     >
                       {columnOrder.map((field) => {
                         const column = getColumn(field);
-                        const frozen = stickyOffsets.has(field);
+                        const frozen = frozenFields.includes(field);
                         return (
                           <TableCell
                             key={field}
                             data-column={field}
                             data-frozen={frozen || undefined}
+                            data-frozen-edge={
+                              frozenThrough === field || undefined
+                            }
                             style={
                               frozen
-                                ? { left: stickyOffsets.get(field) }
+                                ? {
+                                    left: stickyColumnLeft(frozenFields, field),
+                                  }
                                 : undefined
                             }
                             className={cn(
                               column.cellClassName,
+                              // Opaque base so scrolled columns stay hidden; the row
+                              // hover tint rides on top as an overlay so a frozen cell
+                              // reads the same as the rest of its row.
                               frozen &&
-                                "sticky z-20 bg-card group-hover/row:bg-muted",
-                              frozenThrough === field &&
-                                "border-r-2 border-border shadow-[3px_0_6px_-4px_rgba(0,0,0,0.35)]",
+                                "sticky z-20 bg-card after:pointer-events-none after:absolute after:inset-0 after:transition-colors after:duration-300 after:content-[''] group-hover/row:after:bg-muted/45",
+                              frozenThrough === field && FROZEN_EDGE_CLASS,
                             )}
                           >
                             {renderOAuthClientCell(client, field)}
@@ -1362,18 +1595,36 @@ export function AdminOAuthClientsPage() {
                 {String(total)} clients
               </p>
               <div className="flex flex-wrap items-center gap-2">
+                {!isDefaultColumnLayout(
+                  columnPreferences,
+                  DEFAULT_COLUMN_PREFERENCES,
+                ) && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={resetColumnLayout}
+                  >
+                    <RotateCcw
+                      className="mr-2 h-3.5 w-3.5"
+                      aria-hidden="true"
+                    />
+                    Reset columns
+                  </Button>
+                )}
                 <Select
                   value={String(listParams.per_page)}
                   disabled={isFetching}
-                  onValueChange={(value) =>
+                  onValueChange={(value) => {
+                    const rows = Number(value) as AdminOAuthClientPerPage;
                     updateListSearch({
                       page: undefined,
                       per_page:
-                        Number(value) === DEFAULT_PER_PAGE
+                        rows === ADMIN_OAUTH_CLIENT_DEFAULT_PER_PAGE
                           ? undefined
-                          : (Number(value) as 50 | 100),
-                    })
-                  }
+                          : rows,
+                    });
+                  }}
                 >
                   <SelectTrigger
                     aria-label="Rows per page"
@@ -1382,9 +1633,11 @@ export function AdminOAuthClientsPage() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="25">25 rows</SelectItem>
-                    <SelectItem value="50">50 rows</SelectItem>
-                    <SelectItem value="100">100 rows</SelectItem>
+                    {ADMIN_OAUTH_CLIENT_PER_PAGE_OPTIONS.map((rows) => (
+                      <SelectItem key={rows} value={String(rows)}>
+                        {String(rows)} rows
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
                 <Button

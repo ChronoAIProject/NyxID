@@ -42,6 +42,9 @@ import type {
 
 const ALL_FIELDS_VALUE = "__data_table_all_fields__";
 const DEFAULT_DATE_MODES = ["dates", "range"] as const;
+/** Mirrors the server's per-filter bounds on custom text. */
+const MAX_CUSTOM_VALUES = 8;
+const MAX_CUSTOM_VALUE_LENGTH = 256;
 
 const FILTER_DATE_FORMATTER = new Intl.DateTimeFormat("en-US", {
   month: "short",
@@ -184,6 +187,8 @@ export function DataTableSearch<SearchKey extends string>({
 export interface DataTableFilterPopoverProps<FilterKey extends string> {
   readonly fields: readonly DataTableFilterField<FilterKey>[];
   readonly values: DataTableFilterSelections<FilterKey>;
+  /** Free text per filter, for fields declaring `supports_custom_text`. */
+  readonly customValues?: DataTableFilterSelections<FilterKey>;
   readonly open: boolean;
   readonly selectedKey: FilterKey;
   readonly activeCount: number;
@@ -194,12 +199,16 @@ export interface DataTableFilterPopoverProps<FilterKey extends string> {
   ) => boolean;
   readonly onOpenChange: (open: boolean) => void;
   readonly onSelectField: (key: FilterKey) => void;
-  readonly onApply: (selections: DataTableFilterSelections<FilterKey>) => void;
+  readonly onApply: (
+    selections: DataTableFilterSelections<FilterKey>,
+    customSelections: DataTableFilterSelections<FilterKey>,
+  ) => void;
 }
 
 export function DataTableFilterPopover<FilterKey extends string>({
   fields,
   values,
+  customValues = {},
   open,
   selectedKey,
   activeCount,
@@ -212,7 +221,11 @@ export function DataTableFilterPopover<FilterKey extends string>({
   const selectedField =
     fields.find((field) => field.key === selectedKey) ?? fields[0];
   const selectionKey = JSON.stringify(
-    fields.map((field) => [field.key, values[field.key] ?? []]),
+    fields.map((field) => [
+      field.key,
+      values[field.key] ?? [],
+      customValues[field.key] ?? [],
+    ]),
   );
 
   function handleOpenChange(nextOpen: boolean) {
@@ -254,12 +267,13 @@ export function DataTableFilterPopover<FilterKey extends string>({
           key={`${open ? "open" : "closed"}:${selectionKey}`}
           fields={fields}
           values={values}
+          customValues={customValues}
           selectedField={selectedField}
           validateValues={validateValues}
           onSelectField={onSelectField}
           onCancel={() => onOpenChange(false)}
-          onApply={(selections) => {
-            onApply(selections);
+          onApply={(selections, customSelections) => {
+            onApply(selections, customSelections);
             onOpenChange(false);
           }}
         />
@@ -271,6 +285,7 @@ export function DataTableFilterPopover<FilterKey extends string>({
 function DataTableFilterPanel<FilterKey extends string>({
   fields,
   values,
+  customValues,
   selectedField,
   validateValues,
   onSelectField,
@@ -279,6 +294,7 @@ function DataTableFilterPanel<FilterKey extends string>({
 }: {
   readonly fields: readonly DataTableFilterField<FilterKey>[];
   readonly values: DataTableFilterSelections<FilterKey>;
+  readonly customValues: DataTableFilterSelections<FilterKey>;
   readonly selectedField: DataTableFilterField<FilterKey> | undefined;
   readonly validateValues?: (
     field: DataTableFilterField<FilterKey>,
@@ -286,11 +302,17 @@ function DataTableFilterPanel<FilterKey extends string>({
   ) => boolean;
   readonly onSelectField: (key: FilterKey) => void;
   readonly onCancel: () => void;
-  readonly onApply: (selections: DataTableFilterSelections<FilterKey>) => void;
+  readonly onApply: (
+    selections: DataTableFilterSelections<FilterKey>,
+    customSelections: DataTableFilterSelections<FilterKey>,
+  ) => void;
 }) {
   const [draftSelections, setDraftSelections] = useState<
     DataTableFilterSelections<FilterKey>
   >(() => ({ ...values }));
+  const [draftCustom, setDraftCustom] = useState<
+    DataTableFilterSelections<FilterKey>
+  >(() => ({ ...customValues }));
 
   return (
     <div className="grid min-h-[260px] grid-cols-[minmax(112px,0.85fr)_minmax(0,1.35fr)]">
@@ -298,9 +320,9 @@ function DataTableFilterPanel<FilterKey extends string>({
         {fields.map((field) => {
           const fieldValues = draftSelections[field.key] ?? [];
           const selectedValueCount =
-            field.value_type === "date"
+            (field.value_type === "date"
               ? Number(fieldValues.slice(1).some(Boolean))
-              : fieldValues.length;
+              : fieldValues.length) + (draftCustom[field.key]?.length ?? 0);
           const active = selectedValueCount > 0;
           const selected = field.key === selectedField?.key;
           return (
@@ -341,6 +363,7 @@ function DataTableFilterPanel<FilterKey extends string>({
           key={`${selectedField.key}:${selectedField.date_modes?.join(",") ?? ""}`}
           field={selectedField}
           values={draftSelections[selectedField.key] ?? []}
+          customValues={draftCustom[selectedField.key] ?? []}
           validateValues={validateValues}
           onValuesChange={(nextValues) =>
             setDraftSelections((current) => ({
@@ -348,8 +371,14 @@ function DataTableFilterPanel<FilterKey extends string>({
               [selectedField.key]: nextValues,
             }))
           }
+          onCustomValuesChange={(nextValues) =>
+            setDraftCustom((current) => ({
+              ...current,
+              [selectedField.key]: nextValues,
+            }))
+          }
           onCancel={onCancel}
-          onApply={() => onApply(draftSelections)}
+          onApply={() => onApply(draftSelections, draftCustom)}
         />
       ) : (
         <div />
@@ -361,18 +390,22 @@ function DataTableFilterPanel<FilterKey extends string>({
 function DataTableFilterEditor<FilterKey extends string>({
   field,
   values,
+  customValues,
   validateValues,
   onValuesChange,
+  onCustomValuesChange,
   onCancel,
   onApply,
 }: {
   readonly field: DataTableFilterField<FilterKey>;
   readonly values: readonly string[];
+  readonly customValues: readonly string[];
   readonly validateValues?: (
     field: DataTableFilterField<FilterKey>,
     values: readonly string[],
   ) => boolean;
   readonly onValuesChange: (values: readonly string[]) => void;
+  readonly onCustomValuesChange: (values: readonly string[]) => void;
   readonly onCancel: () => void;
   readonly onApply: () => void;
 }) {
@@ -393,6 +426,7 @@ function DataTableFilterEditor<FilterKey extends string>({
   const allSelected =
     field.options.length > 0 && values.length === field.options.length;
   const partiallySelected = values.length > 0 && !allSelected;
+  const selectedCount = values.length + customValues.length;
 
   return (
     <div className="flex min-w-0 flex-col">
@@ -405,10 +439,17 @@ function DataTableFilterEditor<FilterKey extends string>({
             </span>
           </p>
           <span className="shrink-0 text-[10px] text-muted-foreground">
-            {String(values.length)} selected
+            {String(selectedCount)} selected
           </span>
         </div>
       </div>
+      {field.supports_custom_text === true && (
+        <DataTableCustomTextFilter
+          field={field}
+          values={customValues}
+          onValuesChange={onCustomValuesChange}
+        />
+      )}
       <div
         role="group"
         aria-label={`${field.label} values`}
@@ -498,11 +539,96 @@ function DataTableFilterEditor<FilterKey extends string>({
         })}
       </div>
       <DataTableFilterActions
-        hasValue={values.length > 0}
-        onClear={() => onValuesChange([])}
+        hasValue={selectedCount > 0}
+        onClear={() => {
+          onValuesChange([]);
+          onCustomValuesChange([]);
+        }}
         onCancel={onCancel}
         onApply={onApply}
       />
+    </div>
+  );
+}
+
+/**
+ * Free-text values for one filter. The server matches each as a case-insensitive
+ * `contains` and ORs it with the filter's checked options, so this widens a
+ * filter to values that were never in its option list.
+ */
+function DataTableCustomTextFilter<FilterKey extends string>({
+  field,
+  values,
+  onValuesChange,
+}: {
+  readonly field: DataTableFilterField<FilterKey>;
+  readonly values: readonly string[];
+  readonly onValuesChange: (values: readonly string[]) => void;
+}) {
+  const [draft, setDraft] = useState("");
+
+  const trimmed = draft.trim();
+  const duplicate = values.some(
+    (value) => value.toLowerCase() === trimmed.toLowerCase(),
+  );
+  const full = values.length >= MAX_CUSTOM_VALUES;
+  const canAdd =
+    trimmed !== "" &&
+    !duplicate &&
+    !full &&
+    [...trimmed].length <= MAX_CUSTOM_VALUE_LENGTH;
+
+  function addValue(event: FormEvent) {
+    event.preventDefault();
+    if (!canAdd) return;
+    onValuesChange([...values, trimmed]);
+    setDraft("");
+  }
+
+  return (
+    <div className="border-b border-border/70 px-3 py-2.5">
+      <form className="flex items-center gap-2" onSubmit={addValue}>
+        <input
+          type="text"
+          value={draft}
+          maxLength={MAX_CUSTOM_VALUE_LENGTH}
+          aria-label={`Custom ${field.label} value`}
+          placeholder={`Contains…`}
+          className="h-11 min-w-0 flex-1 rounded-md border border-input bg-transparent px-2.5 text-xs outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-white/[0.15] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring md:h-9"
+          onChange={(event) => setDraft(event.target.value)}
+        />
+        <Button type="submit" variant="outline" size="sm" disabled={!canAdd}>
+          Add
+        </Button>
+      </form>
+      {(values.length > 0 || full) && (
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {values.map((value) => (
+            <span
+              key={value}
+              className="flex max-w-full items-center gap-1 rounded-md border border-primary/40 bg-primary/10 py-1 pl-2 pr-1 text-[11px] text-foreground"
+            >
+              <span className="text-muted-foreground">contains</span>
+              <span className="min-w-0 break-all font-medium">{value}</span>
+              <button
+                type="button"
+                aria-label={`Remove custom ${field.label} value ${value}`}
+                className="flex h-4 w-4 shrink-0 items-center justify-center rounded-sm text-muted-foreground outline-none transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+                onClick={() =>
+                  onValuesChange(values.filter((item) => item !== value))
+                }
+              >
+                <X className="h-3 w-3" aria-hidden="true" />
+              </button>
+            </span>
+          ))}
+          {full && (
+            <span className="self-center text-[10px] text-muted-foreground">
+              {String(MAX_CUSTOM_VALUES)} value limit reached
+            </span>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -803,7 +929,8 @@ export interface DataTableFilterChipsProps<
   readonly onEditSearchValue: (field: SearchKey, value: string) => void;
   readonly onRemoveSearchValue: (field: SearchKey, value: string) => void;
   readonly onEdit: (key: FilterKey) => void;
-  readonly onRemove: (key: FilterKey) => void;
+  /** `custom` distinguishes a filter's custom-text chip from its options chip. */
+  readonly onRemove: (key: FilterKey, custom: boolean) => void;
   readonly onClear: () => void;
 }
 
@@ -925,7 +1052,7 @@ export function DataTableFilterChips<
         );
       })}
       {filters.map(
-        ({ field, values, valueLabels, operatorLabel, valueSummary }) => {
+        ({ field, values, valueLabels, operatorLabel, valueSummary, custom }) => {
           const resolvedOperatorLabel =
             operatorLabel ??
             (values.length > 1
@@ -940,15 +1067,18 @@ export function DataTableFilterChips<
               hiddenValueCount > 0 ? ` +${String(hiddenValueCount)} more` : ""
             }`;
           const fullValueSummary = valueSummary ?? valueLabels.join(", ");
+          // A filter's options and its custom text get their own chips, so
+          // clearing one leaves the other applied.
+          const chipLabel = custom === true ? `${field.label} custom text` : `${field.label} filter`;
           return (
             <div
-              key={field.key}
+              key={`${field.key}:${custom === true ? "custom" : "values"}`}
               className="flex min-h-11 max-w-full items-stretch overflow-hidden rounded-md border border-border/80 bg-muted/25 text-xs md:min-h-9"
             >
               <button
                 type="button"
                 className="min-w-0 px-2.5 py-1.5 text-left outline-none transition-colors hover:bg-accent focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
-                aria-label={`Edit ${field.label} filter: ${resolvedOperatorLabel} ${fullValueSummary}`}
+                aria-label={`Edit ${chipLabel}: ${resolvedOperatorLabel} ${fullValueSummary}`}
                 title={fullValueSummary}
                 onClick={() => onEdit(field.key)}
               >
@@ -965,9 +1095,9 @@ export function DataTableFilterChips<
               <button
                 type="button"
                 className="flex w-11 shrink-0 items-center justify-center border-l border-border/70 text-muted-foreground outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring md:w-9"
-                aria-label={`Remove ${field.label} filter`}
-                title={`Remove ${field.label} filter`}
-                onClick={() => onRemove(field.key)}
+                aria-label={`Remove ${chipLabel}`}
+                title={`Remove ${chipLabel}`}
+                onClick={() => onRemove(field.key, custom === true)}
               >
                 <X className="h-3.5 w-3.5" aria-hidden="true" />
               </button>

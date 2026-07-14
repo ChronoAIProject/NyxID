@@ -2,7 +2,7 @@ use chrono::{NaiveDate, Utc};
 use futures::TryStreamExt;
 use mongodb::bson::{self, Binary, Bson, Document, doc, spec::BinarySubtype};
 use serde::Deserialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use url::Url;
 use uuid::Uuid;
 
@@ -50,6 +50,26 @@ pub const ADMIN_CLIENT_TYPE_FILTERS: &[&str] = &["public", "confidential", "othe
 pub const ADMIN_CREATOR_TYPE_FILTERS: &[&str] =
     &["dynamic_registration", "system", "owned", "ownerless"];
 pub const ADMIN_BROKER_FILTERS: &[&str] = &["enabled", "disabled", "flag", "scope"];
+
+/// Filters that accept free-text values alongside their fixed options, mapped to
+/// the stored field the text is matched against with a case-insensitive
+/// `contains`. Only filters backed by a single string column can appear here:
+/// `is_active` is a boolean, `broker` is derived from several fields, and
+/// `created_at` is a date, so none of them has a column a substring could match.
+pub const ADMIN_CUSTOM_TEXT_FILTERS: &[(&str, &str)] = &[
+    ("client_type", "client_type"),
+    ("creator_type", "created_by"),
+    ("scope", "allowed_scopes"),
+];
+
+/// Stored field a custom-text filter searches, or `None` when the filter takes
+/// no free text.
+pub fn admin_custom_text_field(filter: &str) -> Option<&'static str> {
+    ADMIN_CUSTOM_TEXT_FILTERS
+        .iter()
+        .find(|(key, _)| *key == filter)
+        .map(|(_, stored)| *stored)
+}
 pub const ADMIN_SEARCH_FIELDS: &[(&str, &str)] = &[
     ("client", "Client"),
     ("client_type", "Client type"),
@@ -367,6 +387,7 @@ pub struct AdminOAuthClientListParams<'a> {
     pub per_page: u64,
     pub search: Option<&'a str>,
     pub search_filters: Option<&'a str>,
+    pub custom_filters: Option<&'a str>,
     pub client_type: Option<&'a str>,
     pub creator_type: Option<&'a str>,
     pub broker: Option<&'a str>,
@@ -478,47 +499,66 @@ fn admin_oauth_client_filter(params: &AdminOAuthClientListParams<'_>) -> AppResu
         clauses.extend(admin_search_filter_clauses(search_filters)?);
     }
 
-    if let Some(client_type) = params.client_type {
-        let values =
-            admin_csv_filter_values("client_type", client_type, ADMIN_CLIENT_TYPE_FILTERS)?;
-        clauses.push(one_or_many(
-            values
-                .into_iter()
-                .map(|value| match value {
-                    "public" | "confidential" => doc! { "client_type": value },
-                    "other" => {
-                        doc! { "client_type": { "$nin": ["public", "confidential"] } }
-                    }
-                    _ => unreachable!("client_type was validated against its fixed domain"),
-                })
-                .collect(),
-        ));
-    }
+    // Free text typed into a filter widens that filter rather than narrowing it:
+    // the custom `contains` branches are OR'd into the same clause as that
+    // filter's checked options, so `Type is public or contains "acme"` works.
+    // A filter carrying only custom text still emits its clause.
+    let mut custom = admin_custom_filter_branches(params.custom_filters)?;
+    let mut push_filter = |clauses: &mut Vec<Document>, key: &str, options: Vec<Document>| {
+        let mut branches = options;
+        branches.extend(custom.remove(key).unwrap_or_default());
+        if !branches.is_empty() {
+            clauses.push(one_or_many(branches));
+        }
+    };
 
-    if let Some(creator_type) = params.creator_type {
-        let values =
-            admin_csv_filter_values("creator_type", creator_type, ADMIN_CREATOR_TYPE_FILTERS)?;
-        clauses.push(one_or_many(
-            values
-                .into_iter()
-                .map(|value| match value {
-                    "dynamic_registration" | "system" => doc! { "created_by": value },
-                    "owned" => doc! {
-                        "created_by": {
-                            "$exists": true,
-                            "$nin": [
-                                Bson::Null,
-                                Bson::String("dynamic_registration".to_string()),
-                                Bson::String("system".to_string()),
-                            ]
+    push_filter(
+        &mut clauses,
+        "client_type",
+        match params.client_type {
+            None => Vec::new(),
+            Some(client_type) => {
+                admin_csv_filter_values("client_type", client_type, ADMIN_CLIENT_TYPE_FILTERS)?
+                    .into_iter()
+                    .map(|value| match value {
+                        "public" | "confidential" => doc! { "client_type": value },
+                        "other" => {
+                            doc! { "client_type": { "$nin": ["public", "confidential"] } }
                         }
-                    },
-                    "ownerless" => doc! { "created_by": Bson::Null },
-                    _ => unreachable!("creator_type was validated against its fixed domain"),
-                })
-                .collect(),
-        ));
-    }
+                        _ => unreachable!("client_type was validated against its fixed domain"),
+                    })
+                    .collect()
+            }
+        },
+    );
+
+    push_filter(
+        &mut clauses,
+        "creator_type",
+        match params.creator_type {
+            None => Vec::new(),
+            Some(creator_type) => {
+                admin_csv_filter_values("creator_type", creator_type, ADMIN_CREATOR_TYPE_FILTERS)?
+                    .into_iter()
+                    .map(|value| match value {
+                        "dynamic_registration" | "system" => doc! { "created_by": value },
+                        "owned" => doc! {
+                            "created_by": {
+                                "$exists": true,
+                                "$nin": [
+                                    Bson::Null,
+                                    Bson::String("dynamic_registration".to_string()),
+                                    Bson::String("system".to_string()),
+                                ]
+                            }
+                        },
+                        "ownerless" => doc! { "created_by": Bson::Null },
+                        _ => unreachable!("creator_type was validated against its fixed domain"),
+                    })
+                    .collect()
+            }
+        },
+    );
 
     if let Some(broker) = params.broker {
         let values = admin_csv_filter_values("broker", broker, ADMIN_BROKER_FILTERS)?;
@@ -536,15 +576,17 @@ fn admin_oauth_client_filter(params: &AdminOAuthClientListParams<'_>) -> AppResu
         }
     }
 
-    if let Some(scope) = params.scope {
-        let values = admin_csv_filter_values("scope", scope, KNOWN_OIDC_SCOPES)?;
-        clauses.push(one_or_many(
-            values
+    push_filter(
+        &mut clauses,
+        "scope",
+        match params.scope {
+            None => Vec::new(),
+            Some(scope) => admin_csv_filter_values("scope", scope, KNOWN_OIDC_SCOPES)?
                 .into_iter()
                 .map(|value| scope_token_filter(value, true))
                 .collect(),
-        ));
-    }
+        },
+    );
 
     if let Some(created_at) =
         admin_created_at_filter(params.created_dates, params.created_from, params.created_to)?
@@ -557,6 +599,96 @@ fn admin_oauth_client_filter(params: &AdminOAuthClientListParams<'_>) -> AppResu
         1 => clauses.remove(0),
         _ => doc! { "$and": clauses },
     })
+}
+
+/// Parse the `custom_filters` query param into per-filter `contains` branches.
+///
+/// Shape: `{"client_type":["acme"],"creator_type":["d0d7b72a"]}`. Values are
+/// regex-escaped and matched case-insensitively against the stored field the
+/// filter maps to ([`ADMIN_CUSTOM_TEXT_FILTERS`]). Bounds mirror `search_filters`.
+fn admin_custom_filter_branches(
+    raw: Option<&str>,
+) -> AppResult<HashMap<&'static str, Vec<Document>>> {
+    let mut branches: HashMap<&'static str, Vec<Document>> = HashMap::new();
+    let Some(raw) = raw else {
+        return Ok(branches);
+    };
+
+    let groups: HashMap<String, Vec<String>> = serde_json::from_str(raw).map_err(|_| {
+        AppError::ValidationError(
+            "custom_filters must be a JSON object of filter keys to value arrays".to_string(),
+        )
+    })?;
+
+    if groups.len() > ADMIN_SEARCH_FILTER_MAX_GROUPS {
+        return Err(AppError::ValidationError(format!(
+            "custom_filters must contain at most {ADMIN_SEARCH_FILTER_MAX_GROUPS} filters"
+        )));
+    }
+
+    let mut total_values = 0usize;
+    for (filter, values) in groups {
+        let Some(stored_field) = admin_custom_text_field(&filter) else {
+            return Err(AppError::ValidationError(format!(
+                "custom_filters filter must be one of: {}",
+                ADMIN_CUSTOM_TEXT_FILTERS
+                    .iter()
+                    .map(|(key, _)| *key)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        };
+        if values.is_empty() {
+            return Err(AppError::ValidationError(format!(
+                "custom_filters values for {filter} must not be empty"
+            )));
+        }
+        if values.len() > ADMIN_SEARCH_FILTER_MAX_VALUES_PER_GROUP {
+            return Err(AppError::ValidationError(format!(
+                "custom_filters values for {filter} must contain at most {ADMIN_SEARCH_FILTER_MAX_VALUES_PER_GROUP} entries"
+            )));
+        }
+        total_values = total_values.checked_add(values.len()).ok_or_else(|| {
+            AppError::ValidationError("custom_filters contains too many values".to_string())
+        })?;
+        if total_values > ADMIN_SEARCH_FILTER_MAX_TOTAL_VALUES {
+            return Err(AppError::ValidationError(format!(
+                "custom_filters must contain at most {ADMIN_SEARCH_FILTER_MAX_TOTAL_VALUES} values"
+            )));
+        }
+
+        let entry = branches.entry(stored_field_key(&filter)).or_default();
+        for raw_value in values {
+            let value = raw_value.trim();
+            if value.is_empty() {
+                return Err(AppError::ValidationError(format!(
+                    "custom_filters values for {filter} must not be empty"
+                )));
+            }
+            if value.chars().count() > ADMIN_SEARCH_MAX_CHARS {
+                return Err(AppError::ValidationError(format!(
+                    "custom_filters values must be {ADMIN_SEARCH_MAX_CHARS} characters or less"
+                )));
+            }
+            entry.push(doc! {
+                stored_field: {
+                    "$regex": regex::escape(value),
+                    "$options": "i",
+                }
+            });
+        }
+    }
+
+    Ok(branches)
+}
+
+/// Borrow the `'static` filter key so the branch map outlives the parsed JSON.
+fn stored_field_key(filter: &str) -> &'static str {
+    ADMIN_CUSTOM_TEXT_FILTERS
+        .iter()
+        .find(|(key, _)| *key == filter)
+        .map(|(key, _)| *key)
+        .expect("filter was validated against ADMIN_CUSTOM_TEXT_FILTERS")
 }
 
 #[derive(Debug, Deserialize)]
@@ -1277,6 +1409,7 @@ mod tests {
             per_page: 25,
             search: None,
             search_filters: None,
+            custom_filters: None,
             client_type: None,
             creator_type: None,
             broker: None,
@@ -1529,6 +1662,98 @@ mod tests {
                 .and_then(|condition| condition.get_str("$regex").ok()),
             Some(r"(^|\s)email(\s|$)")
         );
+    }
+
+    #[test]
+    fn admin_custom_filter_text_ors_a_contains_branch_into_its_own_filter() {
+        let filter = admin_oauth_client_filter(&AdminOAuthClientListParams {
+            client_type: Some("public"),
+            custom_filters: Some(r#"{"client_type":[" acme.* "],"creator_type":["d0d7b72a"]}"#),
+            ..admin_list_params()
+        })
+        .unwrap();
+
+        let field_clauses = filter.get_array("$and").expect("different fields use AND");
+        assert_eq!(
+            field_clauses.len(),
+            2,
+            "one clause per filter, not per value"
+        );
+
+        let client_types = field_clauses[0]
+            .as_document()
+            .and_then(|condition| condition.get_array("$or").ok())
+            .expect("the checked option and the custom text OR together");
+        assert_eq!(
+            client_types,
+            &vec![
+                Bson::Document(doc! { "client_type": "public" }),
+                Bson::Document(doc! {
+                    "client_type": { "$regex": r"acme\.\*", "$options": "i" }
+                }),
+            ],
+            "custom text is trimmed, regex-escaped, and matched case-insensitively"
+        );
+
+        // creator_type has no checked options here, so its custom text stands alone,
+        // and it searches created_by -- the column that filter is derived from.
+        assert_eq!(
+            field_clauses[1].as_document(),
+            Some(&doc! {
+                "created_by": { "$regex": "d0d7b72a", "$options": "i" }
+            }),
+        );
+    }
+
+    #[test]
+    fn admin_custom_filters_reject_unsupported_filters_and_out_of_bounds_values() {
+        // Boolean, derived, and date filters have no column to run a contains on.
+        for filter in ["is_active", "broker", "created_at", "nonsense"] {
+            let error = admin_oauth_client_filter(&AdminOAuthClientListParams {
+                custom_filters: Some(&format!(r#"{{"{filter}":["x"]}}"#)),
+                ..admin_list_params()
+            })
+            .expect_err("filter does not accept custom text");
+            assert!(
+                matches!(error, AppError::ValidationError(message) if message.contains("custom_filters filter must be one of")),
+                "{filter} must be rejected"
+            );
+        }
+
+        let too_long = "a".repeat(ADMIN_SEARCH_MAX_CHARS + 1);
+        for (raw, expected) in [
+            ("not json", "custom_filters must be a JSON object"),
+            (r#"{"scope":[]}"#, "must not be empty"),
+            (r#"{"scope":["  "]}"#, "must not be empty"),
+            (
+                &format!(r#"{{"scope":["{too_long}"]}}"#),
+                "characters or less",
+            ),
+            (
+                r#"{"scope":["a","b","c","d","e","f","g","h","i"]}"#,
+                "at most 8 entries",
+            ),
+        ] {
+            let error = admin_oauth_client_filter(&AdminOAuthClientListParams {
+                custom_filters: Some(raw),
+                ..admin_list_params()
+            })
+            .expect_err("invalid custom_filters payload");
+            assert!(
+                matches!(error, AppError::ValidationError(message) if message.contains(expected)),
+                "expected {expected:?} for {raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn admin_custom_text_filters_cover_only_string_backed_columns() {
+        assert_eq!(admin_custom_text_field("client_type"), Some("client_type"));
+        assert_eq!(admin_custom_text_field("creator_type"), Some("created_by"));
+        assert_eq!(admin_custom_text_field("scope"), Some("allowed_scopes"));
+        assert_eq!(admin_custom_text_field("is_active"), None);
+        assert_eq!(admin_custom_text_field("broker"), None);
+        assert_eq!(admin_custom_text_field("created_at"), None);
     }
 
     #[test]
@@ -2226,6 +2451,7 @@ mod tests {
                 per_page: 1,
                 search: Some("aevatar"),
                 search_filters: None,
+                custom_filters: None,
                 client_type: Some("public"),
                 creator_type: Some("dynamic_registration"),
                 broker: Some("scope"),
@@ -2330,6 +2556,7 @@ mod tests {
                 per_page: 1,
                 search: None,
                 search_filters: None,
+                custom_filters: None,
                 client_type: Some("public, confidential"),
                 creator_type: Some("dynamic_registration, system"),
                 broker: None,
