@@ -81,6 +81,16 @@ const refetchCases: ReadonlyArray<{
     expected: JSON.stringify([{ field: "client", values: ["console"] }]),
   },
   {
+    label: "custom filters",
+    patch: {
+      custom_filters: JSON.stringify([
+        { field: "client_type", values: ["machine"] },
+      ]),
+    },
+    queryKey: "custom_filters",
+    expected: JSON.stringify([{ field: "client_type", values: ["machine"] }]),
+  },
+  {
     label: "client type filter",
     patch: { client_type: "public,confidential" },
     queryKey: "client_type",
