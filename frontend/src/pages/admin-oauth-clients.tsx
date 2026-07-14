@@ -96,6 +96,9 @@ import {
   DataTableSearch,
 } from "@/components/data-table/data-table-controls";
 import {
+  DATA_TABLE_CLASS_NAME,
+  DataTableBadgeCell,
+  DataTableCellShell,
   DataTableColumnHeader,
   nextDataTableSort,
   useDataTableColumns,
@@ -636,19 +639,34 @@ export function AdminOAuthClientsPage() {
       case "client_name":
         return (
           <div className="min-w-0 space-y-1">
-            <p className="truncate text-sm font-medium text-foreground">
+            <p
+              className="line-clamp-2 break-words text-sm font-medium text-foreground"
+              title={client.client_name}
+            >
               {client.client_name}
             </p>
-            <p className="truncate font-mono text-[11px] text-muted-foreground">
+            <p
+              className="line-clamp-2 break-all font-mono text-[11px] text-muted-foreground"
+              title={client.id}
+            >
               {client.id}
             </p>
           </div>
         );
       case "client_type":
-        return <Badge variant="secondary">{client.client_type}</Badge>;
+        return (
+          <DataTableBadgeCell>
+            <Badge variant="secondary">{client.client_type}</Badge>
+          </DataTableBadgeCell>
+        );
       case "created_by":
         return (
-          <span className="break-all">{client.created_by ?? "ownerless"}</span>
+          <span
+            className="line-clamp-2 break-all"
+            title={client.created_by ?? "ownerless"}
+          >
+            {client.created_by ?? "ownerless"}
+          </span>
         );
       case "broker":
         return canWrite ? (
@@ -907,7 +925,7 @@ export function AdminOAuthClientsPage() {
               <Table
                 ref={tableRef}
                 containerClassName="overscroll-x-none"
-                className="table-fixed [&_td]:overflow-hidden [&_td]:py-1.5"
+                className={DATA_TABLE_CLASS_NAME}
                 style={tableStyle}
               >
                 <colgroup>
@@ -941,7 +959,9 @@ export function AdminOAuthClientsPage() {
                     >
                       {columnOrder.map((field) => (
                         <TableCell key={field} {...columnCellProps(field)}>
-                          {renderOAuthClientCell(client, field)}
+                          <DataTableCellShell>
+                            {renderOAuthClientCell(client, field)}
+                          </DataTableCellShell>
                         </TableCell>
                       ))}
                     </TableRow>

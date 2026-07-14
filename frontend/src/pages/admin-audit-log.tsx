@@ -65,6 +65,9 @@ import {
   DataTableSearch,
 } from "@/components/data-table/data-table-controls";
 import {
+  DATA_TABLE_CLASS_NAME,
+  DataTableBadgeCell,
+  DataTableCellShell,
   DataTableColumnHeader,
   nextDataTableSort,
   useDataTableColumns,
@@ -481,7 +484,7 @@ export function AdminAuditLogPage() {
         );
       case "api_key_name":
         return entry.api_key_name ? (
-          <BadgeCell>
+          <DataTableBadgeCell>
             {/* No line-clamp on the badge: clamping forces `display:-webkit-box`
                 and would undo the pill's inline-flex layout. It wraps instead. */}
             <Badge
@@ -491,7 +494,7 @@ export function AdminAuditLogPage() {
             >
               {entry.api_key_name}
             </Badge>
-          </BadgeCell>
+          </DataTableBadgeCell>
         ) : (
           <EmptyCell />
         );
@@ -500,9 +503,9 @@ export function AdminAuditLogPage() {
         return status === null ? (
           <EmptyCell />
         ) : (
-          <BadgeCell>
+          <DataTableBadgeCell>
             <Badge variant={statusVariant(status)}>{status}</Badge>
-          </BadgeCell>
+          </DataTableBadgeCell>
         );
       }
       case "user_id":
@@ -722,9 +725,7 @@ export function AdminAuditLogPage() {
               <Table
                 ref={tableRef}
                 containerClassName="overscroll-x-none"
-                // Vertical padding moves onto each cell's inner shell, which owns
-                // the 52px minimum -- see CellShell.
-                className="table-fixed [&_td]:overflow-hidden [&_td]:py-0"
+                className={DATA_TABLE_CLASS_NAME}
                 style={tableStyle}
               >
                 <colgroup>
@@ -758,7 +759,7 @@ export function AdminAuditLogPage() {
                     >
                       {columnOrder.map((field) => (
                         <TableCell key={field} {...columnCellProps(field)}>
-                          <CellShell>{renderAuditLogCell(entry, field)}</CellShell>
+                          <DataTableCellShell>{renderAuditLogCell(entry, field)}</DataTableCellShell>
                         </TableCell>
                       ))}
                     </TableRow>
@@ -848,29 +849,7 @@ export function AdminAuditLogPage() {
   );
 }
 
-/**
- * Owns each cell's vertical rhythm: a 52px floor that *includes* the padding
- * (border-box), so short rows are 52px tall with real breathing room rather than
- * content squeezed against the edges, and a cell that wraps to a second line
- * grows past the floor while keeping the same padding.
- */
-function CellShell({ children }: { readonly children: React.ReactNode }) {
-  return (
-    // `[&>*]:min-w-0` lets the child shrink below its intrinsic width, which a
-    // flex item otherwise refuses to do -- without it, clamped text overflows.
-    <div className="flex min-h-[52px] w-full min-w-0 items-center py-2 [&>*]:min-w-0">
-      {children}
-    </div>
-  );
-}
-
 function EmptyCell() {
   return <span className="text-muted-foreground">--</span>;
 }
 
-/** Keeps badges inside the column, wrapping rather than overflowing it. */
-function BadgeCell({ children }: { readonly children: React.ReactNode }) {
-  return (
-    <div className="flex min-w-0 flex-wrap items-center gap-1.5">{children}</div>
-  );
-}

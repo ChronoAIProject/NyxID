@@ -55,6 +55,46 @@ const COLUMN_RESIZE_STEP = 16;
 const COLUMN_WIDTH_BOUNDS = { min: MIN_COLUMN_WIDTH, max: MAX_COLUMN_WIDTH };
 
 /**
+ * Shared table class. Cells carry no vertical padding of their own -- that
+ * belongs to [`DataTableCellShell`], which owns the row's minimum height.
+ */
+export const DATA_TABLE_CLASS_NAME =
+  "table-fixed [&_td]:overflow-hidden [&_td]:py-0";
+
+/**
+ * Every body cell's vertical rhythm, so each admin table measures the same.
+ *
+ * A 52px floor that *includes* the padding (border-box), so short rows get real
+ * breathing room rather than content squeezed against the edges, and a cell that
+ * wraps to a second line grows past the floor keeping the same padding.
+ *
+ * `[&>*]:min-w-0` lets the child shrink below its intrinsic width, which a flex
+ * item otherwise refuses to do -- without it, clamped text overflows its column.
+ */
+export function DataTableCellShell({
+  children,
+}: {
+  readonly children: React.ReactNode;
+}) {
+  return (
+    <div className="flex min-h-[52px] w-full min-w-0 items-center py-2 [&>*]:min-w-0">
+      {children}
+    </div>
+  );
+}
+
+/** Keeps badges inside their column, wrapping rather than overflowing it. */
+export function DataTableBadgeCell({
+  children,
+}: {
+  readonly children: React.ReactNode;
+}) {
+  return (
+    <div className="flex min-w-0 flex-wrap items-center gap-1.5">{children}</div>
+  );
+}
+
+/**
  * Divider marking the frozen edge, drawn as a pseudo-element rather than a
  * `border-r`. A collapsed border belongs to the table's border grid, not to the
  * cell, so it stays behind with the grid when a sticky cell is offset -- the
