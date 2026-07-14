@@ -1254,14 +1254,26 @@ export function AdminOAuthClientsPage() {
         ) : (
           <>
             <div
-              className={`transition-opacity motion-reduce:transition-none ${
-                isPlaceholderData ? "opacity-60" : ""
-              }`}
+              className={cn(
+                "relative transition-opacity motion-reduce:transition-none",
+                isPlaceholderData && "pointer-events-none opacity-60",
+              )}
               aria-busy={isFetching}
             >
               <p className="sr-only" aria-live="polite" aria-atomic="true">
                 {columnAnnouncement}
               </p>
+              {isPlaceholderData && (
+                <div
+                  data-testid="oauth-clients-refetch-overlay"
+                  className="pointer-events-none absolute inset-0 z-30 flex items-start justify-center pt-16 motion-reduce:pt-8"
+                  aria-hidden="true"
+                >
+                  <div className="rounded-full border border-border bg-background/90 p-2.5 shadow-md backdrop-blur-sm">
+                    <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+                  </div>
+                </div>
+              )}
               <Table
                 containerClassName="overscroll-x-none"
                 className="table-fixed [&_td]:py-1.5"

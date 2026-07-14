@@ -970,6 +970,21 @@ describe("AdminOAuthClientsPage", () => {
         name: "Toggle broker capability for Aevatar (dcr-aevatar)",
       }),
     ).toBeDisabled();
+
+    const overlay = screen.getByTestId("oauth-clients-refetch-overlay");
+    expect(overlay).toBeInTheDocument();
+    const overlayWrapper = overlay.parentElement;
+    expect(overlayWrapper).not.toBeNull();
+    expect(overlayWrapper).toHaveAttribute("aria-busy", "true");
+    expect(overlayWrapper).toHaveClass("opacity-60", "pointer-events-none");
+  });
+
+  it("hides the refetch overlay when the current results match the query", () => {
+    render(<AdminOAuthClientsPage />);
+
+    expect(
+      screen.queryByTestId("oauth-clients-refetch-overlay"),
+    ).not.toBeInTheDocument();
   });
 
   it("warns and retries when a cached-data refresh fails", async () => {
