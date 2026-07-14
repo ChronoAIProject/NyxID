@@ -47,6 +47,7 @@ export function useAdminOAuthClients(params: AdminOAuthClientListParams) {
       );
     },
     placeholderData: keepPreviousData,
+    staleTime: 0,
   });
 }
 
