@@ -68,10 +68,28 @@ export function OAuthConsentPage() {
   useApplyTheme();
   const { data: userServices, isLoading: userServicesLoading } =
     useUserServices();
-  // The consent page renders once per authorize redirect; the query string
-  // never changes within a mount, so URL-derived values are memoized to keep
-  // referential stability for the memos below.
-  const search = useMemo(() => new URLSearchParams(window.location.search), []);
+  // The consent page renders once per authorize redirect; capture every
+  // repeated query value in one immutable snapshot so downstream memos keep
+  // stable array identities across local state updates.
+  const [authorizeQuery] = useState(() => {
+    const search = new URLSearchParams(window.location.search);
+    return {
+      search,
+      resources: search.getAll("resource"),
+      preselectServiceIds: search.getAll("preselect_service_ids"),
+      unmatchedDefaults: search.getAll("unmatched_defaults"),
+      requiredServiceIds: search.getAll("required_service_ids"),
+      currentBindingServiceIds: search.getAll("current_binding_service_ids"),
+    };
+  });
+  const {
+    search,
+    resources,
+    preselectServiceIds,
+    unmatchedDefaults,
+    requiredServiceIds,
+    currentBindingServiceIds,
+  } = authorizeQuery;
 
   const responseType = readParam(search, "response_type");
   const clientId = readParam(search, "client_id");
@@ -89,26 +107,9 @@ export function OAuthConsentPage() {
     search.get("external_subject_external_user_id") ?? "";
   const bindingGrantId = search.get("binding_grant_id") ?? "";
   const consentRequest = search.get("consent_request") ?? "";
-  const resources = useMemo(() => search.getAll("resource"), [search]);
   // Server-resolved hints: the app's declared default services matched to
   // this user (pre-selected), and declared services the user has no match
   // for (informational only).
-  const preselectServiceIds = useMemo(
-    () => search.getAll("preselect_service_ids"),
-    [search],
-  );
-  const unmatchedDefaults = useMemo(
-    () => search.getAll("unmatched_defaults"),
-    [search],
-  );
-  const requiredServiceIds = useMemo(
-    () => search.getAll("required_service_ids"),
-    [search],
-  );
-  const currentBindingServiceIds = useMemo(
-    () => search.getAll("current_binding_service_ids"),
-    [search],
-  );
   const bindingReview =
     search.get("binding_review") === "true" && Boolean(bindingGrantId);
   const currentBindingAllowsAllServices =
