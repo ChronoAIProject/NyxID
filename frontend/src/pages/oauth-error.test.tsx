@@ -64,6 +64,41 @@ describe("OAuthErrorPage", () => {
     ).toBeInTheDocument();
   });
 
+  it("links a missing required service to the existing connection flow", async () => {
+    const user = userEvent.setup();
+    const backSpy = vi
+      .spyOn(window.history, "back")
+      .mockImplementation(() => undefined);
+    setSearch(
+      "?code=required_service_not_connected" +
+        "&message=Required%20service%20is%20not%20connected" +
+        "&service_slug=chrono-llm-public" +
+        "&service_name=Chrono%20Public%20LLM",
+    );
+
+    render(<OAuthErrorPage />);
+
+    expect(screen.getByText("Connect a Required Service")).toBeInTheDocument();
+    expect(screen.getByText("Chrono Public LLM")).toBeInTheDocument();
+    expect(screen.getByText("chrono-llm-public")).toBeInTheDocument();
+    expect(
+      screen.getByText(/is required by this app but is not connected/),
+    ).toBeInTheDocument();
+
+    const connect = screen.getByRole("link", { name: /Connect service/ });
+    expect(connect).toHaveAttribute(
+      "href",
+      "/keys?tab=services&slug=chrono-llm-public",
+    );
+    expect(connect).toHaveAttribute("target", "_blank");
+
+    await user.click(
+      screen.getByRole("button", { name: /Retry authorization/ }),
+    );
+    expect(backSpy).toHaveBeenCalledTimes(1);
+    backSpy.mockRestore();
+  });
+
   it("Go Back calls window.history.back()", async () => {
     const user = userEvent.setup();
     setSearch("?code=login_required");
@@ -95,6 +130,7 @@ describe("OAuthErrorPage", () => {
       pkce_verification_failed: "PKCE Verification Failed",
       consent_required: "Consent Required",
       login_required: "Login Required",
+      required_service_not_connected: "Connect a Required Service",
     };
     for (const [code, label] of Object.entries(cases)) {
       setSearch(`?code=${code}`);

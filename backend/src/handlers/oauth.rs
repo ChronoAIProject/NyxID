@@ -678,12 +678,8 @@ pub async fn authorize(
     let params = match resolve_pushed_authorize_params(&state, params).await {
         Ok(params) => params,
         Err(err) if is_browser_mode => {
-            let error_url = format!(
-                "{}/error?code={}&message={}",
-                state.config.frontend_url,
-                urlencoding::encode(err.error_key()),
-                urlencoding::encode(&err.to_string()),
-            );
+            let error_url =
+                build_frontend_authorization_error_url(&state.config.frontend_url, &err);
             return Ok(redirect_302(&error_url));
         }
         Err(err) => return Err(err),
@@ -726,12 +722,7 @@ pub async fn authorize(
                 error = %err,
                 "OAuth authorize failed, redirecting to error page"
             );
-            let error_url = format!(
-                "{}/error?code={}&message={}",
-                state.config.frontend_url,
-                urlencoding::encode(err.error_key()),
-                urlencoding::encode(&err.to_string()),
-            );
+            let error_url = build_frontend_authorization_error_url(&state.config.frontend_url, err);
             Ok(redirect_302(&error_url))
         }
         Err(err) => Err(err),
@@ -1407,6 +1398,29 @@ fn build_callback_error_url(params: &AuthorizeQuery, error: &str, description: &
     if let Some(ref state_param) = params.state {
         url.push_str(&format!("&state={}", urlencoding::encode(state_param)));
     }
+    url
+}
+
+fn build_frontend_authorization_error_url(frontend_url: &str, err: &AppError) -> String {
+    let mut url = format!(
+        "{}/error?code={}&message={}",
+        frontend_url.trim_end_matches('/'),
+        urlencoding::encode(err.error_key()),
+        urlencoding::encode(&err.to_string()),
+    );
+
+    if let AppError::RequiredServiceNotConnected {
+        service_slug,
+        service_name,
+    } = err
+    {
+        url.push_str(&format!(
+            "&service_slug={}&service_name={}",
+            urlencoding::encode(service_slug),
+            urlencoding::encode(service_name),
+        ));
+    }
+
     url
 }
 
@@ -3127,6 +3141,7 @@ mod tests {
     use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
     use mongodb::bson::doc;
     use serde::Serialize;
+    use sha2::{Digest, Sha256};
     use uuid::Uuid;
 
     use crate::crypto::jwt;
@@ -4330,6 +4345,187 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn broker_resource_flow_authorize_consent_code_and_binding_exchange_is_end_to_end() {
+        let Some(db) = connect_test_database("oauth_broker_resource_e2e").await else {
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let client_id = "aevatar-broker-resource-e2e";
+        let user_id = Uuid::new_v4().to_string();
+        let scope = format!("openid profile offline_access proxy {BROKER_BINDING_SCOPE}");
+        let redirect_uri = "https://app.example/callback";
+        let verifier = "aevatar-nyxid-broker-resource-e2e-verifier-0123456789";
+        let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(Sha256::digest(verifier.as_bytes()));
+        let external_subject = ExternalSubjectRef {
+            platform: "lark".to_string(),
+            tenant: Some("tenant-e2e".to_string()),
+            external_user_id: "sender-e2e".to_string(),
+        };
+
+        insert_person_user(&db, &user_id).await;
+        insert_public_client(&db, client_id, &scope).await;
+        let services = [
+            insert_user_service(&db, &user_id, "aevatar").await,
+            insert_user_service(&db, &user_id, "chrono-llm-public").await,
+            insert_user_service(&db, &user_id, "ornn-api").await,
+        ];
+        let resources = services
+            .iter()
+            .map(|service| resource_uri(&service.slug))
+            .collect::<Vec<_>>();
+        let service_ids = services
+            .iter()
+            .map(|service| service.id.clone())
+            .collect::<Vec<_>>();
+        let params = AuthorizeQuery {
+            response_type: "code".to_string(),
+            client_id: client_id.to_string(),
+            redirect_uri: redirect_uri.to_string(),
+            scope: Some(scope.clone()),
+            state: Some("aevatar-state-e2e".to_string()),
+            code_challenge: Some(challenge.clone()),
+            code_challenge_method: Some("S256".to_string()),
+            nonce: Some("nonce-e2e".to_string()),
+            external_subject_platform: Some(external_subject.platform.clone()),
+            external_subject_tenant: external_subject.tenant.clone(),
+            external_subject_external_user_id: Some(external_subject.external_user_id.clone()),
+            binding_grant_id: None,
+            prompt: Some("consent".to_string()),
+            request_uri: None,
+            resource: resources.clone(),
+        };
+
+        let consent_redirect = authorize_inner(
+            &state,
+            OptionalAuthUser(Some(crate::test_utils::test_auth_user(&user_id))),
+            &params,
+            true,
+            Some(&external_subject),
+        )
+        .await
+        .expect("authorize redirects to consent");
+        assert_eq!(consent_redirect.status(), StatusCode::FOUND);
+        let consent_url = consent_redirect
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .expect("consent redirect location");
+        let parsed_consent_url = url::Url::parse(consent_url).expect("parse consent URL");
+        let consent_request = parsed_consent_url
+            .query_pairs()
+            .find_map(|(key, value)| (key == "consent_request").then(|| value.into_owned()))
+            .expect("signed consent request");
+        let required_ids = parsed_consent_url
+            .query_pairs()
+            .filter_map(|(key, value)| (key == "required_service_ids").then(|| value.into_owned()))
+            .collect::<Vec<_>>();
+        assert_eq!(required_ids, service_ids);
+
+        let code_redirect = authorize_decision(
+            State(state.clone()),
+            OptionalAuthUser(Some(crate::test_utils::test_auth_user(&user_id))),
+            TelemetryContext::default(),
+            Form(ConsentDecisionForm {
+                response_type: params.response_type.clone(),
+                client_id: params.client_id.clone(),
+                redirect_uri: params.redirect_uri.clone(),
+                scope: params.scope.clone(),
+                state: params.state.clone(),
+                code_challenge: params.code_challenge.clone(),
+                code_challenge_method: params.code_challenge_method.clone(),
+                nonce: params.nonce.clone(),
+                external_subject_platform: params.external_subject_platform.clone(),
+                external_subject_tenant: params.external_subject_tenant.clone(),
+                external_subject_external_user_id: params.external_subject_external_user_id.clone(),
+                binding_grant_id: None,
+                prompt: params.prompt.clone(),
+                allow_all_services: false,
+                allowed_service_ids: service_ids.clone(),
+                consent_request: Some(consent_request),
+                resource: resources.clone(),
+                decision: "allow".to_string(),
+            }),
+        )
+        .await
+        .expect("approve required resources");
+        assert_eq!(code_redirect.status(), StatusCode::FOUND);
+        let callback_url = code_redirect
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .expect("authorization code callback");
+        let code = url::Url::parse(callback_url)
+            .expect("parse callback URL")
+            .query_pairs()
+            .find_map(|(key, value)| (key == "code").then(|| value.into_owned()))
+            .expect("authorization code");
+
+        let Json(code_exchange) = token_inner(
+            &state,
+            &TelemetryContext::default(),
+            &HeaderMap::new(),
+            TokenRequest {
+                grant_type: "authorization_code".to_string(),
+                code: Some(code),
+                redirect_uri: Some(redirect_uri.to_string()),
+                client_id: Some(client_id.to_string()),
+                client_secret: None,
+                code_verifier: Some(verifier.to_string()),
+                refresh_token: None,
+                subject_token: None,
+                subject_token_type: None,
+                scope: None,
+                provider: None,
+                resource: resources.clone(),
+            },
+        )
+        .await
+        .expect("exchange authorization code");
+        assert_eq!(
+            code_exchange.resource.as_deref(),
+            Some(resources.as_slice())
+        );
+        let binding_id = code_exchange.binding_id.expect("new binding id");
+
+        let Json(binding_exchange) = token_inner(
+            &state,
+            &TelemetryContext::default(),
+            &HeaderMap::new(),
+            TokenRequest {
+                grant_type: "urn:ietf:params:oauth:grant-type:token-exchange".to_string(),
+                code: None,
+                redirect_uri: None,
+                client_id: Some(client_id.to_string()),
+                client_secret: None,
+                code_verifier: None,
+                refresh_token: None,
+                subject_token: Some(binding_id),
+                subject_token_type: Some(
+                    oauth_broker_service::BROKER_SUBJECT_TOKEN_TYPE.to_string(),
+                ),
+                scope: Some("proxy".to_string()),
+                provider: None,
+                resource: resources.clone(),
+            },
+        )
+        .await
+        .expect("exchange binding");
+        let claims = jwt::verify_token(
+            &state.jwt_keys,
+            &state.config,
+            &binding_exchange.access_token,
+        )
+        .expect("verify binding access token");
+        assert_eq!(claims.resources.as_deref(), Some(resources.as_slice()));
+        assert_eq!(
+            claims.allowed_service_ids.as_deref(),
+            Some(service_ids.as_slice())
+        );
+        assert_eq!(claims.allow_all_services, Some(false));
+    }
+
+    #[tokio::test]
     async fn broker_authorization_code_strict_unpinned_reject_leaves_no_refresh_token() {
         let Some(db) = connect_test_database("oauth_broker_strict_unpinned_no_refresh").await
         else {
@@ -5252,5 +5448,35 @@ mod tests {
         );
         assert!(!none.contains("preselect_service_ids"));
         assert!(!none.contains("unmatched_defaults"));
+    }
+
+    #[test]
+    fn frontend_authorization_error_url_carries_actionable_service_identity() {
+        let url = build_frontend_authorization_error_url(
+            "https://app.example/",
+            &AppError::RequiredServiceNotConnected {
+                service_slug: "chrono-llm-public".to_string(),
+                service_name: "Chrono Public LLM".to_string(),
+            },
+        );
+        let parsed = url::Url::parse(&url).expect("parse frontend error URL");
+        let query = parsed
+            .query_pairs()
+            .into_owned()
+            .collect::<std::collections::HashMap<_, _>>();
+
+        assert_eq!(parsed.path(), "/error");
+        assert_eq!(
+            query.get("code").map(String::as_str),
+            Some("required_service_not_connected")
+        );
+        assert_eq!(
+            query.get("service_slug").map(String::as_str),
+            Some("chrono-llm-public")
+        );
+        assert_eq!(
+            query.get("service_name").map(String::as_str),
+            Some("Chrono Public LLM")
+        );
     }
 }
