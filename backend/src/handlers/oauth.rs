@@ -1794,13 +1794,12 @@ pub async fn pushed_authorization_request(
         body.external_subject_tenant.as_deref(),
         body.external_subject_external_user_id.as_deref(),
     )?;
-    if let Some(binding_grant_id) = body.binding_grant_id.as_deref() {
-        if external_subject.is_none() || !oauth_broker_service::is_binding_hash(binding_grant_id) {
-            return Err(AppError::InvalidTarget(
-                "binding grant review requires a valid external subject and binding hash"
-                    .to_string(),
-            ));
-        }
+    if let Some(binding_grant_id) = body.binding_grant_id.as_deref()
+        && (external_subject.is_none() || !oauth_broker_service::is_binding_hash(binding_grant_id))
+    {
+        return Err(AppError::InvalidTarget(
+            "binding grant review requires a valid external subject and binding hash".to_string(),
+        ));
     }
     for resource in &body.resource {
         oauth_resource_service::validate_resource_uri(resource)?;
