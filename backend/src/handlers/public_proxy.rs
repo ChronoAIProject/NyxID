@@ -11,6 +11,10 @@ use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::DownstreamService;
 use crate::services::{anonymous_endpoint_service, audit_service, proxy_service};
 
+// Billing policy: anonymous public proxy traffic has no `AuthUser`, API key,
+// or wallet owner, so it is not metered. Instead, billable downstream resale is
+// blocked for enabled anonymous endpoints by `find_matching_enabled_rule`
+// through `validate_anonymous_service_runtime_safety` before any forwarding.
 pub async fn public_proxy_request(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -350,6 +354,7 @@ mod tests {
         use crate::models::downstream_service::{
             AnonymousEndpointRule, COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
         };
+        use crate::models::service_billing::{BillingMetric, ServiceBilling};
         use crate::services::anonymous_endpoint_service;
         use crate::test_utils::{connect_test_database, test_app_state};
         use axum::body::{Body, to_bytes};
@@ -692,6 +697,55 @@ mod tests {
             .await
             .expect_err("unmatched path must not be exposed");
             assert!(matches!(err, AppError::NotFound(_)));
+        }
+
+        /// Public proxy has no authenticated billing owner. A resale-billable
+        /// service with an enabled anonymous rule is therefore blocked before
+        /// quota increment or downstream forwarding.
+        #[tokio::test]
+        async fn resale_billable_service_is_rejected_before_forwarding() {
+            let Some(db) = connect_test_database("pproxy_resale_billable").await else {
+                return;
+            };
+            let mut service = public_service("pub", "https://example.test", 100);
+            service.billing = Some(ServiceBilling {
+                resale_billable: true,
+                resale_metric: BillingMetric::Tokens,
+                lago_resale_metric_code: Some("resale_tokens".to_string()),
+            });
+            db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+                .insert_one(&service)
+                .await
+                .expect("insert service");
+            let state = test_app_state(db);
+
+            let err = execute_public_proxy(
+                state.clone(),
+                Some(peer()),
+                "pub".to_string(),
+                "public/echo".to_string(),
+                proxy_request_with_credentials(),
+            )
+            .await
+            .expect_err("resale-billable anonymous service must be rejected");
+
+            assert!(
+                matches!(err, AppError::AnonymousIncompatibleBilling(_)),
+                "expected billing incompatibility, got {err:?}"
+            );
+
+            let quota_rows = state
+                .db
+                .collection::<crate::models::anonymous_endpoint_usage::AnonymousEndpointUsage>(
+                    crate::models::anonymous_endpoint_usage::COLLECTION_NAME,
+                )
+                .count_documents(mongodb::bson::doc! {})
+                .await
+                .expect("count quota rows");
+            assert_eq!(
+                quota_rows, 0,
+                "billing-incompatible public proxy requests must be rejected before quota use"
+            );
         }
 
         /// Guard: the runtime force-strip helper neutralizes identity and

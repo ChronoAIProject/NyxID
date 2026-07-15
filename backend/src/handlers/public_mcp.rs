@@ -89,6 +89,9 @@ async fn handle_public_mcp_post(
                 serde_json::json!({ "tools": tools }),
             ))
         }
+        // Billing policy: `/public/mcp` is discovery-only. Anonymous tool
+        // execution would have no billing owner, so it stays blocked rather
+        // than being forwarded or metered.
         "tools/call" => Ok(rpc_error(
             parsed.id,
             -32601,
@@ -129,6 +132,7 @@ fn json_response(value: serde_json::Value) -> Response<Body> {
 mod tests {
     use super::*;
     use crate::models::downstream_service::{AnonymousEndpointRule, DownstreamService};
+    use crate::models::service_billing::{BillingMetric, ServiceBilling};
     use crate::test_utils::{connect_test_database, test_app_state};
     use axum::body::to_bytes;
     use chrono::Utc;
@@ -301,9 +305,19 @@ mod tests {
         disabled_svc.id = Uuid::new_v4().to_string();
         disabled_svc.slug = "disabled-service".to_string();
         disabled_svc.anonymous_endpoints[0].enabled = false;
+        // A resale-billable anonymous service has no billing owner on the
+        // public MCP path -> excluded from discovery.
+        let mut billable_svc = safe_anonymous_service();
+        billable_svc.id = Uuid::new_v4().to_string();
+        billable_svc.slug = "billable-service".to_string();
+        billable_svc.billing = Some(ServiceBilling {
+            resale_billable: true,
+            resale_metric: BillingMetric::Tokens,
+            lago_resale_metric_code: Some("resale_tokens".to_string()),
+        });
 
         db.collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
-            .insert_many([safe.clone(), unsafe_svc, disabled_svc])
+            .insert_many([safe.clone(), unsafe_svc, disabled_svc, billable_svc])
             .await
             .expect("insert services");
 
@@ -353,6 +367,10 @@ mod tests {
         let body = json_body(response).await;
         assert_eq!(body["id"], 3);
         assert_eq!(body["error"]["code"], -32601);
+        assert_eq!(
+            body["error"]["message"],
+            "Public MCP tool execution is not supported"
+        );
     }
 
     #[tokio::test]
