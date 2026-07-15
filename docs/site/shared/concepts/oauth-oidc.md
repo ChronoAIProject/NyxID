@@ -44,6 +44,14 @@ The flow:
 
 Redirect URI types supported: standard HTTPS URLs, loopback redirects (`http://127.0.0.1:*`, `http://localhost:*`), and private-use URI schemes (e.g. `cursor://`, `vscode://`).
 
+## Reviewing a broker binding's service access
+
+Broker-capable applications can let a signed-in user review the service grant behind an existing binding without replacing its opaque binding credential. The application starts a normal Authorization Code + PKCE request with `prompt=consent`, the required RFC 8707 `resource` values, the exact external subject, and `binding_grant_id=SHA-256(binding_id)`. The raw `binding_id` must never be placed in a browser-visible URL or form.
+
+NyxID accepts the review only when the binding belongs to the authenticated user, OAuth client, and exact external subject. The consent page then distinguishes services already authorized by the binding, services required by the application, and optional services the user can add or remove. Required resources cannot be deselected individually; the user can deny the whole request instead.
+
+When the user confirms the review, NyxID rotates the refresh grant behind the same binding with optimistic concurrency. The token response contains `binding_updated: true` and no replacement `binding_id`. This keeps the application's stored binding handle stable while NyxID remains the source of truth for service authorization.
+
 ## Token types
 
 All tokens are RS256-signed JWTs using a 4096-bit RSA key pair.

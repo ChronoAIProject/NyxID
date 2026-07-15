@@ -2411,6 +2411,7 @@ mod operator_route_tests {
                 code_challenge_method: None,
                 nonce: None,
                 external_subject: None,
+                binding_grant_id: None,
                 resource_uris: Vec::new(),
                 allowed_service_ids: Vec::new(),
                 allow_all_services: true,

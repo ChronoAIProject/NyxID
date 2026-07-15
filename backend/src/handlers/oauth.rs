@@ -54,6 +54,10 @@ pub struct AuthorizeQuery {
     pub external_subject_platform: Option<String>,
     pub external_subject_tenant: Option<String>,
     pub external_subject_external_user_id: Option<String>,
+    /// SHA-256 identifier of an existing broker binding whose service grant
+    /// the authenticated owner is reviewing. The raw binding credential is
+    /// never sent through the browser.
+    pub binding_grant_id: Option<String>,
     /// OIDC prompt parameter: "none", "login", "consent", or space-separated combo.
     pub prompt: Option<String>,
     pub request_uri: Option<String>,
@@ -74,6 +78,7 @@ pub struct ConsentDecisionForm {
     pub external_subject_platform: Option<String>,
     pub external_subject_tenant: Option<String>,
     pub external_subject_external_user_id: Option<String>,
+    pub binding_grant_id: Option<String>,
     pub prompt: Option<String>,
     #[serde(default = "default_allow_all_services_form")]
     pub allow_all_services: bool,
@@ -127,6 +132,8 @@ pub struct TokenResponse {
     pub resource: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub binding_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub binding_updated: Option<bool>,
     /// RFC 8693: Indicates the type of the issued token (only for token exchange grant).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub issued_token_type: Option<String>,
@@ -262,6 +269,7 @@ pub struct PushedAuthorizationRequestForm {
     pub external_subject_platform: Option<String>,
     pub external_subject_tenant: Option<String>,
     pub external_subject_external_user_id: Option<String>,
+    pub binding_grant_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -304,6 +312,7 @@ struct ConsentRequestClaims {
     external_subject_platform: Option<String>,
     external_subject_tenant: Option<String>,
     external_subject_external_user_id: Option<String>,
+    binding_grant_id: Option<String>,
     prompt: Option<String>,
     resource: Vec<String>,
 }
@@ -489,6 +498,30 @@ fn consent_requires_prompt(
     })
 }
 
+async fn resolve_binding_grant_review(
+    state: &AppState,
+    params: &AuthorizeQuery,
+    user_id: &str,
+    external_subject: Option<&ExternalSubjectRef>,
+) -> AppResult<Option<oauth_broker_service::BindingGrantSnapshot>> {
+    let Some(binding_hash) = params.binding_grant_id.as_deref() else {
+        return Ok(None);
+    };
+    let external_subject = external_subject.ok_or_else(|| {
+        AppError::InvalidTarget("binding grant review requires an external subject".to_string())
+    })?;
+
+    oauth_broker_service::resolve_binding_grant(
+        &state.db,
+        &params.client_id,
+        user_id,
+        external_subject,
+        binding_hash,
+    )
+    .await
+    .map(Some)
+}
+
 fn params_from_consent_form(form: &ConsentDecisionForm) -> AuthorizeQuery {
     AuthorizeQuery {
         response_type: form.response_type.clone(),
@@ -502,6 +535,7 @@ fn params_from_consent_form(form: &ConsentDecisionForm) -> AuthorizeQuery {
         external_subject_platform: form.external_subject_platform.clone(),
         external_subject_tenant: form.external_subject_tenant.clone(),
         external_subject_external_user_id: form.external_subject_external_user_id.clone(),
+        binding_grant_id: form.binding_grant_id.clone(),
         prompt: form.prompt.clone(),
         resource: form.resource.clone(),
         request_uri: None,
@@ -539,6 +573,7 @@ fn sign_consent_request(
         external_subject_platform: params.external_subject_platform.clone(),
         external_subject_tenant: params.external_subject_tenant.clone(),
         external_subject_external_user_id: params.external_subject_external_user_id.clone(),
+        binding_grant_id: params.binding_grant_id.clone(),
         prompt: params.prompt.clone(),
         resource: params.resource.clone(),
     };
@@ -579,6 +614,7 @@ fn verify_consent_request(
         external_subject_platform: claims.external_subject_platform,
         external_subject_tenant: claims.external_subject_tenant,
         external_subject_external_user_id: claims.external_subject_external_user_id,
+        binding_grant_id: claims.binding_grant_id,
         prompt: claims.prompt,
         resource: claims.resource,
         request_uri: None,
@@ -734,7 +770,6 @@ pub async fn authorize_decision(
             .ok_or_else(|| AppError::BadRequest("Missing consent request".to_string()))?,
         &user_id_str,
     )?;
-
     let external_subject = validate_external_subject_params(
         params.external_subject_platform.as_deref(),
         params.external_subject_tenant.as_deref(),
@@ -756,6 +791,11 @@ pub async fn authorize_decision(
         return Err(AppError::BadRequest("Invalid consent decision".to_string()));
     }
 
+    // Re-resolve the reviewed binding after the consent round-trip. The
+    // signed consent request carries only its hash; current ownership and
+    // active grant state remain authoritative in the database.
+    resolve_binding_grant_review(&state, &params, &user_id_str, external_subject.as_ref()).await?;
+
     if !selected_resources_are_subset(&params.resource, &form.resource) {
         return Err(AppError::InvalidTarget(
             "selected resource was not in the original authorization request".to_string(),
@@ -765,7 +805,22 @@ pub async fn authorize_decision(
     let consent_allowed_service_ids = if form.allow_all_services {
         None
     } else {
-        let selected_service_ids = normalize_allowed_service_ids(form.allowed_service_ids);
+        let mut selected_service_ids = normalize_allowed_service_ids(form.allowed_service_ids);
+        let required_service_ids = oauth_resource_service::resolve_resource_service_ids_for_user(
+            &state.db,
+            &state.config,
+            &user_id_str,
+            &params.resource,
+        )
+        .await?;
+        for service_id in required_service_ids {
+            if !selected_service_ids
+                .iter()
+                .any(|selected| selected == &service_id)
+            {
+                selected_service_ids.push(service_id);
+            }
+        }
         validate_allowed_service_ids(&state.db, &user_id_str, &selected_service_ids).await?;
         Some(selected_service_ids)
     };
@@ -909,10 +964,13 @@ async fn authorize_inner(
                     non_empty_resources(&params.resource),
                 )
                 .await?;
+                let binding_grant =
+                    resolve_binding_grant_review(state, params, &user_id_str, external_subject)
+                        .await?;
 
-                let needs_consent =
-                    consent_requires_prompt(consent.as_ref(), resolved_resources.as_ref())
-                        || force_consent;
+                let needs_consent = binding_grant.is_some()
+                    || consent_requires_prompt(consent.as_ref(), resolved_resources.as_ref())
+                    || force_consent;
 
                 if needs_consent {
                     // prompt=none + needs consent → error, not redirect
@@ -925,8 +983,10 @@ async fn authorize_inner(
                         return Ok(redirect_302(&redirect_url));
                     }
 
-                    let default_service_hints =
+                    let mut default_service_hints =
                         resolve_app_default_service_hints(state, &client, &user_id_str).await?;
+                    default_service_hints
+                        .include_flow_grants(resolved_resources.as_ref(), binding_grant.as_ref());
                     let consent_url = build_consent_url(
                         &state.config.frontend_url,
                         params,
@@ -987,10 +1047,17 @@ async fn authorize_inner(
             non_empty_resources(&params.resource),
         )
         .await?;
+        let binding_grant =
+            resolve_binding_grant_review(state, params, &user_id_str, external_subject).await?;
 
-        if consent_requires_prompt(consent.as_ref(), resolved_resources.as_ref()) || force_consent {
-            let default_service_hints =
+        if binding_grant.is_some()
+            || consent_requires_prompt(consent.as_ref(), resolved_resources.as_ref())
+            || force_consent
+        {
+            let mut default_service_hints =
                 resolve_app_default_service_hints(state, &client, &user_id_str).await?;
+            default_service_hints
+                .include_flow_grants(resolved_resources.as_ref(), binding_grant.as_ref());
             let consent_url = build_consent_url(
                 &state.config.frontend_url,
                 params,
@@ -1190,6 +1257,7 @@ fn has_non_par_authorize_params(params: &AuthorizeQuery) -> bool {
         || params.external_subject_platform.is_some()
         || params.external_subject_tenant.is_some()
         || params.external_subject_external_user_id.is_some()
+        || params.binding_grant_id.is_some()
         || params.prompt.is_some()
         || !params.resource.is_empty()
 }
@@ -1235,6 +1303,7 @@ async fn resolve_pushed_authorize_params(
         external_subject_platform,
         external_subject_tenant,
         external_subject_external_user_id,
+        binding_grant_id: record.binding_grant_id,
         prompt: record.prompt,
         resource: record.resources,
         request_uri: None,
@@ -1301,6 +1370,12 @@ fn build_authorize_url(base_url: &str, params: &AuthorizeQuery) -> String {
         url.push_str(&format!(
             "&external_subject_external_user_id={}",
             urlencoding::encode(external_user_id)
+        ));
+    }
+    if let Some(ref binding_grant_id) = params.binding_grant_id {
+        url.push_str(&format!(
+            "&binding_grant_id={}",
+            urlencoding::encode(binding_grant_id)
         ));
     }
     if let Some(ref prompt) = params.prompt {
@@ -1377,6 +1452,30 @@ struct AppDefaultServiceHints {
     /// Human-readable names of declared catalog services the user has no
     /// matching service for -- shown as unmatched on the consent screen.
     unmatched_names: Vec<String>,
+    /// Services resolved from RFC 8707 resource parameters. These are required
+    /// by the app and cannot be removed independently of denying the request.
+    required_service_ids: Vec<String>,
+    /// Service grant currently held by the reviewed broker binding.
+    current_binding_service_ids: Vec<String>,
+    current_binding_allow_all_services: bool,
+    binding_review: bool,
+}
+
+impl AppDefaultServiceHints {
+    fn include_flow_grants(
+        &mut self,
+        resolved_resources: Option<&oauth_resource_service::ResolvedOAuthResources>,
+        binding_grant: Option<&oauth_broker_service::BindingGrantSnapshot>,
+    ) {
+        self.required_service_ids = resolved_resources
+            .map(|resolved| resolved.service_ids.clone())
+            .unwrap_or_default();
+        if let Some(binding_grant) = binding_grant {
+            self.binding_review = true;
+            self.current_binding_service_ids = binding_grant.allowed_service_ids.clone();
+            self.current_binding_allow_all_services = binding_grant.allow_all_services;
+        }
+    }
 }
 
 /// Resolve `client.default_service_catalog_slugs` against the consenting
@@ -1439,6 +1538,7 @@ async fn resolve_app_default_service_hints(
     Ok(AppDefaultServiceHints {
         preselect_service_ids: user_services.into_iter().map(|s| s.id).collect(),
         unmatched_names,
+        ..AppDefaultServiceHints::default()
     })
 }
 
@@ -1500,6 +1600,12 @@ fn build_consent_url(
             urlencoding::encode(external_user_id)
         ));
     }
+    if let Some(ref binding_grant_id) = params.binding_grant_id {
+        url.push_str(&format!(
+            "&binding_grant_id={}",
+            urlencoding::encode(binding_grant_id)
+        ));
+    }
     if let Some(ref prompt) = params.prompt {
         url.push_str(&format!("&prompt={}", urlencoding::encode(prompt)));
     }
@@ -1517,6 +1623,24 @@ fn build_consent_url(
             "&unmatched_defaults={}",
             urlencoding::encode(name)
         ));
+    }
+    for service_id in &default_service_hints.required_service_ids {
+        url.push_str(&format!(
+            "&required_service_ids={}",
+            urlencoding::encode(service_id)
+        ));
+    }
+    for service_id in &default_service_hints.current_binding_service_ids {
+        url.push_str(&format!(
+            "&current_binding_service_ids={}",
+            urlencoding::encode(service_id)
+        ));
+    }
+    if default_service_hints.current_binding_allow_all_services {
+        url.push_str("&current_binding_allow_all_services=true");
+    }
+    if default_service_hints.binding_review {
+        url.push_str("&binding_review=true");
     }
     if let Some(consent_request) = consent_request {
         url.push_str(&format!(
@@ -1580,6 +1704,7 @@ async fn issue_authorization_code(
         params.code_challenge_method.as_deref(),
         params.nonce.as_deref(),
         external_subject,
+        params.binding_grant_id.as_deref(),
         &resource_uris,
         &allowed_service_ids,
         // AuthorizationCode stores the allow-all flag, while this path
@@ -1669,6 +1794,14 @@ pub async fn pushed_authorization_request(
         body.external_subject_tenant.as_deref(),
         body.external_subject_external_user_id.as_deref(),
     )?;
+    if let Some(binding_grant_id) = body.binding_grant_id.as_deref() {
+        if external_subject.is_none() || !oauth_broker_service::is_binding_hash(binding_grant_id) {
+            return Err(AppError::InvalidTarget(
+                "binding grant review requires a valid external subject and binding hash"
+                    .to_string(),
+            ));
+        }
+    }
     for resource in &body.resource {
         oauth_resource_service::validate_resource_uri(resource)?;
     }
@@ -1686,6 +1819,7 @@ pub async fn pushed_authorization_request(
         body.prompt.as_deref(),
         &body.resource,
         external_subject,
+        body.binding_grant_id.as_deref(),
     )
     .await?;
 
@@ -1826,26 +1960,45 @@ async fn token_inner(
                         refresh_token_jti: exchanged.refresh_token_jti.clone(),
                     }
                 };
-                let (binding_id, _binding_hash) = oauth_broker_service::create_binding(
-                    &state.db,
-                    &state.encryption_keys,
-                    client_id_str,
-                    &exchanged.user_id,
-                    &binding_refresh.refresh_token,
-                    &binding_refresh.refresh_token_jti,
-                    &granted_scopes,
-                    exchanged.external_subject.as_ref(),
-                    sender_constraint.clone(),
-                    broker_require_sender_constraint,
-                )
-                .await?;
-
-                let binding_hash =
-                    crate::models::oauth_broker_binding::hash_binding_id(&binding_id);
+                let (binding_id, binding_hash, binding_updated) =
+                    if let Some(binding_hash) = exchanged.binding_grant_id.as_deref() {
+                        oauth_broker_service::update_binding_grant(
+                            &state.db,
+                            &state.encryption_keys,
+                            client_id_str,
+                            &exchanged.user_id,
+                            binding_hash,
+                            &binding_refresh.refresh_token,
+                            &binding_refresh.refresh_token_jti,
+                            &granted_scopes,
+                            exchanged.external_subject.as_ref(),
+                        )
+                        .await?;
+                        (None, binding_hash.to_string(), true)
+                    } else {
+                        let (binding_id, binding_hash) = oauth_broker_service::create_binding(
+                            &state.db,
+                            &state.encryption_keys,
+                            client_id_str,
+                            &exchanged.user_id,
+                            &binding_refresh.refresh_token,
+                            &binding_refresh.refresh_token_jti,
+                            &granted_scopes,
+                            exchanged.external_subject.as_ref(),
+                            sender_constraint.clone(),
+                            broker_require_sender_constraint,
+                        )
+                        .await?;
+                        (Some(binding_id), binding_hash, false)
+                    };
                 audit_service::log_async(
                     state.db.clone(),
                     Some(exchanged.user_id.clone()),
-                    "oauth_broker_binding_issued".to_string(),
+                    if binding_updated {
+                        "oauth_broker_binding_grant_updated".to_string()
+                    } else {
+                        "oauth_broker_binding_issued".to_string()
+                    },
                     Some(serde_json::json!({
                         "client_id": client_id_str,
                         "binding_hash": oauth_broker_service::binding_hash_prefix(&binding_hash),
@@ -1872,7 +2025,8 @@ async fn token_inner(
                     id_token: exchanged.id_token,
                     scope: Some(exchanged.granted_scope),
                     resource: response_resources(exchanged.resource_uris),
-                    binding_id: Some(binding_id),
+                    binding_id,
+                    binding_updated: binding_updated.then_some(true),
                     issued_token_type: None,
                 }));
             }
@@ -1886,6 +2040,7 @@ async fn token_inner(
                 scope: Some(exchanged.granted_scope),
                 resource: response_resources(exchanged.resource_uris),
                 binding_id: None,
+                binding_updated: None,
                 issued_token_type: None,
             }))
         }
@@ -1913,6 +2068,7 @@ async fn token_inner(
                 scope: None,
                 resource: response_resources(tokens.resource_uris),
                 binding_id: None,
+                binding_updated: None,
                 issued_token_type: None,
             }))
         }
@@ -1981,6 +2137,7 @@ async fn token_inner(
                     scope: Some(result.scope),
                     resource: None,
                     binding_id: None,
+                    binding_updated: None,
                     issued_token_type: Some(
                         "urn:ietf:params:oauth:token-type:access_token".to_string(),
                     ),
@@ -2039,6 +2196,7 @@ async fn token_inner(
                     scope: Some(result.scope),
                     resource: None,
                     binding_id: None,
+                    binding_updated: None,
                     issued_token_type: Some(result.issued_token_type),
                 }))
             } else if subject_token_type == oauth_broker_service::BROKER_SUBJECT_TOKEN_TYPE {
@@ -2113,6 +2271,7 @@ async fn token_inner(
                     scope: Some(result.granted_scope),
                     resource: None,
                     binding_id: None,
+                    binding_updated: None,
                     issued_token_type: Some(result.issued_token_type),
                 }))
             } else {
@@ -2168,6 +2327,7 @@ async fn token_inner(
                         scope: Some(response.scope),
                         resource: None,
                         binding_id: None,
+                        binding_updated: None,
                         issued_token_type: None,
                     }))
                 }
@@ -3165,6 +3325,7 @@ mod tests {
                 code_challenge_method: None,
                 nonce: Some("nonce-1".to_string()),
                 external_subject: None,
+                binding_grant_id: None,
                 resource_uris: Vec::new(),
                 allowed_service_ids: Vec::new(),
                 allow_all_services: true,
@@ -3388,6 +3549,7 @@ mod tests {
             external_subject_platform: None,
             external_subject_tenant: None,
             external_subject_external_user_id: None,
+            binding_grant_id: None,
             prompt: None,
             request_uri: None,
             resource: Vec::new(),
@@ -3448,6 +3610,7 @@ mod tests {
             external_subject_platform: None,
             external_subject_tenant: None,
             external_subject_external_user_id: None,
+            binding_grant_id: None,
             prompt: None,
             request_uri: None,
             resource: vec![resource_uri("svc-b")],
@@ -3517,6 +3680,7 @@ mod tests {
             external_subject_platform: None,
             external_subject_tenant: None,
             external_subject_external_user_id: None,
+            binding_grant_id: None,
             prompt: None,
             request_uri: None,
             resource: vec![resource_uri("svc-a")],
@@ -3586,6 +3750,7 @@ mod tests {
             external_subject_platform: None,
             external_subject_tenant: None,
             external_subject_external_user_id: None,
+            binding_grant_id: None,
             prompt: Some("none".to_string()),
             request_uri: None,
             resource: vec![resource_uri("svc-b")],
@@ -3642,6 +3807,7 @@ mod tests {
             external_subject_platform: None,
             external_subject_tenant: None,
             external_subject_external_user_id: None,
+            binding_grant_id: None,
             prompt: None,
             request_uri: None,
             resource: Vec::new(),
@@ -3698,6 +3864,7 @@ mod tests {
             external_subject_platform: None,
             external_subject_tenant: None,
             external_subject_external_user_id: None,
+            binding_grant_id: None,
             prompt: Some("none".to_string()),
             request_uri: None,
             resource: Vec::new(),
@@ -3749,6 +3916,7 @@ mod tests {
             external_subject_platform: None,
             external_subject_tenant: None,
             external_subject_external_user_id: None,
+            binding_grant_id: None,
             prompt: None,
             request_uri: None,
             resource: Vec::new(),
@@ -3802,6 +3970,7 @@ mod tests {
             external_subject_platform: None,
             external_subject_tenant: None,
             external_subject_external_user_id: None,
+            binding_grant_id: None,
             prompt: None,
             request_uri: None,
             resource: vec![resource_uri("svc-a")],
@@ -3860,6 +4029,7 @@ mod tests {
             external_subject_platform: None,
             external_subject_tenant: None,
             external_subject_external_user_id: None,
+            binding_grant_id: None,
             prompt: None,
             request_uri: None,
             resource: Vec::new(),
@@ -3883,6 +4053,7 @@ mod tests {
                 external_subject_platform: None,
                 external_subject_tenant: None,
                 external_subject_external_user_id: None,
+                binding_grant_id: None,
                 prompt: None,
                 allow_all_services: false,
                 allowed_service_ids: Vec::new(),
@@ -4657,6 +4828,7 @@ mod tests {
             external_subject_platform: None,
             external_subject_tenant: None,
             external_subject_external_user_id: None,
+            binding_grant_id: None,
             prompt: None,
             request_uri: None,
             resource: vec![requested_resource],
@@ -4680,6 +4852,7 @@ mod tests {
                 external_subject_platform: None,
                 external_subject_tenant: None,
                 external_subject_external_user_id: None,
+                binding_grant_id: None,
                 prompt: None,
                 allow_all_services: true,
                 allowed_service_ids: Vec::new(),
@@ -5048,6 +5221,7 @@ mod tests {
             external_subject_platform: None,
             external_subject_tenant: None,
             external_subject_external_user_id: None,
+            binding_grant_id: None,
             prompt: None,
             request_uri: None,
             resource: vec![],
@@ -5055,6 +5229,7 @@ mod tests {
         let hints = AppDefaultServiceHints {
             preselect_service_ids: vec!["svc-1".to_string(), "svc-2".to_string()],
             unmatched_names: vec!["Lark Bot".to_string()],
+            ..AppDefaultServiceHints::default()
         };
         let url = build_consent_url(
             "https://app.example",

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { vi } from "vitest";
@@ -303,24 +303,19 @@ describe("OAuthConsentPage", () => {
     );
   });
 
-  it("submits only the selected requested resources", () => {
+  it("keeps every requested resource backend-authoritative", () => {
     const resourceA = "https://nyx.example/api/v1/proxy/s/openai";
     const resourceB = "https://nyx.example/api/v1/proxy/s/anthropic";
     setSearch({ ...VALID, resource: [resourceA, resourceB] });
 
     render(<OAuthConsentPage />);
 
-    expect(hiddenInput("resource_selection_present")?.value).toBe("true");
     expect(hiddenInputs("resource").map((input) => input.value)).toEqual([
       resourceA,
       resourceB,
     ]);
-
-    fireEvent.click(screen.getByRole("checkbox", { name: resourceB }));
-
-    expect(hiddenInputs("resource").map((input) => input.value)).toEqual([
-      resourceA,
-    ]);
+    expect(screen.queryByRole("checkbox", { name: resourceA })).toBeNull();
+    expect(screen.queryByRole("checkbox", { name: resourceB })).toBeNull();
   });
 
   it("renders an Unknown redirect host for an unparseable redirect_uri", () => {
@@ -486,5 +481,103 @@ describe("OAuthConsentPage", () => {
         "svc-openai",
       ]);
     });
+  });
+
+  it("opens a Lark binding review with the current service grant visible", () => {
+    setSearch({
+      ...VALID,
+      external_subject_platform: "lark",
+      external_subject_external_user_id: "ou-user-1",
+      binding_grant_id: "a".repeat(64),
+      binding_review: "true",
+      current_binding_service_ids: ["svc-openai"],
+    });
+
+    render(<OAuthConsentPage />);
+
+    expect(screen.getByText("Review Lark bot access")).toBeInTheDocument();
+    expect(screen.getByText("My OpenAI")).toBeInTheDocument();
+    expect(screen.getByText("Authorized now")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Update access" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeInTheDocument();
+    expect(hiddenInput("binding_grant_id")?.value).toBe("a".repeat(64));
+    expect(
+      hiddenInputs("allowed_service_ids").map((input) => input.value),
+    ).toEqual(["svc-openai"]);
+  });
+
+  it("keeps app-required services selected and lets the user add optional access", async () => {
+    const user = userEvent.setup();
+    state.userServices.push(
+      {
+        id: "svc-ornn",
+        label: "Ornn Skills",
+        slug: "ornn-api",
+        catalog_service_name: "Ornn",
+        resource_uri: "https://nyx.example/api/v1/proxy/s/ornn-api",
+        auth_method: "bearer",
+        is_active: true,
+        credential_source: { type: "personal" },
+      },
+      {
+        id: "svc-optional",
+        label: "Optional Service",
+        slug: "optional-service",
+        catalog_service_name: null,
+        resource_uri: "https://nyx.example/api/v1/proxy/s/optional-service",
+        auth_method: "bearer",
+        is_active: true,
+        credential_source: { type: "personal" },
+      },
+    );
+    setSearch({
+      ...VALID,
+      external_subject_platform: "lark",
+      external_subject_external_user_id: "ou-user-1",
+      binding_grant_id: "b".repeat(64),
+      binding_review: "true",
+      current_binding_service_ids: ["svc-openai"],
+      required_service_ids: ["svc-openai", "svc-org", "svc-ornn"],
+    });
+
+    render(<OAuthConsentPage />);
+
+    for (const name of [/My OpenAI/i, /Org Service/i, /Ornn Skills/i]) {
+      const required = screen.getByRole("checkbox", { name });
+      expect(required).toBeChecked();
+      expect(required).toBeDisabled();
+    }
+
+    await user.click(
+      screen.getByRole("checkbox", { name: /Optional Service/i }),
+    );
+
+    expect(screen.getByText("New")).toBeInTheDocument();
+    expect(
+      hiddenInputs("allowed_service_ids").map((input) => input.value),
+    ).toEqual(["svc-openai", "svc-org", "svc-ornn", "svc-optional"]);
+  });
+
+  it("lets a binding review remove an optional current service", async () => {
+    const user = userEvent.setup();
+    setSearch({
+      ...VALID,
+      external_subject_platform: "lark",
+      external_subject_external_user_id: "ou-user-1",
+      binding_grant_id: "c".repeat(64),
+      binding_review: "true",
+      current_binding_service_ids: ["svc-org"],
+      required_service_ids: ["svc-openai"],
+    });
+
+    render(<OAuthConsentPage />);
+
+    await user.click(screen.getByRole("checkbox", { name: /Org Service/i }));
+
+    expect(
+      hiddenInputs("allowed_service_ids").map((input) => input.value),
+    ).toEqual(["svc-openai"]);
   });
 });

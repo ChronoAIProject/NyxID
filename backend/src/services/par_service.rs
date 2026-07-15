@@ -27,6 +27,7 @@ pub async fn create_request(
     prompt: Option<&str>,
     resources: &[String],
     external_subject: Option<ExternalSubjectRef>,
+    binding_grant_id: Option<&str>,
 ) -> AppResult<(String, i64)> {
     let request_uri = generate_request_uri();
     let id = hash_request_uri(&request_uri);
@@ -45,6 +46,7 @@ pub async fn create_request(
         nonce: nonce.map(String::from),
         prompt: prompt.map(String::from),
         external_subject,
+        binding_grant_id: binding_grant_id.map(String::from),
         resources: resources.to_vec(),
         expires_at,
         created_at: now,
@@ -96,6 +98,7 @@ mod tests {
             nonce: None,
             prompt: None,
             external_subject: None,
+            binding_grant_id: None,
             resources: Vec::new(),
             expires_at: now - Duration::seconds(1),
             created_at: now - Duration::seconds(PAR_TTL_SECS + 1),
@@ -124,6 +127,7 @@ mod tests {
             Some("nonce-1"),
             None,
             &[],
+            None,
             None,
         )
         .await
@@ -166,6 +170,7 @@ mod tests {
             Some("consent"),
             &["https://nyx.example/api/v1/proxy/s/openai".to_string()],
             Some(external_subject.clone()),
+            Some(&"a".repeat(64)),
         )
         .await
         .expect("create PAR");
@@ -187,6 +192,7 @@ mod tests {
             vec!["https://nyx.example/api/v1/proxy/s/openai".to_string()]
         );
         assert_eq!(record.external_subject, Some(external_subject));
+        assert_eq!(record.binding_grant_id, Some("a".repeat(64)));
     }
 
     #[tokio::test]
@@ -219,6 +225,7 @@ mod tests {
             None,
             &[],
             None,
+            None,
         )
         .await
         .expect("create PAR");
@@ -244,6 +251,7 @@ mod tests {
             None,
             None,
             &[],
+            None,
             None,
         )
         .await
