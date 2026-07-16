@@ -26,6 +26,9 @@ export const LoginDevicePage = lazy(() =>
 export const DashboardPage = lazy(() =>
   import("@/pages/dashboard").then((m) => ({ default: m.DashboardPage })),
 );
+export const AssistantPage = lazy(() =>
+  import("@/pages/assistant").then((m) => ({ default: m.AssistantPage })),
+);
 export const ApiKeyDetailPage = lazy(() =>
   import("@/pages/api-key-detail").then((m) => ({
     default: m.ApiKeyDetailPage,

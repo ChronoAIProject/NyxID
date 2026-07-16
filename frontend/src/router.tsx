@@ -13,9 +13,11 @@ import { AppNotFound } from "@/components/shared/app-not-found";
 import { AuthLayout } from "@/components/layout/auth-layout";
 import { DashboardLayout } from "@/components/layout/dashboard-layout";
 import { BillingRouteGuard } from "@/components/billing-route-guard";
+import { AssistantRouteGuard } from "@/components/assistant-route-guard";
 import { useAuthStore } from "@/stores/auth-store";
 import { hasAdminRead } from "@/types/api";
 import { shouldRedirectFromBilling } from "@/lib/billing-availability";
+import { shouldRedirectFromAssistant } from "@/lib/assistant-availability";
 import { normalizeAdminOAuthClientSearch } from "@/lib/admin-oauth-clients";
 
 import {
@@ -24,6 +26,7 @@ import {
   LoginPage,
   RegisterPage,
   DashboardPage,
+  AssistantPage,
   ApiKeyDetailPage,
   ServicesPage,
   ServiceListPage,
@@ -251,6 +254,72 @@ const sshTerminalRoute = createRoute({
     }
   },
   component: SshTerminalPage,
+});
+
+// Shared by every /assistant* route. Keep this auth mirror aligned with
+// dashboardLayout.beforeLoad below; the Assistant shell intentionally lives
+// outside DashboardLayout.
+const assistantBeforeLoad = async ({
+  location,
+}: {
+  location: { pathname: string; searchStr: string };
+}) => {
+  if (import.meta.env.DEV) {
+    const { isMockMode, getMockUser } = await import("./lib/mock-data");
+    if (isMockMode()) {
+      const store = useAuthStore.getState();
+      if (!store.user) {
+        store.setUser(getMockUser() as import("./types/api").User);
+      }
+    }
+  }
+
+  const { isAuthenticated, isLoading, user } = useAuthStore.getState();
+  if (!isAuthenticated && !isLoading) {
+    const returnPath = `${location.pathname}${location.searchStr}`;
+    const returnTo = `${window.location.origin}${returnPath}`;
+    window.location.assign(`/login?return_to=${encodeURIComponent(returnTo)}`);
+    return;
+  }
+  if (shouldRedirectFromAssistant({ isLoading, user })) {
+    throw redirect({ to: "/dashboard" });
+  }
+};
+
+const assistantRoute = createRoute({
+  path: "/assistant",
+  getParentRoute: () => rootRoute,
+  validateSearch: (search: Record<string, unknown>): { c?: string } => ({
+    ...(typeof search.c === "string" ? { c: search.c } : {}),
+  }),
+  beforeLoad: assistantBeforeLoad,
+  component: () => (
+    <AssistantRouteGuard>
+      <AssistantPage />
+    </AssistantRouteGuard>
+  ),
+});
+
+const assistantPluginsRoute = createRoute({
+  path: "/assistant/plugins",
+  getParentRoute: () => rootRoute,
+  beforeLoad: assistantBeforeLoad,
+  component: () => (
+    <AssistantRouteGuard>
+      <AssistantPage view="plugins" />
+    </AssistantRouteGuard>
+  ),
+});
+
+const assistantApprovalsRoute = createRoute({
+  path: "/assistant/approvals",
+  getParentRoute: () => rootRoute,
+  beforeLoad: assistantBeforeLoad,
+  component: () => (
+    <AssistantRouteGuard>
+      <AssistantPage view="approvals" />
+    </AssistantRouteGuard>
+  ),
 });
 
 const dashboardLayout = createRoute({
@@ -776,6 +845,9 @@ const routeTree = rootRoute.addChildren([
   cliPairRoute,
   loginDeviceRoute,
   sshTerminalRoute,
+  assistantRoute,
+  assistantPluginsRoute,
+  assistantApprovalsRoute,
   designSystemRoute,
   dashboardLayout.addChildren([
     dashboardIndexRoute,
