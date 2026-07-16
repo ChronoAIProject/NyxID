@@ -22,6 +22,7 @@ pub mod device_code;
 pub mod device_onboard_credential;
 pub mod device_pubkey_lockout;
 pub mod downstream_service;
+pub mod feature_flag_override;
 pub mod group;
 pub mod invite_code;
 pub mod mcp_session;

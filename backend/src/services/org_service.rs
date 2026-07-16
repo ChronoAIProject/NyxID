@@ -728,6 +728,7 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
         .await?;
     // Cascade memberships
     crate::services::org_role_scope_service::delete_all_for_org(db, org_user_id).await?;
+    crate::services::feature_flag_service::delete_all_for_org(db, org_user_id).await?;
     db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
         .delete_many(doc! { "org_user_id": org_user_id })
         .await?;

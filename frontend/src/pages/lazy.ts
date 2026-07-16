@@ -197,6 +197,11 @@ export const AdminInviteCodesPage = lazy(() =>
     default: m.AdminInviteCodesPage,
   })),
 );
+export const AdminFeatureFlagsPage = lazy(() =>
+  import("@/pages/admin-feature-flags").then((m) => ({
+    default: m.AdminFeatureFlagsPage,
+  })),
+);
 export const SshTerminalPage = lazy(() =>
   import("@/pages/ssh-terminal").then((m) => ({
     default: m.SshTerminalPage,

@@ -28,6 +28,10 @@ pub struct ProfileConfigResponse {
 #[derive(Debug, Serialize)]
 pub struct UserCapabilitiesResponse {
     pub billing_available: bool,
+    /// Feature-flag keys enabled for this user in the personal (non-org)
+    /// context, resolved server-side (per-user personal > global > code
+    /// default). Org surfaces use `OrgResponse.enabled_features` instead.
+    pub enabled_features: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -92,6 +96,11 @@ pub async fn get_me(
     let platform_role = role_service::resolve_platform_role(&state.db, &user_model).await?;
     let role = platform_role.as_str().to_string();
     let (is_admin, is_operator) = platform_role.legacy_flags();
+    // Personal (non-org) feature-flag resolution — so users with zero orgs
+    // still receive their enabled flags.
+    let enabled_features =
+        crate::services::feature_flag_service::resolve_personal_features(&state.db, &user_id)
+            .await?;
     Ok(Json(UserProfileResponse {
         id: user_model.id,
         email: user_model.email,
@@ -117,6 +126,7 @@ pub async fn get_me(
         },
         capabilities: UserCapabilitiesResponse {
             billing_available: state.billing.billing_enabled() && state.billing.lago_configured(),
+            enabled_features,
         },
     }))
 }
@@ -393,6 +403,7 @@ mod tests {
             },
             capabilities: UserCapabilitiesResponse {
                 billing_available: true,
+                enabled_features: vec![],
             },
         };
         let json = serde_json::to_value(&resp).unwrap();
@@ -440,6 +451,7 @@ mod tests {
             },
             capabilities: UserCapabilitiesResponse {
                 billing_available: false,
+                enabled_features: vec![],
             },
         };
         let json = serde_json::to_value(&resp).unwrap();
@@ -621,6 +633,7 @@ mod tests {
             },
             capabilities: UserCapabilitiesResponse {
                 billing_available: false,
+                enabled_features: vec![],
             },
         };
         let json = serde_json::to_value(&resp).unwrap();
