@@ -337,6 +337,15 @@ pub fn build_router(
 
     let admin_routes = Router::new()
         .route(
+            "/feature-flags",
+            get(handlers::admin_feature_flags::list_feature_flags),
+        )
+        .route(
+            "/feature-flags/{flag_key}",
+            put(handlers::admin_feature_flags::set_feature_flag)
+                .delete(handlers::admin_feature_flags::clear_feature_flag),
+        )
+        .route(
             "/users",
             get(handlers::admin::list_users).post(handlers::admin::create_user),
         )
