@@ -2892,7 +2892,7 @@ fn websocket_realtime_usage_enabled(
     service_slug: &str,
     metered: &crate::services::billing::MeteredProxyContext,
 ) -> bool {
-    service_slug.starts_with("llm-")
+    service_slug == "llm-openai"
         && metered
             .route
             .as_ref()
@@ -4652,13 +4652,10 @@ mod tests {
     }
 
     #[test]
-    fn websocket_realtime_usage_requires_llm_service_and_trusted_resale_key() {
+    fn websocket_realtime_usage_requires_openai_protocol_and_trusted_resale_key() {
         let trusted = token_resale_metered_context(CredentialClass::NyxidManagedMaster);
         assert!(websocket_realtime_usage_enabled("llm-openai", &trusted));
-        assert!(!websocket_realtime_usage_enabled(
-            "custom-service",
-            &trusted
-        ));
+        assert!(!websocket_realtime_usage_enabled("llm-anthropic", &trusted));
 
         let user_owned = token_resale_metered_context(CredentialClass::UserOwned);
         assert!(!websocket_realtime_usage_enabled("llm-openai", &user_owned));
@@ -4699,12 +4696,19 @@ mod tests {
     #[test]
     fn websocket_resale_falls_back_for_non_realtime_protocol() {
         let metered = token_resale_metered_context(CredentialClass::NyxidManagedMaster);
+        let collect_realtime_llm_usage =
+            websocket_realtime_usage_enabled("llm-anthropic", &metered);
+        let realtime_llm_usage =
+            llm_usage_service::RealtimeLlmUsageCollector::new(collect_realtime_llm_usage)
+                .finalize();
         let stats = ConnectionUsageStats {
             bytes_in: 40,
             bytes_out: 60,
+            realtime_llm_usage,
             ..Default::default()
         };
 
+        assert!(!stats.realtime_llm_usage.collection_enabled);
         let resale = websocket_resale_usage(&metered, &stats).expect("resale usage");
         assert_eq!(resale.quantity, 25);
     }
