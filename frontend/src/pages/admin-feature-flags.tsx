@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
   Select,
   SelectContent,
@@ -15,16 +16,12 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
-
-/**
- * PROTOTYPE — platform-admin, flag-centric feature-flag management.
- *
- * This is the proposed single home for feature flags (see design discussion):
- * flags are configured here across every scope of the resolution ladder —
- * Global → per-org → per-user — instead of under a single org's page. Data is
- * local mock state so the layout/flow can be reviewed before the backend
- * (global + org-less scopes, /admin endpoints) is built.
- */
+import { useAdminUsers } from "@/hooks/use-admin";
+import {
+  useAdminFeatureFlags,
+  useClearAdminFeatureFlag,
+  useSetAdminFeatureFlag,
+} from "@/hooks/use-admin-feature-flags";
 
 type ScopeState = "inherit" | "enabled" | "disabled";
 type FlagKind = "experiment" | "entitlement" | "ops";
@@ -44,36 +41,41 @@ interface FlagRow {
   users: Assignment[];
 }
 
-// ── Mock catalogs (prototype only) ──────────────────────────────────────────
-const ALL_ORGS = [
-  { id: "org-acme", label: "Acme" },
-  { id: "org-globex", label: "Globex" },
-  { id: "org-initech", label: "Initech" },
-  { id: "org-umbrella", label: "Umbrella" },
-  { id: "org-wonka", label: "Wonka Industries" },
-] as const;
-const ALL_USERS = [
-  { id: "u-alice", label: "alice@acme.io" },
-  { id: "u-bob", label: "bob@globex.com" },
-  { id: "u-carol", label: "carol@initech.dev" },
-  { id: "u-dave", label: "dave@personal.me" },
-] as const;
-
-// No flags loaded yet — the page renders its empty state. Populate this list
-// (or wire the backend) to visualize the flag-centric layout.
-const INITIAL_FLAGS: FlagRow[] = [];
-
 type ScopeType = "global" | "org" | "user";
 const draftKey = (flag: string, type: ScopeType, id: string) =>
   `${flag}\u001f${type}\u001f${id}`;
 
 export function AdminFeatureFlagsPage() {
-  const [flags, setFlags] = useState<FlagRow[]>(() =>
-    structuredCloneFlags(INITIAL_FLAGS),
-  );
+  const { data, isLoading, error } = useAdminFeatureFlags();
+  const { data: usersData, isLoading: usersLoading } = useAdminUsers(1, 100);
+  const setOverride = useSetAdminFeatureFlag();
+  const clearOverride = useClearAdminFeatureFlag();
   const [drafts, setDrafts] = useState<Record<string, ScopeState>>({});
   const [search, setSearch] = useState("");
   const [openKeys, setOpenKeys] = useState<string[]>([]);
+  const userOptions = (usersData?.users ?? []).map((user) => ({
+    id: user.id,
+    label: user.email,
+  }));
+  const userLabels = new Map(userOptions.map((user) => [user.id, user.label]));
+  const flags: FlagRow[] = (data?.flags ?? []).map((flag) => ({
+    key: flag.key,
+    description: flag.description,
+    kind: flag.key.startsWith("experimental:") ? "experiment" : "ops",
+    defaultEnabled: flag.default_enabled,
+    global:
+      flag.global_override == null
+        ? "inherit"
+        : flag.global_override
+          ? "enabled"
+          : "disabled",
+    orgs: [],
+    users: flag.user_overrides.map((override) => ({
+      id: override.user_id,
+      label: userLabels.get(override.user_id) ?? override.user_id,
+      state: override.enabled ? "enabled" : "disabled",
+    })),
+  }));
 
   const flagByKey = (key: string) => flags.find((f) => f.key === key);
   const persisted = (flag: string, type: ScopeType, id: string): ScopeState => {
@@ -94,34 +96,34 @@ export function AdminFeatureFlagsPage() {
   });
   const pendingCount = pending.length;
 
-  function applyChanges() {
-    setFlags((prev) => {
-      const next = structuredCloneFlags(prev);
-      for (const [k, state] of pending) {
-        const [flag, type, id] = k.split("\u001f");
-        const f = next.find((x) => x.key === flag);
-        if (!f) continue;
-        if (type === "global") {
-          f.global = state;
-        } else {
-          const list = type === "org" ? f.orgs : f.users;
-          const existing = list.find((a) => a.id === id);
-          if (existing) {
-            existing.state = state;
+  async function applyChanges() {
+    try {
+      await Promise.all(
+        pending.map(async ([key, scopeState]) => {
+          const [flagKey = "", type = "global", id = ""] = key.split("\u001f");
+          const targetKind = type === "user" ? "user" : "global";
+          const targetKey = targetKind === "user" ? id : null;
+          if (scopeState === "inherit") {
+            await clearOverride.mutateAsync({ flagKey, targetKind, targetKey });
           } else {
-            const cat = (type === "org" ? ALL_ORGS : ALL_USERS).find(
-              (c) => c.id === id,
-            );
-            if (cat) list.push({ id: cat.id, label: cat.label, state });
+            await setOverride.mutateAsync({
+              flagKey,
+              body: {
+                target_kind: targetKind,
+                target_key: targetKey,
+                enabled: scopeState === "enabled",
+              },
+            });
           }
-        }
-      }
-      return next;
-    });
-    setDrafts({});
-    toast.success(
-      `${pendingCount} change${pendingCount === 1 ? "" : "s"} applied (prototype)`,
-    );
+        }),
+      );
+      setDrafts({});
+      toast.success(
+        `${pendingCount} change${pendingCount === 1 ? "" : "s"} applied`,
+      );
+    } catch {
+      toast.error("Failed to apply feature flag changes");
+    }
   }
 
   const q = search.trim().toLowerCase();
@@ -176,7 +178,18 @@ export function AdminFeatureFlagsPage() {
         />
       </div>
 
-      {flags.length === 0 ? (
+      {isLoading ? (
+        <div className="space-y-2" aria-label="Loading feature flags">
+          {Array.from({ length: 3 }).map((_, index) => (
+            <Skeleton key={index} className="h-24 w-full" />
+          ))}
+        </div>
+      ) : error ? (
+        <FlagsEmptyState
+          title="Failed to load feature flags"
+          subtitle="Please try again later."
+        />
+      ) : flags.length === 0 ? (
         <FlagsEmptyState
           title="No feature flags"
           subtitle="Flags are declared in code. None have been defined yet."
@@ -203,6 +216,8 @@ export function AdminFeatureFlagsPage() {
               stage={(type, id, s) => stage(flag.key, type, id, s)}
               stagedUsers={stagedIds(drafts, flag.key, "user")}
               stagedOrgs={stagedIds(drafts, flag.key, "org")}
+              userOptions={userOptions}
+              usersLoading={usersLoading}
             />
           ))}
         </div>
@@ -221,6 +236,8 @@ function FlagCard({
   stage,
   stagedOrgs,
   stagedUsers,
+  userOptions,
+  usersLoading,
 }: {
   readonly flag: FlagRow;
   readonly open: boolean;
@@ -231,6 +248,8 @@ function FlagCard({
   readonly stage: (type: ScopeType, id: string, s: ScopeState) => void;
   readonly stagedOrgs: readonly string[];
   readonly stagedUsers: readonly string[];
+  readonly userOptions: readonly { id: string; label: string }[];
+  readonly usersLoading: boolean;
 }) {
   const [addOrg, setAddOrg] = useState("");
   const [addUser, setAddUser] = useState("");
@@ -238,11 +257,11 @@ function FlagCard({
   const orgIds = uniq([...flag.orgs.map((o) => o.id), ...stagedOrgs]);
   const userIds = uniq([...flag.users.map((u) => u.id), ...stagedUsers]);
   const labelFor = (type: ScopeType, id: string) =>
-    (type === "org" ? ALL_ORGS : ALL_USERS).find((c) => c.id === id)?.label ??
-    id;
+    type === "user"
+      ? userOptions.find((candidate) => candidate.id === id)?.label ?? id
+      : id;
 
-  const addableOrgs = ALL_ORGS.filter((o) => !orgIds.includes(o.id));
-  const addableUsers = ALL_USERS.filter((u) => !userIds.includes(u.id));
+  const addableUsers = userOptions.filter((user) => !userIds.includes(user.id));
 
   // Collapsed summary pills: Global + configured orgs/users (non-inherit).
   const pills: { id: string; label: string; state: ScopeState; pending: boolean }[] =
@@ -344,16 +363,10 @@ function FlagCard({
           <Group label="By organization">
             <AddPicker
               value={addOrg}
-              placeholder={
-                addableOrgs.length === 0
-                  ? "All organizations added"
-                  : "Add organization…"
-              }
-              options={addableOrgs}
-              onPick={(id) => {
-                setAddOrg("");
-                stage("org", id, "enabled");
-              }}
+              placeholder="Manage overrides from the organization page"
+              options={[]}
+              onPick={setAddOrg}
+              disabledReason="Organization-scoped overrides are managed from each organization page."
             />
             {orgIds.map((id) => (
               <ScopeRow
@@ -370,7 +383,9 @@ function FlagCard({
             <AddPicker
               value={addUser}
               placeholder={
-                addableUsers.length === 0
+                usersLoading
+                  ? "Loading users…"
+                  : addableUsers.length === 0
                   ? "All users added"
                   : "Add user…"
               }
@@ -438,18 +453,23 @@ function AddPicker({
   placeholder,
   options,
   onPick,
+  disabledReason,
 }: {
   readonly value: string;
   readonly placeholder: string;
   readonly options: readonly { id: string; label: string }[];
   readonly onPick: (id: string) => void;
+  readonly disabledReason?: string;
 }) {
   return (
-    <div className="border-b border-border/40 px-3 py-2 last:border-b-0">
+    <div
+      className="border-b border-border/40 px-3 py-2 last:border-b-0"
+      title={disabledReason}
+    >
       <Select
         value={value}
         onValueChange={onPick}
-        disabled={options.length === 0}
+        disabled={Boolean(disabledReason) || options.length === 0}
       >
         <SelectTrigger className="h-8 w-full text-[12px]">
           <SelectValue placeholder={placeholder} />
@@ -533,11 +553,4 @@ function stagedIds(
     .map((k) => k.split("\u001f"))
     .filter((p) => p[0] === flag && p[1] === type && p[2])
     .map((p) => p[2] as string);
-}
-function structuredCloneFlags(rows: FlagRow[]): FlagRow[] {
-  return rows.map((f) => ({
-    ...f,
-    orgs: f.orgs.map((o) => ({ ...o })),
-    users: f.users.map((u) => ({ ...u })),
-  }));
 }
