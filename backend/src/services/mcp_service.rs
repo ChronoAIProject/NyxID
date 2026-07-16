@@ -54,6 +54,28 @@ impl McpToolSource {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct McpBillingAttribution {
+    billing_owner_id: String,
+    actor_user_id: String,
+}
+
+async fn resolve_mcp_billing_attribution(
+    billing: &crate::services::billing::BillingService,
+    actor_user_id: &str,
+    effective_owner_id: Option<&str>,
+) -> AppResult<McpBillingAttribution> {
+    let billing_owner = billing
+        .owner_resolver()
+        .resolve(actor_user_id, effective_owner_id)
+        .await?;
+
+    Ok(McpBillingAttribution {
+        billing_owner_id: billing_owner.owner_id,
+        actor_user_id: actor_user_id.to_string(),
+    })
+}
+
 /// Agent/scope context carried into [`execute_tool`].
 ///
 /// Mirrors the agent-isolation fields already honored by the REST proxy
@@ -2394,7 +2416,7 @@ pub async fn execute_tool(
 
     // Resolve the proxy target and node routing from the fresh resolver result
     // (not cached loader flags -- credential state may have changed).
-    let (target, node_route, has_server_credential) = match &service.source {
+    let (target, node_route, has_server_credential, effective_owner_id) = match &service.source {
         McpToolSource::UserManaged {
             user_service_id, ..
         } => {
@@ -2493,7 +2515,13 @@ pub async fn execute_tool(
             // never bypasses the node for user-managed node-routed tools.
             // (Sixth-round Codex review P1.)
             let has_cred_for_fallback = has_cred && nr.is_none();
-            (resolution.target, nr, has_cred_for_fallback)
+            let effective_owner_id = effective_owner.to_string();
+            (
+                resolution.target,
+                nr,
+                has_cred_for_fallback,
+                Some(effective_owner_id),
+            )
         }
         McpToolSource::Platform {
             downstream_service_id,
@@ -2554,7 +2582,7 @@ pub async fn execute_tool(
             // fallback for binding-based routes. Keep the same semantic
             // here: a transient node failure on a platform service can
             // fall back to direct HTTP if a server credential exists.
-            (t, nr, has_cred)
+            (t, nr, has_cred, None)
         }
     };
 
@@ -2694,7 +2722,9 @@ pub async fn execute_tool(
     } else {
         build_downstream_request_headers(endpoint, body.is_some())?
     };
-    let billing_owner = billing.owner_resolver().resolve(user_id, None).await?;
+    let billing_attribution =
+        resolve_mcp_billing_attribution(billing.as_ref(), user_id, effective_owner_id.as_deref())
+            .await?;
     let node_intent = match &node_route {
         Some(route) if !route.fallback_node_ids.is_empty() => {
             crate::services::billing::NodeIntent::NodeWithFallback
@@ -2711,8 +2741,8 @@ pub async fn execute_tool(
     let catalog_service_id = Some(target.service.id.clone());
     let billing_ctx = crate::services::billing::BillingRouteContext::new(
         uuid::Uuid::new_v4().to_string(),
-        billing_owner.owner_id,
-        user_id.to_string(),
+        billing_attribution.billing_owner_id,
+        billing_attribution.actor_user_id,
         exec_ctx.api_key_id.map(str::to_string),
         user_service_id,
         catalog_service_id,
@@ -5207,6 +5237,63 @@ mod tests {
             has_server_credential: true,
         };
         assert!(user.is_user_service());
+    }
+
+    #[tokio::test]
+    async fn mcp_personal_billing_attributes_owner_and_actor_to_user() {
+        let Some(db) = crate::test_utils::connect_test_database("mcp_billing_personal").await
+        else {
+            return;
+        };
+        let billing = crate::services::billing::BillingService::new(
+            db,
+            std::sync::Arc::new(crate::test_utils::test_app_config()),
+        );
+
+        let attribution = resolve_mcp_billing_attribution(&billing, "actor", Some("actor"))
+            .await
+            .expect("personal MCP billing attribution");
+
+        assert_eq!(attribution.billing_owner_id, "actor");
+        assert_eq!(attribution.actor_user_id, "actor");
+    }
+
+    #[tokio::test]
+    async fn mcp_org_billing_attributes_owner_to_org_and_actor_to_member() {
+        use crate::models::org_membership::{COLLECTION_NAME as ORG_MEMBERSHIPS, OrgRole};
+        use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+
+        let Some(db) = crate::test_utils::connect_test_database("mcp_billing_org").await else {
+            return;
+        };
+        let actor_user_id = uuid::Uuid::new_v4().to_string();
+        let org_user_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(crate::test_utils::test_user(&org_user_id, UserType::Org))
+            .await
+            .expect("insert organization owner");
+        db.collection::<crate::models::org_membership::OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(crate::test_utils::test_membership(
+                &org_user_id,
+                &actor_user_id,
+                OrgRole::Member,
+                None,
+            ))
+            .await
+            .expect("insert organization membership");
+        let billing = crate::services::billing::BillingService::new(
+            db,
+            std::sync::Arc::new(crate::test_utils::test_app_config()),
+        );
+
+        let attribution =
+            resolve_mcp_billing_attribution(&billing, &actor_user_id, Some(&org_user_id))
+                .await
+                .expect("organization MCP billing attribution");
+
+        assert_eq!(attribution.billing_owner_id, org_user_id);
+        assert_eq!(attribution.actor_user_id, actor_user_id);
+        assert_ne!(attribution.billing_owner_id, attribution.actor_user_id);
     }
 
     mod public_tools {
