@@ -213,6 +213,7 @@ const ALLOWED_WS_FORWARD_HEADERS: &[&str] = &[
 /// Pre-resolved proxy target from the new UserService path.
 struct PreResolved {
     target: proxy_service::ProxyTarget,
+    catalog_service_slug: Option<String>,
     node_id: Option<String>,
     /// The UserService ID for API key scope checks.
     user_service_id: Option<String>,
@@ -583,6 +584,7 @@ async fn proxy_request_inner(
                 request,
                 Some(PreResolved {
                     target: resolved.target,
+                    catalog_service_slug: resolved.catalog_service_slug,
                     node_id: resolved.node_id,
                     user_service_id: Some(resolved.user_service_id),
                     has_server_credential: resolved.has_server_credential,
@@ -639,6 +641,7 @@ async fn proxy_request_inner(
             request,
             Some(PreResolved {
                 target: resolved.target,
+                catalog_service_slug: resolved.catalog_service_slug,
                 node_id: resolved.node_id,
                 user_service_id: Some(resolved.user_service_id),
                 has_server_credential: resolved.has_server_credential,
@@ -794,6 +797,7 @@ async fn proxy_request_by_slug_inner(
                 request,
                 Some(PreResolved {
                     target: resolved.target,
+                    catalog_service_slug: resolved.catalog_service_slug,
                     node_id: resolved.node_id,
                     user_service_id: Some(resolved.user_service_id),
                     has_server_credential: resolved.has_server_credential,
@@ -850,6 +854,7 @@ async fn proxy_request_by_slug_inner(
             request,
             Some(PreResolved {
                 target: resolved.target,
+                catalog_service_slug: resolved.catalog_service_slug,
                 node_id: resolved.node_id,
                 user_service_id: Some(resolved.user_service_id),
                 has_server_credential: resolved.has_server_credential,
@@ -1244,6 +1249,7 @@ async fn execute_proxy_inner(
         has_server_credential,
         resolved_user_service_id,
         node_routing_required,
+        catalog_service_slug,
     ) = if let Some(mut pre) = pre_resolved {
         effective_owner_for_approval = Some(pre.effective_owner_id.clone());
         // New UserService path: target already resolved.
@@ -1362,12 +1368,14 @@ async fn execute_proxy_inner(
         }
 
         let required = pre.node_id.is_some();
+        let catalog_service_slug = pre.catalog_service_slug;
         (
             node_route,
             pre.target,
             pre.has_server_credential,
             pre.user_service_id,
             required,
+            catalog_service_slug,
         )
     } else {
         // Old DownstreamService path -- scoped keys must use configured
@@ -1393,8 +1401,14 @@ async fn execute_proxy_inner(
             return Err(err);
         }
 
-        let resolved =
-            resolve_via_downstream_service(state, auth_user, &user_id_str, service_id).await?;
+        let (
+            node_route,
+            target,
+            has_server_credential,
+            resolved_user_service_id,
+            node_routing_required,
+        ) = resolve_via_downstream_service(state, auth_user, &user_id_str, service_id).await?;
+        let catalog_service_slug = Some(target.service.slug.clone());
         // Legacy path resolution succeeded — this is still personal
         // routing (caller's own DownstreamService + provider token), so
         // attribute it the same way the UserService path is attributed.
@@ -1404,7 +1418,14 @@ async fn execute_proxy_inner(
         // that failed before a target was resolved (disconnected service,
         // missing credential, etc.). See ChronoAIProject/NyxID#423.
         audit_personal_routing(state, auth_user, None, service_id, None);
-        resolved
+        (
+            node_route,
+            target,
+            has_server_credential,
+            resolved_user_service_id,
+            node_routing_required,
+            catalog_service_slug,
+        )
     };
 
     // Record the resolved service slug so the outer wrapper can attach it
@@ -1794,6 +1815,8 @@ async fn execute_proxy_inner(
     }
 
     let metered = state.billing.open(&billing_ctx).await?;
+    let collect_realtime_llm_usage =
+        websocket_realtime_usage_enabled(catalog_service_slug.as_deref(), &metered);
 
     // === WebSocket Passthrough ===
     // If this is a WS upgrade request, branch into the WS path now that
@@ -1832,6 +1855,7 @@ async fn execute_proxy_inner(
                 &ws_forward_headers,
                 service_owner_for_approval,
                 &proxy_actor_user_id,
+                collect_realtime_llm_usage,
                 metered.clone(),
             )
             .await;
@@ -1850,6 +1874,7 @@ async fn execute_proxy_inner(
             query.as_deref(),
             &ws_forward_headers,
             caller_token.as_deref(),
+            collect_realtime_llm_usage,
             metered.clone(),
         )
         .await;
@@ -2889,10 +2914,10 @@ fn llm_platform_usage(
 }
 
 fn websocket_realtime_usage_enabled(
-    service_slug: &str,
+    catalog_service_slug: Option<&str>,
     metered: &crate::services::billing::MeteredProxyContext,
 ) -> bool {
-    service_slug == "llm-openai"
+    catalog_service_slug == Some("llm-openai")
         && metered
             .route
             .as_ref()
@@ -3781,6 +3806,7 @@ async fn handle_ws_passthrough(
     query: Option<&str>,
     forward_headers: &[(String, String)],
     caller_token: Option<&str>,
+    collect_realtime_llm_usage: bool,
     metered: crate::services::billing::MeteredProxyContext,
 ) -> AppResult<Response> {
     let downstream_url = build_downstream_ws_url(target, path, query, delegated)?;
@@ -3838,8 +3864,6 @@ async fn handle_ws_passthrough(
     let db = state.db.clone();
     let billing = state.billing.clone();
     let metered_for_settle = metered.clone();
-    let collect_realtime_llm_usage =
-        websocket_realtime_usage_enabled(&target.service.slug, &metered);
     let sid = service_id_owned.clone();
     let ws_frame_injections = target.ws_frame_injections.clone();
     let credential = target.credential.clone();
@@ -3916,6 +3940,7 @@ async fn handle_ws_passthrough_via_node(
     forward_headers: &[(String, String)],
     service_owner_user_id: &str,
     proxy_actor_user_id: &str,
+    collect_realtime_llm_usage: bool,
     metered: crate::services::billing::MeteredProxyContext,
 ) -> AppResult<Response> {
     use crate::services::node_ws_manager::NodeWsProxyRequest;
@@ -4122,8 +4147,6 @@ async fn handle_ws_passthrough_via_node(
     let ws_manager = state.node_ws_manager.clone();
     let billing = state.billing.clone();
     let metered_for_settle = metered.clone();
-    let collect_realtime_llm_usage =
-        websocket_realtime_usage_enabled(&target.service.slug, &metered);
     let sid = service_id_owned.clone();
     let sess_id = session_id.clone();
     let owner_for_audit = service_owner_user_id_owned.clone();
@@ -4652,13 +4675,23 @@ mod tests {
     }
 
     #[test]
-    fn websocket_realtime_usage_requires_openai_protocol_and_trusted_resale_key() {
+    fn websocket_realtime_usage_requires_catalog_protocol_and_trusted_resale_key() {
         let trusted = token_resale_metered_context(CredentialClass::NyxidManagedMaster);
-        assert!(websocket_realtime_usage_enabled("llm-openai", &trusted));
-        assert!(!websocket_realtime_usage_enabled("llm-anthropic", &trusted));
+        assert!(websocket_realtime_usage_enabled(
+            Some("llm-openai"),
+            &trusted
+        ));
+        assert!(!websocket_realtime_usage_enabled(
+            Some("llm-anthropic"),
+            &trusted
+        ));
+        assert!(!websocket_realtime_usage_enabled(None, &trusted));
 
         let user_owned = token_resale_metered_context(CredentialClass::UserOwned);
-        assert!(!websocket_realtime_usage_enabled("llm-openai", &user_owned));
+        assert!(!websocket_realtime_usage_enabled(
+            Some("llm-openai"),
+            &user_owned
+        ));
     }
 
     #[test]
@@ -4697,7 +4730,7 @@ mod tests {
     fn websocket_resale_falls_back_for_non_realtime_protocol() {
         let metered = token_resale_metered_context(CredentialClass::NyxidManagedMaster);
         let collect_realtime_llm_usage =
-            websocket_realtime_usage_enabled("llm-anthropic", &metered);
+            websocket_realtime_usage_enabled(Some("llm-anthropic"), &metered);
         let realtime_llm_usage =
             llm_usage_service::RealtimeLlmUsageCollector::new(collect_realtime_llm_usage)
                 .finalize();

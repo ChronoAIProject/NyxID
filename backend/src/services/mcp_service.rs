@@ -5290,6 +5290,7 @@ mod tests {
                 ws_frame_injections: Vec::new(),
                 connection_id: None,
             },
+            catalog_service_slug: None,
             node_id: None,
             user_service_id: "user-service".to_string(),
             has_server_credential: false,
