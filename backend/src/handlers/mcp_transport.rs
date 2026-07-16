@@ -286,6 +286,16 @@ impl McpAuthContext {
             .unwrap_or_else(|| self.user_id.clone())
     }
 
+    fn billing_principal_user_id(&self) -> &str {
+        if self.auth_method == AuthMethod::ServiceAccount {
+            self.approval_owner_user_id
+                .as_deref()
+                .unwrap_or(&self.user_id)
+        } else {
+            &self.user_id
+        }
+    }
+
     /// Whether this auth is stateless for MCP session purposes: it must
     /// re-present its credential on every request rather than relying on a
     /// persisted MCP session. API keys are stateless, and so are relay tokens
@@ -1277,6 +1287,7 @@ async fn handle_tools_call(
         &state.node_ws_manager,
         &state.billing,
         &auth.user_id,
+        auth.billing_principal_user_id(),
         service,
         endpoint,
         &arguments,
@@ -1630,6 +1641,7 @@ async fn handle_meta_call_tool(
         &state.node_ws_manager,
         &state.billing,
         &auth.user_id,
+        auth.billing_principal_user_id(),
         service,
         endpoint,
         &inner_args,
@@ -2821,6 +2833,7 @@ mod tests {
 
         assert_eq!(target.service_id, "svc-a");
         assert_eq!(target.service_owner_user_id, "owner-1");
+        assert_eq!(auth.billing_principal_user_id(), "owner-1");
     }
 
     #[test]

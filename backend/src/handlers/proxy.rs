@@ -1440,13 +1440,13 @@ async fn execute_proxy_inner(
     // here would make `resolve_owner_access` deny a service account billing
     // its own owner and abort an otherwise-authorized proxy request.
     let billing_resolution_user_id = auth_user.proxy_resolution_user_id();
+    let billing_resource_owner_id = effective_owner_for_approval
+        .as_deref()
+        .unwrap_or(&billing_resolution_user_id);
     let billing_owner = state
         .billing
         .owner_resolver()
-        .resolve(
-            &billing_resolution_user_id,
-            effective_owner_for_approval.as_deref(),
-        )
+        .resolve_for_resource(&billing_resolution_user_id, billing_resource_owner_id)
         .await?;
     let billing_request_id = uuid::Uuid::new_v4().to_string();
     let credential_class = final_credential_class(

@@ -263,7 +263,7 @@ pub async fn get_wallet(
     let owner = state
         .billing
         .owner_resolver()
-        .resolve(&auth_user.user_id.to_string(), None)
+        .resolve_for_wallet_management(&auth_user.user_id.to_string(), None)
         .await?;
     if let Some(wallet) = state.billing.get_wallet(&owner.owner_id).await? {
         return Ok(Json(BillingWalletResponse::from_wallet(wallet, false)));
@@ -295,7 +295,7 @@ pub async fn provision_wallet(
     let owner = state
         .billing
         .owner_resolver()
-        .resolve(&actor_id, body.owner_id.as_deref())
+        .resolve_for_wallet_management(&actor_id, body.owner_id.as_deref())
         .await?;
     let provisioned = state.billing.ensure_wallet(&owner.owner_id).await?;
 
@@ -324,7 +324,7 @@ pub async fn create_topup(
     let owner = state
         .billing
         .owner_resolver()
-        .resolve(&actor_id, body.owner_id.as_deref())
+        .resolve_for_wallet_management(&actor_id, body.owner_id.as_deref())
         .await?;
     let checkout = state
         .billing

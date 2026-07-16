@@ -25,7 +25,6 @@ use crate::services::node_ws_manager::NodeWebTerminalAuthMode;
 use crate::services::{audit_service, node_routing_service, node_service, ssh_service};
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
-use super::services_helpers::fetch_service;
 use super::ssh_tunnel::authorize_ssh_access;
 
 #[derive(Debug, Deserialize)]
@@ -70,28 +69,8 @@ pub async fn ssh_web_terminal(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> AppResult<Response> {
-    authorize_ssh_access(&state, &auth_user, &service_id).await?;
+    let auth_context = authorize_ssh_access(&state, &auth_user, &service_id).await?;
     let ssh_svc = ssh_service::get_ssh_service(&state.db, &service_id).await?;
-    // Resolve the catalog slug once up front so telemetry reports the
-    // service by slug rather than by UUID path param. Best-effort: web
-    // terminal availability must not fail on a telemetry-only lookup.
-    let service_row = fetch_service(&state, &service_id).await.ok();
-    let service_slug = service_row
-        .as_ref()
-        .map(|s| s.slug.clone())
-        .unwrap_or_else(|| service_id.clone());
-    let service_owner_id = service_row
-        .as_ref()
-        .map(|s| s.created_by.clone())
-        .unwrap_or_else(|| auth_user.user_id.to_string());
-    let auth_context = ssh_service::resolve_ssh_auth_context(
-        &state.db,
-        &auth_user.user_id.to_string(),
-        &service_id,
-        &service_slug,
-    )
-    .await?;
-
     if auth_context.mode == SshAuthMode::ProxyOnly {
         return Err(AppError::SshAuthModeUnsupportedForOperation(
             "web terminal is not supported for proxy-only SSH services".to_string(),
@@ -158,7 +137,7 @@ pub async fn ssh_web_terminal(
                 session_guard,
                 client_meta,
                 tele,
-                service_owner_id,
+                auth_context.owner_user_id,
             )
             .await;
         })
@@ -180,10 +159,11 @@ async fn handle_web_terminal(
     session_guard: ssh_service::SshSessionGuard,
     client_meta: (Option<String>, Option<String>),
     tele: TelemetryContext,
-    service_owner_id: String,
+    resource_owner_id: String,
 ) {
     let _ = &session_guard;
     let user_id = auth_user.user_id.to_string();
+    let billing_resolution_user_id = auth_user.proxy_resolution_user_id();
     let session_id = uuid::Uuid::new_v4().to_string();
     let started_at = Instant::now();
     let (ip_address, user_agent) = client_meta;
@@ -243,7 +223,8 @@ async fn handle_web_terminal(
             node_route,
             ephemeral,
             tele,
-            service_owner_id,
+            resource_owner_id,
+            billing_resolution_user_id,
         )
         .await;
     } else {
@@ -289,7 +270,8 @@ async fn handle_node_web_terminal(
     node_route: node_routing_service::NodeRoute,
     ephemeral: Option<EphemeralSshCredentials>,
     tele: TelemetryContext,
-    service_owner_id: String,
+    resource_owner_id: String,
+    billing_resolution_user_id: String,
 ) {
     let all_node_ids: Vec<&str> = std::iter::once(node_route.node_id.as_str())
         .chain(node_route.fallback_node_ids.iter().map(|id| id.as_str()))
@@ -297,7 +279,7 @@ async fn handle_node_web_terminal(
     let billing_owner = match state
         .billing
         .owner_resolver()
-        .resolve(&user_id, Some(&service_owner_id))
+        .resolve_for_resource(&billing_resolution_user_id, &resource_owner_id)
         .await
     {
         Ok(owner) => owner,

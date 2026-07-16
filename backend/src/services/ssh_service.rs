@@ -21,9 +21,11 @@ pub struct SshSessionManager {
     max_sessions_per_user: usize,
 }
 
+#[derive(Debug)]
 pub struct ResolvedSshAuthContext {
     pub mode: SshAuthMode,
     pub service_slug: String,
+    pub owner_user_id: String,
 }
 
 impl SshSessionManager {
@@ -109,44 +111,31 @@ pub async fn get_ssh_service(
     ensure_ssh_service(&service).cloned()
 }
 
-pub async fn resolve_ssh_auth_context(
+pub async fn resolve_ssh_auth_context_for_owner(
     db: &mongodb::Database,
-    actor_user_id: &str,
-    service_id: &str,
-    catalog_slug: &str,
+    owner_user_id: &str,
+    service: &DownstreamService,
 ) -> AppResult<ResolvedSshAuthContext> {
-    let effective_owner = crate::services::proxy_service::find_effective_service_owner(
-        db,
-        actor_user_id,
-        None,
-        Some(service_id),
-    )
-    .await?;
-    let owner_user_id = effective_owner.as_deref().unwrap_or(actor_user_id);
-
     if let Some(user_service) = crate::services::user_service_service::find_by_catalog_service_id(
         db,
         owner_user_id,
-        service_id,
+        &service.id,
     )
     .await?
     {
         return Ok(ResolvedSshAuthContext {
             mode: user_service.ssh_auth_mode,
             service_slug: user_service.slug,
+            owner_user_id: user_service.user_id,
         });
     }
 
-    let service = db
-        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-        .find_one(doc! { "_id": service_id })
-        .await?
-        .ok_or_else(|| AppError::NotFound("SSH service not found".to_string()))?;
-    let ssh = ensure_ssh_service(&service)?;
+    let ssh = ensure_ssh_service(service)?;
 
     Ok(ResolvedSshAuthContext {
         mode: ssh.ssh_auth_mode,
-        service_slug: catalog_slug.to_string(),
+        service_slug: service.slug.clone(),
+        owner_user_id: owner_user_id.to_string(),
     })
 }
 
@@ -456,14 +445,135 @@ pub async fn issue_certificate(
 #[cfg(test)]
 mod tests {
     use super::{
-        SshConfigInput, SshSessionManager, build_ssh_config, issue_certificate, target_base_url,
-        validate_certificate_settings, validate_principal, validate_ssh_target_syntax,
+        SshConfigInput, SshSessionManager, build_ssh_config, issue_certificate,
+        resolve_ssh_auth_context_for_owner, target_base_url, validate_certificate_settings,
+        validate_principal, validate_ssh_target_syntax,
     };
     use crate::crypto::aes::EncryptionKeys;
     use crate::crypto::local_key_provider::LocalKeyProvider;
     use crate::models::downstream_service::SshServiceConfig;
     use crate::models::ssh_auth_mode::SshAuthMode;
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn catalog_backed_ssh_bills_personal_and_org_user_service_owners() {
+        use crate::models::downstream_service::{
+            COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, test_helpers::dummy_service,
+        };
+        use crate::models::org_membership::{
+            COLLECTION_NAME as ORG_MEMBERSHIPS, OrgMembership, OrgRole,
+        };
+        use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+        use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
+        use crate::services::billing::BillingOwnerResolver;
+        use crate::test_utils::{
+            connect_test_database, test_membership, test_user, test_user_service,
+        };
+
+        let Some(db) = connect_test_database("ssh_catalog_billing_owner").await else {
+            eprintln!("Skipping MongoDB-backed test; no test database available");
+            return;
+        };
+
+        let catalog_author_id = uuid::Uuid::new_v4().to_string();
+        let personal_owner_id = uuid::Uuid::new_v4().to_string();
+        let org_owner_id = uuid::Uuid::new_v4().to_string();
+        let org_member_id = uuid::Uuid::new_v4().to_string();
+        let catalog_service_id = uuid::Uuid::new_v4().to_string();
+        let personal_service_id = uuid::Uuid::new_v4().to_string();
+        let org_service_id = uuid::Uuid::new_v4().to_string();
+
+        db.collection::<User>(USERS)
+            .insert_many([
+                test_user(&catalog_author_id, UserType::Person),
+                test_user(&personal_owner_id, UserType::Person),
+                test_user(&org_owner_id, UserType::Org),
+                test_user(&org_member_id, UserType::Person),
+            ])
+            .await
+            .expect("insert SSH ownership users");
+
+        let mut catalog_service = dummy_service();
+        catalog_service.id = catalog_service_id.clone();
+        catalog_service.slug = "catalog-ssh".to_string();
+        catalog_service.service_type = "ssh".to_string();
+        catalog_service.created_by = catalog_author_id.clone();
+        catalog_service.ssh_config = Some(SshServiceConfig {
+            host: "10.0.0.5".to_string(),
+            port: 22,
+            ssh_auth_mode: SshAuthMode::Cert,
+            certificate_auth_enabled: true,
+            certificate_ttl_minutes: 30,
+            allowed_principals: vec!["ubuntu".to_string()],
+            ca_private_key_encrypted: None,
+            ca_public_key: None,
+        });
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog_service)
+            .await
+            .expect("insert admin-authored SSH catalog service");
+
+        let mut personal_service = test_user_service(
+            &personal_service_id,
+            &personal_owner_id,
+            "personal-ssh",
+            &uuid::Uuid::new_v4().to_string(),
+            Some(&catalog_service_id),
+            None,
+        );
+        personal_service.service_type = "ssh".to_string();
+        personal_service.ssh_auth_mode = SshAuthMode::Cert;
+        let mut org_service = test_user_service(
+            &org_service_id,
+            &org_owner_id,
+            "org-ssh",
+            &uuid::Uuid::new_v4().to_string(),
+            Some(&catalog_service_id),
+            None,
+        );
+        org_service.service_type = "ssh".to_string();
+        org_service.ssh_auth_mode = SshAuthMode::NodeKey;
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_many([personal_service, org_service])
+            .await
+            .expect("insert catalog-backed SSH user services");
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(
+                &org_owner_id,
+                &org_member_id,
+                OrgRole::Member,
+                None,
+            ))
+            .await
+            .expect("insert SSH org membership");
+
+        let personal_context =
+            resolve_ssh_auth_context_for_owner(&db, &personal_owner_id, &catalog_service)
+                .await
+                .expect("resolve personal catalog-backed SSH context");
+        let org_context = resolve_ssh_auth_context_for_owner(&db, &org_owner_id, &catalog_service)
+            .await
+            .expect("resolve org catalog-backed SSH context");
+
+        assert_eq!(personal_context.owner_user_id, personal_owner_id);
+        assert_eq!(personal_context.service_slug, "personal-ssh");
+        assert_eq!(org_context.owner_user_id, org_owner_id);
+        assert_eq!(org_context.service_slug, "org-ssh");
+        assert_ne!(personal_context.owner_user_id, catalog_author_id);
+        assert_ne!(org_context.owner_user_id, catalog_author_id);
+
+        let billing = BillingOwnerResolver::new(db);
+        let personal_payer = billing
+            .resolve_for_resource(&personal_owner_id, &personal_context.owner_user_id)
+            .await
+            .expect("resolve personal SSH payer");
+        let org_payer = billing
+            .resolve_for_resource(&org_member_id, &org_context.owner_user_id)
+            .await
+            .expect("resolve org SSH payer");
+        assert_eq!(personal_payer.owner_id, personal_owner_id);
+        assert_eq!(org_payer.owner_id, org_owner_id);
+    }
 
     #[test]
     fn validates_ssh_target_syntax() {
