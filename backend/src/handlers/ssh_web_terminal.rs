@@ -80,10 +80,6 @@ pub async fn ssh_web_terminal(
         .as_ref()
         .map(|s| s.slug.clone())
         .unwrap_or_else(|| service_id.clone());
-    let service_owner_id = service_row
-        .as_ref()
-        .map(|s| s.created_by.clone())
-        .unwrap_or_else(|| auth_user.user_id.to_string());
     let auth_context = ssh_service::resolve_ssh_auth_context(
         &state.db,
         &auth_user.user_id.to_string(),
@@ -158,7 +154,7 @@ pub async fn ssh_web_terminal(
                 session_guard,
                 client_meta,
                 tele,
-                service_owner_id,
+                auth_context.owner_user_id,
             )
             .await;
         })
@@ -180,7 +176,7 @@ async fn handle_web_terminal(
     session_guard: ssh_service::SshSessionGuard,
     client_meta: (Option<String>, Option<String>),
     tele: TelemetryContext,
-    service_owner_id: String,
+    resource_owner_id: String,
 ) {
     let _ = &session_guard;
     let user_id = auth_user.user_id.to_string();
@@ -244,7 +240,7 @@ async fn handle_web_terminal(
             node_route,
             ephemeral,
             tele,
-            service_owner_id,
+            resource_owner_id,
             billing_resolution_user_id,
         )
         .await;
@@ -291,7 +287,7 @@ async fn handle_node_web_terminal(
     node_route: node_routing_service::NodeRoute,
     ephemeral: Option<EphemeralSshCredentials>,
     tele: TelemetryContext,
-    service_owner_id: String,
+    resource_owner_id: String,
     billing_resolution_user_id: String,
 ) {
     let all_node_ids: Vec<&str> = std::iter::once(node_route.node_id.as_str())
@@ -300,7 +296,7 @@ async fn handle_node_web_terminal(
     let billing_owner = match state
         .billing
         .owner_resolver()
-        .resolve_for_resource(&billing_resolution_user_id, &service_owner_id)
+        .resolve_for_resource(&billing_resolution_user_id, &resource_owner_id)
         .await
     {
         Ok(owner) => owner,

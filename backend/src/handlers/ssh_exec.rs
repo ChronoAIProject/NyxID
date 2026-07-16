@@ -117,10 +117,6 @@ pub async fn ssh_exec(
         .map(|s| s.slug.clone())
         .unwrap_or_else(|| service_id.clone());
     let user_id = auth_user.user_id.to_string();
-    let service_owner_id = service_row
-        .as_ref()
-        .map(|s| s.created_by.clone())
-        .unwrap_or_else(|| user_id.clone());
     let auth_context =
         ssh_service::resolve_ssh_auth_context(&state.db, &user_id, &service_id, &service_slug)
             .await?;
@@ -193,7 +189,7 @@ pub async fn ssh_exec(
     let billing_owner = state
         .billing
         .owner_resolver()
-        .resolve_for_resource(&billing_resolution_user_id, &service_owner_id)
+        .resolve_for_resource(&billing_resolution_user_id, &auth_context.owner_user_id)
         .await?;
     let node_intent = if node_route.fallback_node_ids.is_empty() {
         crate::services::billing::NodeIntent::Node

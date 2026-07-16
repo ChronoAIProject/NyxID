@@ -193,10 +193,6 @@ pub async fn ssh_tunnel_ws(
         .as_ref()
         .map(|s| s.slug.clone())
         .unwrap_or_else(|| service_id.clone());
-    let service_owner_id = service_row
-        .as_ref()
-        .map(|s| s.created_by.clone())
-        .unwrap_or_else(|| auth_user.user_id.to_string());
     let auth_context = ssh_service::resolve_ssh_auth_context(
         &state.db,
         &auth_user.user_id.to_string(),
@@ -246,7 +242,7 @@ pub async fn ssh_tunnel_ws(
                 session_guard,
                 client_meta,
                 tele,
-                service_owner_id,
+                auth_context.owner_user_id,
             )
             .await;
         })
@@ -264,7 +260,7 @@ async fn handle_ssh_socket(
     session_guard: ssh_service::SshSessionGuard,
     client_meta: TunnelClientMeta,
     tele: TelemetryContext,
-    service_owner_id: String,
+    resource_owner_id: String,
 ) {
     // Held for Drop-based session count cleanup for the tunnel lifetime.
     let _ = &session_guard;
@@ -295,7 +291,7 @@ async fn handle_ssh_socket(
     let billing_owner = match state
         .billing
         .owner_resolver()
-        .resolve_for_resource(&billing_resolution_user_id, &service_owner_id)
+        .resolve_for_resource(&billing_resolution_user_id, &resource_owner_id)
         .await
     {
         Ok(owner) => owner,
