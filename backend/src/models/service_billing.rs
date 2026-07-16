@@ -50,11 +50,25 @@ impl ServiceBilling {
 pub struct PlatformUsage {
     pub requests: i64,
     pub bytes: i64,
+    #[serde(default)]
+    pub tokens: i64,
 }
 
 impl PlatformUsage {
     pub fn single_request(bytes: i64) -> Self {
-        Self { requests: 1, bytes }
+        Self {
+            requests: 1,
+            bytes,
+            tokens: 0,
+        }
+    }
+
+    pub fn llm_completion(bytes: i64, tokens: i64) -> Self {
+        Self {
+            requests: 1,
+            bytes,
+            tokens,
+        }
     }
 }
 

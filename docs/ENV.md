@@ -85,6 +85,12 @@ NyxID writes a durable `usage_meter` ledger, can push finalized rows into Lago, 
 | `BILLING_FAIL_CLOSED` | `false` | Operator fail-closed override reserved for later phases. |
 | `BILLING_RESALE_ENABLED` | `false` | Explicit opt-in for the dormant catalog resale layer. Resale still also requires `ServiceBilling.resale_billable=true` and final `CredentialClass::NyxidManagedMaster`. |
 
+Billing policy for public and relay paths:
+
+- Public proxy (`/public/s/{slug}`) is block-not-meter. It has no `AuthUser`, API key, or wallet owner, so enabled anonymous endpoints cannot be combined with `ServiceBilling.resale_billable=true`; writes and runtime reads reject that shape with `AnonymousIncompatibleBilling` (`11304`) before forwarding.
+- Public MCP (`/public/mcp`) is discovery-only. `tools/list` may describe safe anonymous endpoints, but `tools/call` returns `"Public MCP tool execution is not supported"` and never forwards traffic.
+- Oracle relay (`/api/v1/oracle`) is explicitly exempt. Tasks run on user-supplied browser worker capacity; NyxID does not supply downstream model credentials, tokens, or paid compute on that path. If NyxID-hosted Oracle workers or NyxID-paid model capacity are introduced later, they must attach a `BillingRouteContext` before dispatch.
+
 Configure Lago to send webhooks to `<BASE_URL>/api/v1/webhooks/lago` with the same shared secret as `LAGO_WEBHOOK_SECRET`. NyxID verifies `X-Lago-Signature` over the raw request body before processing and uses `X-Lago-Unique-Key` only as metadata. Wallet events refresh the local wallet balance from Lago and clear accounted `pending_lago_debits`; subscription or entitlement events invalidate the local billing decision marker. The reconcile sweep remains enabled for missed or delayed webhooks unless `BILLING_RECONCILE_INTERVAL_SECS=0`.
 
 `POST /api/v1/billing/wallet` provisions the owner in Lago and creates a local `billing_wallet` cache idempotently. `POST /api/v1/billing/topup` creates a Lago wallet transaction, then uses Lago's documented `POST /api/v1/wallet_transactions/{lago_id}/payment_url` endpoint to obtain the provider-hosted Stripe checkout URL. NyxID never directly increments local credits; local balance changes only after Lago webhook/reconcile confirms the wallet balance.

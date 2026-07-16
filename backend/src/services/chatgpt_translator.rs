@@ -16,10 +16,29 @@ use crate::services::llm_gateway_service::{
     LlmTranslator, SseEvent, StreamTranslationState, TranslatedRequest,
 };
 use crate::services::llm_usage_service::{
-    ReportedLlmUsageAccumulator, UsageAuditContext, extract_reported_usage,
+    ReportedLlmUsage, ReportedLlmUsageAccumulator, UsageAuditContext, extract_reported_usage,
     extract_reported_usage_from_sse_event, log_reported_usage_async,
 };
 use crate::services::sse_parser;
+
+pub type UsageCompleteCallback =
+    std::sync::Arc<dyn Fn(Option<ReportedLlmUsage>, i64) + Send + Sync>;
+
+fn finalize_usage_capture(
+    usage_context: Option<UsageAuditContext>,
+    usage_complete: Option<UsageCompleteCallback>,
+    usage: Option<ReportedLlmUsage>,
+    response_len: i64,
+) {
+    if let Some(context) = usage_context
+        && let Some(usage) = usage.clone()
+    {
+        log_reported_usage_async(context, usage);
+    }
+    if let Some(complete) = usage_complete {
+        complete(usage, response_len.max(0));
+    }
+}
 
 /// Returns `true` if the body is in Chat Completions format (has `messages`).
 /// Returns `false` if already in Responses API format (has `input`).
@@ -926,6 +945,7 @@ pub async fn send_to_chatgpt(
     translate_response: bool,
     query: Option<&str>,
     usage_context: Option<UsageAuditContext>,
+    usage_complete: Option<UsageCompleteCallback>,
 ) -> AppResult<axum::response::Response> {
     send_to_chatgpt_with_api_url(
         translated_body,
@@ -935,10 +955,12 @@ pub async fn send_to_chatgpt(
         query,
         CHATGPT_RESPONSES_API_URL,
         usage_context,
+        usage_complete,
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn send_to_chatgpt_with_api_url(
     translated_body: &serde_json::Value,
     bearer_token: &str,
@@ -947,6 +969,7 @@ async fn send_to_chatgpt_with_api_url(
     query: Option<&str>,
     api_url: &str,
     usage_context: Option<UsageAuditContext>,
+    usage_complete: Option<UsageCompleteCallback>,
 ) -> AppResult<axum::response::Response> {
     use axum::body::Body;
     use axum::http::StatusCode;
@@ -991,6 +1014,7 @@ async fn send_to_chatgpt_with_api_url(
     // the ChatGPT backend rejected (e.g. unsupported parameter for a model).
     if !status.is_success() {
         let error_body = response.text().await.unwrap_or_default();
+        finalize_usage_capture(None, usage_complete, None, error_body.len() as i64);
         tracing::warn!(
             "ChatGPT backend returned HTTP {status}: {}",
             truncate_for_log(&error_body, 1000),
@@ -1012,10 +1036,12 @@ async fn send_to_chatgpt_with_api_url(
     if is_streaming {
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(32);
         let usage_context = usage_context.clone();
+        let usage_complete = usage_complete.clone();
 
         tokio::spawn(async move {
             let mut received_any_event = false;
             let mut usage_accumulator = ReportedLlmUsageAccumulator::default();
+            let mut response_len: i64 = 0;
 
             if translate_response {
                 // Chat Completions mode: translate SSE events → OpenAI chunks
@@ -1059,28 +1085,31 @@ async fn send_to_chatgpt_with_api_url(
                                 "ChatGPT SSE emit: {}",
                                 truncate_for_log(translated, 500),
                             );
+                            response_len += translated.len() as i64;
                             if tx
                                 .send(Ok(bytes::Bytes::from(translated.clone())))
                                 .await
                                 .is_err()
                             {
                                 tracing::debug!("ChatGPT SSE client disconnected");
-                                if let Some(context) = usage_context.clone()
-                                    && let Some(usage) = usage_accumulator.clone().finalize()
-                                {
-                                    log_reported_usage_async(context, usage);
-                                }
+                                finalize_usage_capture(
+                                    usage_context.clone(),
+                                    usage_complete.clone(),
+                                    usage_accumulator.finalize(),
+                                    response_len,
+                                );
                                 return;
                             }
                         }
 
                         let etype = event.event_type.as_deref().unwrap_or("");
                         if etype == "response.completed" || etype == "response.incomplete" {
-                            if let Some(context) = usage_context.clone()
-                                && let Some(usage) = usage_accumulator.clone().finalize()
-                            {
-                                log_reported_usage_async(context, usage);
-                            }
+                            finalize_usage_capture(
+                                usage_context.clone(),
+                                usage_complete.clone(),
+                                usage_accumulator.finalize(),
+                                response_len,
+                            );
                             return;
                         }
                     }
@@ -1119,23 +1148,26 @@ async fn send_to_chatgpt_with_api_url(
                         );
 
                         let sse = format!("event: {event_type}\ndata: {}\n\n", event.data,);
+                        response_len += sse.len() as i64;
                         if tx.send(Ok(bytes::Bytes::from(sse))).await.is_err() {
                             tracing::debug!("ChatGPT SSE client disconnected (passthrough)");
-                            if let Some(context) = usage_context.clone()
-                                && let Some(usage) = usage_accumulator.clone().finalize()
-                            {
-                                log_reported_usage_async(context, usage);
-                            }
+                            finalize_usage_capture(
+                                usage_context.clone(),
+                                usage_complete.clone(),
+                                usage_accumulator.finalize(),
+                                response_len,
+                            );
                             return;
                         }
 
                         if event_type == "response.completed" || event_type == "response.incomplete"
                         {
-                            if let Some(context) = usage_context.clone()
-                                && let Some(usage) = usage_accumulator.clone().finalize()
-                            {
-                                log_reported_usage_async(context, usage);
-                            }
+                            finalize_usage_capture(
+                                usage_context.clone(),
+                                usage_complete.clone(),
+                                usage_accumulator.finalize(),
+                                response_len,
+                            );
                             return;
                         }
                     }
@@ -1154,33 +1186,28 @@ async fn send_to_chatgpt_with_api_url(
                             "code": "upstream_error",
                         }
                     });
-                    let _ = tx
-                        .send(Ok(bytes::Bytes::from(format!(
-                            "data: {}\n\ndata: [DONE]\n\n",
-                            error_chunk,
-                        ))))
-                        .await;
+                    let error_text = format!("data: {}\n\ndata: [DONE]\n\n", error_chunk);
+                    response_len += error_text.len() as i64;
+                    let _ = tx.send(Ok(bytes::Bytes::from(error_text))).await;
                 } else {
                     let error_event = serde_json::json!({
                         "type": "error",
                         "error": { "message": error_msg },
                     });
-                    let _ = tx
-                        .send(Ok(bytes::Bytes::from(format!(
-                            "event: error\ndata: {}\n\n",
-                            error_event,
-                        ))))
-                        .await;
+                    let error_text = format!("event: error\ndata: {}\n\n", error_event);
+                    response_len += error_text.len() as i64;
+                    let _ = tx.send(Ok(bytes::Bytes::from(error_text))).await;
                 }
             }
 
             tracing::debug!("ChatGPT SSE stream ended");
 
-            if let Some(context) = usage_context
-                && let Some(usage) = usage_accumulator.finalize()
-            {
-                log_reported_usage_async(context, usage);
-            }
+            finalize_usage_capture(
+                usage_context,
+                usage_complete,
+                usage_accumulator.finalize(),
+                response_len,
+            );
         });
 
         let body = Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx));
@@ -1253,14 +1280,16 @@ async fn send_to_chatgpt_with_api_url(
             resp_json
         };
 
-        if let Some(context) = usage_context
-            && let Some(usage) = extract_reported_usage(&output_json)
-        {
-            log_reported_usage_async(context, usage);
-        }
+        let usage = extract_reported_usage(&output_json);
 
         let body_bytes = serde_json::to_vec(&output_json)
             .map_err(|e| AppError::Internal(format!("Failed to serialize response: {e}")))?;
+        finalize_usage_capture(
+            usage_context,
+            usage_complete,
+            usage,
+            body_bytes.len() as i64,
+        );
 
         axum::http::Response::builder()
             .status(StatusCode::OK)
