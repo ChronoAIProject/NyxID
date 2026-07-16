@@ -46,6 +46,7 @@ pub struct ApprovalRequestItem {
     pub approval_mode: ApprovalMode,
     pub status: String,
     pub created_at: String,
+    pub expires_at: String,
     pub decided_at: Option<String>,
     pub decision_channel: Option<String>,
     /// True when this request was created under an org's per-service
@@ -172,6 +173,7 @@ fn to_approval_request_item(
         approval_mode: request.approval_mode,
         status: request.status,
         created_at: request.created_at.to_rfc3339(),
+        expires_at: request.expires_at.to_rfc3339(),
         decided_at: request.decided_at.map(|d| d.to_rfc3339()),
         decision_channel: request.decision_channel,
         from_org_policy,

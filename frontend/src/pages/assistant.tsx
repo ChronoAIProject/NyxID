@@ -99,6 +99,10 @@ export function AssistantPage({
         ) : (
           <ChatThread
             messages={history.data?.messages ?? []}
+            thinking={
+              active &&
+              history.data?.messages.at(-1)?.role !== "assistant"
+            }
             onDecideApproval={(blockId, approved) =>
               decideApproval.mutateAsync({ blockId, approved })
             }

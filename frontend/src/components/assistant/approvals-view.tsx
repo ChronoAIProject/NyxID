@@ -1,8 +1,10 @@
-import { Link } from "@tanstack/react-router";
-import { ArrowUpRight, MessageSquareText, ShieldCheck } from "lucide-react";
+import { ShieldCheck } from "lucide-react";
+import { toast } from "sonner";
 import { ApprovalCard } from "@/components/assistant/blocks/approval-card";
 import { ServiceIcon } from "@/components/service-icon";
+import { ErrorBanner } from "@/components/shared/error-banner";
 import { Badge } from "@/components/ui/badge";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
   Table,
   TableBody,
@@ -11,17 +13,19 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { useApprovals, useDecideApprovalFor } from "@/hooks/use-assistant";
+import { useDecideApproval } from "@/hooks/use-approvals";
+import { useAssistantApprovals } from "@/hooks/use-assistant";
+import { ApiError } from "@/lib/api-client";
 import { formatDate } from "@/lib/utils";
-import type { ApprovalListEntry } from "@/lib/assistant/mock-data";
+import type { AssistantApprovalEntry } from "@/lib/assistant/approvals";
 import type {
   ApprovalDecision,
   ApprovalDecisionChannel,
 } from "@/types/assistant";
 
 // Decision vocabulary mirrors the Studio approval-history page (badge variants
-// per status); "denied"/"cancelled" are the assistant-block spellings of the
-// same outcomes (PRD §5.5: NyxID "rejected" ⇄ block "denied").
+// per status); "denied" is the assistant-block spelling of NyxID "rejected"
+// (PRD §5.5).
 function getDecisionBadge(decision: ApprovalDecision) {
   switch (decision) {
     case "approved":
@@ -57,43 +61,13 @@ function ServiceCell({ slug }: { readonly slug: string }) {
   );
 }
 
-function ConversationLink({
-  conversationId,
-  conversationTitle,
-  size = "xs",
-  className,
-}: {
-  readonly conversationId: string;
-  readonly conversationTitle: string;
-  readonly size?: "xs" | "sm";
-  readonly className?: string;
-}) {
-  return (
-    <Link
-      to="/assistant"
-      search={{ c: conversationId }}
-      className={`group inline-flex min-w-0 items-center transition-colors hover:text-foreground ${
-        size === "sm"
-          ? "gap-1.5 text-[12px] font-medium text-muted-foreground"
-          : "gap-1 text-[11px] text-text-tertiary"
-      } ${className ?? ""}`}
-    >
-      {size === "sm" && (
-        <MessageSquareText className="h-3.5 w-3.5 shrink-0 text-text-tertiary" />
-      )}
-      <span className="truncate">{conversationTitle}</span>
-      <ArrowUpRight className="h-3 w-3 shrink-0 opacity-0 transition-opacity group-hover:opacity-100" />
-    </Link>
-  );
-}
-
 function PendingSection({
   entries,
   onDecide,
 }: {
-  readonly entries: ApprovalListEntry[];
+  readonly entries: readonly AssistantApprovalEntry[];
   readonly onDecide: (
-    entry: ApprovalListEntry,
+    entry: AssistantApprovalEntry,
     approved: boolean,
   ) => Promise<void>;
 }) {
@@ -121,13 +95,11 @@ function PendingSection({
       </p>
       <div className="space-y-5">
         {entries.map((entry) => (
-          <div key={entry.block.block_id}>
-            <ConversationLink
-              conversationId={entry.conversationId}
-              conversationTitle={entry.conversationTitle}
-              size="sm"
-              className="mb-2"
-            />
+          <div key={entry.requestId}>
+            <p className="mb-2 flex items-center gap-1.5 text-[12px] font-medium text-muted-foreground">
+              <ServiceIcon slug={`api-${entry.block.service_slug}`} size="xs" />
+              <span className="truncate">{entry.serviceName}</span>
+            </p>
             <ApprovalCard
               block={entry.block}
               onDecide={(approved) => onDecide(entry, approved)}
@@ -139,7 +111,11 @@ function PendingSection({
   );
 }
 
-function HistorySection({ entries }: { readonly entries: ApprovalListEntry[] }) {
+function HistorySection({
+  entries,
+}: {
+  readonly entries: readonly AssistantApprovalEntry[];
+}) {
   if (entries.length === 0) {
     return (
       <div className="rounded-lg bg-overlay px-4 py-3 text-[12px] text-muted-foreground">
@@ -154,7 +130,7 @@ function HistorySection({ entries }: { readonly entries: ApprovalListEntry[] }) 
       <div className="flex flex-col gap-3 md:hidden">
         {entries.map((entry) => (
           <div
-            key={entry.block.block_id}
+            key={entry.requestId}
             className="rounded-xl border border-border/50 bg-card p-4"
           >
             <div className="flex items-start justify-between gap-2">
@@ -171,12 +147,11 @@ function HistorySection({ entries }: { readonly entries: ApprovalListEntry[] }) 
             </p>
             <div className="mt-3 flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
               <span className="text-[11px] text-muted-foreground">
-                {formatDate(entry.requestedAt)}
+                {formatDate(entry.decidedAt ?? entry.requestedAt)}
               </span>
-              <ConversationLink
-                conversationId={entry.conversationId}
-                conversationTitle={entry.conversationTitle}
-              />
+              <span className="text-[11px] text-text-tertiary">
+                {entry.block.agent_key_prefix}
+              </span>
             </div>
           </div>
         ))}
@@ -196,7 +171,7 @@ function HistorySection({ entries }: { readonly entries: ApprovalListEntry[] }) 
           </TableHeader>
           <TableBody>
             {entries.map((entry) => (
-              <TableRow key={entry.block.block_id}>
+              <TableRow key={entry.requestId}>
                 <TableCell>
                   <div className="flex min-w-0 flex-col gap-0.5">
                     <span
@@ -205,10 +180,9 @@ function HistorySection({ entries }: { readonly entries: ApprovalListEntry[] }) 
                     >
                       {entry.block.body}
                     </span>
-                    <ConversationLink
-                      conversationId={entry.conversationId}
-                      conversationTitle={entry.conversationTitle}
-                    />
+                    <span className="text-[11px] text-text-tertiary">
+                      {entry.block.agent_key_prefix}
+                    </span>
                   </div>
                 </TableCell>
                 <TableCell className="text-muted-foreground">
@@ -222,7 +196,7 @@ function HistorySection({ entries }: { readonly entries: ApprovalListEntry[] }) 
                   {channelLabel(entry.block.decision_channel)}
                 </TableCell>
                 <TableCell className="text-muted-foreground">
-                  {formatDate(entry.requestedAt)}
+                  {formatDate(entry.decidedAt ?? entry.requestedAt)}
                 </TableCell>
               </TableRow>
             ))}
@@ -234,16 +208,32 @@ function HistorySection({ entries }: { readonly entries: ApprovalListEntry[] }) 
 }
 
 export function ApprovalsView() {
-  const approvals = useApprovals();
-  const decide = useDecideApprovalFor();
-  const entries = approvals.data ?? [];
+  const approvals = useAssistantApprovals();
+  const decide = useDecideApproval();
+
   // Pending: most urgent (soonest expiry) first. History: newest first.
-  const pending = entries
-    .filter((entry) => entry.block.decision === null)
-    .sort((a, b) => a.block.expires_at.localeCompare(b.block.expires_at));
-  const decided = entries
-    .filter((entry) => entry.block.decision !== null)
-    .sort((a, b) => b.requestedAt.localeCompare(a.requestedAt));
+  const pending = [...approvals.pending].sort((a, b) =>
+    a.block.expires_at.localeCompare(b.block.expires_at),
+  );
+  const decided = [...approvals.history].sort((a, b) =>
+    (b.decidedAt ?? b.requestedAt).localeCompare(a.decidedAt ?? a.requestedAt),
+  );
+
+  async function handleDecide(
+    entry: AssistantApprovalEntry,
+    approved: boolean,
+  ): Promise<void> {
+    try {
+      await decide.mutateAsync({ requestId: entry.requestId, approved });
+      toast.success(approved ? "Request approved" : "Request denied");
+    } catch (error) {
+      toast.error(
+        error instanceof ApiError
+          ? error.message
+          : `Failed to ${approved ? "approve" : "deny"} the request`,
+      );
+    }
+  }
 
   return (
     <div className="h-full min-h-0 overflow-y-auto overscroll-contain">
@@ -253,26 +243,36 @@ export function ApprovalsView() {
         </h1>
         <p className="mt-1 max-w-2xl text-[12px] text-muted-foreground">
           Write actions gated by your NyxID policy wait here for your decision.
-          Deciding in chat, Telegram, or mobile converges to the same result.
+          Deciding here, in Telegram, or on mobile converges to the same
+          result.
         </p>
       </div>
 
       <div className="max-w-[680px] px-5 pb-10 pt-5 sm:px-8">
-        <PendingSection
-          entries={pending}
-          onDecide={(entry, approved) =>
-            decide.mutateAsync({
-              conversationId: entry.conversationId,
-              blockId: entry.block.block_id,
-              approved,
-            })
-          }
-        />
+        {approvals.isLoading ? (
+          <div className="space-y-3">
+            {Array.from({ length: 3 }).map((_, i) => (
+              <Skeleton
+                key={`approval-skel-${String(i)}`}
+                className="h-24 w-full"
+              />
+            ))}
+          </div>
+        ) : approvals.isError ? (
+          <ErrorBanner
+            message="Failed to load approvals. Please try again."
+            onRetry={approvals.refetch}
+          />
+        ) : (
+          <>
+            <PendingSection entries={pending} onDecide={handleDecide} />
 
-        <p className="mb-2.5 mt-8 text-[10px] font-semibold uppercase tracking-[1.5px] text-text-tertiary">
-          History
-        </p>
-        <HistorySection entries={decided} />
+            <p className="mb-2.5 mt-8 text-[10px] font-semibold uppercase tracking-[1.5px] text-text-tertiary">
+              History
+            </p>
+            <HistorySection entries={decided} />
+          </>
+        )}
       </div>
     </div>
   );

@@ -4,6 +4,14 @@ import {
   useQueryClient,
   type QueryClient,
 } from "@tanstack/react-query";
+import {
+  useApprovalRequests,
+  useNotificationSettings,
+} from "@/hooks/use-approvals";
+import {
+  toAssistantApprovalEntry,
+  type AssistantApprovalEntry,
+} from "@/lib/assistant/approvals";
 import { assistantMockStore } from "@/lib/assistant/mock-data";
 import { assistantTransport } from "@/lib/assistant/transport";
 import type {
@@ -22,8 +30,16 @@ export const assistantKeys = {
     [...ROOT, "history", conversationId] as const,
   turn: (conversationId: string) => [...ROOT, "turn", conversationId] as const,
   workspace: [...ROOT, "workspace"] as const,
-  approvals: [...ROOT, "approvals"] as const,
 } as const;
+
+// Live-update cadence for real approval data. Pending requests are
+// time-sensitive (they expire), so they poll faster than history.
+const PENDING_APPROVALS_POLL_MS = 5_000;
+const APPROVAL_HISTORY_POLL_MS = 15_000;
+// One page comfortably above anything a single user accumulates as
+// simultaneously-pending; the badge uses the server-side total anyway.
+const PENDING_APPROVALS_PAGE_SIZE = 50;
+const APPROVAL_HISTORY_PAGE_SIZE = 20;
 
 const activeHandles = new Map<string, TurnHandle>();
 
@@ -44,7 +60,6 @@ async function projectTransportState(
     () => conversations,
   );
   await queryClient.invalidateQueries({ queryKey: assistantKeys.workspace });
-  await queryClient.invalidateQueries({ queryKey: assistantKeys.approvals });
 }
 
 function turnFromEvent(event: TurnEvent): ActiveTurn | undefined {
@@ -61,46 +76,76 @@ function turnFromEvent(event: TurnEvent): ActiveTurn | undefined {
   return undefined;
 }
 
-// TODO(api-pass): workspace counts read the mock store directly — these are
-// sidebar chrome, not part of the C1 transport contract. The API pass derives
-// them from real endpoints (artifacts listing, pending approvals).
+/**
+ * Pending approval requests, polled so requests raised (or decided) from
+ * anywhere — agents hitting the proxy, Telegram, mobile, another tab —
+ * appear live. Shares its query cache with the sidebar badge.
+ */
+function usePendingApprovalRequests() {
+  return useApprovalRequests(1, PENDING_APPROVALS_PAGE_SIZE, "pending", {
+    refetchIntervalMs: PENDING_APPROVALS_POLL_MS,
+  });
+}
+
+/**
+ * Real approvals for the assistant Approvals view: pending requests plus
+ * recent decided history, both mapped into assistant approval-card blocks.
+ */
+export function useAssistantApprovals() {
+  const settings = useNotificationSettings();
+  const pendingQuery = usePendingApprovalRequests();
+  const historyQuery = useApprovalRequests(
+    1,
+    APPROVAL_HISTORY_PAGE_SIZE,
+    undefined,
+    { refetchIntervalMs: APPROVAL_HISTORY_POLL_MS },
+  );
+
+  // Grant-mode approvals create a reusable grant with the user-configured
+  // expiry; surface that duration on the card so "approve" is informed.
+  const grantDurationSec =
+    settings.data !== undefined
+      ? settings.data.grant_expiry_days * 86_400
+      : null;
+
+  const pending: AssistantApprovalEntry[] = (
+    pendingQuery.data?.requests ?? []
+  ).map((request) => toAssistantApprovalEntry(request, grantDurationSec));
+  const history: AssistantApprovalEntry[] = (
+    historyQuery.data?.requests ?? []
+  )
+    .filter((request) => request.status !== "pending")
+    .map((request) => toAssistantApprovalEntry(request, grantDurationSec));
+
+  return {
+    pending,
+    history,
+    isLoading: pendingQuery.isLoading || historyQuery.isLoading,
+    isError: pendingQuery.isError || historyQuery.isError,
+    refetch: () => {
+      void pendingQuery.refetch();
+      void historyQuery.refetch();
+    },
+  };
+}
+
+/**
+ * Sidebar workspace counts. Artifacts still come from the mock store
+ * (TODO(api-pass): back with the artifacts listing); the pending-approvals
+ * badge is the real server-side total from `/approvals/requests`.
+ */
 export function useWorkspaceCounts() {
-  return useQuery({
+  const artifactsQuery = useQuery({
     queryKey: assistantKeys.workspace,
     queryFn: () => assistantMockStore.workspaceCounts(),
   });
-}
-
-// TODO(api-pass): approvals across conversations read the mock store directly;
-// the API pass backs this with the real approvals listing.
-export function useApprovals() {
-  return useQuery({
-    queryKey: assistantKeys.approvals,
-    queryFn: () => assistantMockStore.listApprovals(),
-  });
-}
-
-/** Decide an approval from outside its conversation (the Approvals view). */
-export function useDecideApprovalFor() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: async ({
-      conversationId,
-      blockId,
-      approved,
-    }: {
-      readonly conversationId: string;
-      readonly blockId: string;
-      readonly approved: boolean;
-    }): Promise<void> => {
-      await assistantTransport.decideApproval(
-        conversationId,
-        blockId,
-        approved,
-      );
-      await projectTransportState(queryClient, conversationId);
+  const pendingQuery = usePendingApprovalRequests();
+  return {
+    data: {
+      artifacts: artifactsQuery.data?.artifacts ?? 0,
+      pendingApprovals: pendingQuery.data?.total ?? 0,
     },
-  });
+  };
 }
 
 export function useConversations() {

@@ -50,4 +50,40 @@ describe("ChatThread", () => {
     ).toBeInTheDocument();
     expect(screen.queryByText("Hidden")).not.toBeInTheDocument();
   });
+
+  it("shows the thinking indicator while a turn awaits its first content", () => {
+    render(
+      <ChatThread
+        messages={[
+          message({
+            role: "user",
+            blocks: [{ type: "text", block_id: "text-1", text: "Hi" }],
+          }),
+        ]}
+        thinking
+        onDecideApproval={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByRole("status", { name: "Assistant is thinking" }),
+    ).toBeInTheDocument();
+  });
+
+  it("hides the thinking indicator once assistant content streams", () => {
+    render(
+      <ChatThread
+        messages={[
+          message({
+            blocks: [{ type: "text", block_id: "text-1", text: "Answer" }],
+          }),
+        ]}
+        onDecideApproval={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.queryByRole("status", { name: "Assistant is thinking" }),
+    ).not.toBeInTheDocument();
+  });
 });

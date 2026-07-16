@@ -301,7 +301,9 @@ const assistantBeforeLoad = async ({
     return;
   }
   if (shouldRedirectFromAssistant({ isLoading: false, user })) {
-    throw redirect({ to: "/dashboard" });
+    // `replace` so the guarded /assistant entry never lingers in history —
+    // pressing Back from /dashboard must not re-enter the redirect loop.
+    throw redirect({ to: "/dashboard", replace: true });
   }
 };
 

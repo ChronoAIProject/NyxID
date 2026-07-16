@@ -26,6 +26,9 @@ const CLICK_THROTTLE_MS = 750;
 const URGENT_THRESHOLD_MS = 5 * 60_000;
 
 function remainingLabel(remainingMs: number): string {
+  // NaN when the server didn't send a parseable expiry (e.g. an older
+  // backend without expires_at on the listing) — omit the countdown.
+  if (Number.isNaN(remainingMs)) return "";
   if (remainingMs <= 0) return "expired";
   return `expires in ${String(Math.max(1, Math.ceil(remainingMs / 60_000)))} min`;
 }
@@ -33,7 +36,8 @@ function remainingLabel(remainingMs: number): string {
 function grantDurationLabel(seconds: number | null): string {
   if (seconds === null) return "grant";
   if (seconds < 3600) return `${String(Math.round(seconds / 60))} min`;
-  return `${String(Math.round(seconds / 3600))} h`;
+  if (seconds < 86_400) return `${String(Math.round(seconds / 3600))} h`;
+  return `${String(Math.round(seconds / 86_400))} d`;
 }
 
 /** Small mono chip used by the scope row (mockup: `.a-scope code`). */

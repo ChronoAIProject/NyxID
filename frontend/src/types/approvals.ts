@@ -64,6 +64,7 @@ export interface ApprovalRequestItem {
   readonly approval_mode: ApprovalMode;
   readonly status: "pending" | "approved" | "rejected" | "expired";
   readonly created_at: string;
+  readonly expires_at: string;
   readonly decided_at: string | null;
   readonly decision_channel: string | null;
 }

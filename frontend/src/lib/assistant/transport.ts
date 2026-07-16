@@ -1,3 +1,5 @@
+import { AevatarAssistantTransport } from "@/lib/assistant/aevatar-transport";
+import { AssistantTurnActiveError } from "@/lib/assistant/errors";
 import {
   assistantMockStore,
   createScriptedTurn,
@@ -13,6 +15,8 @@ import type {
 } from "@/types/assistant";
 import { isTurnActive } from "@/types/assistant";
 
+export { AssistantTurnActiveError };
+
 const EVENT_CADENCE_MS = 100;
 
 interface RunningScript {
@@ -23,13 +27,6 @@ interface RunningScript {
   readonly openBlockIds: Set<string>;
   cancelled: boolean;
   finished: boolean;
-}
-
-export class AssistantTurnActiveError extends Error {
-  constructor() {
-    super("A turn is already active for this conversation.");
-    this.name = "AssistantTurnActiveError";
-  }
 }
 
 class MockAssistantTransport implements AssistantTransport {
@@ -180,10 +177,40 @@ class MockAssistantTransport implements AssistantTransport {
   }
 }
 
-// TODO(api-pass): replace this implementation with the C1 HTTP/SSE transport.
+/**
+ * Which transport a session gets. Vitest and dev `?mock` demo sessions stay
+ * on the scripted transport; every other session — production above all —
+ * talks to Aevatar's nyxid-chat API through the NyxID proxy. The `?mock`
+ * switch mirrors the page-level mock layer (lib/mock-data.ts `isMockMode`),
+ * duplicated as a cheap check so the prod bundle does not statically pull
+ * that module in; outside dev builds it is inert.
+ */
+export function selectAssistantTransportKind(env: {
+  readonly mode: string;
+  readonly dev: boolean;
+  readonly search: string;
+}): "mock" | "aevatar" {
+  if (env.mode === "test") return "mock";
+  if (env.dev && new URLSearchParams(env.search).has("mock")) return "mock";
+  return "aevatar";
+}
+
+function createAssistantTransport(): AssistantTransport {
+  const kind = selectAssistantTransportKind({
+    mode: import.meta.env.MODE,
+    dev: import.meta.env.DEV,
+    search: typeof window === "undefined" ? "" : window.location.search,
+  });
+  return kind === "mock"
+    ? new MockAssistantTransport()
+    : new AevatarAssistantTransport();
+}
+
 export const assistantTransport: AssistantTransport =
-  new MockAssistantTransport();
+  createAssistantTransport();
 
 export function resetAssistantTransport(now: () => number = Date.now): void {
-  (assistantTransport as MockAssistantTransport).reset(now);
+  if (assistantTransport instanceof MockAssistantTransport) {
+    assistantTransport.reset(now);
+  }
 }

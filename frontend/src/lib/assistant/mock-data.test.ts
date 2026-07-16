@@ -267,37 +267,6 @@ describe("MockAssistantStore.decideApproval same-run multi-gate", () => {
   });
 });
 
-describe("MockAssistantStore.listApprovals", () => {
-  it("seeds decided history and orders pending first, then most recent", () => {
-    const store = new MockAssistantStore();
-    store.reset(() => FIXED_NOW);
-    const entries = store.listApprovals();
-    expect(entries.map((entry) => entry.block.block_id)).toEqual([
-      "approval-stripe-lark",
-      "approval-github-rotate",
-      "approval-weekly-lark",
-      "approval-weekly-email",
-    ]);
-    expect(entries[0]?.block.decision).toBeNull();
-    expect(entries[1]?.block).toMatchObject({
-      decision: "approved",
-      decision_channel: "web",
-      service_slug: "github",
-    });
-    expect(entries[2]?.block).toMatchObject({
-      decision: "expired",
-      decision_channel: null,
-    });
-    expect(entries[3]?.block).toMatchObject({
-      decision: "denied",
-      decision_channel: "mobile",
-    });
-    for (const entry of entries) {
-      expect(Number.isNaN(Date.parse(entry.requestedAt))).toBe(false);
-    }
-  });
-});
-
 describe("MockAssistantStore.workspaceCounts", () => {
   it("counts artifacts and pending approvals across conversations", () => {
     const store = new MockAssistantStore();

@@ -58,11 +58,37 @@ function renderBlock(
   }
 }
 
+function ThinkingRow() {
+  return (
+    <article className="flex items-start gap-3">
+      <div className="flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-lg border border-nyx-secondary-400/20 bg-nyx-secondary-400/[0.06]">
+        <NyxidIcon className="h-[13px] w-[13px]" />
+      </div>
+      <div
+        className="flex min-w-0 flex-1 items-center gap-1.5 py-2"
+        role="status"
+        aria-label="Assistant is thinking"
+      >
+        <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-text-tertiary [animation-delay:-0.3s]" />
+        <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-text-tertiary [animation-delay:-0.15s]" />
+        <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-text-tertiary" />
+      </div>
+    </article>
+  );
+}
+
 export function ChatThread({
   messages,
+  thinking = false,
   onDecideApproval,
 }: {
   readonly messages: readonly AssistantMessage[];
+  /**
+   * Turn is running but no assistant content has arrived yet. Aevatar can
+   * take seconds before its first frame; without this the thread reads as
+   * dead between send and first answer.
+   */
+  readonly thinking?: boolean;
   readonly onDecideApproval: (
     blockId: string,
     approved: boolean,
@@ -73,7 +99,7 @@ export function ChatThread({
   useEffect(() => {
     const element = scrollRef.current;
     if (element) element.scrollTop = element.scrollHeight;
-  }, [messages]);
+  }, [messages, thinking]);
 
   if (messages.length === 0) {
     return (
@@ -130,6 +156,7 @@ export function ChatThread({
             </div>
           </article>
         ))}
+        {thinking ? <ThinkingRow /> : null}
       </div>
     </div>
   );

@@ -35,13 +35,6 @@ interface StoredConversation {
  * created_at of the message carrying the card — the PRD §5.5 block itself has
  * no decided_at, so the message timestamp is the honest "when" we can show.
  */
-export interface ApprovalListEntry {
-  readonly conversationId: string;
-  readonly conversationTitle: string;
-  readonly requestedAt: string;
-  readonly block: ApprovalCardContentBlock;
-}
-
 function buildInitialConversations(now: number): StoredConversation[] {
   const showcaseCreated = timestamp(now - 3 * DAY);
   const showcaseUpdated = timestamp(now - 18 * MINUTE);
@@ -640,31 +633,6 @@ export class MockAssistantStore {
       ...stored.conversation,
       last_message_at: timestamp(this.now()),
     };
-  }
-
-  listApprovals(): ApprovalListEntry[] {
-    const entries: ApprovalListEntry[] = [];
-    for (const stored of this.conversations.values()) {
-      for (const message of stored.turnState.messages) {
-        for (const block of message.blocks) {
-          if (block.type === "approval_card") {
-            entries.push({
-              conversationId: stored.conversation.id,
-              conversationTitle: stored.conversation.title,
-              requestedAt: message.created_at,
-              block: clone(block),
-            });
-          }
-        }
-      }
-    }
-    // Pending first, then most recently requested.
-    return entries.sort((a, b) => {
-      const pendingDelta =
-        Number(b.block.decision === null) - Number(a.block.decision === null);
-      if (pendingDelta !== 0) return pendingDelta;
-      return b.requestedAt.localeCompare(a.requestedAt);
-    });
   }
 
   workspaceCounts(): { artifacts: number; pendingApprovals: number } {
