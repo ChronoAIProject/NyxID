@@ -33,6 +33,8 @@ pub struct ReportedLlmUsageAccumulator {
     reported_cost: Option<f64>,
 }
 
+const FALLBACK_BYTES_PER_TOKEN: i64 = 4;
+
 impl ReportedLlmUsageAccumulator {
     pub fn observe_snapshot(&mut self, usage: ReportedLlmUsage) {
         self.prompt_tokens = self.prompt_tokens.max(usage.prompt_tokens);
@@ -82,6 +84,58 @@ impl ReportedLlmUsageAccumulator {
         };
 
         (!usage.is_empty()).then_some(usage)
+    }
+}
+
+pub fn estimate_tokens_from_bytes(total_bytes: i64) -> i64 {
+    let bytes = total_bytes.max(0);
+    let estimated = bytes.saturating_add(FALLBACK_BYTES_PER_TOKEN - 1) / FALLBACK_BYTES_PER_TOKEN;
+    estimated.max(1)
+}
+
+pub fn token_quantity_or_estimate(usage: Option<&ReportedLlmUsage>, fallback_bytes: i64) -> i64 {
+    usage
+        .and_then(|usage| {
+            (usage.total_tokens > 0).then_some(usage.total_tokens.min(i64::MAX as u64) as i64)
+        })
+        .unwrap_or_else(|| estimate_tokens_from_bytes(fallback_bytes))
+}
+
+pub fn force_stream_options_include_usage(body: &mut serde_json::Value) -> bool {
+    let Some(object) = body.as_object_mut() else {
+        return false;
+    };
+    if object.get("stream").and_then(|value| value.as_bool()) != Some(true) {
+        return false;
+    }
+
+    match object.get_mut("stream_options") {
+        Some(serde_json::Value::Object(options)) => {
+            if options
+                .get("include_usage")
+                .and_then(|value| value.as_bool())
+                == Some(true)
+            {
+                false
+            } else {
+                options.insert("include_usage".to_string(), serde_json::Value::Bool(true));
+                true
+            }
+        }
+        Some(_) => {
+            object.insert(
+                "stream_options".to_string(),
+                serde_json::json!({ "include_usage": true }),
+            );
+            true
+        }
+        None => {
+            object.insert(
+                "stream_options".to_string(),
+                serde_json::json!({ "include_usage": true }),
+            );
+            true
+        }
     }
 }
 
@@ -249,7 +303,8 @@ pub fn log_reported_usage_async(context: UsageAuditContext, usage: ReportedLlmUs
 mod tests {
     use super::{
         ReportedLlmUsage, ReportedLlmUsageAccumulator, UsageAggregationMode,
-        extract_reported_usage, extract_reported_usage_from_sse_event,
+        estimate_tokens_from_bytes, extract_reported_usage, extract_reported_usage_from_sse_event,
+        force_stream_options_include_usage, token_quantity_or_estimate,
     };
 
     #[test]
@@ -406,6 +461,55 @@ mod tests {
     fn empty_accumulator_finalizes_to_none() {
         let accumulator = ReportedLlmUsageAccumulator::default();
         assert!(accumulator.finalize().is_none());
+    }
+
+    #[test]
+    fn token_quantity_uses_reported_total_before_estimate() {
+        let usage = ReportedLlmUsage {
+            prompt_tokens: 20,
+            completion_tokens: 10,
+            total_tokens: 30,
+            reported_cost: None,
+        };
+
+        assert_eq!(token_quantity_or_estimate(Some(&usage), 10_000), 30);
+    }
+
+    #[test]
+    fn token_quantity_estimate_has_positive_floor() {
+        assert_eq!(estimate_tokens_from_bytes(0), 1);
+        assert_eq!(estimate_tokens_from_bytes(1), 1);
+        assert_eq!(estimate_tokens_from_bytes(4), 1);
+        assert_eq!(estimate_tokens_from_bytes(5), 2);
+        assert_eq!(token_quantity_or_estimate(None, 0), 1);
+    }
+
+    #[test]
+    fn token_quantity_estimates_when_usage_has_no_tokens() {
+        let usage = ReportedLlmUsage {
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            reported_cost: Some(0.01),
+        };
+
+        assert_eq!(token_quantity_or_estimate(Some(&usage), 17), 5);
+    }
+
+    #[test]
+    fn force_stream_options_include_usage_preserves_existing_options() {
+        let mut body = serde_json::json!({
+            "model": "gpt-4o-mini",
+            "stream": true,
+            "stream_options": {
+                "another_option": true
+            }
+        });
+
+        assert!(force_stream_options_include_usage(&mut body));
+        assert_eq!(body["stream_options"]["include_usage"], true);
+        assert_eq!(body["stream_options"]["another_option"], true);
+        assert!(!force_stream_options_include_usage(&mut body));
     }
 
     #[test]

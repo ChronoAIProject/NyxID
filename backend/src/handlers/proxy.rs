@@ -1618,6 +1618,7 @@ async fn execute_proxy_inner(
     } else {
         Some(body_bytes)
     };
+    let body = force_stream_usage_for_service(&target.service.slug, path, body);
     let request_body_len = body.as_ref().map(|b| b.len() as i64).unwrap_or(0);
 
     // === Delegated Credentials ===
@@ -2013,7 +2014,7 @@ async fn execute_proxy_inner(
                             settle_meter_async(
                                 state.billing.clone(),
                                 metered.clone(),
-                                PlatformUsage::single_request(request_len + response_len),
+                                llm_platform_usage(None, request_len + response_len),
                                 None,
                                 None,
                             );
@@ -2162,7 +2163,7 @@ async fn execute_proxy_inner(
                                 settle_meter_async(
                                     stream_billing,
                                     stream_metered,
-                                    PlatformUsage::single_request(request_len + response_len),
+                                    llm_platform_usage(None, request_len + response_len),
                                     None,
                                     None,
                                 );
@@ -2344,6 +2345,20 @@ async fn execute_proxy_inner(
             .get("stream")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        let request_len = serde_json::to_vec(&translated.body)
+            .map(|bytes| bytes.len() as i64)
+            .unwrap_or(request_body_len);
+        let model = body_json
+            .get("model")
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+        let usage_complete = chatgpt_usage_callback(
+            state.billing.clone(),
+            metered.clone(),
+            request_len,
+            billing_ctx.resale.as_ref().map(|spec| spec.metric),
+            model.clone(),
+        );
 
         state.billing.mark_forwarded(&metered).await?;
         let mut response = chatgpt_translator::send_to_chatgpt(
@@ -2357,30 +2372,14 @@ async fn execute_proxy_inner(
                 user_id: user_id_str.clone(),
                 provider_slug: None,
                 service_id: Some(service_id.to_string()),
-                model: body_json
-                    .get("model")
-                    .and_then(|value| value.as_str())
-                    .map(str::to_string),
+                model,
                 path: path.to_string(),
                 api_key_id: auth_user.api_key_id.clone(),
                 api_key_name: auth_user.api_key_name.clone(),
             }),
+            Some(usage_complete),
         )
         .await?;
-        settle_meter_async(
-            state.billing.clone(),
-            metered.clone(),
-            PlatformUsage::single_request(
-                serde_json::to_vec(&translated.body)
-                    .map(|bytes| bytes.len() as i64)
-                    .unwrap_or(0),
-            ),
-            None,
-            body_json
-                .get("model")
-                .and_then(|value| value.as_str())
-                .map(str::to_string),
-        );
 
         let status = response.status();
 
@@ -2526,7 +2525,7 @@ async fn execute_proxy_inner(
                                 settle_meter_async(
                                     stream_billing,
                                     stream_metered,
-                                    PlatformUsage::single_request(request_len + response_len),
+                                    llm_platform_usage(usage.as_ref(), request_len + response_len),
                                     resale,
                                     stream_usage_context.model.clone(),
                                 );
@@ -2557,7 +2556,7 @@ async fn execute_proxy_inner(
                             settle_meter_async(
                                 stream_billing,
                                 stream_metered,
-                                PlatformUsage::single_request(request_len + response_len),
+                                llm_platform_usage(usage.as_ref(), request_len + response_len),
                                 resale,
                                 stream_usage_context.model.clone(),
                             );
@@ -2586,7 +2585,7 @@ async fn execute_proxy_inner(
                             settle_meter_async(
                                 stream_billing,
                                 stream_metered,
-                                PlatformUsage::single_request(request_len + response_len),
+                                llm_platform_usage(usage.as_ref(), request_len + response_len),
                                 resale,
                                 stream_usage_context.model.clone(),
                             );
@@ -2615,7 +2614,7 @@ async fn execute_proxy_inner(
                             settle_meter_async(
                                 stream_billing,
                                 stream_metered,
-                                PlatformUsage::single_request(request_len + response_len),
+                                llm_platform_usage(usage.as_ref(), request_len + response_len),
                                 resale,
                                 stream_usage_context.model.clone(),
                             );
@@ -2672,7 +2671,7 @@ async fn execute_proxy_inner(
                 settle_meter_async(
                     stream_billing,
                     stream_metered,
-                    PlatformUsage::single_request(request_len + response_len),
+                    llm_platform_usage(None, request_len + response_len),
                     None,
                     None,
                 );
@@ -2724,7 +2723,7 @@ async fn execute_proxy_inner(
             .billing
             .settle(
                 &metered,
-                PlatformUsage::single_request(request_len + response_len),
+                llm_platform_usage(reported_usage.as_ref(), request_len + response_len),
                 resale,
                 model,
             )
@@ -2850,23 +2849,11 @@ fn platform_metric_for_target(
 ) -> BillingMetric {
     if is_connection || target.service.service_type == "ssh" {
         BillingMetric::Bytes
+    } else if target.service.slug.starts_with("llm-") {
+        BillingMetric::Tokens
     } else {
         BillingMetric::Requests
     }
-}
-
-fn resale_usage_from_reported(
-    metric: BillingMetric,
-    usage: &llm_usage_service::ReportedLlmUsage,
-    fallback_bytes: i64,
-) -> ResaleUsage {
-    let quantity = match metric {
-        BillingMetric::Tokens => usage.total_tokens.min(i64::MAX as u64) as i64,
-        BillingMetric::Requests => 1,
-        BillingMetric::Bytes => fallback_bytes,
-    };
-
-    ResaleUsage { metric, quantity }
 }
 
 fn resale_usage_from_optional_reported(
@@ -2875,8 +2862,10 @@ fn resale_usage_from_optional_reported(
     fallback_bytes: i64,
 ) -> Option<ResaleUsage> {
     match metric {
-        BillingMetric::Tokens => usage
-            .map(|usage| resale_usage_from_reported(BillingMetric::Tokens, usage, fallback_bytes)),
+        BillingMetric::Tokens => Some(ResaleUsage {
+            metric,
+            quantity: llm_usage_service::token_quantity_or_estimate(usage, fallback_bytes),
+        }),
         BillingMetric::Requests => Some(ResaleUsage {
             metric,
             quantity: 1,
@@ -2886,6 +2875,71 @@ fn resale_usage_from_optional_reported(
             quantity: fallback_bytes.max(0),
         }),
     }
+}
+
+fn llm_platform_usage(
+    usage: Option<&llm_usage_service::ReportedLlmUsage>,
+    fallback_bytes: i64,
+) -> PlatformUsage {
+    PlatformUsage::llm_completion(
+        fallback_bytes,
+        llm_usage_service::token_quantity_or_estimate(usage, fallback_bytes),
+    )
+}
+
+fn service_supports_stream_options_include_usage(service_slug: &str) -> bool {
+    matches!(service_slug, "llm-openai" | "llm-deepseek")
+}
+
+fn force_stream_usage_for_service(
+    service_slug: &str,
+    path: &str,
+    body: Option<bytes::Bytes>,
+) -> Option<bytes::Bytes> {
+    let body_bytes = body?;
+    if body_bytes.is_empty()
+        || !service_supports_stream_options_include_usage(service_slug)
+        || !path.contains("chat/completions")
+    {
+        return Some(body_bytes);
+    }
+
+    let Ok(mut body_json) = serde_json::from_slice::<serde_json::Value>(&body_bytes) else {
+        return Some(body_bytes);
+    };
+    if body_json.get("stream").and_then(|value| value.as_bool()) != Some(true)
+        || !llm_usage_service::force_stream_options_include_usage(&mut body_json)
+    {
+        return Some(body_bytes);
+    }
+
+    Some(
+        serde_json::to_vec(&body_json)
+            .map(bytes::Bytes::from)
+            .unwrap_or(body_bytes),
+    )
+}
+
+fn chatgpt_usage_callback(
+    billing: std::sync::Arc<crate::services::billing::BillingService>,
+    metered: crate::services::billing::MeteredProxyContext,
+    request_len: i64,
+    resale_metric: Option<BillingMetric>,
+    model: Option<String>,
+) -> chatgpt_translator::UsageCompleteCallback {
+    std::sync::Arc::new(move |usage, response_len| {
+        let total_bytes = request_len + response_len;
+        let resale = resale_metric.and_then(|metric| {
+            resale_usage_from_optional_reported(metric, usage.as_ref(), total_bytes)
+        });
+        settle_meter_async(
+            billing.clone(),
+            metered.clone(),
+            llm_platform_usage(usage.as_ref(), total_bytes),
+            resale,
+            model.clone(),
+        );
+    })
 }
 
 fn settle_meter_async(
@@ -3735,7 +3789,7 @@ async fn handle_ws_passthrough(
             settle_meter_async(
                 billing,
                 metered_for_settle,
-                PlatformUsage::single_request(stats.total_bytes()),
+                llm_platform_usage(None, stats.total_bytes()),
                 None,
                 None,
             );
@@ -4020,7 +4074,7 @@ async fn handle_ws_passthrough_via_node(
             settle_meter_async(
                 billing,
                 metered_for_settle,
-                PlatformUsage::single_request(stats.total_bytes()),
+                llm_platform_usage(None, stats.total_bytes()),
                 None,
                 None,
             );
