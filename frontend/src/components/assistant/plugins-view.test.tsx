@@ -8,11 +8,17 @@ import { resetSkillCatalog } from "@/lib/assistant/skills";
 const mocks = vi.hoisted(() => ({
   useCatalog: vi.fn(),
   useKeys: vi.fn(),
+  useKey: vi.fn(),
+  useUpdateKey: vi.fn(),
+  useDeleteKey: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-keys", () => ({
   useCatalog: mocks.useCatalog,
   useKeys: mocks.useKeys,
+  useKey: mocks.useKey,
+  useUpdateKey: mocks.useUpdateKey,
+  useDeleteKey: mocks.useDeleteKey,
 }));
 
 vi.mock("@tanstack/react-router", () => ({
@@ -126,6 +132,20 @@ describe("PluginsView", () => {
     vi.clearAllMocks();
     resetSkillCatalog();
     mockLoaded();
+    // Manage-modal hooks: a fully-shaped key + no-op mutations.
+    mocks.useKey.mockReturnValue({
+      data: {
+        ...keys[0],
+        status: "active",
+        is_active: true,
+        proxy_url: "http://localhost:3011/api/v1/proxy/s/openai",
+        last_used_at: null,
+        granted_scopes: null,
+      },
+      isLoading: false,
+    });
+    mocks.useUpdateKey.mockReturnValue({ mutate: vi.fn(), isPending: false });
+    mocks.useDeleteKey.mockReturnValue({ mutate: vi.fn(), isPending: false });
   });
 
   it("splits connectors into real connections and unconnected catalog entries", () => {
@@ -150,11 +170,81 @@ describe("PluginsView", () => {
     expect(connect).toHaveAttribute("data-search", '{"slug":"github"}');
   });
 
-  it("links Manage to the key detail page", () => {
+  it("opens the compact manage modal for a single-connection service", async () => {
+    const user = userEvent.setup();
     render(<PluginsView />);
-    const manage = screen.getAllByRole("link", { name: "Manage" })[0];
-    expect(manage).toHaveAttribute("data-to", "/keys/$keyId");
-    expect(manage).toHaveAttribute("data-params", '{"keyId":"key-1"}');
+    // Conditional mount: no key detail is fetched before Manage is clicked.
+    expect(mocks.useKey).not.toHaveBeenCalled();
+    // The OpenAI card (single connection) manages via a button, not a link.
+    const manageButtons = screen.getAllByRole("button", { name: "Manage" });
+    await user.click(manageButtons[0] as HTMLElement);
+    // Modal renders the key's details + the full-settings escape hatch.
+    expect(mocks.useKey).toHaveBeenCalledWith("key-1");
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    const fullSettings = screen.getByRole("link", {
+      name: /open full settings/i,
+    });
+    expect(fullSettings).toHaveAttribute("data-to", "/keys/$keyId");
+    expect(fullSettings).toHaveAttribute("data-params", '{"keyId":"key-1"}');
+  });
+
+  it("toggles the connection active state through the modal", async () => {
+    const mutate = vi.fn();
+    mocks.useUpdateKey.mockReturnValue({ mutate, isPending: false });
+    const user = userEvent.setup();
+    render(<PluginsView />);
+    await user.click(screen.getAllByRole("button", { name: "Manage" })[0] as HTMLElement);
+    await user.click(
+      await screen.findByRole("switch", { name: /toggle connection enabled/i }),
+    );
+    expect(mutate).toHaveBeenCalledWith(
+      { keyId: "key-1", is_active: false },
+      expect.anything(),
+    );
+  });
+
+  it("requires an explicit confirmation before revoking", async () => {
+    const mutate = vi.fn();
+    mocks.useDeleteKey.mockReturnValue({ mutate, isPending: false });
+    const user = userEvent.setup();
+    render(<PluginsView />);
+    await user.click(screen.getAllByRole("button", { name: "Manage" })[0] as HTMLElement);
+    // First Revoke click only arms the inline confirmation — no delete yet.
+    await user.click(await screen.findByRole("button", { name: "Revoke" }));
+    expect(mutate).not.toHaveBeenCalled();
+    // The confirm click sends the delete with the key id.
+    const confirm = screen
+      .getAllByRole("button", { name: "Revoke" })
+      .at(-1) as HTMLElement;
+    await user.click(confirm);
+    expect(mutate).toHaveBeenCalledWith("key-1", expect.anything());
+  });
+
+  it("hides mutation controls for an auto-connected (platform-managed) key", async () => {
+    mocks.useKey.mockReturnValue({
+      data: {
+        ...keys[0],
+        status: "active",
+        is_active: true,
+        proxy_url: "http://localhost:3011/api/v1/proxy/s/openai",
+        last_used_at: null,
+        granted_scopes: null,
+        auto_connected: true,
+      },
+      isLoading: false,
+    });
+    const user = userEvent.setup();
+    render(<PluginsView />);
+    await user.click(screen.getAllByRole("button", { name: "Manage" })[0] as HTMLElement);
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    expect(screen.queryByRole("switch")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Revoke" }),
+    ).not.toBeInTheDocument();
+    // The full-settings escape hatch remains.
+    expect(
+      screen.getByRole("link", { name: /open full settings/i }),
+    ).toBeInTheDocument();
   });
 
   it("shows loading skeletons while either query is in flight", () => {

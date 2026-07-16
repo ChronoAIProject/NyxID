@@ -17,7 +17,10 @@ import { AssistantRouteGuard } from "@/components/assistant-route-guard";
 import { useAuthStore } from "@/stores/auth-store";
 import { hasAdminRead } from "@/types/api";
 import { shouldRedirectFromBilling } from "@/lib/billing-availability";
-import { shouldRedirectFromAssistant } from "@/lib/assistant-availability";
+import {
+  fetchAssistantAccessUser,
+  shouldRedirectFromAssistant,
+} from "@/lib/assistant-availability";
 import { normalizeAdminOAuthClientSearch } from "@/lib/admin-oauth-clients";
 
 import {
@@ -274,14 +277,30 @@ const assistantBeforeLoad = async ({
     }
   }
 
-  const { isAuthenticated, isLoading, user } = useAuthStore.getState();
-  if (!isAuthenticated && !isLoading) {
+  const redirectToLogin = () => {
     const returnPath = `${location.pathname}${location.searchStr}`;
     const returnTo = `${window.location.origin}${returnPath}`;
     window.location.assign(`/login?return_to=${encodeURIComponent(returnTo)}`);
+  };
+
+  const { isAuthenticated, isLoading } = useAuthStore.getState();
+  if (!isAuthenticated && !isLoading) {
+    redirectToLogin();
     return;
   }
-  if (shouldRedirectFromAssistant({ isLoading, user })) {
+
+  // The flag decision is verified against the server on every route entry —
+  // never trusted from the cached client snapshot alone. Fail-closed: a
+  // failed fetch reads as flag-off unless it was a 401, which clears the
+  // session and routes to login instead.
+  const user = await fetchAssistantAccessUser();
+  if (user) {
+    useAuthStore.getState().setUser(user);
+  } else if (!useAuthStore.getState().isAuthenticated) {
+    redirectToLogin();
+    return;
+  }
+  if (shouldRedirectFromAssistant({ isLoading: false, user })) {
     throw redirect({ to: "/dashboard" });
   }
 };

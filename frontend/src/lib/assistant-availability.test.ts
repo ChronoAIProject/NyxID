@@ -1,7 +1,18 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { UserCapabilities } from "@/types/api";
 import { FEATURE_FLAG } from "./feature-flags";
-import { shouldRedirectFromAssistant } from "./assistant-availability";
+import {
+  fetchAssistantAccessUser,
+  shouldRedirectFromAssistant,
+} from "./assistant-availability";
+
+const { mockGet } = vi.hoisted(() => ({
+  mockGet: vi.fn(),
+}));
+
+vi.mock("@/lib/api-client", () => ({
+  api: { get: mockGet },
+}));
 
 function userWithAssistant(enabled: boolean): {
   readonly capabilities: UserCapabilities;
@@ -39,5 +50,31 @@ describe("shouldRedirectFromAssistant", () => {
         user: userWithAssistant(true),
       }),
     ).toBe(false);
+  });
+});
+
+describe("fetchAssistantAccessUser", () => {
+  beforeEach(() => {
+    mockGet.mockReset();
+  });
+
+  it("returns the server-resolved user from /users/me", async () => {
+    const user = userWithAssistant(true);
+    mockGet.mockResolvedValueOnce(user);
+
+    await expect(fetchAssistantAccessUser()).resolves.toBe(user);
+    expect(mockGet).toHaveBeenCalledWith("/users/me");
+  });
+
+  it("fails closed to null when the verification fetch rejects", async () => {
+    mockGet.mockRejectedValueOnce(new Error("network down"));
+
+    await expect(fetchAssistantAccessUser()).resolves.toBeNull();
+  });
+
+  it("treats a null verified user as flag-off (guard redirects)", () => {
+    expect(shouldRedirectFromAssistant({ isLoading: false, user: null })).toBe(
+      true,
+    );
   });
 });

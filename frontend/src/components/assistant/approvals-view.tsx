@@ -1,6 +1,7 @@
 import { Link } from "@tanstack/react-router";
-import { ArrowUpRight, ShieldCheck } from "lucide-react";
+import { ArrowUpRight, MessageSquareText, ShieldCheck } from "lucide-react";
 import { ApprovalCard } from "@/components/assistant/blocks/approval-card";
+import { ServiceIcon } from "@/components/service-icon";
 import { Badge } from "@/components/ui/badge";
 import {
   Table,
@@ -14,7 +15,6 @@ import { useApprovals, useDecideApprovalFor } from "@/hooks/use-assistant";
 import { formatDate } from "@/lib/utils";
 import type { ApprovalListEntry } from "@/lib/assistant/mock-data";
 import type {
-  ApprovalCardContentBlock,
   ApprovalDecision,
   ApprovalDecisionChannel,
 } from "@/types/assistant";
@@ -44,51 +44,98 @@ function channelLabel(channel: ApprovalDecisionChannel | null): string {
     case "mobile":
       return "Mobile";
     default:
-      return "-";
+      return "—";
   }
+}
+
+function ServiceCell({ slug }: { readonly slug: string }) {
+  return (
+    <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
+      <ServiceIcon slug={`api-${slug}`} size="xs" />
+      {slug}
+    </span>
+  );
 }
 
 function ConversationLink({
   conversationId,
   conversationTitle,
+  size = "xs",
   className,
 }: {
   readonly conversationId: string;
   readonly conversationTitle: string;
+  readonly size?: "xs" | "sm";
   readonly className?: string;
 }) {
   return (
     <Link
       to="/assistant"
       search={{ c: conversationId }}
-      className={`group inline-flex items-center gap-1 text-[11px] text-text-tertiary transition-colors hover:text-foreground ${className ?? ""}`}
+      className={`group inline-flex min-w-0 items-center transition-colors hover:text-foreground ${
+        size === "sm"
+          ? "gap-1.5 text-[12px] font-medium text-muted-foreground"
+          : "gap-1 text-[11px] text-text-tertiary"
+      } ${className ?? ""}`}
     >
-      {conversationTitle}
-      <ArrowUpRight className="h-3 w-3 opacity-0 transition-opacity group-hover:opacity-100" />
+      {size === "sm" && (
+        <MessageSquareText className="h-3.5 w-3.5 shrink-0 text-text-tertiary" />
+      )}
+      <span className="truncate">{conversationTitle}</span>
+      <ArrowUpRight className="h-3 w-3 shrink-0 opacity-0 transition-opacity group-hover:opacity-100" />
     </Link>
   );
 }
 
-function ApprovalEntry({
-  conversationId,
-  conversationTitle,
-  block,
+function PendingSection({
+  entries,
   onDecide,
 }: {
-  readonly conversationId: string;
-  readonly conversationTitle: string;
-  readonly block: ApprovalCardContentBlock;
-  readonly onDecide: (approved: boolean) => Promise<void>;
+  readonly entries: ApprovalListEntry[];
+  readonly onDecide: (
+    entry: ApprovalListEntry,
+    approved: boolean,
+  ) => Promise<void>;
 }) {
+  if (entries.length === 0) {
+    return (
+      <div className="flex flex-col items-center rounded-xl border border-border bg-card px-6 py-12 text-center">
+        <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-success/25 bg-success/[0.06]">
+          <ShieldCheck className="h-5 w-5 text-success" />
+        </div>
+        <p className="mt-3 text-[13px] font-medium text-foreground">
+          Nothing waiting on you
+        </p>
+        <p className="mt-1 text-[11px] text-muted-foreground">
+          Approval requests show up here when a write needs your sign-off.
+        </p>
+      </div>
+    );
+  }
+
   return (
-    <div>
-      <ConversationLink
-        conversationId={conversationId}
-        conversationTitle={conversationTitle}
-        className="mb-1.5"
-      />
-      <ApprovalCard block={block} onDecide={onDecide} />
-    </div>
+    <>
+      <p className="mb-2.5 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[1.5px] text-text-tertiary">
+        Waiting on you
+        <Badge variant="warning">{entries.length}</Badge>
+      </p>
+      <div className="space-y-5">
+        {entries.map((entry) => (
+          <div key={entry.block.block_id}>
+            <ConversationLink
+              conversationId={entry.conversationId}
+              conversationTitle={entry.conversationTitle}
+              size="sm"
+              className="mb-2"
+            />
+            <ApprovalCard
+              block={entry.block}
+              onDecide={(approved) => onDecide(entry, approved)}
+            />
+          </div>
+        ))}
+      </div>
+    </>
   );
 }
 
@@ -117,10 +164,10 @@ function HistorySection({ entries }: { readonly entries: ApprovalListEntry[] }) 
               {entry.block.decision !== null &&
                 getDecisionBadge(entry.block.decision)}
             </div>
-            <p className="mt-1 text-[11px] text-muted-foreground">
-              {entry.block.service_slug}
+            <p className="mt-1.5 flex items-center gap-1.5 text-[11px] text-muted-foreground">
+              <ServiceCell slug={entry.block.service_slug} />
               {entry.block.decision_channel !== null &&
-                ` - via ${channelLabel(entry.block.decision_channel)}`}
+                `via ${channelLabel(entry.block.decision_channel)}`}
             </p>
             <div className="mt-3 flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
               <span className="text-[11px] text-muted-foreground">
@@ -152,7 +199,10 @@ function HistorySection({ entries }: { readonly entries: ApprovalListEntry[] }) 
               <TableRow key={entry.block.block_id}>
                 <TableCell>
                   <div className="flex min-w-0 flex-col gap-0.5">
-                    <span className="max-w-[260px] truncate">
+                    <span
+                      className="max-w-[260px] truncate"
+                      title={entry.block.body}
+                    >
                       {entry.block.body}
                     </span>
                     <ConversationLink
@@ -162,7 +212,7 @@ function HistorySection({ entries }: { readonly entries: ApprovalListEntry[] }) 
                   </div>
                 </TableCell>
                 <TableCell className="text-muted-foreground">
-                  {entry.block.service_slug}
+                  <ServiceCell slug={entry.block.service_slug} />
                 </TableCell>
                 <TableCell>
                   {entry.block.decision !== null &&
@@ -187,8 +237,13 @@ export function ApprovalsView() {
   const approvals = useApprovals();
   const decide = useDecideApprovalFor();
   const entries = approvals.data ?? [];
-  const pending = entries.filter((entry) => entry.block.decision === null);
-  const decided = entries.filter((entry) => entry.block.decision !== null);
+  // Pending: most urgent (soonest expiry) first. History: newest first.
+  const pending = entries
+    .filter((entry) => entry.block.decision === null)
+    .sort((a, b) => a.block.expires_at.localeCompare(b.block.expires_at));
+  const decided = entries
+    .filter((entry) => entry.block.decision !== null)
+    .sort((a, b) => b.requestedAt.localeCompare(a.requestedAt));
 
   return (
     <div className="h-full min-h-0 overflow-y-auto overscroll-contain">
@@ -203,42 +258,16 @@ export function ApprovalsView() {
       </div>
 
       <div className="max-w-[680px] px-5 pb-10 pt-5 sm:px-8">
-        {pending.length > 0 ? (
-          <>
-            <p className="mb-2.5 text-[10px] font-semibold uppercase tracking-[1.5px] text-text-tertiary">
-              Waiting on you
-            </p>
-            <div className="space-y-4">
-              {pending.map((entry) => (
-                <ApprovalEntry
-                  key={entry.block.block_id}
-                  conversationId={entry.conversationId}
-                  conversationTitle={entry.conversationTitle}
-                  block={entry.block}
-                  onDecide={(approved) =>
-                    decide.mutateAsync({
-                      conversationId: entry.conversationId,
-                      blockId: entry.block.block_id,
-                      approved,
-                    })
-                  }
-                />
-              ))}
-            </div>
-          </>
-        ) : (
-          <div className="flex flex-col items-center rounded-xl border border-border bg-card px-6 py-12 text-center">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-success/25 bg-success/[0.06]">
-              <ShieldCheck className="h-5 w-5 text-success" />
-            </div>
-            <p className="mt-3 text-[13px] font-medium text-foreground">
-              Nothing waiting on you
-            </p>
-            <p className="mt-1 text-[11px] text-muted-foreground">
-              Approval requests show up here when a write needs your sign-off.
-            </p>
-          </div>
-        )}
+        <PendingSection
+          entries={pending}
+          onDecide={(entry, approved) =>
+            decide.mutateAsync({
+              conversationId: entry.conversationId,
+              blockId: entry.block.block_id,
+              approved,
+            })
+          }
+        />
 
         <p className="mb-2.5 mt-8 text-[10px] font-semibold uppercase tracking-[1.5px] text-text-tertiary">
           History

@@ -5,6 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ErrorBanner } from "@/components/shared/error-banner";
+import { ManageConnectionModal } from "@/components/assistant/manage-connection-modal";
 import { ServiceIcon } from "@/components/service-icon";
 import { useCatalog, useKeys } from "@/hooks/use-keys";
 import {
@@ -156,7 +157,13 @@ function LoadingGrid() {
   );
 }
 
-function ConnectorCard({ item }: { readonly item: ConnectorCardItem }) {
+function ConnectorCard({
+  item,
+  onManage,
+}: {
+  readonly item: ConnectorCardItem;
+  readonly onManage: (keyId: string) => void;
+}) {
   return (
     <PluginCard
       item={item}
@@ -164,12 +171,18 @@ function ConnectorCard({ item }: { readonly item: ConnectorCardItem }) {
       addedMeta={item.manageKeyId ? undefined : item.meta}
       addedAction={
         item.manageKeyId ? (
-          <Button asChild variant="outline" size="sm">
-            <Link to="/keys/$keyId" params={{ keyId: item.manageKeyId }}>
-              Manage
-            </Link>
+          // Single-connection service: manage in a compact modal in-place.
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => onManage(item.manageKeyId as string)}
+          >
+            Manage
           </Button>
         ) : (
+          // Multi-connection service: which credential is ambiguous, so send
+          // to the Studio keys list (filtered) rather than a single-key modal.
           <Button asChild variant="outline" size="sm">
             <Link to="/keys">Manage</Link>
           </Button>
@@ -191,6 +204,7 @@ function ConnectorCard({ item }: { readonly item: ConnectorCardItem }) {
 function ConnectorsTab({ query }: { readonly query: string }) {
   const keysQuery = useKeys();
   const catalogQuery = useCatalog();
+  const [manageKeyId, setManageKeyId] = useState<string | null>(null);
 
   const items = useMemo(
     () => deriveConnectorItems(keysQuery.data ?? [], catalogQuery.data ?? []),
@@ -234,7 +248,11 @@ function ConnectorsTab({ query }: { readonly query: string }) {
             <div className="mb-7">
               <CardGrid>
                 {added.map((item) => (
-                  <ConnectorCard key={item.id} item={item} />
+                  <ConnectorCard
+                    key={item.id}
+                    item={item}
+                    onManage={setManageKeyId}
+                  />
                 ))}
               </CardGrid>
             </div>
@@ -252,10 +270,21 @@ function ConnectorsTab({ query }: { readonly query: string }) {
           <SectionHeading>Available to add</SectionHeading>
           <CardGrid>
             {available.map((item) => (
-              <ConnectorCard key={item.id} item={item} />
+              <ConnectorCard
+                key={item.id}
+                item={item}
+                onManage={setManageKeyId}
+              />
             ))}
           </CardGrid>
         </>
+      )}
+
+      {manageKeyId !== null && (
+        <ManageConnectionModal
+          keyId={manageKeyId}
+          onClose={() => setManageKeyId(null)}
+        />
       )}
     </>
   );
