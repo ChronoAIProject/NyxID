@@ -518,10 +518,10 @@ export function OAuthConsentPage() {
             <p className="break-all text-xs text-foreground">{redirectUri}</p>
           </div>
 
-          <div className="rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-4 py-3">
+          <div className="rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-4 py-3 light:border-warning/40 light:bg-warning/10">
             <div className="flex items-start gap-2">
-              <AlertTriangle className="mt-0.5 h-4 w-4 text-yellow-300" />
-              <p className="text-xs text-yellow-100/90">
+              <AlertTriangle className="mt-0.5 h-4 w-4 text-yellow-300 light:text-warning" />
+              <p className="text-xs text-yellow-100/90 light:text-warning">
                 Only continue if you trust this application. You can revoke this
                 access later from <strong>Authorized Applications</strong>.
               </p>
