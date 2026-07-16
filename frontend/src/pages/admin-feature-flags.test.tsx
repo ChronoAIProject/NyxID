@@ -2,9 +2,8 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AdminFeatureFlagsPage } from "./admin-feature-flags";
 
-const { mockUseFlags, mockUseUser, mockUseUsers } = vi.hoisted(() => ({
+const { mockUseFlags, mockUseUsers } = vi.hoisted(() => ({
   mockUseFlags: vi.fn(),
-  mockUseUser: vi.fn(),
   mockUseUsers: vi.fn(),
 }));
 
@@ -15,7 +14,6 @@ vi.mock("@/hooks/use-admin-feature-flags", () => ({
 }));
 
 vi.mock("@/hooks/use-admin", () => ({
-  useAdminUser: mockUseUser,
   useAdminUsers: mockUseUsers,
 }));
 
@@ -24,7 +22,6 @@ beforeEach(() => {
     data: { users: [], total: 201, page: 1, per_page: 20 },
     isLoading: false,
   });
-  mockUseUser.mockReturnValue({ data: undefined, isLoading: false });
 });
 
 describe("AdminFeatureFlagsPage", () => {
@@ -64,13 +61,6 @@ describe("AdminFeatureFlagsPage", () => {
   });
 
   it("resolves an existing override label independently of search results", () => {
-    mockUseUser.mockImplementation((userId: string) => ({
-      data:
-        userId === "user-outside-page"
-          ? { id: userId, email: "existing@example.com" }
-          : undefined,
-      isLoading: false,
-    }));
     mockUseFlags.mockReturnValue({
       data: {
         flags: [
@@ -83,6 +73,8 @@ describe("AdminFeatureFlagsPage", () => {
             user_overrides: [
               {
                 user_id: "user-outside-page",
+                user_email: "existing@example.com",
+                user_display_name: null,
                 enabled: true,
                 updated_at: "2026-07-17T00:00:00Z",
                 updated_by: "admin-1",

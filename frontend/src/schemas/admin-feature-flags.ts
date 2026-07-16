@@ -7,6 +7,8 @@ export type AdminFeatureFlagTargetKind = z.infer<
 
 export const adminUserFeatureFlagOverrideSchema = z.object({
   user_id: z.string(),
+  user_email: z.string().nullable(),
+  user_display_name: z.string().nullable(),
   enabled: z.boolean(),
   updated_at: z.string(),
   updated_by: z.string(),

@@ -14,6 +14,8 @@
 //! role / user is a runtime write, no deploy. Mirror new keys in
 //! `frontend/src/lib/feature-flags.ts`.
 
+use std::collections::{HashMap, HashSet};
+
 use chrono::Utc;
 use futures::TryStreamExt;
 use mongodb::bson::{self, doc};
@@ -277,6 +279,57 @@ pub async fn list_platform_overrides(
         .try_collect()
         .await?;
     Ok(rows)
+}
+
+/// Safe user fields used to enrich platform-admin feature-flag responses.
+#[derive(Clone, Debug)]
+pub struct PlatformOverrideUserDisplay {
+    pub email: String,
+    pub display_name: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct PlatformOverrideUserProjection {
+    #[serde(rename = "_id")]
+    id: String,
+    email: String,
+    #[serde(default)]
+    display_name: Option<String>,
+}
+
+/// Resolve every user referenced by platform overrides in one projected query.
+/// Deleted users are absent and become null display fields in the response.
+pub async fn fetch_platform_override_users(
+    db: &mongodb::Database,
+    overrides: &[FeatureFlagOverride],
+) -> AppResult<HashMap<String, PlatformOverrideUserDisplay>> {
+    let user_ids: HashSet<&str> = overrides
+        .iter()
+        .filter(|row| row.target_kind == FlagTargetKind::User)
+        .filter_map(|row| row.target_key.as_deref())
+        .collect();
+    if user_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let cursor = db
+        .collection::<PlatformOverrideUserProjection>(USERS)
+        .find(doc! { "_id": { "$in": user_ids.into_iter().collect::<Vec<_>>() } })
+        .projection(doc! { "_id": 1, "email": 1, "display_name": 1 })
+        .await?;
+    let users: Vec<PlatformOverrideUserProjection> = cursor.try_collect().await?;
+    Ok(users
+        .into_iter()
+        .map(|user| {
+            (
+                user.id,
+                PlatformOverrideUserDisplay {
+                    email: user.email,
+                    display_name: user.display_name,
+                },
+            )
+        })
+        .collect())
 }
 
 /// A registry flag paired with the org's current overrides for it. Powers the

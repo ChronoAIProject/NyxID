@@ -16,7 +16,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
-import { useAdminUser, useAdminUsers } from "@/hooks/use-admin";
+import { useAdminUsers } from "@/hooks/use-admin";
 import {
   useAdminFeatureFlags,
   useClearAdminFeatureFlag,
@@ -29,6 +29,7 @@ type FlagKind = "experiment" | "entitlement" | "ops";
 interface Assignment {
   readonly id: string;
   readonly label: string;
+  readonly missingUser?: boolean;
   state: ScopeState;
 }
 interface FlagRow {
@@ -66,7 +67,9 @@ export function AdminFeatureFlagsPage() {
     orgs: [],
     users: flag.user_overrides.map((override) => ({
       id: override.user_id,
-      label: override.user_id,
+      label: userOverrideLabel(override),
+      missingUser:
+        override.user_email == null && override.user_display_name == null,
       state: override.enabled ? "enabled" : "disabled",
     })),
   }));
@@ -240,41 +243,41 @@ function FlagCard({
   readonly stagedUsers: readonly string[];
 }) {
   const [addOrg, setAddOrg] = useState("");
+  const [stagedUserLabels, setStagedUserLabels] = useState<
+    Record<string, string>
+  >({});
 
   const orgIds = uniq([...flag.orgs.map((o) => o.id), ...stagedOrgs]);
   const userIds = uniq([...flag.users.map((u) => u.id), ...stagedUsers]);
-  const labelFor = (_type: ScopeType, id: string) => id;
+  const labelFor = (type: ScopeType, id: string) =>
+    type === "user"
+      ? flag.users.find((user) => user.id === id)?.label ??
+        stagedUserLabels[id] ??
+        id
+      : id;
 
   // Collapsed summary pills: Global + configured orgs/users (non-inherit).
   const pills: {
     id: string;
     label: string;
-    scope: ScopeType;
-    targetId: string;
     state: ScopeState;
     pending: boolean;
   }[] = [
     {
       id: "global",
       label: "Global",
-      scope: "global" as const,
-      targetId: "",
       state: stateFor("global", ""),
       pending: isPending("global", ""),
     },
     ...orgIds.map((id) => ({
       id: `org-${id}`,
       label: labelFor("org", id),
-      scope: "org" as const,
-      targetId: id,
       state: stateFor("org", id),
       pending: isPending("org", id),
     })),
     ...userIds.map((id) => ({
       id: `user-${id}`,
-      label: id,
-      scope: "user" as const,
-      targetId: id,
+      label: labelFor("user", id),
       state: stateFor("user", id),
       pending: isPending("user", id),
     })),
@@ -364,19 +367,31 @@ function FlagCard({
           <Group label="By user">
             <UserSearchPicker
               excludedIds={userIds}
-              onPick={(id) => {
-                stage("user", id, "enabled");
+              onPick={(user) => {
+                setStagedUserLabels((labels) => ({
+                  ...labels,
+                  [user.id]: user.label,
+                }));
+                stage("user", user.id, "enabled");
               }}
             />
-            {userIds.map((id) => (
-              <UserScopeRow
-                key={id}
-                userId={id}
-                state={stateFor("user", id)}
-                pending={isPending("user", id)}
-                onChange={(s) => stage("user", id, s)}
-              />
-            ))}
+            {userIds.map((id) => {
+              const assignment = flag.users.find((user) => user.id === id);
+              const label = labelFor("user", id);
+              return (
+                <div
+                  key={id}
+                  title={assignment?.missingUser ? id : undefined}
+                >
+                  <ScopeRow
+                    label={label}
+                    state={stateFor("user", id)}
+                    pending={isPending("user", id)}
+                    onChange={(state) => stage("user", id, state)}
+                  />
+                </div>
+              );
+            })}
           </Group>
         </div>
       )}
@@ -386,17 +401,11 @@ function FlagCard({
 
 interface SummaryPillValue {
   readonly label: string;
-  readonly scope: ScopeType;
-  readonly targetId: string;
   readonly state: ScopeState;
   readonly pending: boolean;
 }
 
 function SummaryPill({ pill }: { readonly pill: SummaryPillValue }) {
-  const { data: user } = useAdminUser(
-    pill.scope === "user" ? pill.targetId : "",
-  );
-  const label = user?.email ?? pill.label;
   return (
     <Badge
       variant={pill.state === "enabled" ? "success" : "secondary"}
@@ -405,9 +414,9 @@ function SummaryPill({ pill }: { readonly pill: SummaryPillValue }) {
         pill.state === "inherit" && !pill.pending && "opacity-60",
         pill.pending && "ring-1 ring-primary/70",
       )}
-      title={`${label} · ${word(pill.state)}`}
+      title={`${pill.label} · ${word(pill.state)}`}
     >
-      <span className="min-w-0 truncate">{label}</span>
+      <span className="min-w-0 truncate">{pill.label}</span>
       <span className="shrink-0">· {word(pill.state)}</span>
     </Badge>
   );
@@ -418,7 +427,7 @@ function UserSearchPicker({
   onPick,
 }: {
   readonly excludedIds: readonly string[];
-  readonly onPick: (id: string) => void;
+  readonly onPick: (user: { id: string; label: string }) => void;
 }) {
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
@@ -465,7 +474,7 @@ function UserSearchPicker({
                 key={user.id}
                 type="button"
                 onClick={() => {
-                  onPick(user.id);
+                  onPick({ id: user.id, label: user.email });
                   setSearch("");
                   setDebouncedSearch("");
                 }}
@@ -480,30 +489,6 @@ function UserSearchPicker({
           )}
         </div>
       )}
-    </div>
-  );
-}
-
-function UserScopeRow({
-  userId,
-  state,
-  pending,
-  onChange,
-}: {
-  readonly userId: string;
-  readonly state: ScopeState;
-  readonly pending: boolean;
-  readonly onChange: (state: ScopeState) => void;
-}) {
-  const { data: user } = useAdminUser(userId);
-  return (
-    <div title={user ? undefined : userId}>
-      <ScopeRow
-        label={user?.email ?? userId}
-        state={state}
-        pending={pending}
-        onChange={onChange}
-      />
     </div>
   );
 }
@@ -650,4 +635,16 @@ function stagedIds(
     .map((k) => k.split("\u001f"))
     .filter((p) => p[0] === flag && p[1] === type && p[2])
     .map((p) => p[2] as string);
+}
+
+function userOverrideLabel(override: {
+  readonly user_id: string;
+  readonly user_email: string | null;
+  readonly user_display_name: string | null;
+}): string {
+  const displayName = override.user_display_name?.trim();
+  if (displayName && override.user_email) {
+    return `${displayName} (${override.user_email})`;
+  }
+  return displayName || override.user_email || override.user_id;
 }

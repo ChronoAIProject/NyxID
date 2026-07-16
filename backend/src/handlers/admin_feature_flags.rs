@@ -20,20 +20,29 @@ use feature_flag_service::FlagTarget;
 #[derive(Debug, Serialize, ToSchema)]
 pub struct AdminUserFeatureFlagOverride {
     pub user_id: String,
+    pub user_email: Option<String>,
+    pub user_display_name: Option<String>,
     pub enabled: bool,
     pub updated_at: String,
     pub updated_by: String,
 }
 
-impl TryFrom<FeatureFlagOverride> for AdminUserFeatureFlagOverride {
-    type Error = AppError;
-
-    fn try_from(row: FeatureFlagOverride) -> Result<Self, Self::Error> {
+impl AdminUserFeatureFlagOverride {
+    fn from_row(
+        row: FeatureFlagOverride,
+        users: &std::collections::HashMap<
+            String,
+            feature_flag_service::PlatformOverrideUserDisplay,
+        >,
+    ) -> AppResult<Self> {
         let user_id = row.target_key.ok_or_else(|| {
             AppError::Internal("platform user override is missing its target key".to_string())
         })?;
+        let user = users.get(&user_id);
         Ok(Self {
             user_id,
+            user_email: user.map(|item| item.email.clone()),
+            user_display_name: user.and_then(|item| item.display_name.clone()),
             enabled: row.enabled,
             updated_at: row.updated_at.to_rfc3339(),
             updated_by: row.updated_by,
@@ -100,6 +109,7 @@ pub async fn list_feature_flags(
 ) -> AppResult<Json<AdminFeatureFlagListResponse>> {
     require_admin_or_operator(&state, &auth_user, "admin.feature_flags.list").await?;
     let overrides = feature_flag_service::list_platform_overrides(&state.db).await?;
+    let users = feature_flag_service::fetch_platform_override_users(&state.db, &overrides).await?;
     let mut flags = Vec::with_capacity(feature_flag_service::FEATURE_FLAGS.len());
 
     for def in feature_flag_service::FEATURE_FLAGS {
@@ -111,7 +121,7 @@ pub async fn list_feature_flags(
             .iter()
             .filter(|row| row.flag_key == def.key && row.target_kind == FlagTargetKind::User)
             .cloned()
-            .map(TryInto::try_into)
+            .map(|row| AdminUserFeatureFlagOverride::from_row(row, &users))
             .collect::<AppResult<Vec<_>>>()?;
         flags.push(AdminFeatureFlagItem {
             key: def.key.to_string(),
@@ -276,6 +286,30 @@ mod tests {
         let item = list.flags.iter().find(|flag| flag.key == flag_key).unwrap();
         assert_eq!(item.user_overrides.len(), 1);
         assert_eq!(item.user_overrides[0].user_id, target_id);
+        let expected_email = format!("{target_id}@example.com");
+        assert_eq!(
+            item.user_overrides[0].user_email.as_deref(),
+            Some(expected_email.as_str())
+        );
+        assert_eq!(
+            item.user_overrides[0].user_display_name.as_deref(),
+            Some("Test User")
+        );
+
+        state
+            .db
+            .collection::<crate::models::user::User>(USERS)
+            .delete_one(mongodb::bson::doc! { "_id": &target_id })
+            .await
+            .expect("delete target user");
+        let Json(list) = list_feature_flags(State(state.clone()), auth.clone())
+            .await
+            .expect("list flags after target deletion");
+        let item = list.flags.iter().find(|flag| flag.key == flag_key).unwrap();
+        assert_eq!(item.user_overrides.len(), 1);
+        assert_eq!(item.user_overrides[0].user_id, target_id);
+        assert!(item.user_overrides[0].user_email.is_none());
+        assert!(item.user_overrides[0].user_display_name.is_none());
 
         let missing_user_error = set_feature_flag(
             State(state.clone()),
