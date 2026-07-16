@@ -13,6 +13,7 @@ use super::route_context::BillingRouteContext;
 
 pub const PLATFORM_REQUESTS_METRIC_CODE: &str = "platform_requests";
 pub const PLATFORM_BYTES_METRIC_CODE: &str = "platform_bytes";
+pub const PLATFORM_TOKENS_METRIC_CODE: &str = "platform_tokens";
 
 #[derive(Clone, Debug, Default)]
 pub struct MeteredProxyContext {
@@ -279,15 +280,17 @@ pub(crate) fn transaction_id(
 
 pub(crate) fn platform_metric_code(metric: BillingMetric) -> &'static str {
     match metric {
-        BillingMetric::Requests | BillingMetric::Tokens => PLATFORM_REQUESTS_METRIC_CODE,
+        BillingMetric::Requests => PLATFORM_REQUESTS_METRIC_CODE,
         BillingMetric::Bytes => PLATFORM_BYTES_METRIC_CODE,
+        BillingMetric::Tokens => PLATFORM_TOKENS_METRIC_CODE,
     }
 }
 
 fn platform_quantity(metric: BillingMetric, usage: &PlatformUsage) -> i64 {
     match metric {
         BillingMetric::Bytes => usage.bytes.max(0),
-        BillingMetric::Requests | BillingMetric::Tokens => usage.requests.max(0),
+        BillingMetric::Requests => usage.requests.max(0),
+        BillingMetric::Tokens => usage.tokens.max(0),
     }
 }
 
@@ -310,7 +313,9 @@ mod tests {
     use crate::models::billing_wallet::{BillingWallet, CollectionState, PlanKind};
     use crate::models::service_billing::{BillingMetric, PlatformUsage, ServiceBilling};
     use crate::models::usage_meter::{BillingLayer, CredentialClass, UsageMeterRow, UsageStatus};
-    use crate::services::billing::meter::{mark_forwarded, open, settle};
+    use crate::services::billing::meter::{
+        PLATFORM_TOKENS_METRIC_CODE, mark_forwarded, open, settle,
+    };
     use crate::services::billing::reservation::BillingReservation;
     use crate::services::billing::route_context::{BillingRouteContext, NodeIntent};
     use crate::test_utils::connect_test_database;
@@ -393,6 +398,56 @@ mod tests {
                 && row.quantity == Some(17)
                 && row.credential_class == CredentialClass::NyxidManagedMaster
         }));
+    }
+
+    #[tokio::test]
+    async fn platform_tokens_settle_as_token_quantity() {
+        let Some(db) = connect_test_database("usage_meter_platform_tokens").await else {
+            return;
+        };
+        create_usage_transaction_index(&db).await;
+
+        let ctx = BillingRouteContext::new(
+            "billing-token-request-1".to_string(),
+            "owner-1".to_string(),
+            "actor-1".to_string(),
+            None,
+            Some("user-service-1".to_string()),
+            Some("catalog-1".to_string()),
+            Some("llm-openai".to_string()),
+            NodeIntent::Direct,
+            "bearer".to_string(),
+            CredentialClass::UserOwned,
+            BillingMetric::Tokens,
+            None::<&ServiceBilling>,
+            false,
+        )
+        .with_platform_metering(true);
+
+        let metered = open(&db, &ctx, None).await.expect("open token meter");
+        mark_forwarded(&db, &metered).await.expect("mark forwarded");
+        settle(
+            &db,
+            &metered,
+            PlatformUsage::llm_completion(128, 37),
+            None,
+            Some("gpt-test".to_string()),
+        )
+        .await
+        .expect("settle tokens");
+
+        let row = db
+            .collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
+            .find_one(doc! { "billing_request_id": "billing-token-request-1" })
+            .await
+            .expect("find row")
+            .expect("row exists");
+
+        assert_eq!(row.layer, BillingLayer::Platform);
+        assert_eq!(row.metric, BillingMetric::Tokens);
+        assert_eq!(row.lago_metric_code, PLATFORM_TOKENS_METRIC_CODE);
+        assert_eq!(row.quantity, Some(37));
+        assert_eq!(row.status, UsageStatus::Finalized);
     }
 
     #[test]

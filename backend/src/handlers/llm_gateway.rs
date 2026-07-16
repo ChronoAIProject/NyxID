@@ -40,9 +40,9 @@ fn resale_usage_from_optional_reported(
     fallback_bytes: i64,
 ) -> Option<ResaleUsage> {
     match metric {
-        BillingMetric::Tokens => usage.map(|usage| ResaleUsage {
+        BillingMetric::Tokens => Some(ResaleUsage {
             metric,
-            quantity: usage.total_tokens.min(i64::MAX as u64) as i64,
+            quantity: llm_usage_service::token_quantity_or_estimate(usage, fallback_bytes),
         }),
         BillingMetric::Requests => Some(ResaleUsage {
             metric,
@@ -53,6 +53,82 @@ fn resale_usage_from_optional_reported(
             quantity: fallback_bytes.max(0),
         }),
     }
+}
+
+fn llm_platform_usage(
+    usage: Option<&llm_usage_service::ReportedLlmUsage>,
+    fallback_bytes: i64,
+) -> PlatformUsage {
+    PlatformUsage::llm_completion(
+        fallback_bytes,
+        llm_usage_service::token_quantity_or_estimate(usage, fallback_bytes),
+    )
+}
+
+fn supports_stream_options_include_usage(provider_slug: &str) -> bool {
+    matches!(provider_slug, "openai" | "deepseek")
+}
+
+fn should_force_stream_usage(provider_slug: &str, path: &str, body: &serde_json::Value) -> bool {
+    supports_stream_options_include_usage(provider_slug)
+        && path.contains("chat/completions")
+        && body.get("stream").and_then(|value| value.as_bool()) == Some(true)
+}
+
+fn force_stream_usage_for_provider(
+    provider_slug: &str,
+    path: &str,
+    mut body: serde_json::Value,
+) -> serde_json::Value {
+    if should_force_stream_usage(provider_slug, path, &body) {
+        llm_usage_service::force_stream_options_include_usage(&mut body);
+    }
+    body
+}
+
+fn force_stream_usage_bytes_for_provider(
+    provider_slug: &str,
+    path: &str,
+    body_bytes: bytes::Bytes,
+) -> bytes::Bytes {
+    if body_bytes.is_empty() || !supports_stream_options_include_usage(provider_slug) {
+        return body_bytes;
+    }
+
+    let Ok(mut body) = serde_json::from_slice::<serde_json::Value>(&body_bytes) else {
+        return body_bytes;
+    };
+    if !should_force_stream_usage(provider_slug, path, &body) {
+        return body_bytes;
+    }
+    if !llm_usage_service::force_stream_options_include_usage(&mut body) {
+        return body_bytes;
+    }
+    serde_json::to_vec(&body)
+        .map(bytes::Bytes::from)
+        .unwrap_or(body_bytes)
+}
+
+fn chatgpt_usage_callback(
+    billing: std::sync::Arc<crate::services::billing::BillingService>,
+    metered: crate::services::billing::MeteredProxyContext,
+    request_len: i64,
+    resale_metric: Option<BillingMetric>,
+    model: Option<String>,
+) -> chatgpt_translator::UsageCompleteCallback {
+    std::sync::Arc::new(move |usage, response_len| {
+        let total_bytes = request_len + response_len;
+        let resale = resale_metric.and_then(|metric| {
+            resale_usage_from_optional_reported(metric, usage.as_ref(), total_bytes)
+        });
+        settle_meter_async(
+            billing.clone(),
+            metered.clone(),
+            llm_platform_usage(usage.as_ref(), total_bytes),
+            resale,
+            model.clone(),
+        );
+    })
 }
 
 fn settle_meter_async(
@@ -256,12 +332,11 @@ pub async fn llm_proxy_request(
         crate::services::billing::NodeIntent::Direct,
         target.auth_method.clone(),
         llm_credential_class(resolved_via_user_service, &target),
-        BillingMetric::Requests,
+        BillingMetric::Tokens,
         target.service.billing.as_ref().or(service.billing.as_ref()),
         state.billing.resale_enabled(),
     );
     let metered = state.billing.open(&billing_ctx).await?;
-    let request_len = body_bytes.len() as i64;
 
     // Resolve credentials for injection. The new UserService path bakes the
     // credential into `target` (via auth_method / credential), so we only need
@@ -322,40 +397,51 @@ pub async fn llm_proxy_request(
 
         let translator = llm_gateway_service::get_translator(&provider_slug);
         let translated = translator.translate_request(&path, &body_json)?;
+        let request_len = serde_json::to_vec(&translated.body)
+            .map(|bytes| bytes.len() as i64)
+            .unwrap_or(body_bytes.len() as i64);
 
         let bearer_token = extract_bearer_token(&delegated)?;
         let is_streaming = body_json
             .get("stream")
             .and_then(|s| s.as_bool())
             .unwrap_or(false);
+        let usage_complete = chatgpt_usage_callback(
+            state.billing.clone(),
+            metered.clone(),
+            request_len,
+            metered
+                .route
+                .as_ref()
+                .and_then(|ctx| ctx.resale.as_ref().map(|spec| spec.metric)),
+            body_json
+                .get("model")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+        );
 
         state.billing.mark_forwarded(&metered).await?;
-        let response = chatgpt_translator::send_to_chatgpt(
+        chatgpt_translator::send_to_chatgpt(
             &translated.body,
             &bearer_token,
             is_streaming,
             is_chat_completions_path,
             query.as_deref(),
             Some(usage_context),
+            Some(usage_complete),
         )
-        .await?;
-        settle_meter_async(
-            state.billing.clone(),
-            metered.clone(),
-            PlatformUsage::single_request(request_len),
-            None,
-            body_json
-                .get("model")
-                .and_then(|value| value.as_str())
-                .map(str::to_string),
-        );
-        response
+        .await?
     } else {
         let body = if body_bytes.is_empty() {
             None
         } else {
-            Some(body_bytes)
+            Some(force_stream_usage_bytes_for_provider(
+                &provider_slug,
+                &path,
+                body_bytes,
+            ))
         };
+        let request_len = body.as_ref().map(|bytes| bytes.len() as i64).unwrap_or(0);
 
         let reqwest_method = convert_method(&method)?;
         let reqwest_headers = convert_headers(&headers);
@@ -444,7 +530,7 @@ pub async fn gateway_request(
         .map_err(|e| AppError::BadRequest(format!("Failed to read request body: {e}")))?;
 
     // Parse body as JSON to extract model
-    let body_json: serde_json::Value = if body_bytes.is_empty() {
+    let mut body_json: serde_json::Value = if body_bytes.is_empty() {
         return Err(AppError::ValidationError(
             "Request body is required with a 'model' field".to_string(),
         ));
@@ -458,21 +544,24 @@ pub async fn gateway_request(
     let model = body_json
         .get("model")
         .and_then(|m| m.as_str())
+        .map(str::to_string)
         .ok_or_else(|| {
             AppError::ValidationError("'model' field is required in request body".to_string())
         })?;
 
     // Resolve provider slug from model name
-    let primary_slug = llm_gateway_service::resolve_provider_for_model(model).ok_or_else(|| {
-        AppError::BadRequest(format!(
-            "Unknown model: '{model}'. Cannot determine provider."
-        ))
-    })?;
+    let primary_slug =
+        llm_gateway_service::resolve_provider_for_model(&model).ok_or_else(|| {
+            AppError::BadRequest(format!(
+                "Unknown model: '{model}'. Cannot determine provider."
+            ))
+        })?;
 
     // Try to find the user's active token for the resolved provider.
     // For OpenAI models, fall back to openai-codex if openai is not connected.
     let provider_slug =
         resolve_provider_slug_with_fallback(&state.db, &user_id_str, primary_slug).await?;
+    body_json = force_stream_usage_for_provider(&provider_slug, &path, body_json);
 
     // Resolve the downstream service
     let (service, _provider) =
@@ -644,7 +733,7 @@ pub async fn gateway_request(
         crate::services::billing::NodeIntent::Direct,
         target.auth_method.clone(),
         llm_credential_class(resolved_via_user_service, &target),
-        BillingMetric::Requests,
+        BillingMetric::Tokens,
         target.service.billing.as_ref().or(service.billing.as_ref()),
         state.billing.resale_enabled(),
     );
@@ -772,25 +861,28 @@ pub async fn gateway_request(
         // Path determines response format: chat/completions → translate back
         // to Chat Completions, responses → return Responses API as-is
         let is_chat_completions_path = path.contains("chat/completions");
+        let usage_complete = chatgpt_usage_callback(
+            state.billing.clone(),
+            metered.clone(),
+            request_len,
+            metered
+                .route
+                .as_ref()
+                .and_then(|ctx| ctx.resale.as_ref().map(|spec| spec.metric)),
+            Some(model.to_string()),
+        );
 
         state.billing.mark_forwarded(&metered).await?;
-        let response = chatgpt_translator::send_to_chatgpt(
+        chatgpt_translator::send_to_chatgpt(
             &translated_body,
             &bearer_token,
             is_streaming,
             is_chat_completions_path,
             query.as_deref(),
             Some(usage_context),
+            Some(usage_complete),
         )
-        .await?;
-        settle_meter_async(
-            state.billing.clone(),
-            metered.clone(),
-            PlatformUsage::single_request(request_len),
-            None,
-            Some(model.to_string()),
-        );
-        response
+        .await?
     } else {
         state.billing.mark_forwarded(&metered).await?;
         let downstream_response = proxy_service::forward_request(
@@ -1090,7 +1182,7 @@ async fn build_filtered_response(
                 settle_meter_async(
                     stream_billing,
                     stream_metered,
-                    PlatformUsage::single_request(request_len + response_len),
+                    llm_platform_usage(usage.as_ref(), request_len + response_len),
                     resale,
                     context.model,
                 );
@@ -1123,7 +1215,7 @@ async fn build_filtered_response(
             settle_meter_async(
                 stream_billing,
                 stream_metered,
-                PlatformUsage::single_request(request_len + response_len),
+                llm_platform_usage(None, request_len + response_len),
                 None,
                 None,
             );
@@ -1159,7 +1251,7 @@ async fn build_filtered_response(
         billing
             .settle(
                 &metered,
-                PlatformUsage::single_request(request_len + response_len),
+                llm_platform_usage(reported_usage.as_ref(), request_len + response_len),
                 resale,
                 model,
             )
@@ -1216,7 +1308,7 @@ async fn build_translated_json_response(
         billing
             .settle(
                 &metered,
-                PlatformUsage::single_request(request_len + response_len),
+                llm_platform_usage(reported_usage.as_ref(), request_len + response_len),
                 resale,
                 model,
             )
@@ -1271,7 +1363,7 @@ async fn build_translated_json_response(
         billing
             .settle(
                 &metered,
-                PlatformUsage::single_request(request_len + error_bytes.len() as i64),
+                llm_platform_usage(None, request_len + error_bytes.len() as i64),
                 None,
                 usage_context.and_then(|context| context.model),
             )
@@ -1368,7 +1460,7 @@ async fn build_translated_sse_response(
                             settle_meter_async(
                                 stream_billing,
                                 stream_metered,
-                                PlatformUsage::single_request(request_len + response_len),
+                                llm_platform_usage(usage.as_ref(), request_len + response_len),
                                 resale,
                                 usage_context.and_then(|context| context.model),
                             );
@@ -1408,7 +1500,7 @@ async fn build_translated_sse_response(
         settle_meter_async(
             stream_billing,
             stream_metered,
-            PlatformUsage::single_request(request_len + response_len),
+            llm_platform_usage(usage.as_ref(), request_len + response_len),
             resale,
             None,
         );
@@ -1572,8 +1664,13 @@ fn should_bypass_approval_flow(
 
 #[cfg(test)]
 mod tests {
-    use super::should_bypass_approval_flow;
+    use super::{
+        force_stream_usage_bytes_for_provider, llm_platform_usage,
+        resale_usage_from_optional_reported, should_bypass_approval_flow,
+    };
+    use crate::models::service_billing::BillingMetric;
     use crate::mw::auth::AuthMethod;
+    use crate::services::llm_usage_service::ReportedLlmUsage;
 
     #[test]
     fn bypasses_when_approval_is_disabled() {
@@ -1600,6 +1697,55 @@ mod tests {
             true,
             &AuthMethod::ServiceAccount
         ));
+    }
+
+    #[test]
+    fn llm_platform_usage_uses_reported_tokens() {
+        let usage = ReportedLlmUsage {
+            prompt_tokens: 8,
+            completion_tokens: 12,
+            total_tokens: 20,
+            reported_cost: None,
+        };
+
+        let platform = llm_platform_usage(Some(&usage), 10_000);
+
+        assert_eq!(platform.requests, 1);
+        assert_eq!(platform.bytes, 10_000);
+        assert_eq!(platform.tokens, 20);
+    }
+
+    #[test]
+    fn llm_platform_usage_estimates_when_usage_is_omitted() {
+        let platform = llm_platform_usage(None, 17);
+
+        assert_eq!(platform.requests, 1);
+        assert_eq!(platform.bytes, 17);
+        assert_eq!(platform.tokens, 5);
+    }
+
+    #[test]
+    fn token_resale_usage_estimates_when_usage_is_omitted() {
+        let resale = resale_usage_from_optional_reported(BillingMetric::Tokens, None, 9)
+            .expect("token resale usage");
+
+        assert_eq!(resale.metric, BillingMetric::Tokens);
+        assert_eq!(resale.quantity, 3);
+    }
+
+    #[test]
+    fn force_stream_usage_bytes_only_for_supported_provider() {
+        let body = bytes::Bytes::from_static(br#"{"model":"gpt-4o-mini","stream":true}"#);
+        let forced =
+            force_stream_usage_bytes_for_provider("openai", "chat/completions", body.clone());
+        let forced_json: serde_json::Value = serde_json::from_slice(&forced).unwrap();
+
+        assert_eq!(forced_json["stream_options"]["include_usage"], true);
+
+        let unchanged =
+            force_stream_usage_bytes_for_provider("anthropic", "chat/completions", body);
+        let unchanged_json: serde_json::Value = serde_json::from_slice(&unchanged).unwrap();
+        assert!(unchanged_json.get("stream_options").is_none());
     }
 
     // -----------------------------------------------------------------------

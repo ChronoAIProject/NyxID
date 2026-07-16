@@ -2,7 +2,7 @@ import { type ReactNode, useState } from "react";
 import { ChevronDown, Search } from "lucide-react";
 import { toast } from "sonner";
 import { PageHeader } from "@/components/shared/page-header";
-import { SwitchIcon } from "@/components/icons/empty-state";
+import { PowerButtonIcon } from "@/components/icons/empty-state";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -148,11 +148,6 @@ export function AdminFeatureFlagsPage() {
         title="Feature Flags"
         description="Platform-wide feature rollout. Configure each flag globally, per organization, and per user."
       />
-
-      <div className="rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-[12px] text-foreground">
-        Prototype — mock data, not wired to the backend yet. For visualizing the
-        flag-centric admin surface.
-      </div>
 
       {pendingCount > 0 && (
         <div className="sticky top-2 z-10 flex items-center justify-between gap-3 rounded-lg border border-primary/40 bg-primary/10 px-3 py-2 shadow-sm backdrop-blur">
@@ -409,11 +404,11 @@ function FlagsEmptyState({
   readonly subtitle: string;
 }) {
   return (
-    <div className="flex flex-col items-center justify-center gap-2 py-16 text-center">
-      <SwitchIcon className="h-40 w-40 text-muted-foreground" />
+    <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+      <PowerButtonIcon className="h-64 w-64 text-muted-foreground" />
       <div className="space-y-1">
-        <p className="text-[13px] font-medium text-foreground">{title}</p>
-        <p className="max-w-sm text-xs text-muted-foreground">{subtitle}</p>
+        <p className="text-[12px] font-medium text-muted-foreground">{title}</p>
+        <p className="text-xs text-muted-foreground">{subtitle}</p>
       </div>
     </div>
   );

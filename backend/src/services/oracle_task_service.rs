@@ -12,6 +12,11 @@
 //! Prompt and response bodies are stored only on the task document
 //! (TTL-expired via `expires_at`); tracing and audit events stay
 //! metadata-only.
+//!
+//! Billing policy: the Oracle relay is exempt from `usage_meter` billing
+//! because it relays work to user-supplied browser workers. NyxID stores and
+//! dispatches queue data here, but does not supply downstream model
+//! credentials, tokens, or paid compute on this path.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -54,6 +59,10 @@ const MAX_WORKER_LABEL_LEN: usize = 64;
 
 /// Workers polling within this window count as "active" in pool status.
 pub const WORKER_RECENT_SECS: i64 = 120;
+/// Billing policy marker for the oracle relay (#1155): user-supplied browser
+/// capacity is exempt from platform metering. Only asserted from the test module.
+#[cfg(test)]
+pub const ORACLE_RELAY_BILLING_POLICY: &str = "exempt_user_supplied_browser_capacity";
 
 #[derive(Debug, Clone)]
 pub struct SubmitterIdentity {
@@ -1830,6 +1839,14 @@ mod tests {
     }
 
     #[test]
+    fn oracle_relay_billing_policy_is_explicit_exemption() {
+        assert_eq!(
+            ORACLE_RELAY_BILLING_POLICY,
+            "exempt_user_supplied_browser_capacity"
+        );
+    }
+
+    #[test]
     fn truncate_chars_respects_char_boundaries() {
         assert_eq!(truncate_chars("héllo", 2), "hé");
         assert_eq!(truncate_chars("短", 5), "短");
@@ -2023,6 +2040,35 @@ mod tests {
         assert_eq!(
             claimed_default.required_project_url.as_deref(),
             pool.chatgpt_project_url.as_deref()
+        );
+
+        db.drop().await.ok();
+    }
+
+    #[tokio::test]
+    async fn submit_task_is_billing_exempt_and_writes_no_usage_meter_rows() {
+        let Some(db) = connect_test_database("oracle_task_billing_exempt").await else {
+            return;
+        };
+        let owner = uuid::Uuid::new_v4().to_string();
+        let pool = test_pool(&owner);
+        seed_pool(&db, &pool).await;
+
+        submit_task(&db, &pool, &submitter(&owner), prompt_input("oracle task"))
+            .await
+            .expect("oracle task submits");
+
+        let usage_rows = db
+            .collection::<crate::models::usage_meter::UsageMeterRow>(
+                crate::models::usage_meter::COLLECTION_NAME,
+            )
+            .count_documents(doc! {})
+            .await
+            .expect("count usage rows");
+
+        assert_eq!(
+            usage_rows, 0,
+            "oracle relay tasks are explicitly exempt from usage_meter billing"
         );
 
         db.drop().await.ok();
