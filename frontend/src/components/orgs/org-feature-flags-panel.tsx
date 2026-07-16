@@ -1,5 +1,6 @@
 import { type ReactNode, useState } from "react";
 import { ChevronDown, Search } from "lucide-react";
+import { PowerButtonIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -21,7 +22,6 @@ import {
   useSetOrgFeatureFlag,
 } from "@/hooks/use-org-feature-flags";
 import { useOrgMembers } from "@/hooks/use-org-members";
-import { SwitchIcon } from "@/components/icons/empty-state";
 import type {
   FeatureFlagItem,
   FlagTargetKind,
@@ -232,13 +232,13 @@ export function OrgFeatureFlagsPanel({ orgId }: { readonly orgId: string }) {
       </div>
 
       {flags.length === 0 ? (
-        <div className="flex flex-col items-center justify-center gap-2 py-16 text-center">
-          <SwitchIcon className="h-40 w-40 text-muted-foreground" />
+        <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+          <PowerButtonIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-[13px] font-medium text-foreground">
+            <p className="text-[12px] font-medium text-muted-foreground">
               No feature flags
             </p>
-            <p className="max-w-sm text-xs text-muted-foreground">
+            <p className="text-xs text-muted-foreground">
               No features are available for this organization yet.
             </p>
           </div>
