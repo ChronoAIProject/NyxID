@@ -225,17 +225,18 @@ struct PreResolved {
     effective_owner_id: String,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct ConnectionUsageStats {
     frames_in: i64,
     frames_out: i64,
     bytes_in: i64,
     bytes_out: i64,
     duration: std::time::Duration,
+    realtime_llm_usage: llm_usage_service::RealtimeLlmUsageSummary,
 }
 
 impl ConnectionUsageStats {
-    fn total_bytes(self) -> i64 {
+    fn total_bytes(&self) -> i64 {
         self.bytes_in.saturating_add(self.bytes_out)
     }
 }
@@ -2887,6 +2888,76 @@ fn llm_platform_usage(
     )
 }
 
+fn websocket_realtime_usage_enabled(
+    service_slug: &str,
+    metered: &crate::services::billing::MeteredProxyContext,
+) -> bool {
+    service_slug.starts_with("llm-")
+        && metered
+            .route
+            .as_ref()
+            .and_then(|route| route.resale.as_ref())
+            .is_some_and(|resale| resale.metric == BillingMetric::Tokens)
+}
+
+fn websocket_platform_usage(stats: &ConnectionUsageStats) -> PlatformUsage {
+    if stats.realtime_llm_usage.collection_enabled {
+        PlatformUsage::llm_completion(
+            stats.total_bytes(),
+            stats.realtime_llm_usage.token_quantity(),
+        )
+    } else {
+        llm_platform_usage(None, stats.total_bytes())
+    }
+}
+
+fn add_websocket_usage_provenance(event: &mut serde_json::Value, stats: &ConnectionUsageStats) {
+    if !stats.realtime_llm_usage.collection_enabled {
+        return;
+    }
+
+    let reported_tokens = stats
+        .realtime_llm_usage
+        .reported_usage
+        .as_ref()
+        .map(|usage| usage.total_tokens)
+        .unwrap_or(0);
+    let estimated_tokens = if stats.realtime_llm_usage.uncovered_bytes > 0 {
+        llm_usage_service::estimate_tokens_from_bytes(stats.realtime_llm_usage.uncovered_bytes)
+    } else {
+        0
+    };
+    event["usage_provenance"] = serde_json::json!({
+        "reported_response_count": stats.realtime_llm_usage.reported_response_count,
+        "estimated_response_count": stats.realtime_llm_usage.estimated_response_count,
+        "reported_tokens": reported_tokens,
+        "estimated_tokens": estimated_tokens,
+        "fallback_bytes": stats.realtime_llm_usage.uncovered_bytes,
+    });
+}
+
+fn websocket_resale_usage(
+    metered: &crate::services::billing::MeteredProxyContext,
+    stats: &ConnectionUsageStats,
+) -> Option<ResaleUsage> {
+    let metric = metered
+        .route
+        .as_ref()?
+        .resale
+        .as_ref()
+        .map(|resale| resale.metric)?;
+    let quantity = match metric {
+        BillingMetric::Tokens if stats.realtime_llm_usage.collection_enabled => {
+            stats.realtime_llm_usage.token_quantity()
+        }
+        BillingMetric::Tokens => llm_usage_service::estimate_tokens_from_bytes(stats.total_bytes()),
+        BillingMetric::Requests => 1,
+        BillingMetric::Bytes => stats.total_bytes().max(0),
+    };
+
+    Some(ResaleUsage { metric, quantity })
+}
+
 fn service_supports_stream_options_include_usage(service_slug: &str) -> bool {
     matches!(service_slug, "llm-openai" | "llm-deepseek")
 }
@@ -3460,6 +3531,7 @@ async fn bridge_websockets(
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >,
     service_id: String,
+    collect_realtime_llm_usage: bool,
     ws_frame_injections: Vec<crate::models::ws_frame_injection::WsFrameInjection>,
     credential: String,
     db: mongodb::Database,
@@ -3474,6 +3546,8 @@ async fn bridge_websockets(
     let (mut client_sink, mut client_stream) = client_ws.split();
     let (mut downstream_sink, mut downstream_stream) = downstream_ws.split();
     let mut injector_state = ws_frame_injector::InjectorState::default();
+    let mut realtime_llm_usage =
+        llm_usage_service::RealtimeLlmUsageCollector::new(collect_realtime_llm_usage);
 
     let max_duration = tokio::time::sleep(std::time::Duration::from_secs(
         WS_PASSTHROUGH_MAX_DURATION_SECS,
@@ -3508,10 +3582,12 @@ async fn bridge_websockets(
                             axum::extract::ws::Message::Text(text) => {
                                 stats.frames_in += 1;
                                 stats.bytes_in += text.len() as i64;
+                                realtime_llm_usage.observe_client_text(text.as_str());
                             }
                             axum::extract::ws::Message::Binary(bytes) => {
                                 stats.frames_in += 1;
                                 stats.bytes_in += bytes.len() as i64;
+                                realtime_llm_usage.observe_client_binary(bytes.len());
                             }
                             _ => {}
                         }
@@ -3583,10 +3659,12 @@ async fn bridge_websockets(
                             tokio_tungstenite::tungstenite::Message::Text(text) => {
                                 stats.frames_out += 1;
                                 stats.bytes_out += text.len() as i64;
+                                realtime_llm_usage.observe_downstream_text(text.as_str());
                             }
                             tokio_tungstenite::tungstenite::Message::Binary(bytes) => {
                                 stats.frames_out += 1;
                                 stats.bytes_out += bytes.len() as i64;
+                                realtime_llm_usage.observe_downstream_binary(bytes.len());
                             }
                             _ => {}
                         }
@@ -3659,6 +3737,7 @@ async fn bridge_websockets(
     let _ = client_sink.close().await;
 
     stats.duration = start.elapsed();
+    stats.realtime_llm_usage = realtime_llm_usage.finalize();
     stats
 }
 
@@ -3759,6 +3838,8 @@ async fn handle_ws_passthrough(
     let db = state.db.clone();
     let billing = state.billing.clone();
     let metered_for_settle = metered.clone();
+    let collect_realtime_llm_usage =
+        websocket_realtime_usage_enabled(&target.service.slug, &metered);
     let sid = service_id_owned.clone();
     let ws_frame_injections = target.ws_frame_injections.clone();
     let credential = target.credential.clone();
@@ -3775,6 +3856,7 @@ async fn handle_ws_passthrough(
                 client_ws,
                 downstream.stream,
                 sid.clone(),
+                collect_realtime_llm_usage,
                 ws_frame_injections,
                 credential,
                 db.clone(),
@@ -3786,23 +3868,27 @@ async fn handle_ws_passthrough(
             )
             .await;
             drop(guard); // decrement counter (guard moved into closure)
+            let platform_usage = websocket_platform_usage(&stats);
+            let resale_usage = websocket_resale_usage(&metered_for_settle, &stats);
             settle_meter_async(
                 billing,
                 metered_for_settle,
-                llm_platform_usage(None, stats.total_bytes()),
-                None,
+                platform_usage,
+                resale_usage,
                 None,
             );
 
+            let mut disconnect_event = serde_json::json!({
+                "service_id": sid,
+                "duration_secs": stats.duration.as_secs(),
+                "acting_client_id": &acting_client_id,
+            });
+            add_websocket_usage_provenance(&mut disconnect_event, &stats);
             audit_service::log_async(
                 db,
                 Some(user_id_str),
                 "proxy_ws_disconnect".to_string(),
-                Some(serde_json::json!({
-                    "service_id": sid,
-                    "duration_secs": stats.duration.as_secs(),
-                    "acting_client_id": &acting_client_id,
-                })),
+                Some(disconnect_event),
                 req_ip,
                 req_ua,
                 ak_id,
@@ -4036,6 +4122,8 @@ async fn handle_ws_passthrough_via_node(
     let ws_manager = state.node_ws_manager.clone();
     let billing = state.billing.clone();
     let metered_for_settle = metered.clone();
+    let collect_realtime_llm_usage =
+        websocket_realtime_usage_enabled(&target.service.slug, &metered);
     let sid = service_id_owned.clone();
     let sess_id = session_id.clone();
     let owner_for_audit = service_owner_user_id_owned.clone();
@@ -4057,6 +4145,7 @@ async fn handle_ws_passthrough_via_node(
                 &node_id_owned,
                 &sess_id,
                 sid.clone(),
+                collect_realtime_llm_usage,
                 db.clone(),
                 user_id_str.clone(),
                 ak_id.clone(),
@@ -4071,11 +4160,13 @@ async fn handle_ws_passthrough_via_node(
             // Best-effort close the node-side session.
             let _ = ws_manager.send_ws_proxy_close(&node_id_owned, &sess_id, None, None);
             drop(guard); // explicitly decrement counter
+            let platform_usage = websocket_platform_usage(&stats);
+            let resale_usage = websocket_resale_usage(&metered_for_settle, &stats);
             settle_meter_async(
                 billing,
                 metered_for_settle,
-                llm_platform_usage(None, stats.total_bytes()),
-                None,
+                platform_usage,
+                resale_usage,
                 None,
             );
 
@@ -4086,6 +4177,7 @@ async fn handle_ws_passthrough_via_node(
                 "routed_via": "node",
                 "node_id": node_id_owned,
             });
+            add_websocket_usage_provenance(&mut disconnect_event, &stats);
             add_owner_user_id_if_shared(&mut disconnect_event, &owner_for_audit, &actor_for_audit);
             audit_service::log_async(
                 db,
@@ -4110,6 +4202,7 @@ async fn bridge_websockets_via_node(
     node_id: &str,
     session_id: &str,
     service_id: String,
+    collect_realtime_llm_usage: bool,
     db: mongodb::Database,
     user_id: String,
     api_key_id: Option<String>,
@@ -4124,6 +4217,8 @@ async fn bridge_websockets_via_node(
     let start = std::time::Instant::now();
     let mut stats = ConnectionUsageStats::default();
     let (mut client_sink, mut client_stream) = client_ws.split();
+    let mut realtime_llm_usage =
+        llm_usage_service::RealtimeLlmUsageCollector::new(collect_realtime_llm_usage);
 
     let max_duration = tokio::time::sleep(std::time::Duration::from_secs(
         WS_PASSTHROUGH_MAX_DURATION_SECS,
@@ -4151,6 +4246,7 @@ async fn bridge_websockets_via_node(
                     Some(Ok(axum::extract::ws::Message::Text(t))) => {
                         stats.frames_in += 1;
                         stats.bytes_in += t.len() as i64;
+                        realtime_llm_usage.observe_client_text(t.as_str());
                         idle_timeout.as_mut().reset(
                             tokio::time::Instant::now()
                                 + std::time::Duration::from_secs(WS_PASSTHROUGH_IDLE_TIMEOUT_SECS),
@@ -4162,6 +4258,7 @@ async fn bridge_websockets_via_node(
                     Some(Ok(axum::extract::ws::Message::Binary(b))) => {
                         stats.frames_in += 1;
                         stats.bytes_in += b.len() as i64;
+                        realtime_llm_usage.observe_client_binary(b.len());
                         idle_timeout.as_mut().reset(
                             tokio::time::Instant::now()
                                 + std::time::Duration::from_secs(WS_PASSTHROUGH_IDLE_TIMEOUT_SECS),
@@ -4194,6 +4291,7 @@ async fn bridge_websockets_via_node(
                     Some(WsProxyFrame::Text(t)) => {
                         stats.frames_out += 1;
                         stats.bytes_out += t.len() as i64;
+                        realtime_llm_usage.observe_downstream_text(&t);
                         idle_timeout.as_mut().reset(
                             tokio::time::Instant::now()
                                 + std::time::Duration::from_secs(WS_PASSTHROUGH_IDLE_TIMEOUT_SECS),
@@ -4209,6 +4307,7 @@ async fn bridge_websockets_via_node(
                     Some(WsProxyFrame::Binary(b)) => {
                         stats.frames_out += 1;
                         stats.bytes_out += b.len() as i64;
+                        realtime_llm_usage.observe_downstream_binary(b.len());
                         idle_timeout.as_mut().reset(
                             tokio::time::Instant::now()
                                 + std::time::Duration::from_secs(WS_PASSTHROUGH_IDLE_TIMEOUT_SECS),
@@ -4285,6 +4384,7 @@ async fn bridge_websockets_via_node(
 
     let _ = client_sink.close().await;
     stats.duration = start.elapsed();
+    stats.realtime_llm_usage = realtime_llm_usage.finalize();
     stats
 }
 
@@ -4292,13 +4392,17 @@ async fn bridge_websockets_via_node(
 mod tests {
     use super::{
         ALLOWED_FORWARD_HEADER_PREFIXES, ALLOWED_FORWARD_HEADERS, ALLOWED_WS_FORWARD_HEADERS,
-        WsPassthroughGuard, apply_agent_attribution_headers, auth_kind_label,
-        collect_forward_headers_with_prefixes, compose_pre_resolved_node_ids,
-        is_chat_completions_proxy_path, is_codex_transport_path, is_ws_upgrade_request,
-        should_enforce_runtime_approval, validate_range_header,
+        ConnectionUsageStats, WsPassthroughGuard, add_websocket_usage_provenance,
+        apply_agent_attribution_headers, auth_kind_label, collect_forward_headers_with_prefixes,
+        compose_pre_resolved_node_ids, is_chat_completions_proxy_path, is_codex_transport_path,
+        is_ws_upgrade_request, should_enforce_runtime_approval, validate_range_header,
+        websocket_realtime_usage_enabled, websocket_resale_usage,
     };
+    use crate::models::service_billing::{BillingMetric, ServiceBilling};
+    use crate::models::usage_meter::CredentialClass;
     use crate::mw::auth::AuthMethod;
-    use crate::services::proxy_service::validate_requested_proxy_path;
+    use crate::services::billing::{BillingRouteContext, MeteredProxyContext, NodeIntent};
+    use crate::services::{llm_usage_service, proxy_service::validate_requested_proxy_path};
     use axum::{
         Router,
         body::{Body, to_bytes},
@@ -4519,6 +4623,90 @@ mod tests {
 
         drop(callback);
         assert_eq!(counter.load(Ordering::Relaxed), 0);
+    }
+
+    fn token_resale_metered_context(credential_class: CredentialClass) -> MeteredProxyContext {
+        let billing = ServiceBilling {
+            resale_billable: true,
+            resale_metric: BillingMetric::Tokens,
+            lago_resale_metric_code: Some("resale_tokens".to_string()),
+        };
+
+        MeteredProxyContext {
+            route: Some(BillingRouteContext::new(
+                "request-1".to_string(),
+                "owner-1".to_string(),
+                "actor-1".to_string(),
+                None,
+                Some("user-service-1".to_string()),
+                Some("catalog-1".to_string()),
+                Some("llm-openai".to_string()),
+                NodeIntent::Direct,
+                "bearer".to_string(),
+                credential_class,
+                BillingMetric::Bytes,
+                Some(&billing),
+                true,
+            )),
+        }
+    }
+
+    #[test]
+    fn websocket_realtime_usage_requires_llm_service_and_trusted_resale_key() {
+        let trusted = token_resale_metered_context(CredentialClass::NyxidManagedMaster);
+        assert!(websocket_realtime_usage_enabled("llm-openai", &trusted));
+        assert!(!websocket_realtime_usage_enabled(
+            "custom-service",
+            &trusted
+        ));
+
+        let user_owned = token_resale_metered_context(CredentialClass::UserOwned);
+        assert!(!websocket_realtime_usage_enabled("llm-openai", &user_owned));
+    }
+
+    #[test]
+    fn websocket_resale_uses_reported_plus_uncovered_estimate() {
+        let metered = token_resale_metered_context(CredentialClass::NyxidManagedMaster);
+        let stats = ConnectionUsageStats {
+            bytes_in: 120,
+            bytes_out: 280,
+            realtime_llm_usage: llm_usage_service::RealtimeLlmUsageSummary {
+                collection_enabled: true,
+                reported_usage: Some(llm_usage_service::ReportedLlmUsage {
+                    prompt_tokens: 20,
+                    completion_tokens: 10,
+                    total_tokens: 30,
+                    reported_cost: None,
+                }),
+                uncovered_bytes: 20,
+                reported_response_count: 1,
+                estimated_response_count: 1,
+            },
+            ..Default::default()
+        };
+
+        let resale = websocket_resale_usage(&metered, &stats).expect("resale usage");
+        assert_eq!(resale.metric, BillingMetric::Tokens);
+        assert_eq!(resale.quantity, 35);
+
+        let mut event = serde_json::json!({});
+        add_websocket_usage_provenance(&mut event, &stats);
+        assert_eq!(event["usage_provenance"]["reported_tokens"], 30);
+        assert_eq!(event["usage_provenance"]["estimated_tokens"], 5);
+        assert_eq!(event["usage_provenance"]["fallback_bytes"], 20);
+    }
+
+    #[test]
+    fn websocket_resale_falls_back_for_non_realtime_protocol() {
+        let metered = token_resale_metered_context(CredentialClass::NyxidManagedMaster);
+        let stats = ConnectionUsageStats {
+            bytes_in: 40,
+            bytes_out: 60,
+            ..Default::default()
+        };
+
+        let resale = websocket_resale_usage(&metered, &stats).expect("resale usage");
+        assert_eq!(resale.quantity, 25);
     }
 
     #[test]
@@ -4912,6 +5100,7 @@ mod tests {
                 client_ws,
                 downstream_ws,
                 "svc-ha".to_string(),
+                false,
                 vec![crate::models::ws_frame_injection::WsFrameInjection {
                     trigger: crate::models::ws_frame_injection::WsFrameTrigger::JsonFieldEquals {
                         path: "$.type".to_string(),
