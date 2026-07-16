@@ -9,6 +9,14 @@
    inherit the dark token defaults below and are never themed. */
 @custom-variant dark (&:where(.theme-dark, .theme-dark *));
 
+/* Companion `light:` variant, scoped to the dashboard's `.theme-light` class.
+   Dark is the product's primary/base surface, so components author their default
+   (unprefixed) classes for dark and use `light:` only for deliberate light-mode
+   deviations — e.g. badges swap their dark tint for a solid fill because the tint
+   loses contrast on a light canvas. Untouched by `light:` = unchanged in dark and
+   on the never-themed public pages. */
+@custom-variant light (&:where(.theme-light, .theme-light *));
+
 @theme {
   /* ── NyxID Brand Primary ── */
   --color-nyx-50: #EDE5FE;
