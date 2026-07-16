@@ -3,7 +3,6 @@ use axum::{
     extract::{Path, State},
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
@@ -168,49 +167,6 @@ fn to_response(c: OauthClient, secret: Option<String>) -> DeveloperOAuthClientRe
     }
 }
 
-/// Maximum catalog slugs an app may declare as consent defaults.
-const MAX_DEFAULT_SERVICE_SLUGS: usize = 25;
-
-/// Trim, de-duplicate, and verify each declared catalog slug against the
-/// active service catalog. Unknown slugs are rejected so app owners catch
-/// typos at save time instead of silently pre-selecting nothing.
-async fn validate_default_service_catalog_slugs(
-    state: &AppState,
-    slugs: &[String],
-) -> AppResult<Vec<String>> {
-    let mut seen = HashSet::new();
-    let mut validated = Vec::new();
-    for raw in slugs {
-        let slug = raw.trim();
-        if slug.is_empty() {
-            continue;
-        }
-        if !seen.insert(slug.to_string()) {
-            continue;
-        }
-        let exists = state
-            .db
-            .collection::<crate::models::downstream_service::DownstreamService>(
-                crate::models::downstream_service::COLLECTION_NAME,
-            )
-            .find_one(doc! { "slug": slug, "is_active": true })
-            .await?
-            .is_some();
-        if !exists {
-            return Err(AppError::ValidationError(format!(
-                "Unknown catalog service slug: {slug}"
-            )));
-        }
-        validated.push(slug.to_string());
-    }
-    if validated.len() > MAX_DEFAULT_SERVICE_SLUGS {
-        return Err(AppError::ValidationError(format!(
-            "At most {MAX_DEFAULT_SERVICE_SLUGS} default services may be declared"
-        )));
-    }
-    Ok(validated)
-}
-
 fn validate_redirect_uris(redirect_uris: &[String]) -> AppResult<Vec<String>> {
     oauth_client_service::validate_redirect_uris(redirect_uris)
 }
@@ -303,7 +259,9 @@ pub async fn create_my_oauth_client(
             None => None,
         };
     let default_service_catalog_slugs = match body.default_service_catalog_slugs.as_deref() {
-        Some(slugs) => validate_default_service_catalog_slugs(&state, slugs).await?,
+        Some(slugs) => {
+            oauth_client_service::validate_default_service_catalog_slugs(&state.db, slugs).await?
+        }
         None => Vec::new(),
     };
 
@@ -420,7 +378,9 @@ pub async fn update_my_oauth_client(
             None => None,
         };
     let validated_default_slugs = match body.default_service_catalog_slugs.as_deref() {
-        Some(slugs) => Some(validate_default_service_catalog_slugs(&state, slugs).await?),
+        Some(slugs) => Some(
+            oauth_client_service::validate_default_service_catalog_slugs(&state.db, slugs).await?,
+        ),
         None => None,
     };
 

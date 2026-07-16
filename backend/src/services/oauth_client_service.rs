@@ -10,6 +10,9 @@ use crate::crypto::token::{generate_random_token, hash_token};
 use crate::errors::{AppError, AppResult};
 use crate::models::authorization_code::COLLECTION_NAME as AUTH_CODES;
 use crate::models::consent::COLLECTION_NAME as CONSENTS;
+use crate::models::downstream_service::{
+    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
+};
 use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
 use crate::models::refresh_token::COLLECTION_NAME as REFRESH_TOKENS;
 
@@ -45,6 +48,58 @@ pub const DEFAULT_ALLOWED_SCOPES: &str = "openid profile email";
 /// still gated by what the client requests at `/oauth/authorize` and what the
 /// user consents to.
 pub const DEFAULT_MCP_ALLOWED_SCOPES: &str = "openid profile email roles groups proxy";
+
+/// Maximum catalog slugs an OAuth client may declare as consent defaults.
+pub const MAX_DEFAULT_SERVICE_CATALOG_SLUGS: usize = 25;
+
+/// Trim, de-duplicate, and verify declared consent defaults against the active
+/// service catalog. Unknown slugs are rejected at the write boundary so a
+/// client cannot silently provision defaults that the consent screen can
+/// never resolve.
+pub async fn validate_default_service_catalog_slugs(
+    db: &mongodb::Database,
+    slugs: &[String],
+) -> AppResult<Vec<String>> {
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+    for raw in slugs {
+        let slug = raw.trim();
+        if !slug.is_empty() && seen.insert(slug.to_string()) {
+            normalized.push(slug.to_string());
+        }
+    }
+
+    if normalized.len() > MAX_DEFAULT_SERVICE_CATALOG_SLUGS {
+        return Err(AppError::ValidationError(format!(
+            "At most {MAX_DEFAULT_SERVICE_CATALOG_SLUGS} default services may be declared"
+        )));
+    }
+    if normalized.is_empty() {
+        return Ok(normalized);
+    }
+
+    let active_slugs: HashSet<String> = db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find(doc! {
+            "slug": { "$in": &normalized },
+            "is_active": true,
+        })
+        .await?
+        .map_ok(|service| service.slug)
+        .try_collect()
+        .await?;
+
+    if let Some(unknown) = normalized
+        .iter()
+        .find(|slug| !active_slugs.contains(slug.as_str()))
+    {
+        return Err(AppError::ValidationError(format!(
+            "Unknown catalog service slug: {unknown}"
+        )));
+    }
+
+    Ok(normalized)
+}
 
 pub const ADMIN_CLIENT_TYPE_FILTERS: &[&str] = &["public", "confidential", "other"];
 pub const ADMIN_CREATOR_TYPE_FILTERS: &[&str] =
@@ -1228,6 +1283,7 @@ pub struct AdminUpdateClient<'a> {
     pub client_name: Option<&'a str>,
     pub redirect_uris: Option<&'a [String]>,
     pub allowed_scopes: Option<&'a str>,
+    pub default_service_catalog_slugs: Option<&'a [String]>,
     pub broker_capability_enabled: Option<bool>,
     pub is_active: Option<bool>,
 }
@@ -1262,6 +1318,17 @@ pub async fn admin_update_client(
 
     if let Some(scopes) = update.allowed_scopes {
         set_doc.insert("allowed_scopes", scopes);
+    }
+
+    if let Some(slugs) = update.default_service_catalog_slugs {
+        set_doc.insert(
+            "default_service_catalog_slugs",
+            bson::to_bson(slugs).map_err(|e| {
+                AppError::Internal(format!(
+                    "Failed to convert default_service_catalog_slugs to bson: {e}"
+                ))
+            })?,
+        );
     }
 
     if let Some(enabled) = update.broker_capability_enabled {

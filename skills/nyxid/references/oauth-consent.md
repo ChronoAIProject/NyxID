@@ -51,7 +51,11 @@ Current management surfaces:
 
 - Web UI: Developer Apps -> app detail -> `Default Services` uses the include-all catalog picker.
 - API: `POST /api/v1/developer/oauth-clients` and `PATCH /api/v1/developer/oauth-clients/{client_id}` accept `default_service_catalog_slugs`.
+- Dynamic Client Registration: `POST /oauth/register` accepts and returns `default_service_catalog_slugs`. NyxID validates the slugs before creating the ownerless client.
+- Admin API: `POST /api/v1/admin/oauth-clients` and `PATCH /api/v1/admin/oauth-clients/{client_id}` accept `default_service_catalog_slugs`; admin responses include the persisted list. This is the repair path for ownerless DCR clients created before the field was supported.
 - CLI: ordinary `nyxid developer-app create/update` exists, but default-service flags are not available yet. CLI parity is tracked separately in issue #1126.
+
+Existing DCR clients are not backfilled automatically. Re-register the client with the desired defaults or patch the existing client once through the admin API after deploying support.
 
 ## RFC 8707 resource indicators
 

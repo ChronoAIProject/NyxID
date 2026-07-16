@@ -2740,6 +2740,10 @@ pub async fn revoke(
 pub struct RegisterClientRequest {
     pub client_name: Option<String>,
     pub redirect_uris: Option<Vec<String>>,
+    /// NyxID extension: catalog services preselected on the consent screen.
+    /// These remain user-editable hints and do not grant service access.
+    #[serde(default)]
+    pub default_service_catalog_slugs: Vec<String>,
     // RFC 7591 fields parsed but not yet acted on. Kept so serde accepts
     // conformant requests; remove if/when we start branching on them.
     #[allow(dead_code)]
@@ -2759,6 +2763,7 @@ pub struct RegisterClientResponse {
     pub response_types: Vec<String>,
     pub token_endpoint_auth_method: String,
     pub scope: String,
+    pub default_service_catalog_slugs: Vec<String>,
     pub client_id_issued_at: i64,
 }
 
@@ -2810,6 +2815,13 @@ pub async fn register_client(
         ));
     }
 
+    let default_service_catalog_slugs =
+        oauth_client_service::validate_default_service_catalog_slugs(
+            &state.db,
+            &body.default_service_catalog_slugs,
+        )
+        .await?;
+
     let (client, _secret) = oauth_client_service::create_client(
         &state.db,
         &client_name,
@@ -2821,7 +2833,7 @@ pub async fn register_client(
         false,
         None,
         None,
-        &[],
+        &default_service_catalog_slugs,
     )
     .await?;
 
@@ -2844,6 +2856,7 @@ pub async fn register_client(
             response_types: vec!["code".to_string()],
             token_endpoint_auth_method: "none".to_string(),
             scope: client.allowed_scopes,
+            default_service_catalog_slugs: client.default_service_catalog_slugs,
             client_id_issued_at: client.created_at.timestamp(),
         }),
     ))
@@ -3927,6 +3940,7 @@ mod tests {
             Json(RegisterClientRequest {
                 client_name: Some("Aevatar".to_string()),
                 redirect_uris: Some(vec!["http://localhost/callback".to_string()]),
+                default_service_catalog_slugs: Vec::new(),
                 grant_types: None,
                 response_types: None,
                 token_endpoint_auth_method: Some("none".to_string()),
@@ -3957,6 +3971,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn register_client_validates_and_persists_default_service_catalog_slugs() {
+        let Some(db) = connect_test_database("oauth_dcr_default_services").await else {
+            return;
+        };
+        let mut aevatar = crate::models::downstream_service::test_helpers::dummy_service();
+        aevatar.id = "catalog-aevatar".to_string();
+        aevatar.slug = "aevatar".to_string();
+        let mut ornn = crate::models::downstream_service::test_helpers::dummy_service();
+        ornn.id = "catalog-ornn".to_string();
+        ornn.slug = "ornn-api".to_string();
+        db.collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .insert_many([&aevatar, &ornn])
+        .await
+        .expect("insert catalog services");
+        let state = test_app_state(db.clone());
+
+        let (status, Json(response)) = register_client(
+            State(state.clone()),
+            Json(RegisterClientRequest {
+                client_name: Some("Aevatar".to_string()),
+                redirect_uris: Some(vec!["http://localhost/callback".to_string()]),
+                default_service_catalog_slugs: vec![
+                    " aevatar ".to_string(),
+                    "ornn-api".to_string(),
+                    "aevatar".to_string(),
+                ],
+                grant_types: None,
+                response_types: None,
+                token_endpoint_auth_method: Some("none".to_string()),
+                scope: None,
+            }),
+        )
+        .await
+        .expect("register client with consent defaults");
+
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(
+            response.default_service_catalog_slugs,
+            vec!["aevatar".to_string(), "ornn-api".to_string()]
+        );
+        let stored = db
+            .collection::<OauthClient>(OAUTH_CLIENTS)
+            .find_one(doc! { "_id": &response.client_id })
+            .await
+            .expect("query client")
+            .expect("client exists");
+        assert_eq!(
+            stored.default_service_catalog_slugs,
+            response.default_service_catalog_slugs
+        );
+
+        let error = register_client(
+            State(state),
+            Json(RegisterClientRequest {
+                client_name: Some("Invalid defaults".to_string()),
+                redirect_uris: Some(vec!["http://localhost/callback-2".to_string()]),
+                default_service_catalog_slugs: vec!["missing-service".to_string()],
+                grant_types: None,
+                response_types: None,
+                token_endpoint_auth_method: Some("none".to_string()),
+                scope: None,
+            }),
+        )
+        .await
+        .expect_err("unknown catalog slugs must be rejected");
+        assert!(
+            matches!(error, AppError::ValidationError(message) if message.contains("missing-service"))
+        );
+    }
+
+    #[tokio::test]
     async fn register_client_rejects_broker_scope_when_admin_capability_required() {
         let Some(db) = connect_test_database("oauth_dcr_broker_scope_strict").await else {
             return;
@@ -3970,6 +4057,7 @@ mod tests {
             Json(RegisterClientRequest {
                 client_name: Some("Aevatar".to_string()),
                 redirect_uris: Some(vec!["http://localhost/callback".to_string()]),
+                default_service_catalog_slugs: Vec::new(),
                 grant_types: None,
                 response_types: None,
                 token_endpoint_auth_method: Some("none".to_string()),
@@ -3994,6 +4082,7 @@ mod tests {
             Json(RegisterClientRequest {
                 client_name: Some("Aevatar".to_string()),
                 redirect_uris: Some(vec!["http://localhost/callback".to_string()]),
+                default_service_catalog_slugs: Vec::new(),
                 grant_types: None,
                 response_types: None,
                 token_endpoint_auth_method: Some("none".to_string()),
@@ -4284,6 +4373,7 @@ mod tests {
             Json(RegisterClientRequest {
                 client_name: Some("Bad Scope".to_string()),
                 redirect_uris: Some(vec!["http://localhost/callback".to_string()]),
+                default_service_catalog_slugs: Vec::new(),
                 grant_types: None,
                 response_types: None,
                 token_endpoint_auth_method: Some("none".to_string()),
@@ -4307,6 +4397,7 @@ mod tests {
             Json(RegisterClientRequest {
                 client_name: Some("Default Scope".to_string()),
                 redirect_uris: Some(vec!["http://localhost/callback".to_string()]),
+                default_service_catalog_slugs: Vec::new(),
                 grant_types: None,
                 response_types: None,
                 token_endpoint_auth_method: Some("none".to_string()),

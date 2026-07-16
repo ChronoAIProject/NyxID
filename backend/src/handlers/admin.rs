@@ -887,6 +887,9 @@ pub struct CreateOAuthClientRequest {
     /// OIDC scopes this client is allowed to request.
     /// Defaults to `["openid", "profile", "email"]` when omitted; `[]` canonicalizes to `["openid"]`.
     pub allowed_scopes: Option<Vec<String>>,
+    /// Catalog services preselected on the consent screen. This is a hint,
+    /// not an authorization grant; the user may change the selection.
+    pub default_service_catalog_slugs: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -896,6 +899,7 @@ pub struct UpdateOAuthClientRequest {
     pub redirect_uris: Option<Vec<String>>,
     pub allowed_scopes: Option<Vec<String>>,
     pub client_name: Option<String>,
+    pub default_service_catalog_slugs: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -944,6 +948,7 @@ pub struct OAuthClientResponse {
     pub redirect_uris: Vec<String>,
     pub allowed_scopes: String,
     pub delegation_scopes: String,
+    pub default_service_catalog_slugs: Vec<String>,
     pub broker_capability_enabled: bool,
     pub broker_capability_effective: bool,
     pub broker_capability_source: BrokerCapabilitySource,
@@ -1094,6 +1099,7 @@ fn oauth_client_response(
         redirect_uris: client.redirect_uris,
         allowed_scopes: client.allowed_scopes,
         delegation_scopes: client.delegation_scopes,
+        default_service_catalog_slugs: client.default_service_catalog_slugs,
         broker_capability_enabled: client.broker_capability_enabled,
         broker_capability_effective,
         broker_capability_source,
@@ -1327,6 +1333,12 @@ pub async fn create_oauth_client(
             Some(secret) => Some(state.encryption_keys.encrypt(secret.as_bytes()).await?),
             None => None,
         };
+    let default_service_catalog_slugs = match body.default_service_catalog_slugs.as_deref() {
+        Some(slugs) => {
+            oauth_client_service::validate_default_service_catalog_slugs(&state.db, slugs).await?
+        }
+        None => Vec::new(),
+    };
 
     let (client, raw_secret) = oauth_client_service::create_client(
         &state.db,
@@ -1339,7 +1351,7 @@ pub async fn create_oauth_client(
         body.broker_capability_enabled.unwrap_or(false),
         revocation_webhook_url,
         revocation_webhook_secret_encrypted,
-        &[],
+        &default_service_catalog_slugs,
     )
     .await?;
 
@@ -1461,6 +1473,12 @@ pub async fn update_oauth_client(
         .as_deref()
         .map(oauth_client_service::validate_allowed_scopes_list)
         .transpose()?;
+    let default_service_catalog_slugs = match body.default_service_catalog_slugs.as_deref() {
+        Some(slugs) => Some(
+            oauth_client_service::validate_default_service_catalog_slugs(&state.db, slugs).await?,
+        ),
+        None => None,
+    };
 
     let changed_fields = oauth_client_update_changed_fields(&body);
     let updated = oauth_client_service::admin_update_client(
@@ -1470,6 +1488,7 @@ pub async fn update_oauth_client(
             client_name,
             redirect_uris: redirect_uris.as_deref(),
             allowed_scopes: allowed_scopes.as_deref(),
+            default_service_catalog_slugs: default_service_catalog_slugs.as_deref(),
             broker_capability_enabled: body.broker_capability_enabled,
             is_active: body.is_active,
         },
@@ -1512,6 +1531,9 @@ fn oauth_client_update_changed_fields(body: &UpdateOAuthClientRequest) -> Vec<&'
     }
     if body.client_name.is_some() {
         changed.push("client_name");
+    }
+    if body.default_service_catalog_slugs.is_some() {
+        changed.push("default_service_catalog_slugs");
     }
     changed
 }
@@ -2276,6 +2298,20 @@ mod operator_route_tests {
         );
     }
 
+    #[test]
+    fn oauth_client_update_audit_includes_default_service_catalog_slugs() {
+        let changed = oauth_client_update_changed_fields(&UpdateOAuthClientRequest {
+            broker_capability_enabled: None,
+            is_active: None,
+            redirect_uris: None,
+            allowed_scopes: None,
+            client_name: None,
+            default_service_catalog_slugs: Some(vec!["aevatar".to_string()]),
+        });
+
+        assert_eq!(changed, vec!["default_service_catalog_slugs"]);
+    }
+
     #[tokio::test]
     async fn operator_lists_paginated_oauth_clients_with_metadata_and_no_secret() {
         let Some(db) = connect_test_database("admin_oauth_client_list_operator").await else {
@@ -2398,6 +2434,15 @@ mod operator_route_tests {
             .insert_one(test_oauth_client(client_id))
             .await
             .expect("insert dcr client");
+        let mut catalog_service = crate::models::downstream_service::test_helpers::dummy_service();
+        catalog_service.id = "catalog-aevatar".to_string();
+        catalog_service.slug = "aevatar".to_string();
+        db.collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .insert_one(&catalog_service)
+        .await
+        .expect("insert catalog service");
         let now = chrono::Utc::now();
         db.collection::<AuthorizationCode>(AUTH_CODES)
             .insert_one(AuthorizationCode {
@@ -2440,6 +2485,10 @@ mod operator_route_tests {
                     "urn:nyxid:scope:broker_binding".to_string(),
                 ]),
                 client_name: Some("Aevatar Broker".to_string()),
+                default_service_catalog_slugs: Some(vec![
+                    " aevatar ".to_string(),
+                    "aevatar".to_string(),
+                ]),
             }),
         )
         .await
@@ -2460,6 +2509,10 @@ mod operator_route_tests {
         assert_eq!(
             response.0.allowed_scopes,
             "openid urn:nyxid:scope:broker_binding"
+        );
+        assert_eq!(
+            response.0.default_service_catalog_slugs,
+            vec!["aevatar".to_string()]
         );
         let pending_codes = db
             .collection::<AuthorizationCode>(AUTH_CODES)
@@ -2500,6 +2553,7 @@ mod operator_route_tests {
                     redirect_uris: None,
                     allowed_scopes: None,
                     client_name: None,
+                    default_service_catalog_slugs: None,
                 }),
             )
             .await
@@ -2535,6 +2589,7 @@ mod operator_route_tests {
                 redirect_uris: None,
                 allowed_scopes: Some(vec!["admin".to_string()]),
                 client_name: None,
+                default_service_catalog_slugs: None,
             }),
         )
         .await
@@ -2542,7 +2597,7 @@ mod operator_route_tests {
         assert!(matches!(scope_err, AppError::ValidationError(_)));
 
         let uri_err = update_oauth_client(
-            State(state),
+            State(state.clone()),
             test_auth_user(&admin_id),
             Path(client_id.to_string()),
             Json(UpdateOAuthClientRequest {
@@ -2551,11 +2606,29 @@ mod operator_route_tests {
                 redirect_uris: Some(vec!["javascript:alert(1)".to_string()]),
                 allowed_scopes: None,
                 client_name: None,
+                default_service_catalog_slugs: None,
             }),
         )
         .await
         .expect_err("invalid redirect_uri must be rejected");
         assert!(matches!(uri_err, AppError::ValidationError(_)));
+
+        let default_service_err = update_oauth_client(
+            State(state),
+            test_auth_user(&admin_id),
+            Path(client_id.to_string()),
+            Json(UpdateOAuthClientRequest {
+                broker_capability_enabled: None,
+                is_active: None,
+                redirect_uris: None,
+                allowed_scopes: None,
+                client_name: None,
+                default_service_catalog_slugs: Some(vec!["missing-service".to_string()]),
+            }),
+        )
+        .await
+        .expect_err("unknown default service must be rejected");
+        assert!(matches!(default_service_err, AppError::ValidationError(_)));
     }
 
     #[test]
@@ -2730,6 +2803,7 @@ mod operator_route_tests {
             Json(crate::handlers::oauth::RegisterClientRequest {
                 client_name: Some("Allowed Before Override".to_string()),
                 redirect_uris: Some(vec!["http://localhost:8080/callback".to_string()]),
+                default_service_catalog_slugs: Vec::new(),
                 grant_types: None,
                 response_types: None,
                 token_endpoint_auth_method: Some("none".to_string()),
@@ -2756,6 +2830,7 @@ mod operator_route_tests {
             Json(crate::handlers::oauth::RegisterClientRequest {
                 client_name: Some("Rejected After Override".to_string()),
                 redirect_uris: Some(vec!["http://localhost:8081/callback".to_string()]),
+                default_service_catalog_slugs: Vec::new(),
                 grant_types: None,
                 response_types: None,
                 token_endpoint_auth_method: Some("none".to_string()),
