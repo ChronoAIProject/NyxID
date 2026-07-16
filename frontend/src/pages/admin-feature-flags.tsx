@@ -1,4 +1,4 @@
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { ChevronDown, Search } from "lucide-react";
 import { toast } from "sonner";
 import { PageHeader } from "@/components/shared/page-header";
@@ -16,7 +16,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
-import { useAdminUsers } from "@/hooks/use-admin";
+import { useAdminUser, useAdminUsers } from "@/hooks/use-admin";
 import {
   useAdminFeatureFlags,
   useClearAdminFeatureFlag,
@@ -47,17 +47,11 @@ const draftKey = (flag: string, type: ScopeType, id: string) =>
 
 export function AdminFeatureFlagsPage() {
   const { data, isLoading, error } = useAdminFeatureFlags();
-  const { data: usersData, isLoading: usersLoading } = useAdminUsers(1, 100);
   const setOverride = useSetAdminFeatureFlag();
   const clearOverride = useClearAdminFeatureFlag();
   const [drafts, setDrafts] = useState<Record<string, ScopeState>>({});
   const [search, setSearch] = useState("");
   const [openKeys, setOpenKeys] = useState<string[]>([]);
-  const userOptions = (usersData?.users ?? []).map((user) => ({
-    id: user.id,
-    label: user.email,
-  }));
-  const userLabels = new Map(userOptions.map((user) => [user.id, user.label]));
   const flags: FlagRow[] = (data?.flags ?? []).map((flag) => ({
     key: flag.key,
     description: flag.description,
@@ -72,7 +66,7 @@ export function AdminFeatureFlagsPage() {
     orgs: [],
     users: flag.user_overrides.map((override) => ({
       id: override.user_id,
-      label: userLabels.get(override.user_id) ?? override.user_id,
+      label: override.user_id,
       state: override.enabled ? "enabled" : "disabled",
     })),
   }));
@@ -216,8 +210,6 @@ export function AdminFeatureFlagsPage() {
               stage={(type, id, s) => stage(flag.key, type, id, s)}
               stagedUsers={stagedIds(drafts, flag.key, "user")}
               stagedOrgs={stagedIds(drafts, flag.key, "org")}
-              userOptions={userOptions}
-              usersLoading={usersLoading}
             />
           ))}
         </div>
@@ -236,8 +228,6 @@ function FlagCard({
   stage,
   stagedOrgs,
   stagedUsers,
-  userOptions,
-  usersLoading,
 }: {
   readonly flag: FlagRow;
   readonly open: boolean;
@@ -248,43 +238,47 @@ function FlagCard({
   readonly stage: (type: ScopeType, id: string, s: ScopeState) => void;
   readonly stagedOrgs: readonly string[];
   readonly stagedUsers: readonly string[];
-  readonly userOptions: readonly { id: string; label: string }[];
-  readonly usersLoading: boolean;
 }) {
   const [addOrg, setAddOrg] = useState("");
-  const [addUser, setAddUser] = useState("");
 
   const orgIds = uniq([...flag.orgs.map((o) => o.id), ...stagedOrgs]);
   const userIds = uniq([...flag.users.map((u) => u.id), ...stagedUsers]);
-  const labelFor = (type: ScopeType, id: string) =>
-    type === "user"
-      ? userOptions.find((candidate) => candidate.id === id)?.label ?? id
-      : id;
-
-  const addableUsers = userOptions.filter((user) => !userIds.includes(user.id));
+  const labelFor = (_type: ScopeType, id: string) => id;
 
   // Collapsed summary pills: Global + configured orgs/users (non-inherit).
-  const pills: { id: string; label: string; state: ScopeState; pending: boolean }[] =
-    [
-      {
-        id: "global",
-        label: "Global",
-        state: stateFor("global", ""),
-        pending: isPending("global", ""),
-      },
-      ...orgIds.map((id) => ({
-        id: `org-${id}`,
-        label: labelFor("org", id),
-        state: stateFor("org", id),
-        pending: isPending("org", id),
-      })),
-      ...userIds.map((id) => ({
-        id: `user-${id}`,
-        label: labelFor("user", id),
-        state: stateFor("user", id),
-        pending: isPending("user", id),
-      })),
-    ].filter((p) => p.id === "global" || p.state !== "inherit");
+  const pills: {
+    id: string;
+    label: string;
+    scope: ScopeType;
+    targetId: string;
+    state: ScopeState;
+    pending: boolean;
+  }[] = [
+    {
+      id: "global",
+      label: "Global",
+      scope: "global" as const,
+      targetId: "",
+      state: stateFor("global", ""),
+      pending: isPending("global", ""),
+    },
+    ...orgIds.map((id) => ({
+      id: `org-${id}`,
+      label: labelFor("org", id),
+      scope: "org" as const,
+      targetId: id,
+      state: stateFor("org", id),
+      pending: isPending("org", id),
+    })),
+    ...userIds.map((id) => ({
+      id: `user-${id}`,
+      label: id,
+      scope: "user" as const,
+      targetId: id,
+      state: stateFor("user", id),
+      pending: isPending("user", id),
+    })),
+  ].filter((pill) => pill.id === "global" || pill.state !== "inherit");
   const shownPills = pills.slice(0, 6);
   const extraPills = pills.length - shownPills.length;
 
@@ -310,20 +304,8 @@ function FlagCard({
           </p>
           {!open && (
             <div className="flex flex-wrap items-center gap-1 pt-0.5">
-              {shownPills.map((p) => (
-                <Badge
-                  key={p.id}
-                  variant={p.state === "enabled" ? "success" : "secondary"}
-                  className={cn(
-                    "flex max-w-[180px] gap-1 text-[11px] font-normal",
-                    p.state === "inherit" && !p.pending && "opacity-60",
-                    p.pending && "ring-1 ring-primary/70",
-                  )}
-                  title={`${p.label} · ${word(p.state)}`}
-                >
-                  <span className="min-w-0 truncate">{p.label}</span>
-                  <span className="shrink-0">· {word(p.state)}</span>
-                </Badge>
+              {shownPills.map((pill) => (
+                <SummaryPill key={pill.id} pill={pill} />
               ))}
               {extraPills > 0 && (
                 <Badge
@@ -380,25 +362,16 @@ function FlagCard({
           </Group>
 
           <Group label="By user">
-            <AddPicker
-              value={addUser}
-              placeholder={
-                usersLoading
-                  ? "Loading users…"
-                  : addableUsers.length === 0
-                  ? "All users added"
-                  : "Add user…"
-              }
-              options={addableUsers}
+            <UserSearchPicker
+              excludedIds={userIds}
               onPick={(id) => {
-                setAddUser("");
                 stage("user", id, "enabled");
               }}
             />
             {userIds.map((id) => (
-              <ScopeRow
+              <UserScopeRow
                 key={id}
-                label={labelFor("user", id)}
+                userId={id}
                 state={stateFor("user", id)}
                 pending={isPending("user", id)}
                 onChange={(s) => stage("user", id, s)}
@@ -408,6 +381,130 @@ function FlagCard({
         </div>
       )}
     </Card>
+  );
+}
+
+interface SummaryPillValue {
+  readonly label: string;
+  readonly scope: ScopeType;
+  readonly targetId: string;
+  readonly state: ScopeState;
+  readonly pending: boolean;
+}
+
+function SummaryPill({ pill }: { readonly pill: SummaryPillValue }) {
+  const { data: user } = useAdminUser(
+    pill.scope === "user" ? pill.targetId : "",
+  );
+  const label = user?.email ?? pill.label;
+  return (
+    <Badge
+      variant={pill.state === "enabled" ? "success" : "secondary"}
+      className={cn(
+        "flex max-w-[180px] gap-1 text-[11px] font-normal",
+        pill.state === "inherit" && !pill.pending && "opacity-60",
+        pill.pending && "ring-1 ring-primary/70",
+      )}
+      title={`${label} · ${word(pill.state)}`}
+    >
+      <span className="min-w-0 truncate">{label}</span>
+      <span className="shrink-0">· {word(pill.state)}</span>
+    </Badge>
+  );
+}
+
+function UserSearchPicker({
+  excludedIds,
+  onPick,
+}: {
+  readonly excludedIds: readonly string[];
+  readonly onPick: (id: string) => void;
+}) {
+  const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const normalizedSearch = search.trim();
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedSearch(normalizedSearch), 300);
+    return () => window.clearTimeout(timer);
+  }, [normalizedSearch]);
+
+  const { data, isLoading } = useAdminUsers(
+    1,
+    20,
+    debouncedSearch || undefined,
+  );
+  const waitingForSearch = normalizedSearch !== debouncedSearch;
+  const results = debouncedSearch && !waitingForSearch
+    ? (data?.users ?? []).filter((user) => !excludedIds.includes(user.id))
+    : [];
+
+  return (
+    <div className="space-y-2 border-b border-border/40 px-3 py-2 last:border-b-0">
+      <div className="relative">
+        <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+        <Input
+          value={search}
+          onChange={(event) => setSearch(event.target.value)}
+          placeholder="Search users by email…"
+          aria-label="Search users by email"
+          className="h-8 pl-8 text-[12px]"
+        />
+      </div>
+      {normalizedSearch && (
+        <div className="max-h-40 overflow-y-auto rounded-md border border-border/60">
+          {isLoading || waitingForSearch ? (
+            <p className="px-3 py-2 text-xs text-muted-foreground">Searching…</p>
+          ) : results.length === 0 ? (
+            <p className="px-3 py-2 text-xs text-muted-foreground">
+              No users match this search.
+            </p>
+          ) : (
+            results.map((user) => (
+              <button
+                key={user.id}
+                type="button"
+                onClick={() => {
+                  onPick(user.id);
+                  setSearch("");
+                  setDebouncedSearch("");
+                }}
+                className="block w-full border-b border-border/40 px-3 py-2 text-left text-xs last:border-b-0 hover:bg-muted/50"
+              >
+                <span className="block truncate font-medium">{user.email}</span>
+                <span className="block truncate text-muted-foreground">
+                  {user.id}
+                </span>
+              </button>
+            ))
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function UserScopeRow({
+  userId,
+  state,
+  pending,
+  onChange,
+}: {
+  readonly userId: string;
+  readonly state: ScopeState;
+  readonly pending: boolean;
+  readonly onChange: (state: ScopeState) => void;
+}) {
+  const { data: user } = useAdminUser(userId);
+  return (
+    <div title={user ? undefined : userId}>
+      <ScopeRow
+        label={user?.email ?? userId}
+        state={state}
+        pending={pending}
+        onChange={onChange}
+      />
+    </div>
   );
 }
 

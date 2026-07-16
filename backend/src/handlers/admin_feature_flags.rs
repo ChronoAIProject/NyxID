@@ -11,7 +11,7 @@ use utoipa::ToSchema;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
-use crate::handlers::admin_helpers::require_admin;
+use crate::handlers::admin_helpers::{require_admin, require_admin_or_operator};
 use crate::models::feature_flag_override::{FeatureFlagOverride, FlagTargetKind};
 use crate::mw::auth::AuthUser;
 use crate::services::{audit_service, feature_flag_service};
@@ -98,7 +98,7 @@ pub async fn list_feature_flags(
     State(state): State<AppState>,
     auth_user: AuthUser,
 ) -> AppResult<Json<AdminFeatureFlagListResponse>> {
-    require_admin(&state, &auth_user).await?;
+    require_admin_or_operator(&state, &auth_user, "admin.feature_flags.list").await?;
     let overrides = feature_flag_service::list_platform_overrides(&state.db).await?;
     let mut flags = Vec::with_capacity(feature_flag_service::FEATURE_FLAGS.len());
 
@@ -220,19 +220,22 @@ mod tests {
     use axum::extract::{Path, Query, State};
     use uuid::Uuid;
 
-    async fn setup(prefix: &str) -> Option<(AppState, String, String)> {
+    async fn setup(prefix: &str) -> Option<(AppState, String, String, String)> {
         let db = connect_test_database(prefix).await?;
         role_service::seed_system_roles(&db).await.ok()?;
         let role_ids = role_service::get_platform_role_ids(&db).await.ok()?;
         let admin_id = Uuid::new_v4().to_string();
+        let operator_id = Uuid::new_v4().to_string();
         let target_id = Uuid::new_v4().to_string();
         let mut admin = test_user(&admin_id, UserType::Person);
         admin.role_ids.push(role_ids.admin);
+        let mut operator = test_user(&operator_id, UserType::Person);
+        operator.role_ids.push(role_ids.operator);
         db.collection(USERS)
-            .insert_many([admin, test_user(&target_id, UserType::Person)])
+            .insert_many([admin, operator, test_user(&target_id, UserType::Person)])
             .await
             .ok()?;
-        Some((test_app_state(db), admin_id, target_id))
+        Some((test_app_state(db), admin_id, operator_id, target_id))
     }
 
     #[test]
@@ -245,7 +248,9 @@ mod tests {
 
     #[tokio::test]
     async fn set_list_clear_round_trip_and_unknown_rejection() {
-        let Some((state, admin_id, target_id)) = setup("admin_feature_flags_flow").await else {
+        let Some((state, admin_id, _operator_id, target_id)) =
+            setup("admin_feature_flags_flow").await
+        else {
             eprintln!("skipping admin feature flag handler test: no local MongoDB available");
             return;
         };
@@ -311,5 +316,77 @@ mod tests {
         .await
         .expect_err("unknown flag rejected");
         assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn admin_operator_read_write_split_is_enforced() {
+        let Some((state, admin_id, operator_id, _target_id)) =
+            setup("admin_feature_flags_access_split").await
+        else {
+            eprintln!("skipping admin feature flag access test: no local MongoDB available");
+            return;
+        };
+        let flag_key = "example_ui".to_string();
+        let operator = test_auth_user(&operator_id);
+        let admin = test_auth_user(&admin_id);
+
+        let _ = list_feature_flags(State(state.clone()), operator.clone())
+            .await
+            .expect("operator GET should succeed");
+
+        let operator_put = set_feature_flag(
+            State(state.clone()),
+            operator.clone(),
+            Path(flag_key.clone()),
+            Json(SetAdminFeatureFlagRequest {
+                target_kind: AdminFlagTargetKind::Global,
+                target_key: None,
+                enabled: true,
+            }),
+        )
+        .await
+        .expect_err("operator PUT should be forbidden");
+        assert!(matches!(operator_put, AppError::Forbidden(_)));
+
+        let operator_delete = clear_feature_flag(
+            State(state.clone()),
+            operator,
+            Path(flag_key.clone()),
+            Query(ClearAdminFeatureFlagQuery {
+                target_kind: AdminFlagTargetKind::Global,
+                target_key: None,
+            }),
+        )
+        .await
+        .err()
+        .expect("operator DELETE should be forbidden");
+        assert!(matches!(operator_delete, AppError::Forbidden(_)));
+
+        let _ = list_feature_flags(State(state.clone()), admin.clone())
+            .await
+            .expect("admin GET should succeed");
+        let _ = set_feature_flag(
+            State(state.clone()),
+            admin.clone(),
+            Path(flag_key.clone()),
+            Json(SetAdminFeatureFlagRequest {
+                target_kind: AdminFlagTargetKind::Global,
+                target_key: None,
+                enabled: true,
+            }),
+        )
+        .await
+        .expect("admin PUT should succeed");
+        clear_feature_flag(
+            State(state),
+            admin,
+            Path(flag_key),
+            Query(ClearAdminFeatureFlagQuery {
+                target_kind: AdminFlagTargetKind::Global,
+                target_key: None,
+            }),
+        )
+        .await
+        .expect("admin DELETE should succeed");
     }
 }
