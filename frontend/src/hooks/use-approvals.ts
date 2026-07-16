@@ -116,6 +116,7 @@ export function useApprovalRequests(
   page: number = 1,
   perPage: number = 20,
   status?: string,
+  options?: { readonly refetchIntervalMs?: number },
 ) {
   return useQuery({
     queryKey: ["approvals", "requests", page, perPage, status],
@@ -129,6 +130,10 @@ export function useApprovalRequests(
         `/approvals/requests?${params.toString()}`,
       );
     },
+    // Polling only fires while the tab is focused (TanStack default); used
+    // by the assistant surfaces so decisions made elsewhere (Telegram,
+    // mobile, another tab) show up without a manual refresh.
+    refetchInterval: options?.refetchIntervalMs,
   });
 }
 

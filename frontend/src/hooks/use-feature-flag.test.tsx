@@ -3,6 +3,7 @@ import { renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PropsWithChildren } from "react";
 import { useFeature } from "./use-feature-flag";
+import { FEATURE_FLAG } from "@/lib/feature-flags";
 import { useAuthStore } from "@/stores/auth-store";
 
 const { mockGet } = vi.hoisted(() => ({ mockGet: vi.fn() }));
@@ -43,29 +44,32 @@ beforeEach(() => {
 
 describe("useFeature", () => {
   it("is true when the org's enabled_features includes the flag", async () => {
-    mockGet.mockResolvedValue(orgResponse(["example_ui"]));
-    const { result } = renderHook(() => useFeature("example_ui", "org-1"), {
-      wrapper: createWrapper(),
-    });
+    mockGet.mockResolvedValue(orgResponse([FEATURE_FLAG.AI_ASSISTANT]));
+    const { result } = renderHook(
+      () => useFeature(FEATURE_FLAG.AI_ASSISTANT, "org-1"),
+      { wrapper: createWrapper() },
+    );
     await waitFor(() => expect(result.current).toBe(true));
     expect(mockGet).toHaveBeenCalledWith("/orgs/org-1");
   });
 
   it("is false when the flag is absent from enabled_features", async () => {
     mockGet.mockResolvedValue(orgResponse([]));
-    const { result } = renderHook(() => useFeature("example_ui", "org-1"), {
-      wrapper: createWrapper(),
-    });
+    const { result } = renderHook(
+      () => useFeature(FEATURE_FLAG.AI_ASSISTANT, "org-1"),
+      { wrapper: createWrapper() },
+    );
     // Let the query settle, then assert still-false (fail-closed).
     await waitFor(() => expect(mockGet).toHaveBeenCalled());
     expect(result.current).toBe(false);
   });
 
   it("fails closed to false while loading / without an orgId", () => {
-    mockGet.mockResolvedValue(orgResponse(["example_ui"]));
-    const { result } = renderHook(() => useFeature("example_ui", ""), {
-      wrapper: createWrapper(),
-    });
+    mockGet.mockResolvedValue(orgResponse([FEATURE_FLAG.AI_ASSISTANT]));
+    const { result } = renderHook(
+      () => useFeature(FEATURE_FLAG.AI_ASSISTANT, ""),
+      { wrapper: createWrapper() },
+    );
     expect(result.current).toBe(false);
     expect(mockGet).not.toHaveBeenCalled();
   });
@@ -78,9 +82,11 @@ describe("useFeature (personal / non-org context)", () => {
 
   it("reads capabilities.enabled_features from /users/me when no orgId", () => {
     useAuthStore.setState({
-      user: { capabilities: { enabled_features: ["example_ui"] } } as never,
+      user: {
+        capabilities: { enabled_features: [FEATURE_FLAG.AI_ASSISTANT] },
+      } as never,
     });
-    const { result } = renderHook(() => useFeature("example_ui"), {
+    const { result } = renderHook(() => useFeature(FEATURE_FLAG.AI_ASSISTANT), {
       wrapper: createWrapper(),
     });
     expect(result.current).toBe(true);
@@ -91,7 +97,7 @@ describe("useFeature (personal / non-org context)", () => {
     useAuthStore.setState({
       user: { capabilities: { enabled_features: [] } } as never,
     });
-    const { result } = renderHook(() => useFeature("example_ui"), {
+    const { result } = renderHook(() => useFeature(FEATURE_FLAG.AI_ASSISTANT), {
       wrapper: createWrapper(),
     });
     expect(result.current).toBe(false);

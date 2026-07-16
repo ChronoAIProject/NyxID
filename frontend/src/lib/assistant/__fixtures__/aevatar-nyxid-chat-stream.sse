@@ -1,0 +1,12 @@
+data: {"type":"RUN_STARTED","actorId":"nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae"}
+
+data: {"type":"TEXT_MESSAGE_START","textMessageStart":{"messageId":"31c82249c61e42239075795cfa9306d9","role":"assistant"}}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","textMessageContent":{"delta":"Blue is a color.  \nGreen is a color."}}
+
+data: {"type":"USAGE","usage":{"available":true,"promptTokens":25447,"completionTokens":15,"totalTokens":25462,"model":null}}
+
+data: {"type":"TEXT_MESSAGE_END","textMessageEnd":{"messageId":"31c82249c61e42239075795cfa9306d9"}}
+
+data: {"type":"RUN_FINISHED"}
+
