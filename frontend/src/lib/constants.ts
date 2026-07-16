@@ -70,11 +70,16 @@ export const OAUTH_SCOPE_META: Readonly<Record<string, OAuthScopeMeta>> = {
   },
 };
 
+// Risk/severity pill colors are theme-split with the same convention as the Badge
+// component: dark (base, unprefixed) is the primary surface and keeps the tuned tint;
+// light mode deviates to a solid semantic fill (`light:`) because the tint washes out on
+// a light canvas. This is the fix for the reported light-mode legibility bug.
 export function scopeRiskClass(risk: OAuthScopeRisk): string {
-  if (risk === "high") return "border-red-500/30 bg-red-500/10 text-red-200";
+  if (risk === "high")
+    return "border-red-500/30 bg-red-500/10 text-red-200 light:border-transparent light:bg-destructive light:text-white";
   if (risk === "medium")
-    return "border-yellow-500/30 bg-yellow-500/10 text-yellow-200";
-  return "border-emerald-500/30 bg-emerald-500/10 text-emerald-200";
+    return "border-yellow-500/30 bg-yellow-500/10 text-yellow-200 light:border-transparent light:bg-warning light:text-white";
+  return "border-emerald-500/30 bg-emerald-500/10 text-emerald-200 light:border-transparent light:bg-success light:text-white";
 }
 
 export function scopeRiskLabel(risk: OAuthScopeRisk): string {

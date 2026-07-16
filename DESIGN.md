@@ -106,8 +106,9 @@
 - **Padding:** `px-2 py-0.5`
 - **Text:** `text-[10px] font-medium`
 - **Radius:** `rounded-md`
-- **Variants:** `default` (purple — `border-nyx-500/30 bg-nyx-500/15 text-nyx-200`), `secondary` (`bg-muted`), `destructive`, `success`, `warning`, `info`, `accent` (purple, slightly softer fill)
-- **Pattern:** `border-{color}/30 bg-{color}/15 text-{color}` (success/warning/info use `/10` fill)
+- **Variants:** `default` (purple), `secondary` (`bg-muted`), `destructive`, `success`, `warning`, `info`, `accent` (purple, slightly softer fill)
+- **Dark = tuned tint, light = solid fill (theme-split).** Dark is the primary surface: the base (unprefixed) classes are the tint `border-{color}/30 bg-{color}/{10|15} text-{color}` and are left as-is. Light mode deviates to a SOLID fill via the `light:` variant — `light:border-transparent light:bg-{color} light:text-white` — because the low-opacity tint loses contrast on a light canvas. Every color-carrying variant follows this in `components/ui/badge.tsx`. `secondary` is the neutral badge: it keeps its `bg-muted` fill in dark, but in light its fill matches the canvas and vanishes, so it deviates to an OUTLINE (`light:bg-transparent light:border-muted-foreground` — border in the same `muted-foreground` as its text). `{color}` is a semantic token (`destructive`/`success`/`warning`/`info`/`nyx-500`/`nyx-secondary-500`). The `light:`/`dark:` variants are class-scoped to `html.theme-{light,dark}` in `app.css`; never-themed public pages (landing/blog) keep the dark base. Do NOT give a pill a single *theme-blind* raw-palette class as its only color (e.g. `text-red-200 bg-red-500/10` with no variant) — the `-200`/`-300` tints wash out in light; always pair a dark tint with a `light:` solid.
+- **Severity / risk pills** (`lib/constants.ts` `scopeRiskClass`): same theme-split convention; map the scale onto tokens high→`destructive`, medium→`warning`, low→`success`.
 - **Role badges** (`RoleBadge`): owner → `accent`, admin → `info`, member → `success`, viewer → `secondary`. Use these mappings consistently for any role/permission UI.
 
 ### Tables
