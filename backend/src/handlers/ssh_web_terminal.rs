@@ -25,7 +25,6 @@ use crate::services::node_ws_manager::NodeWebTerminalAuthMode;
 use crate::services::{audit_service, node_routing_service, node_service, ssh_service};
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
-use super::services_helpers::fetch_service;
 use super::ssh_tunnel::authorize_ssh_access;
 
 #[derive(Debug, Deserialize)]
@@ -70,24 +69,8 @@ pub async fn ssh_web_terminal(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> AppResult<Response> {
-    authorize_ssh_access(&state, &auth_user, &service_id).await?;
+    let auth_context = authorize_ssh_access(&state, &auth_user, &service_id).await?;
     let ssh_svc = ssh_service::get_ssh_service(&state.db, &service_id).await?;
-    // Resolve the catalog slug once up front so telemetry reports the
-    // service by slug rather than by UUID path param. Best-effort: web
-    // terminal availability must not fail on a telemetry-only lookup.
-    let service_row = fetch_service(&state, &service_id).await.ok();
-    let service_slug = service_row
-        .as_ref()
-        .map(|s| s.slug.clone())
-        .unwrap_or_else(|| service_id.clone());
-    let auth_context = ssh_service::resolve_ssh_auth_context(
-        &state.db,
-        &auth_user.user_id.to_string(),
-        &service_id,
-        &service_slug,
-    )
-    .await?;
-
     if auth_context.mode == SshAuthMode::ProxyOnly {
         return Err(AppError::SshAuthModeUnsupportedForOperation(
             "web terminal is not supported for proxy-only SSH services".to_string(),

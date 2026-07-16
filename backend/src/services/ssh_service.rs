@@ -21,6 +21,7 @@ pub struct SshSessionManager {
     max_sessions_per_user: usize,
 }
 
+#[derive(Debug)]
 pub struct ResolvedSshAuthContext {
     pub mode: SshAuthMode,
     pub service_slug: String,
@@ -110,25 +111,15 @@ pub async fn get_ssh_service(
     ensure_ssh_service(&service).cloned()
 }
 
-pub async fn resolve_ssh_auth_context(
+pub async fn resolve_ssh_auth_context_for_owner(
     db: &mongodb::Database,
-    actor_user_id: &str,
-    service_id: &str,
-    catalog_slug: &str,
+    owner_user_id: &str,
+    service: &DownstreamService,
 ) -> AppResult<ResolvedSshAuthContext> {
-    let effective_owner = crate::services::proxy_service::find_effective_service_owner(
-        db,
-        actor_user_id,
-        None,
-        Some(service_id),
-    )
-    .await?;
-    let owner_user_id = effective_owner.as_deref().unwrap_or(actor_user_id);
-
     if let Some(user_service) = crate::services::user_service_service::find_by_catalog_service_id(
         db,
         owner_user_id,
-        service_id,
+        &service.id,
     )
     .await?
     {
@@ -139,16 +130,11 @@ pub async fn resolve_ssh_auth_context(
         });
     }
 
-    let service = db
-        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-        .find_one(doc! { "_id": service_id })
-        .await?
-        .ok_or_else(|| AppError::NotFound("SSH service not found".to_string()))?;
-    let ssh = ensure_ssh_service(&service)?;
+    let ssh = ensure_ssh_service(service)?;
 
     Ok(ResolvedSshAuthContext {
         mode: ssh.ssh_auth_mode,
-        service_slug: catalog_slug.to_string(),
+        service_slug: service.slug.clone(),
         owner_user_id: owner_user_id.to_string(),
     })
 }
@@ -460,7 +446,7 @@ pub async fn issue_certificate(
 mod tests {
     use super::{
         SshConfigInput, SshSessionManager, build_ssh_config, issue_certificate,
-        resolve_ssh_auth_context, target_base_url, validate_certificate_settings,
+        resolve_ssh_auth_context_for_owner, target_base_url, validate_certificate_settings,
         validate_principal, validate_ssh_target_syntax,
     };
     use crate::crypto::aes::EncryptionKeys;
@@ -523,7 +509,7 @@ mod tests {
             ca_public_key: None,
         });
         db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-            .insert_one(catalog_service)
+            .insert_one(&catalog_service)
             .await
             .expect("insert admin-authored SSH catalog service");
 
@@ -562,13 +548,12 @@ mod tests {
             .expect("insert SSH org membership");
 
         let personal_context =
-            resolve_ssh_auth_context(&db, &personal_owner_id, &catalog_service_id, "catalog-ssh")
+            resolve_ssh_auth_context_for_owner(&db, &personal_owner_id, &catalog_service)
                 .await
                 .expect("resolve personal catalog-backed SSH context");
-        let org_context =
-            resolve_ssh_auth_context(&db, &org_member_id, &catalog_service_id, "catalog-ssh")
-                .await
-                .expect("resolve org catalog-backed SSH context");
+        let org_context = resolve_ssh_auth_context_for_owner(&db, &org_owner_id, &catalog_service)
+            .await
+            .expect("resolve org catalog-backed SSH context");
 
         assert_eq!(personal_context.owner_user_id, personal_owner_id);
         assert_eq!(personal_context.service_slug, "personal-ssh");

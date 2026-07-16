@@ -79,24 +79,10 @@ pub async fn issue_ssh_certificate(
     Path(service_id): Path<String>,
     Json(body): Json<IssueSshCertificateRequest>,
 ) -> AppResult<Json<IssueSshCertificateResponse>> {
-    authorize_ssh_access(&state, &auth_user, &service_id).await?;
+    let auth_context = authorize_ssh_access(&state, &auth_user, &service_id).await?;
     let ssh_service = ssh_service::get_ssh_service(&state.db, &service_id).await?;
-    // Resolve the catalog slug for telemetry -- the path param is the
-    // service UUID, not the slug. Best-effort: cert issuance already
-    // passed auth + SSH config validation, so a transient read failure
-    // here (or the service getting deleted between auth and this
-    // lookup) must never fail the issuance. Fall back to the UUID and
-    // accept that the event will be scrubbed to `[UUID_REDACTED]` in
-    // that rare case.
-    let service_row = fetch_service(&state, &service_id).await.ok();
-    let service_slug = service_row
-        .as_ref()
-        .map(|s| s.slug.clone())
-        .unwrap_or_else(|| service_id.clone());
+    let service_slug = auth_context.service_slug;
     let user_id = auth_user.user_id.to_string();
-    let auth_context =
-        ssh_service::resolve_ssh_auth_context(&state.db, &user_id, &service_id, &service_slug)
-            .await?;
     if auth_context.mode != SshAuthMode::Cert {
         return Err(AppError::SshAuthModeUnsupportedForOperation(
             "SSH certificate issuance is only supported for cert-mode SSH services".to_string(),
@@ -182,24 +168,9 @@ pub async fn ssh_tunnel_ws(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> AppResult<Response> {
-    authorize_ssh_access(&state, &auth_user, &service_id).await?;
+    let auth_context = authorize_ssh_access(&state, &auth_user, &service_id).await?;
     let ssh_service = ssh_service::get_ssh_service(&state.db, &service_id).await?;
-    // Resolve the downstream service so telemetry
-    // (`ssh.tunnel_opened` / `_closed`) emits the slug, not the UUID.
-    // Best-effort: SSH tunnel establishment is user-facing; a transient
-    // telemetry-only lookup failure must never block the tunnel.
-    let service_row = fetch_service(&state, &service_id).await.ok();
-    let service_slug = service_row
-        .as_ref()
-        .map(|s| s.slug.clone())
-        .unwrap_or_else(|| service_id.clone());
-    let auth_context = ssh_service::resolve_ssh_auth_context(
-        &state.db,
-        &auth_user.user_id.to_string(),
-        &service_id,
-        &service_slug,
-    )
-    .await?;
+    let service_slug = auth_context.service_slug.clone();
     if auth_context.mode == SshAuthMode::NodeKey {
         return Err(AppError::SshAuthModeUnsupportedForOperation(
             "ssh proxy is not supported for node-key SSH services; use ssh exec or terminal"
@@ -1016,7 +987,7 @@ pub(crate) async fn authorize_ssh_access(
     state: &AppState,
     auth_user: &AuthUser,
     service_id: &str,
-) -> AppResult<()> {
+) -> AppResult<ssh_service::ResolvedSshAuthContext> {
     let operation = operation_descriptor::build_ssh_descriptor(
         operation_descriptor::SshOperationKind::Tunnel,
         None,
@@ -1029,8 +1000,9 @@ pub(crate) async fn authorize_ssh_access_for_operation(
     auth_user: &AuthUser,
     service_id: &str,
     operation: &operation_descriptor::OperationDescriptor,
-) -> AppResult<()> {
+) -> AppResult<ssh_service::ResolvedSshAuthContext> {
     let approval_owner_user_id = auth_user.effective_approval_owner_user_id();
+    let resolution_user_id = auth_user.proxy_resolution_user_id();
     let service = fetch_service(state, service_id).await?;
     if !service.is_active {
         return Err(AppError::NotFound("SSH service not found".to_string()));
@@ -1050,7 +1022,7 @@ pub(crate) async fn authorize_ssh_access_for_operation(
     // leaking the existence of a private service the caller cannot see.
     let effective_owner = crate::services::proxy_service::find_effective_service_owner(
         &state.db,
-        &approval_owner_user_id,
+        &resolution_user_id,
         None,
         Some(service_id),
     )
@@ -1064,12 +1036,15 @@ pub(crate) async fn authorize_ssh_access_for_operation(
             // UserService also resolves to `None` here and must not be locked
             // out of their own service. Public catalog services keep their
             // open behaviour.
-            if service.visibility == "private" && service.created_by != approval_owner_user_id {
+            if service.visibility == "private" && service.created_by != resolution_user_id {
                 return Err(AppError::NotFound("SSH service not found".to_string()));
             }
-            &approval_owner_user_id
+            &resolution_user_id
         }
     };
+    let auth_context =
+        ssh_service::resolve_ssh_auth_context_for_owner(&state.db, owner_for_resolution, &service)
+            .await?;
     let approval_outcome = approval_service::evaluate_and_check(
         &state.db,
         &approval_owner_user_id,
@@ -1083,7 +1058,7 @@ pub(crate) async fn authorize_ssh_access_for_operation(
     .await?;
 
     let pending = match approval_outcome {
-        approval_service::ApprovalOutcome::Allowed { .. } => return Ok(()),
+        approval_service::ApprovalOutcome::Allowed { .. } => return Ok(auth_context),
         approval_service::ApprovalOutcome::Denied => {
             return Err(AppError::Forbidden(
                 "Operation denied by approval policy".to_string(),
@@ -1143,7 +1118,7 @@ pub(crate) async fn authorize_ssh_access_for_operation(
             )
         })?;
 
-    Ok(())
+    Ok(auth_context)
 }
 
 async fn resolve_ssh_approval_service_slug(
@@ -1531,6 +1506,74 @@ mod tests {
         super::authorize_ssh_access(&state, &test_auth_user(&creator_id), &service_id)
             .await
             .expect("the service creator must retain access to their own private SSH service");
+    }
+
+    #[tokio::test]
+    async fn authorize_ssh_access_carries_service_account_owner_to_billing() {
+        use crate::models::downstream_service::COLLECTION_NAME as DOWNSTREAM_SERVICES;
+        use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+        use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
+        use crate::mw::auth::AuthMethod;
+        use crate::test_utils::{
+            connect_test_database, test_app_state, test_auth_user, test_user, test_user_service,
+        };
+
+        let Some(db) = connect_test_database("ssh_authz_service_account_owner").await else {
+            eprintln!("Skipping MongoDB-backed test; no test database available");
+            return;
+        };
+
+        let catalog_author_id = uuid::Uuid::new_v4().to_string();
+        let owner_id = uuid::Uuid::new_v4().to_string();
+        let service_account_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        let user_service_id = uuid::Uuid::new_v4().to_string();
+
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&owner_id, UserType::Person))
+            .await
+            .expect("insert service-account owner");
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(ssh_service_row(&service_id, &catalog_author_id, "private"))
+            .await
+            .expect("insert catalog SSH service");
+        let mut user_service = test_user_service(
+            &user_service_id,
+            &owner_id,
+            "owner-ssh",
+            &uuid::Uuid::new_v4().to_string(),
+            Some(&service_id),
+            None,
+        );
+        user_service.service_type = "ssh".to_string();
+        user_service.ssh_auth_mode = SshAuthMode::NodeKey;
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(user_service)
+            .await
+            .expect("insert owner SSH service");
+
+        let state = test_app_state(db);
+        let mut auth_user = test_auth_user(&service_account_id);
+        auth_user.auth_method = AuthMethod::ServiceAccount;
+        auth_user.approval_owner_user_id = Some(owner_id.clone());
+
+        let auth_context = super::authorize_ssh_access(&state, &auth_user, &service_id)
+            .await
+            .expect("service account should use its owner's SSH service");
+        let billing_principal_user_id = auth_user.proxy_resolution_user_id();
+        let payer = state
+            .billing
+            .owner_resolver()
+            .resolve_for_resource(&billing_principal_user_id, &auth_context.owner_user_id)
+            .await
+            .expect("resolve service-account SSH payer");
+
+        assert_eq!(auth_context.owner_user_id, owner_id);
+        assert_eq!(auth_context.service_slug, "owner-ssh");
+        assert_eq!(auth_context.mode, SshAuthMode::NodeKey);
+        assert_eq!(payer.owner_id, owner_id);
+        assert_ne!(payer.owner_id, service_account_id);
+        assert_ne!(payer.owner_id, catalog_author_id);
     }
 
     // ── ssh_banner_validated: additional edge cases ──────────────────────
