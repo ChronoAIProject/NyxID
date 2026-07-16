@@ -42,21 +42,28 @@ pub struct FeatureFlagDef {
 /// The known feature flags. Keys are stable identifiers referenced by both the
 /// backend and `frontend/src/lib/feature-flags.ts`.
 ///
-/// No flags are shipped yet — the registry is intentionally empty so the
-/// product surfaces render their empty states. Add real flags here (and mirror
-/// the key in `frontend/src/lib/feature-flags.ts`) when introducing one.
-#[cfg(not(test))]
-pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[];
-
-/// Test builds carry a placeholder flag so the resolution / override pipeline
-/// stays exercised even while the production registry is empty.
-#[cfg(test)]
-pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[FeatureFlagDef {
-    key: "example_ui",
-    description: "Test-only placeholder flag.",
+const AI_ASSISTANT_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: "experimental:ai-assistant",
+    description: "AI Assistant chat surface (mock-data preview).",
     default_enabled: false,
     org_manageable: true,
-}];
+};
+
+#[cfg(not(test))]
+pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[AI_ASSISTANT_FLAG];
+
+/// Test builds carry a placeholder flag so the resolution / override pipeline
+/// can exercise multiple definitions alongside the production registry entry.
+#[cfg(test)]
+pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
+    AI_ASSISTANT_FLAG,
+    FeatureFlagDef {
+        key: "example_ui",
+        description: "Test-only placeholder flag.",
+        default_enabled: false,
+        org_manageable: true,
+    },
+];
 
 /// Look up a flag definition by key. `None` for unknown keys.
 pub fn find_flag(key: &str) -> Option<&'static FeatureFlagDef> {
@@ -662,6 +669,7 @@ mod tests {
         // Pure validation lives before any DB call, but exercising it needs a
         // db handle; assert the registry lookup instead.
         assert!(find_flag("does-not-exist").is_none());
+        assert!(find_flag("experimental:ai-assistant").is_some());
         assert!(find_flag("example_ui").is_some());
     }
 

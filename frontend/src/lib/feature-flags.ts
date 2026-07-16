@@ -6,8 +6,7 @@
  * match the backend exactly. The backend owns authoritative metadata and
  * resolution — the client only needs the typed keys to gate UI.
  *
- * No flags are shipped yet — this is intentionally empty. Reference flags by
- * their constant once added:
+ * Reference flags by their catalog constant:
  *
  *   import { FEATURE_FLAG } from "@/lib/feature-flags";
  *   const on = useFeature(FEATURE_FLAG.AI_ASSISTANT, orgId);
@@ -17,8 +16,7 @@
  * every call site becomes compile-time checked.
  */
 export const FEATURE_FLAG = {
-  // Add real flags here, e.g.:
-  // AI_ASSISTANT: "experimental:ai-assistant",
+  AI_ASSISTANT: "experimental:ai-assistant",
 } as const;
 
 type FeatureFlagKey = (typeof FEATURE_FLAG)[keyof typeof FEATURE_FLAG];

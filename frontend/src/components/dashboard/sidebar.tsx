@@ -35,6 +35,8 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
+import { FEATURE_FLAG } from "@/lib/feature-flags";
+import { useFeature } from "@/hooks/use-feature-flag";
 import { useAuthStore } from "@/stores/auth-store";
 import { hasAdminRead, isBillingAvailable } from "@/types/api";
 
@@ -154,6 +156,57 @@ function NavItem({
   );
 }
 
+export function AssistantNavEntry({
+  collapsed = false,
+  mobile = false,
+  onClick,
+}: {
+  readonly collapsed?: boolean;
+  readonly mobile?: boolean;
+  readonly onClick?: () => void;
+}) {
+  const enabled = useFeature(FEATURE_FLAG.AI_ASSISTANT);
+
+  if (!enabled) return null;
+
+  return (
+    <Link
+      to="/assistant"
+      onClick={onClick}
+      title={collapsed ? "Assistant" : undefined}
+      className={cn(
+        "group/assistant mb-1.5 flex w-full items-center overflow-hidden rounded-lg border border-nyx-500/30 font-medium text-foreground",
+        "transition-[padding,gap,background-color,border-color] duration-300 ease-in-out hover:border-nyx-500/40 hover:bg-overlay",
+        mobile ? "gap-3 px-4 py-3 text-[14px]" : "py-[7px] text-[12px]",
+        !mobile && (collapsed ? "justify-center gap-0 px-0" : "gap-[9px] px-3"),
+      )}
+    >
+      <Sparkles
+        className={cn(
+          "shrink-0 text-nyx-secondary-400",
+          mobile ? "h-[18px] w-[18px]" : "h-[14px] w-[14px]",
+        )}
+      />
+      <span
+        className={cn(
+          "truncate whitespace-nowrap transition-[opacity,max-width] duration-300 ease-in-out",
+          collapsed ? "max-w-0 opacity-0" : "max-w-[160px] opacity-100",
+        )}
+      >
+        Assistant
+      </span>
+      <span
+        className={cn(
+          "ml-auto rounded-md border border-nyx-500/30 bg-nyx-500/15 px-1.5 text-[9px] font-semibold text-nyx-secondary-400",
+          collapsed && "hidden",
+        )}
+      >
+        NEW
+      </span>
+    </Link>
+  );
+}
+
 function readMode(): SidebarMode {
   try {
     const v = localStorage.getItem(STORAGE_KEY);
@@ -223,6 +276,7 @@ export function Sidebar({
   const sidebarContent = (
     <>
       <nav className="flex-1 overflow-y-auto scrollbar-none px-2 pt-2 pb-4">
+        <AssistantNavEntry collapsed={isCollapsed} onClick={onNavigate} />
         <div className="flex flex-col gap-[2px]">
           {mainNav.map((item) => (
             <NavItem
@@ -408,13 +462,17 @@ function SidebarModeOption({
       onClick={onClick}
       className={cn(
         "flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-[13px] transition-colors duration-200 hover:bg-overlay-strong",
-        active ? "text-foreground" : "text-muted-foreground hover:text-foreground",
+        active
+          ? "text-foreground"
+          : "text-muted-foreground hover:text-foreground",
       )}
     >
       <Circle
         className={cn(
           "h-2 w-2 shrink-0",
-          active ? "fill-nyx-secondary-400 text-nyx-secondary-400" : "fill-transparent text-muted-foreground/30",
+          active
+            ? "fill-nyx-secondary-400 text-nyx-secondary-400"
+            : "fill-transparent text-muted-foreground/30",
         )}
       />
       {label}

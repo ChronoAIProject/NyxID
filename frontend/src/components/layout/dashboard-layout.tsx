@@ -1,6 +1,6 @@
 import { Suspense, useState, useEffect, useCallback, useMemo, createContext, useContext } from "react";
 import { Outlet, Link, useNavigate, useRouterState } from "@tanstack/react-router";
-import { Sidebar, APPROVALS_NAV, DEVELOPER_NAV, ADMIN_NAV, getVisibleMainNav, isNavActive } from "@/components/dashboard/sidebar";
+import { Sidebar, AssistantNavEntry, APPROVALS_NAV, DEVELOPER_NAV, ADMIN_NAV, getVisibleMainNav, isNavActive } from "@/components/dashboard/sidebar";
 import { hasAdminRead } from "@/types/api";
 import {
   CommandPalette,
@@ -589,6 +589,7 @@ function MobileNav({
           )
         ) : (
           <>
+            <AssistantNavEntry mobile onClick={onClose} />
             <div className="flex flex-col gap-0.5">
               {mainNav.map((item) => (
                 <MobileNavItem

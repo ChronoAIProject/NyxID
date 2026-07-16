@@ -76,6 +76,7 @@ function makeRequest(
     approval_mode: "per_request",
     status: "pending",
     created_at: "2026-05-01T00:00:00Z",
+    expires_at: "2026-05-01T00:15:00Z",
     decided_at: null,
     decision_channel: null,
     ...overrides,
