@@ -59,6 +59,9 @@ const MAX_WORKER_LABEL_LEN: usize = 64;
 
 /// Workers polling within this window count as "active" in pool status.
 pub const WORKER_RECENT_SECS: i64 = 120;
+/// Billing policy marker for the oracle relay (#1155): user-supplied browser
+/// capacity is exempt from platform metering. Only asserted from the test module.
+#[cfg(test)]
 pub const ORACLE_RELAY_BILLING_POLICY: &str = "exempt_user_supplied_browser_capacity";
 
 #[derive(Debug, Clone)]

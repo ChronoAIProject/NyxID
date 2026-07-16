@@ -960,6 +960,7 @@ pub async fn send_to_chatgpt(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn send_to_chatgpt_with_api_url(
     translated_body: &serde_json::Value,
     bearer_token: &str,
