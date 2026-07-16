@@ -99,6 +99,45 @@ describe("orgResponseSchema", () => {
     });
     expect(result.success).toBe(true);
   });
+
+  it("defaults enabled_features to [] when the backend omits it", () => {
+    // Guards backend-compat: older backends without the field must still
+    // parse, and consumers can rely on an array (never undefined).
+    const result = orgResponseSchema.safeParse({
+      id: "org-1",
+      slug: "acme",
+      display_name: "Acme",
+      avatar_url: null,
+      contact_email: null,
+      created_at: "2026-01-01T00:00:00Z",
+      your_role: "member",
+      member_count: 1,
+      remote_credential_integrity_verification_opt_out: false,
+    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.enabled_features).toEqual([]);
+    }
+  });
+
+  it("preserves an explicit enabled_features array", () => {
+    const result = orgResponseSchema.safeParse({
+      id: "org-1",
+      slug: "acme",
+      display_name: "Acme",
+      avatar_url: null,
+      contact_email: null,
+      created_at: "2026-01-01T00:00:00Z",
+      your_role: "admin",
+      member_count: 1,
+      remote_credential_integrity_verification_opt_out: false,
+      enabled_features: ["example_ui"],
+    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.enabled_features).toEqual(["example_ui"]);
+    }
+  });
 });
 
 describe("memberResponseSchema", () => {

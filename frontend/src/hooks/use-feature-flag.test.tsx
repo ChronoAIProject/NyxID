@@ -1,0 +1,99 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { renderHook, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { PropsWithChildren } from "react";
+import { useFeature } from "./use-feature-flag";
+import { useAuthStore } from "@/stores/auth-store";
+
+const { mockGet } = vi.hoisted(() => ({ mockGet: vi.fn() }));
+
+vi.mock("@/lib/api-client", () => ({
+  api: { get: mockGet },
+}));
+
+function createWrapper() {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  return function Wrapper({ children }: PropsWithChildren) {
+    return (
+      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    );
+  };
+}
+
+function orgResponse(enabledFeatures: string[]) {
+  return {
+    id: "org-1",
+    slug: "acme",
+    display_name: "Acme",
+    avatar_url: null,
+    contact_email: null,
+    created_at: "2026-01-01T00:00:00Z",
+    remote_credential_integrity_verification_opt_out: false,
+    your_role: "member",
+    member_count: 1,
+    enabled_features: enabledFeatures,
+  };
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+});
+
+describe("useFeature", () => {
+  it("is true when the org's enabled_features includes the flag", async () => {
+    mockGet.mockResolvedValue(orgResponse(["example_ui"]));
+    const { result } = renderHook(() => useFeature("example_ui", "org-1"), {
+      wrapper: createWrapper(),
+    });
+    await waitFor(() => expect(result.current).toBe(true));
+    expect(mockGet).toHaveBeenCalledWith("/orgs/org-1");
+  });
+
+  it("is false when the flag is absent from enabled_features", async () => {
+    mockGet.mockResolvedValue(orgResponse([]));
+    const { result } = renderHook(() => useFeature("example_ui", "org-1"), {
+      wrapper: createWrapper(),
+    });
+    // Let the query settle, then assert still-false (fail-closed).
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+    expect(result.current).toBe(false);
+  });
+
+  it("fails closed to false while loading / without an orgId", () => {
+    mockGet.mockResolvedValue(orgResponse(["example_ui"]));
+    const { result } = renderHook(() => useFeature("example_ui", ""), {
+      wrapper: createWrapper(),
+    });
+    expect(result.current).toBe(false);
+    expect(mockGet).not.toHaveBeenCalled();
+  });
+});
+
+describe("useFeature (personal / non-org context)", () => {
+  afterEach(() => {
+    useAuthStore.setState({ user: null });
+  });
+
+  it("reads capabilities.enabled_features from /users/me when no orgId", () => {
+    useAuthStore.setState({
+      user: { capabilities: { enabled_features: ["example_ui"] } } as never,
+    });
+    const { result } = renderHook(() => useFeature("example_ui"), {
+      wrapper: createWrapper(),
+    });
+    expect(result.current).toBe(true);
+    expect(mockGet).not.toHaveBeenCalled(); // no org fetch in personal context
+  });
+
+  it("fails closed when the personal set lacks the flag", () => {
+    useAuthStore.setState({
+      user: { capabilities: { enabled_features: [] } } as never,
+    });
+    const { result } = renderHook(() => useFeature("example_ui"), {
+      wrapper: createWrapper(),
+    });
+    expect(result.current).toBe(false);
+  });
+});

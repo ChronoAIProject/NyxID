@@ -23,6 +23,7 @@ import {
   KeyRound,
   Bot,
   Ticket,
+  Flag,
   PanelLeftClose,
   PanelLeft,
   Circle,
@@ -68,6 +69,7 @@ export const DEVELOPER_NAV = [
 export const ADMIN_NAV = [
   { to: "/admin/users", icon: Users, label: "Users" },
   { to: "/admin/invite-codes", icon: Ticket, label: "Invite Codes" },
+  { to: "/admin/feature-flags", icon: Flag, label: "Feature Flags" },
   { to: "/admin/audit-log", icon: ClipboardList, label: "Audit Log" },
   { to: "/admin/service-accounts", icon: Bot, label: "Service Accounts" },
   { to: "/admin/oauth-clients", icon: KeyRound, label: "OAuth Clients" },

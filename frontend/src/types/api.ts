@@ -43,6 +43,12 @@ export interface ProfileConfig {
 
 export interface UserCapabilities {
   readonly billing_available?: boolean;
+  /**
+   * Feature-flag keys enabled for this user in the personal (non-org) context,
+   * resolved server-side. Powers `useFeature(flag)` with no org. Optional so
+   * older backends that omit it fail closed.
+   */
+  readonly enabled_features?: readonly string[];
 }
 
 export function isBillingAvailable(

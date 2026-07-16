@@ -77,6 +77,13 @@ export const orgResponseSchema = z.object({
   remote_credential_integrity_verification_opt_out: z.boolean(),
   your_role: orgRoleSchema,
   member_count: z.number().int().nonnegative(),
+  /**
+   * Feature-flag keys enabled for the calling member in this org, resolved
+   * server-side (per-user > per-role > per-org > code default). Gate UI on
+   * membership in this list via `useFeature()`; see `lib/feature-flags.ts`.
+   * `.default([])` keeps older backends that omit the field safe.
+   */
+  enabled_features: z.array(z.string()).default([]),
 });
 export type OrgResponse = z.infer<typeof orgResponseSchema>;
 

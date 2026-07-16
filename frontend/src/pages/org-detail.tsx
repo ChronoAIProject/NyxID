@@ -92,6 +92,7 @@ import { RoleBadge } from "@/components/orgs/role-badge";
 import { InviteDialog } from "@/components/orgs/invite-dialog";
 import { OrgApprovalConfigs } from "@/components/orgs/org-approval-configs";
 import { OrgAvatar } from "@/components/orgs/org-avatar";
+import { OrgFeatureFlagsPanel } from "@/components/orgs/org-feature-flags-panel";
 import { OrgDeveloperAppsTab } from "@/components/orgs/org-developer-apps-tab";
 import { OrgServiceAccountsTab } from "@/components/orgs/org-service-accounts-tab";
 
@@ -343,6 +344,9 @@ export function OrgDetailPage() {
         <TabsList>
           <TabsTrigger value="members">Members</TabsTrigger>
           <TabsTrigger value="role-permissions">Role permissions</TabsTrigger>
+          {isAdmin && (
+            <TabsTrigger value="feature-flags">Feature flags</TabsTrigger>
+          )}
           <TabsTrigger value="invites">Invites</TabsTrigger>
           <TabsTrigger value="approvals">Approvals</TabsTrigger>
           {isAdmin && (
@@ -471,6 +475,18 @@ export function OrgDetailPage() {
             <Card>
               <CardContent className="py-6 text-center text-[12px] text-muted-foreground">
                 Only admins can manage role permissions.
+              </CardContent>
+            </Card>
+          )}
+        </TabsContent>
+
+        <TabsContent value="feature-flags" className="mt-6">
+          {isAdmin ? (
+            <OrgFeatureFlagsPanel orgId={orgId} />
+          ) : (
+            <Card>
+              <CardContent className="py-6 text-center text-[12px] text-muted-foreground">
+                Only admins can manage feature flags.
               </CardContent>
             </Card>
           )}
