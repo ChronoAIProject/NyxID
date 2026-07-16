@@ -613,8 +613,7 @@ mod tests {
     #[test]
     fn personal_default_off() {
         assert!(
-            !resolve_personal_from_overrides(&[], "user-1")
-                .contains(&"example_ui".to_string())
+            !resolve_personal_from_overrides(&[], "user-1").contains(&"example_ui".to_string())
         );
     }
 
@@ -675,16 +674,9 @@ mod tests {
         let org_id = Uuid::new_v4().to_string();
         let actor = Uuid::new_v4().to_string();
 
-        let stored = set_override(
-            &db,
-            &org_id,
-            "example_ui",
-            &FlagTarget::Org,
-            true,
-            &actor,
-        )
-        .await
-        .expect("set org override");
+        let stored = set_override(&db, &org_id, "example_ui", &FlagTarget::Org, true, &actor)
+            .await
+            .expect("set org override");
         assert_eq!(stored.org_user_id.as_deref(), Some(org_id.as_str()));
         assert_eq!(stored.flag_key, "example_ui");
         assert_eq!(stored.target_kind, FlagTargetKind::Org);
@@ -692,16 +684,9 @@ mod tests {
         assert_eq!(stored.updated_by, actor);
 
         // Idempotent upsert keeps the same row id, flips value.
-        let updated = set_override(
-            &db,
-            &org_id,
-            "example_ui",
-            &FlagTarget::Org,
-            false,
-            &actor,
-        )
-        .await
-        .expect("update org override");
+        let updated = set_override(&db, &org_id, "example_ui", &FlagTarget::Org, false, &actor)
+            .await
+            .expect("update org override");
         assert_eq!(updated.id, stored.id);
         assert!(!updated.enabled);
 
@@ -722,7 +707,9 @@ mod tests {
                 .await
                 .expect("clear")
         );
-        let after = list_overrides(&db, &org_id).await.expect("list after clear");
+        let after = list_overrides(&db, &org_id)
+            .await
+            .expect("list after clear");
         assert!(after.is_empty());
     }
 
@@ -763,15 +750,9 @@ mod tests {
         );
 
         // Global rollout enables it for everyone, org or not.
-        let g = set_platform_override(
-            &db,
-            "example_ui",
-            &FlagTarget::Global,
-            true,
-            &actor,
-        )
-        .await
-        .expect("set global");
+        let g = set_platform_override(&db, "example_ui", &FlagTarget::Global, true, &actor)
+            .await
+            .expect("set global");
         assert!(g.org_user_id.is_none());
         assert!(
             resolve_personal_features(&db, &user)

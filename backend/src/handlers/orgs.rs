@@ -536,13 +536,9 @@ pub async fn create_org(
     let opt_out = org_service::remote_credential_integrity_verification_opt_out(&org);
     // A freshly-created org has no overrides yet, so this is just the code
     // defaults — but resolve it the same way for a single source of truth.
-    let enabled_features = feature_flag_service::resolve_enabled_features(
-        &state.db,
-        &org.id,
-        &actor,
-        membership.role,
-    )
-    .await?;
+    let enabled_features =
+        feature_flag_service::resolve_enabled_features(&state.db, &org.id, &actor, membership.role)
+            .await?;
     Ok((
         StatusCode::CREATED,
         Json(OrgResponse {
@@ -605,13 +601,9 @@ pub async fn get_org(
     let contact_email = org_service::contact_email_for_display(&org);
     let slug = slug_for_response(&org);
     let opt_out = org_service::remote_credential_integrity_verification_opt_out(&org);
-    let enabled_features = feature_flag_service::resolve_enabled_features(
-        &state.db,
-        &org_id,
-        &actor,
-        membership.role,
-    )
-    .await?;
+    let enabled_features =
+        feature_flag_service::resolve_enabled_features(&state.db, &org_id, &actor, membership.role)
+            .await?;
 
     Ok(Json(OrgResponse {
         id: org.id,
@@ -681,13 +673,9 @@ pub async fn update_org(
     let contact_email = org_service::contact_email_for_display(&org);
     let slug = slug_for_response(&org);
     let opt_out = org_service::remote_credential_integrity_verification_opt_out(&org);
-    let enabled_features = feature_flag_service::resolve_enabled_features(
-        &state.db,
-        &org_id,
-        &actor,
-        membership.role,
-    )
-    .await?;
+    let enabled_features =
+        feature_flag_service::resolve_enabled_features(&state.db, &org_id, &actor, membership.role)
+            .await?;
 
     let contact_email_changed = body.contact_email.is_some();
     audit_service::log_for_user(
