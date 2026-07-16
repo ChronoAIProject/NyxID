@@ -316,10 +316,14 @@ pub async fn llm_proxy_request(
     )
     .await?;
 
+    let billing_resolution_user_id = auth_user.proxy_resolution_user_id();
+    let billing_resource_owner_id = owner_for_approval
+        .as_deref()
+        .unwrap_or(&billing_resolution_user_id);
     let billing_owner = state
         .billing
         .owner_resolver()
-        .resolve(&user_id_str, owner_for_approval.as_deref())
+        .resolve_for_resource(&billing_resolution_user_id, billing_resource_owner_id)
         .await?;
     let billing_ctx = crate::services::billing::BillingRouteContext::new(
         uuid::Uuid::new_v4().to_string(),
@@ -717,10 +721,14 @@ pub async fn gateway_request(
     )
     .await?;
 
+    let billing_resolution_user_id = auth_user.proxy_resolution_user_id();
+    let billing_resource_owner_id = effective_owner_for_approval
+        .as_deref()
+        .unwrap_or(&billing_resolution_user_id);
     let billing_owner = state
         .billing
         .owner_resolver()
-        .resolve(&user_id_str, effective_owner_for_approval.as_deref())
+        .resolve_for_resource(&billing_resolution_user_id, billing_resource_owner_id)
         .await?;
     let billing_ctx = crate::services::billing::BillingRouteContext::new(
         uuid::Uuid::new_v4().to_string(),

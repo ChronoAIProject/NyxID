@@ -189,10 +189,11 @@ pub async fn ssh_exec(
                 .to_string(),
         )
     })?;
+    let billing_resolution_user_id = auth_user.proxy_resolution_user_id();
     let billing_owner = state
         .billing
         .owner_resolver()
-        .resolve(&user_id, Some(&service_owner_id))
+        .resolve_for_resource(&billing_resolution_user_id, &service_owner_id)
         .await?;
     let node_intent = if node_route.fallback_node_ids.is_empty() {
         crate::services::billing::NodeIntent::Node

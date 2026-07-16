@@ -184,6 +184,7 @@ async fn handle_web_terminal(
 ) {
     let _ = &session_guard;
     let user_id = auth_user.user_id.to_string();
+    let billing_resolution_user_id = auth_user.proxy_resolution_user_id();
     let session_id = uuid::Uuid::new_v4().to_string();
     let started_at = Instant::now();
     let (ip_address, user_agent) = client_meta;
@@ -244,6 +245,7 @@ async fn handle_web_terminal(
             ephemeral,
             tele,
             service_owner_id,
+            billing_resolution_user_id,
         )
         .await;
     } else {
@@ -290,6 +292,7 @@ async fn handle_node_web_terminal(
     ephemeral: Option<EphemeralSshCredentials>,
     tele: TelemetryContext,
     service_owner_id: String,
+    billing_resolution_user_id: String,
 ) {
     let all_node_ids: Vec<&str> = std::iter::once(node_route.node_id.as_str())
         .chain(node_route.fallback_node_ids.iter().map(|id| id.as_str()))
@@ -297,7 +300,7 @@ async fn handle_node_web_terminal(
     let billing_owner = match state
         .billing
         .owner_resolver()
-        .resolve(&user_id, Some(&service_owner_id))
+        .resolve_for_resource(&billing_resolution_user_id, &service_owner_id)
         .await
     {
         Ok(owner) => owner,

@@ -62,7 +62,7 @@ struct McpBillingRouteContextBuilder {
 
 impl McpBillingRouteContextBuilder {
     fn from_user_service_resolution(
-        actor_user_id: &str,
+        billing_principal_user_id: &str,
         resolution: &proxy_service::UserServiceResolution,
     ) -> Self {
         Self {
@@ -70,16 +70,16 @@ impl McpBillingRouteContextBuilder {
                 .org_routing
                 .as_ref()
                 .map(|routing| routing.org_user_id.as_str())
-                .unwrap_or(actor_user_id)
+                .unwrap_or(billing_principal_user_id)
                 .to_string(),
             user_service_id: Some(resolution.user_service_id.clone()),
             is_user_service: true,
         }
     }
 
-    fn for_platform_service(actor_user_id: &str) -> Self {
+    fn for_platform_service(billing_principal_user_id: &str) -> Self {
         Self {
-            effective_owner_id: actor_user_id.to_string(),
+            effective_owner_id: billing_principal_user_id.to_string(),
             user_service_id: None,
             is_user_service: false,
         }
@@ -90,6 +90,7 @@ impl McpBillingRouteContextBuilder {
         self,
         billing: &crate::services::billing::BillingService,
         actor_user_id: &str,
+        billing_principal_user_id: &str,
         api_key_id: Option<&str>,
         target: &proxy_service::ProxyTarget,
         node_route: Option<&node_routing_service::NodeRoute>,
@@ -97,7 +98,7 @@ impl McpBillingRouteContextBuilder {
     ) -> AppResult<crate::services::billing::BillingRouteContext> {
         let billing_owner = billing
             .owner_resolver()
-            .resolve(actor_user_id, Some(&self.effective_owner_id))
+            .resolve_for_resource(billing_principal_user_id, &self.effective_owner_id)
             .await?;
         let node_intent = match node_route {
             Some(route) if !route.fallback_node_ids.is_empty() => {
@@ -2447,6 +2448,7 @@ pub async fn execute_tool(
     node_ws_manager: &std::sync::Arc<NodeWsManager>,
     billing: &std::sync::Arc<crate::services::billing::BillingService>,
     user_id: &str,
+    billing_principal_user_id: &str,
     service: &McpToolService,
     endpoint: &McpToolEndpoint,
     arguments: &serde_json::Value,
@@ -2571,7 +2573,10 @@ pub async fn execute_tool(
             // (Sixth-round Codex review P1.)
             let has_cred_for_fallback = has_cred && nr.is_none();
             let billing_context_builder =
-                McpBillingRouteContextBuilder::from_user_service_resolution(user_id, &resolution);
+                McpBillingRouteContextBuilder::from_user_service_resolution(
+                    billing_principal_user_id,
+                    &resolution,
+                );
             (
                 resolution.target,
                 nr,
@@ -2642,7 +2647,7 @@ pub async fn execute_tool(
                 t,
                 nr,
                 has_cred,
-                McpBillingRouteContextBuilder::for_platform_service(user_id),
+                McpBillingRouteContextBuilder::for_platform_service(billing_principal_user_id),
             )
         }
     };
@@ -2787,6 +2792,7 @@ pub async fn execute_tool(
         .build(
             billing.as_ref(),
             user_id,
+            billing_principal_user_id,
             exec_ctx.api_key_id,
             &target,
             node_route.as_ref(),
@@ -5320,6 +5326,7 @@ mod tests {
                 .build(
                     &billing,
                     "actor",
+                    "actor",
                     None,
                     &resolution.target,
                     None,
@@ -5369,6 +5376,7 @@ mod tests {
         .build(
             &billing,
             &actor_user_id,
+            &actor_user_id,
             None,
             &resolution.target,
             None,
@@ -5381,6 +5389,37 @@ mod tests {
         assert_eq!(billing_ctx.actor_user_id, actor_user_id);
         assert_ne!(billing_ctx.billing_owner_id, billing_ctx.actor_user_id);
         assert_eq!(billing_ctx.user_service_id.as_deref(), Some("user-service"));
+    }
+
+    #[tokio::test]
+    async fn mcp_service_account_bills_owner_and_keeps_subject_attribution() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("mcp_billing_service_account").await
+        else {
+            return;
+        };
+        let billing = crate::services::billing::BillingService::new(
+            db,
+            std::sync::Arc::new(crate::test_utils::test_app_config()),
+        );
+        let target = mcp_billing_resolution("owner", None).target;
+
+        let billing_ctx = McpBillingRouteContextBuilder::for_platform_service("owner")
+            .build(
+                &billing,
+                "service-account",
+                "owner",
+                None,
+                &target,
+                None,
+                false,
+            )
+            .await
+            .expect("service-account MCP billing context");
+
+        assert_eq!(billing_ctx.billing_owner_id, "owner");
+        assert_eq!(billing_ctx.actor_user_id, "service-account");
+        assert_ne!(billing_ctx.billing_owner_id, billing_ctx.actor_user_id);
     }
 
     mod public_tools {
