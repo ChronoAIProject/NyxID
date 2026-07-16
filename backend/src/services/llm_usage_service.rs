@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use serde::Serialize;
 
 use crate::services::audit_service;
@@ -31,6 +33,164 @@ pub struct ReportedLlmUsageAccumulator {
     completion_tokens: u64,
     total_tokens: u64,
     reported_cost: Option<f64>,
+}
+
+const MAX_REALTIME_RESPONSE_ID_LEN: usize = 256;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RealtimeResponseDone {
+    pub response_id: String,
+    pub usage: Option<ReportedLlmUsage>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RealtimeLlmUsageSummary {
+    pub collection_enabled: bool,
+    pub reported_usage: Option<ReportedLlmUsage>,
+    pub uncovered_bytes: i64,
+    pub reported_response_count: usize,
+    pub estimated_response_count: usize,
+}
+
+impl RealtimeLlmUsageSummary {
+    pub fn token_quantity(&self) -> i64 {
+        let reported = self
+            .reported_usage
+            .as_ref()
+            .map(|usage| usage.total_tokens.min(i64::MAX as u64) as i64)
+            .unwrap_or(0);
+        let estimated = if self.uncovered_bytes > 0 {
+            estimate_tokens_from_bytes(self.uncovered_bytes)
+        } else {
+            0
+        };
+
+        reported.saturating_add(estimated)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RealtimeLlmUsageCollector {
+    enabled: bool,
+    seen_response_ids: HashSet<String>,
+    reported_usage: ReportedLlmUsageAccumulator,
+    segment_bytes: i64,
+    segment_has_response_activity: bool,
+    uncovered_bytes: i64,
+    reported_response_count: usize,
+    estimated_response_count: usize,
+}
+
+impl RealtimeLlmUsageCollector {
+    pub fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            seen_response_ids: HashSet::new(),
+            reported_usage: ReportedLlmUsageAccumulator::default(),
+            segment_bytes: 0,
+            segment_has_response_activity: false,
+            uncovered_bytes: 0,
+            reported_response_count: 0,
+            estimated_response_count: 0,
+        }
+    }
+
+    pub fn observe_client_text(&mut self, text: &str) {
+        if !self.enabled {
+            return;
+        }
+
+        self.add_segment_bytes(text.len());
+        if serde_json::from_str::<serde_json::Value>(text)
+            .ok()
+            .is_some_and(|value| {
+                value.get("type").and_then(serde_json::Value::as_str) == Some("response.create")
+            })
+        {
+            self.segment_has_response_activity = true;
+        }
+    }
+
+    pub fn observe_client_binary(&mut self, bytes: usize) {
+        if self.enabled {
+            self.add_segment_bytes(bytes);
+        }
+    }
+
+    pub fn observe_downstream_text(&mut self, text: &str) {
+        if !self.enabled {
+            return;
+        }
+
+        self.add_segment_bytes(text.len());
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+            return;
+        };
+        let Some(event_type) = value.get("type").and_then(serde_json::Value::as_str) else {
+            return;
+        };
+
+        if event_type != "response.done" {
+            if event_type.starts_with("response.") {
+                self.segment_has_response_activity = true;
+            }
+            return;
+        }
+
+        let segment_was_active = self.segment_has_response_activity;
+        self.segment_has_response_activity = true;
+        let Some(done) = extract_realtime_response_done(&value) else {
+            return;
+        };
+        if !self.seen_response_ids.insert(done.response_id) {
+            self.segment_bytes = self
+                .segment_bytes
+                .saturating_sub(i64::try_from(text.len()).unwrap_or(i64::MAX));
+            self.segment_has_response_activity = segment_was_active;
+            return;
+        }
+
+        match done.usage {
+            Some(usage) if usage.total_tokens > 0 => {
+                self.reported_usage.observe_delta(usage);
+                self.reported_response_count = self.reported_response_count.saturating_add(1);
+            }
+            _ => {
+                self.uncovered_bytes = self.uncovered_bytes.saturating_add(self.segment_bytes);
+                self.estimated_response_count = self.estimated_response_count.saturating_add(1);
+            }
+        }
+
+        self.segment_bytes = 0;
+        self.segment_has_response_activity = false;
+    }
+
+    pub fn observe_downstream_binary(&mut self, bytes: usize) {
+        if self.enabled {
+            self.add_segment_bytes(bytes);
+        }
+    }
+
+    pub fn finalize(mut self) -> RealtimeLlmUsageSummary {
+        if self.enabled && self.segment_has_response_activity {
+            self.uncovered_bytes = self.uncovered_bytes.saturating_add(self.segment_bytes);
+            self.estimated_response_count = self.estimated_response_count.saturating_add(1);
+        }
+
+        RealtimeLlmUsageSummary {
+            collection_enabled: self.enabled,
+            reported_usage: self.reported_usage.finalize(),
+            uncovered_bytes: self.uncovered_bytes,
+            reported_response_count: self.reported_response_count,
+            estimated_response_count: self.estimated_response_count,
+        }
+    }
+
+    fn add_segment_bytes(&mut self, bytes: usize) {
+        self.segment_bytes = self
+            .segment_bytes
+            .saturating_add(i64::try_from(bytes).unwrap_or(i64::MAX));
+    }
 }
 
 const FALLBACK_BYTES_PER_TOKEN: i64 = 4;
@@ -238,6 +398,26 @@ pub fn extract_reported_usage(value: &serde_json::Value) -> Option<ReportedLlmUs
     (!usage.is_empty()).then_some(usage)
 }
 
+pub fn extract_realtime_response_done(value: &serde_json::Value) -> Option<RealtimeResponseDone> {
+    if value.get("type").and_then(serde_json::Value::as_str) != Some("response.done") {
+        return None;
+    }
+
+    let response = value.get("response")?;
+    let response_id = response.get("id")?.as_str()?;
+    if response_id.is_empty()
+        || response_id.trim() != response_id
+        || response_id.len() > MAX_REALTIME_RESPONSE_ID_LEN
+    {
+        return None;
+    }
+
+    Some(RealtimeResponseDone {
+        response_id: response_id.to_string(),
+        usage: extract_reported_usage(response),
+    })
+}
+
 fn has_explicit_total(value: &serde_json::Value) -> bool {
     [
         "/total_tokens",
@@ -302,8 +482,9 @@ pub fn log_reported_usage_async(context: UsageAuditContext, usage: ReportedLlmUs
 #[cfg(test)]
 mod tests {
     use super::{
-        ReportedLlmUsage, ReportedLlmUsageAccumulator, UsageAggregationMode,
-        estimate_tokens_from_bytes, extract_reported_usage, extract_reported_usage_from_sse_event,
+        RealtimeLlmUsageCollector, ReportedLlmUsage, ReportedLlmUsageAccumulator,
+        UsageAggregationMode, estimate_tokens_from_bytes, extract_realtime_response_done,
+        extract_reported_usage, extract_reported_usage_from_sse_event,
         force_stream_options_include_usage, token_quantity_or_estimate,
     };
 
@@ -348,6 +529,138 @@ mod tests {
         assert_eq!(usage.completion_tokens, 15);
         assert_eq!(usage.total_tokens, 40);
         assert_eq!(usage.reported_cost, None);
+    }
+
+    #[test]
+    fn realtime_done_adapter_requires_nested_response_id_and_usage() {
+        let value = serde_json::json!({
+            "type": "response.done",
+            "response": {
+                "id": "resp_123",
+                "usage": {
+                    "input_tokens": 25,
+                    "output_tokens": 15,
+                    "total_tokens": 40
+                }
+            }
+        });
+
+        let done = extract_realtime_response_done(&value).expect("response.done");
+        assert_eq!(done.response_id, "resp_123");
+        assert_eq!(done.usage.expect("usage").total_tokens, 40);
+
+        let wrong_type = serde_json::json!({
+            "type": "response.completed",
+            "response": { "id": "resp_123", "usage": { "total_tokens": 40 } }
+        });
+        assert!(extract_realtime_response_done(&wrong_type).is_none());
+
+        let root_only = serde_json::json!({
+            "type": "response.done",
+            "id": "resp_123",
+            "usage": { "total_tokens": 40 }
+        });
+        assert!(extract_realtime_response_done(&root_only).is_none());
+    }
+
+    #[test]
+    fn realtime_collector_sums_unique_response_done_usage() {
+        let mut collector = RealtimeLlmUsageCollector::new(true);
+        collector.observe_client_text(r#"{"type":"response.create"}"#);
+        collector.observe_downstream_text(
+            r#"{"type":"response.done","response":{"id":"resp_1","usage":{"input_tokens":20,"output_tokens":10,"total_tokens":30}}}"#,
+        );
+        collector.observe_downstream_text(
+            r#"{"type":"response.done","response":{"id":"resp_1","usage":{"total_tokens":999}}}"#,
+        );
+        collector.observe_client_text(r#"{"type":"response.create"}"#);
+        collector.observe_downstream_text(
+            r#"{"type":"response.done","response":{"id":"resp_2","usage":{"input_tokens":5,"output_tokens":7,"total_tokens":12}}}"#,
+        );
+
+        let summary = collector.finalize();
+        let usage = summary.reported_usage.as_ref().expect("reported usage");
+        assert_eq!(usage.prompt_tokens, 25);
+        assert_eq!(usage.completion_tokens, 17);
+        assert_eq!(usage.total_tokens, 42);
+        assert_eq!(summary.reported_response_count, 2);
+        assert_eq!(summary.estimated_response_count, 0);
+        assert_eq!(summary.uncovered_bytes, 0);
+        assert_eq!(summary.token_quantity(), 42);
+    }
+
+    #[test]
+    fn realtime_collector_ignores_trailing_duplicate_without_fallback() {
+        let done =
+            r#"{"type":"response.done","response":{"id":"resp_1","usage":{"total_tokens":30}}}"#;
+        let mut collector = RealtimeLlmUsageCollector::new(true);
+        collector.observe_client_text(r#"{"type":"response.create"}"#);
+        collector.observe_downstream_text(done);
+        collector.observe_downstream_text(done);
+
+        let summary = collector.finalize();
+        assert_eq!(summary.token_quantity(), 30);
+        assert_eq!(summary.reported_response_count, 1);
+        assert_eq!(summary.estimated_response_count, 0);
+        assert_eq!(summary.uncovered_bytes, 0);
+    }
+
+    #[test]
+    fn realtime_collector_estimates_only_uncovered_response_segment() {
+        let first_create = r#"{"type":"response.create"}"#;
+        let first_done =
+            r#"{"type":"response.done","response":{"id":"resp_1","usage":{"total_tokens":30}}}"#;
+        let second_create = r#"{"type":"response.create"}"#;
+        let second_done = r#"{"type":"response.done","response":{"id":"resp_2"}}"#;
+        let mut collector = RealtimeLlmUsageCollector::new(true);
+
+        collector.observe_client_text(first_create);
+        collector.observe_downstream_text(first_done);
+        collector.observe_client_text(second_create);
+        collector.observe_downstream_text(second_done);
+
+        let summary = collector.finalize();
+        let expected_uncovered = (second_create.len() + second_done.len()) as i64;
+        assert_eq!(summary.uncovered_bytes, expected_uncovered);
+        assert_eq!(summary.reported_response_count, 1);
+        assert_eq!(summary.estimated_response_count, 1);
+        assert_eq!(
+            summary.token_quantity(),
+            30 + estimate_tokens_from_bytes(expected_uncovered)
+        );
+    }
+
+    #[test]
+    fn realtime_collector_estimates_trailing_incomplete_response() {
+        let create = r#"{"type":"response.create"}"#;
+        let created = r#"{"type":"response.created","response":{"id":"resp_1"}}"#;
+        let mut collector = RealtimeLlmUsageCollector::new(true);
+
+        collector.observe_client_text(create);
+        collector.observe_client_binary(64);
+        collector.observe_downstream_text(created);
+        collector.observe_downstream_binary(32);
+
+        let summary = collector.finalize();
+        assert_eq!(
+            summary.uncovered_bytes,
+            (create.len() + created.len() + 64 + 32) as i64
+        );
+        assert_eq!(summary.reported_response_count, 0);
+        assert_eq!(summary.estimated_response_count, 1);
+        assert!(summary.token_quantity() > 0);
+    }
+
+    #[test]
+    fn realtime_collector_ignores_non_response_control_traffic() {
+        let mut collector = RealtimeLlmUsageCollector::new(true);
+        collector.observe_client_text(r#"{"type":"session.update"}"#);
+        collector.observe_downstream_text(r#"{"type":"session.updated"}"#);
+
+        let summary = collector.finalize();
+        assert_eq!(summary.token_quantity(), 0);
+        assert_eq!(summary.uncovered_bytes, 0);
+        assert_eq!(summary.estimated_response_count, 0);
     }
 
     #[test]
