@@ -62,6 +62,7 @@ import {
   NodeDetailPage,
   AdminNodesPage,
   AdminAuditLogPage,
+  AdminFeatureFlagsPage,
   AdminInviteCodesPage,
   CliAuthPage,
   CliPairPage,
@@ -753,6 +754,12 @@ const adminInviteCodesRoute = createRoute({
   component: AdminInviteCodesPage,
 });
 
+const adminFeatureFlagsRoute = createRoute({
+  path: "feature-flags",
+  getParentRoute: () => adminLayout,
+  component: AdminFeatureFlagsPage,
+});
+
 const routeTree = rootRoute.addChildren([
   landingRoute,
   authLayout.addChildren([loginRoute, registerRoute]),
@@ -827,6 +834,7 @@ const routeTree = rootRoute.addChildren([
       adminNodesRoute,
       adminAuditLogRoute,
       adminInviteCodesRoute,
+      adminFeatureFlagsRoute,
     ]),
   ]),
 ]);

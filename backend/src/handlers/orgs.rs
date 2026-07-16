@@ -27,7 +27,8 @@ use crate::models::org_membership::{MemberScopeSource, OrgMembership, OrgRole};
 use crate::models::user::User;
 use crate::mw::auth::AuthUser;
 use crate::services::{
-    audit_service, org_invite_service, org_role_scope_service, org_service, org_slug,
+    audit_service, feature_flag_service, org_invite_service, org_role_scope_service, org_service,
+    org_slug,
 };
 
 /// Maximum invite TTL accepted by `POST /orgs/{id}/invites` and the
@@ -143,6 +144,11 @@ pub struct OrgResponse {
     /// Caller's role in this org. Always present in single-org responses.
     pub your_role: OrgRoleWire,
     pub member_count: u64,
+    /// Feature-flag keys enabled for the *calling member* in this org, already
+    /// resolved server-side (per-user > per-role > per-org > code default).
+    /// The frontend gates UI on membership in this list; see
+    /// `feature_flag_service` and `frontend/src/lib/feature-flags.ts`.
+    pub enabled_features: Vec<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -528,6 +534,15 @@ pub async fn create_org(
     let contact_email = org_service::contact_email_for_display(&org);
     let slug = slug_for_response(&org);
     let opt_out = org_service::remote_credential_integrity_verification_opt_out(&org);
+    // A freshly-created org has no overrides yet, so this is just the code
+    // defaults — but resolve it the same way for a single source of truth.
+    let enabled_features = feature_flag_service::resolve_enabled_features(
+        &state.db,
+        &org.id,
+        &actor,
+        membership.role,
+    )
+    .await?;
     Ok((
         StatusCode::CREATED,
         Json(OrgResponse {
@@ -540,6 +555,7 @@ pub async fn create_org(
             remote_credential_integrity_verification_opt_out: opt_out,
             your_role: membership.role.into(),
             member_count: 1,
+            enabled_features,
         }),
     ))
 }
@@ -589,6 +605,13 @@ pub async fn get_org(
     let contact_email = org_service::contact_email_for_display(&org);
     let slug = slug_for_response(&org);
     let opt_out = org_service::remote_credential_integrity_verification_opt_out(&org);
+    let enabled_features = feature_flag_service::resolve_enabled_features(
+        &state.db,
+        &org_id,
+        &actor,
+        membership.role,
+    )
+    .await?;
 
     Ok(Json(OrgResponse {
         id: org.id,
@@ -600,6 +623,7 @@ pub async fn get_org(
         remote_credential_integrity_verification_opt_out: opt_out,
         your_role: membership.role.into(),
         member_count: members.len() as u64,
+        enabled_features,
     }))
 }
 
@@ -657,6 +681,13 @@ pub async fn update_org(
     let contact_email = org_service::contact_email_for_display(&org);
     let slug = slug_for_response(&org);
     let opt_out = org_service::remote_credential_integrity_verification_opt_out(&org);
+    let enabled_features = feature_flag_service::resolve_enabled_features(
+        &state.db,
+        &org_id,
+        &actor,
+        membership.role,
+    )
+    .await?;
 
     let contact_email_changed = body.contact_email.is_some();
     audit_service::log_for_user(
@@ -680,6 +711,7 @@ pub async fn update_org(
         remote_credential_integrity_verification_opt_out: opt_out,
         your_role: membership.role.into(),
         member_count: members.len() as u64,
+        enabled_features,
     }))
 }
 
@@ -1957,12 +1989,14 @@ mod tests {
             remote_credential_integrity_verification_opt_out: false,
             your_role: OrgRoleWire::Admin,
             member_count: 5,
+            enabled_features: vec!["example_ui".to_string()],
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["id"], "org-1");
         assert_eq!(json["slug"], "acme");
         assert_eq!(json["your_role"], "admin");
         assert_eq!(json["member_count"], 5);
+        assert_eq!(json["enabled_features"][0], "example_ui");
     }
 
     // ── ORG_INVITE_MAX_TTL_HOURS constant ───────────────────────────────

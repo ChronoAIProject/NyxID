@@ -1728,6 +1728,21 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    // ── feature_flag_overrides ──
+    // One override per (org, flag, target scope). target_key is null for
+    // org-scope rows, the role string for role scope, the member_user_id for
+    // user scope — so the compound key uniquely identifies each override.
+    let feature_flag_overrides =
+        db.collection::<Document>(crate::models::feature_flag_override::COLLECTION_NAME);
+    feature_flag_overrides
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "org_user_id": 1, "flag_key": 1, "target_kind": 1, "target_key": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+
     // ── org_invites ──
     let org_invites = db.collection::<Document>("org_invites");
     org_invites

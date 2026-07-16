@@ -181,6 +181,7 @@ const SIDEBAR_ITEMS: Record<string, string> = {
   "/admin/roles": "Roles",
   "/admin/groups": "Groups",
   "/admin/invite-codes": "Invite Codes",
+  "/admin/feature-flags": "Feature Flags",
   "/admin/nodes": "Nodes",
   "/admin/services": "Services",
   "/admin/providers": "Providers",
