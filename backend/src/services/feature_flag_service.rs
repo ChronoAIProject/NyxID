@@ -14,6 +14,8 @@
 //! role / user is a runtime write, no deploy. Mirror new keys in
 //! `frontend/src/lib/feature-flags.ts`.
 
+use std::collections::{HashMap, HashSet};
+
 use chrono::Utc;
 use futures::TryStreamExt;
 use mongodb::bson::{self, doc};
@@ -23,6 +25,7 @@ use uuid::Uuid;
 use crate::errors::{AppError, AppResult};
 use crate::models::feature_flag_override::{COLLECTION_NAME, FeatureFlagOverride, FlagTargetKind};
 use crate::models::org_membership::OrgRole;
+use crate::models::user::{COLLECTION_NAME as USERS, User};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Registry (source of truth — declared in code)
@@ -278,6 +281,57 @@ pub async fn list_platform_overrides(
     Ok(rows)
 }
 
+/// Safe user fields used to enrich platform-admin feature-flag responses.
+#[derive(Clone, Debug)]
+pub struct PlatformOverrideUserDisplay {
+    pub email: String,
+    pub display_name: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct PlatformOverrideUserProjection {
+    #[serde(rename = "_id")]
+    id: String,
+    email: String,
+    #[serde(default)]
+    display_name: Option<String>,
+}
+
+/// Resolve every user referenced by platform overrides in one projected query.
+/// Deleted users are absent and become null display fields in the response.
+pub async fn fetch_platform_override_users(
+    db: &mongodb::Database,
+    overrides: &[FeatureFlagOverride],
+) -> AppResult<HashMap<String, PlatformOverrideUserDisplay>> {
+    let user_ids: HashSet<&str> = overrides
+        .iter()
+        .filter(|row| row.target_kind == FlagTargetKind::User)
+        .filter_map(|row| row.target_key.as_deref())
+        .collect();
+    if user_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let cursor = db
+        .collection::<PlatformOverrideUserProjection>(USERS)
+        .find(doc! { "_id": { "$in": user_ids.into_iter().collect::<Vec<_>>() } })
+        .projection(doc! { "_id": 1, "email": 1, "display_name": 1 })
+        .await?;
+    let users: Vec<PlatformOverrideUserProjection> = cursor.try_collect().await?;
+    Ok(users
+        .into_iter()
+        .map(|user| {
+            (
+                user.id,
+                PlatformOverrideUserDisplay {
+                    email: user.email,
+                    display_name: user.display_name,
+                },
+            )
+        })
+        .collect())
+}
+
 /// A registry flag paired with the org's current overrides for it. Powers the
 /// admin toggle UI.
 #[derive(Clone, Debug)]
@@ -395,9 +449,6 @@ pub async fn clear_override(
 /// personal `User` targets are valid — org/role scopes require an org, and are
 /// rejected here. No `org_manageable` gate: platform admins own these.
 ///
-// Write path for the forthcoming platform-admin `/admin/feature-flags` surface;
-// exercised by tests today. `allow(dead_code)` until those endpoints land.
-#[allow(dead_code)]
 pub async fn set_platform_override(
     db: &mongodb::Database,
     flag_key: &str,
@@ -411,6 +462,16 @@ pub async fn set_platform_override(
         return Err(AppError::BadRequest(
             "org and role targets require an org; use the org feature-flag API".to_string(),
         ));
+    }
+    if let FlagTarget::User(user_id) = target {
+        let exists = db
+            .collection::<User>(USERS)
+            .find_one(doc! { "_id": user_id })
+            .await?
+            .is_some();
+        if !exists {
+            return Err(AppError::NotFound("User not found".to_string()));
+        }
     }
 
     let now = bson::DateTime::from_chrono(Utc::now());
@@ -458,27 +519,26 @@ pub async fn set_platform_override(
     Ok(row)
 }
 
-/// Clear a platform-level override. Returns whether a row was removed.
-#[allow(dead_code)]
+/// Clear a platform-level override. Returns the removed row when present.
 pub async fn clear_platform_override(
     db: &mongodb::Database,
     flag_key: &str,
     target: &FlagTarget,
-) -> AppResult<bool> {
+) -> AppResult<Option<FeatureFlagOverride>> {
     let target_key = match target.key() {
         Some(k) => bson::Bson::String(k),
         None => bson::Bson::Null,
     };
-    let res = db
+    let row = db
         .collection::<FeatureFlagOverride>(COLLECTION_NAME)
-        .delete_one(doc! {
+        .find_one_and_delete(doc! {
             "org_user_id": bson::Bson::Null,
             "flag_key": flag_key,
             "target_kind": target.kind().as_str(),
             "target_key": target_key,
         })
         .await?;
-    Ok(res.deleted_count > 0)
+    Ok(row)
 }
 
 /// Cascade helper: drop every override for an org (used when the org is deleted).
@@ -492,7 +552,8 @@ pub async fn delete_all_for_org(db: &mongodb::Database, org_user_id: &str) -> Ap
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::connect_test_database;
+    use crate::models::user::UserType;
+    use crate::test_utils::{connect_test_database, test_user};
 
     fn override_row(
         org: Option<&str>,
@@ -748,6 +809,10 @@ mod tests {
         };
         let user = Uuid::new_v4().to_string();
         let actor = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&user, UserType::Person))
+            .await
+            .expect("insert target user");
 
         // A user with zero orgs starts with the code default (off).
         assert!(
@@ -797,6 +862,7 @@ mod tests {
             clear_platform_override(&db, "example_ui", &FlagTarget::Global)
                 .await
                 .expect("clear global")
+                .is_some()
         );
     }
 }

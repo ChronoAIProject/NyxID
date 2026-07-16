@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod admin_anonymous_endpoints;
+pub mod admin_feature_flags;
 pub mod admin_groups;
 pub mod admin_helpers;
 pub mod admin_nodes;
