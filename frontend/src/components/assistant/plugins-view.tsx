@@ -5,6 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ErrorBanner } from "@/components/shared/error-banner";
+import { AddKeyDialog } from "@/components/dashboard/add-key-dialog";
 import { ManageConnectionModal } from "@/components/assistant/manage-connection-modal";
 import { ServiceIcon } from "@/components/service-icon";
 import { useCatalog, useKeys } from "@/hooks/use-keys";
@@ -160,9 +161,11 @@ function LoadingGrid() {
 function ConnectorCard({
   item,
   onManage,
+  onConnect,
 }: {
   readonly item: ConnectorCardItem;
   readonly onManage: (keyId: string) => void;
+  readonly onConnect: (slug: string) => void;
 }) {
   return (
     <PluginCard
@@ -190,10 +193,13 @@ function ConnectorCard({
       }
       availableAction={
         item.connectSlug ? (
-          <Button asChild variant="primary" size="sm">
-            <Link to="/keys" search={{ slug: item.connectSlug }}>
-              Connect
-            </Link>
+          <Button
+            type="button"
+            variant="primary"
+            size="sm"
+            onClick={() => onConnect(item.connectSlug as string)}
+          >
+            Connect
           </Button>
         ) : null
       }
@@ -205,6 +211,7 @@ function ConnectorsTab({ query }: { readonly query: string }) {
   const keysQuery = useKeys();
   const catalogQuery = useCatalog();
   const [manageKeyId, setManageKeyId] = useState<string | null>(null);
+  const [connectSlug, setConnectSlug] = useState<string | null>(null);
 
   const items = useMemo(
     () => deriveConnectorItems(keysQuery.data ?? [], catalogQuery.data ?? []),
@@ -252,6 +259,7 @@ function ConnectorsTab({ query }: { readonly query: string }) {
                     key={item.id}
                     item={item}
                     onManage={setManageKeyId}
+                    onConnect={setConnectSlug}
                   />
                 ))}
               </CardGrid>
@@ -274,6 +282,7 @@ function ConnectorsTab({ query }: { readonly query: string }) {
                 key={item.id}
                 item={item}
                 onManage={setManageKeyId}
+                onConnect={setConnectSlug}
               />
             ))}
           </CardGrid>
@@ -284,6 +293,19 @@ function ConnectorsTab({ query }: { readonly query: string }) {
         <ManageConnectionModal
           keyId={manageKeyId}
           onClose={() => setManageKeyId(null)}
+        />
+      )}
+
+      {/* The same add-service dialog the Studio /keys page uses — handles every
+          connect flavor (OAuth popup, API-key paste, device-code) and
+          invalidates the keys query on success, so the card moves to Added. */}
+      {connectSlug !== null && (
+        <AddKeyDialog
+          open
+          prefillSlug={connectSlug}
+          onOpenChange={(next) => {
+            if (!next) setConnectSlug(null);
+          }}
         />
       )}
     </>

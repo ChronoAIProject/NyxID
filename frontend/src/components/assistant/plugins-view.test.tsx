@@ -13,6 +13,23 @@ const mocks = vi.hoisted(() => ({
   useDeleteKey: vi.fn(),
 }));
 
+// The full add-service dialog has its own test suite and many hooks; stub it
+// to a marker so this test only asserts Connect opens it with the right slug.
+vi.mock("@/components/dashboard/add-key-dialog", () => ({
+  AddKeyDialog: ({
+    open,
+    prefillSlug,
+  }: {
+    readonly open: boolean;
+    readonly prefillSlug?: string;
+  }) =>
+    open ? (
+      <div role="dialog" aria-label="Add service" data-prefill={prefillSlug}>
+        Add service dialog
+      </div>
+    ) : null,
+}));
+
 vi.mock("@/hooks/use-keys", () => ({
   useCatalog: mocks.useCatalog,
   useKeys: mocks.useKeys,
@@ -163,11 +180,15 @@ describe("PluginsView", () => {
     expect(screen.getByText("oauth")).toBeInTheDocument();
   });
 
-  it("deep-links Connect to the /keys add-service flow for the catalog slug", () => {
+  it("opens the add-service dialog prefilled with the catalog slug on Connect", async () => {
+    const user = userEvent.setup();
     render(<PluginsView />);
-    const connect = screen.getAllByRole("link", { name: "Connect" })[0];
-    expect(connect).toHaveAttribute("data-to", "/keys");
-    expect(connect).toHaveAttribute("data-search", '{"slug":"github"}');
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    await user.click(
+      screen.getAllByRole("button", { name: "Connect" })[0] as HTMLElement,
+    );
+    const dialog = await screen.findByRole("dialog", { name: "Add service" });
+    expect(dialog).toHaveAttribute("data-prefill", "github");
   });
 
   it("opens the compact manage modal for a single-connection service", async () => {
@@ -294,7 +315,7 @@ describe("PluginsView", () => {
       screen.getByText(/No connected services yet/),
     ).toBeInTheDocument();
     // All catalog entries are available when nothing is connected.
-    expect(screen.getAllByRole("link", { name: "Connect" })).toHaveLength(3);
+    expect(screen.getAllByRole("button", { name: "Connect" })).toHaveLength(3);
   });
 
   it("filters the catalog by search", async () => {
