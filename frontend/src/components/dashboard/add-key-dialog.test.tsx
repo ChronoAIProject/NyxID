@@ -133,6 +133,20 @@ const DEVICE_CODE_ENTRY = {
   device_code_format: "openai",
 } as unknown as CatalogEntry;
 
+const SUPABASE_ENTRY = {
+  ...OPENAI_ENTRY,
+  slug: "api-supabase",
+  name: "Supabase Data API",
+  description: "Supabase PostgREST Data API connector",
+  base_url: "https://project-ref.supabase.co/rest/v1",
+  provider_config_id: "provider-supabase",
+  provider_type: "api_key",
+  auth_method: "header",
+  auth_key_name: "apikey",
+  requires_gateway_url: true,
+  requires_credential: true,
+} as unknown as CatalogEntry;
+
 function makeReconnectKey(overrides: Partial<KeyInfo> = {}): KeyInfo {
   return {
     id: "existing-service-1",
@@ -364,6 +378,42 @@ describe("AddKeyDialog — catalog template path", () => {
     );
     expect(toastFns.success).not.toHaveBeenCalledWith("Key created");
     expect(mockNavigate).not.toHaveBeenCalled();
+  });
+
+  it("requires a real Supabase project URL instead of submitting the catalog placeholder", async () => {
+    catalog.entries = [SUPABASE_ENTRY];
+    createKeyMutate.mockImplementation((_params, opts) => {
+      opts?.onSuccess?.({ id: "new-supabase-key" });
+    });
+    const user = userEvent.setup();
+    render(<AddKeyDialog open onOpenChange={vi.fn()} />);
+
+    await user.click(screen.getByRole("button", { name: /Supabase Data API/i }));
+    await user.click(
+      screen.getByRole("button", { name: /Next: Enter Credentials/i }),
+    );
+
+    const endpoint = document.querySelector<HTMLInputElement>("#add-key-endpoint");
+    expect(endpoint).not.toBeNull();
+    expect(endpoint?.value).toBe("");
+    expect(endpoint?.placeholder).toBe("https://project-ref.supabase.co");
+    expect(screen.getByText("Supabase Project URL")).toBeInTheDocument();
+    expect(screen.getByText("Supabase API Key")).toBeInTheDocument();
+
+    await typeInto(user, "add-key-credential", "sb_secret_test");
+    await typeInto(user, "add-key-endpoint", "https://demo.supabase.co");
+    await user.click(screen.getByRole("button", { name: "Connect Service" }));
+
+    await waitFor(() => expect(createKeyMutate).toHaveBeenCalledTimes(1));
+    expect(createKeyMutate).toHaveBeenCalledWith(
+      {
+        credential: "sb_secret_test",
+        label: "Supabase Data API",
+        service_slug: "api-supabase",
+        endpoint_url: "https://demo.supabase.co",
+      },
+      expect.anything(),
+    );
   });
 });
 

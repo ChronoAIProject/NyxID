@@ -1128,7 +1128,7 @@ pub async fn update_key(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Path(key_id): Path<String>,
-    Json(body): Json<UpdateKeyRequest>,
+    Json(mut body): Json<UpdateKeyRequest>,
 ) -> AppResult<Json<KeyResponse>> {
     let actor = auth_user.user_id.to_string();
     let access = resolve_key_write_owner(&state, &actor, &key_id).await?;
@@ -1144,6 +1144,13 @@ pub async fn update_key(
         return Err(crate::errors::AppError::BadRequest(
             "Auto-connected services cannot be modified".to_string(),
         ));
+    }
+
+    if let Some(raw_url) = body.endpoint_url.take() {
+        body.endpoint_url = Some(user_endpoint_service::normalize_catalog_endpoint_url(
+            view.catalog_service_slug.as_deref(),
+            &raw_url,
+        )?);
     }
 
     // NOTE: label writes are intentionally deferred past the strict
@@ -3732,6 +3739,63 @@ mod tests {
 
         assert_eq!(updated.id, created.id);
         assert_eq!(updated.label, "Via Slug");
+    }
+
+    #[tokio::test]
+    async fn update_key_normalizes_supabase_project_url() {
+        let Some(db) = connect_test_database("h_keys_update_supabase_url").await else {
+            eprintln!("skipping: no local MongoDB");
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let catalog_id = uuid::Uuid::new_v4().to_string();
+        let endpoint_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        insert_user(&db, &user_id, UserType::Person).await;
+
+        let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
+        catalog.id = catalog_id.clone();
+        catalog.slug = "api-supabase".to_string();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(catalog)
+            .await
+            .unwrap();
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(test_user_endpoint(
+                &endpoint_id,
+                &user_id,
+                "Supabase",
+                "https://old.supabase.co/rest/v1",
+                None,
+                Some(&catalog_id),
+            ))
+            .await
+            .unwrap();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(test_user_service(
+                &service_id,
+                &user_id,
+                "api-supabase",
+                &endpoint_id,
+                Some(&catalog_id),
+                None,
+            ))
+            .await
+            .unwrap();
+
+        let mut update = empty_update_request();
+        update.endpoint_url = Some("https://new.supabase.co".to_string());
+        let Json(updated) = super::update_key(
+            State(state),
+            test_auth_user(&user_id),
+            Path(service_id),
+            Json(update),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(updated.endpoint_url, "https://new.supabase.co/rest/v1");
     }
 
     #[tokio::test]

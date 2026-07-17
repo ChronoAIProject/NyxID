@@ -756,7 +756,7 @@ pub async fn create_key(
         }
 
         // Determine endpoint URL
-        let ep_url = if let Some(url) = endpoint_url {
+        let mut ep_url = if let Some(url) = endpoint_url {
             url.to_string()
         } else if is_ssh {
             // SSH: derive from SshServiceConfig
@@ -774,6 +774,11 @@ pub async fn create_key(
         } else {
             svc.base_url.clone()
         };
+
+        ep_url = user_endpoint_service::normalize_catalog_endpoint_url(
+            Some(svc.slug.as_str()),
+            &ep_url,
+        )?;
 
         if endpoint_url.is_some() && node_id.is_none() {
             crate::services::url_validation::validate_user_endpoint_url(
@@ -7818,6 +7823,66 @@ mod tests {
         assert!(
             matches!(err, AppError::BadRequest(ref m) if m.contains("requires an endpoint URL"))
         );
+    }
+
+    #[tokio::test]
+    async fn create_key_supabase_catalog_normalizes_project_url_and_snapshots_apikey_auth() {
+        let Some(db) = connect_test_database("uks_cat_supabase").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let mut provider = multi_conn_provider("api_key");
+        provider.slug = "supabase".to_string();
+        provider.requires_gateway_url = true;
+
+        let mut catalog = multi_conn_catalog(&provider);
+        catalog.slug = "api-supabase".to_string();
+        catalog.auth_method = "header".to_string();
+        catalog.auth_key_name = "apikey".to_string();
+        catalog.base_url = "https://project-ref.supabase.co/rest/v1".to_string();
+        catalog.service_category = "connection".to_string();
+        catalog.requires_user_credential = true;
+
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(&provider)
+            .await
+            .unwrap();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+
+        let result = create_key(
+            &db,
+            &enc,
+            &user_id,
+            &user_id,
+            Some("api-supabase"),
+            Some("https://demo.supabase.co"),
+            "sb_secret_test",
+            "Personal Supabase",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            OpenApiSpecUrlInput::Inherit,
+            None,
+            false,
+            OauthClientCredentialsInput::None,
+            false,
+        )
+        .await
+        .expect("Supabase catalog connection should be created");
+
+        assert_eq!(result.endpoint.url, "https://demo.supabase.co/rest/v1");
+        assert_eq!(result.service.auth_method, "header");
+        assert_eq!(result.service.auth_key_name, "apikey");
+        assert!(result.api_key.is_some());
     }
 
     // ── revoke_key: revoke a catalog-backed key ─────────────────────
