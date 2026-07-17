@@ -13,14 +13,10 @@ import { AppNotFound } from "@/components/shared/app-not-found";
 import { AuthLayout } from "@/components/layout/auth-layout";
 import { DashboardLayout } from "@/components/layout/dashboard-layout";
 import { BillingRouteGuard } from "@/components/billing-route-guard";
-import { AssistantRouteGuard } from "@/components/assistant-route-guard";
 import { useAuthStore } from "@/stores/auth-store";
 import { hasAdminRead } from "@/types/api";
 import { shouldRedirectFromBilling } from "@/lib/billing-availability";
-import {
-  fetchAssistantAccessUser,
-  shouldRedirectFromAssistant,
-} from "@/lib/assistant-availability";
+import { resolveAssistantEntry } from "@/lib/assistant-availability";
 import { normalizeAdminOAuthClientSearch } from "@/lib/admin-oauth-clients";
 
 import {
@@ -262,10 +258,19 @@ const sshTerminalRoute = createRoute({
 // Shared by every /assistant* route. Keep this auth mirror aligned with
 // dashboardLayout.beforeLoad below; the Assistant shell intentionally lives
 // outside DashboardLayout.
+//
+// This beforeLoad is the ONLY flag gate for the assistant surface. It blocks
+// the route transition until the decision is made, so the previous page stays
+// on screen and an admitted page is never yanked away afterwards. Do not add
+// a reactive component-level guard on top: one existed and raced the auth
+// store (boot `checkAuth`, transient 401 `setUser(null)`) — it blanked and
+// bounced users whose permission simply hadn't loaded yet.
 const assistantBeforeLoad = async ({
   location,
+  cause,
 }: {
   location: { pathname: string; searchStr: string };
+  cause: "preload" | "enter" | "stay";
 }) => {
   if (import.meta.env.DEV) {
     const { isMockMode, getMockUser } = await import("./lib/mock-data");
@@ -277,30 +282,26 @@ const assistantBeforeLoad = async ({
     }
   }
 
-  const redirectToLogin = () => {
+  // `enter`/`preload` verify the flag against the server; `stay` re-runs
+  // (`?c=` conversation switches, invalidations) decide from the settled
+  // store snapshot without a network round trip. Decision semantics — incl.
+  // the sign-out-wins ordering for a session cleared mid-fetch — live in
+  // resolveAssistantEntry, where they are unit-tested.
+  const decision = await resolveAssistantEntry({
+    cause,
+    getAuth: () => useAuthStore.getState(),
+    applyUser: (user) => {
+      useAuthStore.getState().setUser(user);
+    },
+  });
+
+  if (decision === "redirect-login") {
     const returnPath = `${location.pathname}${location.searchStr}`;
     const returnTo = `${window.location.origin}${returnPath}`;
     window.location.assign(`/login?return_to=${encodeURIComponent(returnTo)}`);
-  };
-
-  const { isAuthenticated, isLoading } = useAuthStore.getState();
-  if (!isAuthenticated && !isLoading) {
-    redirectToLogin();
     return;
   }
-
-  // The flag decision is verified against the server on every route entry —
-  // never trusted from the cached client snapshot alone. Fail-closed: a
-  // failed fetch reads as flag-off unless it was a 401, which clears the
-  // session and routes to login instead.
-  const user = await fetchAssistantAccessUser();
-  if (user) {
-    useAuthStore.getState().setUser(user);
-  } else if (!useAuthStore.getState().isAuthenticated) {
-    redirectToLogin();
-    return;
-  }
-  if (shouldRedirectFromAssistant({ isLoading: false, user })) {
+  if (decision === "redirect-dashboard") {
     // `replace` so the guarded /assistant entry never lingers in history —
     // pressing Back from /dashboard must not re-enter the redirect loop.
     throw redirect({ to: "/dashboard", replace: true });
@@ -314,33 +315,21 @@ const assistantRoute = createRoute({
     ...(typeof search.c === "string" ? { c: search.c } : {}),
   }),
   beforeLoad: assistantBeforeLoad,
-  component: () => (
-    <AssistantRouteGuard>
-      <AssistantPage />
-    </AssistantRouteGuard>
-  ),
+  component: AssistantPage,
 });
 
 const assistantPluginsRoute = createRoute({
   path: "/assistant/plugins",
   getParentRoute: () => rootRoute,
   beforeLoad: assistantBeforeLoad,
-  component: () => (
-    <AssistantRouteGuard>
-      <AssistantPage view="plugins" />
-    </AssistantRouteGuard>
-  ),
+  component: () => <AssistantPage view="plugins" />,
 });
 
 const assistantApprovalsRoute = createRoute({
   path: "/assistant/approvals",
   getParentRoute: () => rootRoute,
   beforeLoad: assistantBeforeLoad,
-  component: () => (
-    <AssistantRouteGuard>
-      <AssistantPage view="approvals" />
-    </AssistantRouteGuard>
-  ),
+  component: () => <AssistantPage view="approvals" />,
 });
 
 const dashboardLayout = createRoute({
