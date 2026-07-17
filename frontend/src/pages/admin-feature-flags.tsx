@@ -23,6 +23,8 @@ import {
   useClearAdminFeatureFlag,
   useSetAdminFeatureFlag,
 } from "@/hooks/use-admin-feature-flags";
+import { useAuthStore } from "@/stores/auth-store";
+import { canAdminWrite } from "@/types/api";
 
 type ScopeState = "inherit" | "enabled" | "disabled";
 type FlagKind = "experiment" | "entitlement" | "ops";
@@ -52,6 +54,10 @@ export function AdminFeatureFlagsPage() {
   const { data, isLoading, error } = useAdminFeatureFlags();
   const setOverride = useSetAdminFeatureFlag();
   const clearOverride = useClearAdminFeatureFlag();
+  // Operators get read access to this page but their writes 403 — render
+  // them a read-only view instead of controls that fail on Apply.
+  const currentUser = useAuthStore((s) => s.user);
+  const canWrite = canAdminWrite(currentUser);
   const [drafts, setDrafts] = useState<Record<string, ScopeState>>({});
   const [search, setSearch] = useState("");
   const [openKeys, setOpenKeys] = useState<string[]>([]);
@@ -157,7 +163,7 @@ export function AdminFeatureFlagsPage() {
         description="Platform-wide feature rollout. Configure each flag globally, per organization, and per user."
       />
 
-      {pendingCount > 0 && (
+      {canWrite && pendingCount > 0 && (
         <div className="sticky top-2 z-10 flex items-center justify-between gap-3 rounded-lg border border-primary/40 bg-primary/10 px-3 py-2 shadow-sm backdrop-blur">
           <span className="text-[12px] font-medium">
             {pendingCount} unsaved change{pendingCount === 1 ? "" : "s"}
@@ -222,6 +228,7 @@ export function AdminFeatureFlagsPage() {
               stage={(type, id, s) => stage(flag.key, type, id, s)}
               stagedUsers={stagedIds(drafts, flag.key, "user")}
               stagedOrgs={stagedIds(drafts, flag.key, "org")}
+              canWrite={canWrite}
             />
           ))}
         </div>
@@ -240,6 +247,7 @@ function FlagCard({
   stage,
   stagedOrgs,
   stagedUsers,
+  canWrite,
 }: {
   readonly flag: FlagRow;
   readonly open: boolean;
@@ -250,6 +258,7 @@ function FlagCard({
   readonly stage: (type: ScopeType, id: string, s: ScopeState) => void;
   readonly stagedOrgs: readonly string[];
   readonly stagedUsers: readonly string[];
+  readonly canWrite: boolean;
 }) {
   const [stagedOrgLabels, setStagedOrgLabels] = useState<
     Record<string, string>
@@ -356,22 +365,25 @@ function FlagCard({
               label="All users (rollout / killswitch)"
               state={stateFor("global", "")}
               pending={isPending("global", "")}
+              disabled={!canWrite}
               onChange={(s) => stage("global", "", s)}
             />
           </Group>
 
           <Group label="By organization">
-            <AccountSearchPicker
-              kind="org"
-              excludedIds={orgIds}
-              onPick={(org) => {
-                setStagedOrgLabels((labels) => ({
-                  ...labels,
-                  [org.id]: org.label,
-                }));
-                stage("org", org.id, "enabled");
-              }}
-            />
+            {canWrite && (
+              <AccountSearchPicker
+                kind="org"
+                excludedIds={orgIds}
+                onPick={(org) => {
+                  setStagedOrgLabels((labels) => ({
+                    ...labels,
+                    [org.id]: org.label,
+                  }));
+                  stage("org", org.id, "enabled");
+                }}
+              />
+            )}
             {orgIds.map((id) => {
               const assignment = flag.orgs.find((org) => org.id === id);
               return (
@@ -383,6 +395,7 @@ function FlagCard({
                     label={labelFor("org", id)}
                     state={stateFor("org", id)}
                     pending={isPending("org", id)}
+                    disabled={!canWrite}
                     onChange={(s) => stage("org", id, s)}
                   />
                 </div>
@@ -391,17 +404,19 @@ function FlagCard({
           </Group>
 
           <Group label="By user">
-            <AccountSearchPicker
-              kind="person"
-              excludedIds={userIds}
-              onPick={(user) => {
-                setStagedUserLabels((labels) => ({
-                  ...labels,
-                  [user.id]: user.label,
-                }));
-                stage("user", user.id, "enabled");
-              }}
-            />
+            {canWrite && (
+              <AccountSearchPicker
+                kind="person"
+                excludedIds={userIds}
+                onPick={(user) => {
+                  setStagedUserLabels((labels) => ({
+                    ...labels,
+                    [user.id]: user.label,
+                  }));
+                  stage("user", user.id, "enabled");
+                }}
+              />
+            )}
             {userIds.map((id) => {
               const assignment = flag.users.find((user) => user.id === id);
               const label = labelFor("user", id);
@@ -414,6 +429,7 @@ function FlagCard({
                     label={label}
                     state={stateFor("user", id)}
                     pending={isPending("user", id)}
+                    disabled={!canWrite}
                     onChange={(state) => stage("user", id, state)}
                   />
                 </div>
@@ -662,11 +678,13 @@ function ScopeRow({
   label,
   state,
   pending,
+  disabled = false,
   onChange,
 }: {
   readonly label: string;
   readonly state: ScopeState;
   readonly pending: boolean;
+  readonly disabled?: boolean;
   readonly onChange: (s: ScopeState) => void;
 }) {
   return (
@@ -688,7 +706,11 @@ function ScopeRow({
         />
         {label}
       </span>
-      <Select value={state} onValueChange={(s) => onChange(s as ScopeState)}>
+      <Select
+        value={state}
+        disabled={disabled}
+        onValueChange={(s) => onChange(s as ScopeState)}
+      >
         <SelectTrigger className="h-7 w-[120px] text-[12px]" aria-label={label}>
           <SelectValue />
         </SelectTrigger>

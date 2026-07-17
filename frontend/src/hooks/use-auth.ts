@@ -24,6 +24,10 @@ export function useUser() {
     },
     retry: false,
     staleTime: 5 * 60 * 1000,
+    // Server-resolved capabilities (feature flags) can change out from under
+    // this session — an admin enabling a flag for the user's org must reach
+    // the sidebar without a hard reload. Visible tabs only (default).
+    refetchInterval: 60 * 1000,
   });
 }
 

@@ -9,7 +9,7 @@ import {
 } from "@/components/navigation/command-palette";
 import { AmbientStatusLine } from "@/components/chrome/ambient-status-line";
 import { useAuthStore } from "@/stores/auth-store";
-import { useLogout } from "@/hooks/use-auth";
+import { useLogout, useUser } from "@/hooks/use-auth";
 import { useShouldShowOnboarding } from "@/hooks/use-onboarding";
 import { useApplyTheme } from "@/hooks/use-theme";
 import { NyxidLogo } from "@/components/brand/nyxid-logo";
@@ -55,6 +55,11 @@ export function useBreadcrumbLabel(label: string | undefined | null) {
 }
 
 export function DashboardLayout() {
+  // Keep an active /users/me observer for every dashboard session: its
+  // queryFn syncs the auth store, so server-side capability changes (feature
+  // flags flipped by an admin, mutation-triggered ["user"] invalidations)
+  // reach flag-gated UI like the sidebar without a hard reload.
+  useUser();
   const [commandOpen, setCommandOpen] = useState(false);
   const [mobileNavState, setMobileNavState] = useState<"closed" | "open" | "closing">("closed");
   const [rightPanel, setRightPanel] = useState<React.ReactNode>(null);
