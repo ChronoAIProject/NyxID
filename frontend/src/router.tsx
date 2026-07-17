@@ -16,10 +16,7 @@ import { BillingRouteGuard } from "@/components/billing-route-guard";
 import { useAuthStore } from "@/stores/auth-store";
 import { hasAdminRead } from "@/types/api";
 import { shouldRedirectFromBilling } from "@/lib/billing-availability";
-import {
-  fetchAssistantAccessUser,
-  hasAssistantAccess,
-} from "@/lib/assistant-availability";
+import { resolveAssistantEntry } from "@/lib/assistant-availability";
 import { normalizeAdminOAuthClientSearch } from "@/lib/admin-oauth-clients";
 
 import {
@@ -275,13 +272,6 @@ const assistantBeforeLoad = async ({
   location: { pathname: string; searchStr: string };
   cause: "preload" | "enter" | "stay";
 }) => {
-  // Re-runs on an already-entered match (`stay`, e.g. the `?c=` search param
-  // changing while switching conversations) must not each await a fresh
-  // `/users/me` round trip — the user was verified when they entered.
-  if (cause === "stay") {
-    return;
-  }
-
   if (import.meta.env.DEV) {
     const { isMockMode, getMockUser } = await import("./lib/mock-data");
     if (isMockMode()) {
@@ -292,32 +282,26 @@ const assistantBeforeLoad = async ({
     }
   }
 
-  const redirectToLogin = () => {
+  // `enter`/`preload` verify the flag against the server; `stay` re-runs
+  // (`?c=` conversation switches, invalidations) decide from the settled
+  // store snapshot without a network round trip. Decision semantics — incl.
+  // the sign-out-wins ordering for a session cleared mid-fetch — live in
+  // resolveAssistantEntry, where they are unit-tested.
+  const decision = await resolveAssistantEntry({
+    cause,
+    getAuth: () => useAuthStore.getState(),
+    applyUser: (user) => {
+      useAuthStore.getState().setUser(user);
+    },
+  });
+
+  if (decision === "redirect-login") {
     const returnPath = `${location.pathname}${location.searchStr}`;
     const returnTo = `${window.location.origin}${returnPath}`;
     window.location.assign(`/login?return_to=${encodeURIComponent(returnTo)}`);
-  };
-
-  const { isAuthenticated, isLoading } = useAuthStore.getState();
-  if (!isAuthenticated && !isLoading) {
-    redirectToLogin();
     return;
   }
-
-  // The flag decision is verified against the server on every route entry —
-  // the cached client snapshot alone is never trusted to ADMIT after a flag
-  // was disabled mid-session. A 401 clears the session inside the api client
-  // and routes to login; any other fetch failure falls back to the
-  // authenticated store snapshot (see `hasAssistantAccess`) so a transient
-  // hiccup doesn't bounce an entitled user to /dashboard.
-  const user = await fetchAssistantAccessUser();
-  if (user) {
-    useAuthStore.getState().setUser(user);
-  } else if (!useAuthStore.getState().isAuthenticated) {
-    redirectToLogin();
-    return;
-  }
-  if (!hasAssistantAccess(user, useAuthStore.getState().user)) {
+  if (decision === "redirect-dashboard") {
     // `replace` so the guarded /assistant entry never lingers in history —
     // pressing Back from /dashboard must not re-enter the redirect loop.
     throw redirect({ to: "/dashboard", replace: true });
