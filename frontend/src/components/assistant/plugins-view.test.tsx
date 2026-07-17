@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
@@ -357,6 +357,72 @@ describe("PluginsView", () => {
       screen.getAllByRole("button", { name: "Install" })[0] as HTMLElement,
     );
     expect(screen.getAllByText("Installed")).toHaveLength(2);
+  });
+
+  it("expands a card into a detail view with the full description and its action", async () => {
+    const user = userEvent.setup();
+    render(<PluginsView />);
+    // The grid alone shows no dialog — the detail view is click-driven.
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "GitHub details" }));
+    const detail = await screen.findByRole("dialog", { name: /GitHub/ });
+    // Untruncated description + the meta line, inside the dialog itself.
+    expect(within(detail).getByText("Repos, issues, and PRs.")).toBeInTheDocument();
+    expect(within(detail).getByText("oauth")).toBeInTheDocument();
+
+    // The dialog's Connect is the card's own action: same add-service flow.
+    await user.click(within(detail).getByRole("button", { name: "Connect" }));
+    const addDialog = await screen.findByRole("dialog", { name: "Add service" });
+    expect(addDialog).toHaveAttribute("data-prefill", "github");
+    // Acting closes the detail view rather than stacking dialogs on it.
+    expect(screen.queryByRole("dialog", { name: /GitHub/ })).not.toBeInTheDocument();
+  });
+
+  it("shows the Connected badge and manage action in an added card's detail view", async () => {
+    const user = userEvent.setup();
+    render(<PluginsView />);
+    await user.click(screen.getByRole("button", { name: "OpenAI details" }));
+    const detail = await screen.findByRole("dialog", { name: /OpenAI/ });
+    expect(within(detail).getByText("Connected")).toBeInTheDocument();
+
+    // Single-connection service: Manage opens the compact modal, as on the card.
+    await user.click(within(detail).getByRole("button", { name: "Manage" }));
+    expect(mocks.useKey).toHaveBeenCalledWith("key-1");
+    expect(
+      await screen.findByRole("link", { name: /open full settings/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("does not expand the card when its inline action button is clicked", async () => {
+    const user = userEvent.setup();
+    render(<PluginsView />);
+    // The Connect button lives inside the clickable card surface; its click
+    // must not bubble into the expand handler.
+    await user.click(
+      screen.getAllByRole("button", { name: "Connect" })[0] as HTMLElement,
+    );
+    expect(
+      await screen.findByRole("dialog", { name: "Add service" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("dialog", { name: /GitHub/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("expands a card from the keyboard", async () => {
+    const user = userEvent.setup();
+    render(<PluginsView />);
+    const card = screen.getByRole("button", { name: "Stripe details" });
+    card.focus();
+    await user.keyboard("{Enter}");
+    expect(await screen.findByRole("dialog", { name: /Stripe/ })).toBeInTheDocument();
+
+    // Space is the other role="button" activation key.
+    await user.keyboard("{Escape}");
+    card.focus();
+    await user.keyboard("[Space]");
+    expect(await screen.findByRole("dialog", { name: /Stripe/ })).toBeInTheDocument();
   });
 
   it("keeps installed skills across unmount and remount", async () => {
