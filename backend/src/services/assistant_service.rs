@@ -139,6 +139,54 @@ pub fn workflow_chat_ws_path() -> String {
     "api/ws/chat".to_string()
 }
 
+/// Post-create materialization poll bounds. Conversation create is
+/// async-accepted (202 + `actorId`); streaming into an actor before it
+/// appears in the `nyxid-chat` actor index races the materialization, so
+/// create waits for the actor with the same attempt count and a comparable
+/// backoff budget (~2s) to the reference client (nyxid-chat `server.mjs`
+/// `waitForConversation`: 6 attempts, 250ms + 100ms/attempt).
+pub const CREATE_POLL_ATTEMPTS: u32 = 6;
+
+/// Delay before the next poll attempt (200ms, 300ms, ... capped by the
+/// attempt count; ~2.0s of sleeps worst case, before network time).
+pub fn create_poll_delay_ms(attempt: u32) -> u64 {
+    200 + u64::from(attempt) * 100
+}
+
+/// `actorId` from a create-conversation response body. Aevatar responses
+/// have been observed in both camel- and Pascal-case.
+pub fn extract_actor_id(body: &serde_json::Value) -> Option<&str> {
+    body.get("actorId")
+        .or_else(|| body.get("ActorId"))?
+        .as_str()
+}
+
+/// Whether the `nyxid-chat` actor index (`{"conversations":[{"actorId"}]}`)
+/// lists the given actor.
+pub fn actor_index_contains(index: &serde_json::Value, actor_id: &str) -> bool {
+    index
+        .get("conversations")
+        .or_else(|| index.get("Conversations"))
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|conversations| {
+            conversations.iter().any(|entry| {
+                entry
+                    .get("actorId")
+                    .or_else(|| entry.get("ActorId"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some(actor_id)
+            })
+        })
+}
+
+/// Composite-delete tolerance: deleting a conversation removes both the
+/// `nyxid-chat` actor and the chat-history row, and either side may already
+/// be gone (an `/api/chat`-created row has no actor; a cascaded actor
+/// delete may have removed the history row first). 404 is success-shaped.
+pub fn delete_status_acceptable(status: u16) -> bool {
+    (200..300).contains(&status) || status == 404
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,5 +247,53 @@ mod tests {
     fn accepts_the_opaque_ids_aevatar_issues() {
         assert!(history_path(USER, CONV).is_ok());
         assert!(history_path(USER, "abc_DEF-123").is_ok());
+    }
+
+    #[test]
+    fn extracts_actor_ids_in_both_observed_casings() {
+        let camel = serde_json::json!({ "status": "accepted", "actorId": CONV });
+        let pascal = serde_json::json!({ "ActorId": CONV });
+        assert_eq!(extract_actor_id(&camel), Some(CONV));
+        assert_eq!(extract_actor_id(&pascal), Some(CONV));
+        assert_eq!(extract_actor_id(&serde_json::json!({})), None);
+        assert_eq!(extract_actor_id(&serde_json::json!({ "actorId": 7 })), None);
+    }
+
+    #[test]
+    fn finds_actors_in_the_index_and_tolerates_shape_drift() {
+        let index = serde_json::json!({
+            "conversations": [{ "actorId": "other" }, { "actorId": CONV }],
+            "stateVersion": 3,
+        });
+        assert!(actor_index_contains(&index, CONV));
+        assert!(!actor_index_contains(&index, "missing"));
+        let pascal = serde_json::json!({ "Conversations": [{ "ActorId": CONV }] });
+        assert!(actor_index_contains(&pascal, CONV));
+        assert!(!actor_index_contains(&serde_json::json!({}), CONV));
+        assert!(!actor_index_contains(&serde_json::json!([1, 2]), CONV));
+    }
+
+    #[test]
+    fn composite_delete_accepts_success_and_absent_but_nothing_else() {
+        assert!(delete_status_acceptable(200));
+        assert!(delete_status_acceptable(204));
+        assert!(delete_status_acceptable(404));
+        assert!(!delete_status_acceptable(401));
+        assert!(!delete_status_acceptable(403));
+        assert!(!delete_status_acceptable(500));
+        assert!(!delete_status_acceptable(502));
+    }
+
+    #[test]
+    fn create_poll_backoff_is_bounded() {
+        // Sleeps happen between attempts; the last attempt's delay is never
+        // slept.
+        let total: u64 = (0..CREATE_POLL_ATTEMPTS - 1)
+            .map(create_poll_delay_ms)
+            .sum();
+        assert!(
+            total <= 2_500,
+            "poll wait must stay well under stream-start latency budgets, got {total}ms"
+        );
     }
 }
