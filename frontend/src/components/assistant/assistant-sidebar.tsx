@@ -13,7 +13,6 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { Link } from "@tanstack/react-router";
-import { TransportToggle } from "@/components/assistant/transport-toggle";
 import { Button } from "@/components/ui/button";
 import {
   Tooltip,
@@ -64,7 +63,6 @@ export function AssistantSidebar({
   activeConversationId,
   activeView = "chat",
   creating,
-  turnActive = false,
   onNewChat,
   onSelect,
 }: {
@@ -72,7 +70,6 @@ export function AssistantSidebar({
   readonly activeConversationId: string | undefined;
   readonly activeView?: "chat" | "plugins" | "approvals";
   readonly creating: boolean;
-  readonly turnActive?: boolean;
   readonly onNewChat: () => void;
   readonly onSelect: (conversationId: string) => void;
 }) {
@@ -169,7 +166,6 @@ export function AssistantSidebar({
       </nav>
 
       <div className="shrink-0 border-t border-border/60 p-2">
-        <TransportToggle turnActive={turnActive} />
         <Link
           to="/dashboard"
           className="flex items-center gap-3 rounded-lg px-3 py-2 text-[13px] text-muted-foreground transition-colors hover:bg-overlay hover:text-foreground"

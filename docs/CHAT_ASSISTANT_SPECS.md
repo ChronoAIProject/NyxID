@@ -56,6 +56,13 @@ user — needs a second account, cannot be tested with one token) and the browse
 - **`/api/chat`:** already wired end-to-end and proven to write history. NOT changed
   in this cut — enabling persistence on the workflow transport is a product decision
   (see "Enable-ready" below), not a wiring gap.
+- **Single production transport (toggle removed 2026-07-17).** The sidebar "Chat API"
+  mode toggle and the alternate `completions` / `workflow` frontend transports (plus
+  the mode store) were deleted; **nyxid-chat AG-UI is the sole production chat
+  transport**. The backend `/assistant/completions` and `/assistant/workflow-chat[/ws]`
+  pass-through routes are retained (thin, unused by the UI) — remove them too if the
+  surface should be minimal. The endpoint-map rows and workflow/completions references
+  below describe those retained backend routes, not a user-facing mode.
 - **Auth: real Bearer, no NyxID-side minting.** A brief interim mint-and-forward
   bridge (mint a token for cookie sessions) was added and then **reverted** on
   2026-07-17: the client must present a real Bearer instead — a `nyxid_ag_` agent
