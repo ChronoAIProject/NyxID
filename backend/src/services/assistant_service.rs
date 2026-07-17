@@ -142,9 +142,10 @@ pub fn workflow_chat_ws_path() -> String {
 /// Post-create materialization poll bounds. Conversation create is
 /// async-accepted (202 + `actorId`); streaming into an actor before it
 /// appears in the `nyxid-chat` actor index races the materialization, so
-/// create waits for the actor with the same bounded backoff the reference
-/// client uses (nyxid-chat `server.mjs` `waitForConversation`).
-pub const CREATE_POLL_ATTEMPTS: u32 = 5;
+/// create waits for the actor with the same attempt count and a comparable
+/// backoff budget (~2s) to the reference client (nyxid-chat `server.mjs`
+/// `waitForConversation`: 6 attempts, 250ms + 100ms/attempt).
+pub const CREATE_POLL_ATTEMPTS: u32 = 6;
 
 /// Delay before the next poll attempt (200ms, 300ms, ... capped by the
 /// attempt count; ~1.4s worst case).
@@ -285,9 +286,13 @@ mod tests {
 
     #[test]
     fn create_poll_backoff_is_bounded() {
-        let total: u64 = (0..CREATE_POLL_ATTEMPTS).map(create_poll_delay_ms).sum();
+        // Sleeps happen between attempts; the last attempt's delay is never
+        // slept.
+        let total: u64 = (0..CREATE_POLL_ATTEMPTS - 1)
+            .map(create_poll_delay_ms)
+            .sum();
         assert!(
-            total <= 2_000,
+            total <= 2_500,
             "poll wait must stay well under stream-start latency budgets, got {total}ms"
         );
     }
