@@ -1,6 +1,8 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AdminFeatureFlagsPage } from "./admin-feature-flags";
+import { useAuthStore } from "@/stores/auth-store";
+import type { User } from "@/types/api";
 
 const { mockUseFlags, mockUseUsers, mockSetFlag, mockClearFlag } = vi.hoisted(
   () => ({
@@ -74,11 +76,43 @@ function defaultSuggestionsMock() {
   };
 }
 
+function adminUser(): User {
+  return {
+    id: "admin-1",
+    email: "admin@example.com",
+    display_name: "Admin",
+    avatar_url: null,
+    email_verified: true,
+    mfa_enabled: false,
+    is_admin: true,
+    role: "admin",
+    is_active: true,
+    created_at: "2026-01-01T00:00:00Z",
+  };
+}
+
+function operatorUser(): User {
+  return {
+    ...adminUser(),
+    id: "operator-1",
+    email: "operator@example.com",
+    display_name: "Operator",
+    is_admin: false,
+    is_operator: true,
+    role: "operator",
+  };
+}
+
 beforeEach(() => {
   mockSetFlag.mockReset().mockResolvedValue(undefined);
   mockClearFlag.mockReset().mockResolvedValue(undefined);
   mockUseUsers.mockReset().mockReturnValue({
     data: { users: [], total: 201, page: 1, per_page: 20 },
+    isLoading: false,
+  });
+  useAuthStore.setState({
+    user: adminUser(),
+    isAuthenticated: true,
     isLoading: false,
   });
 });
@@ -319,5 +353,58 @@ describe("AdminFeatureFlagsPage", () => {
     );
     expect(mockSetFlag).toHaveBeenCalledTimes(1);
     expect(mockClearFlag).not.toHaveBeenCalled();
+  });
+
+  it("tolerates a backend response without org_overrides (deploy skew)", () => {
+    const legacy = flagFixture() as Record<string, unknown>;
+    delete legacy["org_overrides"];
+    mockUseFlags.mockReturnValue({
+      data: { flags: [legacy] },
+      isLoading: false,
+      error: null,
+    });
+
+    render(<AdminFeatureFlagsPage />);
+    expect(screen.getByText("experimental:ai-assistant")).toBeInTheDocument();
+  });
+
+  it("shows operators a read-only view without pickers or apply controls", () => {
+    useAuthStore.setState({ user: operatorUser() });
+    mockUseFlags.mockReturnValue({
+      data: {
+        flags: [
+          flagFixture({
+            org_overrides: [
+              {
+                org_id: "org-1",
+                org_display_name: "ChronoAI",
+                org_slug: "chronoai",
+                enabled: true,
+                updated_at: "2026-07-17T00:00:00Z",
+                updated_by: "admin-1",
+              },
+            ],
+          }),
+        ],
+      },
+      isLoading: false,
+      error: null,
+    });
+
+    render(<AdminFeatureFlagsPage />);
+    fireEvent.click(screen.getByText("experimental:ai-assistant"));
+
+    expect(
+      screen.queryByLabelText("Search organizations by name"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("Search users by email"),
+    ).not.toBeInTheDocument();
+    // Scope selects are disabled, so no draft can be staged.
+    expect(screen.getByLabelText("ChronoAI (chronoai)")).toBeDisabled();
+    expect(
+      screen.getByLabelText("All users (rollout / killswitch)"),
+    ).toBeDisabled();
+    expect(screen.queryByText("Apply changes")).not.toBeInTheDocument();
   });
 });

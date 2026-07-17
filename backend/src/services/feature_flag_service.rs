@@ -6,8 +6,16 @@
 //! computes the effective enabled set for a given (org, member, role) and the
 //! client only receives the resolved list — it never sees the override rules.
 //!
-//! Precedence, most-specific first:
-//! `user override` → `role override` → `org override` → `code default`.
+//! Precedence, most-specific first (org context):
+//! `user override` → `role override` → `org override` → `global` → `code default`.
+//!
+//! Personal (non-org) surfaces are **grant-union** over the user's active org
+//! memberships: a flag is on when the platform baseline (`global` → default)
+//! enables it OR any org the user belongs to grants it (that org's own
+//! `user → role → org` chain resolving to enabled). An org-level disable only
+//! withholds that org's grant — it never revokes the platform baseline or
+//! another org's grant. A platform personal `user` override is the final
+//! per-person allow/deny and beats everything.
 //!
 //! Adding a new flag = add a [`FeatureFlagDef`] entry here (ships with a deploy)
 //! and consume its key on the frontend. Toggling an existing flag for an org /
@@ -26,6 +34,7 @@ use crate::errors::{AppError, AppResult};
 use crate::models::feature_flag_override::{COLLECTION_NAME, FeatureFlagOverride, FlagTargetKind};
 use crate::models::org_membership::OrgRole;
 use crate::models::user::{COLLECTION_NAME as USERS, User};
+use crate::services::org_service;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Registry (source of truth — declared in code)
@@ -206,24 +215,75 @@ pub fn resolve_from_overrides(
     enabled_keys
 }
 
+/// Pick the enabled value of an org-scoped override matching
+/// `(org_user_id, flag_key, kind, key)` from a mixed multi-org row set.
+fn pick_org_override(
+    overrides: &[FeatureFlagOverride],
+    org_user_id: &str,
+    flag_key: &str,
+    kind: FlagTargetKind,
+    key: Option<&str>,
+) -> Option<bool> {
+    overrides
+        .iter()
+        .find(|o| {
+            o.org_user_id.as_deref() == Some(org_user_id)
+                && o.flag_key == flag_key
+                && o.target_kind == kind
+                && o.target_key.as_deref() == key
+        })
+        .map(|o| o.enabled)
+}
+
+/// Whether one org grants `flag_key` to this member: that org's
+/// `user → role → org` chain, most-specific present value wins. An absent
+/// chain (no rows) grants nothing; an explicit `false` merely withholds this
+/// org's grant.
+fn org_grants_flag(
+    org_rows: &[FeatureFlagOverride],
+    org_user_id: &str,
+    flag_key: &str,
+    user_id: &str,
+    role: OrgRole,
+) -> bool {
+    let kinds = [
+        (FlagTargetKind::User, Some(user_id)),
+        (FlagTargetKind::Role, Some(role.as_str())),
+        (FlagTargetKind::Org, None),
+    ];
+    for (kind, key) in kinds {
+        if let Some(v) = pick_org_override(org_rows, org_user_id, flag_key, kind, key) {
+            return v;
+        }
+    }
+    false
+}
+
 /// Compute the enabled-flag keys for a user in the **personal** (non-org)
-/// context. Per flag: `default → global → user(personal, matching `user_id`)`.
+/// context — the resolution behind `/users/me` and every non-org surface
+/// (sidebar, `/assistant`, …).
 ///
-/// This is what a user with zero orgs — or any non-org surface — sees. No org
-/// rungs apply.
+/// Grant-union per flag:
+/// `personal user override ?? (baseline(global ?? default) || any org grant)`.
+/// `memberships` are the user's **active** org memberships as
+/// `(org_user_id, role)`; `org_rows` are override rows across those orgs.
+///
+/// Pure and DB-free so the precedence matrix is unit-testable.
 pub fn resolve_personal_from_overrides(
     platform: &[FeatureFlagOverride],
+    org_rows: &[FeatureFlagOverride],
+    memberships: &[(String, OrgRole)],
     user_id: &str,
 ) -> Vec<String> {
     let mut enabled_keys = Vec::new();
     for def in FEATURE_FLAGS {
-        let mut enabled = def.default_enabled;
-        if let Some(v) = pick_override(platform, def.key, FlagTargetKind::Global, None) {
-            enabled = v;
-        }
-        if let Some(v) = pick_override(platform, def.key, FlagTargetKind::User, Some(user_id)) {
-            enabled = v;
-        }
+        let baseline = pick_override(platform, def.key, FlagTargetKind::Global, None)
+            .unwrap_or(def.default_enabled);
+        let org_granted = memberships
+            .iter()
+            .any(|(org_id, role)| org_grants_flag(org_rows, org_id, def.key, user_id, *role));
+        let enabled = pick_override(platform, def.key, FlagTargetKind::User, Some(user_id))
+            .unwrap_or(baseline || org_granted);
         if enabled {
             enabled_keys.push(def.key.to_string());
         }
@@ -245,13 +305,42 @@ pub async fn resolve_enabled_features(
 }
 
 /// Resolve enabled-flag keys for a user in the personal (non-org) context.
-/// Delivered on `GET /users/me` so users with zero orgs still get their flags.
+/// Delivered on `GET /users/me`. Org-aware: unions in grants from every org
+/// the user is an active member of (see the module docs for precedence), so
+/// enabling a flag for an org lights up non-org surfaces for its members.
 pub async fn resolve_personal_features(
     db: &mongodb::Database,
     user_id: &str,
 ) -> AppResult<Vec<String>> {
-    let platform = list_platform_overrides(db).await?;
-    Ok(resolve_personal_from_overrides(&platform, user_id))
+    let memberships = org_service::list_memberships_for_member(db, user_id, false).await?;
+
+    // One query for the platform rows (`org_user_id: null`) plus every
+    // membership org's rows — no per-org fan-out on the hot /users/me path.
+    let mut scope_keys: Vec<bson::Bson> = vec![bson::Bson::Null];
+    scope_keys.extend(
+        memberships
+            .iter()
+            .map(|m| bson::Bson::String(m.org_user_id.clone())),
+    );
+    let rows: Vec<FeatureFlagOverride> = db
+        .collection::<FeatureFlagOverride>(COLLECTION_NAME)
+        .find(doc! { "org_user_id": { "$in": scope_keys } })
+        .await?
+        .try_collect()
+        .await?;
+    let (org_rows, platform): (Vec<_>, Vec<_>) =
+        rows.into_iter().partition(|row| row.org_user_id.is_some());
+    let membership_roles: Vec<(String, OrgRole)> = memberships
+        .into_iter()
+        .map(|m| (m.org_user_id, m.role))
+        .collect();
+
+    Ok(resolve_personal_from_overrides(
+        &platform,
+        &org_rows,
+        &membership_roles,
+        user_id,
+    ))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -833,11 +922,23 @@ mod tests {
     }
 
     // ── personal (non-org) resolution ─────────────────────────────────────
+    fn personal_enabled(
+        platform: &[FeatureFlagOverride],
+        org_rows: &[FeatureFlagOverride],
+        memberships: &[(String, OrgRole)],
+        user_id: &str,
+    ) -> bool {
+        resolve_personal_from_overrides(platform, org_rows, memberships, user_id)
+            .contains(&"example_ui".to_string())
+    }
+
+    fn member(org: &str, role: OrgRole) -> (String, OrgRole) {
+        (org.to_string(), role)
+    }
+
     #[test]
     fn personal_default_off() {
-        assert!(
-            !resolve_personal_from_overrides(&[], "user-1").contains(&"example_ui".to_string())
-        );
+        assert!(!personal_enabled(&[], &[], &[], "user-1"));
     }
 
     #[test]
@@ -853,15 +954,151 @@ mod tests {
             ),
         ];
         // user-1: personal override (off) wins over global (on).
-        assert!(
-            !resolve_personal_from_overrides(&platform, "user-1")
-                .contains(&"example_ui".to_string())
-        );
+        assert!(!personal_enabled(&platform, &[], &[], "user-1"));
         // user-2: no personal override, sees global (on).
-        assert!(
-            resolve_personal_from_overrides(&platform, "user-2")
-                .contains(&"example_ui".to_string())
-        );
+        assert!(personal_enabled(&platform, &[], &[], "user-2"));
+    }
+
+    #[test]
+    fn org_grant_lights_personal_surface() {
+        // The prod scenario: org-wide enable must reach the member's personal
+        // resolution (sidebar + /assistant read /users/me).
+        let org_rows = vec![override_row(
+            Some("chronoai"),
+            "example_ui",
+            FlagTargetKind::Org,
+            None,
+            true,
+        )];
+        assert!(personal_enabled(
+            &[],
+            &org_rows,
+            &[member("chronoai", OrgRole::Member)],
+            "user-1"
+        ));
+        // Same rows, but the user is not a member: no grant.
+        assert!(!personal_enabled(&[], &org_rows, &[], "user-1"));
+    }
+
+    #[test]
+    fn org_disable_withholds_grant_but_never_revokes() {
+        let global_on = vec![override_row(
+            None,
+            "example_ui",
+            FlagTargetKind::Global,
+            None,
+            true,
+        )];
+        let org_off = vec![override_row(
+            Some("org-a"),
+            "example_ui",
+            FlagTargetKind::Org,
+            None,
+            false,
+        )];
+        // Org disable does not revoke the platform-global grant on a
+        // personal surface.
+        assert!(personal_enabled(
+            &global_on,
+            &org_off,
+            &[member("org-a", OrgRole::Member)],
+            "user-1"
+        ));
+        // Org A disable does not revoke org B's grant.
+        let mixed = vec![
+            override_row(
+                Some("org-a"),
+                "example_ui",
+                FlagTargetKind::Org,
+                None,
+                false,
+            ),
+            override_row(Some("org-b"), "example_ui", FlagTargetKind::Org, None, true),
+        ];
+        assert!(personal_enabled(
+            &[],
+            &mixed,
+            &[
+                member("org-a", OrgRole::Member),
+                member("org-b", OrgRole::Member)
+            ],
+            "user-1"
+        ));
+        // With only the disabling org, nothing grants.
+        assert!(!personal_enabled(
+            &[],
+            &org_off,
+            &[member("org-a", OrgRole::Member)],
+            "user-1"
+        ));
+    }
+
+    #[test]
+    fn org_grant_respects_role_and_member_specificity() {
+        // Org-wide on, but this member's role is explicitly excluded.
+        let rows = vec![
+            override_row(Some("org-a"), "example_ui", FlagTargetKind::Org, None, true),
+            override_row(
+                Some("org-a"),
+                "example_ui",
+                FlagTargetKind::Role,
+                Some("viewer"),
+                false,
+            ),
+            override_row(
+                Some("org-a"),
+                "example_ui",
+                FlagTargetKind::User,
+                Some("user-2"),
+                true,
+            ),
+        ];
+        // Viewer role: role override withholds the org grant.
+        assert!(!personal_enabled(
+            &[],
+            &rows,
+            &[member("org-a", OrgRole::Viewer)],
+            "user-1"
+        ));
+        // But a per-member enable inside the org beats the role exclusion.
+        assert!(personal_enabled(
+            &[],
+            &rows,
+            &[member("org-a", OrgRole::Viewer)],
+            "user-2"
+        ));
+        // Member role: unaffected by the viewer exclusion.
+        assert!(personal_enabled(
+            &[],
+            &rows,
+            &[member("org-a", OrgRole::Member)],
+            "user-1"
+        ));
+    }
+
+    #[test]
+    fn personal_user_override_is_final_over_org_grants() {
+        let platform = vec![override_row(
+            None,
+            "example_ui",
+            FlagTargetKind::User,
+            Some("user-1"),
+            false,
+        )];
+        let org_rows = vec![override_row(
+            Some("org-a"),
+            "example_ui",
+            FlagTargetKind::Org,
+            None,
+            true,
+        )];
+        // Personal deny beats an org grant.
+        assert!(!personal_enabled(
+            &platform,
+            &org_rows,
+            &[member("org-a", OrgRole::Member)],
+            "user-1"
+        ));
     }
 
     #[test]
@@ -1102,5 +1339,115 @@ mod tests {
             set_platform_org_override(&db, &person, "example_ui", true, &actor).await,
             Err(AppError::NotFound(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn admin_org_override_reaches_member_personal_resolution() {
+        use crate::models::org_membership::{
+            COLLECTION_NAME as MEMBERSHIPS, MemberScopeSource, OrgMembership,
+        };
+
+        let Some(db) = connect_test_database("feature_flag_admin_org").await else {
+            eprintln!("skipping feature flag service test: no local MongoDB available");
+            return;
+        };
+        let org_id = Uuid::new_v4().to_string();
+        let member_id = Uuid::new_v4().to_string();
+        let outsider_id = Uuid::new_v4().to_string();
+        let actor = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&org_id, UserType::Org))
+            .await
+            .expect("insert org user");
+        db.collection::<OrgMembership>(MEMBERSHIPS)
+            .insert_one(OrgMembership {
+                id: Uuid::new_v4().to_string(),
+                org_user_id: org_id.clone(),
+                member_user_id: member_id.clone(),
+                role: OrgRole::Member,
+                scope_source: MemberScopeSource::Inherit,
+                allowed_service_ids: None,
+                created_at: Utc::now(),
+                revoked_at: None,
+            })
+            .await
+            .expect("insert membership");
+
+        // The prod scenario: platform admin enables the flag org-wide without
+        // being an org member; the member's personal resolution picks it up.
+        let row = set_platform_org_override(&db, &org_id, "example_ui", true, &actor)
+            .await
+            .expect("admin org enable");
+        assert_eq!(row.org_user_id.as_deref(), Some(org_id.as_str()));
+        assert_eq!(row.target_kind, FlagTargetKind::Org);
+        assert!(
+            resolve_personal_features(&db, &member_id)
+                .await
+                .expect("resolve member")
+                .contains(&"example_ui".to_string())
+        );
+        // A non-member sees nothing from the org grant.
+        assert!(
+            !resolve_personal_features(&db, &outsider_id)
+                .await
+                .expect("resolve outsider")
+                .contains(&"example_ui".to_string())
+        );
+
+        // Clear removes the grant; resolution falls back to default (off).
+        assert!(
+            clear_platform_org_override(&db, &org_id, "example_ui")
+                .await
+                .expect("admin org clear")
+                .is_some()
+        );
+        assert!(
+            !resolve_personal_features(&db, &member_id)
+                .await
+                .expect("resolve after clear")
+                .contains(&"example_ui".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn revoked_membership_does_not_grant() {
+        use crate::models::org_membership::{
+            COLLECTION_NAME as MEMBERSHIPS, MemberScopeSource, OrgMembership,
+        };
+
+        let Some(db) = connect_test_database("feature_flag_revoked_member").await else {
+            eprintln!("skipping feature flag service test: no local MongoDB available");
+            return;
+        };
+        let org_id = Uuid::new_v4().to_string();
+        let member_id = Uuid::new_v4().to_string();
+        let actor = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&org_id, UserType::Org))
+            .await
+            .expect("insert org user");
+        db.collection::<OrgMembership>(MEMBERSHIPS)
+            .insert_one(OrgMembership {
+                id: Uuid::new_v4().to_string(),
+                org_user_id: org_id.clone(),
+                member_user_id: member_id.clone(),
+                role: OrgRole::Member,
+                scope_source: MemberScopeSource::Inherit,
+                allowed_service_ids: None,
+                created_at: Utc::now(),
+                revoked_at: Some(Utc::now()),
+            })
+            .await
+            .expect("insert revoked membership");
+
+        set_platform_org_override(&db, &org_id, "example_ui", true, &actor)
+            .await
+            .expect("admin org enable");
+        assert!(
+            !resolve_personal_features(&db, &member_id)
+                .await
+                .expect("resolve revoked member")
+                .contains(&"example_ui".to_string())
+        );
     }
 }
