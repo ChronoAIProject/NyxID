@@ -1,6 +1,8 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { ComponentProps } from "react";
+import { Dialog, DialogContent } from "@/components/ui/dialog";
 import type { ApiKeyCreateResponse } from "@/types/api";
 import { ConnectVerifyStep, type CreatedKey } from "./connect-verify-step";
 import {
@@ -76,6 +78,26 @@ function rejected(status: number): Response {
   return new Response("{}", { status });
 }
 
+/**
+ * Renders the step the way production does — inside a Dialog. Its header is
+ * the dialog's real DialogTitle/DialogDescription (see `step-header.tsx`),
+ * and Radix's title primitive throws outside a Dialog context.
+ */
+function renderStep(props: Partial<ComponentProps<typeof ConnectVerifyStep>> = {}) {
+  return render(
+    <Dialog open>
+      <DialogContent>
+        <ConnectVerifyStep
+          createdKey={CREATED_KEY}
+          isNodeRouted={false}
+          onDone={vi.fn()}
+          {...props}
+        />
+      </DialogContent>
+    </Dialog>,
+  );
+}
+
 async function mintKey(user: ReturnType<typeof userEvent.setup>) {
   createApiKeyMutate.mockImplementation((_params, opts) => {
     opts?.onSuccess?.(MINTED_KEY);
@@ -93,13 +115,7 @@ beforeEach(() => {
 
 describe("ConnectVerifyStep — initial phase (connected)", () => {
   it("renders the 'you need an Agent Key' prompt and both CTAs", () => {
-    render(
-      <ConnectVerifyStep
-        createdKey={CREATED_KEY}
-        isNodeRouted={false}
-        onDone={vi.fn()}
-      />,
-    );
+    renderStep();
 
     expect(document.body.textContent ?? "").toMatch(
       /need an\s+Agent Key\s+to call/i,
@@ -112,13 +128,7 @@ describe("ConnectVerifyStep — initial phase (connected)", () => {
 
   it("REGRESSION (silent CTA): clicking 'Create Agent Key' fires the mutation", async () => {
     const user = userEvent.setup();
-    render(
-      <ConnectVerifyStep
-        createdKey={CREATED_KEY}
-        isNodeRouted={false}
-        onDone={vi.fn()}
-      />,
-    );
+    renderStep();
 
     await user.click(screen.getByRole("button", { name: /Create Agent Key/i }));
 
@@ -143,13 +153,7 @@ describe("ConnectVerifyStep — initial phase (connected)", () => {
   it("'Maybe later' calls onDone without firing the mutation", async () => {
     const onDone = vi.fn();
     const user = userEvent.setup();
-    render(
-      <ConnectVerifyStep
-        createdKey={CREATED_KEY}
-        isNodeRouted={false}
-        onDone={onDone}
-      />,
-    );
+    renderStep({ onDone });
 
     await user.click(screen.getByRole("button", { name: /Maybe later/i }));
 
@@ -164,13 +168,7 @@ describe("ConnectVerifyStep — key_ready phase", () => {
       opts?.onSuccess?.(MINTED_KEY);
     });
     const user = userEvent.setup();
-    render(
-      <ConnectVerifyStep
-        createdKey={CREATED_KEY}
-        isNodeRouted={false}
-        onDone={vi.fn()}
-      />,
-    );
+    renderStep();
 
     await user.click(screen.getByRole("button", { name: /Create Agent Key/i }));
 
@@ -188,13 +186,7 @@ describe("ConnectVerifyStep — key_ready phase", () => {
       opts?.onError?.(new Error("scoped-service-must-be-active"));
     });
     const user = userEvent.setup();
-    render(
-      <ConnectVerifyStep
-        createdKey={CREATED_KEY}
-        isNodeRouted={false}
-        onDone={vi.fn()}
-      />,
-    );
+    renderStep();
 
     await user.click(screen.getByRole("button", { name: /Create Agent Key/i }));
 
@@ -223,13 +215,7 @@ describe("ConnectVerifyStep — probe (downstream OK)", () => {
     window.addEventListener(FIRST_PROXY_CALL_SUCCEEDED_EVENT, succeededSpy);
 
     const user = userEvent.setup();
-    render(
-      <ConnectVerifyStep
-        createdKey={CREATED_KEY}
-        isNodeRouted={false}
-        onDone={vi.fn()}
-      />,
-    );
+    renderStep();
     await mintKey(user);
     await user.click(screen.getByRole("button", { name: /Test Agent Key/i }));
 
@@ -269,13 +255,7 @@ describe("ConnectVerifyStep — probe (agent key VALID despite downstream failur
     window.addEventListener(FIRST_PROXY_CALL_SUCCEEDED_EVENT, succeededSpy);
 
     const user = userEvent.setup();
-    render(
-      <ConnectVerifyStep
-        createdKey={CREATED_KEY}
-        isNodeRouted={false}
-        onDone={vi.fn()}
-      />,
-    );
+    renderStep();
     await mintKey(user);
     await user.click(screen.getByRole("button", { name: /Test Agent Key/i }));
 
@@ -303,13 +283,7 @@ describe("ConnectVerifyStep — probe (agent key VALID despite downstream failur
     vi.spyOn(window, "fetch").mockResolvedValue(proxied(404));
 
     const user = userEvent.setup();
-    render(
-      <ConnectVerifyStep
-        createdKey={CREATED_KEY}
-        isNodeRouted={false}
-        onDone={vi.fn()}
-      />,
-    );
+    renderStep();
     await mintKey(user);
     await user.click(screen.getByRole("button", { name: /Test Agent Key/i }));
 
@@ -330,13 +304,7 @@ describe("ConnectVerifyStep — probe (agent key INVALID: NyxID-layer rejection)
     window.addEventListener(FIRST_PROXY_CALL_SUCCEEDED_EVENT, succeededSpy);
 
     const user = userEvent.setup();
-    render(
-      <ConnectVerifyStep
-        createdKey={CREATED_KEY}
-        isNodeRouted={false}
-        onDone={vi.fn()}
-      />,
-    );
+    renderStep();
     await mintKey(user);
     await user.click(screen.getByRole("button", { name: /Test Agent Key/i }));
 
@@ -358,13 +326,7 @@ describe("ConnectVerifyStep — probe (agent key INVALID: NyxID-layer rejection)
     vi.spyOn(window, "fetch").mockResolvedValue(rejected(403));
 
     const user = userEvent.setup();
-    render(
-      <ConnectVerifyStep
-        createdKey={CREATED_KEY}
-        isNodeRouted={false}
-        onDone={vi.fn()}
-      />,
-    );
+    renderStep();
     await mintKey(user);
     await user.click(screen.getByRole("button", { name: /Test Agent Key/i }));
 
@@ -391,13 +353,7 @@ describe("ConnectVerifyStep — probe (agent key INVALID: NyxID-layer rejection)
       );
 
     const user = userEvent.setup();
-    render(
-      <ConnectVerifyStep
-        createdKey={CREATED_KEY}
-        isNodeRouted={false}
-        onDone={vi.fn()}
-      />,
-    );
+    renderStep();
     await mintKey(user);
     await user.click(screen.getByRole("button", { name: /Test Agent Key/i }));
 
@@ -418,13 +374,7 @@ describe("ConnectVerifyStep — probe (agent key INVALID: NyxID-layer rejection)
     vi.spyOn(window, "fetch").mockRejectedValue(new TypeError("network down"));
 
     const user = userEvent.setup();
-    render(
-      <ConnectVerifyStep
-        createdKey={CREATED_KEY}
-        isNodeRouted={false}
-        onDone={vi.fn()}
-      />,
-    );
+    renderStep();
     await mintKey(user);
     await user.click(screen.getByRole("button", { name: /Test Agent Key/i }));
 
@@ -464,13 +414,7 @@ describe("ConnectVerifyStep — no Test button when we can't be highly confident
     const fetchSpy = vi.spyOn(window, "fetch");
 
     const user = userEvent.setup();
-    render(
-      <ConnectVerifyStep
-        createdKey={CODEX_KEY}
-        isNodeRouted={false}
-        onDone={vi.fn()}
-      />,
-    );
+    renderStep({ createdKey: CODEX_KEY });
     await user.click(screen.getByRole("button", { name: /Create Agent Key/i }));
 
     // Panel appears — user can still copy the key.
@@ -510,13 +454,7 @@ describe("ConnectVerifyStep — no Test button when we can't be highly confident
     const fetchSpy = vi.spyOn(window, "fetch");
 
     const user = userEvent.setup();
-    render(
-      <ConnectVerifyStep
-        createdKey={CUSTOM_KEY}
-        isNodeRouted={false}
-        onDone={vi.fn()}
-      />,
-    );
+    renderStep({ createdKey: CUSTOM_KEY });
     await user.click(screen.getByRole("button", { name: /Create Agent Key/i }));
 
     await waitFor(() =>
@@ -545,13 +483,7 @@ describe("ConnectVerifyStep — no Test button when we can't be highly confident
     });
     const onDone = vi.fn();
     const user = userEvent.setup();
-    render(
-      <ConnectVerifyStep
-        createdKey={CODEX_KEY}
-        isNodeRouted={false}
-        onDone={onDone}
-      />,
-    );
+    renderStep({ createdKey: CODEX_KEY, onDone });
     await user.click(screen.getByRole("button", { name: /Create Agent Key/i }));
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /^Done$/i })).toBeEnabled(),
@@ -572,13 +504,7 @@ describe("ConnectVerifyStep — loading events + Done", () => {
     window.addEventListener(VERIFY_KEY_LOADING_END_EVENT, endSpy);
 
     const user = userEvent.setup();
-    render(
-      <ConnectVerifyStep
-        createdKey={CREATED_KEY}
-        isNodeRouted={false}
-        onDone={vi.fn()}
-      />,
-    );
+    renderStep();
     await mintKey(user);
     await user.click(screen.getByRole("button", { name: /Test Agent Key/i }));
 
@@ -593,13 +519,7 @@ describe("ConnectVerifyStep — loading events + Done", () => {
     vi.spyOn(window, "fetch").mockResolvedValue(proxied(200));
 
     const user = userEvent.setup();
-    render(
-      <ConnectVerifyStep
-        createdKey={CREATED_KEY}
-        isNodeRouted={false}
-        onDone={vi.fn()}
-      />,
-    );
+    renderStep();
     await mintKey(user);
 
     // Not visible before the probe runs.
@@ -620,18 +540,14 @@ describe("ConnectVerifyStep — loading events + Done", () => {
     vi.spyOn(window, "fetch").mockResolvedValue(proxied(200));
 
     const user = userEvent.setup();
-    render(
-      <ConnectVerifyStep
-        createdKey={{
-          ...CREATED_KEY,
-          slug: "llm-openrouter",
-          catalogSlug: "llm-openrouter",
-          serviceName: "OpenRouter",
-        }}
-        isNodeRouted={false}
-        onDone={vi.fn()}
-      />,
-    );
+    renderStep({
+      createdKey: {
+        ...CREATED_KEY,
+        slug: "llm-openrouter",
+        catalogSlug: "llm-openrouter",
+        serviceName: "OpenRouter",
+      },
+    });
     await mintKey(user);
 
     // llm-openrouter is registered in PROBE_REGISTRY, so the Test
@@ -651,13 +567,7 @@ describe("ConnectVerifyStep — loading events + Done", () => {
 
     const onDone = vi.fn();
     const user = userEvent.setup();
-    render(
-      <ConnectVerifyStep
-        createdKey={CREATED_KEY}
-        isNodeRouted={false}
-        onDone={onDone}
-      />,
-    );
+    renderStep({ onDone });
     await mintKey(user);
     await user.click(screen.getByRole("button", { name: /Test Agent Key/i }));
     await waitFor(() =>

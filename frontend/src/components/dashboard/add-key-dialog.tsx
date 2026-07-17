@@ -20,10 +20,7 @@ import { OAuthCallbackGuidance } from "@/components/shared/twitter-oauth-guidanc
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
   DialogFooter,
-  DialogHeader,
-  DialogTitle,
 } from "@/components/ui/dialog";
 import {
   Select,
@@ -49,6 +46,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { ServiceIcon } from "@/components/service-icon";
+import { StepHeader } from "@/components/dashboard/step-header";
 import {
   ConnectVerifyStep,
   type CreatedKey,
@@ -489,16 +487,18 @@ function RoutingStep({
         Back to catalog
       </button>
 
-      {catalogEntry && (
-        <div className="rounded-lg border border-border bg-muted/50 p-3">
-          <p className="text-[12px] font-medium">{catalogEntry.name}</p>
-          {catalogEntry.description && (
-            <p className="text-xs text-muted-foreground">
-              {catalogEntry.description}
-            </p>
-          )}
-        </div>
-      )}
+      <StepHeader
+        slug={catalogEntry?.slug}
+        title={
+          catalogEntry
+            ? `Configure routing for ${catalogEntry.name}`
+            : "Configure routing"
+        }
+        description={
+          catalogEntry?.description ??
+          "Choose how requests reach the endpoint."
+        }
+      />
 
       <div className="space-y-3">
         <Label>How should requests reach this service?</Label>
@@ -645,26 +645,25 @@ function KeyForm({
         Back
       </button>
 
-      {catalogEntry && (
-        <div className="rounded-lg border border-border bg-muted/50 p-3">
-          <p className="text-[12px] font-medium">{catalogEntry.name}</p>
-          {catalogEntry.description && (
-            <p className="text-xs text-muted-foreground">
-              {catalogEntry.description}
-            </p>
-          )}
-          {catalogEntry.api_key_url && (
-            <a
-              href={catalogEntry.api_key_url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="mt-1 inline-flex items-center gap-1 text-xs text-primary hover:underline"
-            >
-              Get API key
-              <ExternalLink className="h-3 w-3" />
-            </a>
-          )}
-        </div>
+      <StepHeader
+        slug={catalogEntry?.slug}
+        title={catalogEntry ? `Configure ${catalogEntry.name}` : "Custom endpoint"}
+        description={
+          catalogEntry?.description ??
+          "Configure your custom endpoint and credentials."
+        }
+      />
+
+      {catalogEntry?.api_key_url && (
+        <a
+          href={catalogEntry.api_key_url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+        >
+          Get API key
+          <ExternalLink className="h-3 w-3" />
+        </a>
       )}
 
       {catalogEntry?.api_key_instructions && (
@@ -1026,6 +1025,14 @@ function NodeSetupStep({
         Back
       </button>
 
+      <StepHeader
+        slug={catalogEntry?.slug}
+        title={
+          catalogEntry ? `${catalogEntry.name} — Node setup` : "Node setup"
+        }
+        description="Configure credentials on your node agent."
+      />
+
       <div className="space-y-1.5">
         <Label htmlFor="node-label">
           Label <span className="text-destructive">*</span>
@@ -1367,19 +1374,11 @@ function OAuthStep({
         Back
       </button>
 
-      <div className="rounded-lg border border-border bg-muted/50 p-3">
-        <p className="text-[12px] font-medium">{catalogEntry.name}</p>
-        {catalogEntry.description && (
-          <p className="text-xs text-muted-foreground">
-            {catalogEntry.description}
-          </p>
-        )}
-      </div>
-
-      <p className="text-[12px] text-muted-foreground">
-        This service uses OAuth to authenticate. Click the button below to
-        connect your account.
-      </p>
+      <StepHeader
+        slug={catalogEntry?.slug}
+        title={`${reconnectMode ? "Reconnect" : "Connect"} to ${catalogEntry.name}`}
+        description="This service uses OAuth to authenticate. Click the button below to connect your account."
+      />
 
       <UpstreamScopePicker
         catalog={catalogEntry.scope_catalog ?? []}
@@ -1763,19 +1762,11 @@ function DeviceCodeStep({
           Back
         </button>
 
-        <div className="rounded-lg border border-border bg-muted/50 p-3">
-          <p className="text-[12px] font-medium">{catalogEntry.name}</p>
-          {catalogEntry.description && (
-            <p className="text-xs text-muted-foreground">
-              {catalogEntry.description}
-            </p>
-          )}
-        </div>
-
-        <p className="text-[12px] text-muted-foreground">
-          This service uses a device code to authenticate. Click continue to
-          request a code.
-        </p>
+        <StepHeader
+          slug={catalogEntry?.slug}
+          title={`${reconnectMode ? "Reconnect" : "Connect"} to ${catalogEntry.name}`}
+          description="This service uses a device code to authenticate. Click continue to request a code."
+        />
 
         {supportsAdditionalScopes ? (
           <UpstreamScopePicker
@@ -1813,11 +1804,13 @@ function DeviceCodeStep({
           <ArrowLeft className="h-3 w-3" />
           Back
         </button>
-        <div className="flex flex-col items-center gap-3 py-8">
+        <StepHeader
+          slug={catalogEntry?.slug}
+          title={`${reconnectMode ? "Reconnect" : "Connect"} to ${catalogEntry.name}`}
+          description={`Requesting code from ${catalogEntry.name}...`}
+        />
+        <div className="flex justify-center py-6">
           <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-          <p className="text-[12px] text-muted-foreground">
-            Requesting code from {catalogEntry.name}...
-          </p>
         </div>
       </div>
     );
@@ -1826,11 +1819,13 @@ function DeviceCodeStep({
   if (flowStep === "success") {
     return (
       <div className="space-y-4">
-        <div className="flex flex-col items-center gap-3 py-4">
+        <StepHeader
+          slug={catalogEntry?.slug}
+          title={`${catalogEntry.name} connected`}
+          description={`Your ${catalogEntry.name} account has been connected successfully.`}
+        />
+        <div className="flex justify-center py-4">
           <CheckCircle2 className="h-8 w-8 text-success" />
-          <p className="text-[12px] text-center text-muted-foreground">
-            Your {catalogEntry.name} account has been connected successfully.
-          </p>
         </div>
         <Button
           variant="primary"
@@ -1859,6 +1854,11 @@ function DeviceCodeStep({
           <ArrowLeft className="h-3 w-3" />
           Back
         </button>
+        <StepHeader
+          slug={catalogEntry?.slug}
+          title={`${reconnectMode ? "Reconnect" : "Connect"} to ${catalogEntry.name}`}
+          description="Something went wrong. Review the error below and try again."
+        />
         <div className="flex flex-col items-center gap-3 py-4">
           <AlertCircle className="h-8 w-8 text-destructive" />
           <p className="text-[12px] text-destructive text-center">{errorMessage}</p>
@@ -1886,6 +1886,12 @@ function DeviceCodeStep({
         <ArrowLeft className="h-3 w-3" />
         Back
       </button>
+
+      <StepHeader
+        slug={catalogEntry?.slug}
+        title={`${reconnectMode ? "Reconnect" : "Connect"} to ${catalogEntry.name}`}
+        description={`Enter this code at ${catalogEntry.name} to finish authenticating.`}
+      />
 
       <div className="flex flex-col items-center gap-3 rounded-lg border-2 border-dashed border-primary/30 bg-primary/5 p-6">
         <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
@@ -1988,12 +1994,11 @@ function OAuthCredentialsStep({
         Back
       </button>
 
-      <div className="rounded-lg border border-border bg-muted/50 p-3">
-        <p className="text-[12px] font-medium">{catalogEntry.name}</p>
-        <p className="text-xs text-muted-foreground">
-          This service requires your own OAuth app credentials.
-        </p>
-      </div>
+      <StepHeader
+        slug={catalogEntry?.slug}
+        title={`Setup ${catalogEntry.name} credentials`}
+        description="This service requires your own OAuth app credentials."
+      />
 
       {catalogEntry.documentation_url && (
         <a
@@ -2557,82 +2562,24 @@ export function AddKeyDialog({
     });
   }
 
-  function dialogTitle(): string {
-    switch (step) {
-      case "catalog":
-        return isReconnect ? "Reconnect Service" : "Add AI Service";
-      case "routing":
-        return "Configure Routing";
-      case "node_setup":
-        return "Node Setup";
-      case "oauth_credentials":
-        return `Setup ${selectedEntry?.name ?? "Service"} Credentials`;
-      case "oauth":
-        return `${isReconnect ? "Reconnect" : "Connect"} to ${selectedEntry?.name ?? "Service"}`;
-      case "device_code":
-        return `${isReconnect ? "Reconnect" : "Connect"} to ${selectedEntry?.name ?? "Service"}`;
-      case "verify":
-        return `${createdKey?.serviceName ?? "Service"} connected`;
-      default:
-        return "Configure Service";
-    }
-  }
-
-  function dialogDescription(): string {
-    switch (step) {
-      case "catalog":
-        return isReconnect
-          ? "Restart authentication for this existing service."
-          : "Pick from the catalog or create a custom endpoint.";
-      case "routing":
-        return "Choose how requests reach the endpoint.";
-      case "node_setup":
-        return "Configure credentials on your node agent.";
-      case "oauth_credentials":
-        return `Enter your OAuth app credentials for ${selectedEntry?.name ?? "the service"}.`;
-      case "oauth":
-        return `Authenticate with ${selectedEntry?.name ?? "the service"} via OAuth.`;
-      case "device_code":
-        return `Authenticate with ${selectedEntry?.name ?? "the service"} using a device code.`;
-      case "verify":
-        return "Connect your AI tools to this service through NyxID.";
-      default:
-        return selectedEntry
-          ? `Set up your ${selectedEntry.name} credentials.`
-          : "Configure your custom endpoint and credentials.";
-    }
-  }
-
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent>
-        <DialogHeader>
-          <DialogTitle>
-            {step === "verify" && createdKey ? (
-              // Umbrella framing: the DialogTitle communicates the state
-              // (Service "<name>" connected) — that's the umbrella. The
-              // body then tells the user what's needed next (an Agent
-              // Key to let their AI tools actually use it).
-              //
-              // "Service" prefix is intentional per Calvin's ask — it
-              // labels the noun so the quoted name isn't dangling.
-              <span className="inline-flex items-center gap-2">
-                <ServiceIcon slug={createdKey.catalogSlug} size="sm" />
-                <span>
-                  Service{" "}
-                  <span className="text-muted-foreground">&ldquo;</span>
-                  {createdKey.serviceName}
-                  <span className="text-muted-foreground">&rdquo;</span>{" "}
-                  connected
-                </span>
-              </span>
-            ) : (
-              dialogTitle()
-            )}
-          </DialogTitle>
-          <DialogDescription>{dialogDescription()}</DialogDescription>
-        </DialogHeader>
-
+        {/* No DialogHeader here on purpose: each step body renders its own
+            <StepHeader>, which owns the real DialogTitle/DialogDescription.
+            That keeps the title visually attached to the content it
+            introduces instead of sitting above it across DialogContent's
+            gap-4, and leaves exactly one heading in the a11y tree. */}
+        {step === "catalog" && (
+          <StepHeader
+            title={isReconnect ? "Reconnect Service" : "Add AI Service"}
+            description={
+              isReconnect
+                ? "Restart authentication for this existing service."
+                : "Pick from the catalog or create a custom endpoint."
+            }
+          />
+        )}
         {step === "catalog" && (
           <OwnerPicker value={targetOrgId} onChange={setTargetOrgId} />
         )}
