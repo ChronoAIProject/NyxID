@@ -457,9 +457,16 @@ export class AevatarAssistantTransport implements AssistantTransport {
         },
       );
       if (!response.ok || !response.body) {
+        // A 401/403 here means aevatar rejected the forwarded identity, not
+        // that the NyxID session died — this raw fetch never touches auth
+        // state, so it cannot trigger a sign-out. Surface an auth-specific
+        // message rather than a bare status so the failed turn is legible.
+        const unauthorized = response.status === 401 || response.status === 403;
         this.finishTurn(conversationId, run, "failed", {
-          code: `http_${String(response.status)}`,
-          message: "The assistant stream could not be started.",
+          code: unauthorized ? "unauthorized" : `http_${String(response.status)}`,
+          message: unauthorized
+            ? "NyxID could not authenticate you to the chat backend. You are still signed in — reconnect the aevatar service and try again."
+            : "The assistant stream could not be started.",
         });
         return;
       }

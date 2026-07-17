@@ -354,6 +354,24 @@ describe("AevatarAssistantTransport", () => {
     ).toBe("http_409");
   });
 
+  it("gives a stream 401 an auth-specific code and message, not a bare status", async () => {
+    stubFetch(routeCreate, (url, init) =>
+      url.endsWith("/stream") && init?.method === "POST"
+        ? jsonResponse({ error: "unauthorized" }, 401)
+        : undefined,
+    );
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    const events = await collectTurn(transport, "Hello");
+
+    const terminal = events[events.length - 1];
+    const error =
+      terminal?.event === "turn.completed" ? terminal.error : undefined;
+    expect(error?.code).toBe("unauthorized");
+    expect(error?.message).toContain("still signed in");
+  });
+
   it("settles open blocks and the turn on cancel", async () => {
     // A stream that emits the message start then stays open forever.
     const openStream = new ReadableStream<Uint8Array>({

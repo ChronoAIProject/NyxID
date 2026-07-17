@@ -157,11 +157,12 @@ export function useWorkspaceCounts() {
 const TRANSPORT_TOAST_ID = "assistant-transport-unavailable";
 
 /**
- * Chat reaches aevatar through `/proxy/s/aevatar`, which passes the DOWNSTREAM's
- * status straight through. A 401 there means aevatar rejected the identity
- * NyxID forwarded — the NyxID session itself is fine — so the transport opts
- * those requests out of the global sign-out (`preserveSessionOn401` in
- * aevatar-transport) and the route stays put. Without a toast that failure is
+ * Chat reaches aevatar through NyxID's `/api/v1/assistant/*` pass-through, which
+ * forwards the DOWNSTREAM's status straight through. A 401 there means aevatar
+ * rejected the identity NyxID forwarded — the NyxID session itself is fine — so
+ * the transport opts those requests out of the global sign-out
+ * (`preserveSessionOn401` in aevatar-transport) and the route stays put.
+ * Without a toast that failure is
  * invisible: the sidebar just renders empty, which reads as "no chats yet"
  * rather than "chat is down".
  */
