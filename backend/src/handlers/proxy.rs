@@ -910,7 +910,11 @@ pub async fn proxy_request_by_slug_root(
 /// it here would record a "routed via personal" attribution even for
 /// requests that never resolved a target (e.g. disconnected service,
 /// missing credential). See ChronoAIProject/NyxID#423.
-async fn execute_proxy(
+/// Forward a request to a `DownstreamService` by catalog id (the
+/// admin/master-credential path). Exposed for the assistant
+/// pass-through, which must resolve the admin service and must not fall
+/// back to a caller-owned `UserService` -- see `services::assistant_service`.
+pub(crate) async fn execute_proxy(
     state: &AppState,
     auth_user: &AuthUser,
     service_id: &str,

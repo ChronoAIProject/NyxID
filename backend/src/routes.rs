@@ -1019,8 +1019,40 @@ pub fn build_router(
         .layer(middleware::from_fn(reject_delegated_tokens))
         .layer(middleware::from_fn(reject_relay_tokens));
 
+    // Assistant chat pass-through (PRD decision 4): the browser calls these
+    // NyxID routes with its session cookie and NyxID forwards to the
+    // admin-managed Aevatar service with a server-derived scope. Mounted in
+    // the human-only router below: the chat surface -- approvals above all --
+    // is a human session surface, so API-key, service-account, delegated, and
+    // relay callers are rejected by that router's layers.
+    let assistant_routes = Router::new()
+        .route(
+            "/conversations",
+            post(handlers::assistant::create_conversation)
+                .get(handlers::assistant::list_conversations),
+        )
+        .route(
+            "/conversations/{conversation_id}",
+            get(handlers::assistant::get_history).delete(handlers::assistant::delete_conversation),
+        )
+        .route(
+            "/conversations/{conversation_id}/stream",
+            post(handlers::assistant::stream_turn),
+        )
+        .route(
+            "/conversations/{conversation_id}/approve",
+            post(handlers::assistant::decide_approval),
+        )
+        .route("/completions", post(handlers::assistant::completions))
+        .route("/workflow-chat", post(handlers::assistant::workflow_chat))
+        .route(
+            "/workflow-chat/ws",
+            get(handlers::assistant::workflow_chat_ws),
+        );
+
     // Routes that BLOCK service account tokens (human-only endpoints)
     let api_v1_human_only = Router::new()
+        .nest("/assistant", assistant_routes)
         .nest("/auth", auth_routes)
         .route(
             "/devices/code/approve",
