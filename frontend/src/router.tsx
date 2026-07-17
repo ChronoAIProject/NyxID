@@ -16,7 +16,6 @@ import { BillingRouteGuard } from "@/components/billing-route-guard";
 import { useAuthStore } from "@/stores/auth-store";
 import { hasAdminRead } from "@/types/api";
 import { shouldRedirectFromBilling } from "@/lib/billing-availability";
-import { resolveAssistantEntry } from "@/lib/assistant-availability";
 import { normalizeAdminOAuthClientSearch } from "@/lib/admin-oauth-clients";
 
 import {
@@ -259,18 +258,15 @@ const sshTerminalRoute = createRoute({
 // dashboardLayout.beforeLoad below; the Assistant shell intentionally lives
 // outside DashboardLayout.
 //
-// This beforeLoad is the ONLY flag gate for the assistant surface. It blocks
-// the route transition until the decision is made, so the previous page stays
-// on screen and an admitted page is never yanked away afterwards. Do not add
-// a reactive component-level guard on top: one existed and raced the auth
-// store (boot `checkAuth`, transient 401 `setUser(null)`) — it blanked and
-// bounced users whose permission simply hadn't loaded yet.
+// The assistant surface is deliberately not flag-gated here: both a reactive
+// component guard and a server-verified beforeLoad gate raced the auth store
+// (boot `checkAuth`, transient 401 `setUser(null)`) and bounced users whose
+// permission had simply not loaded yet. Reachability is nav-level only (the
+// sidebar link honours the flag) and the backend authorizes every API call.
 const assistantBeforeLoad = async ({
   location,
-  cause,
 }: {
   location: { pathname: string; searchStr: string };
-  cause: "preload" | "enter" | "stay";
 }) => {
   if (import.meta.env.DEV) {
     const { isMockMode, getMockUser } = await import("./lib/mock-data");
@@ -279,32 +275,15 @@ const assistantBeforeLoad = async ({
       if (!store.user) {
         store.setUser(getMockUser() as import("./types/api").User);
       }
+      return;
     }
   }
 
-  // `enter`/`preload` verify the flag against the server; `stay` re-runs
-  // (`?c=` conversation switches, invalidations) decide from the settled
-  // store snapshot without a network round trip. Decision semantics — incl.
-  // the sign-out-wins ordering for a session cleared mid-fetch — live in
-  // resolveAssistantEntry, where they are unit-tested.
-  const decision = await resolveAssistantEntry({
-    cause,
-    getAuth: () => useAuthStore.getState(),
-    applyUser: (user) => {
-      useAuthStore.getState().setUser(user);
-    },
-  });
-
-  if (decision === "redirect-login") {
+  const { isAuthenticated, isLoading } = useAuthStore.getState();
+  if (!isAuthenticated && !isLoading) {
     const returnPath = `${location.pathname}${location.searchStr}`;
     const returnTo = `${window.location.origin}${returnPath}`;
     window.location.assign(`/login?return_to=${encodeURIComponent(returnTo)}`);
-    return;
-  }
-  if (decision === "redirect-dashboard") {
-    // `replace` so the guarded /assistant entry never lingers in history —
-    // pressing Back from /dashboard must not re-enter the redirect loop.
-    throw redirect({ to: "/dashboard", replace: true });
   }
 };
 
