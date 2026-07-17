@@ -165,6 +165,32 @@ describe("401 auth state handling", () => {
     expect(mockSetUser).toHaveBeenCalledWith(null);
   });
 
+  it("does not clear auth state on 401 when preserveSessionOn401 is set", async () => {
+    // Page-scoped integrations (the /assistant transport calling aevatar
+    // through the proxy) opt out per request: a 401 there is the downstream
+    // rejecting the request, not the NyxID session dying, and must surface
+    // as a normal error instead of signing the user out.
+    mockFetch.mockResolvedValueOnce(
+      errorResponse(401, -1, "Downstream rejected the request"),
+    );
+    await expect(
+      apiClient("/proxy/s/aevatar/api/scopes/abc/nyxid-chat/conversations", {
+        preserveSessionOn401: true,
+      }),
+    ).rejects.toThrow(ApiError);
+    expect(mockSetUser).not.toHaveBeenCalled();
+  });
+
+  it("still clears auth state on 401 for requests without the opt-out", async () => {
+    // The opt-out is per request, not per path: the same proxy endpoint
+    // without the flag keeps the strict global behavior.
+    mockFetch.mockResolvedValueOnce(errorResponse(401, 1001, "Unauthorized"));
+    await expect(
+      apiClient("/proxy/s/aevatar/api/scopes/abc/nyxid-chat/conversations"),
+    ).rejects.toThrow(ApiError);
+    expect(mockSetUser).toHaveBeenCalledWith(null);
+  });
+
   it("does not clear auth state for auth endpoints", async () => {
     const authEndpoints = [
       "/auth/login",

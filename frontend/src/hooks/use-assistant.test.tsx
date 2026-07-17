@@ -2,8 +2,10 @@ import { act, renderHook } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { PropsWithChildren } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ApiError } from "@/lib/api-client";
 import { resetAssistantTransport } from "@/lib/assistant/transport";
 import {
+  describeTransportError,
   useAssistantTurn,
   useCancelTurn,
   useConversation,
@@ -216,4 +218,27 @@ describe("assistant hooks", () => {
       queryClient.clear();
     },
   );
+});
+
+describe("describeTransportError", () => {
+  // A downstream 401 from `/proxy/s/aevatar` means aevatar rejected the
+  // forwarded identity, NOT that the NyxID session died. The copy must say
+  // "you are still signed in" — the whole point of the fix is that we no
+  // longer bounce to /login here.
+  it("explains a downstream 401 without implying the session died", () => {
+    const { message, description } = describeTransportError(
+      new ApiError(401, {
+        error: "unknown_error",
+        error_code: -1,
+        message: "Request failed with status 401",
+      }),
+    );
+    expect(message).toBe("Assistant chat is unavailable");
+    expect(description).toContain("still signed in");
+  });
+
+  it("falls back to a generic message for non-401 failures", () => {
+    const { message } = describeTransportError(new Error("network down"));
+    expect(message).toBe("Could not load your chats");
+  });
 });
