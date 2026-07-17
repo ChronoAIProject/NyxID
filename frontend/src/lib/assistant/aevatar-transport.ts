@@ -420,6 +420,9 @@ export class AevatarAssistantTransport implements AssistantTransport {
     this.conversations.set(id, {
       conversation,
       turnState: existing?.turnState ?? EMPTY_TURN_STATE,
+      // Reprojection must not re-mint the run-session id: one session per
+      // conversation is the reference contract.
+      sessionId: existing?.sessionId,
     });
   }
 
@@ -458,6 +461,9 @@ export class AevatarAssistantTransport implements AssistantTransport {
         activeTurn: existing?.turnState.activeTurn ?? null,
         lastCursor: existing?.turnState.lastCursor ?? 0,
       },
+      // Post-turn history reloads run through here; losing the session id
+      // would silently start a new upstream run-session every turn.
+      sessionId: existing?.sessionId,
     };
     this.conversations.set(conversationId, stored);
     return stored;

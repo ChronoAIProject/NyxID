@@ -233,6 +233,12 @@ export interface SentMessage {
   readonly handle: TurnHandle;
 }
 
+// Single-flight guard for the empty-state auto-create: two sends racing in
+// before React commits the disabled/sending state must share ONE created
+// conversation (the second is then rejected by the active-turn guard)
+// instead of allocating two actors and streaming into both.
+let pendingAutoCreate: Promise<Conversation> | null = null;
+
 /**
  * Send a message into the bound conversation — or, when no conversation is
  * selected (the "New chat" empty state), create one first and send there.
@@ -246,7 +252,12 @@ export function useSendMessage(conversationId: string | undefined) {
     mutationFn: async (content: string): Promise<SentMessage> => {
       let target = conversationId;
       if (!target) {
-        const conversation = await assistantTransport.createConversation();
+        pendingAutoCreate ??= assistantTransport
+          .createConversation()
+          .finally(() => {
+            pendingAutoCreate = null;
+          });
+        const conversation = await pendingAutoCreate;
         target = conversation.id;
         await projectTransportState(queryClient, target);
       }
@@ -270,6 +281,18 @@ export function useSendMessage(conversationId: string | undefined) {
           }
           if (event.event === "turn.completed") {
             activeHandles.delete(targetId);
+            // The mutation resolved when the stream STARTED, so failures
+            // after that (pre-SSE rejection, truncated stream, RUN_ERROR)
+            // never reject `mutateAsync` — without this toast they exist
+            // only as cached turn state nothing renders, and the chat
+            // looks dead again. Stable id: at-least-once event delivery
+            // must not stack duplicates.
+            if (event.status === "failed" && event.error) {
+              toast.error("The assistant reply failed", {
+                id: `assistant-turn-failed-${event.turn_id}`,
+                description: event.error.message,
+              });
+            }
           }
           void projectTransportState(queryClient, targetId);
         },

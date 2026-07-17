@@ -666,12 +666,51 @@ describe("captured production wire shapes", () => {
     );
   });
 
-  it("keeps one sessionId per conversation across turns", async () => {
-    const fetchMock = stubFetch(routeCreate, routeStream(OBSERVED_FRAMES));
+  it("keeps one sessionId per conversation across turns and reprojection", async () => {
+    // Between turns, the real hook reloads history and the conversation
+    // list (`projectTransportState`), both of which rebuild the stored
+    // conversation — the session id must survive that, not just the
+    // straight-line two-sends case.
+    const fetchMock = stubFetch(
+      routeCreate,
+      routeStream(OBSERVED_FRAMES),
+      (url, init) =>
+        url === `${ASSISTANT_BASE}/conversations` &&
+        (init?.method ?? "GET") === "GET"
+          ? jsonResponse({
+              conversations: [
+                {
+                  id: CONVERSATION_ID,
+                  title: "Say hello",
+                  updatedAt: "2026-07-17T03:05:00+00:00",
+                  messageCount: 1,
+                },
+              ],
+            })
+          : undefined,
+      routeHistory([
+        {
+          id: "t1:user",
+          role: "user",
+          content: "First turn",
+          timestamp: 1784192889074,
+        },
+        {
+          id: "t1:assistant",
+          role: "assistant",
+          content: "Hello, hope your day shines.",
+          timestamp: 1784192899074,
+        },
+      ]),
+    );
     const transport = new AevatarAssistantTransport();
     await transport.createConversation();
 
     await collectTurn(transport, "First turn");
+    // Post-turn reprojection: server history (equal length) replaces the
+    // local mirror; the list merge rebuilds the conversation row.
+    await transport.getHistory(CONVERSATION_ID);
+    await transport.listConversations();
     await collectTurn(transport, "Second turn");
 
     const sessionIds = fetchMock.mock.calls

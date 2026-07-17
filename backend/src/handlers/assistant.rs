@@ -21,7 +21,7 @@ use axum::{
     Json,
     body::{Body, to_bytes},
     extract::{Path, State},
-    http::{Method, Request, StatusCode},
+    http::{HeaderValue, Method, Request, StatusCode, header},
     response::{IntoResponse, Response},
 };
 
@@ -36,6 +36,25 @@ use crate::services::assistant_service;
 const MAX_CREATE_RESPONSE_BYTES: usize = 64 * 1024;
 /// The actor index is bare `{actorId}` rows (~60 bytes each).
 const MAX_INDEX_RESPONSE_BYTES: usize = 512 * 1024;
+
+/// Server-initiated upstream request derived from a caller request (the
+/// materialization polls, the history half of the composite delete).
+///
+/// Carries the caller's `Authorization` so a `forward_access_token`
+/// service treats the derived call exactly like the original — without it,
+/// Bearer callers would see their polls 401 and their composite delete
+/// fail halfway while the row config still forwards tokens. Everything
+/// else (cookies, client metadata) is intentionally absent.
+fn synthetic_request(
+    method: Method,
+    authorization: Option<&HeaderValue>,
+) -> Result<Request<Body>, axum::http::Error> {
+    let mut builder = Request::builder().method(method).uri("/");
+    if let Some(value) = authorization {
+        builder = builder.header(header::AUTHORIZATION, value.clone());
+    }
+    builder.body(Body::empty())
+}
 
 /// Resolve the admin-managed Aevatar service and forward `path` to it.
 ///
@@ -78,6 +97,7 @@ pub async fn create_conversation(
     request: Request<Body>,
 ) -> AppResult<Response> {
     let user_id = auth_user.user_id.to_string();
+    let authorization = request.headers().get(header::AUTHORIZATION).cloned();
     let path = assistant_service::conversations_path(&user_id);
     let response = forward(&state, &auth_user, path, request).await?;
     if !response.status().is_success() {
@@ -97,7 +117,14 @@ pub async fn create_conversation(
         .and_then(assistant_service::extract_actor_id)
         .map(str::to_owned)
     {
-        wait_for_conversation_materialization(&state, &auth_user, &user_id, &actor_id).await;
+        wait_for_conversation_materialization(
+            &state,
+            &auth_user,
+            &user_id,
+            &actor_id,
+            authorization.as_ref(),
+        )
+        .await;
     }
     Ok(Response::from_parts(parts, Body::from(bytes)))
 }
@@ -111,13 +138,10 @@ async fn wait_for_conversation_materialization(
     auth_user: &AuthUser,
     user_id: &str,
     actor_id: &str,
+    authorization: Option<&HeaderValue>,
 ) {
     for attempt in 0..assistant_service::CREATE_POLL_ATTEMPTS {
-        let Ok(index_request) = Request::builder()
-            .method(Method::GET)
-            .uri("/")
-            .body(Body::empty())
-        else {
+        let Ok(index_request) = synthetic_request(Method::GET, authorization) else {
             return;
         };
         let path = assistant_service::conversations_path(user_id);
@@ -178,6 +202,13 @@ pub async fn get_history(
 /// actor, and a cascaded actor delete may have already dropped the history
 /// row, so 404 from either side counts as done. Anything else propagates
 /// that upstream response unchanged.
+///
+/// Deliberate divergence from the reference BFF (which attempts both
+/// deletes even when the first hard-fails): a non-404 actor-delete failure
+/// short-circuits here so the conversation stays fully intact and
+/// retryable, instead of deleting the history row and leaving an orphaned
+/// actor that no list surface can show. Retrying converges either way
+/// (a half-gone actor answers 404 next time and the history delete runs).
 pub async fn delete_conversation(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -185,6 +216,7 @@ pub async fn delete_conversation(
     request: Request<Body>,
 ) -> AppResult<Response> {
     let user_id = auth_user.user_id.to_string();
+    let authorization = request.headers().get(header::AUTHORIZATION).cloned();
     let actor_path = assistant_service::conversation_path(&user_id, &conversation_id)?;
     let history_path = assistant_service::history_path(&user_id, &conversation_id)?;
 
@@ -193,11 +225,8 @@ pub async fn delete_conversation(
         return Ok(actor_response);
     }
 
-    let history_request = Request::builder()
-        .method(Method::DELETE)
-        .uri("/")
-        .body(Body::empty())
-        .map_err(|_| {
+    let history_request =
+        synthetic_request(Method::DELETE, authorization.as_ref()).map_err(|_| {
             AppError::Internal("assistant: failed to build the history delete request".to_string())
         })?;
     let history_response = forward(&state, &auth_user, history_path, history_request).await?;
@@ -283,4 +312,28 @@ pub async fn workflow_chat_ws(
         request,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn synthetic_requests_carry_the_callers_authorization() {
+        let value = HeaderValue::from_static("Bearer nyx_test_token");
+        let request = synthetic_request(Method::DELETE, Some(&value)).unwrap();
+        assert_eq!(request.method(), Method::DELETE);
+        assert_eq!(
+            request.headers().get(header::AUTHORIZATION),
+            Some(&HeaderValue::from_static("Bearer nyx_test_token"))
+        );
+    }
+
+    #[test]
+    fn synthetic_requests_without_authorization_stay_bare() {
+        let request = synthetic_request(Method::GET, None).unwrap();
+        assert_eq!(request.method(), Method::GET);
+        assert!(request.headers().get(header::AUTHORIZATION).is_none());
+        assert!(request.headers().get(header::COOKIE).is_none());
+    }
 }

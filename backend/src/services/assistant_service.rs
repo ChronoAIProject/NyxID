@@ -148,7 +148,7 @@ pub fn workflow_chat_ws_path() -> String {
 pub const CREATE_POLL_ATTEMPTS: u32 = 6;
 
 /// Delay before the next poll attempt (200ms, 300ms, ... capped by the
-/// attempt count; ~1.4s worst case).
+/// attempt count; ~2.0s of sleeps worst case, before network time).
 pub fn create_poll_delay_ms(attempt: u32) -> u64 {
     200 + u64::from(attempt) * 100
 }

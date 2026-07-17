@@ -10,15 +10,22 @@
  * unterminated remainder for the next read.
  *
  * Line endings are normalized for all three SSE-legal forms (`\r\n`, `\n`,
- * and bare `\r`). Normalizing a trailing `\r` that later turns out to be
- * half of a split `\r\n` is safe: the reassembled buffer still produces the
- * same `\n\n` frame boundary on the next drain.
+ * and bare `\r`). A trailing `\r` is held back undecided: it may be half of
+ * a `\r\n` split across network reads, and eagerly converting it to `\n`
+ * would fabricate a `\n\n` frame boundary when the matching `\n` arrives
+ * (splitting one multi-`data:`-line event into two payloads).
  */
 export function drainSseBuffer(buffer: string): {
   readonly payloads: string[];
   readonly rest: string;
 } {
-  const normalized = buffer.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  let working = buffer;
+  let heldCr = "";
+  if (working.endsWith("\r")) {
+    heldCr = "\r";
+    working = working.slice(0, -1);
+  }
+  const normalized = working.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
   const segments = normalized.split("\n\n");
   const rest = segments.pop() ?? "";
   const payloads: string[] = [];
@@ -30,7 +37,7 @@ export function drainSseBuffer(buffer: string): {
       .join("\n");
     if (data) payloads.push(data);
   }
-  return { payloads, rest };
+  return { payloads, rest: rest + heldCr };
 }
 
 /**

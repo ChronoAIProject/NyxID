@@ -24,6 +24,17 @@ describe("drainSseBuffer", () => {
     expect(rest).toBe("");
   });
 
+  it("does not split a multi-data-line event when a chunk ends inside a CRLF", () => {
+    // One event, two `data:` lines, network read ends right after the `\r`
+    // of the FIRST line's `\r\n`. Eagerly normalizing that trailing `\r`
+    // would fabricate a `\n\n` boundary and split the event in two.
+    const first = drainSseBuffer('data: {"part":\r');
+    expect(first.payloads).toEqual([]);
+    const second = drainSseBuffer(`${first.rest}\ndata: "two"}\r\n\r\n`);
+    expect(second.payloads).toEqual(['{"part":\n"two"}']);
+    expect(second.rest).toBe("");
+  });
+
   it("handles bare-CR framing, including a CRLF split across reads", () => {
     const lone = drainSseBuffer('data: {"a":1}\r\rdata: {"partial"');
     expect(lone.payloads).toEqual(['{"a":1}']);

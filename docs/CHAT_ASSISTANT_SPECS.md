@@ -46,7 +46,7 @@ Reference alignment pass against `eanz17/nyxid-chat` (latest: first-party
 sessions + proxy-only identity handling). Changes:
 
 - **Backend:** `POST /assistant/conversations` now waits for the created actor
-  to appear in the `nyxid-chat` actor index (bounded backoff, ~1.4s worst case,
+  to appear in the `nyxid-chat` actor index (bounded backoff, ~2.0s of sleeps worst case,
   best-effort — mirrors the reference `waitForConversation`) so an immediate
   first stream cannot race the async-202 materialization.
   `DELETE /assistant/conversations/{id}` is now the composite dual-delete
@@ -62,7 +62,7 @@ sessions + proxy-only identity handling). Changes:
   unterminated SSE frame is flushed; bare-`\r` framing normalized; every
   `:stream` body carries a per-conversation `sessionId` (optional upstream,
   reference-aligned).
-- **Reference-mandated aevatar row config** (README, nyxid-chat): 
+- **Reference-mandated aevatar row config** (README, nyxid-chat):
   `identity_propagation_mode:"jwt"`, `identity_jwt_audience:"urn:aevatar:api"`,
   `inject_delegation_token:true`, `forward_access_token:false`. Prod row drift
   as of 2026-07-17: audience empty, forward true, inject false — flip together
