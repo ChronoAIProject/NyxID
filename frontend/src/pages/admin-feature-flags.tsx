@@ -22,6 +22,9 @@ import {
   useClearAdminFeatureFlag,
   useSetAdminFeatureFlag,
 } from "@/hooks/use-admin-feature-flags";
+import type { AdminFeatureFlagTargetKind } from "@/schemas/admin-feature-flags";
+import { useAuthStore } from "@/stores/auth-store";
+import { canAdminWrite } from "@/types/api";
 
 type ScopeState = "inherit" | "enabled" | "disabled";
 type FlagKind = "experiment" | "entitlement" | "ops";
@@ -50,6 +53,8 @@ export function AdminFeatureFlagsPage() {
   const { data, isLoading, error } = useAdminFeatureFlags();
   const setOverride = useSetAdminFeatureFlag();
   const clearOverride = useClearAdminFeatureFlag();
+  const currentUser = useAuthStore((s) => s.user);
+  const canWrite = canAdminWrite(currentUser);
   const [drafts, setDrafts] = useState<Record<string, ScopeState>>({});
   const [search, setSearch] = useState("");
   const [openKeys, setOpenKeys] = useState<string[]>([]);
@@ -64,7 +69,12 @@ export function AdminFeatureFlagsPage() {
         : flag.global_override
           ? "enabled"
           : "disabled",
-    orgs: [],
+    // `?? []` tolerates a not-yet-redeployed backend that omits the field.
+    orgs: (flag.org_overrides ?? []).map((override) => ({
+      id: override.org_user_id,
+      label: orgOverrideLabel(override),
+      state: override.enabled ? "enabled" : "disabled",
+    })),
     users: flag.user_overrides.map((override) => ({
       id: override.user_id,
       label: userOverrideLabel(override),
@@ -98,8 +108,12 @@ export function AdminFeatureFlagsPage() {
       await Promise.all(
         pending.map(async ([key, scopeState]) => {
           const [flagKey = "", type = "global", id = ""] = key.split("\u001f");
-          const targetKind = type === "user" ? "user" : "global";
-          const targetKey = targetKind === "user" ? id : null;
+          // Exhaustive: an org draft must write an org-scoped override --
+          // silently widening it to a global write would flip the flag for
+          // the whole platform.
+          const targetKind: AdminFeatureFlagTargetKind =
+            type === "user" ? "user" : type === "org" ? "org" : "global";
+          const targetKey = targetKind === "global" ? null : id;
           if (scopeState === "inherit") {
             await clearOverride.mutateAsync({ flagKey, targetKind, targetKey });
           } else {
@@ -148,7 +162,7 @@ export function AdminFeatureFlagsPage() {
         description="Platform-wide feature rollout. Configure each flag globally, per organization, and per user."
       />
 
-      {pendingCount > 0 && (
+      {canWrite && pendingCount > 0 && (
         <div className="sticky top-2 z-10 flex items-center justify-between gap-3 rounded-lg border border-primary/40 bg-primary/10 px-3 py-2 shadow-sm backdrop-blur">
           <span className="text-[12px] font-medium">
             {pendingCount} unsaved change{pendingCount === 1 ? "" : "s"}
@@ -205,6 +219,7 @@ export function AdminFeatureFlagsPage() {
               flag={flag}
               open={isOpen(flag.key)}
               dirty={dirtyFlags.has(flag.key)}
+              canWrite={canWrite}
               onToggle={() => toggle(flag.key)}
               stateFor={(type, id) => stateFor(flag.key, type, id)}
               isPending={(type, id) =>
@@ -225,6 +240,7 @@ function FlagCard({
   flag,
   open,
   dirty,
+  canWrite,
   onToggle,
   stateFor,
   isPending,
@@ -235,6 +251,7 @@ function FlagCard({
   readonly flag: FlagRow;
   readonly open: boolean;
   readonly dirty: boolean;
+  readonly canWrite: boolean;
   readonly onToggle: () => void;
   readonly stateFor: (type: ScopeType, id: string) => ScopeState;
   readonly isPending: (type: ScopeType, id: string) => boolean;
@@ -242,19 +259,23 @@ function FlagCard({
   readonly stagedOrgs: readonly string[];
   readonly stagedUsers: readonly string[];
 }) {
-  const [addOrg, setAddOrg] = useState("");
-  const [stagedUserLabels, setStagedUserLabels] = useState<
-    Record<string, string>
-  >({});
+  const [stagedLabels, setStagedLabels] = useState<Record<string, string>>({});
 
   const orgIds = uniq([...flag.orgs.map((o) => o.id), ...stagedOrgs]);
   const userIds = uniq([...flag.users.map((u) => u.id), ...stagedUsers]);
-  const labelFor = (type: ScopeType, id: string) =>
-    type === "user"
-      ? flag.users.find((user) => user.id === id)?.label ??
-        stagedUserLabels[id] ??
-        id
-      : id;
+  const labelFor = (type: ScopeType, id: string) => {
+    const list = type === "user" ? flag.users : type === "org" ? flag.orgs : [];
+    return (
+      list.find((item) => item.id === id)?.label ??
+      stagedLabels[draftKey(flag.key, type, id)] ??
+      id
+    );
+  };
+  const rememberLabel = (type: ScopeType, id: string, label: string) =>
+    setStagedLabels((labels) => ({
+      ...labels,
+      [draftKey(flag.key, type, id)]: label,
+    }));
 
   // Collapsed summary pills: Global + configured orgs/users (non-inherit).
   const pills: {
@@ -341,40 +362,49 @@ function FlagCard({
               label="All users (rollout / killswitch)"
               state={stateFor("global", "")}
               pending={isPending("global", "")}
+              disabled={!canWrite}
               onChange={(s) => stage("global", "", s)}
             />
           </Group>
 
           <Group label="By organization">
-            <AddPicker
-              value={addOrg}
-              placeholder="Manage overrides from the organization page"
-              options={[]}
-              onPick={setAddOrg}
-              disabledReason="Organization-scoped overrides are managed from each organization page."
-            />
+            {canWrite && (
+              <AccountSearchPicker
+                userType="org"
+                placeholder="Search organizations by name…"
+                ariaLabel="Search organizations by name"
+                excludedIds={orgIds}
+                onPick={(org) => {
+                  rememberLabel("org", org.id, org.label);
+                  stage("org", org.id, "enabled");
+                }}
+              />
+            )}
             {orgIds.map((id) => (
               <ScopeRow
                 key={id}
                 label={labelFor("org", id)}
                 state={stateFor("org", id)}
                 pending={isPending("org", id)}
+                disabled={!canWrite}
                 onChange={(s) => stage("org", id, s)}
               />
             ))}
           </Group>
 
           <Group label="By user">
-            <UserSearchPicker
-              excludedIds={userIds}
-              onPick={(user) => {
-                setStagedUserLabels((labels) => ({
-                  ...labels,
-                  [user.id]: user.label,
-                }));
-                stage("user", user.id, "enabled");
-              }}
-            />
+            {canWrite && (
+              <AccountSearchPicker
+                userType="person"
+                placeholder="Search users by email…"
+                ariaLabel="Search users by email"
+                excludedIds={userIds}
+                onPick={(user) => {
+                  rememberLabel("user", user.id, user.label);
+                  stage("user", user.id, "enabled");
+                }}
+              />
+            )}
             {userIds.map((id) => {
               const assignment = flag.users.find((user) => user.id === id);
               const label = labelFor("user", id);
@@ -387,6 +417,7 @@ function FlagCard({
                     label={label}
                     state={stateFor("user", id)}
                     pending={isPending("user", id)}
+                    disabled={!canWrite}
                     onChange={(state) => stage("user", id, state)}
                   />
                 </div>
@@ -422,12 +453,18 @@ function SummaryPill({ pill }: { readonly pill: SummaryPillValue }) {
   );
 }
 
-function UserSearchPicker({
+function AccountSearchPicker({
+  userType,
+  placeholder,
+  ariaLabel,
   excludedIds,
   onPick,
 }: {
+  readonly userType: "person" | "org";
+  readonly placeholder: string;
+  readonly ariaLabel: string;
   readonly excludedIds: readonly string[];
-  readonly onPick: (user: { id: string; label: string }) => void;
+  readonly onPick: (account: { id: string; label: string }) => void;
 }) {
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
@@ -442,11 +479,16 @@ function UserSearchPicker({
     1,
     20,
     debouncedSearch || undefined,
+    userType,
   );
   const waitingForSearch = normalizedSearch !== debouncedSearch;
   const results = debouncedSearch && !waitingForSearch
     ? (data?.users ?? []).filter((user) => !excludedIds.includes(user.id))
     : [];
+  const primary = (user: (typeof results)[number]) =>
+    userType === "org" ? user.display_name ?? user.email : user.email;
+  const secondary = (user: (typeof results)[number]) =>
+    userType === "org" ? user.slug ?? user.id : user.id;
 
   return (
     <div className="space-y-2 border-b border-border/40 px-3 py-2 last:border-b-0">
@@ -455,8 +497,8 @@ function UserSearchPicker({
         <Input
           value={search}
           onChange={(event) => setSearch(event.target.value)}
-          placeholder="Search users by email…"
-          aria-label="Search users by email"
+          placeholder={placeholder}
+          aria-label={ariaLabel}
           className="h-8 pl-8 text-[12px]"
         />
       </div>
@@ -466,7 +508,9 @@ function UserSearchPicker({
             <p className="px-3 py-2 text-xs text-muted-foreground">Searching…</p>
           ) : results.length === 0 ? (
             <p className="px-3 py-2 text-xs text-muted-foreground">
-              No users match this search.
+              {userType === "org"
+                ? "No organizations match this search."
+                : "No users match this search."}
             </p>
           ) : (
             results.map((user) => (
@@ -474,15 +518,17 @@ function UserSearchPicker({
                 key={user.id}
                 type="button"
                 onClick={() => {
-                  onPick({ id: user.id, label: user.email });
+                  onPick({ id: user.id, label: primary(user) });
                   setSearch("");
                   setDebouncedSearch("");
                 }}
                 className="block w-full border-b border-border/40 px-3 py-2 text-left text-xs last:border-b-0 hover:bg-muted/50"
               >
-                <span className="block truncate font-medium">{user.email}</span>
+                <span className="block truncate font-medium">
+                  {primary(user)}
+                </span>
                 <span className="block truncate text-muted-foreground">
-                  {user.id}
+                  {secondary(user)}
                 </span>
               </button>
             ))
@@ -530,53 +576,17 @@ function Group({
   );
 }
 
-function AddPicker({
-  value,
-  placeholder,
-  options,
-  onPick,
-  disabledReason,
-}: {
-  readonly value: string;
-  readonly placeholder: string;
-  readonly options: readonly { id: string; label: string }[];
-  readonly onPick: (id: string) => void;
-  readonly disabledReason?: string;
-}) {
-  return (
-    <div
-      className="border-b border-border/40 px-3 py-2 last:border-b-0"
-      title={disabledReason}
-    >
-      <Select
-        value={value}
-        onValueChange={onPick}
-        disabled={Boolean(disabledReason) || options.length === 0}
-      >
-        <SelectTrigger className="h-8 w-full text-[12px]">
-          <SelectValue placeholder={placeholder} />
-        </SelectTrigger>
-        <SelectContent>
-          {options.map((o) => (
-            <SelectItem key={o.id} value={o.id}>
-              {o.label}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-    </div>
-  );
-}
-
 function ScopeRow({
   label,
   state,
   pending,
+  disabled = false,
   onChange,
 }: {
   readonly label: string;
   readonly state: ScopeState;
   readonly pending: boolean;
+  readonly disabled?: boolean;
   readonly onChange: (s: ScopeState) => void;
 }) {
   return (
@@ -598,7 +608,11 @@ function ScopeRow({
         />
         {label}
       </span>
-      <Select value={state} onValueChange={(s) => onChange(s as ScopeState)}>
+      <Select
+        value={state}
+        disabled={disabled}
+        onValueChange={(s) => onChange(s as ScopeState)}
+      >
         <SelectTrigger className="h-7 w-[120px] text-[12px]" aria-label={label}>
           <SelectValue />
         </SelectTrigger>
@@ -647,4 +661,16 @@ function userOverrideLabel(override: {
     return `${displayName} (${override.user_email})`;
   }
   return displayName || override.user_email || override.user_id;
+}
+
+function orgOverrideLabel(override: {
+  readonly org_user_id: string;
+  readonly org_display_name: string | null;
+  readonly org_slug: string | null;
+}): string {
+  const displayName = override.org_display_name?.trim();
+  if (displayName && override.org_slug) {
+    return `${displayName} (${override.org_slug})`;
+  }
+  return displayName || override.org_slug || override.org_user_id;
 }

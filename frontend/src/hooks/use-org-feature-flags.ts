@@ -37,6 +37,9 @@ function invalidate(
   void queryClient.invalidateQueries({
     queryKey: orgsQueryKeys.detail(orgId),
   });
+  // Org grants feed the personal-surface resolution on /users/me too
+  // (sidebar, /assistant guard) — refetch it so those update live.
+  void queryClient.invalidateQueries({ queryKey: ["user"] });
 }
 
 /** Upsert one override (org / role / user scope) for a flag. */

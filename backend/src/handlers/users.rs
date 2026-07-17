@@ -28,9 +28,11 @@ pub struct ProfileConfigResponse {
 #[derive(Debug, Serialize)]
 pub struct UserCapabilitiesResponse {
     pub billing_available: bool,
-    /// Feature-flag keys enabled for this user in the personal (non-org)
-    /// context, resolved server-side (per-user personal > global > code
-    /// default). Org surfaces use `OrgResponse.enabled_features` instead.
+    /// Feature-flag keys enabled for this user on personal (non-org)
+    /// surfaces, resolved server-side. Grant-union: personal per-user
+    /// override wins; otherwise (global > code default) OR any active org
+    /// membership's grant. Org-scoped pages still use
+    /// `OrgResponse.enabled_features` for that org's own context.
     pub enabled_features: Vec<String>,
 }
 
@@ -96,8 +98,8 @@ pub async fn get_me(
     let platform_role = role_service::resolve_platform_role(&state.db, &user_model).await?;
     let role = platform_role.as_str().to_string();
     let (is_admin, is_operator) = platform_role.legacy_flags();
-    // Personal (non-org) feature-flag resolution — so users with zero orgs
-    // still receive their enabled flags.
+    // Personal-surface feature-flag resolution: org-aware grant-union, so an
+    // org-wide enable reaches its members here (sidebar, /assistant guard).
     let enabled_features =
         crate::services::feature_flag_service::resolve_personal_features(&state.db, &user_id)
             .await?;

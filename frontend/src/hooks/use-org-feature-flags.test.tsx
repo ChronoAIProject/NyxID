@@ -99,4 +99,29 @@ describe("feature-flag mutations", () => {
       "/orgs/org-1/feature-flags/example_ui?target_kind=org",
     );
   });
+
+  it("invalidates the /users/me query so personal-surface gates update live", async () => {
+    // Org grants feed personal resolution (sidebar, /assistant guard); a
+    // toggle that skips this invalidation regresses to hard-reload-only.
+    mockPut.mockResolvedValue({});
+    const queryClient = new QueryClient({
+      defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+    });
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+    function Wrapper({ children }: PropsWithChildren) {
+      return (
+        <QueryClientProvider client={queryClient}>
+          {children}
+        </QueryClientProvider>
+      );
+    }
+    const { result } = renderHook(() => useSetOrgFeatureFlag("org-1"), {
+      wrapper: Wrapper,
+    });
+    await result.current.mutateAsync({
+      flagKey: "example_ui",
+      body: { target_kind: "org", target_value: null, enabled: true },
+    });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["user"] });
+  });
 });

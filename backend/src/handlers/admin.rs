@@ -26,6 +26,9 @@ pub struct UserListQuery {
     pub page: Option<u64>,
     pub per_page: Option<u64>,
     pub search: Option<String>,
+    /// Optional account-type filter: `"person"` or `"org"`. Org rows power
+    /// the platform-admin feature-flag org picker.
+    pub user_type: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -56,6 +59,9 @@ pub struct AdminUserItem {
     /// Resolved platform role: `"admin"`, `"operator"`, or `"user"`.
     pub role: String,
     pub mfa_enabled: bool,
+    /// `"person"` or `"org"`.
+    pub user_type: String,
+    pub slug: Option<String>,
     pub created_at: String,
     pub last_login_at: Option<String>,
 }
@@ -223,6 +229,13 @@ fn user_to_admin_item(u: User, platform_role: PlatformRole) -> AdminUserItem {
         is_operator,
         role,
         mfa_enabled: u.mfa_enabled,
+        user_type: if u.user_type.is_org() {
+            "org"
+        } else {
+            "person"
+        }
+        .to_string(),
+        slug: u.slug,
         created_at: u.created_at.to_rfc3339(),
         last_login_at: u.last_login_at.map(|t| t.to_rfc3339()),
     }
@@ -312,13 +325,35 @@ pub async fn list_users(
     let per_page = query.per_page.unwrap_or(50).min(100);
     let offset = (page - 1) * per_page;
 
-    let filter = match query.search.as_deref() {
-        Some(s) if !s.is_empty() => {
-            let escaped = regex::escape(s);
-            doc! { "email": { "$regex": &escaped, "$options": "i" } }
+    let mut filter = doc! {};
+    match query.user_type.as_deref() {
+        None => {}
+        Some(t @ ("person" | "org")) => {
+            filter.insert("user_type", t);
         }
-        _ => doc! {},
-    };
+        Some(other) => {
+            return Err(AppError::BadRequest(format!(
+                "invalid user_type '{other}'; expected person or org"
+            )));
+        }
+    }
+    if let Some(s) = query.search.as_deref().filter(|s| !s.is_empty()) {
+        let escaped = regex::escape(s);
+        let pattern = doc! { "$regex": &escaped, "$options": "i" };
+        if query.user_type.as_deref() == Some("org") {
+            // Orgs are found by name/slug, not just their (often synthetic) email.
+            filter.insert(
+                "$or",
+                vec![
+                    doc! { "display_name": pattern.clone() },
+                    doc! { "slug": pattern.clone() },
+                    doc! { "email": pattern },
+                ],
+            );
+        } else {
+            filter.insert("email", pattern);
+        }
+    }
 
     let total = state
         .db
@@ -1788,6 +1823,8 @@ mod tests {
             is_operator: true,
             role: "operator".to_string(),
             mfa_enabled: false,
+            user_type: "person".to_string(),
+            slug: None,
             created_at: "2024-01-01T00:00:00+00:00".to_string(),
             last_login_at: None,
         };
@@ -1797,6 +1834,8 @@ mod tests {
         assert!(json["is_operator"].as_bool().unwrap());
         assert!(!json["is_admin"].as_bool().unwrap());
         assert!(json["last_login_at"].is_null());
+        assert_eq!(json["user_type"], "person");
+        assert!(json["slug"].is_null());
     }
 
     #[test]
@@ -2032,6 +2071,7 @@ mod operator_route_tests {
                 page: None,
                 per_page: None,
                 search: None,
+                user_type: None,
             }),
         )
         .await
