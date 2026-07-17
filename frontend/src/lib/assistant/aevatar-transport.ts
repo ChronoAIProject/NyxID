@@ -1,6 +1,6 @@
 import { apiClient } from "@/lib/api-client";
 import { AssistantTurnActiveError } from "@/lib/assistant/errors";
-import { drainSseBuffer } from "@/lib/assistant/sse";
+import { drainSseBuffer, flushSseBuffer } from "@/lib/assistant/sse";
 import {
   applyTurnEvent,
   EMPTY_TURN_STATE,
@@ -97,6 +97,12 @@ interface AevatarHistoryEntry {
 interface StoredConversation {
   conversation: Conversation;
   turnState: TurnReducerState;
+  /**
+   * Aevatar run-session correlation id, minted once per conversation and
+   * sent on every `:stream` body (the reference client keeps one session
+   * per conversation; the field is optional upstream).
+   */
+  sessionId?: string;
 }
 
 interface RunningTurn {
@@ -146,6 +152,54 @@ function deriveTitle(messages: AssistantMessage[]): string | null {
     return null;
   }
   return firstText.text.trim().slice(0, 40);
+}
+
+/**
+ * Map a pre-stream rejection to a turn error. Errors before the SSE stream
+ * starts arrive as a JSON envelope — NyxID's `{error, error_code, message}`
+ * or Aevatar's `{code, message}` — and must not collapse to a bare
+ * `http_<status>`. A 401/403 here means the downstream rejected the
+ * identity NyxID forwarded, not that the NyxID session died — this raw
+ * fetch never touches auth state, so it cannot trigger a sign-out; the
+ * copy says so explicitly.
+ */
+function streamStartError(
+  status: number,
+  bodyText: string,
+): { code: string; message: string } {
+  interface ErrorEnvelope {
+    readonly error?: unknown;
+    readonly code?: unknown;
+    readonly message?: unknown;
+  }
+  let envelope: ErrorEnvelope | null = null;
+  try {
+    envelope = JSON.parse(bodyText) as ErrorEnvelope;
+  } catch {
+    envelope = null;
+  }
+  const envelopeCode =
+    typeof envelope?.code === "string" && envelope.code
+      ? envelope.code
+      : typeof envelope?.error === "string" && envelope.error
+        ? envelope.error
+        : null;
+  const envelopeMessage =
+    typeof envelope?.message === "string" && envelope.message.trim()
+      ? envelope.message
+      : null;
+  if (status === 401 || status === 403) {
+    return {
+      code: envelopeCode ?? "unauthorized",
+      message:
+        "NyxID could not authenticate you to the chat backend. You are still signed in — reconnect the aevatar service and try again.",
+    };
+  }
+  return {
+    code: envelopeCode ?? `http_${String(status)}`,
+    message:
+      envelopeMessage ?? "The assistant stream could not be started.",
+  };
 }
 
 /**
@@ -441,6 +495,8 @@ export class AevatarAssistantTransport implements AssistantTransport {
     prompt: string,
   ): Promise<void> {
     try {
+      const stored = this.conversations.get(conversationId);
+      const sessionId = stored && (stored.sessionId ??= crypto.randomUUID());
       // Hand-rolled fetch (not `apiClient`): the response is an SSE stream,
       // and the endpoint 415s without an explicit JSON content type.
       const response = await fetch(
@@ -452,15 +508,18 @@ export class AevatarAssistantTransport implements AssistantTransport {
             Accept: "text/event-stream",
           },
           credentials: "include",
-          body: JSON.stringify({ prompt }),
+          body: JSON.stringify(sessionId ? { prompt, sessionId } : { prompt }),
           signal: run.controller.signal,
         },
       );
       if (!response.ok || !response.body) {
-        this.finishTurn(conversationId, run, "failed", {
-          code: `http_${String(response.status)}`,
-          message: "The assistant stream could not be started.",
-        });
+        const bodyText = await response.text().catch(() => "");
+        this.finishTurn(
+          conversationId,
+          run,
+          "failed",
+          streamStartError(response.status, bodyText),
+        );
         return;
       }
       const reader = response.body.getReader();
@@ -477,10 +536,23 @@ export class AevatarAssistantTransport implements AssistantTransport {
           if (run.finished) return;
         }
       }
-      // Stream closed without a RUN_FINISHED frame: settle rather than
-      // leaving the turn spinning forever.
+      // The final frame may arrive without a trailing blank line; flush it
+      // before judging how the stream ended.
+      buffer += decoder.decode();
+      for (const payload of flushSseBuffer(buffer)) {
+        this.handleAgUiFrame(conversationId, run, payload);
+        if (run.finished) return;
+      }
+      // EOF without RUN_FINISHED / RUN_ERROR is a truncated run (proxy idle
+      // kill, upstream drop), not a success. Settle the partial text and
+      // report it; the server-side run may still finish, in which case the
+      // full reply surfaces on the next history reload.
       this.closeOpenMessage(conversationId, run);
-      this.finishTurn(conversationId, run, "completed", null);
+      this.finishTurn(conversationId, run, "failed", {
+        code: "stream_closed",
+        message:
+          "The stream ended before the assistant finished. The reply may be incomplete — it will appear in full once the conversation reloads.",
+      });
     } catch (error) {
       // The cancel path aborts the fetch after emitting its own terminal
       // events; an abort here is not a failure.

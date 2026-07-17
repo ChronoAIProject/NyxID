@@ -351,7 +351,99 @@ describe("AevatarAssistantTransport", () => {
     );
     expect(
       terminal?.event === "turn.completed" && terminal.error?.code,
-    ).toBe("http_409");
+    ).toBe("turn_active");
+  });
+
+  it("surfaces the pre-stream error envelope instead of a bare status", async () => {
+    // Errors before the SSE stream starts are a JSON `{code, message}`
+    // envelope (Chat History contract) — the turn error must carry it.
+    stubFetch(routeCreate, (url, init) =>
+      url.endsWith("/stream") && init?.method === "POST"
+        ? jsonResponse(
+            { code: "UPSTREAM_TIMEOUT", message: "Aevatar timed out." },
+            502,
+          )
+        : undefined,
+    );
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    const events = await collectTurn(transport, "Hello");
+
+    const terminal = events[events.length - 1];
+    const error =
+      terminal?.event === "turn.completed" ? terminal.error : undefined;
+    expect(error?.code).toBe("UPSTREAM_TIMEOUT");
+    expect(error?.message).toBe("Aevatar timed out.");
+  });
+
+  it("gives a stream 401 an auth-specific message, not a bare status", async () => {
+    stubFetch(routeCreate, (url, init) =>
+      url.endsWith("/stream") && init?.method === "POST"
+        ? jsonResponse({ error: "unauthorized" }, 401)
+        : undefined,
+    );
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    const events = await collectTurn(transport, "Hello");
+
+    const terminal = events[events.length - 1];
+    const error =
+      terminal?.event === "turn.completed" ? terminal.error : undefined;
+    expect(error?.code).toBe("unauthorized");
+    expect(error?.message).toContain("still signed in");
+  });
+
+  it("reports EOF without a terminal frame as a truncated run, keeping partial text", async () => {
+    // Idle-killed or dropped streams end mid-run with no RUN_FINISHED /
+    // RUN_ERROR. That is not a success (the reference client marks it
+    // "closed"); the partial text must still settle into the transcript.
+    stubFetch(
+      routeCreate,
+      routeStream([OBSERVED_FRAMES[0], OBSERVED_FRAMES[1], OBSERVED_FRAMES[2]]),
+    );
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    const events = await collectTurn(transport, "Hello");
+
+    const terminal = events[events.length - 1];
+    expect(terminal?.event === "turn.completed" && terminal.status).toBe(
+      "failed",
+    );
+    expect(
+      terminal?.event === "turn.completed" && terminal.error?.code,
+    ).toBe("stream_closed");
+    const history = await transport.getHistory(CONVERSATION_ID);
+    expect(history.messages[1]?.blocks).toEqual([
+      { type: "text", block_id: "m-1-text", text: "Hello, " },
+    ]);
+  });
+
+  it("flushes a final RUN_FINISHED frame that has no trailing blank line", async () => {
+    const terminatedFrames = OBSERVED_FRAMES.slice(0, -1)
+      .map((frame) => `data: ${JSON.stringify(frame)}\n\n`)
+      .join("");
+    // The capture ends right after the last data line — no blank line.
+    const body = `${terminatedFrames}data: ${JSON.stringify({ type: "RUN_FINISHED" })}`;
+    stubFetch(routeCreate, (url, init) =>
+      url.endsWith("/stream") && init?.method === "POST"
+        ? new Response(body, {
+            status: 200,
+            headers: { "Content-Type": "text/event-stream" },
+          })
+        : undefined,
+    );
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    const events = await collectTurn(transport, "Hello");
+
+    const terminal = events[events.length - 1];
+    expect(terminal?.event === "turn.completed" && terminal.status).toBe(
+      "completed",
+    );
   });
 
   it("settles open blocks and the turn on cancel", async () => {
@@ -562,7 +654,34 @@ describe("captured production wire shapes", () => {
       "Content-Type": "application/json",
       Accept: "text/event-stream",
     });
-    expect(JSON.parse(String(init.body))).toEqual({ prompt: "Hello there" });
+    const body = JSON.parse(String(init.body)) as {
+      prompt: string;
+      sessionId: string;
+    };
+    expect(body.prompt).toBe("Hello there");
+    // Run-session correlation id (optional upstream; the reference client
+    // sends one per conversation).
+    expect(body.sessionId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+    );
+  });
+
+  it("keeps one sessionId per conversation across turns", async () => {
+    const fetchMock = stubFetch(routeCreate, routeStream(OBSERVED_FRAMES));
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    await collectTurn(transport, "First turn");
+    await collectTurn(transport, "Second turn");
+
+    const sessionIds = fetchMock.mock.calls
+      .filter(([input]) => String(input).endsWith("/stream"))
+      .map(
+        ([, init]) =>
+          (JSON.parse(String(init?.body)) as { sessionId: string }).sessionId,
+      );
+    expect(sessionIds).toHaveLength(2);
+    expect(sessionIds[0]).toBe(sessionIds[1]);
   });
 });
 

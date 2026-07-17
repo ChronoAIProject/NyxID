@@ -3,14 +3,19 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { PropsWithChildren } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "@/lib/api-client";
+import { AssistantTurnActiveError } from "@/lib/assistant/errors";
 import { resetAssistantTransport } from "@/lib/assistant/transport";
+import type { ConversationHistory } from "@/types/assistant";
 import {
+  assistantKeys,
+  describeSendFailure,
   describeTransportError,
   useAssistantTurn,
   useCancelTurn,
   useConversation,
   useDecideApproval,
   useSendMessage,
+  type SentMessage,
 } from "./use-assistant";
 
 const TEST_NOW = Date.parse("2026-07-16T04:00:00.000Z");
@@ -83,6 +88,50 @@ describe("assistant hooks", () => {
     if (completed?.type === "text") {
       expect(completed.text).toContain("API transport swap");
     }
+
+    unmount();
+    queryClient.clear();
+  });
+
+  it("auto-creates a conversation for a send with none selected", async () => {
+    // The "New chat" empty state has no conversation. The first send must
+    // create one and stream into it — never silently no-op (the pre-fix
+    // behavior: an internal throw the composer swallowed).
+    const { queryClient, Wrapper } = createHarness();
+    const { result, unmount } = renderHook(
+      () => ({
+        send: useSendMessage(undefined),
+      }),
+      { wrapper: Wrapper },
+    );
+
+    let sent: SentMessage | null = null;
+    await act(async () => {
+      sent = await result.current.send.mutateAsync(
+        "Hello from the empty state.",
+      );
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    const conversationId = (sent as SentMessage | null)?.conversationId ?? "";
+    expect(conversationId).not.toBe("");
+    const history = queryClient.getQueryData<ConversationHistory>(
+      assistantKeys.history(conversationId),
+    );
+    expect(history?.messages.at(0)?.role).toBe("user");
+    expect(history?.messages.at(0)?.blocks[0]).toMatchObject({
+      type: "text",
+      text: "Hello from the empty state.",
+    });
+
+    // The scripted turn still streams to completion in the new conversation.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+    const settled = queryClient.getQueryData<ConversationHistory>(
+      assistantKeys.history(conversationId),
+    );
+    expect(settled?.messages.at(-1)?.role).toBe("assistant");
 
     unmount();
     queryClient.clear();
@@ -240,5 +289,31 @@ describe("describeTransportError", () => {
   it("falls back to a generic message for non-401 failures", () => {
     const { message } = describeTransportError(new Error("network down"));
     expect(message).toBe("Could not load your chats");
+  });
+});
+
+describe("describeSendFailure", () => {
+  it("explains a downstream 401/403 without implying the session died", () => {
+    const { message, description } = describeSendFailure(
+      new ApiError(401, {
+        error: "unauthorized",
+        error_code: 1001,
+        message: "Unauthorized",
+      }),
+    );
+    expect(message).toBe("Message not sent");
+    expect(description).toContain("still signed in");
+  });
+
+  it("asks the user to wait when a turn is already active", () => {
+    const { description } = describeSendFailure(new AssistantTurnActiveError());
+    expect(description).toContain("current reply");
+  });
+
+  it("surfaces the underlying error message otherwise", () => {
+    const { description } = describeSendFailure(
+      new Error("Aevatar did not return a conversation id."),
+    );
+    expect(description).toBe("Aevatar did not return a conversation id.");
   });
 });

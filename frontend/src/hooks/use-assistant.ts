@@ -7,6 +7,7 @@ import {
 } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { ApiError } from "@/lib/api-client";
+import { AssistantTurnActiveError } from "@/lib/assistant/errors";
 import {
   useApprovalRequests,
   useNotificationSettings,
@@ -157,13 +158,13 @@ export function useWorkspaceCounts() {
 const TRANSPORT_TOAST_ID = "assistant-transport-unavailable";
 
 /**
- * Chat reaches aevatar through `/proxy/s/aevatar`, which passes the DOWNSTREAM's
- * status straight through. A 401 there means aevatar rejected the identity
- * NyxID forwarded — the NyxID session itself is fine — so the transport opts
- * those requests out of the global sign-out (`preserveSessionOn401` in
- * aevatar-transport) and the route stays put. Without a toast that failure is
- * invisible: the sidebar just renders empty, which reads as "no chats yet"
- * rather than "chat is down".
+ * Chat reaches aevatar through NyxID's `/api/v1/assistant/*` pass-through,
+ * which forwards the DOWNSTREAM's status straight through. A 401 there means
+ * aevatar rejected the identity NyxID forwarded — the NyxID session itself is
+ * fine — so the transport opts those requests out of the global sign-out
+ * (`preserveSessionOn401` in aevatar-transport) and the route stays put.
+ * Without a toast that failure is invisible: the sidebar just renders empty,
+ * which reads as "no chats yet" rather than "chat is down".
  */
 export function describeTransportError(error: unknown): {
   readonly message: string;
@@ -227,17 +228,35 @@ export function useCreateConversation() {
   });
 }
 
+export interface SentMessage {
+  readonly conversationId: string;
+  readonly handle: TurnHandle;
+}
+
+/**
+ * Send a message into the bound conversation — or, when no conversation is
+ * selected (the "New chat" empty state), create one first and send there.
+ * Without the auto-create, the first send of a fresh account has no target
+ * and must not silently do nothing; the caller navigates to the returned
+ * `conversationId` to follow the new thread.
+ */
 export function useSendMessage(conversationId: string | undefined) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: async (content: string): Promise<TurnHandle> => {
-      if (!conversationId) throw new Error("Select a conversation first.");
+    mutationFn: async (content: string): Promise<SentMessage> => {
+      let target = conversationId;
+      if (!target) {
+        const conversation = await assistantTransport.createConversation();
+        target = conversation.id;
+        await projectTransportState(queryClient, target);
+      }
+      const targetId = target;
       // Last-seen per-turn cursor, scoped to THIS send's event stream: a
       // rejected concurrent send never touches it, and at-least-once
       // duplicates (e.g. a late "running") cannot regress terminal state.
       let lastSeenCursor = 0;
       const handle = assistantTransport.sendMessage(
-        conversationId,
+        targetId,
         content,
         (event) => {
           if (event.cursor <= lastSeenCursor) return;
@@ -245,21 +264,54 @@ export function useSendMessage(conversationId: string | undefined) {
           const turn = turnFromEvent(event);
           if (turn) {
             queryClient.setQueryData<ActiveTurn | null>(
-              assistantKeys.turn(conversationId),
+              assistantKeys.turn(targetId),
               () => turn,
             );
           }
           if (event.event === "turn.completed") {
-            activeHandles.delete(conversationId);
+            activeHandles.delete(targetId);
           }
-          void projectTransportState(queryClient, conversationId);
+          void projectTransportState(queryClient, targetId);
         },
       );
-      activeHandles.set(conversationId, handle);
-      await projectTransportState(queryClient, conversationId);
-      return handle;
+      activeHandles.set(targetId, handle);
+      await projectTransportState(queryClient, targetId);
+      return { conversationId: targetId, handle };
     },
   });
+}
+
+/**
+ * Human-readable failure for a send that never became a turn (transport
+ * threw before any turn event existed). Failures after the stream starts
+ * surface inside the thread via `turn.completed`; this covers the gap
+ * before that, which previously vanished into the composer's restore-text
+ * catch and made the send button look dead.
+ */
+export function describeSendFailure(error: unknown): {
+  readonly message: string;
+  readonly description: string;
+} {
+  if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
+    return {
+      message: "Message not sent",
+      description:
+        "NyxID could not authenticate you to the chat backend. You are still signed in — reconnect the aevatar service and try again.",
+    };
+  }
+  if (error instanceof AssistantTurnActiveError) {
+    return {
+      message: "Message not sent",
+      description: "Wait for the current reply to finish, then try again.",
+    };
+  }
+  return {
+    message: "Message not sent",
+    description:
+      error instanceof Error && error.message
+        ? error.message
+        : "The assistant backend did not respond. Your text was kept — try again.",
+  };
 }
 
 export function useCancelTurn(conversationId: string | undefined) {

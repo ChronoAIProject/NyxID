@@ -40,6 +40,35 @@ security** question (can a body `scopeId` *override* the derived scope for anoth
 user — needs a second account, cannot be tested with one token) and the browser
 **cookie-401** fix (needs the Aevatar identity-token change).
 
+## Implemented in cut 3 (2026-07-17 late — first-send fix, stream correctness, composite delete)
+
+Reference alignment pass against `eanz17/nyxid-chat` (latest: first-party
+sessions + proxy-only identity handling). Changes:
+
+- **Backend:** `POST /assistant/conversations` now waits for the created actor
+  to appear in the `nyxid-chat` actor index (bounded backoff, ~1.4s worst case,
+  best-effort — mirrors the reference `waitForConversation`) so an immediate
+  first stream cannot race the async-202 materialization.
+  `DELETE /assistant/conversations/{id}` is now the composite dual-delete
+  (actor + chat-history row, 404-tolerant on each side, 200 `{}` on success).
+- **Frontend:** first send from the "New chat" empty state auto-creates a
+  conversation and streams into it (previously a silent no-op: no selected
+  conversation → internal throw → composer swallowed it — the "chat looks
+  dead" prod symptom). Send failures now toast (`describeSendFailure`).
+  Stream handling: pre-SSE `{code,message}` / `{error,error_code,message}`
+  envelopes surface as the turn error (401/403 keeps the auth-specific,
+  you-are-still-signed-in copy); EOF without `RUN_FINISHED`/`RUN_ERROR` is a
+  failed `stream_closed` turn (was: silently reported success); the final
+  unterminated SSE frame is flushed; bare-`\r` framing normalized; every
+  `:stream` body carries a per-conversation `sessionId` (optional upstream,
+  reference-aligned).
+- **Reference-mandated aevatar row config** (README, nyxid-chat): 
+  `identity_propagation_mode:"jwt"`, `identity_jwt_audience:"urn:aevatar:api"`,
+  `inject_delegation_token:true`, `forward_access_token:false`. Prod row drift
+  as of 2026-07-17: audience empty, forward true, inject false — flip together
+  with the Aevatar-side identity-token validation (TD-3), NOT before (Bearer
+  forwarding is what keeps CLI callers working today).
+
 ## Implemented in this cut (2026-07-17, uncommitted, gates green)
 
 - **Backend:** added `history_index_path()` (`assistant_service.rs`) and repointed
@@ -127,7 +156,7 @@ in-memory list. Decision needed: should workflow/`/api/chat` chats persist?
 | `POST /api/v1/assistant/conversations` | `api/scopes/{uid}/nyxid-chat/conversations` | create actor |
 | `GET /api/v1/assistant/conversations` | `api/scopes/{uid}/chat-history` | **changed** — contract-B index |
 | `GET /api/v1/assistant/conversations/{id}` | `api/scopes/{uid}/chat-history/conversations/{id}` | unchanged |
-| `DELETE /api/v1/assistant/conversations/{id}` | actor delete **+** history-row delete | **changed** — composite |
+| `DELETE /api/v1/assistant/conversations/{id}` | actor delete **+** history-row delete | composite — **implemented** (cut 3) |
 | `POST /api/v1/assistant/conversations/{id}/stream` | `...:stream` (AG-UI SSE) | unchanged |
 | `POST /api/v1/assistant/conversations/{id}/approve` | `...:approve` | unchanged |
 | `POST /api/v1/assistant/completions` | `v1/chat/completions` | unchanged |
@@ -240,35 +269,29 @@ unless noted. Each item: what, risk, trigger.
   `ChatInput` DTO with server-forced scope; fail closed on identity generation; drop
   or gate the WS route. Trigger: probe failure = immediate blocker; otherwise before
   GA.
-- **TD-3 — Browser auth: client must carry a real Bearer (mint bridge reverted
-  2026-07-17).** Aevatar accepts a NyxID-signed Bearer and derives the scope
-  from its `sub`; cookie-only callers have no Bearer to forward, so a pure
-  cookie + admin-mount browser session 401s downstream. **Decision: do NOT mint
-  a NyxID token server-side** (an interim mint-and-forward bridge was tried and
-  reverted — a NyxID-audienced token handed downstream is replayable back at
-  NyxID). Instead the client presents a real Bearer, both already fully
-  supported by the backend:
-  - **Agent/dev:** a `nyxid_ag_` API key (scoped to the aevatar service) used
-    directly as the Bearer. `{scopeId}` = the key owner's user id.
-  - **Production:** OAuth Authorization-Code + PKCE (S256) at `/oauth/authorize`,
-    scopes `openid profile email proxy`, with RFC 8707 `resource` params for the
-    aevatar / chrono-llm-public / ornn-api proxy URIs. The token response returns
-    a ~5-min `access_token` **plus a `binding_id`** (`bnd_<32-hex>`,
-    `models/oauth_broker_binding.rs`); store the binding server-side and re-mint
-    access tokens via token exchange (`grant_type=…token-exchange`,
-    `subject_token_type=urn:nyxid:params:oauth:token-type:binding-id`). The
-    access token carries `resources` + `allowed_service_ids`; if the aevatar URI
-    is absent, calls 403 / return `AUTHORIZATION_REQUIRED` mid-run.
-  - **No NyxID code needed** — OAuth PKCE, binding-id token exchange, resource
-    indicators, agent keys, and `forward_access_token` all exist. The identity
-    token NyxID also emits (`X-NyxID-Identity-Token`, TD note) stays the cleaner
-    long-term path but is not required for the Bearer flow.
-  - **Consequence for our dashboard FE:** the current transport uses cookie auth
-    against the `/api/v1/assistant/*` mount, which has no Bearer to forward — so
-    with the bridge reverted it 401s in a browser. Making the product browser
-    surface work means the client acquires a real Bearer (agent key now; a
-    thin BFF holding the `binding_id` + token exchange for prod), per the client
-    brief. That client work is the open item; the backend is ready.
+- **TD-3 — Browser auth: Aevatar validates the identity token (superseded
+  "real Bearer" plan, 2026-07-17 reference alignment).** The reference client
+  (`eanz17/nyxid-chat`) DELETED its developer-app OAuth/binding flow entirely
+  (`/api/auth/authorize` → 410) and lands on exactly our dashboard's model:
+  same-site session cookie → NyxID proxy → proxy injects short-lived
+  `X-NyxID-Identity-Token` (aud `urn:aevatar:api`) + `X-NyxID-Delegation-Token`;
+  Aevatar validates the identity token against NyxID's JWKS (issuer, audience,
+  expiry), derives the scope from `sub`, re-checks path-scope == `sub` (403
+  mismatch), and uses the delegation token to call NyxID APIs/LLM/tools on the
+  user's behalf mid-run. Both prior "client presents a real Bearer"
+  alternatives are structurally broken and are dropped:
+  - `nyxid_ag_` agent keys are rejected by the assistant mount's human-only
+    router (`routes.rs` reject layers) — they never reach the proxy here.
+  - Resource-scoped OAuth tokens die in the legacy catalog branch's
+    scoped-token check (`proxy.rs` "Scoped API keys must use configured
+    services") before contacting Aevatar.
+  The mint-and-forward bridge stays dead (NyxID-audienced tokens are
+  replayable at NyxID). Rollout: (1) Aevatar team validates
+  `X-NyxID-Identity-Token` — the header already flows on every pass-through
+  call; (2) flip the aevatar row to `identity_jwt_audience:"urn:aevatar:api"`,
+  `inject_delegation_token:true`, `forward_access_token:false` (three-field
+  drift from today's prod row). Do NOT flip before (1): Bearer forwarding is
+  what keeps CLI callers working today.
 - **TD-4 — Feature flag not enforced server-side (F17).** Any authenticated human can
   call `/api/v1/assistant/*` with `experimental:ai-assistant` off; the flag only
   hides navigation.
@@ -282,10 +305,15 @@ unless noted. Each item: what, risk, trigger.
   The AG-UI transport renders text only: `TOOL_APPROVAL_REQUEST`, authorization,
   tool, usage, reasoning, keepalive and all `CUSTOM aevatar.*` frames are dropped;
   there is no credential/reasoning redaction (reference `protocol.js` scrubber
-  unported); EOF without `RUN_FINISHED` is treated as success; switching transport
-  modes mid-stream can cross-wire conversation state; mock artifact counts still
-  render. Fix: port the reference normalizer + redactor into one shared protocol
-  module. Trigger: before approvals/tool-use become user-visible chat features.
+  unported); mock artifact counts still render. (Fixed in cut 3: EOF without
+  `RUN_FINISHED` now fails the turn; pre-SSE error envelopes surface.) Two
+  reference-confirmed additions for this item: `:approve` responds with an SSE
+  stream — `decideApproval` currently JSON-parses and will break the moment
+  approval cards render; and `AUTHORIZATION_REQUIRED` must render a
+  service-config card that preserves the failed request for an EXPLICIT retry
+  only (never auto-retry a partially-executed run). Fix: port the reference
+  normalizer + redactor into one shared protocol module. Trigger: before
+  approvals/tool-use become user-visible chat features.
 - **TD-8 — `resolve_admin_service` under-validates provisioning (F2).** It checks
   slug + `requires_user_credential:false` only — not `service_category`, master
   credential, or `identity_propagation_mode`; a misconfigured row degrades silently.

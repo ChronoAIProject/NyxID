@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
+import { toast } from "sonner";
 import { AssistantShell } from "@/components/assistant/assistant-shell";
 import { AssistantSidebar } from "@/components/assistant/assistant-sidebar";
 import { ChatComposer } from "@/components/assistant/chat-composer";
@@ -7,6 +8,7 @@ import { ChatThread } from "@/components/assistant/chat-thread";
 import { ApprovalsView } from "@/components/assistant/approvals-view";
 import { PluginsView } from "@/components/assistant/plugins-view";
 import {
+  describeSendFailure,
   useAssistantTurn,
   useCancelTurn,
   useConversation,
@@ -57,6 +59,23 @@ export function AssistantPage({
   async function createNewChat() {
     const conversation = await createConversation.mutateAsync();
     selectConversation(conversation.id);
+  }
+
+  // First send from the "New chat" empty state has no conversation yet; the
+  // mutation auto-creates one and this follows the navigation to it. A send
+  // that fails before any turn exists must be said out loud — the composer
+  // restores the text, and without the toast the button just looks dead.
+  async function handleSend(content: string) {
+    try {
+      const sent = await sendMessage.mutateAsync(content);
+      if (sent.conversationId !== selectedId) {
+        selectConversation(sent.conversationId);
+      }
+    } catch (error) {
+      const { message, description } = describeSendFailure(error);
+      toast.error(message, { description });
+      throw error;
+    }
   }
 
   const title =
@@ -111,9 +130,7 @@ export function AssistantPage({
         <ChatComposer
           active={active}
           sending={sendMessage.isPending}
-          onSend={(content) =>
-            sendMessage.mutateAsync(content).then(() => undefined)
-          }
+          onSend={handleSend}
           onStop={() => cancelTurn.mutateAsync()}
         />
       </div>
