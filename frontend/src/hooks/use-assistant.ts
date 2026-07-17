@@ -1,9 +1,12 @@
+import { useEffect } from "react";
 import {
   useMutation,
   useQuery,
   useQueryClient,
   type QueryClient,
 } from "@tanstack/react-query";
+import { toast } from "sonner";
+import { ApiError } from "@/lib/api-client";
 import {
   useApprovalRequests,
   useNotificationSettings,
@@ -148,11 +151,52 @@ export function useWorkspaceCounts() {
   };
 }
 
+// One stable sonner id for the whole surface: refetches and the history query
+// failing alongside the list update this toast instead of stacking a new one
+// every poll.
+const TRANSPORT_TOAST_ID = "assistant-transport-unavailable";
+
+/**
+ * Chat reaches aevatar through `/proxy/s/aevatar`, which passes the DOWNSTREAM's
+ * status straight through. A 401 there means aevatar rejected the identity
+ * NyxID forwarded — the NyxID session itself is fine — so the transport opts
+ * those requests out of the global sign-out (`preserveSessionOn401` in
+ * aevatar-transport) and the route stays put. Without a toast that failure is
+ * invisible: the sidebar just renders empty, which reads as "no chats yet"
+ * rather than "chat is down".
+ */
+export function describeTransportError(error: unknown): {
+  readonly message: string;
+  readonly description: string;
+} {
+  if (error instanceof ApiError && error.status === 401) {
+    return {
+      message: "Assistant chat is unavailable",
+      description:
+        "NyxID could not authenticate you to the chat backend. You are still signed in — reconnect the aevatar service and try again.",
+    };
+  }
+  return {
+    message: "Could not load your chats",
+    description: "The assistant backend did not respond. Retrying shortly.",
+  };
+}
+
+function useTransportErrorToast(isError: boolean, error: unknown): void {
+  useEffect(() => {
+    if (!isError) return;
+    const { message, description } = describeTransportError(error);
+    toast.error(message, { id: TRANSPORT_TOAST_ID, description });
+  }, [isError, error]);
+}
+
 export function useConversations() {
-  return useQuery({
+  const query = useQuery({
     queryKey: assistantKeys.conversations,
     queryFn: () => assistantTransport.listConversations(),
   });
+  useTransportErrorToast(query.isError, query.error);
+  return query;
 }
 
 export function useConversation(conversationId: string | undefined) {
