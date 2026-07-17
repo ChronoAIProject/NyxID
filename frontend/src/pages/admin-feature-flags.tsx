@@ -17,6 +17,7 @@ import {
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 import { useAdminUsers } from "@/hooks/use-admin";
+import type { AdminUser } from "@/types/admin";
 import {
   useAdminFeatureFlags,
   useClearAdminFeatureFlag,
@@ -448,6 +449,11 @@ function SummaryPill({ pill }: { readonly pill: SummaryPillValue }) {
   );
 }
 
+/** Default suggestions shown on focus before the admin types anything. */
+const DEFAULT_SUGGESTION_COUNT = 5;
+/** Over-fetch so exclusions don't leave the suggestion list short. */
+const DEFAULT_SUGGESTION_FETCH = 8;
+
 function AccountSearchPicker({
   kind,
   excludedIds,
@@ -459,6 +465,7 @@ function AccountSearchPicker({
 }) {
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [focused, setFocused] = useState(false);
   const normalizedSearch = search.trim();
 
   useEffect(() => {
@@ -476,10 +483,41 @@ function AccountSearchPicker({
   const results = debouncedSearch && !waitingForSearch
     ? (data?.users ?? []).filter((account) => !excludedIds.includes(account.id))
     : [];
+
+  // A flag card renders one picker per scope, so only fetch defaults while this
+  // picker's dropdown is actually open; identical keys dedupe across cards.
+  const showDefaults = focused && !normalizedSearch;
+  const { data: defaultsData, isLoading: defaultsLoading } = useAdminUsers(
+    1,
+    DEFAULT_SUGGESTION_FETCH,
+    undefined,
+    kind,
+    { enabled: showDefaults },
+  );
+  const defaults = (defaultsData?.users ?? [])
+    .filter((account) => !excludedIds.includes(account.id))
+    .slice(0, DEFAULT_SUGGESTION_COUNT);
+  const remaining = Math.max(0, (defaultsData?.total ?? 0) - defaults.length);
+
   const isOrg = kind === "org";
+  const pick = (account: AdminUser) => {
+    onPick({ id: account.id, label: accountLabel(account, isOrg) });
+    setSearch("");
+    setDebouncedSearch("");
+  };
 
   return (
-    <div className="space-y-2 border-b border-border/40 px-3 py-2 last:border-b-0">
+    <div
+      className="space-y-2 border-b border-border/40 px-3 py-2 last:border-b-0"
+      onFocus={() => setFocused(true)}
+      onBlur={(event) => {
+        // Keep the dropdown open while focus moves within the picker, so both
+        // tabbing to a suggestion and clicking one still land a pick.
+        if (!event.currentTarget.contains(event.relatedTarget)) {
+          setFocused(false);
+        }
+      }}
+    >
       <div className="relative">
         <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
         <Input
@@ -494,7 +532,7 @@ function AccountSearchPicker({
           className="h-8 pl-8 text-[12px]"
         />
       </div>
-      {normalizedSearch && (
+      {normalizedSearch ? (
         <div className="max-h-40 overflow-y-auto rounded-md border border-border/60">
           {isLoading || waitingForSearch ? (
             <p className="px-3 py-2 text-xs text-muted-foreground">Searching…</p>
@@ -505,34 +543,82 @@ function AccountSearchPicker({
                 : "No users match this search."}
             </p>
           ) : (
-            results.map((account) => {
-              const label = isOrg
-                ? (account.display_name ?? account.slug ?? account.id)
-                : account.email;
-              const secondary = isOrg ? (account.slug ?? account.id) : account.id;
-              return (
-                <button
-                  key={account.id}
-                  type="button"
-                  onClick={() => {
-                    onPick({ id: account.id, label });
-                    setSearch("");
-                    setDebouncedSearch("");
-                  }}
-                  className="block w-full border-b border-border/40 px-3 py-2 text-left text-xs last:border-b-0 hover:bg-muted/50"
-                >
-                  <span className="block truncate font-medium">{label}</span>
-                  <span className="block truncate text-muted-foreground">
-                    {secondary}
-                  </span>
-                </button>
-              );
-            })
+            results.map((account) => (
+              <AccountOption
+                key={account.id}
+                account={account}
+                isOrg={isOrg}
+                onPick={pick}
+              />
+            ))
           )}
         </div>
+      ) : (
+        showDefaults && (
+          <div className="max-h-40 overflow-y-auto rounded-md border border-border/60">
+            {defaultsLoading ? (
+              <p className="px-3 py-2 text-xs text-muted-foreground">Loading…</p>
+            ) : defaults.length === 0 ? (
+              <p className="px-3 py-2 text-xs text-muted-foreground">
+                {isOrg
+                  ? "No organizations to suggest."
+                  : "No users to suggest."}
+              </p>
+            ) : (
+              <>
+                {defaults.map((account) => (
+                  <AccountOption
+                    key={account.id}
+                    account={account}
+                    isOrg={isOrg}
+                    onPick={pick}
+                  />
+                ))}
+                {remaining > 0 && (
+                  <p className="border-t border-border/40 px-3 py-2 text-[11px] text-muted-foreground">
+                    +{remaining} more — keep typing to narrow
+                  </p>
+                )}
+              </>
+            )}
+          </div>
+        )
       )}
     </div>
   );
+}
+
+function AccountOption({
+  account,
+  isOrg,
+  onPick,
+}: {
+  readonly account: AdminUser;
+  readonly isOrg: boolean;
+  readonly onPick: (account: AdminUser) => void;
+}) {
+  return (
+    <button
+      type="button"
+      // Suppress the input's blur so the click lands before the dropdown closes.
+      onMouseDown={(event) => event.preventDefault()}
+      onClick={() => onPick(account)}
+      className="block w-full border-b border-border/40 px-3 py-2 text-left text-xs last:border-b-0 hover:bg-muted/50"
+    >
+      <span className="block truncate font-medium">
+        {accountLabel(account, isOrg)}
+      </span>
+      <span className="block truncate text-muted-foreground">
+        {isOrg ? (account.slug ?? account.id) : account.id}
+      </span>
+    </button>
+  );
+}
+
+function accountLabel(account: AdminUser, isOrg: boolean): string {
+  return isOrg
+    ? (account.display_name ?? account.slug ?? account.id)
+    : account.email;
 }
 
 function FlagsEmptyState({
