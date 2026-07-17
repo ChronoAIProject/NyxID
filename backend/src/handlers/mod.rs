@@ -11,6 +11,7 @@ pub mod admin_service_accounts;
 pub mod agent_bindings;
 pub mod api_keys;
 pub mod approvals;
+pub mod assistant;
 pub mod auth;
 pub mod auth_device;
 pub mod billing;

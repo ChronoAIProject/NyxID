@@ -72,6 +72,7 @@ export function AssistantPage({
       activeConversationId={view === "chat" ? selectedId : undefined}
       activeView={view}
       creating={createConversation.isPending}
+      turnActive={active}
       onNewChat={() => void createNewChat()}
       onSelect={selectConversation}
     />

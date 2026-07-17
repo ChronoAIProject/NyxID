@@ -1,11 +1,11 @@
 import { api } from "@/lib/api-client";
 import { AssistantTurnActiveError } from "@/lib/assistant/errors";
+import { drainSseBuffer } from "@/lib/assistant/sse";
 import {
   applyTurnEvent,
   EMPTY_TURN_STATE,
   toTerminalBlock,
 } from "@/lib/assistant/stream";
-import { useAuthStore } from "@/stores/auth-store";
 import type {
   ApprovalCardContentBlock,
   AssistantMessage,
@@ -18,17 +18,17 @@ import type {
 } from "@/types/assistant";
 import { isTurnActive } from "@/types/assistant";
 
-// Aevatar's nyxid-chat surface, reached through the NyxID proxy so the
-// browser session authenticates and the broker injects the `scope_id`
-// claim Aevatar resolves the scope from. The scope id is the caller's
-// NyxID subject id, so the path segment must match the signed-in user.
-const AEVATAR_PROXY_PREFIX = "/proxy/s/aevatar";
+// NyxID's own assistant pass-through (PRD decision 4). NyxID resolves the
+// admin-managed aevatar service and derives the aevatar scope from the
+// verified session user, so no scope segment appears here: the browser
+// cannot name a scope, and the surface does not depend on the caller having
+// personally connected aevatar.
+const ASSISTANT_PREFIX = "/assistant";
 
-// The conversation list endpoint returns bare actor ids, so titles and
-// timestamps come from per-conversation history hydration. Cap the
-// first-load fan-out; conversations beyond the cap render with a
-// placeholder title until opened.
-const MAX_TITLE_HYDRATIONS = 20;
+// The conversation list reads the Chat History index (contract-B): each row
+// already carries a server title, timestamps, and message count, so the list
+// needs no per-conversation history hydration fan-out.
+//
 // Sidebar list re-fetch throttle: `projectTransportState` re-projects the
 // conversation list after every turn event, which must not become one
 // network round-trip per streamed token.
@@ -49,8 +49,19 @@ interface AgUiFrame {
   readonly message?: string;
 }
 
+/** One row of the Chat History index (`chat-history`). */
+interface AevatarHistoryIndexEntry {
+  readonly id?: string;
+  readonly title?: string;
+  readonly createdAt?: string;
+  readonly updatedAt?: string;
+  readonly messageCount?: number;
+  readonly llmRoute?: string | null;
+  readonly llmModel?: string | null;
+}
+
 interface AevatarConversationListResponse {
-  readonly conversations?: Array<{ readonly actorId?: string }>;
+  readonly conversations?: readonly AevatarHistoryIndexEntry[];
 }
 
 interface AevatarCreateConversationResponse {
@@ -89,29 +100,6 @@ function isoFromEpochMs(epochMs: number | undefined, fallback: string): string {
     return fallback;
   }
   return new Date(epochMs).toISOString();
-}
-
-/**
- * Incremental SSE framing: consumes complete `data:` payloads from the
- * buffer and returns the unterminated remainder for the next read.
- */
-export function drainSseBuffer(buffer: string): {
-  readonly payloads: string[];
-  readonly rest: string;
-} {
-  const normalized = buffer.replace(/\r\n/g, "\n");
-  const segments = normalized.split("\n\n");
-  const rest = segments.pop() ?? "";
-  const payloads: string[] = [];
-  for (const segment of segments) {
-    const data = segment
-      .split("\n")
-      .filter((line) => line.startsWith("data:"))
-      .map((line) => line.slice("data:".length).trimStart())
-      .join("\n");
-    if (data) payloads.push(data);
-  }
-  return { payloads, rest };
 }
 
 function historyEntryToMessage(
@@ -153,36 +141,19 @@ export class AevatarAssistantTransport implements AssistantTransport {
   private readonly running = new Map<string, RunningTurn>();
   private listFetchedAt = 0;
 
-  private scopePath(suffix: string): string {
-    const userId = useAuthStore.getState().user?.id;
-    if (!userId) {
-      throw new Error("You must be signed in to use the assistant.");
-    }
-    return `${AEVATAR_PROXY_PREFIX}/api/scopes/${userId}/${suffix}`;
-  }
-
   async listConversations(): Promise<Conversation[]> {
     const now = Date.now();
-    if (this.running.size === 0 && now - this.listFetchedAt > CONVERSATION_LIST_TTL_MS) {
+    if (
+      this.running.size === 0 &&
+      now - this.listFetchedAt > CONVERSATION_LIST_TTL_MS
+    ) {
       this.listFetchedAt = now;
       const response = await api.get<AevatarConversationListResponse>(
-        this.scopePath("nyxid-chat/conversations"),
+        `${ASSISTANT_PREFIX}/conversations`,
       );
-      const serverIds = (response.conversations ?? [])
-        .map((item) => item.actorId)
-        .filter((id): id is string => Boolean(id));
-      const unknown = serverIds.filter((id) => !this.conversations.has(id));
-      await Promise.all(
-        unknown.slice(0, MAX_TITLE_HYDRATIONS).map(async (id) => {
-          try {
-            await this.loadHistory(id);
-          } catch {
-            this.seedPlaceholder(id);
-          }
-        }),
-      );
-      for (const id of unknown.slice(MAX_TITLE_HYDRATIONS)) {
-        this.seedPlaceholder(id);
+      for (const entry of response.conversations ?? []) {
+        const id = entry?.id?.trim();
+        if (id) this.mergeIndexEntry(id, entry);
       }
     }
     return [...this.conversations.values()]
@@ -192,7 +163,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
 
   async createConversation(): Promise<Conversation> {
     const response = await api.post<AevatarCreateConversationResponse>(
-      this.scopePath("nyxid-chat/conversations"),
+      `${ASSISTANT_PREFIX}/conversations`,
       {},
     );
     const id = response.actorId;
@@ -335,22 +306,47 @@ export class AevatarAssistantTransport implements AssistantTransport {
       throw new Error("Approval request was not found.");
     }
     await api.post(
-      this.scopePath(`nyxid-chat/conversations/${conversationId}:approve`),
+      `${ASSISTANT_PREFIX}/conversations/${conversationId}/approve`,
       { requestId: card.approval_request_id, approved },
     );
   }
 
-  private seedPlaceholder(id: string): void {
-    if (this.conversations.has(id)) return;
-    const seededAt = new Date(0).toISOString();
+  /**
+   * Fold one Chat History index row into the local mirror. A conversation
+   * with a live turn keeps its in-flight mirror (index metadata must not
+   * clobber a streaming transcript); everything else adopts the server's
+   * title, timestamps, and counts without a per-conversation detail fetch.
+   */
+  private mergeIndexEntry(id: string, entry: AevatarHistoryIndexEntry): void {
+    const existing = this.conversations.get(id);
+    if (existing && isTurnActive(existing.turnState.activeTurn?.status)) {
+      return;
+    }
+    const epoch0 = new Date(0).toISOString();
+    const createdAt =
+      entry.createdAt ?? existing?.conversation.created_at ?? epoch0;
+    const lastMessageAt =
+      entry.updatedAt ??
+      entry.createdAt ??
+      existing?.conversation.last_message_at ??
+      createdAt;
+    const title =
+      entry.title?.trim() || existing?.conversation.title || "Conversation";
+    const conversation: Conversation = {
+      id,
+      title,
+      created_at: createdAt,
+      last_message_at: lastMessageAt,
+      message_count:
+        typeof entry.messageCount === "number"
+          ? entry.messageCount
+          : existing?.conversation.message_count,
+      llm_route: entry.llmRoute ?? existing?.conversation.llm_route ?? null,
+      llm_model: entry.llmModel ?? existing?.conversation.llm_model ?? null,
+    };
     this.conversations.set(id, {
-      conversation: {
-        id,
-        title: "Conversation",
-        created_at: seededAt,
-        last_message_at: seededAt,
-      },
-      turnState: EMPTY_TURN_STATE,
+      conversation,
+      turnState: existing?.turnState ?? EMPTY_TURN_STATE,
     });
   }
 
@@ -358,7 +354,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     conversationId: string,
   ): Promise<StoredConversation> {
     const entries = await api.get<AevatarHistoryEntry[]>(
-      this.scopePath(`chat-history/conversations/${conversationId}`),
+      `${ASSISTANT_PREFIX}/conversations/${conversationId}`,
     );
     const existing = this.conversations.get(conversationId);
     const messages = entries
@@ -429,9 +425,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       // Hand-rolled fetch (not `apiClient`): the response is an SSE stream,
       // and the endpoint 415s without an explicit JSON content type.
       const response = await fetch(
-        `/api/v1${this.scopePath(
-          `nyxid-chat/conversations/${conversationId}:stream`,
-        )}`,
+        `/api/v1${ASSISTANT_PREFIX}/conversations/${conversationId}/stream`,
         {
           method: "POST",
           headers: {
