@@ -117,6 +117,11 @@ export interface Conversation {
   readonly title: string;
   readonly created_at: string;
   readonly last_message_at: string;
+  /** Materialized message count from the Chat History index, when known. */
+  readonly message_count?: number;
+  /** LLM route/model recorded by the Chat History index, when known. */
+  readonly llm_route?: string | null;
+  readonly llm_model?: string | null;
 }
 
 export interface ConversationHistory {
