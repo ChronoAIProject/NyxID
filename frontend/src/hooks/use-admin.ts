@@ -16,15 +16,21 @@ import type {
 } from "@/types/admin";
 import type { PlatformRole } from "@/types/api";
 
-export function useAdminUsers(page: number, perPage: number, search?: string) {
+export function useAdminUsers(
+  page: number,
+  perPage: number,
+  search?: string,
+  userType?: "person" | "org",
+) {
   return useQuery({
-    queryKey: ["admin", "users", page, perPage, search],
+    queryKey: ["admin", "users", page, perPage, search, userType],
     queryFn: async (): Promise<AdminUserListResponse> => {
       const params = new URLSearchParams({
         page: String(page),
         per_page: String(perPage),
       });
       if (search) params.set("search", search);
+      if (userType) params.set("user_type", userType);
       return api.get<AdminUserListResponse>(
         `/admin/users?${params.toString()}`,
       );
