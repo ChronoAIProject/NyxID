@@ -13,6 +13,8 @@ export interface AdminUser {
   readonly id: string;
   readonly email: string;
   readonly display_name: string | null;
+  /// Org accounts only; null/absent for person accounts.
+  readonly slug?: string | null;
   readonly avatar_url: string | null;
   readonly email_verified: boolean;
   readonly is_active: boolean;

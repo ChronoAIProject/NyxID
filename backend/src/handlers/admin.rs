@@ -26,6 +26,9 @@ pub struct UserListQuery {
     pub page: Option<u64>,
     pub per_page: Option<u64>,
     pub search: Option<String>,
+    /// Optional account-type filter: `"person"` or `"org"`. Unset lists all
+    /// accounts (legacy behavior).
+    pub user_type: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -48,6 +51,8 @@ pub struct AdminUserItem {
     pub id: String,
     pub email: String,
     pub display_name: Option<String>,
+    /// Org accounts only; `None` for person accounts.
+    pub slug: Option<String>,
     pub avatar_url: Option<String>,
     pub email_verified: bool,
     pub is_active: bool,
@@ -216,6 +221,7 @@ fn user_to_admin_item(u: User, platform_role: PlatformRole) -> AdminUserItem {
         id: u.id,
         email: u.email,
         display_name: u.display_name,
+        slug: u.slug,
         avatar_url: u.avatar_url,
         email_verified: u.email_verified,
         is_active: u.is_active,
@@ -312,13 +318,34 @@ pub async fn list_users(
     let per_page = query.per_page.unwrap_or(50).min(100);
     let offset = (page - 1) * per_page;
 
-    let filter = match query.search.as_deref() {
-        Some(s) if !s.is_empty() => {
-            let escaped = regex::escape(s);
-            doc! { "email": { "$regex": &escaped, "$options": "i" } }
+    let mut filter = match query.user_type.as_deref() {
+        None => doc! {},
+        Some("org") => doc! { "user_type": "org" },
+        // Legacy person rows predate the field; match its absence too.
+        Some("person") => doc! { "user_type": { "$ne": "org" } },
+        Some(other) => {
+            return Err(AppError::BadRequest(format!(
+                "invalid user_type filter '{other}'; expected person or org"
+            )));
         }
-        _ => doc! {},
     };
+    if let Some(s) = query.search.as_deref().filter(|s| !s.is_empty()) {
+        let escaped = regex::escape(s);
+        let pattern = doc! { "$regex": &escaped, "$options": "i" };
+        if query.user_type.as_deref() == Some("org") {
+            // Orgs are found by name/slug; their emails are auto-generated.
+            filter.insert(
+                "$or",
+                vec![
+                    doc! { "email": pattern.clone() },
+                    doc! { "display_name": pattern.clone() },
+                    doc! { "slug": pattern },
+                ],
+            );
+        } else {
+            filter.insert("email", pattern);
+        }
+    }
 
     let total = state
         .db
@@ -1781,6 +1808,7 @@ mod tests {
             id: "id-1".to_string(),
             email: "test@example.com".to_string(),
             display_name: Some("Display".to_string()),
+            slug: None,
             avatar_url: None,
             email_verified: true,
             is_active: true,
@@ -2032,6 +2060,7 @@ mod operator_route_tests {
                 page: None,
                 per_page: None,
                 search: None,
+                user_type: None,
             }),
         )
         .await

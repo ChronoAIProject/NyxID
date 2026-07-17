@@ -63,7 +63,8 @@ pub struct FeatureFlagOverride {
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub updated_at: DateTime<Utc>,
-    /// member_user_id of the org admin who last wrote this override.
+    /// User id of the admin who last wrote this override — an org admin on the
+    /// org self-serve path, or a platform admin via the admin feature-flag API.
     pub updated_by: String,
 }
 
