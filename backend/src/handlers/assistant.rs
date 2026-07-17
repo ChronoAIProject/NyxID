@@ -26,10 +26,12 @@ use axum::{
 };
 
 use crate::AppState;
+use crate::crypto::jwt::generate_assistant_forward_access_token;
 use crate::errors::{AppError, AppResult};
 use crate::handlers::proxy::execute_proxy;
-use crate::mw::auth::AuthUser;
+use crate::mw::auth::{AuthMethod, AuthUser};
 use crate::services::assistant_service;
+use crate::services::oauth_resource_service;
 
 /// Create responses are a ~300-byte accepted envelope; the cap only guards
 /// against a misbehaving upstream.
@@ -56,6 +58,17 @@ fn synthetic_request(
     builder.body(Body::empty())
 }
 
+/// Whether this call needs the TD-3 forward-token bridge: cookie sessions
+/// carry no bearer for `forward_access_token` to forward, so Aevatar —
+/// which today authenticates only `Authorization: Bearer <NyxID JWT>` —
+/// answers 401 for exactly the browser. Minting is gated on the row still
+/// being in Bearer-forwarding mode: when the TD-3 rollout flips
+/// `forward_access_token` off (Aevatar validates the identity token
+/// instead), the bridge retires itself with no code change.
+fn needs_forward_token_bridge(auth_method: &AuthMethod, forward_access_token: bool) -> bool {
+    *auth_method == AuthMethod::Session && forward_access_token
+}
+
 /// Resolve the admin-managed Aevatar service and forward `path` to it.
 ///
 /// `path` is always built server-side by the callers below from
@@ -64,9 +77,32 @@ async fn forward(
     state: &AppState,
     auth_user: &AuthUser,
     path: String,
-    request: Request<Body>,
+    mut request: Request<Body>,
 ) -> AppResult<Response> {
     let service = assistant_service::resolve_admin_service(&state.db).await?;
+
+    // TD-3 bridge: mint the outbound-only bearer for cookie sessions and
+    // OVERWRITE any stray Authorization header — `AuthMethod::Session`
+    // means bearer auth did not happen, so whatever is there is not an
+    // authenticated credential and must not reach the downstream. Bearer
+    // callers (CLI login JWTs) never enter this branch and keep their
+    // token byte-for-byte.
+    if needs_forward_token_bridge(&auth_user.auth_method, service.forward_access_token) {
+        let resource_uri =
+            oauth_resource_service::user_service_resource_uri(&state.config, &service.slug);
+        let token = generate_assistant_forward_access_token(
+            &state.jwt_keys,
+            &state.config,
+            &auth_user.user_id,
+            &resource_uri,
+        )?;
+        let value = HeaderValue::from_str(&format!("Bearer {token}")).map_err(|_| {
+            AppError::Internal(
+                "assistant: failed to build the forward authorization header".to_string(),
+            )
+        })?;
+        request.headers_mut().insert(header::AUTHORIZATION, value);
+    }
     // Addressing the catalog service by id drives the DownstreamService
     // (admin/master-credential) resolution path. Never route by slug here:
     // the slug resolver would prefer a caller-owned `UserService`.
@@ -335,5 +371,17 @@ mod tests {
         assert_eq!(request.method(), Method::GET);
         assert!(request.headers().get(header::AUTHORIZATION).is_none());
         assert!(request.headers().get(header::COOKIE).is_none());
+    }
+
+    #[test]
+    fn bridge_mints_only_for_cookie_sessions_on_a_forwarding_row() {
+        // The one broken caller class: cookie session + Bearer-forwarding row.
+        assert!(needs_forward_token_bridge(&AuthMethod::Session, true));
+        // Bearer callers keep their own token byte-for-byte.
+        assert!(!needs_forward_token_bridge(&AuthMethod::AccessToken, true));
+        // The TD-3 row flip (forward_access_token -> false, identity-token
+        // mode) retires the bridge with no code change.
+        assert!(!needs_forward_token_bridge(&AuthMethod::Session, false));
+        assert!(!needs_forward_token_bridge(&AuthMethod::AccessToken, false));
     }
 }

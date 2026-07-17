@@ -285,6 +285,11 @@ JWT_RELAY_ACCESS_TTL_SECS=300       # X-NyxID-User-Token relay access token TTL.
                                     # proxy/LLM-only (rejected elsewhere by reject_relay_tokens),
                                     # inherit the agent key's service/node allowlist, and are
                                     # invalidated when that key is revoked (ensure_relay_agent_key_active).
+JWT_ASSISTANT_FORWARD_TTL_SECS=300  # Outbound-only bearer the assistant pass-through mints for
+                                    # cookie sessions and forwards to Aevatar (TD-3 bridge). Carries
+                                    # assistant_forward:true, rejected by verify_token on NyxID
+                                    # re-entry; minted only while the aevatar row has
+                                    # forward_access_token:true (the TD-3 row flip retires it).
 SA_TOKEN_TTL_SECS=3600              # Service account tokens
 ENVIRONMENT=development
 RATE_LIMIT_PER_SECOND=10
