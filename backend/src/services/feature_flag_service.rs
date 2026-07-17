@@ -66,6 +66,12 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
         default_enabled: false,
         org_manageable: true,
     },
+    FeatureFlagDef {
+        key: "staff_only_ui",
+        description: "Test-only staff-managed flag.",
+        default_enabled: false,
+        org_manageable: false,
+    },
 ];
 
 /// Look up a flag definition by key. `None` for unknown keys.
@@ -359,8 +365,9 @@ pub async fn list_for_admin(
         .collect())
 }
 
-/// Upsert an override. Rejects unknown flag keys (400) and non-org-manageable
-/// flags (403). Idempotent per `(org, flag, target_kind, target_key)`.
+/// Upsert an override on the org self-serve path. Rejects unknown flag keys
+/// (400) and non-org-manageable flags (403). Idempotent per
+/// `(org, flag, target_kind, target_key)`.
 pub async fn set_override(
     db: &mongodb::Database,
     org_user_id: &str,
@@ -376,7 +383,19 @@ pub async fn set_override(
             "feature flag '{flag_key}' is not org-manageable"
         )));
     }
+    upsert_override_row(db, org_user_id, flag_key, target, enabled, actor_id).await
+}
 
+/// The shared org-row upsert behind [`set_override`] (org admins) and
+/// [`set_platform_org_override`] (platform staff). Gates live on the callers.
+async fn upsert_override_row(
+    db: &mongodb::Database,
+    org_user_id: &str,
+    flag_key: &str,
+    target: &FlagTarget,
+    enabled: bool,
+    actor_id: &str,
+) -> AppResult<FeatureFlagOverride> {
     let now = bson::DateTime::from_chrono(Utc::now());
     let target_key = match target.key() {
         Some(k) => bson::Bson::String(k),
@@ -422,13 +441,22 @@ pub async fn set_override(
     Ok(row)
 }
 
-/// Delete one override. Returns whether a row was removed (idempotent clear).
+/// Delete one override on the org self-serve path. Returns whether a row was
+/// removed (idempotent clear). Same gates as [`set_override`] so org admins
+/// can't remove staff-set rows on flags they may not manage.
 pub async fn clear_override(
     db: &mongodb::Database,
     org_user_id: &str,
     flag_key: &str,
     target: &FlagTarget,
 ) -> AppResult<bool> {
+    let def = find_flag(flag_key)
+        .ok_or_else(|| AppError::BadRequest(format!("unknown feature flag '{flag_key}'")))?;
+    if !def.org_manageable {
+        return Err(AppError::Forbidden(format!(
+            "feature flag '{flag_key}' is not org-manageable"
+        )));
+    }
     let target_key = match target.key() {
         Some(k) => bson::Bson::String(k),
         None => bson::Bson::Null,
@@ -539,6 +567,133 @@ pub async fn clear_platform_override(
         })
         .await?;
     Ok(row)
+}
+
+/// Upsert an org-wide override on behalf of platform staff. Unlike
+/// [`set_override`] there is no `org_manageable` gate — platform admins own the
+/// full registry — but the target must be an existing org account (404
+/// otherwise). The written row is identical to one an org admin writes, so
+/// resolution and the org's own flags page pick it up unchanged.
+pub async fn set_platform_org_override(
+    db: &mongodb::Database,
+    org_user_id: &str,
+    flag_key: &str,
+    enabled: bool,
+    actor_id: &str,
+) -> AppResult<FeatureFlagOverride> {
+    find_flag(flag_key)
+        .ok_or_else(|| AppError::BadRequest(format!("unknown feature flag '{flag_key}'")))?;
+    ensure_org_exists(db, org_user_id).await?;
+    upsert_override_row(
+        db,
+        org_user_id,
+        flag_key,
+        &FlagTarget::Org,
+        enabled,
+        actor_id,
+    )
+    .await
+}
+
+/// Clear an org-wide override on behalf of platform staff. Returns the removed
+/// row when present (idempotent otherwise). No `org_manageable` gate.
+pub async fn clear_platform_org_override(
+    db: &mongodb::Database,
+    org_user_id: &str,
+    flag_key: &str,
+) -> AppResult<Option<FeatureFlagOverride>> {
+    let row = db
+        .collection::<FeatureFlagOverride>(COLLECTION_NAME)
+        .find_one_and_delete(doc! {
+            "org_user_id": org_user_id,
+            "flag_key": flag_key,
+            "target_kind": FlagTargetKind::Org.as_str(),
+            "target_key": bson::Bson::Null,
+        })
+        .await?;
+    Ok(row)
+}
+
+async fn ensure_org_exists(db: &mongodb::Database, org_user_id: &str) -> AppResult<()> {
+    let is_org = db
+        .collection::<User>(USERS)
+        .find_one(doc! { "_id": org_user_id })
+        .await?
+        .map(|user| user.user_type.is_org())
+        .unwrap_or(false);
+    if !is_org {
+        return Err(AppError::NotFound("Organization not found".to_string()));
+    }
+    Ok(())
+}
+
+/// Every org-wide (`target_kind = "org"`) override row across all orgs. Powers
+/// the platform-admin list view only — resolution reads a single org's rows
+/// via `list_overrides`, so this must never feed the resolver.
+pub async fn list_all_org_scope_overrides(
+    db: &mongodb::Database,
+) -> AppResult<Vec<FeatureFlagOverride>> {
+    let rows: Vec<FeatureFlagOverride> = db
+        .collection::<FeatureFlagOverride>(COLLECTION_NAME)
+        .find(doc! {
+            "target_kind": FlagTargetKind::Org.as_str(),
+            "org_user_id": { "$ne": bson::Bson::Null },
+        })
+        .await?
+        .try_collect()
+        .await?;
+    Ok(rows)
+}
+
+/// Safe org fields used to enrich platform-admin feature-flag responses.
+#[derive(Clone, Debug)]
+pub struct PlatformOverrideOrgDisplay {
+    pub display_name: Option<String>,
+    pub slug: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct PlatformOverrideOrgProjection {
+    #[serde(rename = "_id")]
+    id: String,
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    slug: Option<String>,
+}
+
+/// Resolve every org referenced by org-scope overrides in one projected query.
+/// Deleted orgs are absent and become null display fields in the response.
+pub async fn fetch_override_org_display(
+    db: &mongodb::Database,
+    overrides: &[FeatureFlagOverride],
+) -> AppResult<HashMap<String, PlatformOverrideOrgDisplay>> {
+    let org_ids: HashSet<&str> = overrides
+        .iter()
+        .filter_map(|row| row.org_user_id.as_deref())
+        .collect();
+    if org_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let cursor = db
+        .collection::<PlatformOverrideOrgProjection>(USERS)
+        .find(doc! { "_id": { "$in": org_ids.into_iter().collect::<Vec<_>>() } })
+        .projection(doc! { "_id": 1, "display_name": 1, "slug": 1 })
+        .await?;
+    let orgs: Vec<PlatformOverrideOrgProjection> = cursor.try_collect().await?;
+    Ok(orgs
+        .into_iter()
+        .map(|org| {
+            (
+                org.id,
+                PlatformOverrideOrgDisplay {
+                    display_name: org.display_name,
+                    slug: org.slug,
+                },
+            )
+        })
+        .collect())
 }
 
 /// Cascade helper: drop every override for an org (used when the org is deleted).
@@ -864,5 +1019,88 @@ mod tests {
                 .expect("clear global")
                 .is_some()
         );
+    }
+
+    #[tokio::test]
+    async fn org_manageable_gates_org_path_but_not_platform_staff() {
+        let Some(db) = connect_test_database("feature_flag_staff_only").await else {
+            eprintln!("skipping feature flag service test: no local MongoDB available");
+            return;
+        };
+        let org = Uuid::new_v4().to_string();
+        let actor = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&org, UserType::Org))
+            .await
+            .expect("insert org user");
+
+        // Org self-serve path: staff-only flags are neither settable nor
+        // clearable (an org admin must not remove a staff-set row).
+        assert!(matches!(
+            set_override(&db, &org, "staff_only_ui", &FlagTarget::Org, true, &actor).await,
+            Err(AppError::Forbidden(_))
+        ));
+        assert!(matches!(
+            clear_override(&db, &org, "staff_only_ui", &FlagTarget::Org).await,
+            Err(AppError::Forbidden(_))
+        ));
+        assert!(matches!(
+            clear_override(&db, &org, "nope", &FlagTarget::Org).await,
+            Err(AppError::BadRequest(_))
+        ));
+
+        // Platform staff path: no org_manageable gate; the row lands in the
+        // org's own override set and the cross-org admin listing.
+        let row = set_platform_org_override(&db, &org, "staff_only_ui", true, &actor)
+            .await
+            .expect("staff sets org override");
+        assert_eq!(row.org_user_id.as_deref(), Some(org.as_str()));
+        assert_eq!(row.target_kind, FlagTargetKind::Org);
+        assert!(row.target_key.is_none());
+
+        let org_rows = list_overrides(&db, &org).await.expect("org rows");
+        assert_eq!(org_rows.len(), 1);
+        let all = list_all_org_scope_overrides(&db)
+            .await
+            .expect("all org-scope rows");
+        assert!(all.iter().any(|r| r.id == row.id));
+
+        let display = fetch_override_org_display(&db, &all)
+            .await
+            .expect("org display");
+        assert_eq!(
+            display.get(&org).and_then(|o| o.display_name.as_deref()),
+            Some("Test Org")
+        );
+
+        let removed = clear_platform_org_override(&db, &org, "staff_only_ui")
+            .await
+            .expect("staff clears org override");
+        assert_eq!(removed.map(|r| r.id), Some(row.id));
+    }
+
+    #[tokio::test]
+    async fn set_platform_org_override_requires_existing_org() {
+        let Some(db) = connect_test_database("feature_flag_org_validation").await else {
+            eprintln!("skipping feature flag service test: no local MongoDB available");
+            return;
+        };
+        let actor = Uuid::new_v4().to_string();
+        let person = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&person, UserType::Person))
+            .await
+            .expect("insert person user");
+
+        // Unknown id and a person account both 404 as "not an org".
+        assert!(matches!(
+            set_platform_org_override(&db, &Uuid::new_v4().to_string(), "example_ui", true, &actor)
+                .await,
+            Err(AppError::NotFound(_))
+        ));
+        assert!(matches!(
+            set_platform_org_override(&db, &person, "example_ui", true, &actor).await,
+            Err(AppError::NotFound(_))
+        ));
     }
 }

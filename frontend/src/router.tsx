@@ -13,14 +13,9 @@ import { AppNotFound } from "@/components/shared/app-not-found";
 import { AuthLayout } from "@/components/layout/auth-layout";
 import { DashboardLayout } from "@/components/layout/dashboard-layout";
 import { BillingRouteGuard } from "@/components/billing-route-guard";
-import { AssistantRouteGuard } from "@/components/assistant-route-guard";
 import { useAuthStore } from "@/stores/auth-store";
 import { hasAdminRead } from "@/types/api";
 import { shouldRedirectFromBilling } from "@/lib/billing-availability";
-import {
-  fetchAssistantAccessUser,
-  shouldRedirectFromAssistant,
-} from "@/lib/assistant-availability";
 import { normalizeAdminOAuthClientSearch } from "@/lib/admin-oauth-clients";
 
 import {
@@ -262,6 +257,12 @@ const sshTerminalRoute = createRoute({
 // Shared by every /assistant* route. Keep this auth mirror aligned with
 // dashboardLayout.beforeLoad below; the Assistant shell intentionally lives
 // outside DashboardLayout.
+//
+// The assistant surface is deliberately not flag-gated here: both a reactive
+// component guard and a server-verified beforeLoad gate raced the auth store
+// (boot `checkAuth`, transient 401 `setUser(null)`) and bounced users whose
+// permission had simply not loaded yet. Reachability is nav-level only (the
+// sidebar link honours the flag) and the backend authorizes every API call.
 const assistantBeforeLoad = async ({
   location,
 }: {
@@ -274,36 +275,15 @@ const assistantBeforeLoad = async ({
       if (!store.user) {
         store.setUser(getMockUser() as import("./types/api").User);
       }
+      return;
     }
   }
 
-  const redirectToLogin = () => {
+  const { isAuthenticated, isLoading } = useAuthStore.getState();
+  if (!isAuthenticated && !isLoading) {
     const returnPath = `${location.pathname}${location.searchStr}`;
     const returnTo = `${window.location.origin}${returnPath}`;
     window.location.assign(`/login?return_to=${encodeURIComponent(returnTo)}`);
-  };
-
-  const { isAuthenticated, isLoading } = useAuthStore.getState();
-  if (!isAuthenticated && !isLoading) {
-    redirectToLogin();
-    return;
-  }
-
-  // The flag decision is verified against the server on every route entry —
-  // never trusted from the cached client snapshot alone. Fail-closed: a
-  // failed fetch reads as flag-off unless it was a 401, which clears the
-  // session and routes to login instead.
-  const user = await fetchAssistantAccessUser();
-  if (user) {
-    useAuthStore.getState().setUser(user);
-  } else if (!useAuthStore.getState().isAuthenticated) {
-    redirectToLogin();
-    return;
-  }
-  if (shouldRedirectFromAssistant({ isLoading: false, user })) {
-    // `replace` so the guarded /assistant entry never lingers in history —
-    // pressing Back from /dashboard must not re-enter the redirect loop.
-    throw redirect({ to: "/dashboard", replace: true });
   }
 };
 
@@ -314,33 +294,21 @@ const assistantRoute = createRoute({
     ...(typeof search.c === "string" ? { c: search.c } : {}),
   }),
   beforeLoad: assistantBeforeLoad,
-  component: () => (
-    <AssistantRouteGuard>
-      <AssistantPage />
-    </AssistantRouteGuard>
-  ),
+  component: AssistantPage,
 });
 
 const assistantPluginsRoute = createRoute({
   path: "/assistant/plugins",
   getParentRoute: () => rootRoute,
   beforeLoad: assistantBeforeLoad,
-  component: () => (
-    <AssistantRouteGuard>
-      <AssistantPage view="plugins" />
-    </AssistantRouteGuard>
-  ),
+  component: () => <AssistantPage view="plugins" />,
 });
 
 const assistantApprovalsRoute = createRoute({
   path: "/assistant/approvals",
   getParentRoute: () => rootRoute,
   beforeLoad: assistantBeforeLoad,
-  component: () => (
-    <AssistantRouteGuard>
-      <AssistantPage view="approvals" />
-    </AssistantRouteGuard>
-  ),
+  component: () => <AssistantPage view="approvals" />,
 });
 
 const dashboardLayout = createRoute({

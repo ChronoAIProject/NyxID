@@ -17,6 +17,7 @@ import {
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 import { useAdminUsers } from "@/hooks/use-admin";
+import type { AdminUser } from "@/types/admin";
 import {
   useAdminFeatureFlags,
   useClearAdminFeatureFlag,
@@ -29,7 +30,8 @@ type FlagKind = "experiment" | "entitlement" | "ops";
 interface Assignment {
   readonly id: string;
   readonly label: string;
-  readonly missingUser?: boolean;
+  /** True when the referenced account no longer resolves (deleted). */
+  readonly missingAccount?: boolean;
   state: ScopeState;
 }
 interface FlagRow {
@@ -64,11 +66,17 @@ export function AdminFeatureFlagsPage() {
         : flag.global_override
           ? "enabled"
           : "disabled",
-    orgs: [],
+    orgs: (flag.org_overrides ?? []).map((override) => ({
+      id: override.org_id,
+      label: orgOverrideLabel(override),
+      missingAccount:
+        override.org_display_name == null && override.org_slug == null,
+      state: override.enabled ? "enabled" : "disabled",
+    })),
     users: flag.user_overrides.map((override) => ({
       id: override.user_id,
       label: userOverrideLabel(override),
-      missingUser:
+      missingAccount:
         override.user_email == null && override.user_display_name == null,
       state: override.enabled ? "enabled" : "disabled",
     })),
@@ -98,8 +106,9 @@ export function AdminFeatureFlagsPage() {
       await Promise.all(
         pending.map(async ([key, scopeState]) => {
           const [flagKey = "", type = "global", id = ""] = key.split("\u001f");
-          const targetKind = type === "user" ? "user" : "global";
-          const targetKey = targetKind === "user" ? id : null;
+          const targetKind =
+            type === "user" ? "user" : type === "org" ? "org" : "global";
+          const targetKey = targetKind === "global" ? null : id;
           if (scopeState === "inherit") {
             await clearOverride.mutateAsync({ flagKey, targetKind, targetKey });
           } else {
@@ -242,7 +251,9 @@ function FlagCard({
   readonly stagedOrgs: readonly string[];
   readonly stagedUsers: readonly string[];
 }) {
-  const [addOrg, setAddOrg] = useState("");
+  const [stagedOrgLabels, setStagedOrgLabels] = useState<
+    Record<string, string>
+  >({});
   const [stagedUserLabels, setStagedUserLabels] = useState<
     Record<string, string>
   >({});
@@ -254,7 +265,11 @@ function FlagCard({
       ? flag.users.find((user) => user.id === id)?.label ??
         stagedUserLabels[id] ??
         id
-      : id;
+      : type === "org"
+        ? flag.orgs.find((org) => org.id === id)?.label ??
+          stagedOrgLabels[id] ??
+          id
+        : id;
 
   // Collapsed summary pills: Global + configured orgs/users (non-inherit).
   const pills: {
@@ -346,26 +361,38 @@ function FlagCard({
           </Group>
 
           <Group label="By organization">
-            <AddPicker
-              value={addOrg}
-              placeholder="Manage overrides from the organization page"
-              options={[]}
-              onPick={setAddOrg}
-              disabledReason="Organization-scoped overrides are managed from each organization page."
+            <AccountSearchPicker
+              kind="org"
+              excludedIds={orgIds}
+              onPick={(org) => {
+                setStagedOrgLabels((labels) => ({
+                  ...labels,
+                  [org.id]: org.label,
+                }));
+                stage("org", org.id, "enabled");
+              }}
             />
-            {orgIds.map((id) => (
-              <ScopeRow
-                key={id}
-                label={labelFor("org", id)}
-                state={stateFor("org", id)}
-                pending={isPending("org", id)}
-                onChange={(s) => stage("org", id, s)}
-              />
-            ))}
+            {orgIds.map((id) => {
+              const assignment = flag.orgs.find((org) => org.id === id);
+              return (
+                <div
+                  key={id}
+                  title={assignment?.missingAccount ? id : undefined}
+                >
+                  <ScopeRow
+                    label={labelFor("org", id)}
+                    state={stateFor("org", id)}
+                    pending={isPending("org", id)}
+                    onChange={(s) => stage("org", id, s)}
+                  />
+                </div>
+              );
+            })}
           </Group>
 
           <Group label="By user">
-            <UserSearchPicker
+            <AccountSearchPicker
+              kind="person"
               excludedIds={userIds}
               onPick={(user) => {
                 setStagedUserLabels((labels) => ({
@@ -381,7 +408,7 @@ function FlagCard({
               return (
                 <div
                   key={id}
-                  title={assignment?.missingUser ? id : undefined}
+                  title={assignment?.missingAccount ? id : undefined}
                 >
                   <ScopeRow
                     label={label}
@@ -422,15 +449,23 @@ function SummaryPill({ pill }: { readonly pill: SummaryPillValue }) {
   );
 }
 
-function UserSearchPicker({
+/** Default suggestions shown on focus before the admin types anything. */
+const DEFAULT_SUGGESTION_COUNT = 5;
+/** Over-fetch so exclusions don't leave the suggestion list short. */
+const DEFAULT_SUGGESTION_FETCH = 8;
+
+function AccountSearchPicker({
+  kind,
   excludedIds,
   onPick,
 }: {
+  readonly kind: "person" | "org";
   readonly excludedIds: readonly string[];
-  readonly onPick: (user: { id: string; label: string }) => void;
+  readonly onPick: (picked: { id: string; label: string }) => void;
 }) {
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [focused, setFocused] = useState(false);
   const normalizedSearch = search.trim();
 
   useEffect(() => {
@@ -442,55 +477,148 @@ function UserSearchPicker({
     1,
     20,
     debouncedSearch || undefined,
+    kind,
   );
   const waitingForSearch = normalizedSearch !== debouncedSearch;
   const results = debouncedSearch && !waitingForSearch
-    ? (data?.users ?? []).filter((user) => !excludedIds.includes(user.id))
+    ? (data?.users ?? []).filter((account) => !excludedIds.includes(account.id))
     : [];
 
+  // A flag card renders one picker per scope, so only fetch defaults while this
+  // picker's dropdown is actually open; identical keys dedupe across cards.
+  const showDefaults = focused && !normalizedSearch;
+  const { data: defaultsData, isLoading: defaultsLoading } = useAdminUsers(
+    1,
+    DEFAULT_SUGGESTION_FETCH,
+    undefined,
+    kind,
+    { enabled: showDefaults },
+  );
+  const defaults = (defaultsData?.users ?? [])
+    .filter((account) => !excludedIds.includes(account.id))
+    .slice(0, DEFAULT_SUGGESTION_COUNT);
+  const remaining = Math.max(0, (defaultsData?.total ?? 0) - defaults.length);
+
+  const isOrg = kind === "org";
+  const pick = (account: AdminUser) => {
+    onPick({ id: account.id, label: accountLabel(account, isOrg) });
+    setSearch("");
+    setDebouncedSearch("");
+  };
+
   return (
-    <div className="space-y-2 border-b border-border/40 px-3 py-2 last:border-b-0">
+    <div
+      className="space-y-2 border-b border-border/40 px-3 py-2 last:border-b-0"
+      onFocus={() => setFocused(true)}
+      onBlur={(event) => {
+        // Keep the dropdown open while focus moves within the picker, so both
+        // tabbing to a suggestion and clicking one still land a pick.
+        if (!event.currentTarget.contains(event.relatedTarget)) {
+          setFocused(false);
+        }
+      }}
+    >
       <div className="relative">
         <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
         <Input
           value={search}
           onChange={(event) => setSearch(event.target.value)}
-          placeholder="Search users by email…"
-          aria-label="Search users by email"
+          placeholder={
+            isOrg ? "Search organizations by name…" : "Search users by email…"
+          }
+          aria-label={
+            isOrg ? "Search organizations by name" : "Search users by email"
+          }
           className="h-8 pl-8 text-[12px]"
         />
       </div>
-      {normalizedSearch && (
+      {normalizedSearch ? (
         <div className="max-h-40 overflow-y-auto rounded-md border border-border/60">
           {isLoading || waitingForSearch ? (
             <p className="px-3 py-2 text-xs text-muted-foreground">Searching…</p>
           ) : results.length === 0 ? (
             <p className="px-3 py-2 text-xs text-muted-foreground">
-              No users match this search.
+              {isOrg
+                ? "No organizations match this search."
+                : "No users match this search."}
             </p>
           ) : (
-            results.map((user) => (
-              <button
-                key={user.id}
-                type="button"
-                onClick={() => {
-                  onPick({ id: user.id, label: user.email });
-                  setSearch("");
-                  setDebouncedSearch("");
-                }}
-                className="block w-full border-b border-border/40 px-3 py-2 text-left text-xs last:border-b-0 hover:bg-muted/50"
-              >
-                <span className="block truncate font-medium">{user.email}</span>
-                <span className="block truncate text-muted-foreground">
-                  {user.id}
-                </span>
-              </button>
+            results.map((account) => (
+              <AccountOption
+                key={account.id}
+                account={account}
+                isOrg={isOrg}
+                onPick={pick}
+              />
             ))
           )}
         </div>
+      ) : (
+        showDefaults && (
+          <div className="max-h-40 overflow-y-auto rounded-md border border-border/60">
+            {defaultsLoading ? (
+              <p className="px-3 py-2 text-xs text-muted-foreground">Loading…</p>
+            ) : defaults.length === 0 ? (
+              <p className="px-3 py-2 text-xs text-muted-foreground">
+                {isOrg
+                  ? "No organizations to suggest."
+                  : "No users to suggest."}
+              </p>
+            ) : (
+              <>
+                {defaults.map((account) => (
+                  <AccountOption
+                    key={account.id}
+                    account={account}
+                    isOrg={isOrg}
+                    onPick={pick}
+                  />
+                ))}
+                {remaining > 0 && (
+                  <p className="border-t border-border/40 px-3 py-2 text-[11px] text-muted-foreground">
+                    +{remaining} more — keep typing to narrow
+                  </p>
+                )}
+              </>
+            )}
+          </div>
+        )
       )}
     </div>
   );
+}
+
+function AccountOption({
+  account,
+  isOrg,
+  onPick,
+}: {
+  readonly account: AdminUser;
+  readonly isOrg: boolean;
+  readonly onPick: (account: AdminUser) => void;
+}) {
+  return (
+    <button
+      type="button"
+      // Suppress the input's blur so the click lands before the dropdown closes.
+      onMouseDown={(event) => event.preventDefault()}
+      onClick={() => onPick(account)}
+      className="block w-full border-b border-border/40 px-3 py-2 text-left text-xs last:border-b-0 hover:bg-muted/50"
+    >
+      <span className="block truncate font-medium">
+        {accountLabel(account, isOrg)}
+      </span>
+      <span className="block truncate text-muted-foreground">
+        {isOrg ? (account.slug ?? account.id) : account.id}
+      </span>
+    </button>
+  );
+}
+
+function accountLabel(account: AdminUser, isOrg: boolean): string {
+  return isOrg
+    ? (account.display_name ?? account.slug ?? account.id)
+    : account.email;
 }
 
 function FlagsEmptyState({
@@ -526,44 +654,6 @@ function Group({
       <div className="overflow-hidden rounded-lg border border-border/60 bg-background">
         {children}
       </div>
-    </div>
-  );
-}
-
-function AddPicker({
-  value,
-  placeholder,
-  options,
-  onPick,
-  disabledReason,
-}: {
-  readonly value: string;
-  readonly placeholder: string;
-  readonly options: readonly { id: string; label: string }[];
-  readonly onPick: (id: string) => void;
-  readonly disabledReason?: string;
-}) {
-  return (
-    <div
-      className="border-b border-border/40 px-3 py-2 last:border-b-0"
-      title={disabledReason}
-    >
-      <Select
-        value={value}
-        onValueChange={onPick}
-        disabled={Boolean(disabledReason) || options.length === 0}
-      >
-        <SelectTrigger className="h-8 w-full text-[12px]">
-          <SelectValue placeholder={placeholder} />
-        </SelectTrigger>
-        <SelectContent>
-          {options.map((o) => (
-            <SelectItem key={o.id} value={o.id}>
-              {o.label}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
     </div>
   );
 }
@@ -647,4 +737,16 @@ function userOverrideLabel(override: {
     return `${displayName} (${override.user_email})`;
   }
   return displayName || override.user_email || override.user_id;
+}
+
+function orgOverrideLabel(override: {
+  readonly org_id: string;
+  readonly org_display_name: string | null;
+  readonly org_slug: string | null;
+}): string {
+  const displayName = override.org_display_name?.trim();
+  if (displayName && override.org_slug) {
+    return `${displayName} (${override.org_slug})`;
+  }
+  return displayName || override.org_slug || override.org_id;
 }

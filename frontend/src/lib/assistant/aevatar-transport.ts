@@ -1,4 +1,4 @@
-import { api } from "@/lib/api-client";
+import { apiClient } from "@/lib/api-client";
 import { AssistantTurnActiveError } from "@/lib/assistant/errors";
 import { drainSseBuffer } from "@/lib/assistant/sse";
 import {
@@ -24,6 +24,25 @@ import { isTurnActive } from "@/types/assistant";
 // cannot name a scope, and the surface does not depend on the caller having
 // personally connected aevatar.
 const ASSISTANT_PREFIX = "/assistant";
+
+// A 401 from the assistant mount means the downstream (aevatar) rejected the
+// forwarded identity — page content failing, not the NyxID session dying — so
+// every request opts out of the api-client's global sign-out (#1190) and the
+// failure surfaces as a normal query error (toast + error state) instead of a
+// redirect to /login. Scoped to this transport; the rest of the app keeps
+// strict 401 handling.
+const assistantApi = {
+  get<T>(endpoint: string): Promise<T> {
+    return apiClient<T>(endpoint, { preserveSessionOn401: true });
+  },
+  post<T>(endpoint: string, body?: unknown): Promise<T> {
+    return apiClient<T>(endpoint, {
+      method: "POST",
+      body,
+      preserveSessionOn401: true,
+    });
+  },
+} as const;
 
 // The conversation list reads the Chat History index (contract-B): each row
 // already carries a server title, timestamps, and message count, so the list
@@ -148,7 +167,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       now - this.listFetchedAt > CONVERSATION_LIST_TTL_MS
     ) {
       this.listFetchedAt = now;
-      const response = await api.get<AevatarConversationListResponse>(
+      const response = await assistantApi.get<AevatarConversationListResponse>(
         `${ASSISTANT_PREFIX}/conversations`,
       );
       for (const entry of response.conversations ?? []) {
@@ -162,7 +181,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
   }
 
   async createConversation(): Promise<Conversation> {
-    const response = await api.post<AevatarCreateConversationResponse>(
+    const response = await assistantApi.post<AevatarCreateConversationResponse>(
       `${ASSISTANT_PREFIX}/conversations`,
       {},
     );
@@ -305,7 +324,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     if (!card) {
       throw new Error("Approval request was not found.");
     }
-    await api.post(
+    await assistantApi.post(
       `${ASSISTANT_PREFIX}/conversations/${conversationId}/approve`,
       { requestId: card.approval_request_id, approved },
     );
@@ -353,7 +372,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
   private async loadHistory(
     conversationId: string,
   ): Promise<StoredConversation> {
-    const entries = await api.get<AevatarHistoryEntry[]>(
+    const entries = await assistantApi.get<AevatarHistoryEntry[]>(
       `${ASSISTANT_PREFIX}/conversations/${conversationId}`,
     );
     const existing = this.conversations.get(conversationId);

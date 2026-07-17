@@ -25,6 +25,15 @@ interface RequestOptions {
   readonly body?: unknown;
   readonly headers?: Record<string, string>;
   readonly signal?: AbortSignal;
+  /**
+   * Opt this request out of the global sign-out on 401. For page-scoped
+   * integrations (e.g. the /assistant transports calling a downstream through
+   * the proxy) a 401 means that integration rejected the request — it says
+   * nothing about the NyxID session, so it must surface as a page-level error
+   * instead of clearing auth state and bouncing the user to /login. Requests
+   * that authenticate against NyxID itself must NOT set this.
+   */
+  readonly preserveSessionOn401?: boolean;
 }
 
 // Endpoints that should not clear the global auth state on 401 because they
@@ -114,7 +123,11 @@ export async function apiClient<T>(
 
   const response = await fetch(url, config);
 
-  if (response.status === 401 && !NO_AUTH_STATE_CLEAR_ENDPOINTS.has(endpoint)) {
+  if (
+    response.status === 401 &&
+    !options.preserveSessionOn401 &&
+    !NO_AUTH_STATE_CLEAR_ENDPOINTS.has(endpoint)
+  ) {
     useAuthStore.getState().setUser(null);
   }
 
