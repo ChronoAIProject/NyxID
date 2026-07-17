@@ -4,15 +4,21 @@ import { FEATURE_FLAG } from "@/lib/feature-flags";
 
 type AssistantAvailabilityUser = Pick<User, "capabilities"> | null;
 
-export function shouldRedirectFromAssistant(auth: {
-  readonly isLoading: boolean;
-  readonly user: AssistantAvailabilityUser;
-}): boolean {
-  return (
-    !auth.isLoading &&
-    !(auth.user?.capabilities?.enabled_features ?? []).includes(
-      FEATURE_FLAG.AI_ASSISTANT,
-    )
+/**
+ * Entry decision for the /assistant* route guards. The server-verified user
+ * from `fetchAssistantAccessUser` wins when present; when that re-fetch
+ * failed transiently (non-401), fall back to the already-authenticated
+ * store snapshot so a network hiccup never bounces an entitled user off the
+ * page — the flag only gates UI, the backend authorizes every API call.
+ * With no user from either source this stays fail-closed (flag-off).
+ */
+export function hasAssistantAccess(
+  fetchedUser: AssistantAvailabilityUser,
+  snapshotUser: AssistantAvailabilityUser,
+): boolean {
+  const user = fetchedUser ?? snapshotUser;
+  return (user?.capabilities?.enabled_features ?? []).includes(
+    FEATURE_FLAG.AI_ASSISTANT,
   );
 }
 
@@ -22,9 +28,10 @@ export function shouldRedirectFromAssistant(auth: {
  * instead of the boot-time auth-store snapshot (a flag disabled mid-session
  * must lock the route on the next navigation, not the next hard reload).
  *
- * Fail-closed: any fetch failure resolves to `null`, which callers treat as
- * flag-off. A 401 additionally clears the auth store inside the api client,
- * so the caller's unauthenticated redirect takes over.
+ * Any fetch failure resolves to `null`; callers decide from the auth-store
+ * snapshot instead (see `hasAssistantAccess`). A 401 additionally clears
+ * the auth store inside the api client, so the caller's unauthenticated
+ * redirect takes over.
  */
 export async function fetchAssistantAccessUser(): Promise<User | null> {
   try {

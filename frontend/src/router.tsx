@@ -13,13 +13,12 @@ import { AppNotFound } from "@/components/shared/app-not-found";
 import { AuthLayout } from "@/components/layout/auth-layout";
 import { DashboardLayout } from "@/components/layout/dashboard-layout";
 import { BillingRouteGuard } from "@/components/billing-route-guard";
-import { AssistantRouteGuard } from "@/components/assistant-route-guard";
 import { useAuthStore } from "@/stores/auth-store";
 import { hasAdminRead } from "@/types/api";
 import { shouldRedirectFromBilling } from "@/lib/billing-availability";
 import {
   fetchAssistantAccessUser,
-  shouldRedirectFromAssistant,
+  hasAssistantAccess,
 } from "@/lib/assistant-availability";
 import { normalizeAdminOAuthClientSearch } from "@/lib/admin-oauth-clients";
 
@@ -262,11 +261,27 @@ const sshTerminalRoute = createRoute({
 // Shared by every /assistant* route. Keep this auth mirror aligned with
 // dashboardLayout.beforeLoad below; the Assistant shell intentionally lives
 // outside DashboardLayout.
+//
+// This beforeLoad is the ONLY flag gate for the assistant surface. It blocks
+// the route transition until the decision is made, so the previous page stays
+// on screen and an admitted page is never yanked away afterwards. Do not add
+// a reactive component-level guard on top: one existed and raced the auth
+// store (boot `checkAuth`, transient 401 `setUser(null)`) — it blanked and
+// bounced users whose permission simply hadn't loaded yet.
 const assistantBeforeLoad = async ({
   location,
+  cause,
 }: {
   location: { pathname: string; searchStr: string };
+  cause: "preload" | "enter" | "stay";
 }) => {
+  // Re-runs on an already-entered match (`stay`, e.g. the `?c=` search param
+  // changing while switching conversations) must not each await a fresh
+  // `/users/me` round trip — the user was verified when they entered.
+  if (cause === "stay") {
+    return;
+  }
+
   if (import.meta.env.DEV) {
     const { isMockMode, getMockUser } = await import("./lib/mock-data");
     if (isMockMode()) {
@@ -290,9 +305,11 @@ const assistantBeforeLoad = async ({
   }
 
   // The flag decision is verified against the server on every route entry —
-  // never trusted from the cached client snapshot alone. Fail-closed: a
-  // failed fetch reads as flag-off unless it was a 401, which clears the
-  // session and routes to login instead.
+  // the cached client snapshot alone is never trusted to ADMIT after a flag
+  // was disabled mid-session. A 401 clears the session inside the api client
+  // and routes to login; any other fetch failure falls back to the
+  // authenticated store snapshot (see `hasAssistantAccess`) so a transient
+  // hiccup doesn't bounce an entitled user to /dashboard.
   const user = await fetchAssistantAccessUser();
   if (user) {
     useAuthStore.getState().setUser(user);
@@ -300,7 +317,7 @@ const assistantBeforeLoad = async ({
     redirectToLogin();
     return;
   }
-  if (shouldRedirectFromAssistant({ isLoading: false, user })) {
+  if (!hasAssistantAccess(user, useAuthStore.getState().user)) {
     // `replace` so the guarded /assistant entry never lingers in history —
     // pressing Back from /dashboard must not re-enter the redirect loop.
     throw redirect({ to: "/dashboard", replace: true });
@@ -314,33 +331,21 @@ const assistantRoute = createRoute({
     ...(typeof search.c === "string" ? { c: search.c } : {}),
   }),
   beforeLoad: assistantBeforeLoad,
-  component: () => (
-    <AssistantRouteGuard>
-      <AssistantPage />
-    </AssistantRouteGuard>
-  ),
+  component: AssistantPage,
 });
 
 const assistantPluginsRoute = createRoute({
   path: "/assistant/plugins",
   getParentRoute: () => rootRoute,
   beforeLoad: assistantBeforeLoad,
-  component: () => (
-    <AssistantRouteGuard>
-      <AssistantPage view="plugins" />
-    </AssistantRouteGuard>
-  ),
+  component: () => <AssistantPage view="plugins" />,
 });
 
 const assistantApprovalsRoute = createRoute({
   path: "/assistant/approvals",
   getParentRoute: () => rootRoute,
   beforeLoad: assistantBeforeLoad,
-  component: () => (
-    <AssistantRouteGuard>
-      <AssistantPage view="approvals" />
-    </AssistantRouteGuard>
-  ),
+  component: () => <AssistantPage view="approvals" />,
 });
 
 const dashboardLayout = createRoute({

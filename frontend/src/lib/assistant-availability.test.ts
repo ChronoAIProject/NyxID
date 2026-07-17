@@ -3,7 +3,7 @@ import type { UserCapabilities } from "@/types/api";
 import { FEATURE_FLAG } from "./feature-flags";
 import {
   fetchAssistantAccessUser,
-  shouldRedirectFromAssistant,
+  hasAssistantAccess,
 } from "./assistant-availability";
 
 const { mockGet } = vi.hoisted(() => ({
@@ -24,32 +24,24 @@ function userWithAssistant(enabled: boolean): {
   };
 }
 
-describe("shouldRedirectFromAssistant", () => {
-  it("waits while auth and capabilities are still loading", () => {
+describe("hasAssistantAccess", () => {
+  it("admits when the server-verified user has the flag", () => {
+    expect(hasAssistantAccess(userWithAssistant(true), null)).toBe(true);
+  });
+
+  it("denies when the server-verified user lacks the flag, even if the snapshot has it", () => {
     expect(
-      shouldRedirectFromAssistant({
-        isLoading: true,
-        user: null,
-      }),
+      hasAssistantAccess(userWithAssistant(false), userWithAssistant(true)),
     ).toBe(false);
   });
 
-  it("redirects when the feature is unavailable after auth settles", () => {
-    expect(
-      shouldRedirectFromAssistant({
-        isLoading: false,
-        user: userWithAssistant(false),
-      }),
-    ).toBe(true);
+  it("falls back to the store snapshot when the verification fetch failed", () => {
+    expect(hasAssistantAccess(null, userWithAssistant(true))).toBe(true);
+    expect(hasAssistantAccess(null, userWithAssistant(false))).toBe(false);
   });
 
-  it("does not redirect when the feature is available", () => {
-    expect(
-      shouldRedirectFromAssistant({
-        isLoading: false,
-        user: userWithAssistant(true),
-      }),
-    ).toBe(false);
+  it("fails closed when neither source provides a user", () => {
+    expect(hasAssistantAccess(null, null)).toBe(false);
   });
 });
 
@@ -66,15 +58,9 @@ describe("fetchAssistantAccessUser", () => {
     expect(mockGet).toHaveBeenCalledWith("/users/me");
   });
 
-  it("fails closed to null when the verification fetch rejects", async () => {
+  it("resolves to null when the verification fetch rejects", async () => {
     mockGet.mockRejectedValueOnce(new Error("network down"));
 
     await expect(fetchAssistantAccessUser()).resolves.toBeNull();
-  });
-
-  it("treats a null verified user as flag-off (guard redirects)", () => {
-    expect(shouldRedirectFromAssistant({ isLoading: false, user: null })).toBe(
-      true,
-    );
   });
 });
