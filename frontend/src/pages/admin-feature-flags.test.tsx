@@ -43,6 +43,37 @@ function flagFixture(
   };
 }
 
+/**
+ * Serves the unsearched person page (per_page 8) the picker asks for on focus,
+ * and an empty page for every other call.
+ */
+function defaultSuggestionsMock() {
+  return (
+    _page: number,
+    perPage: number,
+    search?: string,
+    kind?: string,
+    options?: { enabled?: boolean },
+  ) => {
+    const isDefaults =
+      perPage === 8 && !search && kind === "person" && options?.enabled;
+    return {
+      data: isDefaults
+        ? {
+            users: Array.from({ length: 8 }, (_, index) => ({
+              id: `user-${index}`,
+              email: `suggested-${index}@example.com`,
+            })),
+            total: 200,
+            page: 1,
+            per_page: 8,
+          }
+        : { users: [], total: 0, page: 1, per_page: perPage },
+      isLoading: false,
+    };
+  };
+}
+
 beforeEach(() => {
   mockSetFlag.mockReset().mockResolvedValue(undefined);
   mockClearFlag.mockReset().mockResolvedValue(undefined);
@@ -179,6 +210,63 @@ describe("AdminFeatureFlagsPage", () => {
       ),
     );
     expect(await screen.findByText("late@example.com")).toBeInTheDocument();
+  });
+
+  it("suggests the first accounts with a remainder hint when search is focused", async () => {
+    mockUseFlags.mockReturnValue({
+      data: { flags: [flagFixture()] },
+      isLoading: false,
+      error: null,
+    });
+    mockUseUsers.mockImplementation(defaultSuggestionsMock());
+
+    render(<AdminFeatureFlagsPage />);
+    fireEvent.click(screen.getByText("experimental:ai-assistant"));
+    // Nothing is suggested — and no request fans out — until the admin
+    // actually opens the dropdown.
+    expect(screen.queryByText("suggested-0@example.com")).not.toBeInTheDocument();
+    expect(mockUseUsers).toHaveBeenCalledWith(1, 8, undefined, "person", {
+      enabled: false,
+    });
+
+    fireEvent.focusIn(screen.getByLabelText("Search users by email"));
+
+    // Over-fetches 8 and shows 5, so exclusions can't leave the list short.
+    expect(
+      await screen.findByText("suggested-0@example.com"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("suggested-4@example.com")).toBeInTheDocument();
+    expect(screen.queryByText("suggested-5@example.com")).not.toBeInTheDocument();
+    // total (200) minus the 5 shown.
+    expect(
+      screen.getByText("+195 more — keep typing to narrow"),
+    ).toBeInTheDocument();
+    expect(mockUseUsers).toHaveBeenCalledWith(1, 8, undefined, "person", {
+      enabled: true,
+    });
+  });
+
+  it("stages an override from a default suggestion", async () => {
+    mockUseFlags.mockReturnValue({
+      data: { flags: [flagFixture()] },
+      isLoading: false,
+      error: null,
+    });
+    mockUseUsers.mockImplementation(defaultSuggestionsMock());
+
+    render(<AdminFeatureFlagsPage />);
+    fireEvent.click(screen.getByText("experimental:ai-assistant"));
+    fireEvent.focusIn(screen.getByLabelText("Search users by email"));
+    fireEvent.click(await screen.findByText("suggested-2@example.com"));
+
+    fireEvent.click(screen.getByText("Apply changes"));
+    await waitFor(() =>
+      expect(mockSetFlag).toHaveBeenCalledWith({
+        flagKey: "experimental:ai-assistant",
+        body: { target_kind: "user", target_key: "user-2", enabled: true },
+      }),
+    );
+    expect(mockSetFlag).toHaveBeenCalledTimes(1);
   });
 
   it("stages an org from the org search and applies an org-scoped override", async () => {

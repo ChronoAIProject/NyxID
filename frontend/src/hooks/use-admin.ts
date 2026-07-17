@@ -21,6 +21,7 @@ export function useAdminUsers(
   perPage: number,
   search?: string,
   userType?: "person" | "org",
+  options?: { readonly enabled?: boolean },
 ) {
   return useQuery({
     queryKey: ["admin", "users", page, perPage, search, userType],
@@ -35,6 +36,7 @@ export function useAdminUsers(
         `/admin/users?${params.toString()}`,
       );
     },
+    enabled: options?.enabled ?? true,
   });
 }
 
