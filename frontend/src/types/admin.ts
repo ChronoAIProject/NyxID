@@ -13,6 +13,8 @@ export interface AdminUser {
   readonly id: string;
   readonly email: string;
   readonly display_name: string | null;
+  /// Org accounts only; null/absent for person accounts.
+  readonly slug?: string | null;
   readonly avatar_url: string | null;
   readonly email_verified: boolean;
   readonly is_active: boolean;
@@ -23,10 +25,6 @@ export interface AdminUser {
   /// fall back to deriving from `is_admin` / `is_operator`.
   readonly role?: PlatformRole;
   readonly mfa_enabled: boolean;
-  /// "person" or "org". Older backends omit this field.
-  readonly user_type?: "person" | "org";
-  /// Org URL slug; only set for org accounts. Older backends omit this field.
-  readonly slug?: string | null;
   readonly role_ids?: readonly string[];
   readonly group_ids?: readonly string[];
   readonly created_at: string;

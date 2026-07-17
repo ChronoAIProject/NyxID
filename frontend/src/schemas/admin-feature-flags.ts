@@ -19,7 +19,7 @@ export const adminUserFeatureFlagOverrideSchema = z.object({
 });
 
 export const adminOrgFeatureFlagOverrideSchema = z.object({
-  org_user_id: z.string(),
+  org_id: z.string(),
   org_display_name: z.string().nullable(),
   org_slug: z.string().nullable(),
   enabled: z.boolean(),

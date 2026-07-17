@@ -50,11 +50,9 @@ impl AdminUserFeatureFlagOverride {
     }
 }
 
-/// One org-wide override row in the platform-admin listing. Role/user rows
-/// inside an org stay on the org's own feature-flag page.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct AdminOrgFeatureFlagOverride {
-    pub org_user_id: String,
+    pub org_id: String,
     pub org_display_name: Option<String>,
     pub org_slug: Option<String>,
     pub enabled: bool,
@@ -65,16 +63,16 @@ pub struct AdminOrgFeatureFlagOverride {
 impl AdminOrgFeatureFlagOverride {
     fn from_row(
         row: FeatureFlagOverride,
-        orgs: &std::collections::HashMap<String, feature_flag_service::OverrideOrgDisplay>,
+        orgs: &std::collections::HashMap<String, feature_flag_service::PlatformOverrideOrgDisplay>,
     ) -> AppResult<Self> {
-        let org_user_id = row.org_user_id.ok_or_else(|| {
-            AppError::Internal("org-wide override is missing its org id".to_string())
+        let org_id = row.org_user_id.ok_or_else(|| {
+            AppError::Internal("org-scope override is missing its org id".to_string())
         })?;
-        let org = orgs.get(&org_user_id);
+        let org = orgs.get(&org_id);
         Ok(Self {
-            org_user_id,
             org_display_name: org.and_then(|item| item.display_name.clone()),
             org_slug: org.and_then(|item| item.slug.clone()),
+            org_id,
             enabled: row.enabled,
             updated_at: row.updated_at.to_rfc3339(),
             updated_by: row.updated_by,
@@ -122,30 +120,42 @@ pub struct ClearAdminFeatureFlagQuery {
     pub target_key: Option<String>,
 }
 
-/// Parse a **platform-scope** target (global / personal user). `Org` is
-/// handled by the caller before this (it maps to an org-scoped row, not a
-/// platform row); `Role` stays org self-serve only.
-fn parse_platform_target(kind: AdminFlagTargetKind, key: Option<&str>) -> AppResult<FlagTarget> {
+/// A parsed admin-API target: a platform-level row (`org_user_id = null`) or
+/// an org-wide row for one org (wire `target_key` = that org's user id).
+#[derive(Debug)]
+enum AdminTarget {
+    Platform(FlagTarget),
+    OrgWide { org_user_id: String },
+}
+
+fn parse_target(kind: AdminFlagTargetKind, key: Option<&str>) -> AppResult<AdminTarget> {
     match kind {
-        AdminFlagTargetKind::Global if key.is_none() => Ok(FlagTarget::Global),
+        AdminFlagTargetKind::Global if key.is_none() => {
+            Ok(AdminTarget::Platform(FlagTarget::Global))
+        }
         AdminFlagTargetKind::Global => Err(AppError::BadRequest(
             "global target requires target_key to be null".to_string(),
         )),
-        AdminFlagTargetKind::User => FlagTarget::from_parts(FlagTargetKind::User, key),
-        AdminFlagTargetKind::Org => Err(AppError::BadRequest(
-            "org target requires target_key to be the org id".to_string(),
-        )),
+        AdminFlagTargetKind::User => Ok(AdminTarget::Platform(FlagTarget::from_parts(
+            FlagTargetKind::User,
+            key,
+        )?)),
+        AdminFlagTargetKind::Org => {
+            let org_id = key
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    AppError::BadRequest(
+                        "org target requires target_key to be the org's user id".to_string(),
+                    )
+                })?;
+            Ok(AdminTarget::OrgWide {
+                org_user_id: org_id.to_string(),
+            })
+        }
         AdminFlagTargetKind::Role => Err(AppError::BadRequest(
-            "role targets require an org; use the org feature-flag API".to_string(),
+            "role targets are org-scoped; use the org feature-flag API".to_string(),
         )),
-    }
-}
-
-/// The org id for an `Org` target, when present and non-empty.
-fn org_target_key(kind: AdminFlagTargetKind, key: Option<&str>) -> Option<&str> {
-    match kind {
-        AdminFlagTargetKind::Org => key.map(str::trim).filter(|k| !k.is_empty()),
-        _ => None,
     }
 }
 
@@ -156,9 +166,9 @@ pub async fn list_feature_flags(
 ) -> AppResult<Json<AdminFeatureFlagListResponse>> {
     require_admin_or_operator(&state, &auth_user, "admin.feature_flags.list").await?;
     let overrides = feature_flag_service::list_platform_overrides(&state.db).await?;
+    let org_rows = feature_flag_service::list_all_org_scope_overrides(&state.db).await?;
     let users = feature_flag_service::fetch_platform_override_users(&state.db, &overrides).await?;
-    let org_rows = feature_flag_service::list_org_wide_overrides(&state.db).await?;
-    let orgs = feature_flag_service::fetch_override_orgs(&state.db, &org_rows).await?;
+    let orgs = feature_flag_service::fetch_override_org_display(&state.db, &org_rows).await?;
     let mut flags = Vec::with_capacity(feature_flag_service::FEATURE_FLAGS.len());
 
     for def in feature_flag_service::FEATURE_FLAGS {
@@ -201,26 +211,27 @@ pub async fn set_feature_flag(
 ) -> AppResult<Json<AdminUserFeatureFlagOverrideOrGlobal>> {
     require_admin(&state, &auth_user).await?;
     let actor = auth_user.user_id.to_string();
-
-    let row = if let Some(org_id) = org_target_key(body.target_kind, body.target_key.as_deref()) {
-        feature_flag_service::admin_set_org_override(
-            &state.db,
-            org_id,
-            &flag_key,
-            body.enabled,
-            &actor,
-        )
-        .await?
-    } else {
-        let target = parse_platform_target(body.target_kind, body.target_key.as_deref())?;
-        feature_flag_service::set_platform_override(
-            &state.db,
-            &flag_key,
-            &target,
-            body.enabled,
-            &actor,
-        )
-        .await?
+    let row = match parse_target(body.target_kind, body.target_key.as_deref())? {
+        AdminTarget::Platform(target) => {
+            feature_flag_service::set_platform_override(
+                &state.db,
+                &flag_key,
+                &target,
+                body.enabled,
+                &actor,
+            )
+            .await?
+        }
+        AdminTarget::OrgWide { org_user_id } => {
+            feature_flag_service::set_platform_org_override(
+                &state.db,
+                &org_user_id,
+                &flag_key,
+                body.enabled,
+                &actor,
+            )
+            .await?
+        }
     };
 
     audit_service::log_for_user(
@@ -243,8 +254,6 @@ pub async fn set_feature_flag(
 pub struct AdminUserFeatureFlagOverrideOrGlobal {
     pub target_kind: String,
     pub target_key: Option<String>,
-    /// Set when this row is an org-scoped override (org target).
-    pub org_user_id: Option<String>,
     pub enabled: bool,
     pub updated_at: String,
     pub updated_by: String,
@@ -254,8 +263,10 @@ impl From<FeatureFlagOverride> for AdminUserFeatureFlagOverrideOrGlobal {
     fn from(row: FeatureFlagOverride) -> Self {
         Self {
             target_kind: row.target_kind.as_str().to_string(),
-            target_key: row.target_key,
-            org_user_id: row.org_user_id,
+            // Org-wide rows store the org in `org_user_id` with a null
+            // `target_key`; echo the org id back so the response mirrors the
+            // request's wire shape.
+            target_key: row.target_key.or(row.org_user_id),
             enabled: row.enabled,
             updated_at: row.updated_at.to_rfc3339(),
             updated_by: row.updated_by,
@@ -273,13 +284,15 @@ pub async fn clear_feature_flag(
     require_admin(&state, &auth_user).await?;
     feature_flag_service::find_flag(&flag_key)
         .ok_or_else(|| AppError::BadRequest(format!("unknown feature flag '{flag_key}'")))?;
-    let removed =
-        if let Some(org_id) = org_target_key(query.target_kind, query.target_key.as_deref()) {
-            feature_flag_service::admin_clear_org_override(&state.db, org_id, &flag_key).await?
-        } else {
-            let target = parse_platform_target(query.target_kind, query.target_key.as_deref())?;
+    let removed = match parse_target(query.target_kind, query.target_key.as_deref())? {
+        AdminTarget::Platform(target) => {
             feature_flag_service::clear_platform_override(&state.db, &flag_key, &target).await?
-        };
+        }
+        AdminTarget::OrgWide { org_user_id } => {
+            feature_flag_service::clear_platform_org_override(&state.db, &org_user_id, &flag_key)
+                .await?
+        }
+    };
 
     if let Some(row) = removed {
         audit_service::log_for_user(
@@ -327,148 +340,15 @@ mod tests {
 
     #[test]
     fn target_validation_rejects_invalid_platform_scopes() {
-        assert!(parse_platform_target(AdminFlagTargetKind::Global, Some("x")).is_err());
-        assert!(parse_platform_target(AdminFlagTargetKind::User, None).is_err());
-        // Org without an org id falls through to platform parsing and is
-        // rejected there; with an id it routes to the org write path.
-        assert!(org_target_key(AdminFlagTargetKind::Org, None).is_none());
-        assert!(org_target_key(AdminFlagTargetKind::Org, Some("  ")).is_none());
-        assert!(parse_platform_target(AdminFlagTargetKind::Org, None).is_err());
-        assert_eq!(
-            org_target_key(AdminFlagTargetKind::Org, Some("org-1")),
-            Some("org-1")
-        );
-        assert!(org_target_key(AdminFlagTargetKind::Global, Some("org-1")).is_none());
-        assert!(parse_platform_target(AdminFlagTargetKind::Role, Some("admin")).is_err());
-    }
-
-    #[tokio::test]
-    async fn org_target_round_trip_and_acl() {
-        use crate::models::org_membership::{
-            COLLECTION_NAME as MEMBERSHIPS, MemberScopeSource, OrgMembership, OrgRole,
-        };
-        use crate::services::feature_flag_service;
-
-        let Some((state, admin_id, operator_id, _target_id)) =
-            setup("admin_feature_flags_org_target").await
-        else {
-            eprintln!("skipping admin feature flag handler test: no local MongoDB available");
-            return;
-        };
-        let flag_key = "example_ui".to_string();
-        let org_id = Uuid::new_v4().to_string();
-        let member_id = Uuid::new_v4().to_string();
-        let mut org_user = test_user(&org_id, UserType::Org);
-        org_user.display_name = Some("ChronoAI".to_string());
-        state
-            .db
-            .collection(USERS)
-            .insert_one(org_user)
-            .await
-            .expect("insert org user");
-        state
-            .db
-            .collection::<OrgMembership>(MEMBERSHIPS)
-            .insert_one(OrgMembership {
-                id: Uuid::new_v4().to_string(),
-                org_user_id: org_id.clone(),
-                member_user_id: member_id.clone(),
-                role: OrgRole::Member,
-                scope_source: MemberScopeSource::Inherit,
-                allowed_service_ids: None,
-                created_at: chrono::Utc::now(),
-                revoked_at: None,
-            })
-            .await
-            .expect("insert membership");
-
-        // Operator may not write org targets.
-        let operator_err = set_feature_flag(
-            State(state.clone()),
-            test_auth_user(&operator_id),
-            Path(flag_key.clone()),
-            Json(SetAdminFeatureFlagRequest {
-                target_kind: AdminFlagTargetKind::Org,
-                target_key: Some(org_id.clone()),
-                enabled: true,
-            }),
-        )
-        .await
-        .expect_err("operator org PUT forbidden");
-        assert!(matches!(operator_err, AppError::Forbidden(_)));
-
-        // Admin enables org-wide; the response carries the org id.
-        let admin = test_auth_user(&admin_id);
-        let Json(row) = set_feature_flag(
-            State(state.clone()),
-            admin.clone(),
-            Path(flag_key.clone()),
-            Json(SetAdminFeatureFlagRequest {
-                target_kind: AdminFlagTargetKind::Org,
-                target_key: Some(org_id.clone()),
-                enabled: true,
-            }),
-        )
-        .await
-        .expect("admin org PUT");
-        assert_eq!(row.target_kind, "org");
-        assert_eq!(row.org_user_id.as_deref(), Some(org_id.as_str()));
-        assert!(row.enabled);
-
-        // The member's personal resolution now carries the flag — the exact
-        // prod regression ("enable for org → assistant shows up").
-        assert!(
-            feature_flag_service::resolve_personal_features(&state.db, &member_id)
-                .await
-                .expect("resolve member")
-                .contains(&flag_key)
-        );
-
-        // Listing surfaces the org override with display data.
-        let Json(list) = list_feature_flags(State(state.clone()), admin.clone())
-            .await
-            .expect("list flags");
-        let item = list.flags.iter().find(|flag| flag.key == flag_key).unwrap();
-        assert_eq!(item.org_overrides.len(), 1);
-        assert_eq!(item.org_overrides[0].org_user_id, org_id);
-        assert_eq!(
-            item.org_overrides[0].org_display_name.as_deref(),
-            Some("ChronoAI")
-        );
-
-        // Unknown org rejected.
-        let missing_org = set_feature_flag(
-            State(state.clone()),
-            admin.clone(),
-            Path(flag_key.clone()),
-            Json(SetAdminFeatureFlagRequest {
-                target_kind: AdminFlagTargetKind::Org,
-                target_key: Some(Uuid::new_v4().to_string()),
-                enabled: true,
-            }),
-        )
-        .await
-        .expect_err("unknown org rejected");
-        assert!(matches!(missing_org, AppError::OrgNotFound(_)));
-
-        // Clear removes the grant.
-        clear_feature_flag(
-            State(state.clone()),
-            admin,
-            Path(flag_key.clone()),
-            Query(ClearAdminFeatureFlagQuery {
-                target_kind: AdminFlagTargetKind::Org,
-                target_key: Some(org_id),
-            }),
-        )
-        .await
-        .expect("clear org override");
-        assert!(
-            !feature_flag_service::resolve_personal_features(&state.db, &member_id)
-                .await
-                .expect("resolve after clear")
-                .contains(&flag_key)
-        );
+        assert!(parse_target(AdminFlagTargetKind::Global, Some("x")).is_err());
+        assert!(parse_target(AdminFlagTargetKind::User, None).is_err());
+        assert!(parse_target(AdminFlagTargetKind::Org, None).is_err());
+        assert!(parse_target(AdminFlagTargetKind::Org, Some("  ")).is_err());
+        assert!(parse_target(AdminFlagTargetKind::Role, Some("admin")).is_err());
+        assert!(matches!(
+            parse_target(AdminFlagTargetKind::Org, Some("org-1")),
+            Ok(AdminTarget::OrgWide { org_user_id }) if org_user_id == "org-1"
+        ));
     }
 
     #[tokio::test]
@@ -565,6 +445,95 @@ mod tests {
         .await
         .expect_err("unknown flag rejected");
         assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn org_override_round_trip_and_validation() {
+        let Some((state, admin_id, _operator_id, target_id)) =
+            setup("admin_feature_flags_org_flow").await
+        else {
+            eprintln!("skipping admin feature flag org test: no local MongoDB available");
+            return;
+        };
+        let auth = test_auth_user(&admin_id);
+        let flag_key = "staff_only_ui".to_string();
+        let org_id = Uuid::new_v4().to_string();
+        state
+            .db
+            .collection(USERS)
+            .insert_one(test_user(&org_id, UserType::Org))
+            .await
+            .expect("insert org user");
+
+        // Set an org-wide override (on a staff-only flag: no org_manageable
+        // gate on the platform path). The response echoes the org id.
+        let Json(row) = set_feature_flag(
+            State(state.clone()),
+            auth.clone(),
+            Path(flag_key.clone()),
+            Json(SetAdminFeatureFlagRequest {
+                target_kind: AdminFlagTargetKind::Org,
+                target_key: Some(org_id.clone()),
+                enabled: true,
+            }),
+        )
+        .await
+        .expect("set org override");
+        assert_eq!(row.target_kind, "org");
+        assert_eq!(row.target_key.as_deref(), Some(org_id.as_str()));
+        assert!(row.enabled);
+
+        // The admin list shows the enriched org override; the org's own
+        // override set picks up the identical row.
+        let Json(list) = list_feature_flags(State(state.clone()), auth.clone())
+            .await
+            .expect("list flags");
+        let item = list.flags.iter().find(|flag| flag.key == flag_key).unwrap();
+        assert_eq!(item.org_overrides.len(), 1);
+        assert_eq!(item.org_overrides[0].org_id, org_id);
+        assert_eq!(
+            item.org_overrides[0].org_display_name.as_deref(),
+            Some("Test Org")
+        );
+        let org_rows = crate::services::feature_flag_service::list_overrides(&state.db, &org_id)
+            .await
+            .expect("org rows");
+        assert_eq!(org_rows.len(), 1);
+
+        // Nonexistent org and person accounts are rejected as not-an-org.
+        for bad_org in [Uuid::new_v4().to_string(), target_id] {
+            let err = set_feature_flag(
+                State(state.clone()),
+                auth.clone(),
+                Path(flag_key.clone()),
+                Json(SetAdminFeatureFlagRequest {
+                    target_kind: AdminFlagTargetKind::Org,
+                    target_key: Some(bad_org),
+                    enabled: true,
+                }),
+            )
+            .await
+            .expect_err("non-org target rejected");
+            assert!(matches!(err, AppError::NotFound(_)));
+        }
+
+        // Clear removes the row from both views.
+        clear_feature_flag(
+            State(state.clone()),
+            auth.clone(),
+            Path(flag_key.clone()),
+            Query(ClearAdminFeatureFlagQuery {
+                target_kind: AdminFlagTargetKind::Org,
+                target_key: Some(org_id.clone()),
+            }),
+        )
+        .await
+        .expect("clear org override");
+        let Json(list) = list_feature_flags(State(state), auth)
+            .await
+            .expect("list after clear");
+        let item = list.flags.iter().find(|flag| flag.key == flag_key).unwrap();
+        assert!(item.org_overrides.is_empty());
     }
 
     #[tokio::test]

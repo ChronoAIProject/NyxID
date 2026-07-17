@@ -17,12 +17,12 @@ import {
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 import { useAdminUsers } from "@/hooks/use-admin";
+import type { AdminUser } from "@/types/admin";
 import {
   useAdminFeatureFlags,
   useClearAdminFeatureFlag,
   useSetAdminFeatureFlag,
 } from "@/hooks/use-admin-feature-flags";
-import type { AdminFeatureFlagTargetKind } from "@/schemas/admin-feature-flags";
 import { useAuthStore } from "@/stores/auth-store";
 import { canAdminWrite } from "@/types/api";
 
@@ -32,7 +32,8 @@ type FlagKind = "experiment" | "entitlement" | "ops";
 interface Assignment {
   readonly id: string;
   readonly label: string;
-  readonly missingUser?: boolean;
+  /** True when the referenced account no longer resolves (deleted). */
+  readonly missingAccount?: boolean;
   state: ScopeState;
 }
 interface FlagRow {
@@ -53,6 +54,8 @@ export function AdminFeatureFlagsPage() {
   const { data, isLoading, error } = useAdminFeatureFlags();
   const setOverride = useSetAdminFeatureFlag();
   const clearOverride = useClearAdminFeatureFlag();
+  // Operators get read access to this page but their writes 403 — render
+  // them a read-only view instead of controls that fail on Apply.
   const currentUser = useAuthStore((s) => s.user);
   const canWrite = canAdminWrite(currentUser);
   const [drafts, setDrafts] = useState<Record<string, ScopeState>>({});
@@ -69,16 +72,17 @@ export function AdminFeatureFlagsPage() {
         : flag.global_override
           ? "enabled"
           : "disabled",
-    // `?? []` tolerates a not-yet-redeployed backend that omits the field.
     orgs: (flag.org_overrides ?? []).map((override) => ({
-      id: override.org_user_id,
+      id: override.org_id,
       label: orgOverrideLabel(override),
+      missingAccount:
+        override.org_display_name == null && override.org_slug == null,
       state: override.enabled ? "enabled" : "disabled",
     })),
     users: flag.user_overrides.map((override) => ({
       id: override.user_id,
       label: userOverrideLabel(override),
-      missingUser:
+      missingAccount:
         override.user_email == null && override.user_display_name == null,
       state: override.enabled ? "enabled" : "disabled",
     })),
@@ -108,10 +112,7 @@ export function AdminFeatureFlagsPage() {
       await Promise.all(
         pending.map(async ([key, scopeState]) => {
           const [flagKey = "", type = "global", id = ""] = key.split("\u001f");
-          // Exhaustive: an org draft must write an org-scoped override --
-          // silently widening it to a global write would flip the flag for
-          // the whole platform.
-          const targetKind: AdminFeatureFlagTargetKind =
+          const targetKind =
             type === "user" ? "user" : type === "org" ? "org" : "global";
           const targetKey = targetKind === "global" ? null : id;
           if (scopeState === "inherit") {
@@ -219,7 +220,6 @@ export function AdminFeatureFlagsPage() {
               flag={flag}
               open={isOpen(flag.key)}
               dirty={dirtyFlags.has(flag.key)}
-              canWrite={canWrite}
               onToggle={() => toggle(flag.key)}
               stateFor={(type, id) => stateFor(flag.key, type, id)}
               isPending={(type, id) =>
@@ -228,6 +228,7 @@ export function AdminFeatureFlagsPage() {
               stage={(type, id, s) => stage(flag.key, type, id, s)}
               stagedUsers={stagedIds(drafts, flag.key, "user")}
               stagedOrgs={stagedIds(drafts, flag.key, "org")}
+              canWrite={canWrite}
             />
           ))}
         </div>
@@ -240,42 +241,44 @@ function FlagCard({
   flag,
   open,
   dirty,
-  canWrite,
   onToggle,
   stateFor,
   isPending,
   stage,
   stagedOrgs,
   stagedUsers,
+  canWrite,
 }: {
   readonly flag: FlagRow;
   readonly open: boolean;
   readonly dirty: boolean;
-  readonly canWrite: boolean;
   readonly onToggle: () => void;
   readonly stateFor: (type: ScopeType, id: string) => ScopeState;
   readonly isPending: (type: ScopeType, id: string) => boolean;
   readonly stage: (type: ScopeType, id: string, s: ScopeState) => void;
   readonly stagedOrgs: readonly string[];
   readonly stagedUsers: readonly string[];
+  readonly canWrite: boolean;
 }) {
-  const [stagedLabels, setStagedLabels] = useState<Record<string, string>>({});
+  const [stagedOrgLabels, setStagedOrgLabels] = useState<
+    Record<string, string>
+  >({});
+  const [stagedUserLabels, setStagedUserLabels] = useState<
+    Record<string, string>
+  >({});
 
   const orgIds = uniq([...flag.orgs.map((o) => o.id), ...stagedOrgs]);
   const userIds = uniq([...flag.users.map((u) => u.id), ...stagedUsers]);
-  const labelFor = (type: ScopeType, id: string) => {
-    const list = type === "user" ? flag.users : type === "org" ? flag.orgs : [];
-    return (
-      list.find((item) => item.id === id)?.label ??
-      stagedLabels[draftKey(flag.key, type, id)] ??
-      id
-    );
-  };
-  const rememberLabel = (type: ScopeType, id: string, label: string) =>
-    setStagedLabels((labels) => ({
-      ...labels,
-      [draftKey(flag.key, type, id)]: label,
-    }));
+  const labelFor = (type: ScopeType, id: string) =>
+    type === "user"
+      ? flag.users.find((user) => user.id === id)?.label ??
+        stagedUserLabels[id] ??
+        id
+      : type === "org"
+        ? flag.orgs.find((org) => org.id === id)?.label ??
+          stagedOrgLabels[id] ??
+          id
+        : id;
 
   // Collapsed summary pills: Global + configured orgs/users (non-inherit).
   const pills: {
@@ -370,37 +373,46 @@ function FlagCard({
           <Group label="By organization">
             {canWrite && (
               <AccountSearchPicker
-                userType="org"
-                placeholder="Search organizations by name…"
-                ariaLabel="Search organizations by name"
+                kind="org"
                 excludedIds={orgIds}
                 onPick={(org) => {
-                  rememberLabel("org", org.id, org.label);
+                  setStagedOrgLabels((labels) => ({
+                    ...labels,
+                    [org.id]: org.label,
+                  }));
                   stage("org", org.id, "enabled");
                 }}
               />
             )}
-            {orgIds.map((id) => (
-              <ScopeRow
-                key={id}
-                label={labelFor("org", id)}
-                state={stateFor("org", id)}
-                pending={isPending("org", id)}
-                disabled={!canWrite}
-                onChange={(s) => stage("org", id, s)}
-              />
-            ))}
+            {orgIds.map((id) => {
+              const assignment = flag.orgs.find((org) => org.id === id);
+              return (
+                <div
+                  key={id}
+                  title={assignment?.missingAccount ? id : undefined}
+                >
+                  <ScopeRow
+                    label={labelFor("org", id)}
+                    state={stateFor("org", id)}
+                    pending={isPending("org", id)}
+                    disabled={!canWrite}
+                    onChange={(s) => stage("org", id, s)}
+                  />
+                </div>
+              );
+            })}
           </Group>
 
           <Group label="By user">
             {canWrite && (
               <AccountSearchPicker
-                userType="person"
-                placeholder="Search users by email…"
-                ariaLabel="Search users by email"
+                kind="person"
                 excludedIds={userIds}
                 onPick={(user) => {
-                  rememberLabel("user", user.id, user.label);
+                  setStagedUserLabels((labels) => ({
+                    ...labels,
+                    [user.id]: user.label,
+                  }));
                   stage("user", user.id, "enabled");
                 }}
               />
@@ -411,7 +423,7 @@ function FlagCard({
               return (
                 <div
                   key={id}
-                  title={assignment?.missingUser ? id : undefined}
+                  title={assignment?.missingAccount ? id : undefined}
                 >
                   <ScopeRow
                     label={label}
@@ -453,21 +465,23 @@ function SummaryPill({ pill }: { readonly pill: SummaryPillValue }) {
   );
 }
 
+/** Default suggestions shown on focus before the admin types anything. */
+const DEFAULT_SUGGESTION_COUNT = 5;
+/** Over-fetch so exclusions don't leave the suggestion list short. */
+const DEFAULT_SUGGESTION_FETCH = 8;
+
 function AccountSearchPicker({
-  userType,
-  placeholder,
-  ariaLabel,
+  kind,
   excludedIds,
   onPick,
 }: {
-  readonly userType: "person" | "org";
-  readonly placeholder: string;
-  readonly ariaLabel: string;
+  readonly kind: "person" | "org";
   readonly excludedIds: readonly string[];
-  readonly onPick: (account: { id: string; label: string }) => void;
+  readonly onPick: (picked: { id: string; label: string }) => void;
 }) {
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [focused, setFocused] = useState(false);
   const normalizedSearch = search.trim();
 
   useEffect(() => {
@@ -479,64 +493,148 @@ function AccountSearchPicker({
     1,
     20,
     debouncedSearch || undefined,
-    userType,
+    kind,
   );
   const waitingForSearch = normalizedSearch !== debouncedSearch;
   const results = debouncedSearch && !waitingForSearch
-    ? (data?.users ?? []).filter((user) => !excludedIds.includes(user.id))
+    ? (data?.users ?? []).filter((account) => !excludedIds.includes(account.id))
     : [];
-  const primary = (user: (typeof results)[number]) =>
-    userType === "org" ? user.display_name ?? user.email : user.email;
-  const secondary = (user: (typeof results)[number]) =>
-    userType === "org" ? user.slug ?? user.id : user.id;
+
+  // A flag card renders one picker per scope, so only fetch defaults while this
+  // picker's dropdown is actually open; identical keys dedupe across cards.
+  const showDefaults = focused && !normalizedSearch;
+  const { data: defaultsData, isLoading: defaultsLoading } = useAdminUsers(
+    1,
+    DEFAULT_SUGGESTION_FETCH,
+    undefined,
+    kind,
+    { enabled: showDefaults },
+  );
+  const defaults = (defaultsData?.users ?? [])
+    .filter((account) => !excludedIds.includes(account.id))
+    .slice(0, DEFAULT_SUGGESTION_COUNT);
+  const remaining = Math.max(0, (defaultsData?.total ?? 0) - defaults.length);
+
+  const isOrg = kind === "org";
+  const pick = (account: AdminUser) => {
+    onPick({ id: account.id, label: accountLabel(account, isOrg) });
+    setSearch("");
+    setDebouncedSearch("");
+  };
 
   return (
-    <div className="space-y-2 border-b border-border/40 px-3 py-2 last:border-b-0">
+    <div
+      className="space-y-2 border-b border-border/40 px-3 py-2 last:border-b-0"
+      onFocus={() => setFocused(true)}
+      onBlur={(event) => {
+        // Keep the dropdown open while focus moves within the picker, so both
+        // tabbing to a suggestion and clicking one still land a pick.
+        if (!event.currentTarget.contains(event.relatedTarget)) {
+          setFocused(false);
+        }
+      }}
+    >
       <div className="relative">
         <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
         <Input
           value={search}
           onChange={(event) => setSearch(event.target.value)}
-          placeholder={placeholder}
-          aria-label={ariaLabel}
+          placeholder={
+            isOrg ? "Search organizations by name…" : "Search users by email…"
+          }
+          aria-label={
+            isOrg ? "Search organizations by name" : "Search users by email"
+          }
           className="h-8 pl-8 text-[12px]"
         />
       </div>
-      {normalizedSearch && (
+      {normalizedSearch ? (
         <div className="max-h-40 overflow-y-auto rounded-md border border-border/60">
           {isLoading || waitingForSearch ? (
             <p className="px-3 py-2 text-xs text-muted-foreground">Searching…</p>
           ) : results.length === 0 ? (
             <p className="px-3 py-2 text-xs text-muted-foreground">
-              {userType === "org"
+              {isOrg
                 ? "No organizations match this search."
                 : "No users match this search."}
             </p>
           ) : (
-            results.map((user) => (
-              <button
-                key={user.id}
-                type="button"
-                onClick={() => {
-                  onPick({ id: user.id, label: primary(user) });
-                  setSearch("");
-                  setDebouncedSearch("");
-                }}
-                className="block w-full border-b border-border/40 px-3 py-2 text-left text-xs last:border-b-0 hover:bg-muted/50"
-              >
-                <span className="block truncate font-medium">
-                  {primary(user)}
-                </span>
-                <span className="block truncate text-muted-foreground">
-                  {secondary(user)}
-                </span>
-              </button>
+            results.map((account) => (
+              <AccountOption
+                key={account.id}
+                account={account}
+                isOrg={isOrg}
+                onPick={pick}
+              />
             ))
           )}
         </div>
+      ) : (
+        showDefaults && (
+          <div className="max-h-40 overflow-y-auto rounded-md border border-border/60">
+            {defaultsLoading ? (
+              <p className="px-3 py-2 text-xs text-muted-foreground">Loading…</p>
+            ) : defaults.length === 0 ? (
+              <p className="px-3 py-2 text-xs text-muted-foreground">
+                {isOrg
+                  ? "No organizations to suggest."
+                  : "No users to suggest."}
+              </p>
+            ) : (
+              <>
+                {defaults.map((account) => (
+                  <AccountOption
+                    key={account.id}
+                    account={account}
+                    isOrg={isOrg}
+                    onPick={pick}
+                  />
+                ))}
+                {remaining > 0 && (
+                  <p className="border-t border-border/40 px-3 py-2 text-[11px] text-muted-foreground">
+                    +{remaining} more — keep typing to narrow
+                  </p>
+                )}
+              </>
+            )}
+          </div>
+        )
       )}
     </div>
   );
+}
+
+function AccountOption({
+  account,
+  isOrg,
+  onPick,
+}: {
+  readonly account: AdminUser;
+  readonly isOrg: boolean;
+  readonly onPick: (account: AdminUser) => void;
+}) {
+  return (
+    <button
+      type="button"
+      // Suppress the input's blur so the click lands before the dropdown closes.
+      onMouseDown={(event) => event.preventDefault()}
+      onClick={() => onPick(account)}
+      className="block w-full border-b border-border/40 px-3 py-2 text-left text-xs last:border-b-0 hover:bg-muted/50"
+    >
+      <span className="block truncate font-medium">
+        {accountLabel(account, isOrg)}
+      </span>
+      <span className="block truncate text-muted-foreground">
+        {isOrg ? (account.slug ?? account.id) : account.id}
+      </span>
+    </button>
+  );
+}
+
+function accountLabel(account: AdminUser, isOrg: boolean): string {
+  return isOrg
+    ? (account.display_name ?? account.slug ?? account.id)
+    : account.email;
 }
 
 function FlagsEmptyState({
@@ -664,7 +762,7 @@ function userOverrideLabel(override: {
 }
 
 function orgOverrideLabel(override: {
-  readonly org_user_id: string;
+  readonly org_id: string;
   readonly org_display_name: string | null;
   readonly org_slug: string | null;
 }): string {
@@ -672,5 +770,5 @@ function orgOverrideLabel(override: {
   if (displayName && override.org_slug) {
     return `${displayName} (${override.org_slug})`;
   }
-  return displayName || override.org_slug || override.org_user_id;
+  return displayName || override.org_slug || override.org_id;
 }

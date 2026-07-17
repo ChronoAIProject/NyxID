@@ -3,6 +3,14 @@ import { Link } from "@tanstack/react-router";
 import { Plus, Search } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { AddKeyDialog } from "@/components/dashboard/add-key-dialog";
@@ -33,6 +41,80 @@ interface PluginCardShape {
   readonly added: boolean;
 }
 
+/**
+ * Every card in the grid renders at this exact box, whatever its description
+ * length: header (34px tile) + a 3-line description + the action row, inside
+ * `p-4`. The description is the only elastic block (`flex-1` + `line-clamp-3`),
+ * so short and empty descriptions reserve the same space instead of collapsing
+ * the card. `LoadingGrid` skeletons use the same height.
+ */
+const CARD_HEIGHT = "h-[168px]";
+
+function PluginTile({
+  children,
+}: {
+  readonly children: React.ReactNode;
+}) {
+  return (
+    <div className="flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-md bg-muted text-[13px] font-semibold text-muted-foreground">
+      {children}
+    </div>
+  );
+}
+
+/** Full-description detail view for a card, with the card's own primary action.
+ *  The action node is the identical element the card renders, so Connect /
+ *  Manage / Install keep their exact handlers (including the manage-modal vs
+ *  /keys-link split). Any action click also closes this dialog, so the
+ *  manage/add-service modal it opens is never stacked on top of it. */
+function PluginDetailDialog({
+  item,
+  addedBadge,
+  action,
+  onClose,
+}: {
+  readonly item: PluginCardShape;
+  readonly addedBadge: "Connected" | "Installed";
+  readonly action: React.ReactNode;
+  readonly onClose: () => void;
+}) {
+  return (
+    <Dialog open onOpenChange={(next) => (next ? undefined : onClose())}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2.5">
+            <PluginTile>
+              {item.iconSlug ? (
+                <ServiceIcon slug={item.iconSlug} size="md" />
+              ) : (
+                item.initial
+              )}
+            </PluginTile>
+            <span className="min-w-0 flex-1">
+              <span className="block truncate">{item.name}</span>
+              <span className="block text-[10px] font-normal uppercase tracking-[0.5px] text-text-tertiary">
+                {item.category}
+              </span>
+            </span>
+            {item.added && <Badge variant="success">{addedBadge}</Badge>}
+          </DialogTitle>
+        </DialogHeader>
+
+        <DialogDescription className="whitespace-pre-line break-words text-[12px] text-muted-foreground">
+          {item.description}
+        </DialogDescription>
+
+        <DialogFooter className="sm:items-center sm:justify-between">
+          <span className="font-mono text-[10px] text-text-tertiary">
+            {item.meta}
+          </span>
+          <span onClick={onClose}>{action}</span>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function PluginCard({
   item,
   addedBadge,
@@ -47,34 +129,49 @@ function PluginCard({
   readonly addedAction: React.ReactNode;
   readonly availableAction: React.ReactNode;
 }) {
+  const [expanded, setExpanded] = useState(false);
+  const action = item.added ? addedAction : availableAction;
+
   return (
-    <div className="flex flex-col gap-2.5 rounded-xl border border-border bg-card p-4 transition-colors hover:border-hairline-strong">
-      <div className="flex items-start gap-2.5">
-        <div className="flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-md bg-muted text-[13px] font-semibold text-muted-foreground">
-          {item.iconSlug ? (
-            <ServiceIcon slug={item.iconSlug} size="md" />
-          ) : (
-            item.initial
-          )}
-        </div>
-        <div className="min-w-0">
-          <p className="truncate text-[13px] font-medium text-foreground">
-            {item.name}
-          </p>
-          <p className="text-[10px] uppercase tracking-[0.5px] text-text-tertiary">
-            {item.category}
-          </p>
-        </div>
-      </div>
-      <p
-        className="flex-1 text-[12px] text-muted-foreground line-clamp-4 break-words"
-        title={item.description}
+    <>
+      {/* Clickable surface, not a <button>: the card holds its own action
+          button/link, which may not nest inside one. Same role/tabIndex/keydown
+          pattern the dashboard list cards use (api-key-table, channel-bots). */}
+      <div
+        role="button"
+        tabIndex={0}
+        aria-label={`${item.name} details`}
+        onClick={() => setExpanded(true)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            setExpanded(true);
+          }
+        }}
+        className={`flex ${CARD_HEIGHT} cursor-pointer flex-col gap-2.5 rounded-xl border border-border bg-card p-4 text-left transition-colors hover:border-hairline-strong`}
       >
-        {item.description}
-      </p>
-      <div className="flex items-center justify-between gap-2">
-        {item.added ? (
-          <>
+        <div className="flex items-start gap-2.5">
+          <PluginTile>
+            {item.iconSlug ? (
+              <ServiceIcon slug={item.iconSlug} size="md" />
+            ) : (
+              item.initial
+            )}
+          </PluginTile>
+          <div className="min-w-0">
+            <p className="truncate text-[13px] font-medium text-foreground">
+              {item.name}
+            </p>
+            <p className="text-[10px] uppercase tracking-[0.5px] text-text-tertiary">
+              {item.category}
+            </p>
+          </div>
+        </div>
+        <p className="flex-1 break-words text-[12px] leading-[17px] text-muted-foreground line-clamp-3">
+          {item.description}
+        </p>
+        <div className="flex shrink-0 items-center justify-between gap-2">
+          {item.added ? (
             <span className="flex min-w-0 items-center gap-2">
               <Badge variant="success">{addedBadge}</Badge>
               {addedMeta && (
@@ -83,24 +180,39 @@ function PluginCard({
                 </span>
               )}
             </span>
-            {addedAction}
-          </>
-        ) : (
-          <>
+          ) : (
             <span className="font-mono text-[10px] text-text-tertiary">
               {item.meta}
             </span>
-            {availableAction}
-          </>
-        )}
+          )}
+          {/* The inline action stays a plain action: it must not also expand. */}
+          <span
+            className="shrink-0"
+            onClick={(event) => event.stopPropagation()}
+            onKeyDown={(event) => event.stopPropagation()}
+          >
+            {action}
+          </span>
+        </div>
       </div>
-    </div>
+
+      {expanded && (
+        <PluginDetailDialog
+          item={item}
+          addedBadge={addedBadge}
+          action={action}
+          onClose={() => setExpanded(false)}
+        />
+      )}
+    </>
   );
 }
 
 function AddYourOwnSkillCard() {
   return (
-    <div className="flex flex-col gap-2.5 rounded-xl border border-dashed border-border p-4">
+    <div
+      className={`flex ${CARD_HEIGHT} flex-col gap-2.5 rounded-xl border border-dashed border-border p-4`}
+    >
       <div className="flex items-start gap-2.5">
         <div className="flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
           <Plus className="h-3.5 w-3.5" />
@@ -114,11 +226,11 @@ function AddYourOwnSkillCard() {
           </p>
         </div>
       </div>
-      <p className="flex-1 text-[12px] text-muted-foreground">
+      <p className="flex-1 text-[12px] leading-[17px] text-muted-foreground line-clamp-3">
         Register a skill from a Git repo or paste a SKILL.md - your assistant
         loads it on demand in every chat.
       </p>
-      <div className="flex items-center justify-between gap-2">
+      <div className="flex shrink-0 items-center justify-between gap-2">
         <span className="font-mono text-[10px] text-text-tertiary">
           git url or upload
         </span>
@@ -151,7 +263,7 @@ function LoadingGrid() {
     <div role="status" aria-label="Loading the plugin catalog">
       <CardGrid>
         {Array.from({ length: 6 }, (_, i) => (
-          <Skeleton key={i} className="h-36 rounded-xl" />
+          <Skeleton key={i} className={`${CARD_HEIGHT} rounded-xl`} />
         ))}
       </CardGrid>
     </div>

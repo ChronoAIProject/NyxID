@@ -1,8 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  AevatarAssistantTransport,
-  drainSseBuffer,
-} from "@/lib/assistant/aevatar-transport";
+import { AevatarAssistantTransport } from "@/lib/assistant/aevatar-transport";
 import { AssistantTurnActiveError } from "@/lib/assistant/errors";
 import { selectAssistantTransportKind } from "@/lib/assistant/transport";
 import capturedHistory from "@/lib/assistant/__fixtures__/aevatar-chat-history.json";
@@ -13,7 +10,9 @@ import type { TurnEvent } from "@/types/assistant";
 
 const USER_ID = "add69059-bece-4f0e-9559-99cfd10b47eb";
 const CONVERSATION_ID = "nyxid-chat-f8369965a444433f92ec50e67ad8ee52";
-const SCOPE_BASE = `/api/v1/proxy/s/aevatar/api/scopes/${USER_ID}`;
+// NyxID's own assistant mount. No scope segment: the server derives the
+// aevatar scope from the session user (PRD decision 4).
+const ASSISTANT_BASE = "/api/v1/assistant";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -74,20 +73,20 @@ function stubFetch(...routes: FetchRoute[]): ReturnType<typeof vi.fn> {
 }
 
 const routeCreate: FetchRoute = (url, init) =>
-  url === `${SCOPE_BASE}/nyxid-chat/conversations` && init?.method === "POST"
+  url === `${ASSISTANT_BASE}/conversations` && init?.method === "POST"
     ? jsonResponse({ status: "accepted", actorId: CONVERSATION_ID })
     : undefined;
 
 function routeStream(frames: unknown[]): FetchRoute {
   return (url, init) =>
-    url.includes(":stream") && init?.method === "POST"
+    url.endsWith("/stream") && init?.method === "POST"
       ? sseResponse(frames)
       : undefined;
 }
 
 function routeHistory(entries: unknown[]): FetchRoute {
   return (url, init) =>
-    url.includes("/chat-history/conversations/") &&
+    url.startsWith(`${ASSISTANT_BASE}/conversations/`) &&
     (init?.method ?? "GET") === "GET"
       ? jsonResponse(entries)
       : undefined;
@@ -117,24 +116,6 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllGlobals();
   useAuthStore.getState().setUser(null);
-});
-
-describe("drainSseBuffer", () => {
-  it("extracts complete data payloads and keeps the unterminated tail", () => {
-    const { payloads, rest } = drainSseBuffer(
-      'data: {"a":1}\n\ndata: {"b":2}\n\ndata: {"partial"',
-    );
-    expect(payloads).toEqual(['{"a":1}', '{"b":2}']);
-    expect(rest).toBe('data: {"partial"');
-  });
-
-  it("handles CRLF framing and non-data lines", () => {
-    const { payloads, rest } = drainSseBuffer(
-      'event: message\r\ndata: {"a":1}\r\n\r\n',
-    );
-    expect(payloads).toEqual(['{"a":1}']);
-    expect(rest).toBe("");
-  });
 });
 
 describe("AevatarAssistantTransport", () => {
@@ -249,23 +230,40 @@ describe("AevatarAssistantTransport", () => {
     ]);
   });
 
-  it("lists server conversations hydrated with titles from history", async () => {
+  it("lists conversations from the Chat History index without a fan-out", async () => {
+    const detailFetch = vi.fn();
     stubFetch(
       (url, init) =>
-        url === `${SCOPE_BASE}/nyxid-chat/conversations` &&
+        url === `${ASSISTANT_BASE}/conversations` &&
         (init?.method ?? "GET") === "GET"
           ? jsonResponse({
-              conversations: [{ actorId: CONVERSATION_ID }],
+              conversations: [
+                {
+                  id: CONVERSATION_ID,
+                  title: "Summarize this week's merged PRs",
+                  serviceId: "nyxid-chat",
+                  serviceKind: "nyxid.chat",
+                  createdAt: "2026-07-17T03:00:00+00:00",
+                  updatedAt: "2026-07-17T03:05:00+00:00",
+                  messageCount: 4,
+                  llmRoute: "nyxid",
+                  llmModel: "gpt-5.5",
+                },
+              ],
             })
           : undefined,
-      routeHistory([
-        {
-          id: "e1-user",
-          role: "user",
-          content: "Summarize this week's merged PRs",
-          timestamp: 1784192889074,
-        },
-      ]),
+      // If the list ever hydrates titles via per-conversation detail reads,
+      // this route fires and the assertion below fails.
+      (url, init) => {
+        if (
+          url.startsWith(`${ASSISTANT_BASE}/conversations/`) &&
+          (init?.method ?? "GET") === "GET"
+        ) {
+          detailFetch();
+          return jsonResponse([]);
+        }
+        return undefined;
+      },
     );
     const transport = new AevatarAssistantTransport();
 
@@ -274,6 +272,26 @@ describe("AevatarAssistantTransport", () => {
     expect(conversations).toHaveLength(1);
     expect(conversations[0]?.id).toBe(CONVERSATION_ID);
     expect(conversations[0]?.title).toBe("Summarize this week's merged PRs");
+    expect(conversations[0]?.message_count).toBe(4);
+    expect(conversations[0]?.llm_model).toBe("gpt-5.5");
+    expect(conversations[0]?.last_message_at).toBe("2026-07-17T03:05:00+00:00");
+    expect(detailFetch).not.toHaveBeenCalled();
+  });
+
+  it("keeps a streaming conversation's live title over stale index metadata", async () => {
+    stubFetch(routeCreate, routeStream(OBSERVED_FRAMES));
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+    // Start a turn but don't await it, so the conversation is mid-flight.
+    const inflight = collectTurn(transport, "Draft the launch note");
+
+    // A concurrent list refresh must not overwrite the active conversation.
+    const list = await transport.listConversations();
+
+    expect(list.find((c) => c.id === CONVERSATION_ID)?.title).toBe(
+      "Draft the launch note",
+    );
+    await inflight;
   });
 
   it("rejects a concurrent send while a turn is active", async () => {
@@ -318,7 +336,7 @@ describe("AevatarAssistantTransport", () => {
 
   it("fails the turn when the stream endpoint rejects the request", async () => {
     stubFetch(routeCreate, (url, init) =>
-      url.includes(":stream") && init?.method === "POST"
+      url.endsWith("/stream") && init?.method === "POST"
         ? jsonResponse({ error: "turn_active" }, 409)
         : undefined,
     );
@@ -353,7 +371,7 @@ describe("AevatarAssistantTransport", () => {
       },
     });
     stubFetch(routeCreate, (url, init) =>
-      url.includes(":stream") && init?.method === "POST"
+      url.endsWith("/stream") && init?.method === "POST"
         ? new Response(openStream, {
             status: 200,
             headers: { "Content-Type": "text/event-stream" },
@@ -411,6 +429,28 @@ describe("AevatarAssistantTransport", () => {
       transport.sendMessage("unknown", "Hello", () => {});
     }).toThrow("Conversation was not found.");
   });
+
+  it("never puts a scope id on the wire, even with no user in the store", async () => {
+    // The server derives the aevatar scope from the verified session, so the
+    // transport must not depend on the client-side user at all (PRD
+    // decision 4). Regression guard against reintroducing a scope segment.
+    useAuthStore.getState().setUser(null);
+    const fetchMock = stubFetch(routeCreate, routeStream(OBSERVED_FRAMES));
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    const events = await collectTurn(transport, "Hello there");
+
+    const terminal = events[events.length - 1];
+    expect(terminal?.event === "turn.completed" && terminal.status).toBe(
+      "completed",
+    );
+    for (const [input] of fetchMock.mock.calls) {
+      expect(String(input)).not.toContain(USER_ID);
+      expect(String(input)).not.toContain("/scopes/");
+      expect(String(input)).not.toContain("/proxy/");
+    }
+  });
 });
 
 // The fixtures under __fixtures__/ are verbatim wire captures taken against
@@ -436,7 +476,7 @@ describe("captured production wire shapes", () => {
       },
     });
     stubFetch(routeCreate, (url, init) =>
-      url.includes(":stream") && init?.method === "POST"
+      url.endsWith("/stream") && init?.method === "POST"
         ? new Response(trickle, {
             status: 200,
             headers: { "Content-Type": "text/event-stream" },
@@ -504,15 +544,18 @@ describe("captured production wire shapes", () => {
     await collectTurn(transport, "Hello there");
 
     const streamCall = fetchMock.mock.calls.find(([input]) =>
-      String(input).includes(":stream"),
+      String(input).endsWith("/stream"),
     ) as [string, RequestInit] | undefined;
     expect(streamCall).toBeDefined();
     const [url, init] = streamCall ?? ["", {}];
-    // Path must be the NyxID proxy route with the caller's own scope id —
-    // aevatar rejects mismatched scopes, and 415s without the JSON header.
+    // NyxID's own route: no scope segment, because the server derives the
+    // aevatar scope from the verified session. The endpoint still 415s
+    // without the explicit JSON content type.
     expect(url).toBe(
-      `/api/v1/proxy/s/aevatar/api/scopes/${USER_ID}/nyxid-chat/conversations/${CONVERSATION_ID}:stream`,
+      `${ASSISTANT_BASE}/conversations/${CONVERSATION_ID}/stream`,
     );
+    expect(url).not.toContain(USER_ID);
+    expect(url).not.toContain("/proxy/");
     expect(init.method).toBe("POST");
     expect(init.credentials).toBe("include");
     expect(init.headers).toMatchObject({

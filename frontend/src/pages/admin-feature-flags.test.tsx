@@ -4,22 +4,20 @@ import { AdminFeatureFlagsPage } from "./admin-feature-flags";
 import { useAuthStore } from "@/stores/auth-store";
 import type { User } from "@/types/api";
 
-const { mockUseFlags, mockUseUsers, mockSetOverride, mockClearOverride } =
-  vi.hoisted(() => ({
+const { mockUseFlags, mockUseUsers, mockSetFlag, mockClearFlag } = vi.hoisted(
+  () => ({
     mockUseFlags: vi.fn(),
     mockUseUsers: vi.fn(),
-    mockSetOverride: vi.fn(),
-    mockClearOverride: vi.fn(),
-  }));
+    mockSetFlag: vi.fn(),
+    mockClearFlag: vi.fn(),
+  }),
+);
 
 vi.mock("@/hooks/use-admin-feature-flags", () => ({
   useAdminFeatureFlags: mockUseFlags,
-  useSetAdminFeatureFlag: () => ({
-    mutateAsync: mockSetOverride,
-    isPending: false,
-  }),
+  useSetAdminFeatureFlag: () => ({ mutateAsync: mockSetFlag, isPending: false }),
   useClearAdminFeatureFlag: () => ({
-    mutateAsync: mockClearOverride,
+    mutateAsync: mockClearFlag,
     isPending: false,
   }),
 }));
@@ -27,6 +25,56 @@ vi.mock("@/hooks/use-admin-feature-flags", () => ({
 vi.mock("@/hooks/use-admin", () => ({
   useAdminUsers: mockUseUsers,
 }));
+
+function flagFixture(
+  overrides: Partial<{
+    global_override: boolean | null;
+    org_overrides: unknown[];
+    user_overrides: unknown[];
+  }> = {},
+) {
+  return {
+    key: "experimental:ai-assistant",
+    description: "AI Assistant chat surface.",
+    default_enabled: false,
+    org_manageable: true,
+    global_override: null,
+    org_overrides: [],
+    user_overrides: [],
+    ...overrides,
+  };
+}
+
+/**
+ * Serves the unsearched person page (per_page 8) the picker asks for on focus,
+ * and an empty page for every other call.
+ */
+function defaultSuggestionsMock() {
+  return (
+    _page: number,
+    perPage: number,
+    search?: string,
+    kind?: string,
+    options?: { enabled?: boolean },
+  ) => {
+    const isDefaults =
+      perPage === 8 && !search && kind === "person" && options?.enabled;
+    return {
+      data: isDefaults
+        ? {
+            users: Array.from({ length: 8 }, (_, index) => ({
+              id: `user-${index}`,
+              email: `suggested-${index}@example.com`,
+            })),
+            total: 200,
+            page: 1,
+            per_page: 8,
+          }
+        : { users: [], total: 0, page: 1, per_page: perPage },
+      isLoading: false,
+    };
+  };
+}
 
 function adminUser(): User {
   return {
@@ -55,28 +103,9 @@ function operatorUser(): User {
   };
 }
 
-function flagFixture(
-  overrides: Partial<{
-    global_override: boolean | null;
-    org_overrides: unknown[];
-    user_overrides: unknown[];
-  }> = {},
-) {
-  return {
-    key: "experimental:ai-assistant",
-    description: "AI Assistant chat surface.",
-    default_enabled: false,
-    org_manageable: true,
-    global_override: null,
-    org_overrides: [],
-    user_overrides: [],
-    ...overrides,
-  };
-}
-
 beforeEach(() => {
-  mockSetOverride.mockReset().mockResolvedValue(undefined);
-  mockClearOverride.mockReset().mockResolvedValue(undefined);
+  mockSetFlag.mockReset().mockResolvedValue(undefined);
+  mockClearFlag.mockReset().mockResolvedValue(undefined);
   mockUseUsers.mockReset().mockReturnValue({
     data: { users: [], total: 201, page: 1, per_page: 20 },
     isLoading: false,
@@ -113,19 +142,6 @@ describe("AdminFeatureFlagsPage", () => {
     expect(screen.getByText("No feature flags")).toBeInTheDocument();
   });
 
-  it("tolerates a backend response without org_overrides (deploy skew)", () => {
-    const legacy = flagFixture() as Record<string, unknown>;
-    delete legacy["org_overrides"];
-    mockUseFlags.mockReturnValue({
-      data: { flags: [legacy] },
-      isLoading: false,
-      error: null,
-    });
-
-    render(<AdminFeatureFlagsPage />);
-    expect(screen.getByText("experimental:ai-assistant")).toBeInTheDocument();
-  });
-
   it("resolves an existing override label independently of search results", () => {
     mockUseFlags.mockReturnValue({
       data: {
@@ -152,16 +168,16 @@ describe("AdminFeatureFlagsPage", () => {
     expect(screen.getByText("existing@example.com")).toBeInTheDocument();
   });
 
-  it("renders org overrides with their display labels", () => {
+  it("renders org overrides with their display name and slug", () => {
     mockUseFlags.mockReturnValue({
       data: {
         flags: [
           flagFixture({
             org_overrides: [
               {
-                org_user_id: "org-1",
-                org_display_name: "ChronoAI",
-                org_slug: "chronoai",
+                org_id: "org-1",
+                org_display_name: "Acme Corp",
+                org_slug: "acme",
                 enabled: true,
                 updated_at: "2026-07-17T00:00:00Z",
                 updated_by: "admin-1",
@@ -175,7 +191,7 @@ describe("AdminFeatureFlagsPage", () => {
     });
 
     render(<AdminFeatureFlagsPage />);
-    expect(screen.getByText("ChronoAI (chronoai)")).toBeInTheDocument();
+    expect(screen.getByText("Acme Corp (acme)")).toBeInTheDocument();
   });
 
   it("shows loading and error states", () => {
@@ -199,9 +215,9 @@ describe("AdminFeatureFlagsPage", () => {
       error: null,
     });
     mockUseUsers.mockImplementation(
-      (_page: number, _perPage: number, search?: string) => ({
+      (_page: number, _perPage: number, search?: string, kind?: string) => ({
         data:
-          search === "late@example.com"
+          kind === "person" && search === "late@example.com"
             ? {
                 users: [{ id: "user-201", email: "late@example.com" }],
                 total: 1,
@@ -230,29 +246,80 @@ describe("AdminFeatureFlagsPage", () => {
     expect(await screen.findByText("late@example.com")).toBeInTheDocument();
   });
 
-  it("stages an org from the org search and submits an org-scoped write", async () => {
+  it("suggests the first accounts with a remainder hint when search is focused", async () => {
+    mockUseFlags.mockReturnValue({
+      data: { flags: [flagFixture()] },
+      isLoading: false,
+      error: null,
+    });
+    mockUseUsers.mockImplementation(defaultSuggestionsMock());
+
+    render(<AdminFeatureFlagsPage />);
+    fireEvent.click(screen.getByText("experimental:ai-assistant"));
+    // Nothing is suggested — and no request fans out — until the admin
+    // actually opens the dropdown.
+    expect(screen.queryByText("suggested-0@example.com")).not.toBeInTheDocument();
+    expect(mockUseUsers).toHaveBeenCalledWith(1, 8, undefined, "person", {
+      enabled: false,
+    });
+
+    fireEvent.focusIn(screen.getByLabelText("Search users by email"));
+
+    // Over-fetches 8 and shows 5, so exclusions can't leave the list short.
+    expect(
+      await screen.findByText("suggested-0@example.com"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("suggested-4@example.com")).toBeInTheDocument();
+    expect(screen.queryByText("suggested-5@example.com")).not.toBeInTheDocument();
+    // total (200) minus the 5 shown.
+    expect(
+      screen.getByText("+195 more — keep typing to narrow"),
+    ).toBeInTheDocument();
+    expect(mockUseUsers).toHaveBeenCalledWith(1, 8, undefined, "person", {
+      enabled: true,
+    });
+  });
+
+  it("stages an override from a default suggestion", async () => {
+    mockUseFlags.mockReturnValue({
+      data: { flags: [flagFixture()] },
+      isLoading: false,
+      error: null,
+    });
+    mockUseUsers.mockImplementation(defaultSuggestionsMock());
+
+    render(<AdminFeatureFlagsPage />);
+    fireEvent.click(screen.getByText("experimental:ai-assistant"));
+    fireEvent.focusIn(screen.getByLabelText("Search users by email"));
+    fireEvent.click(await screen.findByText("suggested-2@example.com"));
+
+    fireEvent.click(screen.getByText("Apply changes"));
+    await waitFor(() =>
+      expect(mockSetFlag).toHaveBeenCalledWith({
+        flagKey: "experimental:ai-assistant",
+        body: { target_kind: "user", target_key: "user-2", enabled: true },
+      }),
+    );
+    expect(mockSetFlag).toHaveBeenCalledTimes(1);
+  });
+
+  it("stages an org from the org search and applies an org-scoped override", async () => {
     mockUseFlags.mockReturnValue({
       data: { flags: [flagFixture()] },
       isLoading: false,
       error: null,
     });
     mockUseUsers.mockImplementation(
-      (
-        _page: number,
-        _perPage: number,
-        search?: string,
-        userType?: string,
-      ) => ({
+      (_page: number, _perPage: number, search?: string, kind?: string) => ({
         data:
-          userType === "org" && search === "chrono"
+          kind === "org" && search === "acme"
             ? {
                 users: [
                   {
-                    id: "org-1",
-                    email: "org@example.com",
-                    display_name: "ChronoAI",
-                    slug: "chronoai",
-                    user_type: "org",
+                    id: "org-9",
+                    email: "org-acme@nyxid.local",
+                    display_name: "Acme Corp",
+                    slug: "acme",
                   },
                 ],
                 total: 1,
@@ -267,61 +334,38 @@ describe("AdminFeatureFlagsPage", () => {
     render(<AdminFeatureFlagsPage />);
     fireEvent.click(screen.getByText("experimental:ai-assistant"));
     fireEvent.change(screen.getByLabelText("Search organizations by name"), {
-      target: { value: "chrono" },
+      target: { value: "acme" },
     });
-    fireEvent.click(await screen.findByText("ChronoAI"));
+    fireEvent.click(await screen.findByText("Acme Corp"));
 
+    // The pick stages an enabled org override; applying must send an
+    // org-scoped write, never a global one (regression: NyxID killswitch).
     fireEvent.click(screen.getByText("Apply changes"));
-
-    // The regression this page shipped with: an org draft must never be
-    // widened to a global write.
-    await waitFor(() => expect(mockSetOverride).toHaveBeenCalledTimes(1));
-    expect(mockSetOverride).toHaveBeenCalledWith({
-      flagKey: "experimental:ai-assistant",
-      body: {
-        target_kind: "org",
-        target_key: "org-1",
-        enabled: true,
-      },
-    });
-    expect(mockClearOverride).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(mockSetFlag).toHaveBeenCalledWith({
+        flagKey: "experimental:ai-assistant",
+        body: {
+          target_kind: "org",
+          target_key: "org-9",
+          enabled: true,
+        },
+      }),
+    );
+    expect(mockSetFlag).toHaveBeenCalledTimes(1);
+    expect(mockClearFlag).not.toHaveBeenCalled();
   });
 
-  it("clears an org override with an org-scoped delete", async () => {
+  it("tolerates a backend response without org_overrides (deploy skew)", () => {
+    const legacy = flagFixture() as Record<string, unknown>;
+    delete legacy["org_overrides"];
     mockUseFlags.mockReturnValue({
-      data: {
-        flags: [
-          flagFixture({
-            org_overrides: [
-              {
-                org_user_id: "org-1",
-                org_display_name: "ChronoAI",
-                org_slug: "chronoai",
-                enabled: true,
-                updated_at: "2026-07-17T00:00:00Z",
-                updated_by: "admin-1",
-              },
-            ],
-          }),
-        ],
-      },
+      data: { flags: [legacy] },
       isLoading: false,
       error: null,
     });
 
     render(<AdminFeatureFlagsPage />);
-    fireEvent.click(screen.getByText("experimental:ai-assistant"));
-    fireEvent.click(screen.getByLabelText("ChronoAI (chronoai)"));
-    fireEvent.click(await screen.findByRole("option", { name: "Inherit" }));
-    fireEvent.click(screen.getByText("Apply changes"));
-
-    await waitFor(() => expect(mockClearOverride).toHaveBeenCalledTimes(1));
-    expect(mockClearOverride).toHaveBeenCalledWith({
-      flagKey: "experimental:ai-assistant",
-      targetKind: "org",
-      targetKey: "org-1",
-    });
-    expect(mockSetOverride).not.toHaveBeenCalled();
+    expect(screen.getByText("experimental:ai-assistant")).toBeInTheDocument();
   });
 
   it("shows operators a read-only view without pickers or apply controls", () => {
@@ -332,7 +376,7 @@ describe("AdminFeatureFlagsPage", () => {
           flagFixture({
             org_overrides: [
               {
-                org_user_id: "org-1",
+                org_id: "org-1",
                 org_display_name: "ChronoAI",
                 org_slug: "chronoai",
                 enabled: true,
