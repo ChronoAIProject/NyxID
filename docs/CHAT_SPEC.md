@@ -31,10 +31,14 @@ graph LR
   model choice, tool orchestration, and the AG-UI event stream. NyxID does not
   store chat content.
 
-The load-bearing rule: **chat content flows Browser↔Aevatar (through NyxID);
-credential/management actions flow Browser↔NyxID (session).** Aevatar talks only
-to NyxID's data plane (`/proxy`, `/llm`), never to NyxID's human-only management
-APIs. See §5 for why that boundary is exactly the delegated-token boundary.
+The load-bearing rule (the intended contract): **chat content flows
+Browser↔Aevatar (through NyxID); credential/management actions flow
+Browser↔NyxID (session).** Aevatar *should* reach only NyxID's delegated-safe
+data plane (`/proxy`, `/llm`, `/proxy/services`) with the forwarded token, and
+management/card actions are the browser's job. Production conformance of
+Aevatar's agent tools to this contract is **not yet verified** — see §8 (the
+`nyxid_*` tool-route matrix is a release gate). §5 describes the token boundary
+NyxID actually enforces.
 
 ---
 
@@ -46,8 +50,10 @@ routes in `backend/src/routes.rs` (mounted in the **human-only** router:
 `reject_service_account_tokens` — only a real human session or a first-party
 access token reaches it).
 
-Every route is an **explicit 1:1 mapping** onto one Aevatar path (a blanket
-`/{*path}` would expose all ~248 Aevatar routes through a session-authed mount).
+Every route is an **explicit allowlisted mapping** onto one Aevatar path (a
+blanket `/{*path}` would expose all ~248 Aevatar routes through a session-authed
+mount). Two routes fan out server-side: create also runs bounded
+materialization polls, and delete issues two upstream calls (actor + history).
 The scope segment in the upstream path is always derived server-side from the
 verified `AuthUser.user_id` — the browser cannot address another user's scope.
 
@@ -55,7 +61,7 @@ verified `AuthUser.user_id` — the browser cannot address another user's scope.
 |---|---|---|
 | `POST /assistant/conversations` | `api/scopes/{uid}/nyxid-chat/conversations` | create actor (202 + `actorId`), then polls the actor index until it materializes |
 | `GET /assistant/conversations` | `api/scopes/{uid}/chat-history` | Chat History index (server titles/timestamps/counts) |
-| `GET /assistant/conversations/{id}` | `api/scopes/{uid}/chat-history/conversations/{id}` | transcript; `[]` means empty/deleted, never an error |
+| `GET /assistant/conversations/{id}` | `api/scopes/{uid}/chat-history/conversations/{id}` | transcript passed through as-is; `[]` is Aevatar's representation of empty/deleted (the route does not itself coerce errors to `[]`) |
 | `DELETE /assistant/conversations/{id}` | actor delete **+** history-row delete | composite, 404-tolerant on each side |
 | `POST /assistant/conversations/{id}/stream` | `…/nyxid-chat/conversations/{id}:stream` | AG-UI SSE turn, streamed unbuffered |
 | `POST /assistant/conversations/{id}/approve` | `…:approve` | approval decision (SSE response) |
@@ -78,6 +84,14 @@ would prefer a *caller-owned* `UserService` — the assistant would then work on
 for people who had personally connected Aevatar. The row must have
 `requires_user_credential = false` so it can back a platform surface with its
 master credential.
+
+**Caveat (TD-1, not yet closed):** addressing by catalog id avoids slug-based
+`UserService` selection, but `execute_proxy` still evaluates **per-user node
+routing** and **legacy connection state** — an inactive `UserServiceConnection`
+returns 403 (`proxy_service.rs`) and a personal node pin can divert the call
+(`proxy.rs`). So one user's historical disconnected row can produce "chat works
+for everyone but me". The fix is a strict admin-target execution mode; until
+then this admin-managed invariant is not absolute.
 
 ---
 
@@ -117,12 +131,17 @@ generate_delegated_access_token(
 )
 ```
 
-This is **not a new token type** — it is the exact same factory, TTL, actor
-convention, and restriction shape the standard `inject_delegation_token` proxy
-path uses (`handlers/proxy.rs`). The only deviation from the platform standard is
-the **delivery header**: it rides in `Authorization` (which Aevatar reuses)
-instead of `X-NyxID-Delegation-Token`. That deviation is the irreducible
-compatibility requirement and is retired by the TD-3 row flip (§6).
+**The minted JWT is a standard delegated access token** — the exact same
+factory, `delegated:true`, `act.sub`, TTL, and restriction shape the standard
+`inject_delegation_token` proxy path uses (`handlers/proxy.rs`). What differs is
+**issuance and delivery — a temporary assistant-specific adapter**, in four
+ways: (1) it rides in `Authorization` (which Aevatar reuses) instead of
+`X-NyxID-Delegation-Token`; (2) it substitutes `proxy` when the row scope is
+insufficient, where standard injection uses the raw row scope (§6); (3) a mint
+failure fails the assistant call, where standard injection logs and continues;
+(4) it is gated by `Session && forward_access_token` and overwrites
+`Authorization`, where standard injection is gated by `inject_delegation_token`
+and adds a separate header. All four are retired by the TD-3 row flip (§6).
 
 Bearer callers (CLI login JWTs, service integrations) never enter this branch —
 their own token is forwarded byte-for-byte.
@@ -134,10 +153,10 @@ downstreams (`docs/API.md`, `docs/DEVELOPER_GUIDE.md`):
 
 | Token | Header | Audience | NyxID re-entry | Boundary mechanism |
 |---|---|---|---|---|
-| Identity assertion | `X-NyxID-Identity-Token` | per-service URN | rejected | distinct claims struct + audience |
-| Delegation token | `X-NyxID-Delegation-Token` | NyxID | delegated surfaces only | `delegated:true` + `reject_delegated_tokens` |
-| Relay token | `X-NyxID-User-Token` | NyxID | proxy/LLM only | `relay:true` + `reject_relay_tokens` |
-| **Assistant bridge** | `Authorization` (transitional) | NyxID | **delegated surfaces only** | `delegated:true` + `reject_delegated_tokens` |
+| Identity assertion | `X-NyxID-Identity-Token` | `identity_jwt_audience` if set, else service `base_url` | rejected | distinct claims struct + audience |
+| Delegation token | `X-NyxID-Delegation-Token` | NyxID | delegated `/api/v1` group only (see §5 for the `/oauth/userinfo` caveat) | `delegated:true` + `reject_delegated_tokens` |
+| Relay token | `X-NyxID-User-Token` | NyxID | proxy/LLM `/api/v1` group only (same caveat) | `relay:true` + `reject_relay_tokens` |
+| **Assistant bridge** | `Authorization` (transitional) | NyxID | **delegated `/api/v1` group only** (same caveat) | `delegated:true` + `reject_delegated_tokens` |
 
 The assistant bridge **is** the delegation-token standard, just delivered in a
 different header for one deployment window.
@@ -146,21 +165,37 @@ different header for one deployment window.
 
 ## 5. The security boundary (delegated = data plane only)
 
-Because the minted token carries `delegated: true`, NyxID's routers enforce:
+Because the minted token carries `delegated: true`, NyxID's `/api/v1` routers
+enforce:
 
-- **Accepted** on `api_v1_delegated`: `/llm`, `/proxy/s/{slug}` (+ `{*path}`),
-  `/proxy/{id}`, `/proxy/services`, `/delegation/refresh`, approval-status
-  polling, channel relay/events. This is exactly the **data plane** Aevatar
-  needs to act on the user's behalf.
-- **Rejected (403)** on the human-only and shared routers via
+- **Accepted** on the `api_v1_delegated` **delegated-safe route group**: `/llm`,
+  `/proxy/s/{slug}` (+ `{*path}`), `/proxy/{id}`, `/proxy/services`,
+  `/delegation/refresh`, approval-**status** polling, proxy service docs,
+  `/demo`, channel relay/events. This is the subset Aevatar needs to act on the
+  user's behalf (it is a *delegated-safe group*, not literally "the data plane
+  and nothing else").
+- **Rejected (403)** on the human-only and shared `/api/v1` routers via
   `reject_delegated_tokens`: `/users/*`, `/api-keys`, `/keys`, `/user-services`,
   `/catalog`, `/providers`, `/connections`, `/nodes`, admin, org — every
   account-management, credential, and admin surface.
 
+**Exception — `/oauth/userinfo`.** This endpoint lives *outside* the `/api/v1`
+routers and accepts any `AuthUser`, including a delegated token; it returns the
+user's email, display name, verification state, and avatar. So the boundary is
+precisely "delegated tokens are rejected on the `/api/v1` human-only + shared
+routers"; it is NOT "a delegated token can read nothing about the account." A
+leaked token could read that profile info from `/oauth/userinfo`. (The same
+caveat applies to relay tokens.) If this matters, `/oauth/userinfo` should also
+reject delegated tokens — tracked separately.
+
 So a copy of the forwarded token leaked from Aevatar can call the proxy/LLM data
-plane as the user for ≤5 minutes, but **cannot touch account management, keys, or
-admin**. That is strictly safer than the plain full-access token that CLI/Bearer
-callers already forward and prod already trusts.
+plane and read `/oauth/userinfo` as the user, but **cannot touch account
+management, keys, providers, connections, nodes, or admin**. The token expires
+in 300s; note `/delegation/refresh` is itself delegated-accessible, though it
+currently requires an active OAuth client + consent for `act.sub` (so refresh
+likely fails for `act.sub="aevatar"` — see §8 G4). This is still materially
+safer than the plain full-access token CLI/Bearer callers already forward and
+prod trusts, which reaches every management surface.
 
 **This boundary is the same one the PRD draws:** Aevatar uses the data plane;
 management/card actions are the browser's job (session-authed, §4.3 of
@@ -180,12 +215,22 @@ The assistant is driven entirely by the admin `downstream_services` row for
 |---|---|---|
 | `slug` | `aevatar` | resolved by `resolve_admin_service` |
 | `is_active` | `true` | else `resolve_admin_service` → Internal |
-| `service_category` | `internal` | platform surface |
-| `requires_user_credential` | `false` | master credential backs all callers |
+| `service_type` | `http` | enforced during proxy resolution |
+| `service_category` | `internal` | intended platform surface — **note:** `resolve_admin_service` does NOT currently enforce this (or `service_type` / `auth_method` / identity mode); TD-8 |
+| `requires_user_credential` | `false` | master credential backs all callers (this one IS enforced) |
 | `base_url` | prod Aevatar | upstream |
+| `auth_method` | `none` (no auth credential) | a WS service-auth credential could overwrite the forwarded bearer, so the row must not set one |
 | `forward_access_token` | `true` | **the bridge gate** — while true, cookie sessions get a minted delegated bearer in `Authorization`. Flipping to `false` retires the bridge with no code change. |
+| `inject_delegation_token` | `false` today → `true` at TD-3 | today Aevatar reuses `Authorization`; post-cutover it reads the standard `X-NyxID-Delegation-Token` |
 | `identity_propagation_mode` | `jwt` | NyxID also sends `X-NyxID-Identity-Token` (harmless today; Aevatar ignores it until TD-3) |
+| `identity_jwt_audience` | (unset today) → `urn:aevatar:api` at TD-3 | the audience Aevatar will validate post-cutover |
 | `delegation_token_scope` | `proxy` **recommended** | scope of the minted token. See below. |
+
+**Monitoring to watch:** the `resolve_forward_scope` fallback warning (fires
+while the row is still `llm:proxy`), the `assistant_delegation_token_minted`
+debug trace (bridge dependence → 0 after TD-3), downstream proxy status, and the
+LLM-callback route/status. A **`nyxid_*` tool → (method, NyxID route, delegated
+status)** matrix is a required operational artifact / release gate — see §8.
 
 ### Scope sourcing — SSOT with a resilience floor
 

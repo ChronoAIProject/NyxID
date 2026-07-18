@@ -87,23 +87,29 @@ fn needs_forward_token_bridge(auth_method: &AuthMethod, forward_access_token: bo
 /// The scope MUST grant REST proxy access, because Aevatar's LLM callback
 /// arrives as a `/proxy/s/{slug}` passthrough enforcing
 /// `ensure_rest_proxy_access`. If the row does not (e.g. the historical
-/// `llm:proxy` default), fall back to `PROXY_SCOPE` and warn — the assistant
-/// must work on deploy without a coupled DB change, and a hard failure here
-/// would take the whole surface down over one config field. The minimum
-/// capability is dictated by the integration, not a free per-row choice, so
-/// this fallback is a resilience floor, not a policy override.
+/// `llm:proxy` default), fall back to `PROXY_SCOPE` — the assistant must work
+/// on deploy without a coupled DB change, and a hard failure here would take
+/// the whole surface down over one config field. This is an intentional,
+/// transitional compatibility override of an insufficient row value: the
+/// minimum capability is dictated by the integration (Aevatar's callback
+/// path), and every REST-capable configured scope is still honored verbatim.
+/// The warning fires once per process (not per request) to flag the drift
+/// without spamming while every call exercises the fallback.
 fn resolve_forward_scope(service: &DownstreamService) -> &str {
     if scope_allows_rest_proxy(&service.delegation_token_scope) {
         return service.delegation_token_scope.as_str();
     }
-    tracing::warn!(
-        service_slug = %service.slug,
-        configured_scope = %service.delegation_token_scope,
-        "assistant: aevatar delegation_token_scope does not grant REST proxy; \
-         falling back to 'proxy' for the callback bridge. Set the row's \
-         delegation_token_scope to 'proxy' to align it before the TD-3 \
-         identity-token cutover."
-    );
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        tracing::warn!(
+            service_slug = %service.slug,
+            configured_scope = %service.delegation_token_scope,
+            "assistant: aevatar delegation_token_scope does not grant REST proxy; \
+             falling back to 'proxy' for the callback bridge. Set the row's \
+             delegation_token_scope to 'proxy' to align it before the TD-3 \
+             identity-token cutover."
+        );
+    });
     PROXY_SCOPE
 }
 
