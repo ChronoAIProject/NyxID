@@ -285,6 +285,45 @@ suppresses the mint; a `proxy:*` row reaches `claims.scope` verbatim.
 failed with `LLM request failed` — the LLM-callback leg — exactly what the
 delegated-token fix addresses. A prior "bridge chat ok" turn succeeded.
 
+**Empirical proof that the service-invocation plane is entirely delegated-safe
+(prod admin audit, 2026-07-18).** Tracing which NyxID endpoints prod Aevatar
+actually calls (with the forwarded bearer) during real runs, every service
+invocation is a `/proxy/s/{slug}` proxy request — all in `api_v1_delegated`,
+which a delegated token reaches:
+
+| Aevatar action | NyxID `proxy_request` path | route group |
+|---|---|---|
+| LLM inference | `/proxy/s/{llm}/…/chat/completions` | delegated ✓ |
+| Ornn skill search | `/proxy/s/ornn-api/api/v1/skill-search` | delegated ✓ |
+| Skill loading (`use_skill`) | `/proxy/s/ornn-api/api/v1/skills/nyxid/json` | delegated ✓ |
+| Downstream service calls | `/proxy/s/{slug}/…` | delegated ✓ |
+
+No call to `/user-services` or `/catalog` appeared. Codex round 10 verdict:
+**SHIP-CONFIRMED** — the delegated (browser) path is capability-equivalent to
+the proven Bearer path for the entire observed invocation plane. Note: the
+assistant-entry call to Aevatar shows `user_service_id: null` — the admin/catalog
+path (correct); Aevatar's LLM/Ornn callbacks resolving the *user's* personal
+connections is intended (the agent acting through the user's configured
+services), not the TD-1 defect.
+
+### Post-deploy confirmation checklist (the one remaining empirical unknown)
+
+After #1202 deploys, run ONE real **cookie-session** prompt that forces the
+`nyxid_services` discovery tool, and confirm (the `proxy_request` audit alone
+cannot disambiguate a direct management GET, so capture the tool result / ingress
+log):
+
+- `RUN_FINISHED` with a **substantive** answer (not merely "no transport error").
+- LLM + Ornn `proxy_request` events attributed to the same user.
+- **No delegated 403 hidden inside any tool result** — inspect `nyxid_services`'s
+  actual output; if it 403'd on `/user-services`/`/catalog`, the model degrades
+  the inventory silently. If so, apply the §8 remedy (route it via
+  `/proxy/services`, or add an `assistant:read` delegated facade).
+- The assistant-entry audit uses the admin catalog path (`user_service_id: null`).
+- A user with **no** personal Aevatar connection succeeds through the platform row.
+- The `resolve_forward_scope` fallback warning appears while the row is
+  `llm:proxy`, and disappears once it is set to `proxy`.
+
 ---
 
 ## 8. Known gaps (recorded, none blocks basic Q&A chat)
@@ -292,16 +331,18 @@ delegated-token fix addresses. A prior "bridge chat ok" turn succeeded.
 Enumerated in full in `CHAT_ASSISTANT_SPECS.md` cut 5 (G1–G7). The load-bearing
 ones for chat quality:
 
-- **Service-discovery tool on the delegated path (needs confirmation).** Aevatar
-  invokes an agent tool `nyxid_services`. If it backs onto a **delegated-safe**
-  NyxID endpoint (`GET /proxy/services`, which the delegated token reaches), the
-  browser path matches the Bearer path exactly. If it backs onto a **human-only**
-  endpoint (`/user-services`, `/catalog`), the delegated token 403s there and the
-  suggestion list degrades on the browser path even though direct service
-  invocation (`/proxy/s/*`) and the LLM still work. **Resolution:** either
-  confirm with the Aevatar team which endpoint each `nyxid_*` tool calls, or test
-  the cookie path live after deploy. Direct service *invocation* is unaffected —
-  it is all data-plane.
+- **Service-discovery tool on the delegated path (the ONE remaining empirical
+  unknown — NOT a ship blocker).** Aevatar invokes an agent tool `nyxid_services`.
+  Prod audit proves all *service invocations* go through `/proxy/s/*`
+  (delegated-safe), but `nyxid_services` produced no proxy request, so it is
+  either Aevatar-internal or a direct NyxID management GET. If it hits
+  `/user-services` or `/catalog`, the delegated token 403s there and the
+  *inventory/suggestion* view degrades — while LLM, Ornn, search, skill loading,
+  and direct service invocation all keep working. **Resolution:** the §7
+  post-deploy checklist confirms it on a real cookie session; remedy if needed =
+  route it via `/proxy/services` (already delegated-safe) or add an
+  `assistant:read` delegated facade (dedicated scope + `act.sub=="aevatar"`; do
+  NOT widen the delegated router wholesale).
 - **In-chat approval rendering (frontend, TD-7).** The AG-UI normalizer renders
   text/`RUN_ERROR`/`RUN_FINISHED` only; approval/authorization/tool frames are
   dropped, and `decideApproval` JSON-parses an SSE response. Basic Q&A renders;
