@@ -130,6 +130,66 @@ it (consensus: Claude Fable 5 + codex `gpt-5.6-sol`, 2 rounds, session
   node-routed-WS `caller_token` gap — not blockers for the browser chat
   surface, which is direct HTTP through `forward()`.
 
+## Implemented in cut 5 (2026-07-18 — cut-4 marker → delegated access token)
+
+Cut 4 (PR #1200) fixed the chat-entry 401 but a real prod cookie chat then
+failed at the NEXT leg: `RUN_STARTED` then `RUN_ERROR (401)`. Aevatar
+authenticates its OWN callbacks to NyxID by **reusing the inbound
+`Authorization: Bearer`** (the prod row has `inject_delegation_token: false`,
+so it has no `X-NyxID-Delegation-Token`). When Aevatar called NyxID's LLM
+gateway on the user's behalf (`/api/v1/proxy/s/chrono-llm-public`), the cut-4
+`assistant_forward` token — rejected by `verify_token` *everywhere* — was
+refused with `1001 "Invalid token"`. The "reject everywhere" marker was a
+mis-design: it never accounted for Aevatar legitimately calling NyxID's
+proxy/LLM surfaces, which is how chat actually does work. **This was a NyxID
+self-inflicted bug, fixable entirely NyxID-side.**
+
+Fix (consensus: Claude Fable 5 + codex `gpt-5.6-sol` round 5, AGREE-WITH-CHANGES):
+`assistant::forward` now mints a **standard delegated access token**
+(`generate_delegated_access_token`, `delegated: true`, `act.sub = aevatar`,
+scope `PROXY_SCOPE`, restrictions from `TokenRestrictionClaims::from_auth_user`,
+TTL `MCP_DELEGATION_TOKEN_TTL_SECS` = 300s) and overwrites `Authorization`.
+This IS the documented platform delegation-token standard ("downstream calls
+NyxID on the user's behalf"), just delivered in `Authorization` (the header
+Aevatar demonstrably reuses) rather than `X-NyxID-Delegation-Token`. Replay
+boundary is now the router layer: `reject_delegated_tokens` refuses the token
+on every human-only + shared surface (account, admin, keys → 403) while
+`api_v1_delegated` accepts it on `/llm`, `/proxy/s/*`, `/delegation/refresh`.
+Strictly safer than the plain full-access token CLI/Bearer callers already
+forward and prod already trusts. `scope = PROXY_SCOPE` (not the row default
+`llm:proxy`) is required because the LLM call arrives as a REST proxy
+passthrough enforcing `ensure_rest_proxy_access`; `proxy` also satisfies the
+`/llm/*` check.
+
+- **Kill switch unchanged.** Gated on
+  `AuthMethod::Session && service.forward_access_token`; the TD-3 row flip to
+  `forward_access_token: false` (plus `inject_delegation_token: true`)
+  retires the Authorization mint and hands over to the standard delegation
+  header with no code change.
+- **cut-4 tombstone (one deploy only).** `Claims.assistant_forward`, the
+  `verify_token` rejection, `generate_assistant_forward_access_token`, and
+  `JWT_ASSISTANT_FORWARD_TTL_SECS` are RETAINED this deploy: a cut-4 token
+  minted just before rollout may still be live at Aevatar (≤300s + skew), and
+  removing the rejection would let serde decode it as an ordinary access
+  token → reopened replay hole. Follow-up issue: delete the whole marker
+  machinery after all pre-migration tokens have expired (>10 min post-deploy).
+- **E2E-proven** against a two-leg mock (Aevatar replays the forwarded bearer
+  to a seeded `chrono-llm-public` → second mock LLM): full run completes
+  (`RUN_FINISHED` with content), the callback leg returns 200, the same token
+  is rejected 403 at `/users/me`, `/api-keys`, `/connections`, the row flip
+  suppresses the mint, and Bearer callers forward byte-for-byte.
+- **Residuals (codex round 5, recorded not fixed):** (a) delegated callbacks
+  do NOT inherit `Session`'s approval bypass — they enter approval as
+  requester `delegated`/`aevatar`, so a gated write can block pending
+  approval (correct security behavior; Aevatar must handle the approval
+  flow). (b) `/delegation/refresh` may reject `act.sub = "aevatar"` because it
+  expects an active `OauthClient` — a pre-existing standard-family
+  inconsistency (proxy injection also uses `service.slug`), so immediate
+  callbacks work but a run issuing callbacks after 5 min may need a separate
+  fix. (c) `api_v1_delegated` is slightly broader than "proxy/LLM only"
+  (proxy docs, approval-status polling, `/demo`, channel relay/events) —
+  handlers add their own gates.
+
 ## Enable-ready (proven, awaiting a decision — not blocked on code)
 
 `/api/chat` history-write is verified working. To make workflow-mode (or any

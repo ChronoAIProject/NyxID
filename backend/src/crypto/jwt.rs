@@ -397,8 +397,19 @@ pub fn generate_access_token(
         .map_err(|e| AppError::Internal(format!("Failed to encode access token: {e}")))
 }
 
+/// LEGACY / TOMBSTONE (cut 4, superseded by cut 5): the assistant bridge no
+/// longer calls this — it forwards a standard delegated access token via
+/// `generate_delegated_access_token` (see `handlers::assistant::forward`).
+/// Retained for one deploy alongside the `verify_token` rejection so a cut-4
+/// token still live at Aevatar keeps being refused; delete both together once
+/// no pre-migration token can be live.
+///
+// Tombstone: no production caller remains (the assistant bridge forwards a
+// delegated token now); kept one deploy for the paired `verify_token`
+// rejection. Deleted together with the marker machinery in the follow-up.
+#[allow(dead_code)]
 /// Generate the outbound-only access token the assistant pass-through
-/// forwards to Aevatar for cookie-session callers (CHAT_ASSISTANT_SPECS
+/// forwarded to Aevatar for cookie-session callers (CHAT_ASSISTANT_SPECS
 /// TD-3 bridge).
 ///
 /// The downstream validates it like any NyxID access token (RS256 via JWKS,
@@ -900,11 +911,14 @@ pub fn verify_token(keys: &JwtKeys, config: &AppConfig, token: &str) -> Result<C
             _ => AppError::Unauthorized("Invalid token".to_string()),
         })?;
 
-    // Outbound-only assistant forward tokens exist to be validated by the
-    // downstream, never by NyxID. Rejecting here (the shared validator under
-    // bearer auth, token exchange, MCP transport, introspection) makes a
-    // token leaked from the downstream worthless against NyxID. Generic
-    // message on purpose: the caller learns nothing about the token class.
+    // TOMBSTONE (retire after the delegation-token migration drains): the
+    // assistant bridge no longer mints `assistant_forward` tokens — it now
+    // forwards a standard delegated access token (see
+    // `handlers::assistant::forward`). This rejection stays for one deploy so
+    // any cut-4 token still held by Aevatar (<=300s + skew) keeps being
+    // refused; without it, serde would ignore the unknown claim and the old
+    // token would decode as an ordinary access token, reopening the replay
+    // hole. Safe to delete once no pre-migration token can still be live.
     if token_data.claims.assistant_forward == Some(true) {
         return Err(AppError::Unauthorized("Invalid token".to_string()));
     }
