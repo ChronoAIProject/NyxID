@@ -313,6 +313,13 @@ curl -X PUT http://localhost:3001/api/v1/services/<service_id> \
 | `jwt`     | `X-NyxID-Identity-Token` (RS256-signed, 60s TTL)              |
 | `both`    | All of the above                                               |
 
+> **Aevatar compatibility note:** the assistant pass-through additionally
+> mints a transitional `Authorization: Bearer` token for cookie-session
+> callers while the `aevatar` row has `forward_access_token: true`, because
+> Aevatar's current validator authenticates only NyxID JWT Bearers. It is
+> not an identity mode — see "Assistant Forward Token" in `API.md` — and it
+> retires automatically when the row flips to identity-token validation.
+
 ### Verifying Identity JWTs
 
 Downstream services can verify the identity JWT using NyxID's JWKS:

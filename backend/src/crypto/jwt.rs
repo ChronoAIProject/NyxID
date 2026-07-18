@@ -96,6 +96,11 @@ pub struct Claims {
     /// False when this access token is restricted to `allowed_service_ids`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_all_services: Option<bool>,
+    /// True if this token was minted solely for forwarding to a downstream
+    /// service (assistant pass-through bridge). `verify_token` rejects it,
+    /// so a copy leaked from the downstream cannot re-enter NyxID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_forward: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -382,6 +387,7 @@ pub fn generate_access_token(
             .as_ref()
             .map(|r| r.allowed_service_ids.to_vec()),
         allow_all_services: restrictions.as_ref().map(|_| false),
+        assistant_forward: None,
     };
 
     let mut header = Header::new(Algorithm::RS256);
@@ -389,6 +395,62 @@ pub fn generate_access_token(
 
     encode(&header, &claims, &keys.encoding)
         .map_err(|e| AppError::Internal(format!("Failed to encode access token: {e}")))
+}
+
+/// Generate the outbound-only access token the assistant pass-through
+/// forwards to Aevatar for cookie-session callers (CHAT_ASSISTANT_SPECS
+/// TD-3 bridge).
+///
+/// The downstream validates it like any NyxID access token (RS256 via JWKS,
+/// issuer, the fixed NyxID audience, `sub` = the caller). NyxID itself
+/// refuses it: `assistant_forward: true` is rejected in `verify_token`, and
+/// the restriction claims are belt-and-braces fail-closed (`resources`
+/// names only the Aevatar proxy URI; the empty service allowlist matches
+/// nothing). TTL comes from `jwt_assistant_forward_ttl_secs` (default 300s)
+/// to bound the replay window at the downstream.
+pub fn generate_assistant_forward_access_token(
+    keys: &JwtKeys,
+    config: &AppConfig,
+    user_id: &Uuid,
+    resource_uri: &str,
+) -> Result<String, AppError> {
+    let now = Utc::now().timestamp();
+
+    let claims = Claims {
+        sub: user_id.to_string(),
+        iss: config.jwt_issuer.clone(),
+        aud: config.base_url.clone(),
+        exp: now + config.jwt_assistant_forward_ttl_secs,
+        iat: now,
+        jti: Uuid::new_v4().to_string(),
+        scope: "proxy".to_string(),
+        token_type: "access".to_string(),
+        roles: None,
+        groups: None,
+        permissions: None,
+        sid: None,
+        act: None,
+        delegated: None,
+        sa: None,
+        cnf: None,
+        relay: None,
+        relay_api_key_id: None,
+        relay_api_key_name: None,
+        relay_allowed_service_ids: None,
+        relay_allowed_node_ids: None,
+        relay_allow_all_services: None,
+        relay_allow_all_nodes: None,
+        resources: Some(vec![resource_uri.to_string()]),
+        allowed_service_ids: Some(vec![]),
+        allow_all_services: Some(false),
+        assistant_forward: Some(true),
+    };
+
+    let mut header = Header::new(Algorithm::RS256);
+    header.kid = Some(keys.kid.clone());
+
+    encode(&header, &claims, &keys.encoding)
+        .map_err(|e| AppError::Internal(format!("Failed to encode assistant forward token: {e}")))
 }
 
 /// Agent key scope data to embed in relay tokens.
@@ -447,6 +509,7 @@ pub fn generate_relay_access_token(
         resources: None,
         allowed_service_ids: None,
         allow_all_services: None,
+        assistant_forward: None,
     };
 
     let mut header = Header::new(Algorithm::RS256);
@@ -555,6 +618,7 @@ pub fn generate_refresh_token(
         resources: None,
         allowed_service_ids: None,
         allow_all_services: None,
+        assistant_forward: None,
     };
 
     let mut header = Header::new(Algorithm::RS256);
@@ -605,6 +669,7 @@ pub fn reissue_refresh_token(
         resources: None,
         allowed_service_ids: None,
         allow_all_services: None,
+        assistant_forward: None,
     };
 
     let mut header = Header::new(Algorithm::RS256);
@@ -669,6 +734,7 @@ pub fn generate_delegated_access_token(
         resources: restrictions.and_then(|r| r.resources.as_ref().cloned()),
         allowed_service_ids: restrictions.and_then(|r| r.allowed_service_ids.as_ref().cloned()),
         allow_all_services: restrictions.and_then(|r| r.allow_all_services),
+        assistant_forward: None,
     };
 
     let mut header = Header::new(Algorithm::RS256);
@@ -810,6 +876,7 @@ pub fn generate_service_account_token(
         resources: None,
         allowed_service_ids: None,
         allow_all_services: None,
+        assistant_forward: None,
     };
 
     let mut header = Header::new(Algorithm::RS256);
@@ -832,6 +899,15 @@ pub fn verify_token(keys: &JwtKeys, config: &AppConfig, token: &str) -> Result<C
             jsonwebtoken::errors::ErrorKind::ExpiredSignature => AppError::TokenExpired,
             _ => AppError::Unauthorized("Invalid token".to_string()),
         })?;
+
+    // Outbound-only assistant forward tokens exist to be validated by the
+    // downstream, never by NyxID. Rejecting here (the shared validator under
+    // bearer auth, token exchange, MCP transport, introspection) makes a
+    // token leaked from the downstream worthless against NyxID. Generic
+    // message on purpose: the caller learns nothing about the token class.
+    if token_data.claims.assistant_forward == Some(true) {
+        return Err(AppError::Unauthorized("Invalid token".to_string()));
+    }
 
     Ok(token_data.claims)
 }
@@ -1028,6 +1104,7 @@ mod tests {
             jwt_relay_reply_ttl_secs: 1800,
             jwt_relay_callback_ttl_secs: 300,
             jwt_relay_access_ttl_secs: 300,
+            jwt_assistant_forward_ttl_secs: 300,
             jwt_refresh_ttl_secs: 604800,
             release_integrity_manifest_url: None,
             credential_accept_dist_dir: "frontend/dist/credential-accept".to_string(),
@@ -1260,6 +1337,89 @@ mod tests {
         assert_ne!(claims.exp - claims.iat, config.jwt_access_ttl_secs);
     }
 
+    /// Decode an assistant forward token WITHOUT NyxID's inbound-purpose
+    /// rejection — the downstream's view of the token (signature, issuer,
+    /// audience only). `verify_token` intentionally refuses these.
+    fn decode_as_downstream(keys: &JwtKeys, config: &AppConfig, token: &str) -> Claims {
+        let mut validation = Validation::new(Algorithm::RS256);
+        validation.set_issuer(&[&config.jwt_issuer]);
+        validation.set_audience(&[&config.base_url]);
+        decode::<Claims>(token, &keys.decoding, &validation)
+            .unwrap()
+            .claims
+    }
+
+    #[test]
+    fn assistant_forward_token_carries_the_outbound_claim_shape() {
+        let (keys, config) = test_keys_and_config();
+        let user_id = Uuid::new_v4();
+        let resource = format!("{}/api/v1/proxy/s/aevatar", config.base_url);
+        let token =
+            generate_assistant_forward_access_token(&keys, &config, &user_id, &resource).unwrap();
+
+        let claims = decode_as_downstream(&keys, &config, &token);
+        assert_eq!(claims.sub, user_id.to_string());
+        assert_eq!(claims.iss, config.jwt_issuer);
+        assert_eq!(claims.aud, config.base_url);
+        assert_eq!(claims.scope, "proxy");
+        assert_eq!(claims.token_type, "access");
+        assert_eq!(claims.assistant_forward, Some(true));
+        assert_eq!(claims.resources.as_deref(), Some([resource].as_slice()));
+        // Fail-closed restrictions: an empty allowlist matches no service.
+        assert_eq!(claims.allowed_service_ids.as_deref(), Some([].as_slice()));
+        assert_eq!(claims.allow_all_services, Some(false));
+        // Outbound tokens leave the trust boundary; dedicated short TTL.
+        assert_eq!(
+            claims.exp - claims.iat,
+            config.jwt_assistant_forward_ttl_secs
+        );
+        assert_ne!(claims.exp - claims.iat, config.jwt_access_ttl_secs);
+    }
+
+    #[test]
+    fn assistant_forward_token_is_rejected_on_nyxid_re_entry() {
+        let (keys, config) = test_keys_and_config();
+        let user_id = Uuid::new_v4();
+        let token = generate_assistant_forward_access_token(
+            &keys,
+            &config,
+            &user_id,
+            "https://nyx.example/api/v1/proxy/s/aevatar",
+        )
+        .unwrap();
+
+        // The shared validator refuses the marker with the same generic
+        // error as any invalid token — no oracle for the token class.
+        match verify_token(&keys, &config, &token) {
+            Err(AppError::Unauthorized(message)) => assert_eq!(message, "Invalid token"),
+            other => panic!("expected generic Unauthorized, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn normal_token_generators_leave_assistant_forward_unset() {
+        let (keys, config) = test_keys_and_config();
+        let user_id = Uuid::new_v4();
+
+        let access =
+            generate_access_token(&keys, &config, &user_id, "", None, None, None, None, None)
+                .unwrap();
+        assert_eq!(
+            verify_token(&keys, &config, &access)
+                .unwrap()
+                .assistant_forward,
+            None
+        );
+
+        let (refresh, _) = generate_refresh_token(&keys, &config, &user_id).unwrap();
+        assert_eq!(
+            verify_token(&keys, &config, &refresh)
+                .unwrap()
+                .assistant_forward,
+            None
+        );
+    }
+
     #[test]
     fn generate_and_verify_refresh_token() {
         let (keys, config) = test_keys_and_config();
@@ -1326,6 +1486,7 @@ mod tests {
             resources: None,
             allowed_service_ids: None,
             allow_all_services: None,
+            assistant_forward: None,
         };
 
         let mut header = Header::new(Algorithm::RS256);
@@ -1440,6 +1601,7 @@ mod tests {
             resources: None,
             allowed_service_ids: None,
             allow_all_services: None,
+            assistant_forward: None,
         };
         let json = serde_json::to_string(&claims).unwrap();
         let restored: Claims = serde_json::from_str(&json).unwrap();

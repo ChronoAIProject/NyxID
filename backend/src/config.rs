@@ -46,6 +46,14 @@ pub struct AppConfig {
     /// trust boundary, so it is kept far shorter than the general access token
     /// TTL to bound the replay window if the callback surface is observed.
     pub jwt_relay_access_ttl_secs: i64,
+    /// Assistant forward token TTL in seconds (default: 300 = 5 minutes).
+    ///
+    /// The outbound-only bearer the assistant pass-through mints for
+    /// cookie-session callers and forwards to Aevatar (CHAT_ASSISTANT_SPECS
+    /// TD-3 bridge). It leaves NyxID's trust boundary, so it is short-lived;
+    /// NyxID additionally rejects it on re-entry via its
+    /// `assistant_forward` claim.
+    pub jwt_assistant_forward_ttl_secs: i64,
     /// Refresh token TTL in seconds (default: 604800 = 7 days)
     pub jwt_refresh_ttl_secs: i64,
 
@@ -364,6 +372,10 @@ impl std::fmt::Debug for AppConfig {
                 &self.jwt_relay_callback_ttl_secs,
             )
             .field("jwt_relay_access_ttl_secs", &self.jwt_relay_access_ttl_secs)
+            .field(
+                "jwt_assistant_forward_ttl_secs",
+                &self.jwt_assistant_forward_ttl_secs,
+            )
             .field("jwt_refresh_ttl_secs", &self.jwt_refresh_ttl_secs)
             .field(
                 "release_integrity_manifest_url",
@@ -726,6 +738,10 @@ impl AppConfig {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(300),
             jwt_relay_access_ttl_secs: env::var("JWT_RELAY_ACCESS_TTL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(300),
+            jwt_assistant_forward_ttl_secs: env::var("JWT_ASSISTANT_FORWARD_TTL_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(300),
@@ -1303,6 +1319,7 @@ mod tests {
             jwt_relay_reply_ttl_secs: 1800,
             jwt_relay_callback_ttl_secs: 300,
             jwt_relay_access_ttl_secs: 300,
+            jwt_assistant_forward_ttl_secs: 300,
             jwt_refresh_ttl_secs: 604800,
             release_integrity_manifest_url: None,
             credential_accept_dist_dir: "frontend/dist/credential-accept".to_string(),

@@ -99,6 +99,37 @@ sessions + proxy-only identity handling). Changes:
   RFC 8707 resource (re-minted from a `binding_id` via token exchange). The backend
   already supports all of that; see TD-3.
 
+## Implemented in cut 4 (2026-07-18 — TD-3 interim bridge: marker-hardened forward token)
+
+Resurrects the mint-and-forward bridge WITH the hardening whose absence killed
+it (consensus: Claude Fable 5 + codex `gpt-5.6-sol`, 2 rounds, session
+`019f7252-18b2-79f1-a875-e17278cf85fa`). The recorded objection was
+"NyxID-audienced tokens are replayable at NyxID"; the resurrected token is not:
+
+- `assistant::forward` mints an **outbound-only** access token for
+  cookie-session callers (`AuthMethod::Session`) and overwrites
+  `Authorization` before `execute_proxy`, so the existing
+  `forward_access_token` machinery presents a real NyxID Bearer to Aevatar —
+  the exact caller class that was 401ing, and the exact token shape the
+  prod-green CLI/Bearer matrix proved.
+- The token carries `assistant_forward: true`; `crypto::jwt::verify_token`
+  (the shared validator under bearer auth, token exchange, MCP transport,
+  introspection) rejects it with the generic invalid-token error, so a copy
+  leaked from Aevatar cannot re-enter NyxID. Belt-and-braces: `resources`
+  names only the canonical aevatar proxy URI, `allowed_service_ids` is empty
+  with `allow_all_services: false`, TTL `JWT_ASSISTANT_FORWARD_TTL_SECS`
+  (default 300s), scope `proxy`.
+- **Kill switch = the TD-3 row flip.** Minting is gated on
+  `service.forward_access_token == true`. When Aevatar ships identity-token
+  validation and the row flips to `forward_access_token: false`, the bridge
+  retires itself with no code change (no fail-fast on purpose).
+- Bearer callers (CLI login JWTs) never enter the branch; their token is
+  forwarded byte-for-byte as before. Agent keys remain rejected by the
+  human-only mount. No frontend change.
+- Residual (unchanged, recorded): TD-1 strict admin-target mode and the
+  node-routed-WS `caller_token` gap — not blockers for the browser chat
+  surface, which is direct HTTP through `forward()`.
+
 ## Enable-ready (proven, awaiting a decision — not blocked on code)
 
 `/api/chat` history-write is verified working. To make workflow-mode (or any
@@ -285,13 +316,20 @@ unless noted. Each item: what, risk, trigger.
   - Resource-scoped OAuth tokens die in the legacy catalog branch's
     scoped-token check (`proxy.rs` "Scoped API keys must use configured
     services") before contacting Aevatar.
-  The mint-and-forward bridge stays dead (NyxID-audienced tokens are
-  replayable at NyxID). Rollout: (1) Aevatar team validates
-  `X-NyxID-Identity-Token` — the header already flows on every pass-through
-  call; (2) flip the aevatar row to `identity_jwt_audience:"urn:aevatar:api"`,
-  `inject_delegation_token:true`, `forward_access_token:false` (three-field
-  drift from today's prod row). Do NOT flip before (1): Bearer forwarding is
-  what keeps CLI callers working today.
+  ~~The mint-and-forward bridge stays dead (NyxID-audienced tokens are
+  replayable at NyxID).~~ **Superseded by cut 4 (2026-07-18):** the bridge is
+  back with the replay objection removed — the minted token carries
+  `assistant_forward: true`, which `verify_token` rejects on any NyxID
+  re-entry, so it is validatable by Aevatar but worthless at NyxID. Browser
+  cookie sessions chat TODAY without waiting on the Aevatar rollout.
+  Rollout (unchanged, and it doubles as the bridge kill switch): (1) Aevatar
+  team validates `X-NyxID-Identity-Token` — the header already flows on every
+  pass-through call; (2) flip the aevatar row to
+  `identity_jwt_audience:"urn:aevatar:api"`, `inject_delegation_token:true`,
+  `forward_access_token:false` (three-field drift from today's prod row).
+  The `forward_access_token:false` flip also stops the cut-4 minting (gated
+  on that field). Do NOT flip before (1): Bearer forwarding is what keeps CLI
+  callers AND the cut-4 browser bridge working today.
 - **TD-4 — Feature flag not enforced server-side (F17).** Any authenticated human can
   call `/api/v1/assistant/*` with `experimental:ai-assistant` off; the flag only
   hides navigation.
