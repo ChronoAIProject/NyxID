@@ -102,6 +102,12 @@ async fn forward(
             )
         })?;
         request.headers_mut().insert(header::AUTHORIZATION, value);
+        // Metadata-only: lets operators watch bridge dependence fall to
+        // zero after the Aevatar identity-token rollout (TD-3 row flip).
+        tracing::debug!(
+            service_slug = %service.slug,
+            "assistant_forward_token_minted"
+        );
     }
     // Addressing the catalog service by id drives the DownstreamService
     // (admin/master-credential) resolution path. Never route by slug here:
