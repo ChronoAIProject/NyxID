@@ -453,7 +453,10 @@ mod tests {
         let state = test_app_state_no_db().await;
         let user_id = "add69059-bece-4f0e-9559-99cfd10b47eb";
         let auth_user = test_auth_user(user_id);
-        let service = aevatar_row("proxy");
+        // A rest-proxy scope that is deliberately NOT the former hardcoded
+        // `proxy` constant, so this test fails if the code ever reverts to
+        // ignoring the row and hardcoding a scope again.
+        let service = aevatar_row("proxy:*");
 
         let header = build_forward_authorization(&state, &auth_user, &service).unwrap();
         let token = header
@@ -472,8 +475,8 @@ mod tests {
             Some("aevatar"),
             "actor is the Aevatar service slug"
         );
-        // Scope sourced from the row; must grant REST proxy for the callback.
-        assert_eq!(claims.scope, "proxy");
+        // The EXACT row scope must reach the JWT (proves SSOT, not a hardcode).
+        assert_eq!(claims.scope, "proxy:*");
         assert!(scope_allows_rest_proxy(&claims.scope));
         assert_eq!(claims.token_type, "access");
         assert_eq!(claims.assistant_forward, None, "not the retired marker");
