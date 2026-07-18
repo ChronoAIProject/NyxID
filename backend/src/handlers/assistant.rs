@@ -32,7 +32,7 @@ use crate::crypto::jwt::{
 use crate::errors::{AppError, AppResult};
 use crate::handlers::proxy::execute_proxy;
 use crate::models::downstream_service::DownstreamService;
-use crate::mw::auth::{AuthMethod, AuthUser, scope_allows_rest_proxy};
+use crate::mw::auth::{AuthMethod, AuthUser, PROXY_SCOPE, scope_allows_rest_proxy};
 use crate::services::assistant_service;
 
 /// Create responses are a ~300-byte accepted envelope; the cap only guards
@@ -76,36 +76,48 @@ fn needs_forward_token_bridge(auth_method: &AuthMethod, forward_access_token: bo
 /// wiring (delegated scope, actor = the Aevatar slug, inherited service
 /// restrictions, delegation TTL) is unit-testable without a live proxy or DB.
 ///
-/// The delegated capability is sourced from the service row's
-/// `delegation_token_scope` — the single source of truth the standard
-/// `inject_delegation_token` path already reads (`proxy.rs`) — so the token
-/// this bridge delivers in `Authorization` and the token the standard path
-/// delivers in `X-NyxID-Delegation-Token` grant the same capability. The
-/// only deviation from the standard is the delivery header (dictated by
-/// Aevatar's deployed validator reusing `Authorization`). The scope MUST
-/// grant REST proxy access, because Aevatar's LLM callback arrives as a
-/// `/proxy/s/{slug}` passthrough enforcing `ensure_rest_proxy_access`; a row
-/// left at the `llm:proxy` default is a misconfiguration that fails loud here
-/// rather than producing a confusing downstream 403.
+/// The delegated capability prefers the service row's `delegation_token_scope`
+/// — the single source of truth the standard `inject_delegation_token` path
+/// reads (`proxy.rs`) — so the token this bridge delivers in `Authorization`
+/// and the token the standard path delivers in `X-NyxID-Delegation-Token`
+/// grant the same capability when the row is aligned. The only deviation from
+/// the standard is the delivery header (dictated by Aevatar's deployed
+/// validator reusing `Authorization`).
+///
+/// The scope MUST grant REST proxy access, because Aevatar's LLM callback
+/// arrives as a `/proxy/s/{slug}` passthrough enforcing
+/// `ensure_rest_proxy_access`. If the row does not (e.g. the historical
+/// `llm:proxy` default), fall back to `PROXY_SCOPE` and warn — the assistant
+/// must work on deploy without a coupled DB change, and a hard failure here
+/// would take the whole surface down over one config field. The minimum
+/// capability is dictated by the integration, not a free per-row choice, so
+/// this fallback is a resilience floor, not a policy override.
+fn resolve_forward_scope(service: &DownstreamService) -> &str {
+    if scope_allows_rest_proxy(&service.delegation_token_scope) {
+        return service.delegation_token_scope.as_str();
+    }
+    tracing::warn!(
+        service_slug = %service.slug,
+        configured_scope = %service.delegation_token_scope,
+        "assistant: aevatar delegation_token_scope does not grant REST proxy; \
+         falling back to 'proxy' for the callback bridge. Set the row's \
+         delegation_token_scope to 'proxy' to align it before the TD-3 \
+         identity-token cutover."
+    );
+    PROXY_SCOPE
+}
+
 fn build_forward_authorization(
     state: &AppState,
     auth_user: &AuthUser,
     service: &DownstreamService,
 ) -> AppResult<HeaderValue> {
-    let scope = service.delegation_token_scope.as_str();
-    if !scope_allows_rest_proxy(scope) {
-        return Err(AppError::Internal(format!(
-            "assistant: service '{}' delegation_token_scope must grant REST proxy access \
-             (proxy or proxy:*) for the Aevatar callback bridge, got '{scope}'",
-            service.slug
-        )));
-    }
     let restrictions = TokenRestrictionClaims::from_auth_user(auth_user);
     let token = generate_delegated_access_token(
         &state.jwt_keys,
         &state.config,
         &auth_user.user_id,
-        scope,
+        resolve_forward_scope(service),
         &service.slug,
         MCP_DELEGATION_TOKEN_TTL_SECS,
         Some(&restrictions),
@@ -486,20 +498,34 @@ mod tests {
         assert_eq!(claims.exp - claims.iat, MCP_DELEGATION_TOKEN_TTL_SECS);
     }
 
-    /// A row left at the `llm:proxy` default cannot reach `/proxy/s/{slug}`,
-    /// so the bridge fails loud at NyxID instead of minting a token that
-    /// 403s inside Aevatar's callback with a confusing error.
+    /// A row left at the `llm:proxy` default cannot reach `/proxy/s/{slug}`.
+    /// Rather than 500 the whole assistant over one config field, the bridge
+    /// falls back to `proxy` (with a warning) so chat works on deploy. The
+    /// minted token still carries a rest-proxy scope — never the row's
+    /// insufficient `llm:proxy`.
     #[tokio::test]
-    async fn forward_authorization_rejects_a_row_without_rest_proxy_scope() {
+    async fn forward_authorization_falls_back_to_proxy_when_row_scope_is_insufficient() {
+        use crate::crypto::jwt::verify_token;
         use crate::test_utils::{test_app_state_no_db, test_auth_user};
 
         let state = test_app_state_no_db().await;
         let auth_user = test_auth_user("add69059-bece-4f0e-9559-99cfd10b47eb");
 
-        for bad in ["llm:proxy", ""] {
-            let err = build_forward_authorization(&state, &auth_user, &aevatar_row(bad))
-                .expect_err("insufficient scope must fail closed");
-            assert!(matches!(err, AppError::Internal(_)), "got {err:?}");
+        for insufficient in ["llm:proxy", ""] {
+            assert_eq!(
+                resolve_forward_scope(&aevatar_row(insufficient)),
+                PROXY_SCOPE
+            );
+            let header =
+                build_forward_authorization(&state, &auth_user, &aevatar_row(insufficient))
+                    .expect("bridge must still mint a usable token");
+            let token = header.to_str().unwrap().strip_prefix("Bearer ").unwrap();
+            let claims = verify_token(&state.jwt_keys, &state.config, token).unwrap();
+            assert!(
+                scope_allows_rest_proxy(&claims.scope),
+                "fallback token must reach the LLM proxy callback, got {}",
+                claims.scope
+            );
         }
     }
 }

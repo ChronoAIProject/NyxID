@@ -144,27 +144,35 @@ mis-design: it never accounted for Aevatar legitimately calling NyxID's
 proxy/LLM surfaces, which is how chat actually does work. **This was a NyxID
 self-inflicted bug, fixable entirely NyxID-side.**
 
-Fix (consensus: Claude Fable 5 + codex `gpt-5.6-sol` rounds 5-6):
+Fix (consensus: Claude Fable 5 + codex `gpt-5.6-sol` rounds 5-7):
 `assistant::forward` now mints a **standard delegated access token**
 (`generate_delegated_access_token`, `delegated: true`, `act.sub = aevatar`,
 scope from the row's `delegation_token_scope`, restrictions from
 `TokenRestrictionClaims::from_auth_user`, TTL `MCP_DELEGATION_TOKEN_TTL_SECS`
 = 300s) and overwrites `Authorization`.
 
-**Required prod config (round-6 alignment):** the scope is sourced from the
-row's `delegation_token_scope` — the same single source of truth the standard
-`inject_delegation_token` path reads — NOT a hardcoded constant (an earlier
-cut hardcoded `PROXY_SCOPE`, which shadowed the config field; codex round 6
-flagged it as an FI-003/FI-005 SSOT anti-pattern). The Aevatar row MUST set
-`delegation_token_scope: "proxy"` (the default `llm:proxy` cannot reach
-`/proxy/s/{slug}` and the bridge now fails loud on it — `scope_allows_rest_proxy`
-validation in `build_forward_authorization`). This makes the token delivered
-in `Authorization` (this bridge) and the token delivered in
-`X-NyxID-Delegation-Token` (the standard path, post-cutover) grant the *same*
-capability, so the TD-3 header cutover cannot silently re-break callbacks.
-Valid transitional row state: `forward_access_token: true`,
-`inject_delegation_token: true`, `delegation_token_scope: "proxy"`; final
-state flips only `forward_access_token: false`.
+**Scope sourcing — SSOT with a resilience floor (round-6 SSOT + round-7 deploy-safety):**
+`resolve_forward_scope` PREFERS the row's `delegation_token_scope` — the same
+single source of truth the standard `inject_delegation_token` path reads (an
+earlier cut hardcoded `PROXY_SCOPE`, shadowing the config field; codex round 6
+flagged that FI-003/FI-005 anti-pattern). But the callback needs REST-proxy
+capability (`/proxy/s/{slug}` enforces `ensure_rest_proxy_access`), and the
+historical row default is `llm:proxy`, which does NOT grant it. So the code
+FALLS BACK to `PROXY_SCOPE` (with a `tracing::warn!`) when the row scope is
+insufficient, rather than 500-ing the whole assistant over one config field —
+the minimum capability is dictated by the integration, not a free per-row
+choice, so this is a resilience floor, not a policy override. Net: **the
+assistant works on deploy with the current prod row unchanged** (`llm:proxy`
+→ falls back to `proxy`); setting `delegation_token_scope: "proxy"` on the row
+is RECOMMENDED to silence the warning and keep the `Authorization` token
+capability-aligned with the future `X-NyxID-Delegation-Token` (same scope; the
+JWTs differ in `iat`/`jti`). Make the TD-3 cutover ONE atomic three-field row
+update — `forward_access_token: false`, `inject_delegation_token: true`,
+`delegation_token_scope: "proxy"` — and the runbook must read the row back and
+smoke-test one LLM callback before declaring cutover done, because after
+`forward_access_token: false` the bridge stops running and the standard
+`inject_delegation_token` path passes the raw row scope straight to the
+generator (an unchanged `llm:proxy` would then 403 the callback).
 This IS the documented platform delegation-token standard ("downstream calls
 NyxID on the user's behalf"), just delivered in `Authorization` (the header
 Aevatar demonstrably reuses) rather than `X-NyxID-Delegation-Token`. Replay
@@ -172,10 +180,11 @@ boundary is now the router layer: `reject_delegated_tokens` refuses the token
 on every human-only + shared surface (account, admin, keys → 403) while
 `api_v1_delegated` accepts it on `/llm`, `/proxy/s/*`, `/delegation/refresh`.
 Strictly safer than the plain full-access token CLI/Bearer callers already
-forward and prod already trusts. `scope = PROXY_SCOPE` (not the row default
-`llm:proxy`) is required because the LLM call arrives as a REST proxy
-passthrough enforcing `ensure_rest_proxy_access`; `proxy` also satisfies the
-`/llm/*` check.
+forward and prod already trusts. The effective scope must satisfy
+`scope_allows_rest_proxy` because the LLM call arrives as a REST proxy
+passthrough enforcing `ensure_rest_proxy_access` (`proxy` also satisfies the
+`/llm/*` check); `resolve_forward_scope` guarantees that (row scope if
+sufficient, else `PROXY_SCOPE` fallback).
 
 - **Kill switch unchanged.** Gated on
   `AuthMethod::Session && service.forward_access_token`; the TD-3 row flip to
@@ -189,22 +198,53 @@ passthrough enforcing `ensure_rest_proxy_access`; `proxy` also satisfies the
   removing the rejection would let serde decode it as an ordinary access
   token → reopened replay hole. Follow-up issue: delete the whole marker
   machinery after all pre-migration tokens have expired (>10 min post-deploy).
-- **E2E-proven** against a two-leg mock (Aevatar replays the forwarded bearer
-  to a seeded `chrono-llm-public` → second mock LLM): full run completes
-  (`RUN_FINISHED` with content), the callback leg returns 200, the same token
-  is rejected 403 at `/users/me`, `/api-keys`, `/connections`, the row flip
-  suppresses the mint, and Bearer callers forward byte-for-byte.
-- **Residuals (codex round 5, recorded not fixed):** (a) delegated callbacks
-  do NOT inherit `Session`'s approval bypass — they enter approval as
-  requester `delegated`/`aevatar`, so a gated write can block pending
-  approval (correct security behavior; Aevatar must handle the approval
-  flow). (b) `/delegation/refresh` may reject `act.sub = "aevatar"` because it
-  expects an active `OauthClient` — a pre-existing standard-family
-  inconsistency (proxy injection also uses `service.slug`), so immediate
-  callbacks work but a run issuing callbacks after 5 min may need a separate
-  fix. (c) `api_v1_delegated` is slightly broader than "proxy/LLM only"
-  (proxy docs, approval-status polling, `/demo`, channel relay/events) —
-  handlers add their own gates.
+- **E2E-proven — the PRIMARY dashboard conversation flow — with the current
+  prod row unchanged** (`delegation_token_scope: "llm:proxy"`, so the fallback
+  is exercised): list → create → stream (Aevatar replays the forwarded bearer
+  to a seeded `chrono-llm-public` → mock LLM, callback 200) → history →
+  composite delete, every endpoint 200/`RUN_FINISHED`. Also proven: the same
+  token is rejected 403 at `/users/me`, `/api-keys`, `/connections`; the
+  `forward_access_token` flip suppresses the mint; Bearer callers forward
+  byte-for-byte; a `proxy:*` row scope reaches the JWT verbatim (SSOT when
+  configured). NOT covered by this E2E (see the enumerated gaps below): the
+  in-chat approval leg (TD-7 frontend), completions, workflow-chat, and the
+  node-routed WS path.
+### What works today vs. the enumerated remaining gaps (codex round-8 whole-flow audit)
+
+**WORKS TODAY, current prod row, zero config change** — the core "ask the
+assistant, get a streamed answer" experience: list, create, stream (incl. the
+Aevatar→NyxID LLM callback), history, delete. All nine routes now *authenticate*
+correctly through the bridge.
+
+**Remaining gaps (recorded, NOT blockers for basic Q&A chat) — the full list so
+none surface as a surprise "next broken leg":**
+
+- **G1 [P1, frontend TD-7] In-chat approval/authorization not end-to-end.** The
+  AG-UI normalizer renders only text/`RUN_ERROR`/`RUN_FINISHED`; `approval_card`
+  and `AUTHORIZATION_REQUIRED` frames hit the default discard branch, and
+  `decideApproval` uses the JSON `post` helper while Aevatar's `:approve`
+  responds with SSE. The backend endpoint authenticates; the browser cannot yet
+  surface/complete a real approval. Only bites when the assistant performs a
+  NyxID-gated write. Fix = the TD-7 protocol-module port.
+- **G2 [P2, TD-1] Caller-state can still divert/deny.** `execute_proxy` still
+  runs per-user node routing and rejects an inactive legacy Aevatar
+  `UserServiceConnection`, so one historical disconnected row = "works for
+  everyone but me". Fix = strict admin-target execution mode.
+- **G3 [P2] Node-routed workflow WS loses the bearer.** `/workflow-chat/ws` via
+  a user node pin: the node WS path has no `caller_token` and never injects the
+  forwarded bearer → 401. Direct WS is fine. Subsumed by G2's strict admin mode.
+- **G4 [P2] Long-run callback refresh.** The forwarded delegated token is 300s;
+  `/delegation/refresh` expects `act.sub` to be an active `OauthClient`, which
+  `"aevatar"` is not, so a run that issues its first callback after 5 min can
+  fail. Immediate callbacks work.
+- **G5 [P2, TD-10] Workflow approval resume.** No `runs/{runId}:resume`
+  pass-through; a paused workflow can't be resumed through this mount.
+- **G6 SSE idle timeout.** A silent gap > `PROXY_STREAM_IDLE_TIMEOUT_SECS` (60s)
+  kills the stream with no error frame; safe only if Aevatar keepalives < 60s.
+- **G7 chrono-llm-public provisioning.** The callback's scope now passes, but the
+  service still resolves a caller `UserService` first then the active catalog
+  row — its endpoint + credential provisioning remains a runtime dependency
+  (confirm it's an active public/master-credential row, class-equal to aevatar).
 
 ## Enable-ready (proven, awaiting a decision — not blocked on code)
 
