@@ -144,11 +144,27 @@ mis-design: it never accounted for Aevatar legitimately calling NyxID's
 proxy/LLM surfaces, which is how chat actually does work. **This was a NyxID
 self-inflicted bug, fixable entirely NyxID-side.**
 
-Fix (consensus: Claude Fable 5 + codex `gpt-5.6-sol` round 5, AGREE-WITH-CHANGES):
+Fix (consensus: Claude Fable 5 + codex `gpt-5.6-sol` rounds 5-6):
 `assistant::forward` now mints a **standard delegated access token**
 (`generate_delegated_access_token`, `delegated: true`, `act.sub = aevatar`,
-scope `PROXY_SCOPE`, restrictions from `TokenRestrictionClaims::from_auth_user`,
-TTL `MCP_DELEGATION_TOKEN_TTL_SECS` = 300s) and overwrites `Authorization`.
+scope from the row's `delegation_token_scope`, restrictions from
+`TokenRestrictionClaims::from_auth_user`, TTL `MCP_DELEGATION_TOKEN_TTL_SECS`
+= 300s) and overwrites `Authorization`.
+
+**Required prod config (round-6 alignment):** the scope is sourced from the
+row's `delegation_token_scope` — the same single source of truth the standard
+`inject_delegation_token` path reads — NOT a hardcoded constant (an earlier
+cut hardcoded `PROXY_SCOPE`, which shadowed the config field; codex round 6
+flagged it as an FI-003/FI-005 SSOT anti-pattern). The Aevatar row MUST set
+`delegation_token_scope: "proxy"` (the default `llm:proxy` cannot reach
+`/proxy/s/{slug}` and the bridge now fails loud on it — `scope_allows_rest_proxy`
+validation in `build_forward_authorization`). This makes the token delivered
+in `Authorization` (this bridge) and the token delivered in
+`X-NyxID-Delegation-Token` (the standard path, post-cutover) grant the *same*
+capability, so the TD-3 header cutover cannot silently re-break callbacks.
+Valid transitional row state: `forward_access_token: true`,
+`inject_delegation_token: true`, `delegation_token_scope: "proxy"`; final
+state flips only `forward_access_token: false`.
 This IS the documented platform delegation-token standard ("downstream calls
 NyxID on the user's behalf"), just delivered in `Authorization` (the header
 Aevatar demonstrably reuses) rather than `X-NyxID-Delegation-Token`. Replay

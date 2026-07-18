@@ -31,7 +31,8 @@ use crate::crypto::jwt::{
 };
 use crate::errors::{AppError, AppResult};
 use crate::handlers::proxy::execute_proxy;
-use crate::mw::auth::{AuthMethod, AuthUser, PROXY_SCOPE};
+use crate::models::downstream_service::DownstreamService;
+use crate::mw::auth::{AuthMethod, AuthUser, scope_allows_rest_proxy};
 use crate::services::assistant_service;
 
 /// Create responses are a ~300-byte accepted envelope; the cap only guards
@@ -74,21 +75,38 @@ fn needs_forward_token_bridge(auth_method: &AuthMethod, forward_access_token: bo
 /// forwards to Aevatar. Extracted as a seam so the exact security-sensitive
 /// wiring (delegated scope, actor = the Aevatar slug, inherited service
 /// restrictions, delegation TTL) is unit-testable without a live proxy or DB.
+///
+/// The delegated capability is sourced from the service row's
+/// `delegation_token_scope` — the single source of truth the standard
+/// `inject_delegation_token` path already reads (`proxy.rs`) — so the token
+/// this bridge delivers in `Authorization` and the token the standard path
+/// delivers in `X-NyxID-Delegation-Token` grant the same capability. The
+/// only deviation from the standard is the delivery header (dictated by
+/// Aevatar's deployed validator reusing `Authorization`). The scope MUST
+/// grant REST proxy access, because Aevatar's LLM callback arrives as a
+/// `/proxy/s/{slug}` passthrough enforcing `ensure_rest_proxy_access`; a row
+/// left at the `llm:proxy` default is a misconfiguration that fails loud here
+/// rather than producing a confusing downstream 403.
 fn build_forward_authorization(
     state: &AppState,
     auth_user: &AuthUser,
-    service_slug: &str,
+    service: &DownstreamService,
 ) -> AppResult<HeaderValue> {
+    let scope = service.delegation_token_scope.as_str();
+    if !scope_allows_rest_proxy(scope) {
+        return Err(AppError::Internal(format!(
+            "assistant: service '{}' delegation_token_scope must grant REST proxy access \
+             (proxy or proxy:*) for the Aevatar callback bridge, got '{scope}'",
+            service.slug
+        )));
+    }
     let restrictions = TokenRestrictionClaims::from_auth_user(auth_user);
     let token = generate_delegated_access_token(
         &state.jwt_keys,
         &state.config,
         &auth_user.user_id,
-        // NOT `service.delegation_token_scope` (default `llm:proxy`): the LLM
-        // call arrives as a REST proxy passthrough enforcing
-        // `ensure_rest_proxy_access`, which requires `proxy`/`proxy:*`.
-        PROXY_SCOPE,
-        service_slug,
+        scope,
+        &service.slug,
         MCP_DELEGATION_TOKEN_TTL_SECS,
         Some(&restrictions),
     )?;
@@ -120,13 +138,12 @@ async fn forward(
     // Aevatar reuses this same bearer to reach NyxID's LLM/proxy routes
     // (`/proxy/s/chrono-llm-public`, `/llm/*`), which the delegated router
     // accepts, while `reject_delegated_tokens` keeps a leaked copy off every
-    // account-management, admin, and key surface. `PROXY_SCOPE` (not the row
-    // default `llm:proxy`) is required because the LLM call arrives as a REST
-    // proxy passthrough that enforces `ensure_rest_proxy_access`. Bearer
-    // callers (CLI login JWTs) never enter this branch and keep their token
-    // byte-for-byte.
+    // account-management, admin, and key surface. The delegated capability
+    // comes from the row's `delegation_token_scope` (same source of truth as
+    // the standard `inject_delegation_token` path). Bearer callers (CLI login
+    // JWTs) never enter this branch and keep their token byte-for-byte.
     if needs_forward_token_bridge(&auth_user.auth_method, service.forward_access_token) {
-        let value = build_forward_authorization(state, auth_user, &service.slug)?;
+        let value = build_forward_authorization(state, auth_user, &service)?;
         request.headers_mut().insert(header::AUTHORIZATION, value);
         // Metadata-only: lets operators watch bridge dependence fall to
         // zero after the Aevatar identity-token rollout (TD-3 row flip).
@@ -417,10 +434,17 @@ mod tests {
         assert!(!needs_forward_token_bridge(&AuthMethod::AccessToken, false));
     }
 
+    fn aevatar_row(delegation_token_scope: &str) -> DownstreamService {
+        let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+        service.slug = "aevatar".to_string();
+        service.delegation_token_scope = delegation_token_scope.to_string();
+        service
+    }
+
     /// Locks the security-sensitive wiring of the forwarded token: a silent
-    /// change to the scope, actor, TTL, or a dropped `delegated` flag would
-    /// slip past the generator's own tests but break the LLM-callback leg
-    /// (wrong scope) or the replay boundary (missing `delegated`).
+    /// change to the actor, TTL, or a dropped `delegated` flag would slip past
+    /// the generator's own tests but break the replay boundary. The scope now
+    /// comes from the row (single source of truth with `inject_delegation_token`).
     #[tokio::test]
     async fn forward_authorization_is_a_delegated_proxy_token_for_aevatar() {
         use crate::crypto::jwt::verify_token;
@@ -429,8 +453,9 @@ mod tests {
         let state = test_app_state_no_db().await;
         let user_id = "add69059-bece-4f0e-9559-99cfd10b47eb";
         let auth_user = test_auth_user(user_id);
+        let service = aevatar_row("proxy");
 
-        let header = build_forward_authorization(&state, &auth_user, "aevatar").unwrap();
+        let header = build_forward_authorization(&state, &auth_user, &service).unwrap();
         let token = header
             .to_str()
             .unwrap()
@@ -447,13 +472,31 @@ mod tests {
             Some("aevatar"),
             "actor is the Aevatar service slug"
         );
-        // `proxy` (not `llm:proxy`): the LLM call is a REST proxy passthrough.
-        assert_eq!(claims.scope, PROXY_SCOPE);
+        // Scope sourced from the row; must grant REST proxy for the callback.
+        assert_eq!(claims.scope, "proxy");
+        assert!(scope_allows_rest_proxy(&claims.scope));
         assert_eq!(claims.token_type, "access");
         assert_eq!(claims.assistant_forward, None, "not the retired marker");
         // Session user is unrestricted, so the delegated token inherits that.
         assert_eq!(claims.allow_all_services, Some(true));
         // Delegation TTL parity (300s), well under the 900s general access TTL.
         assert_eq!(claims.exp - claims.iat, MCP_DELEGATION_TOKEN_TTL_SECS);
+    }
+
+    /// A row left at the `llm:proxy` default cannot reach `/proxy/s/{slug}`,
+    /// so the bridge fails loud at NyxID instead of minting a token that
+    /// 403s inside Aevatar's callback with a confusing error.
+    #[tokio::test]
+    async fn forward_authorization_rejects_a_row_without_rest_proxy_scope() {
+        use crate::test_utils::{test_app_state_no_db, test_auth_user};
+
+        let state = test_app_state_no_db().await;
+        let auth_user = test_auth_user("add69059-bece-4f0e-9559-99cfd10b47eb");
+
+        for bad in ["llm:proxy", ""] {
+            let err = build_forward_authorization(&state, &auth_user, &aevatar_row(bad))
+                .expect_err("insufficient scope must fail closed");
+            assert!(matches!(err, AppError::Internal(_)), "got {err:?}");
+        }
     }
 }
