@@ -95,6 +95,7 @@ pub fn build_router(
     let api_key_routes = Router::new()
         .route("/", get(handlers::api_keys::list_keys))
         .route("/", post(handlers::api_keys::create_key))
+        .route("/scope-plan", post(handlers::api_keys::plan_key_scope))
         .route("/usage", get(handlers::api_keys::list_key_usage))
         .route(
             "/{key_id}",

@@ -1,5 +1,6 @@
 #[derive(utoipa::OpenApi)]
 #[openapi(
+    modifiers(&SecurityAddon),
     paths(
         crate::handlers::docs::docs_ui,
         crate::handlers::docs::catalog_ui,
@@ -48,6 +49,7 @@
         // NyxID API Keys
         crate::handlers::api_keys::list_keys,
         crate::handlers::api_keys::get_key,
+        crate::handlers::api_keys::plan_key_scope,
         crate::handlers::api_keys::create_key,
         crate::handlers::api_keys::update_key,
         crate::handlers::api_keys::delete_key,
@@ -107,12 +109,23 @@
             // NyxID API Keys
             crate::handlers::api_keys::CreateApiKeyRequest,
             crate::handlers::api_keys::UpdateApiKeyRequest,
+            crate::handlers::api_keys::ApiKeyScopePlanRequest,
             crate::handlers::api_keys::CreateApiKeyResponse,
             crate::handlers::api_keys::AllowedServiceInfo,
             crate::handlers::api_keys::AllowedNodeInfo,
             crate::handlers::api_keys::ApiKeyResponse,
             crate::handlers::api_keys::ApiKeyListResponse,
             crate::handlers::api_keys::DeleteApiKeyResponse,
+            crate::services::api_key_scope_service::EffectiveScopePlan,
+            crate::services::api_key_scope_service::ScopePlanPrincipal,
+            crate::services::api_key_scope_service::ScopePlanOwnerType,
+            crate::services::api_key_scope_service::ScopePlanServiceGrant,
+            crate::services::api_key_scope_service::ScopePlanNodeGrant,
+            crate::services::api_key_scope_service::ScopePlanFreshness,
+            crate::services::api_key_scope_service::ScopePlanFreshnessMode,
+            crate::services::api_key_scope_service::ScopePlanPostCreationDrift,
+            crate::services::api_key_scope_service::ScopePlanCompleteness,
+            crate::services::api_key_scope_service::ScopePlanRouteCandidateBasis,
             // Billing
             crate::handlers::billing::BillingUsageResponse,
             crate::handlers::billing::BillingUsageRow,
@@ -143,3 +156,19 @@
     )
 )]
 pub struct ApiDoc;
+
+struct SecurityAddon;
+
+impl utoipa::Modify for SecurityAddon {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        use utoipa::openapi::security::{Http, HttpAuthScheme, SecurityScheme};
+
+        openapi
+            .components
+            .get_or_insert_with(utoipa::openapi::Components::new)
+            .add_security_scheme(
+                "bearer_auth",
+                SecurityScheme::Http(Http::new(HttpAuthScheme::Bearer)),
+            );
+    }
+}
