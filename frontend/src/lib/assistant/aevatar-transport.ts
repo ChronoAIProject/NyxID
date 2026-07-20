@@ -1,5 +1,8 @@
 import { apiClient } from "@/lib/api-client";
-import { AssistantTurnActiveError } from "@/lib/assistant/errors";
+import {
+  AssistantTurnActiveError,
+  AssistantTurnCancelledError,
+} from "@/lib/assistant/errors";
 import { drainSseBuffer, flushSseBuffer } from "@/lib/assistant/sse";
 import {
   applyTurnEvent,
@@ -10,8 +13,11 @@ import type {
   ApprovalCardContentBlock,
   AssistantMessage,
   AssistantTransport,
+  ConnectCardContentBlock,
+  ContentBlock,
   Conversation,
   ConversationHistory,
+  RunContentBlock,
   TurnEvent,
   TurnHandle,
   TurnReducerState,
@@ -42,6 +48,12 @@ const assistantApi = {
       preserveSessionOn401: true,
     });
   },
+  del<T>(endpoint: string): Promise<T> {
+    return apiClient<T>(endpoint, {
+      method: "DELETE",
+      preserveSessionOn401: true,
+    });
+  },
 } as const;
 
 // The conversation list reads the Chat History index (contract-B): each row
@@ -55,17 +67,127 @@ const CONVERSATION_LIST_TTL_MS = 5_000;
 
 const MAX_MESSAGE_CHARS = 32_768;
 
-/** AG-UI protocol frames observed on `nyxid-chat/conversations/{id}:stream`. */
+// Reference-client parity (nyxid-chat BFF `DEMO_STREAM_PROGRESS_TIMEOUT_MS`):
+// a stream that produces only keepalives for this long is a hung run, not a
+// slow one. Suspended while a human approval gate is open — external gates
+// have no deadline the client can impose.
+const STREAM_PROGRESS_TIMEOUT_MS = 120_000;
+
+// Inline media larger than this (base64 chars ≈ 6 MB decoded) is summarized
+// as text instead of being embedded as a data: URL artifact.
+const MAX_MEDIA_DATA_CHARS = 8_000_000;
+
+const MAX_TOOL_SUMMARY_CHARS = 160;
+
+/** AG-UI frame vocabulary observed on `nyxid-chat/conversations/{id}:stream`. */
+interface ToolCallPayload {
+  readonly toolCallId?: string;
+  readonly toolName?: string;
+  readonly status?: string;
+  readonly success?: boolean;
+  readonly result?: unknown;
+  readonly error?: unknown;
+}
+
+interface ToolApprovalPayload {
+  readonly requestId?: string;
+  readonly approvalRequestId?: string;
+  readonly toolCallId?: string;
+  readonly toolName?: string;
+  readonly message?: string;
+  readonly body?: string;
+  readonly serviceSlug?: string;
+  readonly service_slug?: string;
+  readonly agentKeyPrefix?: string;
+  readonly approvalMode?: string;
+  readonly grantDurationSec?: number;
+  readonly expiresAt?: string;
+  readonly expires_at?: string;
+  readonly commandId?: string;
+  readonly stepId?: string;
+}
+
+interface AuthorizationPayload {
+  readonly serviceId?: string;
+  readonly serviceSlug?: string;
+  readonly service_slug?: string;
+  readonly serviceLabel?: string;
+  readonly resource?: string;
+  readonly resourceUri?: string;
+  readonly message?: string;
+}
+
+interface UsagePayload {
+  readonly available?: boolean;
+  readonly promptTokens?: number;
+  readonly completionTokens?: number;
+  readonly totalTokens?: number;
+  readonly model?: string | null;
+}
+
+interface MediaPayload {
+  readonly mediaType?: string;
+  readonly dataBase64?: string;
+  readonly url?: string;
+  readonly name?: string;
+}
+
+interface StepPayload {
+  readonly runId?: string;
+  readonly stepId?: string;
+  readonly stepType?: string;
+  readonly success?: boolean;
+}
+
+interface CustomEnvelope {
+  readonly name?: string;
+  readonly payload?: unknown;
+}
+
 interface AgUiFrame {
   readonly type?: string;
+  readonly actorId?: string;
   readonly textMessageStart?: {
     readonly messageId?: string;
     readonly role?: string;
   };
   readonly textMessageContent?: { readonly delta?: string };
   readonly textMessageEnd?: { readonly messageId?: string };
+  readonly toolCallStart?: ToolCallPayload;
+  readonly toolCallEnd?: ToolCallPayload;
+  readonly toolApprovalRequest?: ToolApprovalPayload;
+  readonly authorizationRequired?: AuthorizationPayload;
+  readonly usage?: UsagePayload;
+  readonly mediaContent?: MediaPayload;
+  readonly custom?: CustomEnvelope;
+  readonly runError?: { readonly code?: string; readonly message?: string };
   readonly error?: { readonly code?: string; readonly message?: string };
   readonly message?: string;
+}
+
+/** Batched completion inside `aevatar.raw.observed` (reference `protocol.js`). */
+interface RoleChatToolCall {
+  readonly callId?: string;
+  readonly toolName?: string;
+  readonly argumentsJson?: string;
+}
+
+interface RoleChatToolReceipt {
+  readonly callId?: string;
+  readonly toolName?: string;
+  readonly status?: string;
+  readonly resultJson?: string;
+  readonly errorMessage?: string;
+  readonly errorCode?: string;
+}
+
+interface RoleChatCompletion {
+  readonly sessionId?: string;
+  readonly content?: string;
+  readonly toolCalls?: readonly RoleChatToolCall[];
+  readonly toolReceipts?: readonly RoleChatToolReceipt[];
+  readonly usage?: UsagePayload;
+  readonly model?: string;
 }
 
 /** One row of the Chat History index (`chat-history`). */
@@ -105,6 +227,16 @@ interface StoredConversation {
   sessionId?: string;
 }
 
+interface RunStepState {
+  index: number;
+  status: "done" | "active" | "waiting" | "failed" | "skipped";
+  label: string;
+  meta: string;
+  service_slug: string | null;
+  artifact_id: string | null;
+  approval_request_id: string | null;
+}
+
 interface RunningTurn {
   readonly turnId: string;
   readonly controller: AbortController;
@@ -114,10 +246,32 @@ interface RunningTurn {
   currentBlockId: string | null;
   accumulatedText: string;
   finished: boolean;
+  /** Any assistant text streamed this turn (gates the batched-content fallback). */
+  sawText: boolean;
+  /** Synthetic assistant message hosting the run ledger and cards. */
+  activityMessageId: string | null;
+  activityBlockCount: number;
+  runBlockId: string | null;
+  runSteps: RunStepState[];
+  /** tool `toolCallId` / workflow `stepId` → index into `runSteps`. */
+  stepKeys: Map<string, number>;
+  /** Open cards: block_id → kind, completed at turn finalization. */
+  openCards: Map<string, "approval" | "connect">;
+  /** Dedupe guards, per reference client behavior. */
+  promptedApprovalIds: Set<string>;
+  /** Service dedupe key → connect card block_id (for in-place upgrades). */
+  promptedConnectSlugs: Map<string, string>;
+  waitingForApproval: boolean;
+  watchdog: ReturnType<typeof setTimeout> | null;
 }
 
 function newId(prefix: string): string {
   return `${prefix}-${crypto.randomUUID()}`;
+}
+
+function noopEvent(): void {
+  // Continuation stream with no subscriber: state still lands in the
+  // transport mirror via `emit`.
 }
 
 function isoFromEpochMs(epochMs: number | undefined, fallback: string): string {
@@ -197,9 +351,147 @@ function streamStartError(
   }
   return {
     code: envelopeCode ?? `http_${String(status)}`,
-    message:
-      envelopeMessage ?? "The assistant stream could not be started.",
+    // Envelope messages render in toasts and the thread; redact like any
+    // other upstream-derived display string.
+    message: envelopeMessage
+      ? redactDisplayText(envelopeMessage)
+      : "The assistant stream could not be started.",
   };
+}
+
+// ---------------------------------------------------------------------------
+// Redaction and tool-result summaries (ported from the reference client's
+// `protocol.js`): display strings derived from tool payloads are untrusted
+// and may echo credentials; PRD §3.6 forbids raw downstream bodies in blocks.
+// ---------------------------------------------------------------------------
+
+// Auth-scheme values plus BARE well-known token shapes: provider keys leak
+// into natural-language error strings ("AWS rejected AKIA...") where no
+// key=value assignment exists for the assignment rule to catch.
+const SECRET_VALUE_PATTERN =
+  /((?:Bearer|Basic)\s+)[A-Za-z0-9._~+/=-]+|\beyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b|nyx(?:id)?_[A-Za-z0-9_-]{8,}|\b(?:AKIA|ASIA|ABIA|ACCA)[A-Z0-9]{16}\b|\bsk[-_][A-Za-z0-9_-]{8,}\b|\bgh[pousr]_[A-Za-z0-9]{20,}\b|\bAIza[A-Za-z0-9_-]{30,}\b|\bxox[baprs]-[A-Za-z0-9-]{10,}\b/gi;
+
+// Key names match with prefixes/suffixes (`secretAccessKey`, `x-api-key`,
+// `authorizationHeader`); quoted values — double or single (Python-style
+// reprs) — are consumed whole so a secret containing spaces cannot leak
+// its tail.
+const SECRET_ASSIGNMENT_PATTERN =
+  /(["']?[\w.-]*(?:authorization|api[-_]?key|access[-_]?key[-_]?id|token|secret|password|credential|cookie)[\w.-]*["']?\s*[:=]\s*)("[^"]*"|'[^']*'|[^",'\s}]+)/gi;
+
+export function redactDisplayText(value: string): string {
+  // Token shapes first: the assignment rule would otherwise consume the
+  // literal "Bearer" as the assigned value and leave the token itself
+  // (`Authorization: Bearer <token>`) untouched.
+  return value
+    .replace(SECRET_VALUE_PATTERN, (_match, bearerPrefix: unknown) =>
+      typeof bearerPrefix === "string" && bearerPrefix
+        ? `${bearerPrefix}[redacted]`
+        : "[redacted]",
+    )
+    .replace(SECRET_ASSIGNMENT_PATTERN, '$1"[redacted]"');
+}
+
+/** Compact, redacted single-line summary of a tool result for the step meta. */
+export function summarizeToolResult(value: unknown): string {
+  if (value === undefined || value === null || value === "") {
+    return "Completed";
+  }
+  let text: string;
+  if (typeof value === "string") {
+    text = value;
+  } else {
+    try {
+      text = JSON.stringify(value);
+    } catch {
+      return "Completed";
+    }
+  }
+  const compact = redactDisplayText(text).replace(/\s+/g, " ").trim();
+  if (!compact) return "Completed";
+  return compact.length > MAX_TOOL_SUMMARY_CHARS
+    ? `${compact.slice(0, MAX_TOOL_SUMMARY_CHARS - 1)}…`
+    : compact;
+}
+
+// ---------------------------------------------------------------------------
+// Authorization-failure sniffing (reference `findServiceAuthorizationFailure`):
+// belt-and-braces below the dedicated AUTHORIZATION_REQUIRED frame — some
+// runs only surface the gap inside a tool-result error string.
+// ---------------------------------------------------------------------------
+
+const AUTHORIZATION_FAILURE_MARKERS = [
+  "authorization_required",
+  "service_not_authorized",
+  "service_access_required",
+  "service authorization required",
+  "not authorized for this service",
+  "not authorized for service",
+  "does not have access to this service",
+  "does not have access to service",
+  "service access is not granted",
+  "scoped api keys must use configured services",
+  "invalid_target",
+] as const;
+
+export function findServiceAuthorizationFailure(
+  value: unknown,
+): { serviceSlug: string; message: string } | null {
+  if (value === undefined || value === null || value === "") return null;
+  let text: string;
+  try {
+    text = (typeof value === "string" ? value : JSON.stringify(value))
+      .toLowerCase();
+  } catch {
+    return null;
+  }
+  if (!AUTHORIZATION_FAILURE_MARKERS.some((marker) => text.includes(marker))) {
+    return null;
+  }
+  let explicitSlug = "";
+  if (typeof value === "object" && value !== null) {
+    const record = value as Record<string, unknown>;
+    const candidate = record["serviceSlug"] ?? record["service_slug"];
+    if (typeof candidate === "string") explicitSlug = candidate;
+  }
+  const slug =
+    explicitSlug.trim().toLowerCase() ||
+    (/(?:service|slug)[\s"':=]+([a-z0-9][a-z0-9-]{1,80})/.exec(text)?.[1] ??
+      "");
+  return {
+    serviceSlug: slug,
+    message: slug
+      ? `This request needs a working ${slug} connection. Connect it in NyxID, then ask again.`
+      : "This request needs a NyxID service that is not connected yet. Connect it, then ask again.",
+  };
+}
+
+/**
+ * Unwrap a protobuf-`Any`-shaped custom payload (reference `unpackAny`):
+ * either `{value: {...}}` or the object itself minus its `@type` marker.
+ */
+function unpackAny(payload: unknown): Record<string, unknown> {
+  if (typeof payload !== "object" || payload === null) return {};
+  const record = payload as Record<string, unknown>;
+  const value = record["value"];
+  if (typeof value === "object" && value !== null) {
+    return value as Record<string, unknown>;
+  }
+  const clone: Record<string, unknown> = { ...record };
+  delete clone["@type"];
+  return clone;
+}
+
+function humanizeSlug(slug: string): string {
+  const bare = slug.replace(/^api-/, "");
+  if (!bare) return "NyxID service";
+  return bare
+    .split(/[-_]/)
+    .map((part) => (part ? part.charAt(0).toUpperCase() + part.slice(1) : part))
+    .join(" ");
+}
+
+function base64SizeBytes(dataBase64: string): number {
+  return Math.floor((dataBase64.length * 3) / 4);
 }
 
 /**
@@ -208,10 +500,27 @@ function streamStartError(
  * streaming turns render live from turn events while the server history
  * (`chat-history/conversations/{id}`) stays authoritative between turns —
  * the same authority split the mock transport established.
+ *
+ * The stream handler adapts the FULL live AG-UI vocabulary (the reference
+ * client's `protocol.js` taxonomy) onto the PRD §3.5 block types the UI
+ * renders: tool calls become the `run` step ledger, approval requests become
+ * `approval_card`, authorization gaps become `connect_card`, inline media
+ * becomes `artifact`. Reasoning frames are acknowledged but never rendered
+ * (PRD §3.8); batched `aevatar.raw.observed` completions are mined for their
+ * presentation content only.
  */
 export class AevatarAssistantTransport implements AssistantTransport {
   private readonly conversations = new Map<string, StoredConversation>();
   private readonly running = new Map<string, RunningTurn>();
+  /**
+   * Tombstones for server-accepted deletes: the Chat History index is
+   * eventually consistent, so stale list/history responses can still carry
+   * a row we just deleted. Tombstones are PERMANENT for the transport's
+   * lifetime — actor ids are never reused, and retiring one early would
+   * reopen the race where an in-flight pre-delete read lands after the
+   * retire and resurrects the conversation.
+   */
+  private readonly deletedConversationIds = new Set<string>();
   private listFetchedAt = 0;
 
   async listConversations(): Promise<Conversation[]> {
@@ -257,7 +566,27 @@ export class AevatarAssistantTransport implements AssistantTransport {
     return conversation;
   }
 
+  async deleteConversation(conversationId: string): Promise<void> {
+    // A turn still streaming into the conversation must not keep painting
+    // a transcript that is about to disappear: cancel first, matching the
+    // reference client's abort-then-delete order. The server side is the
+    // #1199 composite delete (actor + history row, 404-tolerant), so one
+    // call retires both upstream surfaces.
+    const run = this.running.get(conversationId);
+    if (run) this.cancelTurn(conversationId, run);
+    await assistantApi.del(
+      `${ASSISTANT_PREFIX}/conversations/${conversationId}`,
+    );
+    // Local removal only after the server accepted: a failed delete keeps
+    // the conversation listed and retryable.
+    this.conversations.delete(conversationId);
+    this.deletedConversationIds.add(conversationId);
+  }
+
   async getHistory(conversationId: string): Promise<ConversationHistory> {
+    if (this.deletedConversationIds.has(conversationId)) {
+      throw new Error("Conversation was not found.");
+    }
     const existing = this.conversations.get(conversationId);
     // During a streaming turn the local mirror is ahead of the server;
     // serving it keeps per-event re-projection off the network entirely.
@@ -273,6 +602,12 @@ export class AevatarAssistantTransport implements AssistantTransport {
       stored = await this.loadHistory(conversationId);
     } catch {
       stored = existing;
+    }
+    // Re-check AFTER the await: a delete completing while the history
+    // request was in flight must not be answered with the pre-delete
+    // snapshot captured above (the fallback `existing`).
+    if (this.deletedConversationIds.has(conversationId)) {
+      throw new Error("Conversation was not found.");
     }
     if (!stored) {
       throw new Error("Conversation was not found.");
@@ -337,16 +672,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       last_message_at: createdAt,
     };
 
-    const run: RunningTurn = {
-      turnId: newId("turn"),
-      controller: new AbortController(),
-      onEvent,
-      cursor: 0,
-      currentMessageId: null,
-      currentBlockId: null,
-      accumulatedText: "",
-      finished: false,
-    };
+    const run = this.newRun(onEvent);
     this.running.set(conversationId, run);
     this.emit(conversationId, run, {
       cursor: this.nextCursor(run),
@@ -363,11 +689,31 @@ export class AevatarAssistantTransport implements AssistantTransport {
     };
   }
 
+  /**
+   * Cancel whatever turn is live for the conversation — including an
+   * approval-continuation reservation whose handle the caller never saw
+   * (the handle only returns after the approve response headers arrive, so
+   * Stop needs a transport-level lookup to abort a hung request).
+   */
+  cancelActiveTurn(conversationId: string): void {
+    const run = this.running.get(conversationId);
+    if (run) this.cancelTurn(conversationId, run);
+  }
+
+  /**
+   * Send an approval decision. On the live contract the approve endpoint
+   * answers with an SSE continuation of the run (reference client behavior);
+   * the frames stream through the same adapter as the original turn, with
+   * cursors continuing past the previous turn's so at-least-once consumers
+   * never regress. Resolves once the continuation has started; the returned
+   * handle cancels it.
+   */
   async decideApproval(
     conversationId: string,
     blockId: string,
     approved: boolean,
-  ): Promise<void> {
+    onEvent?: (event: TurnEvent) => void,
+  ): Promise<TurnHandle | null> {
     const stored = this.conversations.get(conversationId);
     const card = stored?.turnState.messages
       .flatMap((message) => message.blocks)
@@ -375,13 +721,155 @@ export class AevatarAssistantTransport implements AssistantTransport {
         (block): block is ApprovalCardContentBlock =>
           block.type === "approval_card" && block.block_id === blockId,
       );
-    if (!card) {
+    if (!stored || !card) {
       throw new Error("Approval request was not found.");
     }
-    await assistantApi.post(
-      `${ASSISTANT_PREFIX}/conversations/${conversationId}/approve`,
-      { requestId: card.approval_request_id, approved },
-    );
+    if (card.decision !== null) {
+      throw new Error("This approval was already decided.");
+    }
+    const active = this.running.get(conversationId);
+    if (active) {
+      if (!active.waitingForApproval) {
+        throw new AssistantTurnActiveError();
+      }
+      // The original stream is idle at the human gate; settle it quietly so
+      // the continuation below becomes the one live turn.
+      this.pauseForApproval(conversationId, active);
+    }
+
+    // Reserve the conversation BEFORE the network call: the whole approve
+    // exchange must read as one active turn, or the idle gap while awaiting
+    // response headers lets a concurrent send/approve/delete slip past the
+    // active-turn guards and interleave two streams into one reducer. The
+    // reservation's controller doubles as the fetch signal so Stop can
+    // abort an approve request hung before headers.
+    const run = this.newRun(onEvent ?? noopEvent);
+    // Continuation cursors continue past the previous turn's: the reducer
+    // and any still-subscribed pump dedup by strictly-increasing cursor.
+    // (Read lastCursor only after pauseForApproval settled the prior turn.)
+    run.cursor = stored.turnState.lastCursor;
+    this.running.set(conversationId, run);
+    this.emit(conversationId, run, {
+      cursor: this.nextCursor(run),
+      event: "turn.status",
+      turn_id: run.turnId,
+      status: "running",
+    });
+
+    let response: Response;
+    try {
+      response = await fetch(
+        `/api/v1${ASSISTANT_PREFIX}/conversations/${conversationId}/approve`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "text/event-stream",
+          },
+          credentials: "include",
+          body: JSON.stringify({
+            requestId: card.approval_request_id,
+            approved,
+            ...(stored.sessionId ? { sessionId: stored.sessionId } : {}),
+          }),
+          signal: run.controller.signal,
+        },
+      );
+    } catch (error) {
+      const aborted = run.controller.signal.aborted;
+      // cancelTurn may already have settled the run; finishTurn is a no-op
+      // then. The card was never flipped, so the decision stays retryable.
+      // Pre-stream failures settle the turn with a NULL error: the thrown
+      // rejection is what surfaces (the mutation's onError toast) — a turn
+      // error here would double-toast the same failure.
+      this.finishTurn(
+        conversationId,
+        run,
+        aborted ? "cancelled" : "failed",
+        null,
+      );
+      throw aborted ? new AssistantTurnCancelledError() : error;
+    }
+    if (!response.ok) {
+      const bodyText = await response.text().catch(() => "");
+      const failure = streamStartError(response.status, bodyText);
+      // Null turn error for the same single-toast reason as above.
+      this.finishTurn(conversationId, run, "failed", null);
+      throw new Error(failure.message);
+    }
+
+    this.emit(conversationId, run, {
+      cursor: this.nextCursor(run),
+      event: "block.updated",
+      block_id: blockId,
+      patch: {
+        decision: approved ? "approved" : "denied",
+        decision_channel: "web",
+      },
+    });
+    // The prior turn's ledger parked with a step waiting on THIS approval;
+    // settle that step so the transient activity line doesn't show a stale
+    // approval clock (approved → the step proceeds; denied → skipped).
+    // Correlated by approval_request_id: deciding one card must not settle
+    // steps gated on a different pending approval, and a ledger with other
+    // approvals still waiting stays parked.
+    const parkedLedger = [...stored.turnState.messages]
+      .flatMap((message) => message.blocks)
+      .reverse()
+      .find(
+        (candidate): candidate is RunContentBlock =>
+          candidate.type === "run" &&
+          candidate.state === "awaiting_approval" &&
+          candidate.steps.some(
+            (step) =>
+              step.status === "waiting" &&
+              step.approval_request_id === card.approval_request_id,
+          ),
+      );
+    if (parkedLedger) {
+      const steps = parkedLedger.steps.map((step) =>
+        step.status === "waiting" &&
+        step.approval_request_id === card.approval_request_id
+          ? {
+              ...step,
+              status: approved ? ("done" as const) : ("skipped" as const),
+            }
+          : step,
+      );
+      const stillWaiting = steps.some((step) => step.status === "waiting");
+      this.emit(conversationId, run, {
+        cursor: this.nextCursor(run),
+        event: "block.updated",
+        block_id: parkedLedger.block_id,
+        patch: {
+          state: stillWaiting
+            ? "awaiting_approval"
+            : approved
+              ? "completed"
+              : "cancelled",
+          steps,
+          steps_complete: steps.filter((step) => step.status === "done").length,
+        },
+      });
+    }
+
+    const contentType = response.headers.get("content-type") ?? "";
+    if (response.body && contentType.includes("text/event-stream")) {
+      void this.consumeTurnStream(conversationId, run, response);
+    } else {
+      // Older backend acknowledging with JSON: nothing further will stream,
+      // and there is no live continuation for the caller to hold a handle
+      // to — returning one would let a stale entry linger in the caller's
+      // handle registry after this turn already completed.
+      this.finishTurn(conversationId, run, "completed", null);
+      return null;
+    }
+    return {
+      turnId: run.turnId,
+      cancel: () => {
+        this.cancelTurn(conversationId, run);
+      },
+    };
   }
 
   /**
@@ -391,6 +879,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
    * title, timestamps, and counts without a per-conversation detail fetch.
    */
   private mergeIndexEntry(id: string, entry: AevatarHistoryIndexEntry): void {
+    if (this.deletedConversationIds.has(id)) return;
     const existing = this.conversations.get(id);
     if (existing && isTurnActive(existing.turnState.activeTurn?.status)) {
       return;
@@ -432,6 +921,12 @@ export class AevatarAssistantTransport implements AssistantTransport {
     const entries = await assistantApi.get<AevatarHistoryEntry[]>(
       `${ASSISTANT_PREFIX}/conversations/${conversationId}`,
     );
+    // The conversation may have been deleted while this request was in
+    // flight (deleting an active chat races cancel-driven projections);
+    // writing the stale result back would resurrect it locally.
+    if (this.deletedConversationIds.has(conversationId)) {
+      throw new Error("Conversation was not found.");
+    }
     const existing = this.conversations.get(conversationId);
     const messages = entries
       .map((entry, index) => historyEntryToMessage(entry, index))
@@ -469,6 +964,30 @@ export class AevatarAssistantTransport implements AssistantTransport {
     return stored;
   }
 
+  private newRun(onEvent: (event: TurnEvent) => void): RunningTurn {
+    return {
+      turnId: newId("turn"),
+      controller: new AbortController(),
+      onEvent,
+      cursor: 0,
+      currentMessageId: null,
+      currentBlockId: null,
+      accumulatedText: "",
+      finished: false,
+      sawText: false,
+      activityMessageId: null,
+      activityBlockCount: 0,
+      runBlockId: null,
+      runSteps: [],
+      stepKeys: new Map(),
+      openCards: new Map(),
+      promptedApprovalIds: new Set(),
+      promptedConnectSlugs: new Map(),
+      waitingForApproval: false,
+      watchdog: null,
+    };
+  }
+
   private nextCursor(run: RunningTurn): number {
     run.cursor += 1;
     return run.cursor;
@@ -490,6 +1009,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     }
     if (event.event === "turn.completed") {
       run.finished = true;
+      this.clearWatchdog(run);
       this.running.delete(conversationId);
     }
     run.onEvent(event);
@@ -528,6 +1048,37 @@ export class AevatarAssistantTransport implements AssistantTransport {
         );
         return;
       }
+      await this.consumeTurnStream(conversationId, run, response);
+    } catch (error) {
+      // The cancel path aborts the fetch after emitting its own terminal
+      // events; an abort here is not a failure.
+      if (run.finished || run.controller.signal.aborted) return;
+      this.closeOpenMessage(conversationId, run);
+      this.finalizeActivity(conversationId, run, "failed");
+      this.finishTurn(conversationId, run, "failed", {
+        code: "network_error",
+        message:
+          error instanceof Error ? error.message : "The stream failed.",
+      });
+    }
+  }
+
+  /**
+   * Shared SSE consumption for the original turn stream and the approval
+   * continuation stream: same framing, same adapter, same watchdog and
+   * truncation semantics.
+   */
+  private async consumeTurnStream(
+    conversationId: string,
+    run: RunningTurn,
+    response: Response,
+  ): Promise<void> {
+    if (!response.body) {
+      this.finishTurn(conversationId, run, "completed", null);
+      return;
+    }
+    try {
+      this.armWatchdog(conversationId, run);
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
@@ -549,28 +1100,70 @@ export class AevatarAssistantTransport implements AssistantTransport {
         this.handleAgUiFrame(conversationId, run, payload);
         if (run.finished) return;
       }
+      this.closeOpenMessage(conversationId, run);
+      if (run.waitingForApproval) {
+        // EOF at a human gate is a pause, not a truncation: Aevatar may
+        // close an idle stream while an approval waits (PRD §3.4). The card
+        // stays actionable; the decision starts the continuation stream.
+        this.finalizeActivity(conversationId, run, "waiting");
+        this.finishTurn(conversationId, run, "completed", null);
+        return;
+      }
       // EOF without RUN_FINISHED / RUN_ERROR is a truncated run (proxy idle
-      // kill, upstream drop), not a success. Settle the partial text and
+      // kill, upstream drop), not a success. Settle the partial state and
       // report it; the server-side run may still finish, in which case the
       // full reply surfaces on the next history reload.
-      this.closeOpenMessage(conversationId, run);
+      this.finalizeActivity(conversationId, run, "failed");
       this.finishTurn(conversationId, run, "failed", {
         code: "stream_closed",
         message:
           "The stream ended before the assistant finished. The reply may be incomplete — it will appear in full once the conversation reloads.",
       });
     } catch (error) {
-      // The cancel path aborts the fetch after emitting its own terminal
-      // events; an abort here is not a failure.
       if (run.finished || run.controller.signal.aborted) return;
       this.closeOpenMessage(conversationId, run);
+      this.finalizeActivity(conversationId, run, "failed");
       this.finishTurn(conversationId, run, "failed", {
         code: "network_error",
         message:
           error instanceof Error ? error.message : "The stream failed.",
       });
+    } finally {
+      this.clearWatchdog(run);
     }
   }
+
+  // -------------------------------------------------------------------------
+  // Watchdog (G-hang): keepalives keep the connection alive but are not
+  // progress; only real frames re-arm the timer.
+  // -------------------------------------------------------------------------
+
+  private armWatchdog(conversationId: string, run: RunningTurn): void {
+    this.clearWatchdog(run);
+    if (run.finished || run.waitingForApproval) return;
+    run.watchdog = setTimeout(() => {
+      this.closeOpenMessage(conversationId, run);
+      this.finalizeActivity(conversationId, run, "failed");
+      this.finishTurn(conversationId, run, "failed", {
+        code: "upstream_progress_timeout",
+        message: `The assistant made no progress for ${String(
+          Math.round(STREAM_PROGRESS_TIMEOUT_MS / 1000),
+        )} seconds and the run was stopped. Try again.`,
+      });
+      run.controller.abort();
+    }, STREAM_PROGRESS_TIMEOUT_MS);
+  }
+
+  private clearWatchdog(run: RunningTurn): void {
+    if (run.watchdog !== null) {
+      clearTimeout(run.watchdog);
+      run.watchdog = null;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Frame adapter: live AG-UI vocabulary → PRD §3.5 blocks / §3.7 events.
+  // -------------------------------------------------------------------------
 
   private handleAgUiFrame(
     conversationId: string,
@@ -583,7 +1176,20 @@ export class AevatarAssistantTransport implements AssistantTransport {
     } catch {
       return;
     }
-    switch (frame.type) {
+    if (typeof frame !== "object" || frame === null) return;
+
+    const type = this.frameType(frame);
+    const isKeepalive =
+      type === "CUSTOM" &&
+      frame.custom?.name === "aevatar.nyxid_chat.keepalive";
+    if (!isKeepalive) {
+      this.armWatchdog(conversationId, run);
+    }
+
+    switch (type) {
+      case "RUN_STARTED":
+        // Context only (actorId echoes the conversation); nothing renders.
+        return;
       case "TEXT_MESSAGE_START": {
         const messageId =
           frame.textMessageStart?.messageId ?? newId("assistant-message");
@@ -610,6 +1216,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
         const delta = frame.textMessageContent?.delta ?? "";
         if (!delta || !run.currentBlockId) return;
         run.accumulatedText += delta;
+        run.sawText = true;
         this.emit(conversationId, run, {
           cursor: this.nextCursor(run),
           event: "block.delta",
@@ -622,29 +1229,671 @@ export class AevatarAssistantTransport implements AssistantTransport {
         this.closeOpenMessage(conversationId, run);
         return;
       }
+      case "TOOL_CALL_START": {
+        const start = frame.toolCallStart ?? {};
+        this.startRunStep(
+          conversationId,
+          run,
+          start.toolCallId ?? newId("tool"),
+          start.toolName ?? "tool",
+        );
+        return;
+      }
+      case "TOOL_CALL_END": {
+        this.finishToolCall(conversationId, run, frame.toolCallEnd ?? {});
+        return;
+      }
+      case "TOOL_APPROVAL_REQUEST": {
+        this.addApprovalCard(
+          conversationId,
+          run,
+          frame.toolApprovalRequest ?? {},
+        );
+        return;
+      }
+      case "AUTHORIZATION_REQUIRED": {
+        this.addConnectCard(
+          conversationId,
+          run,
+          frame.authorizationRequired ?? {},
+        );
+        return;
+      }
+      case "USAGE": {
+        this.applyUsage(conversationId, frame.usage ?? {});
+        return;
+      }
+      case "MEDIA_CONTENT": {
+        this.addMediaArtifact(conversationId, run, frame.mediaContent ?? {});
+        return;
+      }
       case "RUN_ERROR": {
+        const error = frame.runError ?? frame.error;
         this.closeOpenMessage(conversationId, run);
+        this.finalizeActivity(conversationId, run, "failed");
         this.finishTurn(conversationId, run, "failed", {
-          code: frame.error?.code ?? "run_error",
-          message:
-            frame.error?.message ??
-            frame.message ??
-            "The assistant run failed.",
+          code: error?.code ?? "run_error",
+          // Upstream error strings are display surfaces too (thread + toast)
+          // and can echo request headers or credentials.
+          message: redactDisplayText(
+            error?.message ?? frame.message ?? "The assistant run failed.",
+          ),
         });
         return;
       }
       case "RUN_FINISHED": {
         this.closeOpenMessage(conversationId, run);
+        this.finalizeActivity(
+          conversationId,
+          run,
+          run.waitingForApproval ? "waiting" : "done",
+        );
         this.finishTurn(conversationId, run, "completed", null);
         return;
       }
+      case "CUSTOM": {
+        this.handleCustomFrame(conversationId, run, frame.custom ?? {});
+        return;
+      }
       default:
-        // RUN_STARTED, USAGE, and any newer AG-UI frame types have no
-        // presentation mapping; skipping them is the §5.9 forward-compat
-        // posture (never drop the turn over an unknown frame).
+        // Any newer AG-UI frame type has no presentation mapping; skipping
+        // is the §3.0 forward-compat posture (never drop the turn over an
+        // unknown frame).
         return;
     }
   }
+
+  /** Frame type, tolerating both `type`-tagged and body-keyed variants. */
+  private frameType(frame: AgUiFrame): string {
+    if (frame.type) return frame.type.toUpperCase();
+    if (frame.textMessageStart) return "TEXT_MESSAGE_START";
+    if (frame.textMessageContent) return "TEXT_MESSAGE_CONTENT";
+    if (frame.textMessageEnd) return "TEXT_MESSAGE_END";
+    if (frame.toolCallStart) return "TOOL_CALL_START";
+    if (frame.toolCallEnd) return "TOOL_CALL_END";
+    if (frame.toolApprovalRequest) return "TOOL_APPROVAL_REQUEST";
+    if (frame.authorizationRequired) return "AUTHORIZATION_REQUIRED";
+    if (frame.usage) return "USAGE";
+    if (frame.mediaContent) return "MEDIA_CONTENT";
+    if (frame.runError) return "RUN_ERROR";
+    if (frame.custom) return "CUSTOM";
+    return "UNKNOWN";
+  }
+
+  private handleCustomFrame(
+    conversationId: string,
+    run: RunningTurn,
+    custom: CustomEnvelope,
+  ): void {
+    const name = custom.name ?? "";
+    const payload = unpackAny(custom.payload);
+    switch (name) {
+      case "aevatar.nyxid_chat.keepalive":
+        // Connection liveness only — deliberately not progress (watchdog).
+        return;
+      case "aevatar.llm.reasoning":
+        // Reasoning exists on the wire but is never rendered or mirrored
+        // (reference client records it as "[not displayed]"; PRD §3.8).
+        return;
+      case "aevatar.authorization.required":
+      case "nyxid.authorization.required":
+        this.addConnectCard(
+          conversationId,
+          run,
+          payload as AuthorizationPayload,
+        );
+        return;
+      case "aevatar.tool_approval.pending":
+        this.addApprovalCard(
+          conversationId,
+          run,
+          payload as ToolApprovalPayload,
+        );
+        return;
+      case "aevatar.human_input.request":
+        this.addApprovalCard(
+          conversationId,
+          run,
+          payload as ToolApprovalPayload,
+        );
+        return;
+      case "aevatar.step.request": {
+        const step = payload as StepPayload;
+        const key = step.stepId ?? step.stepType ?? newId("step");
+        this.startRunStep(conversationId, run, key, key);
+        return;
+      }
+      case "aevatar.step.completed": {
+        const step = payload as StepPayload;
+        this.finishRunStep(
+          conversationId,
+          run,
+          step.stepId ?? "",
+          step.success !== false,
+          step.success === false ? "Step failed" : "Completed",
+        );
+        return;
+      }
+      case "aevatar.workflow.waiting_signal":
+        this.emit(conversationId, run, {
+          cursor: this.nextCursor(run),
+          event: "turn.status",
+          turn_id: run.turnId,
+          status: "waiting",
+        });
+        return;
+      case "aevatar.run.context":
+      case "demo.conversation.context":
+        // Correlation ids only; nothing renders.
+        return;
+      case "aevatar.raw.observed":
+        this.applyObservedCompletion(conversationId, run, payload);
+        return;
+      default:
+        return;
+    }
+  }
+
+  /**
+   * Batched run completion (`RoleChatSessionCompletedEvent`): the engine
+   * envelope itself is telemetry the browser must not render (PRD §3.8), so
+   * only its presentation content is mined — tool calls/receipts into the
+   * step ledger, the final content as fallback text when nothing streamed,
+   * and the model name. `reasoningContent` is never read.
+   */
+  private applyObservedCompletion(
+    conversationId: string,
+    run: RunningTurn,
+    payload: Record<string, unknown>,
+  ): void {
+    const typeUrl =
+      typeof payload["payloadTypeUrl"] === "string"
+        ? payload["payloadTypeUrl"]
+        : "";
+    const observedType = typeUrl.split(/[/.]/).at(-1) ?? "";
+    if (observedType !== "RoleChatSessionCompletedEvent") return;
+    const completion = unpackAny(payload["payload"]) as RoleChatCompletion;
+
+    const receipts = new Map(
+      (completion.toolReceipts ?? [])
+        .filter((receipt) => receipt.callId)
+        .map((receipt) => [receipt.callId ?? "", receipt]),
+    );
+    for (const call of completion.toolCalls ?? []) {
+      const callId = call.callId ?? newId("tool");
+      this.startRunStep(conversationId, run, callId, call.toolName ?? "tool");
+      const receipt = receipts.get(callId);
+      receipts.delete(callId);
+      this.applyToolReceipt(conversationId, run, callId, receipt);
+    }
+    // Receipts without a matching call (defensive: the reference client
+    // renders both sides independently).
+    for (const [callId, receipt] of receipts) {
+      this.startRunStep(
+        conversationId,
+        run,
+        callId,
+        receipt.toolName ?? "tool",
+      );
+      this.applyToolReceipt(conversationId, run, callId, receipt);
+    }
+
+    if (completion.content && !run.sawText) {
+      this.emitStaticText(conversationId, run, completion.content);
+    }
+    this.applyUsage(conversationId, {
+      ...(completion.usage ?? {}),
+      model: completion.model ?? completion.usage?.model ?? null,
+    });
+  }
+
+  private applyToolReceipt(
+    conversationId: string,
+    run: RunningTurn,
+    callId: string,
+    receipt: RoleChatToolReceipt | undefined,
+  ): void {
+    if (!receipt) {
+      this.finishRunStep(conversationId, run, callId, true, "Completed");
+      return;
+    }
+    const failed = /(ERROR|DENIED)/i.test(receipt.status ?? "");
+    this.finishRunStep(
+      conversationId,
+      run,
+      callId,
+      !failed,
+      summarizeToolResult(
+        failed
+          ? (receipt.errorMessage ?? receipt.errorCode ?? "Failed")
+          : receipt.resultJson,
+      ),
+    );
+    this.sniffAuthorizationFailure(
+      conversationId,
+      run,
+      receipt.resultJson ?? receipt.errorMessage,
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // Activity message: one synthetic assistant message per turn hosts the run
+  // ledger and any cards/artifacts (the reference client's activity card),
+  // so tool progress renders even on turns with no streamed text.
+  // -------------------------------------------------------------------------
+
+  private ensureActivityMessage(
+    conversationId: string,
+    run: RunningTurn,
+  ): string {
+    if (run.activityMessageId) return run.activityMessageId;
+    const messageId = newId("assistant-activity");
+    run.activityMessageId = messageId;
+    this.emit(conversationId, run, {
+      cursor: this.nextCursor(run),
+      event: "message.started",
+      message_id: messageId,
+      role: "assistant",
+    });
+    return messageId;
+  }
+
+  private appendActivityBlock(
+    conversationId: string,
+    run: RunningTurn,
+    block: ContentBlock,
+  ): void {
+    const messageId = this.ensureActivityMessage(conversationId, run);
+    this.emit(conversationId, run, {
+      cursor: this.nextCursor(run),
+      event: "block.started",
+      message_id: messageId,
+      block_id: block.block_id,
+      index: run.activityBlockCount,
+      block,
+    });
+    run.activityBlockCount += 1;
+  }
+
+  private runBlockSnapshot(run: RunningTurn): RunContentBlock {
+    const stepsComplete = run.runSteps.filter(
+      (step) => step.status === "done",
+    ).length;
+    const state = run.waitingForApproval
+      ? "awaiting_approval"
+      : run.promptedConnectSlugs.size > 0
+        ? "awaiting_connection"
+        : "running";
+    return {
+      type: "run",
+      block_id: run.runBlockId ?? newId("run-block"),
+      title: "RUN",
+      steps_total: run.runSteps.length,
+      steps_complete: stepsComplete,
+      state,
+      steps: run.runSteps.map((step) => ({ ...step })),
+    };
+  }
+
+  private patchRunBlock(conversationId: string, run: RunningTurn): void {
+    if (!run.runBlockId) {
+      const block = this.runBlockSnapshot(run);
+      run.runBlockId = block.block_id;
+      this.appendActivityBlock(conversationId, run, block);
+      return;
+    }
+    const snapshot = this.runBlockSnapshot(run);
+    this.emit(conversationId, run, {
+      cursor: this.nextCursor(run),
+      event: "block.updated",
+      block_id: run.runBlockId,
+      // §3.7 patch rule: a patch touching `steps` carries the whole array.
+      patch: {
+        steps_total: snapshot.steps_total,
+        steps_complete: snapshot.steps_complete,
+        state: snapshot.state,
+        steps: snapshot.steps,
+      },
+    });
+  }
+
+  private startRunStep(
+    conversationId: string,
+    run: RunningTurn,
+    key: string,
+    label: string,
+  ): void {
+    if (run.stepKeys.has(key)) return;
+    run.stepKeys.set(key, run.runSteps.length);
+    run.runSteps.push({
+      index: run.runSteps.length + 1,
+      status: "active",
+      label: redactDisplayText(label),
+      meta: "Running",
+      service_slug: null,
+      artifact_id: null,
+      approval_request_id: null,
+    });
+    this.patchRunBlock(conversationId, run);
+  }
+
+  private finishRunStep(
+    conversationId: string,
+    run: RunningTurn,
+    key: string,
+    succeeded: boolean,
+    meta: string,
+  ): void {
+    let index = run.stepKeys.get(key);
+    if (index === undefined) {
+      // End without a start: create the row retroactively (reference client
+      // behavior), then finish it.
+      this.startRunStep(conversationId, run, key, key || "tool");
+      index = run.stepKeys.get(key);
+      if (index === undefined) return;
+    }
+    const step = run.runSteps[index];
+    if (!step) return;
+    step.status = succeeded ? "done" : "failed";
+    step.meta = meta;
+    this.patchRunBlock(conversationId, run);
+  }
+
+  /**
+   * Park the tool step behind a pending approval. Falls back to the last
+   * still-active step when the frame names no toolCallId/stepId — the common
+   * live sequence is TOOL_CALL_START directly followed by the approval
+   * request, and without this the ledger spins forever on a decided card.
+   */
+  private markStepWaiting(
+    conversationId: string,
+    run: RunningTurn,
+    key: string,
+    approvalRequestId: string,
+  ): void {
+    let step: RunStepState | undefined;
+    if (key) {
+      const index = run.stepKeys.get(key);
+      step = index === undefined ? undefined : run.runSteps[index];
+    } else {
+      step = [...run.runSteps].reverse().find(
+        (candidate) => candidate.status === "active",
+      );
+    }
+    if (!step || step.status !== "active") return;
+    step.status = "waiting";
+    step.approval_request_id = approvalRequestId || null;
+    this.patchRunBlock(conversationId, run);
+  }
+
+  private finishToolCall(
+    conversationId: string,
+    run: RunningTurn,
+    payload: ToolCallPayload,
+  ): void {
+    const key = payload.toolCallId ?? "";
+    const status = (payload.status ?? "").toUpperCase();
+    const succeeded =
+      payload.success !== false && !/(ERROR|DENIED)/.test(status);
+    const outcome = payload.result ?? payload.error;
+    if (!key && run.stepKeys.size === 0) {
+      this.startRunStep(
+        conversationId,
+        run,
+        newId("tool"),
+        payload.toolName ?? "tool",
+      );
+    }
+    this.finishRunStep(
+      conversationId,
+      run,
+      key || [...run.stepKeys.keys()].at(-1) || "",
+      succeeded,
+      succeeded
+        ? summarizeToolResult(payload.result)
+        : summarizeToolResult(outcome),
+    );
+    this.sniffAuthorizationFailure(conversationId, run, outcome);
+  }
+
+  private sniffAuthorizationFailure(
+    conversationId: string,
+    run: RunningTurn,
+    outcome: unknown,
+  ): void {
+    const failure = findServiceAuthorizationFailure(outcome);
+    if (!failure) return;
+    this.addConnectCard(conversationId, run, {
+      serviceSlug: failure.serviceSlug,
+      message: failure.message,
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // Cards and artifacts.
+  // -------------------------------------------------------------------------
+
+  private addApprovalCard(
+    conversationId: string,
+    run: RunningTurn,
+    payload: ToolApprovalPayload,
+  ): void {
+    const requestId =
+      payload.requestId ?? payload.approvalRequestId ?? payload.commandId ?? "";
+    if (!requestId || run.promptedApprovalIds.has(requestId)) return;
+    run.promptedApprovalIds.add(requestId);
+    run.waitingForApproval = true;
+    // A human gate has no client-imposed deadline; stop the watchdog.
+    this.clearWatchdog(run);
+
+    const body =
+      payload.message ??
+      payload.body ??
+      (payload.toolName
+        ? `The assistant wants to run ${redactDisplayText(payload.toolName)}.`
+        : "The assistant is requesting your approval to continue.");
+    const block: ApprovalCardContentBlock = {
+      type: "approval_card",
+      block_id: newId("approval-card"),
+      approval_request_id: requestId,
+      body: redactDisplayText(body),
+      service_slug: payload.serviceSlug ?? payload.service_slug ?? "",
+      agent_key_prefix: payload.agentKeyPrefix ?? "aevatar",
+      approval_mode: payload.approvalMode === "grant" ? "grant" : "per_request",
+      grant_duration_sec:
+        typeof payload.grantDurationSec === "number"
+          ? payload.grantDurationSec
+          : null,
+      // Empty when upstream sends none: the card omits the countdown for an
+      // unparseable expiry rather than inventing a deadline.
+      expires_at: payload.expiresAt ?? payload.expires_at ?? "",
+      decision: null,
+      decision_channel: null,
+    };
+    this.appendActivityBlock(conversationId, run, block);
+    run.openCards.set(block.block_id, "approval");
+    this.markStepWaiting(
+      conversationId,
+      run,
+      payload.toolCallId ?? payload.stepId ?? "",
+      requestId,
+    );
+    if (run.runBlockId) this.patchRunBlock(conversationId, run);
+    this.emit(conversationId, run, {
+      cursor: this.nextCursor(run),
+      event: "turn.status",
+      turn_id: run.turnId,
+      status: "waiting",
+    });
+  }
+
+  private addConnectCard(
+    conversationId: string,
+    run: RunningTurn,
+    payload: AuthorizationPayload & { readonly message?: string },
+  ): void {
+    const rawSlug = (payload.serviceSlug ?? payload.service_slug ?? "").trim();
+    const dedupeKey = rawSlug || "unknown-service";
+    const serviceName = payload.serviceLabel?.trim() || humanizeSlug(rawSlug);
+    const message =
+      payload.message?.trim() ||
+      `Connect ${serviceName} in NyxID, then send your request again.`;
+
+    // One card per missing service — but a later, richer signal (typically
+    // the dedicated AUTHORIZATION_REQUIRED frame arriving after the sniffed
+    // tool failure) upgrades the existing card's label and copy in place.
+    const existingCardId = run.promptedConnectSlugs.get(dedupeKey);
+    if (existingCardId) {
+      const label = payload.serviceLabel?.trim() ?? "";
+      const richMessage = payload.message?.trim() ?? "";
+      if (!label && !richMessage) return;
+      this.emit(conversationId, run, {
+        cursor: this.nextCursor(run),
+        event: "block.updated",
+        block_id: existingCardId,
+        patch: {
+          ...(label ? { service_name: label } : {}),
+          ...(richMessage
+            ? {
+                steps: [
+                  {
+                    title: `Connect ${serviceName}`,
+                    body: redactDisplayText(richMessage),
+                    done: false,
+                  },
+                ],
+              }
+            : {}),
+        },
+      });
+      return;
+    }
+    const block: ConnectCardContentBlock = {
+      type: "connect_card",
+      block_id: newId("connect-card"),
+      // Raw NyxID service slug, exactly as the AI Services page passes it
+      // to ServiceIcon — the glyph registry is keyed by full slugs
+      // (`api-github`, `llm-openai`), so stripping a prefix breaks icons.
+      catalog_slug: rawSlug || "custom",
+      service_name: serviceName,
+      icon_url: "",
+      subtitle: "Required by this request",
+      // Display default only: the FE re-resolves actionable parameters from
+      // the NyxID catalog (§4.3); the live frame does not carry auth_kind.
+      auth_kind: "api_key",
+      requested_scopes: [],
+      key_id: null,
+      granted_scopes: null,
+      device_user_code: null,
+      device_verification_url: null,
+      state: "needs_connection",
+      error_message: null,
+      steps: [
+        {
+          title: `Connect ${serviceName}`,
+          body: redactDisplayText(message),
+          done: false,
+        },
+      ],
+      footer: "Brokered by NyxID · configure in AI Services, then ask again",
+    };
+    this.appendActivityBlock(conversationId, run, block);
+    run.promptedConnectSlugs.set(dedupeKey, block.block_id);
+    run.openCards.set(block.block_id, "connect");
+    if (run.runBlockId) this.patchRunBlock(conversationId, run);
+  }
+
+  private addMediaArtifact(
+    conversationId: string,
+    run: RunningTurn,
+    payload: MediaPayload,
+  ): void {
+    const name = payload.name?.trim() || "attachment";
+    const mime = payload.mediaType ?? "application/octet-stream";
+    if (
+      payload.dataBase64 &&
+      payload.dataBase64.length <= MAX_MEDIA_DATA_CHARS
+    ) {
+      this.appendActivityBlock(conversationId, run, {
+        type: "artifact",
+        block_id: newId("artifact"),
+        artifact_id: newId("media"),
+        name,
+        mime,
+        size_bytes: base64SizeBytes(payload.dataBase64),
+        preview: null,
+        download_url: `data:${mime};base64,${payload.dataBase64}`,
+      });
+      return;
+    }
+    if (payload.url) {
+      this.appendActivityBlock(conversationId, run, {
+        type: "artifact",
+        block_id: newId("artifact"),
+        artifact_id: newId("media"),
+        name,
+        mime,
+        size_bytes: 0,
+        preview: null,
+        download_url: payload.url,
+      });
+      return;
+    }
+    // Oversized or shapeless media: acknowledge without embedding.
+    this.emitStaticText(
+      conversationId,
+      run,
+      `The assistant produced an attachment (${name}) that is too large to display here.`,
+    );
+  }
+
+  private applyUsage(conversationId: string, usage: UsagePayload): void {
+    const model = usage.model;
+    if (typeof model !== "string" || !model) return;
+    const stored = this.conversations.get(conversationId);
+    if (!stored) return;
+    stored.conversation = { ...stored.conversation, llm_model: model };
+  }
+
+  /** Emit a complete text message in one started→completed sweep. */
+  private emitStaticText(
+    conversationId: string,
+    run: RunningTurn,
+    text: string,
+  ): void {
+    const messageId = newId("assistant-message");
+    const blockId = `${messageId}-text`;
+    this.emit(conversationId, run, {
+      cursor: this.nextCursor(run),
+      event: "message.started",
+      message_id: messageId,
+      role: "assistant",
+    });
+    this.emit(conversationId, run, {
+      cursor: this.nextCursor(run),
+      event: "block.started",
+      message_id: messageId,
+      block_id: blockId,
+      index: 0,
+      block: { type: "text", block_id: blockId, text },
+    });
+    this.emit(conversationId, run, {
+      cursor: this.nextCursor(run),
+      event: "block.completed",
+      block_id: blockId,
+      block: { type: "text", block_id: blockId, text },
+    });
+    this.emit(conversationId, run, {
+      cursor: this.nextCursor(run),
+      event: "message.completed",
+      message_id: messageId,
+    });
+    run.sawText = true;
+  }
+
+  // -------------------------------------------------------------------------
+  // Turn finalization.
+  // -------------------------------------------------------------------------
 
   private closeOpenMessage(conversationId: string, run: RunningTurn): void {
     if (!run.currentMessageId || !run.currentBlockId) return;
@@ -668,6 +1917,91 @@ export class AevatarAssistantTransport implements AssistantTransport {
     run.accumulatedText = "";
   }
 
+  /**
+   * Settle the activity message when the turn ends. Outcomes:
+   * - `done`      — steps still active are marked done; ledger completes.
+   * - `waiting`   — a human gate is open; the ledger parks in
+   *                 `awaiting_approval` and undecided cards stay actionable.
+   * - `failed`    — active steps fail; undecided approvals cancel; connect
+   *                 cards stay actionable (they ARE the recovery path).
+   * - `cancelled` — PRD §5.6: every open block reaches a terminal state.
+   */
+  private finalizeActivity(
+    conversationId: string,
+    run: RunningTurn,
+    outcome: "done" | "waiting" | "failed" | "cancelled",
+  ): void {
+    if (run.runBlockId) {
+      for (const step of run.runSteps) {
+        if (step.status === "active") {
+          step.status =
+            outcome === "done"
+              ? "done"
+              : outcome === "failed"
+                ? "failed"
+                : outcome === "cancelled"
+                  ? "skipped"
+                  : step.status;
+          if (step.status === "done" && step.meta === "Running") {
+            step.meta = "Completed";
+          }
+        } else if (
+          step.status === "waiting" &&
+          (outcome === "failed" || outcome === "cancelled")
+        ) {
+          // A terminal run must not carry a non-terminal step: an approval
+          // that will never be decided (run died / user stopped) is skipped.
+          step.status = "skipped";
+        }
+      }
+      const snapshot = this.runBlockSnapshot(run);
+      const state =
+        outcome === "done"
+          ? run.runSteps.some((step) => step.status === "failed")
+            ? "failed"
+            : "completed"
+          : outcome === "waiting"
+            ? "awaiting_approval"
+            : outcome === "failed"
+              ? "failed"
+              : "cancelled";
+      this.emit(conversationId, run, {
+        cursor: this.nextCursor(run),
+        event: "block.completed",
+        block_id: run.runBlockId,
+        block: { ...snapshot, block_id: run.runBlockId, state },
+      });
+    }
+
+    const stored = this.conversations.get(conversationId);
+    for (const [blockId, kind] of run.openCards) {
+      const block = stored?.turnState.messages
+        .flatMap((message) => message.blocks)
+        .find((candidate) => candidate.block_id === blockId);
+      if (!block) continue;
+      const terminal =
+        outcome === "cancelled" ||
+        (outcome === "failed" && kind === "approval")
+          ? toTerminalBlock(block)
+          : block;
+      this.emit(conversationId, run, {
+        cursor: this.nextCursor(run),
+        event: "block.completed",
+        block_id: blockId,
+        block: terminal,
+      });
+    }
+    run.openCards.clear();
+
+    if (run.activityMessageId) {
+      this.emit(conversationId, run, {
+        cursor: this.nextCursor(run),
+        event: "message.completed",
+        message_id: run.activityMessageId,
+      });
+    }
+  }
+
   private finishTurn(
     conversationId: string,
     run: RunningTurn,
@@ -685,14 +2019,29 @@ export class AevatarAssistantTransport implements AssistantTransport {
   }
 
   /**
+   * Quietly settle a turn idling at a human gate so an approval decision can
+   * become the live turn: no card is terminal-ized (the decision flow patches
+   * it), the ledger parks as awaiting-approval, and the fetch aborts.
+   */
+  private pauseForApproval(conversationId: string, run: RunningTurn): void {
+    if (run.finished) return;
+    this.closeOpenMessage(conversationId, run);
+    this.finalizeActivity(conversationId, run, "waiting");
+    this.finishTurn(conversationId, run, "completed", null);
+    run.controller.abort();
+  }
+
+  /**
    * Client-side stop: aevatar's nyxid-chat surface has no cancel endpoint,
    * so cancelling aborts the SSE fetch and settles the local turn per the
-   * PRD stop-flow. The server-side run may still finish; its full reply
-   * then surfaces on the next history reload.
+   * PRD stop-flow — every open block reaches a terminal state (§5.6). The
+   * server-side run may still finish; its full reply then surfaces on the
+   * next history reload.
    */
   private cancelTurn(conversationId: string, run: RunningTurn): void {
     if (run.finished) return;
     run.controller.abort();
+    this.clearWatchdog(run);
     if (run.currentBlockId) {
       const stored = this.conversations.get(conversationId);
       const openBlock = stored?.turnState.messages
@@ -720,6 +2069,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       run.currentMessageId = null;
       run.currentBlockId = null;
     }
+    this.finalizeActivity(conversationId, run, "cancelled");
     this.emit(conversationId, run, {
       cursor: this.nextCursor(run),
       event: "turn.status",

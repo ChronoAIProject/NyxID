@@ -15,6 +15,7 @@ import {
   useConversations,
   useCreateConversation,
   useDecideApproval,
+  useDeleteConversation,
   useSendMessage,
 } from "@/hooks/use-assistant";
 import { isTurnActive } from "@/types/assistant";
@@ -48,6 +49,7 @@ export function AssistantPage({
   const sendMessage = useSendMessage(selectedId);
   const cancelTurn = useCancelTurn(selectedId);
   const decideApproval = useDecideApproval(selectedId);
+  const deleteConversation = useDeleteConversation();
 
   function selectConversation(conversationId: string) {
     void navigate({
@@ -59,6 +61,26 @@ export function AssistantPage({
   async function createNewChat() {
     const conversation = await createConversation.mutateAsync();
     selectConversation(conversation.id);
+  }
+
+  // Deleting the URL-addressed conversation must also drop `?c=`, or the
+  // stale id lingers in the address bar and re-selects nothing on reload;
+  // selection then falls back to the newest remaining chat. Failures stay
+  // in the row's popover (still open) with the reason said out loud.
+  async function handleDelete(conversationId: string) {
+    try {
+      await deleteConversation.mutateAsync(conversationId);
+      if (conversationId === selectedFromSearch) {
+        void navigate({ to: "/assistant" as never, search: {} as never });
+      }
+    } catch (error) {
+      toast.error("Could not delete the chat", {
+        description:
+          error instanceof Error && error.message
+            ? error.message
+            : "The assistant backend did not respond. Try again.",
+      });
+    }
   }
 
   // First send from the "New chat" empty state has no conversation yet; the
@@ -91,8 +113,12 @@ export function AssistantPage({
       activeConversationId={view === "chat" ? selectedId : undefined}
       activeView={view}
       creating={createConversation.isPending}
+      deletingId={
+        deleteConversation.isPending ? deleteConversation.variables : undefined
+      }
       onNewChat={() => void createNewChat()}
       onSelect={selectConversation}
+      onDelete={(conversationId) => void handleDelete(conversationId)}
     />
   );
 

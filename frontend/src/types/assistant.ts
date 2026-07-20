@@ -209,16 +209,31 @@ export interface AssistantTransport {
   listConversations(): Promise<Conversation[]>;
   createConversation(): Promise<Conversation>;
   getHistory(conversationId: string): Promise<ConversationHistory>;
+  deleteConversation(conversationId: string): Promise<void>;
   sendMessage(
     conversationId: string,
     content: string,
     onEvent: (event: TurnEvent) => void,
   ): TurnHandle;
+  /**
+   * Cancel the conversation's live turn by id. Covers turns whose handle
+   * the caller does not hold — e.g. an approval continuation still waiting
+   * on response headers. No-op when nothing is running.
+   */
+  cancelActiveTurn(conversationId: string): void;
+  /**
+   * Send an approval decision. On the live Aevatar contract the approve
+   * endpoint responds with an SSE continuation of the run; implementations
+   * that stream it return a cancellable handle for the continuation turn and
+   * deliver its events to `onEvent`. Implementations with no continuation
+   * (mock) return null.
+   */
   decideApproval(
     conversationId: string,
     blockId: string,
     approved: boolean,
-  ): Promise<void>;
+    onEvent?: (event: TurnEvent) => void,
+  ): Promise<TurnHandle | null>;
 }
 
 export function isTurnActive(status: TurnStatus | undefined): boolean {

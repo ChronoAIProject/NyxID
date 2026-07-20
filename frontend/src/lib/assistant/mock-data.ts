@@ -464,6 +464,12 @@ export class MockAssistantStore {
     });
   }
 
+  // Idempotent, like the real composite delete: repeating a delete (or
+  // deleting an id the store never had) is a no-op, not an error.
+  deleteConversation(conversationId: string): void {
+    this.conversations.delete(conversationId);
+  }
+
   getTurnState(conversationId: string): TurnReducerState {
     return clone(this.requireConversation(conversationId).turnState);
   }
