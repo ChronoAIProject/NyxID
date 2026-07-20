@@ -160,10 +160,6 @@ const ALLOWED_RESPONSE_HEADERS: &[&str] = &[
     "x-correlation-id",
     "accept-ranges",
     "content-range",
-    // Streaming hint for buffering reverse proxies. Forwarded so an
-    // upstream that already disables buffering keeps that instruction;
-    // SSE responses get it set explicitly below regardless.
-    "x-accel-buffering",
 ];
 
 /// Request headers safe to forward to node agents for proxy requests.
@@ -2125,11 +2121,6 @@ async fn execute_proxy_inner(
                             }
 
                             // Same anti-buffering opt-out as the direct path:
-                            // a node-routed SSE stream is just as vulnerable
-                            // to a buffering reverse proxy in front of NyxID.
-                            response_builder =
-                                apply_sse_stream_headers(response_builder, node_is_sse);
-
                             let service_id_owned = service_id.to_string();
                             let node_id_owned = node_id.to_string();
                             let stream_db = state.db.clone();
@@ -2503,8 +2494,6 @@ async fn execute_proxy_inner(
             response_builder = response_builder.header(header_name, header_value);
         }
     }
-
-    response_builder = apply_sse_stream_headers(response_builder, is_sse);
 
     let mut response = if should_stream {
         // Stream responses without buffering, but use a forwarding task when
@@ -3080,32 +3069,19 @@ const STREAMING_CONTENT_TYPES: &[&str] = &[
     "application/pdf",
 ];
 
-/// Disable reverse-proxy buffering on SSE responses.
-///
-/// Token-by-token SSE dies behind a buffering reverse proxy: nginx and
-/// friends default to `proxy_buffering on`, hold the whole response, and
-/// deliver it as one blob at the end — the stream still "works", it just
-/// stops being a stream. `X-Accel-Buffering: no` is the documented opt-out
-/// and is inert where no such proxy exists. Any upstream copy of the header
-/// is skipped by `forwardable_response_header`, so this never duplicates.
-fn apply_sse_stream_headers(
-    builder: axum::http::response::Builder,
-    is_sse: bool,
-) -> axum::http::response::Builder {
-    if is_sse {
-        return builder.header("x-accel-buffering", "no");
-    }
-    builder
-}
-
 /// Whether a downstream response header may be forwarded to the client.
 ///
-/// SSE re-derives two of them and must not forward the upstream copy:
-/// `content-length` (unknown for a stream) and `x-accel-buffering` (set to
-/// `no` explicitly, so forwarding would emit a duplicate carrying whatever
-/// value the upstream chose). Shared by the direct and node-routed paths.
+/// SSE drops `content-length`: the length of a stream is unknown, and a
+/// stale upstream value would truncate it. Shared by the direct and
+/// node-routed paths.
+///
+/// `x-accel-buffering` is deliberately absent from the allowlist entirely:
+/// NyxID sets it itself on every SSE response (see
+/// `mw::security_headers`), and forwarding an upstream copy would let an
+/// arbitrary proxied service dictate front-proxy buffering behavior for
+/// non-SSE responses too.
 fn forwardable_response_header(name_lower: &str, is_sse: bool) -> bool {
-    if is_sse && (name_lower == "content-length" || name_lower == "x-accel-buffering") {
+    if is_sse && name_lower == "content-length" {
         return false;
     }
     ALLOWED_RESPONSE_HEADERS.contains(&name_lower)
@@ -6317,98 +6293,30 @@ mod tests {
     /// either half silently un-streams every assistant/LLM SSE surface.
     #[test]
     fn allowed_response_headers_includes_accel_buffering() {
-        assert!(super::ALLOWED_RESPONSE_HEADERS.contains(&"x-accel-buffering"));
-    }
-
-    /// The end-to-end guarantee, asserted on a real built response rather
-    /// than on a predicate: an SSE response leaves NyxID carrying exactly
-    /// one `x-accel-buffering: no`, so a fronting nginx cannot buffer the
-    /// stream into a single end-of-run blob.
-    #[test]
-    fn built_sse_response_carries_no_buffering_header() {
-        let response = super::apply_sse_stream_headers(
-            axum::response::Response::builder().status(StatusCode::OK),
-            true,
-        )
-        .body(axum::body::Body::empty())
-        .expect("response builds");
-
-        let values: Vec<_> = response
-            .headers()
-            .get_all("x-accel-buffering")
-            .iter()
-            .collect();
-        assert_eq!(
-            values.len(),
-            1,
-            "exactly one buffering header, no duplicate"
-        );
-        assert_eq!(values[0], "no");
+        // A proxied service must not be able to dictate front-proxy
+        // buffering: NyxID derives `x-accel-buffering` itself for SSE
+        // (mw::security_headers) and never forwards an upstream copy.
+        assert!(!super::ALLOWED_RESPONSE_HEADERS.contains(&"x-accel-buffering"));
     }
 
     #[test]
-    fn built_non_sse_response_omits_no_buffering_header() {
-        let response = super::apply_sse_stream_headers(
-            axum::response::Response::builder().status(StatusCode::OK),
-            false,
-        )
-        .body(axum::body::Body::empty())
-        .expect("response builds");
-
-        assert!(response.headers().get("x-accel-buffering").is_none());
-    }
-
-    /// Guards the no-duplicate invariant end to end: an upstream that sends
-    /// its own (possibly `yes`) copy has it dropped by the allowlist filter,
-    /// and only NyxID's `no` survives.
-    #[test]
-    fn upstream_buffering_header_cannot_survive_alongside_ours() {
-        assert!(!super::forwardable_response_header(
-            "x-accel-buffering",
-            true
-        ));
-
-        let mut builder = axum::response::Response::builder().status(StatusCode::OK);
-        for (name, value) in [
-            ("x-accel-buffering", "yes"),
-            ("content-type", "text/event-stream"),
-        ] {
-            if super::forwardable_response_header(name, true) {
-                builder = builder.header(name, value);
-            }
-        }
-        let response = super::apply_sse_stream_headers(builder, true)
-            .body(axum::body::Body::empty())
-            .expect("response builds");
-
-        let values: Vec<_> = response
-            .headers()
-            .get_all("x-accel-buffering")
-            .iter()
-            .collect();
-        assert_eq!(values.len(), 1);
-        assert_eq!(values[0], "no", "NyxID's value wins over the upstream copy");
-    }
-
-    #[test]
-    fn sse_skips_upstream_buffering_and_length_headers() {
-        // Both are re-derived for SSE: length is unknown, and the buffering
-        // hint is set explicitly — forwarding the upstream copy would emit
-        // a duplicate header with an upstream-chosen value.
-        assert!(!super::forwardable_response_header(
-            "x-accel-buffering",
-            true
-        ));
+    fn sse_drops_upstream_content_length() {
+        // The length of a stream is unknown; a stale upstream value would
+        // truncate it.
         assert!(!super::forwardable_response_header("content-length", true));
+        assert!(super::forwardable_response_header("content-length", false));
     }
 
     #[test]
-    fn non_sse_forwards_length_and_upstream_buffering_hint() {
-        assert!(super::forwardable_response_header(
+    fn buffering_hint_is_never_forwarded_from_upstream() {
+        assert!(!super::forwardable_response_header(
+            "x-accel-buffering",
+            true
+        ));
+        assert!(!super::forwardable_response_header(
             "x-accel-buffering",
             false
         ));
-        assert!(super::forwardable_response_header("content-length", false));
     }
 
     #[test]

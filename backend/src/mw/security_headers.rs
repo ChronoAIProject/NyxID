@@ -73,7 +73,50 @@ pub async fn security_headers_middleware(request: Request<Body>, next: Next) -> 
     }
     headers.insert(header::PRAGMA, "no-cache".parse().unwrap());
 
+    // Keep SSE unbuffered end to end.
+    //
+    // Token-by-token streaming dies behind a buffering reverse proxy: nginx
+    // and friends default to `proxy_buffering on`, hold the whole response,
+    // and release it as one blob at the end — the stream still "works", it
+    // just stops being a stream. `X-Accel-Buffering: no` is the documented
+    // opt-out and is inert where no such proxy exists.
+    //
+    // Applied here rather than per-handler because NyxID emits SSE from
+    // several independent places (the proxy's direct and node-routed paths,
+    // the Codex translator, the LLM gateway's metered and translated
+    // builders, MCP's notification channel). Per-handler opt-in left most
+    // of them buffered and silently re-broke every time a new streaming
+    // surface appeared. `insert` (not append) guarantees exactly one value
+    // even if a handler or upstream already set one.
+    if response_is_sse(response.headers()) {
+        response.headers_mut().insert(
+            "x-accel-buffering".parse::<header::HeaderName>().unwrap(),
+            "no".parse().unwrap(),
+        );
+    }
+
     response
+}
+
+/// Whether a response is Server-Sent Events, by media type.
+///
+/// Compares only the media type, case-insensitively: media types are
+/// case-insensitive per RFC 9110, and SSE responses normally carry
+/// parameters (`text/event-stream; charset=utf-8`). Substring matching
+/// would both miss `Text/Event-Stream` and false-positive on an unrelated
+/// type whose parameters happen to contain the string.
+fn response_is_sse(headers: &header::HeaderMap) -> bool {
+    headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|content_type| {
+            content_type
+                .split(';')
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .eq_ignore_ascii_case("text/event-stream")
+        })
 }
 
 #[cfg(test)]
@@ -276,5 +319,112 @@ mod tests {
             resp.headers().get(header::X_CONTENT_TYPE_OPTIONS).unwrap(),
             "nosniff"
         );
+    }
+
+    // ---- SSE anti-buffering (X-Accel-Buffering) ----
+    //
+    // This middleware wraps the entire merged router, so these cover every
+    // SSE surface at once: the proxy's direct and node-routed paths, the
+    // Codex translator, the LLM gateway's metered and translated builders,
+    // and MCP's notification channel.
+
+    async fn response_through_middleware(content_type: Option<&'static str>) -> Response {
+        async fn handler(
+            axum::extract::State(content_type): axum::extract::State<Option<&'static str>>,
+        ) -> Response {
+            let mut resp = Response::new(Body::empty());
+            if let Some(ct) = content_type {
+                resp.headers_mut()
+                    .insert(header::CONTENT_TYPE, ct.parse().unwrap());
+            }
+            resp
+        }
+
+        let app = Router::new()
+            .route("/stream", get(handler))
+            .with_state(content_type)
+            .layer(axum::middleware::from_fn(security_headers_middleware));
+        app.oneshot(
+            Request::builder()
+                .uri("/stream")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn sse_response_is_marked_unbufferable() {
+        let resp = response_through_middleware(Some("text/event-stream")).await;
+        let values: Vec<_> = resp.headers().get_all("x-accel-buffering").iter().collect();
+        assert_eq!(values.len(), 1, "exactly one value, never a duplicate");
+        assert_eq!(values[0], "no");
+    }
+
+    #[tokio::test]
+    async fn sse_with_charset_parameter_is_marked() {
+        // The shape real SSE handlers emit.
+        let resp = response_through_middleware(Some("text/event-stream; charset=utf-8")).await;
+        assert_eq!(resp.headers().get("x-accel-buffering").unwrap(), "no");
+    }
+
+    #[tokio::test]
+    async fn sse_media_type_match_is_case_insensitive() {
+        // Media types are case-insensitive per RFC 9110; a substring match
+        // on the lowercase spelling would silently leave this one buffered.
+        let resp = response_through_middleware(Some("Text/Event-Stream; charset=utf-8")).await;
+        assert_eq!(resp.headers().get("x-accel-buffering").unwrap(), "no");
+    }
+
+    #[tokio::test]
+    async fn non_sse_response_is_not_marked() {
+        let resp = response_through_middleware(Some("application/json")).await;
+        assert!(resp.headers().get("x-accel-buffering").is_none());
+    }
+
+    #[tokio::test]
+    async fn non_sse_type_mentioning_sse_in_parameters_is_not_marked() {
+        // Only the media type counts — parameters must not trigger it.
+        let resp =
+            response_through_middleware(Some("application/json; note=text/event-stream")).await;
+        assert!(resp.headers().get("x-accel-buffering").is_none());
+    }
+
+    #[tokio::test]
+    async fn response_without_content_type_is_not_marked() {
+        let resp = response_through_middleware(None).await;
+        assert!(resp.headers().get("x-accel-buffering").is_none());
+    }
+
+    /// A handler (or a forwarded upstream copy) that already set the header
+    /// must not produce two values — NyxID's `no` is authoritative.
+    #[tokio::test]
+    async fn preexisting_buffering_header_is_replaced_not_duplicated() {
+        async fn handler() -> Response {
+            let mut resp = Response::new(Body::empty());
+            resp.headers_mut()
+                .insert(header::CONTENT_TYPE, "text/event-stream".parse().unwrap());
+            resp.headers_mut()
+                .insert("x-accel-buffering", "yes".parse().unwrap());
+            resp
+        }
+
+        let app = Router::new()
+            .route("/stream", get(handler))
+            .layer(axum::middleware::from_fn(security_headers_middleware));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/stream")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let values: Vec<_> = resp.headers().get_all("x-accel-buffering").iter().collect();
+        assert_eq!(values.len(), 1);
+        assert_eq!(values[0], "no");
     }
 }
