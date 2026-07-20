@@ -98,25 +98,52 @@ pub async fn security_headers_middleware(request: Request<Body>, next: Next) -> 
     response
 }
 
-/// Whether a response is Server-Sent Events, by media type.
+/// Whether a `Content-Type` value names the SSE media type.
 ///
 /// Compares only the media type, case-insensitively: media types are
 /// case-insensitive per RFC 9110, and SSE responses normally carry
 /// parameters (`text/event-stream; charset=utf-8`). Substring matching
 /// would both miss `Text/Event-Stream` and false-positive on an unrelated
 /// type whose parameters happen to contain the string.
+///
+/// Shared with the proxy so "is this SSE?" has one answer everywhere —
+/// the proxy also keys `content-length` stripping and SSE usage
+/// observation off it.
+pub fn is_sse_media_type(content_type: &str) -> bool {
+    content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .eq_ignore_ascii_case("text/event-stream")
+}
+
+/// Whether a response is Server-Sent Events.
+///
+/// Duplicate `Content-Type` fields are malformed HTTP but representable,
+/// and an upstream can produce them. Any SSE value marks the response:
+/// for an anti-buffering safeguard, wrongly disabling buffering is
+/// harmless while wrongly leaving it on silently un-streams the response.
 fn response_is_sse(headers: &header::HeaderMap) -> bool {
     headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|content_type| {
-            content_type
-                .split(';')
-                .next()
-                .unwrap_or_default()
-                .trim()
-                .eq_ignore_ascii_case("text/event-stream")
-        })
+        .get_all(header::CONTENT_TYPE)
+        .iter()
+        .any(|value| value.to_str().is_ok_and(is_sse_media_type))
+}
+
+/// Apply NyxID's global response-header policy to a router.
+///
+/// Production assembly (`main.rs`) wraps the fully merged router with
+/// this, so every route — public OAuth, `/api/v1`, proxy, LLM gateway,
+/// `/mcp` — inherits the security headers and the SSE anti-buffering
+/// mark. Keeping it a named function means the guarantee is applied in
+/// exactly one reviewable place instead of an inline `.layer()` that is
+/// easy to drop or scope to one branch by accident.
+pub fn with_response_headers<S>(router: axum::Router<S>) -> axum::Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    router.layer(axum::middleware::from_fn(security_headers_middleware))
 }
 
 #[cfg(test)]
@@ -327,6 +354,81 @@ mod tests {
     // SSE surface at once: the proxy's direct and node-routed paths, the
     // Codex translator, the LLM gateway's metered and translated builders,
     // and MCP's notification channel.
+
+    #[tokio::test]
+    async fn duplicate_content_type_with_one_sse_value_is_marked() {
+        // Malformed but representable: an upstream can emit two
+        // Content-Type fields. Missing the SSE one would silently leave the
+        // stream buffered, so any SSE value marks the response.
+        async fn handler() -> Response {
+            let mut resp = Response::new(Body::empty());
+            resp.headers_mut()
+                .append(header::CONTENT_TYPE, "application/json".parse().unwrap());
+            resp.headers_mut()
+                .append(header::CONTENT_TYPE, "text/event-stream".parse().unwrap());
+            resp
+        }
+
+        let app = Router::new()
+            .route("/stream", get(handler))
+            .layer(axum::middleware::from_fn(security_headers_middleware));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/stream")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.headers().get("x-accel-buffering").unwrap(), "no");
+    }
+
+    /// The wrapper production assembly uses. Exercising it (rather than a
+    /// hand-attached layer) keeps the test honest about what `main.rs`
+    /// actually calls.
+    #[tokio::test]
+    async fn with_response_headers_marks_sse() {
+        async fn handler() -> Response {
+            let mut resp = Response::new(Body::empty());
+            resp.headers_mut().insert(
+                header::CONTENT_TYPE,
+                "text/event-stream; charset=utf-8".parse().unwrap(),
+            );
+            resp
+        }
+
+        let app = with_response_headers(Router::new().route("/stream", get(handler)));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/stream")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.headers().get("x-accel-buffering").unwrap(), "no");
+        assert_eq!(
+            resp.headers().get(header::X_CONTENT_TYPE_OPTIONS).unwrap(),
+            "nosniff",
+            "security headers travel with the same wrapper"
+        );
+    }
+
+    #[test]
+    fn is_sse_media_type_ignores_case_and_parameters() {
+        assert!(is_sse_media_type("text/event-stream"));
+        assert!(is_sse_media_type("Text/Event-Stream; charset=utf-8"));
+        assert!(is_sse_media_type("  text/event-stream  "));
+        assert!(!is_sse_media_type("application/json"));
+        assert!(!is_sse_media_type(
+            "application/json; note=text/event-stream"
+        ));
+        assert!(!is_sse_media_type(""));
+    }
 
     async fn response_through_middleware(content_type: Option<&'static str>) -> Response {
         async fn handler(

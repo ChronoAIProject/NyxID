@@ -2103,7 +2103,7 @@ async fn execute_proxy_inner(
                             // content-length for client download progress / seeking.
                             let node_is_sse = resp_headers.iter().any(|(k, v)| {
                                 k.eq_ignore_ascii_case("content-type")
-                                    && v.contains("text/event-stream")
+                                    && crate::mw::security_headers::is_sse_media_type(v)
                             });
 
                             for (name, value) in &resp_headers {
@@ -2457,11 +2457,14 @@ async fn execute_proxy_inner(
     let status = StatusCode::from_u16(downstream_response.status().as_u16())
         .unwrap_or(StatusCode::BAD_GATEWAY);
 
+    // Same exact, case-insensitive media-type test the response-header
+    // middleware uses, so `content-length` stripping and SSE usage
+    // observation agree with the anti-buffering mark.
     let is_sse = downstream_response
         .headers()
         .get("content-type")
         .and_then(|v| v.to_str().ok())
-        .is_some_and(|ct| ct.contains("text/event-stream"));
+        .is_some_and(crate::mw::security_headers::is_sse_media_type);
     let should_stream = should_stream_response(&downstream_response, status, is_sse);
     let usage_context =
         target
