@@ -1205,8 +1205,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
-      let reachedTerminal = false;
-      for (;;) {
+      readLoop: for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
@@ -1215,12 +1214,10 @@ export class AevatarAssistantTransport implements AssistantTransport {
         for (const payload of payloads) {
           this.handleAgUiFrame(conversationId, run, payload);
           if (run.finished) return { kind: "settled" };
-          if (run.deliveryProtocolError) break;
-          if (run.deliveryTerminal) reachedTerminal = true;
+          if (run.deliveryProtocolError) break readLoop;
         }
-        if (reachedTerminal) break;
       }
-      if (!reachedTerminal) {
+      if (!run.deliveryProtocolError) {
         // The final frame may arrive without a trailing blank line; flush it
         // before judging how the stream ended.
         buffer += decoder.decode();
@@ -1236,7 +1233,6 @@ export class AevatarAssistantTransport implements AssistantTransport {
         return { kind: "protocol_error", error: run.deliveryProtocolError };
       }
       if (run.deliveryTerminal) {
-        await reader.cancel().catch(() => undefined);
         this.settleDeliveryTerminal(conversationId, run, run.deliveryTerminal);
         return { kind: "settled" };
       }

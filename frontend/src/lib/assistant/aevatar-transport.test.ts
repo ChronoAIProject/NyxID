@@ -36,6 +36,30 @@ function sseResponse(frames: unknown[]): Response {
   });
 }
 
+function chunkedSseResponse(frameChunks: unknown[][]): Response {
+  const encoder = new TextEncoder();
+  const chunks = frameChunks.map((frames) =>
+    encoder.encode(
+      frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(""),
+    ),
+  );
+  let chunkIndex = 0;
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      pull(controller) {
+        const chunk = chunks[chunkIndex];
+        chunkIndex += 1;
+        if (chunk) controller.enqueue(chunk);
+        else controller.close();
+      },
+    }),
+    {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    },
+  );
+}
+
 // The exact frame sequence observed live against aevatar's
 // `nyxid-chat/conversations/{id}:stream` on 2026-07-16.
 const OBSERVED_FRAMES = [
@@ -485,17 +509,22 @@ describe("AevatarAssistantTransport", () => {
     ]);
   });
 
-  it("fails a delivery that publishes more than one terminal frame", async () => {
-    stubFetch(
-      routeCreate,
-      routeStream([
-        { type: "RUN_STARTED", turnId: TURN_ID },
-        { type: "RUN_FINISHED" },
-        {
-          type: "RUN_ERROR",
-          runError: { code: "late_error", message: "Too late" },
-        },
-      ]),
+  it("fails duplicate terminal frames delivered in separate chunks", async () => {
+    stubFetch(routeCreate, (url, init) =>
+      url.endsWith("/stream") && init?.method === "POST"
+        ? chunkedSseResponse([
+            [
+              { type: "RUN_STARTED", turnId: TURN_ID },
+              { type: "RUN_FINISHED" },
+            ],
+            [
+              {
+                type: "RUN_ERROR",
+                runError: { code: "late_error", message: "Too late" },
+              },
+            ],
+          ])
+        : undefined,
     );
     const transport = new AevatarAssistantTransport();
     await transport.createConversation();
