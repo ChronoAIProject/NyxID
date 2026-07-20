@@ -160,6 +160,10 @@ const ALLOWED_RESPONSE_HEADERS: &[&str] = &[
     "x-correlation-id",
     "accept-ranges",
     "content-range",
+    // Streaming hint for buffering reverse proxies. Forwarded so an
+    // upstream that already disables buffering keeps that instruction;
+    // SSE responses get it set explicitly below regardless.
+    "x-accel-buffering",
 ];
 
 /// Request headers safe to forward to node agents for proxy requests.
@@ -2108,10 +2112,7 @@ async fn execute_proxy_inner(
 
                             for (name, value) in &resp_headers {
                                 let name_lower = name.to_lowercase();
-                                if node_is_sse && name_lower == "content-length" {
-                                    continue;
-                                }
-                                if ALLOWED_RESPONSE_HEADERS.contains(&name_lower.as_str())
+                                if forwardable_response_header(&name_lower, node_is_sse)
                                     && let (Ok(hn), Ok(hv)) = (
                                         axum::http::header::HeaderName::from_bytes(name.as_bytes()),
                                         axum::http::header::HeaderValue::from_bytes(
@@ -2121,6 +2122,14 @@ async fn execute_proxy_inner(
                                 {
                                     response_builder = response_builder.header(hn, hv);
                                 }
+                            }
+
+                            // Same anti-buffering opt-out as the direct path:
+                            // a node-routed SSE stream is just as vulnerable
+                            // to a buffering reverse proxy in front of NyxID.
+                            if node_is_sse {
+                                response_builder =
+                                    response_builder.header("x-accel-buffering", "no");
                             }
 
                             let service_id_owned = service_id.to_string();
@@ -2488,16 +2497,23 @@ async fn execute_proxy_inner(
     // streaming responses — clients need it for download progress / seeking.
     for (name, value) in downstream_response.headers().iter() {
         let name_lower = name.as_str().to_lowercase();
-        if is_sse && name_lower == "content-length" {
-            continue;
-        }
-        if ALLOWED_RESPONSE_HEADERS.contains(&name_lower.as_str())
+        if forwardable_response_header(&name_lower, is_sse)
             && let Ok(header_name) =
                 axum::http::header::HeaderName::from_bytes(name.as_str().as_bytes())
             && let Ok(header_value) = axum::http::header::HeaderValue::from_bytes(value.as_bytes())
         {
             response_builder = response_builder.header(header_name, header_value);
         }
+    }
+
+    // Token-by-token SSE dies behind a buffering reverse proxy: nginx and
+    // friends default to `proxy_buffering on`, hold the whole response, and
+    // deliver it as one blob at the end — the stream still "works", it just
+    // stops being a stream. `X-Accel-Buffering: no` is the documented
+    // opt-out and is inert where no such proxy exists. Set unconditionally
+    // for SSE (any upstream copy was skipped above, so no duplicate).
+    if is_sse {
+        response_builder = response_builder.header("x-accel-buffering", "no");
     }
 
     let mut response = if should_stream {
@@ -3073,6 +3089,19 @@ const STREAMING_CONTENT_TYPES: &[&str] = &[
     "image/",
     "application/pdf",
 ];
+
+/// Whether a downstream response header may be forwarded to the client.
+///
+/// SSE re-derives two of them and must not forward the upstream copy:
+/// `content-length` (unknown for a stream) and `x-accel-buffering` (set to
+/// `no` explicitly, so forwarding would emit a duplicate carrying whatever
+/// value the upstream chose). Shared by the direct and node-routed paths.
+fn forwardable_response_header(name_lower: &str, is_sse: bool) -> bool {
+    if is_sse && (name_lower == "content-length" || name_lower == "x-accel-buffering") {
+        return false;
+    }
+    ALLOWED_RESPONSE_HEADERS.contains(&name_lower)
+}
 
 /// Decide whether a downstream response should be streamed to the client
 /// instead of buffered in memory.
@@ -6271,6 +6300,44 @@ mod tests {
     fn allowed_response_headers_includes_range_support() {
         assert!(super::ALLOWED_RESPONSE_HEADERS.contains(&"accept-ranges"));
         assert!(super::ALLOWED_RESPONSE_HEADERS.contains(&"content-range"));
+    }
+
+    /// SSE behind a buffering reverse proxy (nginx defaults to
+    /// `proxy_buffering on`) arrives as one blob at the end. Both proxy
+    /// paths set `X-Accel-Buffering: no` on SSE responses, and the header
+    /// must stay forwardable so an upstream copy survives too — dropping
+    /// either half silently un-streams every assistant/LLM SSE surface.
+    #[test]
+    fn allowed_response_headers_includes_accel_buffering() {
+        assert!(super::ALLOWED_RESPONSE_HEADERS.contains(&"x-accel-buffering"));
+    }
+
+    #[test]
+    fn sse_skips_upstream_buffering_and_length_headers() {
+        // Both are re-derived for SSE: length is unknown, and the buffering
+        // hint is set explicitly — forwarding the upstream copy would emit
+        // a duplicate header with an upstream-chosen value.
+        assert!(!super::forwardable_response_header(
+            "x-accel-buffering",
+            true
+        ));
+        assert!(!super::forwardable_response_header("content-length", true));
+    }
+
+    #[test]
+    fn non_sse_forwards_length_and_upstream_buffering_hint() {
+        assert!(super::forwardable_response_header(
+            "x-accel-buffering",
+            false
+        ));
+        assert!(super::forwardable_response_header("content-length", false));
+    }
+
+    #[test]
+    fn forwardable_response_header_still_denies_unlisted_headers() {
+        assert!(!super::forwardable_response_header("set-cookie", true));
+        assert!(!super::forwardable_response_header("set-cookie", false));
+        assert!(super::forwardable_response_header("content-type", true));
     }
 
     // ---- STREAMING_CONTENT_TYPES coverage ----
