@@ -215,6 +215,32 @@ impl BillingService {
         meter::settle(&self.db, metered, platform, resale, model).await
     }
 
+    pub(crate) async fn settle_deferred(
+        &self,
+        metered: &MeteredProxyContext,
+        platform: crate::models::service_billing::PlatformUsage,
+        resale: Option<crate::models::service_billing::ResaleUsage>,
+        model: Option<String>,
+    ) -> AppResult<()> {
+        let billing_request_id = metered
+            .route
+            .as_ref()
+            .map(|route| route.billing_request_id.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+        let persisted =
+            meter::persist_settlement_intent(&self.db, metered, platform, resale, model).await?;
+        let db = self.db.clone();
+        tokio::spawn(async move {
+            if meter::settle_persisted(&db, persisted).await.is_err() {
+                tracing::warn!(
+                    billing_request_id,
+                    "Failed to settle usage meter row; durable retry recorded"
+                );
+            }
+        });
+        Ok(())
+    }
+
     pub async fn fail(&self, metered: &MeteredProxyContext, reason: &str) -> AppResult<()> {
         meter::fail(&self.db, metered, reason).await
     }
