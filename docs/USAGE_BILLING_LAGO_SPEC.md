@@ -185,6 +185,8 @@ pub struct UsageMeterRow {
     pub released: bool,                                   // hold released? (idempotent settle guard, R3.2)
     pub lago_acked: bool,
     pub attempt: i32,
+    pub settlement_attempts: i32,
+    pub settlement_next_retry_at: Option<DateTime<Utc>>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")] pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")] pub updated_at: DateTime<Utc>,
     #[serde(default, with = "bson_datetime::optional")] pub finalized_at: Option<DateTime<Utc>>,
@@ -456,7 +458,9 @@ Lago via the §11 spike before freezing these signatures.
 1. Re-push `lago_acked=false AND updated_at < now-grace` rows.
 2. `Reserved && forwarded=false && updated_at < now-abandon_grace` → `Abandoned` (release holds).
    **`Forwarded` rows are charged/held/dead-lettered, never auto-freed** (R3.3).
-3. `Finalized && released=false` → re-apply the wallet move (settle crash recovery).
+3. `Finalized && released=false` past the settle grace, or a due retryable `Failed` row → re-apply
+   the wallet move through the same idempotent settlement path. Settlement retries use bounded
+   exponential backoff and end in `DeadLetter`.
 4. **Bidirectional** per Lago **customer/subscription**: compare `sum(usage_meter finalized)` vs Lago
    `current_usage`; alert on drift.
 5. Sync `balance_credits` from Lago, clear accounted `pending_lago_debits`, refresh `billing_rate_cache`.

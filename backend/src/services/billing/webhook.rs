@@ -424,6 +424,8 @@ mod tests {
             released: true,
             lago_acked,
             attempt: 0,
+            settlement_attempts: 0,
+            settlement_next_retry_at: None,
             created_at: now,
             updated_at: now,
             finalized_at: Some(now),

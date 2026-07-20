@@ -57,7 +57,10 @@ impl BillingReconciler {
         if !self.config.billing_enabled {
             return Ok(stats);
         }
-        stats.recovered_settlements += reservation::recover_unreleased_finalized(&self.db).await?;
+        let settlement = reservation::recover_retryable_settlements(&self.db).await?;
+        stats.recovered_settlements += settlement.recovered;
+        stats.retried += settlement.retried;
+        stats.dead_lettered += settlement.dead_lettered;
 
         let Some(lago) = &self.lago else {
             return Ok(stats);
@@ -458,6 +461,8 @@ mod tests {
             released: true,
             lago_acked: false,
             attempt: 0,
+            settlement_attempts: 0,
+            settlement_next_retry_at: None,
             created_at: now,
             updated_at: now,
             finalized_at: Some(now),
@@ -622,6 +627,82 @@ mod tests {
         assert_eq!(saved.status, UsageStatus::Finalized);
         assert!(!saved.lago_acked);
         assert_eq!(saved.attempt, 1);
+    }
+
+    #[tokio::test]
+    async fn reconcile_recovers_a_settlement_stranded_past_its_deadline() {
+        let Some(db) = connect_test_database("billing_reconcile_stranded_settlement").await else {
+            return;
+        };
+        let mut row = finalized_row("tx-stranded-settlement");
+        row.wallet_id = None;
+        row.released = false;
+        let row_id = row.id.clone();
+        db.collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
+            .insert_one(&row)
+            .await
+            .expect("insert stranded row");
+        let reconciler = BillingReconciler::new(
+            db.clone(),
+            None,
+            std::sync::Arc::new(billing_enabled_config()),
+        );
+
+        let stats = reconciler.run_once().await.expect("run reconcile");
+        let saved = db
+            .collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
+            .find_one(doc! { "_id": row_id })
+            .await
+            .expect("find row")
+            .expect("row exists");
+
+        assert_eq!(stats.recovered_settlements, 1);
+        assert_eq!(saved.status, UsageStatus::Finalized);
+        assert!(saved.released);
+    }
+
+    #[tokio::test]
+    async fn reconcile_dead_letters_exhausted_settlement_and_excludes_replay() {
+        let Some(db) = connect_test_database("billing_reconcile_settlement_dead_letter").await
+        else {
+            return;
+        };
+        let mut row = finalized_row("tx-settlement-dead-letter");
+        row.status = UsageStatus::Failed;
+        row.released = false;
+        row.reserved_credits = 1;
+        row.settlement_attempts =
+            crate::services::billing::reservation::MAX_SETTLEMENT_ATTEMPTS - 1;
+        row.settlement_next_retry_at = Some(Utc::now() - Duration::seconds(1));
+        let row_id = row.id.clone();
+        db.collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
+            .insert_one(&row)
+            .await
+            .expect("insert failed row");
+        let reconciler = BillingReconciler::new(
+            db.clone(),
+            None,
+            std::sync::Arc::new(billing_enabled_config()),
+        );
+
+        let first = reconciler.run_once().await.expect("run first reconcile");
+        let second = reconciler.run_once().await.expect("run second reconcile");
+        let saved = db
+            .collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
+            .find_one(doc! { "_id": row_id })
+            .await
+            .expect("find row")
+            .expect("row exists");
+
+        assert_eq!(first.dead_lettered, 1);
+        assert_eq!(second.dead_lettered, 0);
+        assert_eq!(second.retried, 0);
+        assert_eq!(saved.status, UsageStatus::DeadLetter);
+        assert_eq!(
+            saved.settlement_attempts,
+            crate::services::billing::reservation::MAX_SETTLEMENT_ATTEMPTS
+        );
+        assert!(saved.settlement_next_retry_at.is_none());
     }
 
     #[tokio::test]

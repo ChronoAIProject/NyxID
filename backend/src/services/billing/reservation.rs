@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use futures::TryStreamExt;
 use mongodb::bson::{self, Bson, Document, doc};
 use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
@@ -19,6 +19,25 @@ use super::route_context::BillingRouteContext;
 const CREDIT_MICROS: i64 = 1_000_000;
 const RECOVERY_BATCH_SIZE: i64 = 100;
 const SETTLEMENT_LOCK_RETRIES: usize = 4;
+const SETTLEMENT_STRANDED_AFTER_SECS: i64 = 30;
+const SETTLEMENT_RETRY_BASE_SECS: i64 = 30;
+const SETTLEMENT_RETRY_MAX_SECS: i64 = 30 * 60;
+const SETTLEMENT_CLAIM_LEASE_SECS: i64 = 60;
+pub(crate) const MAX_SETTLEMENT_ATTEMPTS: i32 = 5;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SettlementRecoveryStats {
+    pub recovered: u64,
+    pub retried: u64,
+    pub dead_lettered: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SettlementFailureDisposition {
+    RetryScheduled(i32),
+    DeadLettered(i32),
+    Unchanged,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LayerReservation {
@@ -373,15 +392,36 @@ pub async fn apply_settlement_for_row(
 
     let update = usage_rows
         .update_one(
-            doc! { "_id": &row.id, "released": false },
+            doc! {
+                "_id": &row.id,
+                "status": { "$in": ["finalized", "failed"] },
+                "released": false,
+            },
             doc! {
                 "$set": {
+                    "status": "finalized",
                     "released": true,
                     "updated_at": bson::DateTime::from_chrono(Utc::now()),
-                }
+                },
+                "$unset": {
+                    "settlement_next_retry_at": "",
+                    "last_error": "",
+                },
             },
         )
         .await?;
+    if update.matched_count == 0 {
+        let released = usage_rows
+            .count_documents(doc! { "_id": &row.id, "released": true })
+            .await?
+            > 0;
+        if !released {
+            return Err(AppError::Internal(format!(
+                "billing settlement could not complete usage row {}",
+                row.id
+            )));
+        }
+    }
     if let Some(wallet_id) = row.wallet_id.as_deref() {
         clear_wallet_settlement_lock(db, wallet_id, &row.billing_owner_id, &row.id).await?;
     }
@@ -464,12 +504,21 @@ async fn complete_wallet_settlement_lock(
     let update = db
         .collection::<UsageMeterRow>(USAGE_METER)
         .update_one(
-            doc! { "_id": &lock.row_id, "status": "finalized", "released": false },
+            doc! {
+                "_id": &lock.row_id,
+                "status": { "$in": ["finalized", "failed"] },
+                "released": false,
+            },
             doc! {
                 "$set": {
+                    "status": "finalized",
                     "released": true,
                     "updated_at": bson::DateTime::from_chrono(Utc::now()),
-                }
+                },
+                "$unset": {
+                    "settlement_next_retry_at": "",
+                    "last_error": "",
+                },
             },
         )
         .await?;
@@ -659,6 +708,144 @@ pub async fn claim_released_and_settle(
     apply_settlement_for_row(db, row, actual_credits).await
 }
 
+pub(crate) async fn record_settlement_failure(
+    db: &mongodb::Database,
+    row: &UsageMeterRow,
+    now: chrono::DateTime<Utc>,
+) -> AppResult<SettlementFailureDisposition> {
+    let next_attempt = row.settlement_attempts.saturating_add(1);
+    if next_attempt >= MAX_SETTLEMENT_ATTEMPTS {
+        if finish_applied_lock_before_dead_letter(db, row).await? {
+            return Ok(SettlementFailureDisposition::Unchanged);
+        }
+
+        let updated = update_settlement_failure(db, row, now, "dead_letter", None).await?;
+        if updated {
+            tracing::warn!(
+                row_id = %row.id,
+                transaction_id = %row.transaction_id,
+                settlement_attempts = next_attempt,
+                quantity = row.quantity.unwrap_or(0),
+                "Billing settlement moved to dead letter"
+            );
+            return Ok(SettlementFailureDisposition::DeadLettered(next_attempt));
+        }
+        return Ok(SettlementFailureDisposition::Unchanged);
+    }
+
+    let next_retry_at = now + settlement_retry_backoff(next_attempt);
+    let updated = update_settlement_failure(db, row, now, "failed", Some(next_retry_at)).await?;
+    if updated {
+        tracing::warn!(
+            row_id = %row.id,
+            transaction_id = %row.transaction_id,
+            settlement_attempts = next_attempt,
+            quantity = row.quantity.unwrap_or(0),
+            "Billing settlement failed; retry scheduled"
+        );
+        Ok(SettlementFailureDisposition::RetryScheduled(next_attempt))
+    } else {
+        Ok(SettlementFailureDisposition::Unchanged)
+    }
+}
+
+async fn update_settlement_failure(
+    db: &mongodb::Database,
+    row: &UsageMeterRow,
+    now: chrono::DateTime<Utc>,
+    status: &str,
+    next_retry_at: Option<chrono::DateTime<Utc>>,
+) -> AppResult<bool> {
+    let last_error = if status == "dead_letter" {
+        "billing settlement retries exhausted"
+    } else {
+        "billing settlement failed"
+    };
+    let mut set = doc! {
+        "status": status,
+        "last_error": last_error,
+        "updated_at": bson::DateTime::from_chrono(now),
+    };
+    if let Some(next_retry_at) = next_retry_at {
+        set.insert(
+            "settlement_next_retry_at",
+            bson::DateTime::from_chrono(next_retry_at),
+        );
+    }
+    let mut update = doc! {
+        "$set": set,
+        "$inc": { "settlement_attempts": 1 },
+    };
+    if next_retry_at.is_none() {
+        update.insert("$unset", doc! { "settlement_next_retry_at": "" });
+    }
+
+    let result = db
+        .collection::<UsageMeterRow>(USAGE_METER)
+        .update_one(
+            doc! {
+                "_id": &row.id,
+                "status": { "$in": ["finalized", "failed"] },
+                "released": false,
+                "$and": [settlement_attempt_filter(row.settlement_attempts)],
+            },
+            update,
+        )
+        .await?;
+    Ok(result.modified_count == 1)
+}
+
+fn settlement_retry_backoff(attempt: i32) -> Duration {
+    let exponent = u32::try_from(attempt.saturating_sub(1))
+        .unwrap_or(0)
+        .min(10);
+    let seconds = SETTLEMENT_RETRY_BASE_SECS
+        .saturating_mul(1_i64 << exponent)
+        .min(SETTLEMENT_RETRY_MAX_SECS);
+    Duration::seconds(seconds)
+}
+
+fn settlement_attempt_filter(expected: i32) -> Document {
+    if expected == 0 {
+        doc! {
+            "$or": [
+                { "settlement_attempts": 0 },
+                { "settlement_attempts": { "$exists": false } },
+            ]
+        }
+    } else {
+        doc! { "settlement_attempts": expected }
+    }
+}
+
+async fn finish_applied_lock_before_dead_letter(
+    db: &mongodb::Database,
+    row: &UsageMeterRow,
+) -> AppResult<bool> {
+    let Some(wallet_id) = row.wallet_id.as_deref() else {
+        return Ok(false);
+    };
+    let Some(wallet) = db
+        .collection::<Document>(BILLING_WALLET)
+        .find_one(doc! { "_id": wallet_id, "owner_id": &row.billing_owner_id })
+        .await?
+    else {
+        return Ok(false);
+    };
+    let Some(lock) = parse_wallet_settlement_lock(&wallet)? else {
+        return Ok(false);
+    };
+    if lock.row_id != row.id {
+        return Ok(false);
+    }
+    if lock.applied {
+        complete_wallet_settlement_lock(db, wallet_id, &row.billing_owner_id, &lock).await?;
+        return Ok(true);
+    }
+    clear_wallet_settlement_lock_any_state(db, wallet_id, &row.billing_owner_id, &row.id).await?;
+    Ok(false)
+}
+
 pub async fn release_unforwarded_rows(
     db: &mongodb::Database,
     billing_request_id: &str,
@@ -710,30 +897,152 @@ pub async fn abandon_stale_unforwarded(
     Ok(released_count)
 }
 
-pub async fn recover_unreleased_finalized(db: &mongodb::Database) -> AppResult<u64> {
+pub async fn recover_retryable_settlements(
+    db: &mongodb::Database,
+) -> AppResult<SettlementRecoveryStats> {
+    recover_retryable_settlements_at(db, Utc::now()).await
+}
+
+pub(crate) async fn recover_retryable_settlements_at(
+    db: &mongodb::Database,
+    now: chrono::DateTime<Utc>,
+) -> AppResult<SettlementRecoveryStats> {
+    let due = settlement_due_filter(now);
+    let mut query = due.clone();
+    query.insert("released", false);
+    query.insert("quantity", doc! { "$ne": Bson::Null });
     let rows: Vec<UsageMeterRow> = db
         .collection::<UsageMeterRow>(USAGE_METER)
-        .find(doc! {
-            "status": "finalized",
-            "released": false,
-            "wallet_id": { "$ne": null },
+        .find(query)
+        .sort(doc! {
+            "settlement_next_retry_at": 1,
+            "finalized_at": 1,
         })
         .limit(RECOVERY_BATCH_SIZE)
         .await?
         .try_collect()
         .await?;
 
-    let mut recovered = 0;
+    let mut stats = SettlementRecoveryStats::default();
     for row in rows {
-        if row.quantity.is_none() {
+        if row.settlement_attempts >= MAX_SETTLEMENT_ATTEMPTS {
+            if mark_exhausted_settlement_dead_letter(db, &row, now).await? {
+                stats.dead_lettered += 1;
+            }
             continue;
         }
-        // Recovery uses the same bounded settlement path as live settlement.
-        if claim_released_and_settle(db, &row).await? {
-            recovered += 1;
+
+        let Some(claimed) = claim_due_settlement(db, &row, now, due.clone()).await? else {
+            continue;
+        };
+        match claim_released_and_settle(db, &claimed).await {
+            Ok(true) => stats.recovered += 1,
+            Ok(false) => {}
+            Err(_error) => match record_settlement_failure(db, &claimed, now).await? {
+                SettlementFailureDisposition::RetryScheduled(_) => stats.retried += 1,
+                SettlementFailureDisposition::DeadLettered(_) => stats.dead_lettered += 1,
+                SettlementFailureDisposition::Unchanged => {}
+            },
         }
     }
-    Ok(recovered)
+    Ok(stats)
+}
+
+fn settlement_due_filter(now: chrono::DateTime<Utc>) -> Document {
+    let stranded_before = now - Duration::seconds(SETTLEMENT_STRANDED_AFTER_SECS);
+    doc! {
+        "$or": [
+            {
+                "status": "failed",
+                "$or": [
+                    { "settlement_next_retry_at": { "$lte": bson::DateTime::from_chrono(now) } },
+                    { "settlement_next_retry_at": null },
+                    { "settlement_next_retry_at": { "$exists": false } },
+                ],
+            },
+            {
+                "status": "finalized",
+                "$or": [
+                    { "finalized_at": { "$lte": bson::DateTime::from_chrono(stranded_before) } },
+                    {
+                        "finalized_at": null,
+                        "updated_at": { "$lte": bson::DateTime::from_chrono(stranded_before) },
+                    },
+                ],
+            },
+        ]
+    }
+}
+
+async fn claim_due_settlement(
+    db: &mongodb::Database,
+    row: &UsageMeterRow,
+    now: chrono::DateTime<Utc>,
+    due: Document,
+) -> AppResult<Option<UsageMeterRow>> {
+    let lease_until = now + Duration::seconds(SETTLEMENT_CLAIM_LEASE_SECS);
+    db.collection::<UsageMeterRow>(USAGE_METER)
+        .find_one_and_update(
+            doc! {
+                "_id": &row.id,
+                "released": false,
+                "quantity": { "$ne": null },
+                "$and": [due, settlement_attempt_filter(row.settlement_attempts)],
+            },
+            doc! {
+                "$set": {
+                    "status": "failed",
+                    "settlement_next_retry_at": bson::DateTime::from_chrono(lease_until),
+                    "updated_at": bson::DateTime::from_chrono(now),
+                }
+            },
+        )
+        .with_options(
+            FindOneAndUpdateOptions::builder()
+                .return_document(ReturnDocument::After)
+                .build(),
+        )
+        .await
+        .map_err(Into::into)
+}
+
+async fn mark_exhausted_settlement_dead_letter(
+    db: &mongodb::Database,
+    row: &UsageMeterRow,
+    now: chrono::DateTime<Utc>,
+) -> AppResult<bool> {
+    if finish_applied_lock_before_dead_letter(db, row).await? {
+        return Ok(false);
+    }
+    let result = db
+        .collection::<UsageMeterRow>(USAGE_METER)
+        .update_one(
+            doc! {
+                "_id": &row.id,
+                "status": "failed",
+                "released": false,
+                "$and": [settlement_attempt_filter(row.settlement_attempts)],
+            },
+            doc! {
+                "$set": {
+                    "status": "dead_letter",
+                    "last_error": "billing settlement retries exhausted",
+                    "updated_at": bson::DateTime::from_chrono(now),
+                },
+                "$unset": { "settlement_next_retry_at": "" },
+            },
+        )
+        .await?;
+    if result.modified_count == 1 {
+        tracing::warn!(
+            row_id = %row.id,
+            transaction_id = %row.transaction_id,
+            settlement_attempts = row.settlement_attempts,
+            quantity = row.quantity.unwrap_or(0),
+            "Billing settlement moved to dead letter"
+        );
+    }
+    Ok(result.modified_count == 1)
 }
 
 async fn estimate_layer_reservations(

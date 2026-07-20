@@ -3054,8 +3054,20 @@ fn settle_meter_async(
     }
 
     tokio::spawn(async move {
-        if let Err(error) = billing.settle(&metered, platform, resale, model).await {
-            tracing::warn!(error = %error, "Failed to settle usage meter row");
+        if billing
+            .settle(&metered, platform, resale, model)
+            .await
+            .is_err()
+        {
+            let billing_request_id = metered
+                .route
+                .as_ref()
+                .map(|route| route.billing_request_id.as_str())
+                .unwrap_or("unknown");
+            tracing::warn!(
+                billing_request_id,
+                "Failed to settle usage meter row; durable retry recorded"
+            );
         }
     });
 }

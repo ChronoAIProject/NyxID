@@ -107,28 +107,45 @@ pub async fn settle(
         return Ok(());
     };
 
-    if ctx.platform_metered() {
-        finalize_layer(
+    let mut finalized_rows = Vec::new();
+    if ctx.platform_metered()
+        && let Some(row) = finalize_layer(
             db,
             ctx,
             BillingLayer::Platform,
             platform_quantity(ctx.platform_metric, &platform),
             model.clone(),
         )
-        .await?;
+        .await?
+    {
+        finalized_rows.push(row);
     }
 
     if let Some(resale_usage) = resale
         && ctx.resale.is_some()
-    {
-        finalize_layer(
+        && let Some(row) = finalize_layer(
             db,
             ctx,
             BillingLayer::Resale,
             resale_usage.quantity.max(0),
             model,
         )
-        .await?;
+        .await?
+    {
+        finalized_rows.push(row);
+    }
+
+    let mut first_error = None;
+    for row in finalized_rows {
+        if let Err(error) = reservation::claim_released_and_settle(db, &row).await {
+            reservation::record_settlement_failure(db, &row, Utc::now()).await?;
+            if first_error.is_none() {
+                first_error = Some(error);
+            }
+        }
+    }
+    if let Some(error) = first_error {
+        return Err(error);
     }
 
     Ok(())
@@ -194,6 +211,8 @@ async fn insert_reserved_row(
         released: false,
         lago_acked: false,
         attempt: 0,
+        settlement_attempts: 0,
+        settlement_next_retry_at: None,
         created_at: now,
         updated_at: now,
         finalized_at: None,
@@ -221,7 +240,7 @@ async fn finalize_layer(
     layer: BillingLayer,
     quantity: i64,
     model: Option<String>,
-) -> AppResult<()> {
+) -> AppResult<Option<UsageMeterRow>> {
     let now = Utc::now();
     let model_for_row = model.clone();
     let collection = db.collection::<UsageMeterRow>(USAGE_METER);
@@ -252,14 +271,10 @@ async fn finalize_layer(
         .await?;
 
     let Some(claimed) = claimed else {
-        return Ok(());
+        return Ok(None);
     };
 
-    // Settlement owns the wallet debit and the `released` transition together.
-    // The bounded wallet lock covers the crash gap between those two writes, so
-    // recovery and live settlement share one idempotent path.
-    reservation::claim_released_and_settle(db, &claimed).await?;
-    Ok(())
+    Ok(Some(claimed))
 }
 
 pub(crate) fn transaction_id(
@@ -588,10 +603,13 @@ mod tests {
             .await
             .expect("simulate applied bounded settlement lock");
 
-        let recovered = crate::services::billing::reservation::recover_unreleased_finalized(&db)
-            .await
-            .expect("recover unreleased");
-        assert_eq!(recovered, 1);
+        let recovered = crate::services::billing::reservation::recover_retryable_settlements_at(
+            &db,
+            Utc::now() + chrono::Duration::seconds(31),
+        )
+        .await
+        .expect("recover unreleased");
+        assert_eq!(recovered.recovered, 1);
 
         let wallet = db
             .collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME)
@@ -668,14 +686,14 @@ mod tests {
     }
 
     /// ChronoAIProject/NyxID#1023 — the settle path and the reconciler's
-    /// `recover_unreleased_finalized` sweep can race the SAME finalized row
+    /// `recover_retryable_settlements` sweep can race the SAME finalized row
     /// while it sits in the gap state `{status:finalized, released:false,
     /// wallet_id:set}`. The wallet debit MUST be atomic with the `released`
     /// transition, so the customer is charged exactly once no matter how many
     /// settle replays or recovery sweeps touch the row concurrently.
     ///
     /// This drives `settle` to produce the gap state, then runs the settle
-    /// path's `claim_released_and_settle` AND `recover_unreleased_finalized`
+    /// path's `claim_released_and_settle` AND `recover_retryable_settlements`
     /// concurrently against that row, and asserts a single debit
     /// (`reserved_credits` lands at 0, never negative; `pending_lago_debits`
     /// is the single-debit amount, never doubled).
@@ -756,9 +774,13 @@ mod tests {
         });
         let recover_db = db.clone();
         let recover_task = tokio::spawn(async move {
-            crate::services::billing::reservation::recover_unreleased_finalized(&recover_db)
-                .await
-                .expect("recovery sweep")
+            crate::services::billing::reservation::recover_retryable_settlements_at(
+                &recover_db,
+                Utc::now() + chrono::Duration::seconds(31),
+            )
+            .await
+            .expect("recovery sweep")
+            .recovered
         });
         let settled_won = settle_task.await.expect("settle join");
         let recovered = recover_task.await.expect("recover join");
@@ -770,9 +792,13 @@ mod tests {
                 .await
                 .expect("settle replay");
         let recovered_again =
-            crate::services::billing::reservation::recover_unreleased_finalized(&db)
-                .await
-                .expect("recovery replay");
+            crate::services::billing::reservation::recover_retryable_settlements_at(
+                &db,
+                Utc::now() + chrono::Duration::seconds(31),
+            )
+            .await
+            .expect("recovery replay")
+            .recovered;
 
         // Exactly one debit total across all four attempts.
         let winners = usize::from(settled_won) + recovered as usize + usize::from(settled_again);
@@ -805,6 +831,96 @@ mod tests {
             .expect("row exists");
         assert!(final_row.released, "row must end released exactly once");
         assert_eq!(final_row.status, UsageStatus::Finalized);
+    }
+
+    #[tokio::test]
+    async fn failed_live_settlement_is_durable_and_recovers_without_double_debit() {
+        let Some(db) = connect_test_database("billing_settle_outbox_recovery").await else {
+            return;
+        };
+        create_usage_transaction_index(&db).await;
+        let owner_id = "owner-settle-outbox";
+        insert_wallet(&db, owner_id, 10, 0).await;
+        crate::services::billing::reservation::try_reserve_prepaid(&db, owner_id, 5)
+            .await
+            .expect("reserve")
+            .expect("reserved");
+
+        let ctx = platform_context("billing-settle-outbox", owner_id);
+        let reservation = BillingReservation {
+            owner_id: owner_id.to_string(),
+            wallet_id: format!("wallet-{owner_id}"),
+            total_reserved_credits: 5,
+            layers: vec![crate::services::billing::reservation::LayerReservation {
+                layer: BillingLayer::Platform,
+                reserved_credits: 5,
+            }],
+        };
+        let metered = open(&db, &ctx, Some(&reservation)).await.expect("open");
+        mark_forwarded(&db, &metered).await.expect("mark forwarded");
+        db.collection::<mongodb::bson::Document>(crate::models::billing_wallet::COLLECTION_NAME)
+            .update_one(
+                doc! { "owner_id": owner_id },
+                doc! { "$set": { "active_settlement": "malformed" } },
+            )
+            .await
+            .expect("inject transient settlement failure");
+
+        settle(&db, &metered, PlatformUsage::single_request(1), None, None)
+            .await
+            .expect_err("malformed lock must fail live settlement");
+        let collection =
+            db.collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME);
+        let failed = collection
+            .find_one(doc! { "billing_request_id": "billing-settle-outbox" })
+            .await
+            .expect("find failed row")
+            .expect("failed row exists");
+        assert_eq!(failed.status, UsageStatus::Failed);
+        assert_eq!(failed.settlement_attempts, 1);
+        assert!(failed.settlement_next_retry_at.is_some());
+        assert!(!failed.released);
+
+        db.collection::<mongodb::bson::Document>(crate::models::billing_wallet::COLLECTION_NAME)
+            .update_one(
+                doc! { "owner_id": owner_id },
+                doc! { "$unset": { "active_settlement": "" } },
+            )
+            .await
+            .expect("repair transient settlement failure");
+        let retry_at = failed.settlement_next_retry_at.expect("retry deadline");
+        let recovered = crate::services::billing::reservation::recover_retryable_settlements_at(
+            &db,
+            retry_at + chrono::Duration::seconds(1),
+        )
+        .await
+        .expect("recover failed settlement");
+        assert_eq!(recovered.recovered, 1);
+
+        let replay = crate::services::billing::reservation::recover_retryable_settlements_at(
+            &db,
+            retry_at + chrono::Duration::minutes(10),
+        )
+        .await
+        .expect("replay recovery sweep");
+        assert_eq!(replay.recovered, 0);
+
+        let saved = collection
+            .find_one(doc! { "_id": &failed.id })
+            .await
+            .expect("find recovered row")
+            .expect("recovered row exists");
+        let wallet = db
+            .collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME)
+            .find_one(doc! { "owner_id": owner_id })
+            .await
+            .expect("find wallet")
+            .expect("wallet exists");
+        assert_eq!(saved.status, UsageStatus::Finalized);
+        assert!(saved.released);
+        assert!(saved.settlement_next_retry_at.is_none());
+        assert_eq!(wallet.reserved_credits, 0);
+        assert_eq!(wallet.pending_lago_debits, 5);
     }
 
     async fn create_usage_transaction_index(db: &mongodb::Database) {

@@ -76,6 +76,10 @@ pub struct UsageMeterRow {
     pub released: bool,
     pub lago_acked: bool,
     pub attempt: i32,
+    #[serde(default)]
+    pub settlement_attempts: i32,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub settlement_next_retry_at: Option<DateTime<Utc>>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
