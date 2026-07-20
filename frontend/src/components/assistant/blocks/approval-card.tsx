@@ -181,6 +181,11 @@ export function ApprovalCard({
     setPendingAction(approved ? "approve" : "deny");
     try {
       await onDecide(approved);
+    } catch {
+      // Delivery failures surface via the mutation's own error toast; the
+      // card only needs to re-enable its buttons. Swallowing here also
+      // keeps the fire-and-forget click handler from raising an
+      // unhandled rejection.
     } finally {
       setPendingAction(null);
     }

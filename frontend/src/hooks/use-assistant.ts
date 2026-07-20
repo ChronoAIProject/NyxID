@@ -7,7 +7,10 @@ import {
 } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { ApiError } from "@/lib/api-client";
-import { AssistantTurnActiveError } from "@/lib/assistant/errors";
+import {
+  AssistantTurnActiveError,
+  AssistantTurnCancelledError,
+} from "@/lib/assistant/errors";
 import {
   useApprovalRequests,
   useNotificationSettings,
@@ -298,7 +301,10 @@ function createTurnEventPump(
         });
       }
     }
-    void projectTransportState(queryClient, targetId);
+    // Swallow projection failures: after a delete races a cancel-driven
+    // event, the history read legitimately rejects (tombstoned id) and
+    // must not surface as an unhandled rejection.
+    projectTransportState(queryClient, targetId).catch(() => undefined);
   };
 }
 
@@ -381,7 +387,10 @@ export function useCancelTurn(conversationId: string | undefined) {
   return useMutation({
     mutationFn: async (): Promise<void> => {
       if (!conversationId) return;
-      activeHandles.get(conversationId)?.cancel();
+      // Transport-level lookup, not the handle registry: an approval
+      // continuation's handle only registers after its response headers
+      // arrive, and Stop must abort a request hung before that.
+      assistantTransport.cancelActiveTurn(conversationId);
       activeHandles.delete(conversationId);
       await projectTransportState(queryClient, conversationId);
     },
@@ -410,6 +419,22 @@ export function useDecideApproval(conversationId: string | undefined) {
       );
       if (handle) activeHandles.set(conversationId, handle);
       await projectTransportState(queryClient, conversationId);
+    },
+    // Without this toast a failed approve POST (or an active-turn
+    // rejection) is invisible: the buttons just re-enable and nothing
+    // happens. A user-initiated Stop is an expected outcome, not a
+    // delivery failure — no toast.
+    onError: (error) => {
+      if (error instanceof AssistantTurnCancelledError) return;
+      toast.error("Approval was not delivered", {
+        id: "assistant-approval-failed",
+        description:
+          error instanceof AssistantTurnActiveError
+            ? "Wait for the current reply to finish, then decide again."
+            : error instanceof Error && error.message
+              ? error.message
+              : "The assistant backend did not respond. Try again.",
+      });
     },
   });
 }

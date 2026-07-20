@@ -1,5 +1,8 @@
 import { apiClient } from "@/lib/api-client";
-import { AssistantTurnActiveError } from "@/lib/assistant/errors";
+import {
+  AssistantTurnActiveError,
+  AssistantTurnCancelledError,
+} from "@/lib/assistant/errors";
 import { drainSseBuffer, flushSseBuffer } from "@/lib/assistant/sse";
 import {
   applyTurnEvent,
@@ -256,7 +259,8 @@ interface RunningTurn {
   openCards: Map<string, "approval" | "connect">;
   /** Dedupe guards, per reference client behavior. */
   promptedApprovalIds: Set<string>;
-  promptedConnectSlugs: Set<string>;
+  /** Service dedupe key → connect card block_id (for in-place upgrades). */
+  promptedConnectSlugs: Map<string, string>;
   waitingForApproval: boolean;
   watchdog: ReturnType<typeof setTimeout> | null;
 }
@@ -347,8 +351,11 @@ function streamStartError(
   }
   return {
     code: envelopeCode ?? `http_${String(status)}`,
-    message:
-      envelopeMessage ?? "The assistant stream could not be started.",
+    // Envelope messages render in toasts and the thread; redact like any
+    // other upstream-derived display string.
+    message: envelopeMessage
+      ? redactDisplayText(envelopeMessage)
+      : "The assistant stream could not be started.",
   };
 }
 
@@ -358,11 +365,18 @@ function streamStartError(
 // and may echo credentials; PRD §3.6 forbids raw downstream bodies in blocks.
 // ---------------------------------------------------------------------------
 
+// Auth-scheme values plus BARE well-known token shapes: provider keys leak
+// into natural-language error strings ("AWS rejected AKIA...") where no
+// key=value assignment exists for the assignment rule to catch.
 const SECRET_VALUE_PATTERN =
-  /(Bearer\s+)[A-Za-z0-9._~+/-]+|\beyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b|nyx(?:id)?_[A-Za-z0-9_-]{8,}/gi;
+  /((?:Bearer|Basic)\s+)[A-Za-z0-9._~+/=-]+|\beyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b|nyx(?:id)?_[A-Za-z0-9_-]{8,}|\b(?:AKIA|ASIA|ABIA|ACCA)[A-Z0-9]{16}\b|\bsk[-_][A-Za-z0-9_-]{8,}\b|\bgh[pousr]_[A-Za-z0-9]{20,}\b|\bAIza[A-Za-z0-9_-]{30,}\b|\bxox[baprs]-[A-Za-z0-9-]{10,}\b/gi;
 
+// Key names match with prefixes/suffixes (`secretAccessKey`, `x-api-key`,
+// `authorizationHeader`); quoted values — double or single (Python-style
+// reprs) — are consumed whole so a secret containing spaces cannot leak
+// its tail.
 const SECRET_ASSIGNMENT_PATTERN =
-  /("?(?:authorization|api[-_]?key|token|secret|password|credential|cookie)"?\s*[:=]\s*)"?[^",\s}]+"?/gi;
+  /(["']?[\w.-]*(?:authorization|api[-_]?key|access[-_]?key[-_]?id|token|secret|password|credential|cookie)[\w.-]*["']?\s*[:=]\s*)("[^"]*"|'[^']*'|[^",'\s}]+)/gi;
 
 export function redactDisplayText(value: string): string {
   // Token shapes first: the assignment rule would otherwise consume the
@@ -498,6 +512,15 @@ function base64SizeBytes(dataBase64: string): number {
 export class AevatarAssistantTransport implements AssistantTransport {
   private readonly conversations = new Map<string, StoredConversation>();
   private readonly running = new Map<string, RunningTurn>();
+  /**
+   * Tombstones for server-accepted deletes: the Chat History index is
+   * eventually consistent, so stale list/history responses can still carry
+   * a row we just deleted. Tombstones are PERMANENT for the transport's
+   * lifetime — actor ids are never reused, and retiring one early would
+   * reopen the race where an in-flight pre-delete read lands after the
+   * retire and resurrects the conversation.
+   */
+  private readonly deletedConversationIds = new Set<string>();
   private listFetchedAt = 0;
 
   async listConversations(): Promise<Conversation[]> {
@@ -557,9 +580,13 @@ export class AevatarAssistantTransport implements AssistantTransport {
     // Local removal only after the server accepted: a failed delete keeps
     // the conversation listed and retryable.
     this.conversations.delete(conversationId);
+    this.deletedConversationIds.add(conversationId);
   }
 
   async getHistory(conversationId: string): Promise<ConversationHistory> {
+    if (this.deletedConversationIds.has(conversationId)) {
+      throw new Error("Conversation was not found.");
+    }
     const existing = this.conversations.get(conversationId);
     // During a streaming turn the local mirror is ahead of the server;
     // serving it keeps per-event re-projection off the network entirely.
@@ -575,6 +602,12 @@ export class AevatarAssistantTransport implements AssistantTransport {
       stored = await this.loadHistory(conversationId);
     } catch {
       stored = existing;
+    }
+    // Re-check AFTER the await: a delete completing while the history
+    // request was in flight must not be answered with the pre-delete
+    // snapshot captured above (the fallback `existing`).
+    if (this.deletedConversationIds.has(conversationId)) {
+      throw new Error("Conversation was not found.");
     }
     if (!stored) {
       throw new Error("Conversation was not found.");
@@ -657,6 +690,17 @@ export class AevatarAssistantTransport implements AssistantTransport {
   }
 
   /**
+   * Cancel whatever turn is live for the conversation — including an
+   * approval-continuation reservation whose handle the caller never saw
+   * (the handle only returns after the approve response headers arrive, so
+   * Stop needs a transport-level lookup to abort a hung request).
+   */
+  cancelActiveTurn(conversationId: string): void {
+    const run = this.running.get(conversationId);
+    if (run) this.cancelTurn(conversationId, run);
+  }
+
+  /**
    * Send an approval decision. On the live contract the approve endpoint
    * answers with an SSE continuation of the run (reference client behavior);
    * the frames stream through the same adapter as the original turn, with
@@ -693,30 +737,16 @@ export class AevatarAssistantTransport implements AssistantTransport {
       this.pauseForApproval(conversationId, active);
     }
 
-    const response = await fetch(
-      `/api/v1${ASSISTANT_PREFIX}/conversations/${conversationId}/approve`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "text/event-stream",
-        },
-        credentials: "include",
-        body: JSON.stringify({
-          requestId: card.approval_request_id,
-          approved,
-          ...(stored.sessionId ? { sessionId: stored.sessionId } : {}),
-        }),
-      },
-    );
-    if (!response.ok) {
-      const bodyText = await response.text().catch(() => "");
-      throw new Error(streamStartError(response.status, bodyText).message);
-    }
-
+    // Reserve the conversation BEFORE the network call: the whole approve
+    // exchange must read as one active turn, or the idle gap while awaiting
+    // response headers lets a concurrent send/approve/delete slip past the
+    // active-turn guards and interleave two streams into one reducer. The
+    // reservation's controller doubles as the fetch signal so Stop can
+    // abort an approve request hung before headers.
     const run = this.newRun(onEvent ?? noopEvent);
     // Continuation cursors continue past the previous turn's: the reducer
     // and any still-subscribed pump dedup by strictly-increasing cursor.
+    // (Read lastCursor only after pauseForApproval settled the prior turn.)
     run.cursor = stored.turnState.lastCursor;
     this.running.set(conversationId, run);
     this.emit(conversationId, run, {
@@ -725,6 +755,49 @@ export class AevatarAssistantTransport implements AssistantTransport {
       turn_id: run.turnId,
       status: "running",
     });
+
+    let response: Response;
+    try {
+      response = await fetch(
+        `/api/v1${ASSISTANT_PREFIX}/conversations/${conversationId}/approve`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "text/event-stream",
+          },
+          credentials: "include",
+          body: JSON.stringify({
+            requestId: card.approval_request_id,
+            approved,
+            ...(stored.sessionId ? { sessionId: stored.sessionId } : {}),
+          }),
+          signal: run.controller.signal,
+        },
+      );
+    } catch (error) {
+      const aborted = run.controller.signal.aborted;
+      // cancelTurn may already have settled the run; finishTurn is a no-op
+      // then. The card was never flipped, so the decision stays retryable.
+      // Pre-stream failures settle the turn with a NULL error: the thrown
+      // rejection is what surfaces (the mutation's onError toast) — a turn
+      // error here would double-toast the same failure.
+      this.finishTurn(
+        conversationId,
+        run,
+        aborted ? "cancelled" : "failed",
+        null,
+      );
+      throw aborted ? new AssistantTurnCancelledError() : error;
+    }
+    if (!response.ok) {
+      const bodyText = await response.text().catch(() => "");
+      const failure = streamStartError(response.status, bodyText);
+      // Null turn error for the same single-toast reason as above.
+      this.finishTurn(conversationId, run, "failed", null);
+      throw new Error(failure.message);
+    }
+
     this.emit(conversationId, run, {
       cursor: this.nextCursor(run),
       event: "block.updated",
@@ -734,13 +807,62 @@ export class AevatarAssistantTransport implements AssistantTransport {
         decision_channel: "web",
       },
     });
+    // The prior turn's ledger parked with a step waiting on THIS approval;
+    // settle that step so the transient activity line doesn't show a stale
+    // approval clock (approved → the step proceeds; denied → skipped).
+    // Correlated by approval_request_id: deciding one card must not settle
+    // steps gated on a different pending approval, and a ledger with other
+    // approvals still waiting stays parked.
+    const parkedLedger = [...stored.turnState.messages]
+      .flatMap((message) => message.blocks)
+      .reverse()
+      .find(
+        (candidate): candidate is RunContentBlock =>
+          candidate.type === "run" &&
+          candidate.state === "awaiting_approval" &&
+          candidate.steps.some(
+            (step) =>
+              step.status === "waiting" &&
+              step.approval_request_id === card.approval_request_id,
+          ),
+      );
+    if (parkedLedger) {
+      const steps = parkedLedger.steps.map((step) =>
+        step.status === "waiting" &&
+        step.approval_request_id === card.approval_request_id
+          ? {
+              ...step,
+              status: approved ? ("done" as const) : ("skipped" as const),
+            }
+          : step,
+      );
+      const stillWaiting = steps.some((step) => step.status === "waiting");
+      this.emit(conversationId, run, {
+        cursor: this.nextCursor(run),
+        event: "block.updated",
+        block_id: parkedLedger.block_id,
+        patch: {
+          state: stillWaiting
+            ? "awaiting_approval"
+            : approved
+              ? "completed"
+              : "cancelled",
+          steps,
+          steps_complete: steps.filter((step) => step.status === "done").length,
+        },
+      });
+    }
 
     const contentType = response.headers.get("content-type") ?? "";
     if (response.body && contentType.includes("text/event-stream")) {
       void this.consumeTurnStream(conversationId, run, response);
     } else {
-      // Older backend acknowledging with JSON: nothing further will stream.
+      // Older backend acknowledging with JSON: nothing further will stream,
+      // and there is no live continuation for the caller to hold a handle
+      // to — returning one would let a stale entry linger in the caller's
+      // handle registry after this turn already completed.
       this.finishTurn(conversationId, run, "completed", null);
+      return null;
     }
     return {
       turnId: run.turnId,
@@ -757,6 +879,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
    * title, timestamps, and counts without a per-conversation detail fetch.
    */
   private mergeIndexEntry(id: string, entry: AevatarHistoryIndexEntry): void {
+    if (this.deletedConversationIds.has(id)) return;
     const existing = this.conversations.get(id);
     if (existing && isTurnActive(existing.turnState.activeTurn?.status)) {
       return;
@@ -798,6 +921,12 @@ export class AevatarAssistantTransport implements AssistantTransport {
     const entries = await assistantApi.get<AevatarHistoryEntry[]>(
       `${ASSISTANT_PREFIX}/conversations/${conversationId}`,
     );
+    // The conversation may have been deleted while this request was in
+    // flight (deleting an active chat races cancel-driven projections);
+    // writing the stale result back would resurrect it locally.
+    if (this.deletedConversationIds.has(conversationId)) {
+      throw new Error("Conversation was not found.");
+    }
     const existing = this.conversations.get(conversationId);
     const messages = entries
       .map((entry, index) => historyEntryToMessage(entry, index))
@@ -853,7 +982,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       stepKeys: new Map(),
       openCards: new Map(),
       promptedApprovalIds: new Set(),
-      promptedConnectSlugs: new Set(),
+      promptedConnectSlugs: new Map(),
       waitingForApproval: false,
       watchdog: null,
     };
@@ -1144,8 +1273,11 @@ export class AevatarAssistantTransport implements AssistantTransport {
         this.finalizeActivity(conversationId, run, "failed");
         this.finishTurn(conversationId, run, "failed", {
           code: error?.code ?? "run_error",
-          message:
+          // Upstream error strings are display surfaces too (thread + toast)
+          // and can echo request headers or credentials.
+          message: redactDisplayText(
             error?.message ?? frame.message ?? "The assistant run failed.",
+          ),
         });
         return;
       }
@@ -1211,17 +1343,13 @@ export class AevatarAssistantTransport implements AssistantTransport {
           payload as AuthorizationPayload,
         );
         return;
-      case "aevatar.tool_approval.pending": {
-        const approval = payload as ToolApprovalPayload;
-        this.addApprovalCard(conversationId, run, approval);
-        this.markStepWaiting(
+      case "aevatar.tool_approval.pending":
+        this.addApprovalCard(
           conversationId,
           run,
-          approval.toolCallId ?? approval.stepId ?? "",
-          approval.approvalRequestId ?? approval.requestId ?? "",
+          payload as ToolApprovalPayload,
         );
         return;
-      }
       case "aevatar.human_input.request":
         this.addApprovalCard(
           conversationId,
@@ -1471,16 +1599,27 @@ export class AevatarAssistantTransport implements AssistantTransport {
     this.patchRunBlock(conversationId, run);
   }
 
+  /**
+   * Park the tool step behind a pending approval. Falls back to the last
+   * still-active step when the frame names no toolCallId/stepId — the common
+   * live sequence is TOOL_CALL_START directly followed by the approval
+   * request, and without this the ledger spins forever on a decided card.
+   */
   private markStepWaiting(
     conversationId: string,
     run: RunningTurn,
     key: string,
     approvalRequestId: string,
   ): void {
-    if (!key) return;
-    const index = run.stepKeys.get(key);
-    if (index === undefined) return;
-    const step = run.runSteps[index];
+    let step: RunStepState | undefined;
+    if (key) {
+      const index = run.stepKeys.get(key);
+      step = index === undefined ? undefined : run.runSteps[index];
+    } else {
+      step = [...run.runSteps].reverse().find(
+        (candidate) => candidate.status === "active",
+      );
+    }
     if (!step || step.status !== "active") return;
     step.status = "waiting";
     step.approval_request_id = approvalRequestId || null;
@@ -1573,6 +1712,12 @@ export class AevatarAssistantTransport implements AssistantTransport {
     };
     this.appendActivityBlock(conversationId, run, block);
     run.openCards.set(block.block_id, "approval");
+    this.markStepWaiting(
+      conversationId,
+      run,
+      payload.toolCallId ?? payload.stepId ?? "",
+      requestId,
+    );
     if (run.runBlockId) this.patchRunBlock(conversationId, run);
     this.emit(conversationId, run, {
       cursor: this.nextCursor(run),
@@ -1589,18 +1734,47 @@ export class AevatarAssistantTransport implements AssistantTransport {
   ): void {
     const rawSlug = (payload.serviceSlug ?? payload.service_slug ?? "").trim();
     const dedupeKey = rawSlug || "unknown-service";
-    if (run.promptedConnectSlugs.has(dedupeKey)) return;
-    run.promptedConnectSlugs.add(dedupeKey);
-
-    const catalogSlug = rawSlug.replace(/^api-/, "");
     const serviceName = payload.serviceLabel?.trim() || humanizeSlug(rawSlug);
     const message =
       payload.message?.trim() ||
       `Connect ${serviceName} in NyxID, then send your request again.`;
+
+    // One card per missing service — but a later, richer signal (typically
+    // the dedicated AUTHORIZATION_REQUIRED frame arriving after the sniffed
+    // tool failure) upgrades the existing card's label and copy in place.
+    const existingCardId = run.promptedConnectSlugs.get(dedupeKey);
+    if (existingCardId) {
+      const label = payload.serviceLabel?.trim() ?? "";
+      const richMessage = payload.message?.trim() ?? "";
+      if (!label && !richMessage) return;
+      this.emit(conversationId, run, {
+        cursor: this.nextCursor(run),
+        event: "block.updated",
+        block_id: existingCardId,
+        patch: {
+          ...(label ? { service_name: label } : {}),
+          ...(richMessage
+            ? {
+                steps: [
+                  {
+                    title: `Connect ${serviceName}`,
+                    body: redactDisplayText(richMessage),
+                    done: false,
+                  },
+                ],
+              }
+            : {}),
+        },
+      });
+      return;
+    }
     const block: ConnectCardContentBlock = {
       type: "connect_card",
       block_id: newId("connect-card"),
-      catalog_slug: catalogSlug || "custom",
+      // Raw NyxID service slug, exactly as the AI Services page passes it
+      // to ServiceIcon — the glyph registry is keyed by full slugs
+      // (`api-github`, `llm-openai`), so stripping a prefix breaks icons.
+      catalog_slug: rawSlug || "custom",
       service_name: serviceName,
       icon_url: "",
       subtitle: "Required by this request",
@@ -1624,6 +1798,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       footer: "Brokered by NyxID · configure in AI Services, then ask again",
     };
     this.appendActivityBlock(conversationId, run, block);
+    run.promptedConnectSlugs.set(dedupeKey, block.block_id);
     run.openCards.set(block.block_id, "connect");
     if (run.runBlockId) this.patchRunBlock(conversationId, run);
   }
@@ -1758,17 +1933,25 @@ export class AevatarAssistantTransport implements AssistantTransport {
   ): void {
     if (run.runBlockId) {
       for (const step of run.runSteps) {
-        if (step.status !== "active") continue;
-        step.status =
-          outcome === "done"
-            ? "done"
-            : outcome === "failed"
-              ? "failed"
-              : outcome === "cancelled"
-                ? "skipped"
-                : step.status;
-        if (step.status === "done" && step.meta === "Running") {
-          step.meta = "Completed";
+        if (step.status === "active") {
+          step.status =
+            outcome === "done"
+              ? "done"
+              : outcome === "failed"
+                ? "failed"
+                : outcome === "cancelled"
+                  ? "skipped"
+                  : step.status;
+          if (step.status === "done" && step.meta === "Running") {
+            step.meta = "Completed";
+          }
+        } else if (
+          step.status === "waiting" &&
+          (outcome === "failed" || outcome === "cancelled")
+        ) {
+          // A terminal run must not carry a non-terminal step: an approval
+          // that will never be decided (run died / user stopped) is skipped.
+          step.status = "skipped";
         }
       }
       const snapshot = this.runBlockSnapshot(run);

@@ -1,82 +1,70 @@
-import { Check, Clock3, Loader2, SkipForward, X } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
-import type { RunContentBlock, RunStepStatus } from "@/types/assistant";
+import { Check, Clock3, Loader2, X } from "lucide-react";
+import type { RunContentBlock } from "@/types/assistant";
 
-function StepIcon({ status }: { readonly status: RunStepStatus }) {
-  const className = "h-3 w-3";
-  switch (status) {
-    case "done":
-      return <Check className={className} />;
-    case "active":
-      return <Loader2 className={`${className} animate-spin`} />;
-    case "waiting":
-      return <Clock3 className={className} />;
-    case "failed":
-      return <X className={className} />;
-    case "skipped":
-      return <SkipForward className={className} />;
-  }
-}
+const TERMINAL_STATES: ReadonlySet<RunContentBlock["state"]> = new Set([
+  "completed",
+  "failed",
+  "cancelled",
+]);
 
-function stepTone(status: RunStepStatus): string {
-  if (status === "done") return "border-success/30 bg-success/10 text-success";
-  if (status === "failed") {
-    return "border-destructive/30 bg-destructive/10 text-destructive";
-  }
-  if (status === "active") return "border-info/30 bg-info/10 text-info";
-  return "border-hairline bg-overlay text-text-tertiary";
-}
-
+/**
+ * Tool activity is a transient whisper, not a card (DESIGN.md: compact,
+ * color is earned). While the run streams, only in-flight steps render — a
+ * slim 11px mono line per running/waiting tool; each disappears with its
+ * TOOL_CALL_END. When the run settles, everything collapses to a single
+ * micro-summary line (or a one-line failure with its redacted reason).
+ */
 export function RunCard({ block }: { readonly block: RunContentBlock }) {
-  const terminal = block.state === "completed" || block.state === "failed";
-  return (
-    <section className="rounded-xl border border-border/70 bg-card p-4">
-      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-2 font-mono text-[10px] font-semibold uppercase text-muted-foreground">
-          {terminal ? (
-            block.state === "completed" ? (
-              <Check className="h-3.5 w-3.5 text-success" />
+  if (!TERMINAL_STATES.has(block.state)) {
+    const inflight = block.steps.filter(
+      (step) => step.status === "active" || step.status === "waiting",
+    );
+    if (inflight.length === 0) return null;
+    return (
+      <div className="space-y-1 py-0.5" role="status" aria-label="Tool activity">
+        {inflight.map((step) => (
+          <div
+            key={step.index}
+            className="flex items-center gap-2 text-[11px] text-muted-foreground"
+          >
+            {step.status === "active" ? (
+              <Loader2 className="h-3 w-3 shrink-0 animate-spin text-text-tertiary" />
             ) : (
-              <X className="h-3.5 w-3.5 text-destructive" />
-            )
-          ) : (
-            <Loader2 className="h-3.5 w-3.5 animate-spin text-info" />
-          )}
-          {block.title} - {String(block.steps_complete)} of{" "}
-          {String(block.steps_total)} steps complete
-        </div>
-        <Badge
-          variant={
-            block.state === "completed"
-              ? "success"
-              : block.state === "failed"
-                ? "destructive"
-                : "warning"
-          }
-        >
-          {block.state.replaceAll("_", " ")}
-        </Badge>
-      </div>
-
-      <ol className="space-y-3">
-        {block.steps.map((step) => (
-          <li key={step.index} className="flex gap-3">
-            <span
-              className={`mt-0.5 flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-md border ${stepTone(step.status)}`}
-            >
-              <StepIcon status={step.status} />
-            </span>
-            <div className="min-w-0">
-              <p className="break-words font-mono text-[11px] leading-relaxed text-foreground">
-                {step.label}
-              </p>
-              <p className="mt-0.5 text-[10px] leading-relaxed text-text-tertiary">
-                {step.meta}
-              </p>
-            </div>
-          </li>
+              <Clock3 className="h-3 w-3 shrink-0 text-warning" />
+            )}
+            <span className="truncate font-mono">{step.label}</span>
+            {step.status === "waiting" && (
+              <span className="shrink-0 text-text-tertiary">
+                waiting for approval
+              </span>
+            )}
+          </div>
         ))}
-      </ol>
-    </section>
+      </div>
+    );
+  }
+
+  const failed = block.steps.find((step) => step.status === "failed");
+  if (failed) {
+    return (
+      <div className="flex items-center gap-2 py-0.5 text-[11px] text-muted-foreground">
+        <X className="h-3 w-3 shrink-0 text-destructive" />
+        <span className="truncate font-mono">{failed.label}</span>
+        {failed.meta && (
+          <span className="truncate text-text-tertiary">{failed.meta}</span>
+        )}
+      </div>
+    );
+  }
+
+  const done = block.steps.filter((step) => step.status === "done");
+  if (done.length === 0) return null;
+  return (
+    <div className="flex items-center gap-2 py-0.5 text-[11px] text-text-tertiary">
+      <Check className="h-3 w-3 shrink-0 text-success/70" />
+      <span className="truncate font-mono">
+        {done.map((step) => step.label).join(" · ")}
+      </span>
+    </div>
   );
 }

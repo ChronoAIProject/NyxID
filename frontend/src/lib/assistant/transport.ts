@@ -107,6 +107,11 @@ class MockAssistantTransport implements AssistantTransport {
     };
   }
 
+  cancelActiveTurn(conversationId: string): void {
+    const script = this.running.get(conversationId);
+    if (script) this.cancelScript(conversationId, script);
+  }
+
   async decideApproval(
     conversationId: string,
     blockId: string,

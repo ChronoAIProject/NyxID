@@ -965,7 +965,7 @@ describe("live AG-UI frame taxonomy", () => {
     const card = blockStarts(events).find(
       (block) => block.type === "connect_card",
     );
-    expect(card?.type === "connect_card" && card.catalog_slug).toBe("github");
+    expect(card?.type === "connect_card" && card.catalog_slug).toBe("api-github");
     expect(card?.type === "connect_card" && card.state).toBe(
       "needs_connection",
     );
@@ -981,6 +981,57 @@ describe("live AG-UI frame taxonomy", () => {
     expect(cardFinal?.type === "connect_card" && cardFinal.state).toBe(
       "needs_connection",
     );
+  });
+
+  it("upgrades a sniffed connect card when the dedicated frame arrives", async () => {
+    // The tool-failure sniffer fires first with generic copy; the dedicated
+    // AUTHORIZATION_REQUIRED frame that follows carries the proper label and
+    // message and must improve the SAME card, not spawn a second one.
+    stubFetch(
+      routeCreate,
+      routeStream([
+        { type: "RUN_STARTED" },
+        {
+          type: "TOOL_CALL_START",
+          toolCallStart: { toolCallId: "c1", toolName: "github_list_prs" },
+        },
+        {
+          type: "TOOL_CALL_END",
+          toolCallEnd: {
+            toolCallId: "c1",
+            status: "AGENT_TOOL_RECEIPT_STATUS_ERROR",
+            error: "user is not authorized for service api-github",
+          },
+        },
+        {
+          type: "AUTHORIZATION_REQUIRED",
+          authorizationRequired: {
+            serviceSlug: "api-github",
+            serviceLabel: "GitHub",
+            message: "GitHub access is required to list your merged PRs.",
+          },
+        },
+        { type: "RUN_FINISHED" },
+      ]),
+    );
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    const events = await collectTurn(transport, "Summarize PRs");
+
+    const cards = blockStarts(events).filter(
+      (block) => block.type === "connect_card",
+    );
+    expect(cards).toHaveLength(1);
+    const final = blockCompletions(events).find(
+      (block) => block.type === "connect_card",
+    );
+    expect(final?.type === "connect_card" && final.service_name).toBe(
+      "GitHub",
+    );
+    expect(
+      final?.type === "connect_card" && final.steps[0]?.body,
+    ).toBe("GitHub access is required to list your merged PRs.");
   });
 
   it("maps AUTHORIZATION_REQUIRED to one deduped connect card", async () => {
@@ -1010,7 +1061,7 @@ describe("live AG-UI frame taxonomy", () => {
     );
     expect(cards).toHaveLength(1);
     const card = cards[0];
-    expect(card?.type === "connect_card" && card.catalog_slug).toBe("github");
+    expect(card?.type === "connect_card" && card.catalog_slug).toBe("api-github");
     expect(
       card?.type === "connect_card" && card.steps[0]?.body,
     ).toBe("GitHub access is required for this request.");
@@ -1047,7 +1098,7 @@ describe("live AG-UI frame taxonomy", () => {
       (block) => block.type === "connect_card",
     );
     expect(card?.type === "connect_card" && card.catalog_slug).toBe(
-      "lark-bot",
+      "api-lark-bot",
     );
   });
 
@@ -1192,6 +1243,130 @@ describe("live AG-UI frame taxonomy", () => {
     );
   });
 
+  it("reserves the conversation for the whole approve exchange", async () => {
+    // Codex P1: without a reservation, the await on the approve fetch left
+    // the conversation looking idle — a concurrent send could slip past the
+    // active-turn guard and interleave two streams into one reducer.
+    let releaseApprove: () => void = () => {};
+    stubFetch(
+      routeCreate,
+      routeStream([
+        { type: "RUN_STARTED" },
+        {
+          type: "TOOL_APPROVAL_REQUEST",
+          toolApprovalRequest: { requestId: "req-slow" },
+        },
+      ]),
+      routeHistory([]),
+    );
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+    await collectTurn(transport, "Do the thing");
+    const history = await transport.getHistory(CONVERSATION_ID);
+    const card = history.messages
+      .flatMap((message) => message.blocks)
+      .find((block) => block.type === "approval_card");
+
+    // Swap fetch for one whose /approve hangs until released.
+    const baseFetch = fetch;
+    let approveSignal: AbortSignal | null | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        if (String(input).endsWith("/approve")) {
+          approveSignal = init?.signal;
+          return new Promise<Response>((resolve) => {
+            releaseApprove = () => {
+              resolve(jsonResponse({ accepted: true }));
+            };
+          });
+        }
+        return baseFetch(input, init);
+      }),
+    );
+
+    const pending = transport.decideApproval(
+      CONVERSATION_ID,
+      card?.block_id ?? "",
+      true,
+    );
+    // Yield so decideApproval reaches the in-flight fetch.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(() => {
+      transport.sendMessage(CONVERSATION_ID, "concurrent send", () => {});
+    }).toThrow(AssistantTurnActiveError);
+    // Stop must be able to abort the in-flight approve request.
+    expect(approveSignal).toBeDefined();
+    releaseApprove();
+    await expect(pending).resolves.toBeNull();
+  });
+
+  it("marks the pending tool step waiting on the dedicated approval frame", async () => {
+    // Codex P2: TOOL_CALL_START directly followed by TOOL_APPROVAL_REQUEST
+    // (no toolCallId on the frame) must park the step, not spin forever.
+    stubFetch(
+      routeCreate,
+      routeStream([
+        { type: "RUN_STARTED" },
+        {
+          type: "TOOL_CALL_START",
+          toolCallStart: { toolCallId: "c1", toolName: "lark_post" },
+        },
+        {
+          type: "TOOL_APPROVAL_REQUEST",
+          toolApprovalRequest: { requestId: "req-9" },
+        },
+      ]),
+    );
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    const events = await collectTurn(transport, "Post it");
+
+    const runFinal = blockCompletions(events).find(
+      (block) => block.type === "run",
+    );
+    expect(
+      runFinal?.type === "run" && runFinal.steps[0],
+    ).toMatchObject({ status: "waiting", approval_request_id: "req-9" });
+    expect(runFinal?.type === "run" && runFinal.state).toBe(
+      "awaiting_approval",
+    );
+  });
+
+  it("keeps a deleted conversation out of stale index responses", async () => {
+    // Codex P2: the Chat History index is eventually consistent; a stale
+    // list response must not resurrect a server-accepted delete.
+    let listCalls = 0;
+    stubFetch(
+      routeCreate,
+      (url, init) =>
+        url === `${ASSISTANT_BASE}/conversations` &&
+        (init?.method ?? "GET") === "GET"
+          ? (listCalls += 1,
+            jsonResponse({
+              conversations:
+                listCalls <= 2
+                  ? [{ id: CONVERSATION_ID, title: "Stale row" }]
+                  : [],
+            }))
+          : undefined,
+      (url, init) =>
+        url === `${ASSISTANT_BASE}/conversations/${CONVERSATION_ID}` &&
+        init?.method === "DELETE"
+          ? jsonResponse({})
+          : undefined,
+    );
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    await transport.deleteConversation(CONVERSATION_ID);
+
+    // Stale index still returns the row — the tombstone must filter it.
+    const list = await transport.listConversations();
+    expect(list).toHaveLength(0);
+  });
+
   it("settles immediately when the approve endpoint acks with JSON", async () => {
     stubFetch(
       routeCreate,
@@ -1214,13 +1389,16 @@ describe("live AG-UI frame taxonomy", () => {
       .find((block) => block.type === "approval_card");
 
     const events: TurnEvent[] = [];
-    await transport.decideApproval(
+    const handle = await transport.decideApproval(
       CONVERSATION_ID,
       card?.block_id ?? "",
       false,
       (event) => events.push(event),
     );
 
+    // No live continuation — no handle to register (a stale entry would
+    // linger in the caller's registry after the turn completed).
+    expect(handle).toBeNull();
     const flip = events.find(
       (event): event is Extract<TurnEvent, { event: "block.updated" }> =>
         event.event === "block.updated",
@@ -1230,6 +1408,362 @@ describe("live AG-UI frame taxonomy", () => {
     expect(terminal?.event === "turn.completed" && terminal.status).toBe(
       "completed",
     );
+  });
+
+  it("settles the parked run ledger when the approval is decided", async () => {
+    // The prior turn's ledger froze in awaiting_approval with a waiting
+    // step; deciding must flip it (approved → done/completed) so the
+    // transient activity line doesn't show a stale approval clock forever.
+    stubFetch(
+      routeCreate,
+      routeStream([
+        { type: "RUN_STARTED" },
+        {
+          type: "TOOL_CALL_START",
+          toolCallStart: { toolCallId: "c1", toolName: "lark_post" },
+        },
+        {
+          type: "TOOL_APPROVAL_REQUEST",
+          toolApprovalRequest: { requestId: "req-ledger" },
+        },
+      ]),
+      (url, init) =>
+        url.endsWith("/approve") && init?.method === "POST"
+          ? jsonResponse({ accepted: true })
+          : undefined,
+      routeHistory([]),
+    );
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+    await collectTurn(transport, "Post it");
+    const history = await transport.getHistory(CONVERSATION_ID);
+    const card = history.messages
+      .flatMap((message) => message.blocks)
+      .find((block) => block.type === "approval_card");
+
+    const events: TurnEvent[] = [];
+    await transport.decideApproval(
+      CONVERSATION_ID,
+      card?.block_id ?? "",
+      true,
+      (event) => events.push(event),
+    );
+
+    const ledgerFlip = events.find(
+      (event): event is Extract<TurnEvent, { event: "block.updated" }> =>
+        event.event === "block.updated" &&
+        (event.patch as { state?: string }).state === "completed",
+    );
+    expect(ledgerFlip).toBeDefined();
+    const steps = (ledgerFlip?.patch as {
+      steps?: Array<{ status: string }>;
+    }).steps;
+    expect(steps?.[0]?.status).toBe("done");
+  });
+
+  it("settles only the decided approval's step; other gates stay parked", async () => {
+    // Second-pass codex P2: ledger settlement is correlated by
+    // approval_request_id — deciding one card must not settle a step gated
+    // on a different pending approval, and the ledger stays parked.
+    stubFetch(
+      routeCreate,
+      routeStream([
+        { type: "RUN_STARTED" },
+        {
+          type: "TOOL_CALL_START",
+          toolCallStart: { toolCallId: "c1", toolName: "tool_one" },
+        },
+        {
+          type: "TOOL_APPROVAL_REQUEST",
+          toolApprovalRequest: { requestId: "req-A", toolCallId: "c1" },
+        },
+        {
+          type: "TOOL_CALL_START",
+          toolCallStart: { toolCallId: "c2", toolName: "tool_two" },
+        },
+        {
+          type: "TOOL_APPROVAL_REQUEST",
+          toolApprovalRequest: { requestId: "req-B", toolCallId: "c2" },
+        },
+      ]),
+      (url, init) =>
+        url.endsWith("/approve") && init?.method === "POST"
+          ? jsonResponse({ accepted: true })
+          : undefined,
+      routeHistory([]),
+    );
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+    await collectTurn(transport, "Two gated actions");
+    const history = await transport.getHistory(CONVERSATION_ID);
+    const cardB = history.messages
+      .flatMap((message) => message.blocks)
+      .find(
+        (block) =>
+          block.type === "approval_card" &&
+          block.approval_request_id === "req-B",
+      );
+
+    const events: TurnEvent[] = [];
+    await transport.decideApproval(
+      CONVERSATION_ID,
+      cardB?.block_id ?? "",
+      true,
+      (event) => events.push(event),
+    );
+
+    const ledgerPatch = events.find(
+      (event): event is Extract<TurnEvent, { event: "block.updated" }> =>
+        event.event === "block.updated" &&
+        Array.isArray((event.patch as { steps?: unknown }).steps),
+    );
+    const patch = ledgerPatch?.patch as {
+      state?: string;
+      steps?: Array<{ status: string; approval_request_id: string | null }>;
+    };
+    expect(patch.state).toBe("awaiting_approval");
+    const stepA = patch.steps?.find(
+      (step) => step.approval_request_id === "req-A",
+    );
+    const stepB = patch.steps?.find(
+      (step) => step.approval_request_id === "req-B",
+    );
+    expect(stepA?.status).toBe("waiting");
+    expect(stepB?.status).toBe("done");
+  });
+
+  it("terminalizes waiting steps when the run dies at an approval gate", async () => {
+    // Second-pass codex P2: a terminal run must not carry a non-terminal
+    // step — RUN_ERROR after an approval request skips the waiting step.
+    stubFetch(
+      routeCreate,
+      routeStream([
+        { type: "RUN_STARTED" },
+        {
+          type: "TOOL_CALL_START",
+          toolCallStart: { toolCallId: "c1", toolName: "lark_post" },
+        },
+        {
+          type: "TOOL_APPROVAL_REQUEST",
+          toolApprovalRequest: { requestId: "req-dead", toolCallId: "c1" },
+        },
+        {
+          type: "RUN_ERROR",
+          error: { code: "upstream_died", message: "engine crashed" },
+        },
+      ]),
+    );
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    const events = await collectTurn(transport, "Post it");
+
+    const runFinal = blockCompletions(events).find(
+      (block) => block.type === "run",
+    );
+    expect(runFinal?.type === "run" && runFinal.state).toBe("failed");
+    expect(runFinal?.type === "run" && runFinal.steps[0]?.status).toBe(
+      "skipped",
+    );
+  });
+
+  it("rejects reads of a deleted conversation instead of resurrecting it", async () => {
+    // Second-pass codex P2: history hydration must honor tombstones — a
+    // projection racing the delete must not write the row back.
+    stubFetch(
+      routeCreate,
+      routeHistory([
+        { id: "h-user", role: "user", content: "hi", timestamp: 1 },
+      ]),
+      (url, init) =>
+        url === `${ASSISTANT_BASE}/conversations/${CONVERSATION_ID}` &&
+        init?.method === "DELETE"
+          ? jsonResponse({})
+          : undefined,
+      (url, init) =>
+        url === `${ASSISTANT_BASE}/conversations` &&
+        (init?.method ?? "GET") === "GET"
+          ? jsonResponse({ conversations: [] })
+          : undefined,
+    );
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    await transport.deleteConversation(CONVERSATION_ID);
+
+    await expect(transport.getHistory(CONVERSATION_ID)).rejects.toThrow(
+      "Conversation was not found.",
+    );
+    expect(await transport.listConversations()).toHaveLength(0);
+  });
+
+  it("refuses to serve a pre-delete snapshot when a delete lands mid-read", async () => {
+    // Third-pass codex P2: getHistory captures `existing` before awaiting
+    // the server; a delete completing during that await must not be
+    // answered with the captured pre-delete snapshot via the catch
+    // fallback.
+    let releaseHistory: () => void = () => {};
+    stubFetch(
+      routeCreate,
+      routeStream(OBSERVED_FRAMES),
+      (url, init) =>
+        url === `${ASSISTANT_BASE}/conversations/${CONVERSATION_ID}` &&
+        init?.method === "DELETE"
+          ? jsonResponse({})
+          : undefined,
+      (url, init) => {
+        if (
+          url === `${ASSISTANT_BASE}/conversations/${CONVERSATION_ID}` &&
+          (init?.method ?? "GET") === "GET"
+        ) {
+          // Hang the history read until released — the route table cannot
+          // express this, so throw a promise-shaped response in via a
+          // stub-of-the-stub below.
+          return undefined;
+        }
+        return undefined;
+      },
+    );
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+    await collectTurn(transport, "Say hello in five words.");
+
+    const baseFetch = fetch;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        if (
+          String(input) ===
+            `${ASSISTANT_BASE}/conversations/${CONVERSATION_ID}` &&
+          (init?.method ?? "GET") === "GET"
+        ) {
+          return new Promise<Response>((resolve) => {
+            releaseHistory = () => {
+              resolve(jsonResponse([]));
+            };
+          });
+        }
+        return baseFetch(input, init);
+      }),
+    );
+
+    const pendingRead = transport.getHistory(CONVERSATION_ID);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await transport.deleteConversation(CONVERSATION_ID);
+    releaseHistory();
+
+    await expect(pendingRead).rejects.toThrow("Conversation was not found.");
+  });
+
+  it("stops an approve request hung before response headers", async () => {
+    // Second-pass codex P2: Stop works during the pre-header window via the
+    // transport-level cancel (the caller holds no handle yet).
+    stubFetch(
+      routeCreate,
+      routeStream([
+        { type: "RUN_STARTED" },
+        {
+          type: "TOOL_APPROVAL_REQUEST",
+          toolApprovalRequest: { requestId: "req-hung" },
+        },
+      ]),
+      routeHistory([]),
+    );
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+    await collectTurn(transport, "Do it");
+    const history = await transport.getHistory(CONVERSATION_ID);
+    const card = history.messages
+      .flatMap((message) => message.blocks)
+      .find((block) => block.type === "approval_card");
+
+    const baseFetch = fetch;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        if (String(input).endsWith("/approve")) {
+          // Hang until aborted.
+          return new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () => {
+              reject(new DOMException("aborted", "AbortError"));
+            });
+          });
+        }
+        return baseFetch(input, init);
+      }),
+    );
+
+    const events: TurnEvent[] = [];
+    const pending = transport.decideApproval(
+      CONVERSATION_ID,
+      card?.block_id ?? "",
+      true,
+      (event) => events.push(event),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    transport.cancelActiveTurn(CONVERSATION_ID);
+
+    await expect(pending).rejects.toThrow(
+      "The approval request was stopped.",
+    );
+    const terminal = events[events.length - 1];
+    expect(terminal?.event === "turn.completed" && terminal.status).toBe(
+      "cancelled",
+    );
+  });
+
+  it("fails an approve rejection with a single messaging surface", async () => {
+    // Second-pass codex P2: pre-stream approve failures reject the mutation
+    // (its toast) and settle the turn with a NULL error so the generic
+    // reply-failed toast cannot double-fire.
+    stubFetch(
+      routeCreate,
+      routeStream([
+        { type: "RUN_STARTED" },
+        {
+          type: "TOOL_APPROVAL_REQUEST",
+          toolApprovalRequest: { requestId: "req-502" },
+        },
+      ]),
+      (url, init) =>
+        url.endsWith("/approve") && init?.method === "POST"
+          ? jsonResponse({ code: "UPSTREAM_DOWN", message: "bad gateway" }, 502)
+          : undefined,
+      routeHistory([]),
+    );
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+    await collectTurn(transport, "Do it");
+    const history = await transport.getHistory(CONVERSATION_ID);
+    const card = history.messages
+      .flatMap((message) => message.blocks)
+      .find((block) => block.type === "approval_card");
+
+    const events: TurnEvent[] = [];
+    await expect(
+      transport.decideApproval(
+        CONVERSATION_ID,
+        card?.block_id ?? "",
+        true,
+        (event) => events.push(event),
+      ),
+    ).rejects.toThrow("bad gateway");
+
+    const terminal = events[events.length - 1];
+    expect(
+      terminal?.event === "turn.completed" && {
+        status: terminal.status,
+        error: terminal.error,
+      },
+    ).toEqual({ status: "failed", error: null });
+    // The card was never flipped — the decision stays retryable.
+    const after = await transport.getHistory(CONVERSATION_ID);
+    const cardAfter = after.messages
+      .flatMap((message) => message.blocks)
+      .find((block) => block.type === "approval_card");
+    expect(
+      cardAfter?.type === "approval_card" && cardAfter.decision,
+    ).toBe(null);
   });
 
   it("mines a raw.observed completion for steps and fallback text, never reasoning", async () => {
@@ -1488,6 +2022,64 @@ describe("redaction and authorization sniffing", () => {
     expect(redactDisplayText("key nyxid_ag_supersecret1234")).toContain(
       "[redacted]",
     );
+    // Codex P1 coverage gaps: Basic auth values, pre/suffixed key names,
+    // and quoted secrets containing spaces.
+    expect(
+      redactDisplayText("Authorization: Basic dXNlcjpwYXNzd29yZA=="),
+    ).not.toContain("dXNlcjpwYXNzd29yZA");
+    expect(
+      redactDisplayText('{"secretAccessKey":"wJalrXUtnFEMI/K7MDENG"}'),
+    ).not.toContain("wJalrXUtnFEMI");
+    expect(
+      redactDisplayText('{"accessKeyId":"AKIAIOSFODNN7EXAMPLE"}'),
+    ).not.toContain("AKIAIOSFODNN7");
+    expect(
+      redactDisplayText('{"password": "correct horse battery staple"}'),
+    ).not.toContain("horse battery");
+    expect(redactDisplayText('{"x-api-key":"abc123secret"}')).not.toContain(
+      "abc123secret",
+    );
+    // Second-pass codex P1: bare token shapes in natural-language strings
+    // (no key=value assignment present) and single-quoted assignments.
+    expect(
+      redactDisplayText("AWS rejected AKIAIOSFODNN7EXAMPLE for this call"),
+    ).not.toContain("AKIAIOSFODNN7EXAMPLE");
+    expect(
+      redactDisplayText("OpenAI rejected sk-proj-abc123def456ghi"),
+    ).not.toContain("sk-proj-abc123def456ghi");
+    expect(
+      redactDisplayText("push failed for ghp_abcdefghij1234567890KLMN"),
+    ).not.toContain("ghp_abcdefghij1234567890KLMN");
+    expect(
+      redactDisplayText("{'api_key': 'sk-live-secret with spaces'}"),
+    ).not.toContain("sk-live-secret");
+  });
+
+  it("redacts credentials from RUN_ERROR messages before they render", async () => {
+    stubFetch(
+      routeCreate,
+      routeStream([
+        { type: "RUN_STARTED" },
+        {
+          type: "RUN_ERROR",
+          error: {
+            code: "upstream_error",
+            message:
+              "Downstream 401 with Authorization: Bearer sk.live.abc123 header",
+          },
+        },
+      ]),
+    );
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    const events = await collectTurn(transport, "Hello");
+
+    const terminal = events[events.length - 1];
+    const message =
+      terminal?.event === "turn.completed" ? terminal.error?.message : "";
+    expect(message).not.toContain("sk.live.abc123");
+    expect(message).toContain("[redacted]");
   });
 
   it("summarizes tool results as compact redacted single lines", () => {

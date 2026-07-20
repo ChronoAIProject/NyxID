@@ -216,6 +216,12 @@ export interface AssistantTransport {
     onEvent: (event: TurnEvent) => void,
   ): TurnHandle;
   /**
+   * Cancel the conversation's live turn by id. Covers turns whose handle
+   * the caller does not hold — e.g. an approval continuation still waiting
+   * on response headers. No-op when nothing is running.
+   */
+  cancelActiveTurn(conversationId: string): void;
+  /**
    * Send an approval decision. On the live Aevatar contract the approve
    * endpoint responds with an SSE continuation of the run; implementations
    * that stream it return a cancellable handle for the continuation turn and
