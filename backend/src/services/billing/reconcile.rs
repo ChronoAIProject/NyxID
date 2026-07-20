@@ -456,6 +456,7 @@ mod tests {
             model: None,
             reserved_credits: 0,
             quantity: Some(1),
+            pending_resale_quantity: None,
             status: UsageStatus::Finalized,
             forwarded: true,
             released: true,

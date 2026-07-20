@@ -180,6 +180,7 @@ pub struct UsageMeterRow {
     #[serde(skip_serializing_if = "Option::is_none")] pub model: Option<String>,
     #[serde(default)] pub reserved_credits: i64,         // 0/unused in P1 (no wallet); set in P3
     #[serde(skip_serializing_if = "Option::is_none")] pub quantity: Option<i64>, // actual metered (settle)
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub pending_resale_quantity: Option<i64>, // multi-layer settle outbox marker
     pub status: UsageStatus,
     pub forwarded: bool,                                  // true once the downstream send fired (R3.3)
     pub released: bool,                                   // hold released? (idempotent settle guard, R3.2)
@@ -206,6 +207,7 @@ reconciliation / dead-lettered — never silently freed.
 **Indexes** (`db.rs`, mirroring oracle patterns at `db.rs:1715-1743`):
 - unique `{ transaction_id: 1 }` — idempotency / no double-row.
 - `{ status: 1, lago_acked: 1, updated_at: 1 }` — reconcile/dead-letter sweeps.
+- sparse `{ pending_resale_quantity: 1 }` — incomplete multi-layer intent materialization.
 - `{ billing_owner_id: 1, created_at: -1 }` — per-owner usage queries / display.
 - TTL `{ expires_at: 1 }` expire-after 0 (the reconcile sweep sets `expires_at` on terminal+acked rows).
 
@@ -458,9 +460,10 @@ Lago via the §11 spike before freezing these signatures.
 1. Re-push `lago_acked=false AND updated_at < now-grace` rows.
 2. `Reserved && forwarded=false && updated_at < now-abandon_grace` → `Abandoned` (release holds).
    **`Forwarded` rows are charged/held/dead-lettered, never auto-freed** (R3.3).
-3. `Finalized && released=false` past the settle grace, or a due retryable `Failed` row → re-apply
-   the wallet move through the same idempotent settlement path. Settlement retries use bounded
-   exponential backoff and end in `DeadLetter`.
+3. Materialize any pending resale layer from its platform-row outbox marker, then re-apply the wallet
+   move for `Finalized && released=false` past the settle grace or a due retryable `Failed` row
+   through the same idempotent settlement path. Settlement retries use bounded exponential backoff
+   and end in `DeadLetter`.
 4. **Bidirectional** per Lago **customer/subscription**: compare `sum(usage_meter finalized)` vs Lago
    `current_usage`; alert on drift.
 5. Sync `balance_credits` from Lago, clear accounted `pending_lago_debits`, refresh `billing_rate_cache`.

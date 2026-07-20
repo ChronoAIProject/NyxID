@@ -1,8 +1,9 @@
 use chrono::Utc;
-use mongodb::bson::{self, doc};
+use futures::TryStreamExt;
+use mongodb::bson::{self, Bson, doc};
 use uuid::Uuid;
 
-use crate::errors::AppResult;
+use crate::errors::{AppError, AppResult};
 use crate::models::service_billing::{BillingMetric, PlatformUsage, ResaleUsage};
 use crate::models::usage_meter::{
     BillingLayer, COLLECTION_NAME as USAGE_METER, UsageMeterRow, UsageStatus,
@@ -14,6 +15,7 @@ use super::route_context::BillingRouteContext;
 pub const PLATFORM_REQUESTS_METRIC_CODE: &str = "platform_requests";
 pub const PLATFORM_BYTES_METRIC_CODE: &str = "platform_bytes";
 pub const PLATFORM_TOKENS_METRIC_CODE: &str = "platform_tokens";
+const SETTLEMENT_INTENT_RECOVERY_BATCH_SIZE: i64 = 100;
 
 #[derive(Clone, Debug, Default)]
 pub struct MeteredProxyContext {
@@ -119,27 +121,72 @@ pub(super) async fn persist_settlement_intent(
     };
 
     let mut finalized_rows = Vec::new();
-    if ctx.platform_metered()
+    let platform_quantity = ctx
+        .platform_metered()
+        .then(|| platform_quantity(ctx.platform_metric, &platform));
+    let resale_quantity = resale
+        .filter(|_| ctx.resale.is_some())
+        .map(|usage| usage.quantity.max(0));
+    let finalized_at = Utc::now();
+
+    if let (Some(platform_quantity), Some(resale_quantity)) = (platform_quantity, resale_quantity) {
+        let coordinator = finalize_layer(
+            db,
+            &ctx.billing_request_id,
+            BillingLayer::Platform,
+            platform_quantity,
+            model.clone(),
+            Some(resale_quantity),
+            finalized_at,
+        )
+        .await?;
+        if let Some(row) = coordinator.as_ref() {
+            finalized_rows.push(row.clone());
+        }
+        let coordinator = match coordinator {
+            Some(row) => Some(row),
+            None => {
+                db.collection::<UsageMeterRow>(USAGE_METER)
+                    .find_one(doc! {
+                        "billing_request_id": &ctx.billing_request_id,
+                        "layer": "platform",
+                        "pending_resale_quantity": { "$exists": true, "$ne": Bson::Null },
+                    })
+                    .await?
+            }
+        };
+        if let Some(coordinator) = coordinator
+            && let Some(row) = materialize_pending_resale_intent(db, &coordinator).await?
+        {
+            finalized_rows.push(row);
+        }
+        return Ok(finalized_rows);
+    }
+
+    if let Some(platform_quantity) = platform_quantity
         && let Some(row) = finalize_layer(
             db,
-            ctx,
+            &ctx.billing_request_id,
             BillingLayer::Platform,
-            platform_quantity(ctx.platform_metric, &platform),
+            platform_quantity,
             model.clone(),
+            None,
+            finalized_at,
         )
         .await?
     {
         finalized_rows.push(row);
     }
 
-    if let Some(resale_usage) = resale
-        && ctx.resale.is_some()
+    if let Some(resale_quantity) = resale_quantity
         && let Some(row) = finalize_layer(
             db,
-            ctx,
+            &ctx.billing_request_id,
             BillingLayer::Resale,
-            resale_usage.quantity.max(0),
+            resale_quantity,
             model,
+            None,
+            finalized_at,
         )
         .await?
     {
@@ -147,6 +194,31 @@ pub(super) async fn persist_settlement_intent(
     }
 
     Ok(finalized_rows)
+}
+
+pub(super) async fn recover_pending_resale_intents(db: &mongodb::Database) -> AppResult<u64> {
+    let coordinators: Vec<UsageMeterRow> = db
+        .collection::<UsageMeterRow>(USAGE_METER)
+        .find(doc! {
+            "layer": "platform",
+            "pending_resale_quantity": { "$exists": true, "$ne": Bson::Null },
+        })
+        .limit(SETTLEMENT_INTENT_RECOVERY_BATCH_SIZE)
+        .await?
+        .try_collect()
+        .await?;
+
+    let mut recovered = 0;
+    for coordinator in coordinators {
+        if materialize_pending_resale_intent(db, &coordinator)
+            .await?
+            .is_some()
+        {
+            recovered += 1;
+        }
+    }
+
+    Ok(recovered)
 }
 
 pub(super) async fn settle_persisted(
@@ -224,6 +296,7 @@ async fn insert_reserved_row(
         model: None,
         reserved_credits,
         quantity: None,
+        pending_resale_quantity: None,
         status: UsageStatus::Reserved,
         forwarded: false,
         released: false,
@@ -254,32 +327,35 @@ async fn insert_reserved_row(
 
 async fn finalize_layer(
     db: &mongodb::Database,
-    ctx: &BillingRouteContext,
+    billing_request_id: &str,
     layer: BillingLayer,
     quantity: i64,
     model: Option<String>,
+    pending_resale_quantity: Option<i64>,
+    finalized_at: chrono::DateTime<Utc>,
 ) -> AppResult<Option<UsageMeterRow>> {
-    let now = Utc::now();
     let model_for_row = model.clone();
+    let mut set = doc! {
+        "status": "finalized",
+        "forwarded": true,
+        "quantity": quantity,
+        "released": false,
+        "model": model_for_row,
+        "updated_at": bson::DateTime::from_chrono(finalized_at),
+        "finalized_at": bson::DateTime::from_chrono(finalized_at),
+    };
+    if let Some(resale_quantity) = pending_resale_quantity {
+        set.insert("pending_resale_quantity", resale_quantity);
+    }
     let collection = db.collection::<UsageMeterRow>(USAGE_METER);
     let claimed = collection
         .find_one_and_update(
             doc! {
-                "billing_request_id": &ctx.billing_request_id,
+                "billing_request_id": billing_request_id,
                 "layer": layer.as_transaction_suffix(),
                 "status": { "$in": ["reserved", "forwarded"] },
             },
-            doc! {
-                "$set": {
-                    "status": "finalized",
-                    "forwarded": true,
-                    "quantity": quantity,
-                    "released": false,
-                    "model": model_for_row,
-                    "updated_at": bson::DateTime::from_chrono(now),
-                    "finalized_at": bson::DateTime::from_chrono(now),
-                }
-            },
+            doc! { "$set": set },
         )
         .with_options(
             mongodb::options::FindOneAndUpdateOptions::builder()
@@ -293,6 +369,77 @@ async fn finalize_layer(
     };
 
     Ok(Some(claimed))
+}
+
+async fn materialize_pending_resale_intent(
+    db: &mongodb::Database,
+    coordinator: &UsageMeterRow,
+) -> AppResult<Option<UsageMeterRow>> {
+    let Some(resale_quantity) = coordinator.pending_resale_quantity else {
+        return Ok(None);
+    };
+    let finalized_at = coordinator.finalized_at.unwrap_or(coordinator.updated_at);
+    let materialized = finalize_layer(
+        db,
+        &coordinator.billing_request_id,
+        BillingLayer::Resale,
+        resale_quantity,
+        coordinator.model.clone(),
+        None,
+        finalized_at,
+    )
+    .await?;
+    clear_pending_resale_intent(
+        db,
+        &coordinator.id,
+        &coordinator.billing_request_id,
+        resale_quantity,
+        coordinator.model.as_deref(),
+    )
+    .await?;
+    Ok(materialized)
+}
+
+async fn clear_pending_resale_intent(
+    db: &mongodb::Database,
+    coordinator_id: &str,
+    billing_request_id: &str,
+    resale_quantity: i64,
+    model: Option<&str>,
+) -> AppResult<()> {
+    let mut resale_filter = doc! {
+        "billing_request_id": billing_request_id,
+        "layer": "resale",
+        "status": { "$in": ["finalized", "failed", "dead_letter"] },
+        "quantity": resale_quantity,
+    };
+    resale_filter.insert(
+        "model",
+        model
+            .map(|value| Bson::String(value.to_string()))
+            .unwrap_or(Bson::Null),
+    );
+    let resale_materialized = db
+        .collection::<UsageMeterRow>(USAGE_METER)
+        .count_documents(resale_filter)
+        .await?
+        > 0;
+    if !resale_materialized {
+        return Err(AppError::Internal(format!(
+            "billing resale settlement intent was not materialized for {billing_request_id}"
+        )));
+    }
+
+    db.collection::<UsageMeterRow>(USAGE_METER)
+        .update_one(
+            doc! {
+                "_id": coordinator_id,
+                "pending_resale_quantity": resale_quantity,
+            },
+            doc! { "$unset": { "pending_resale_quantity": "" } },
+        )
+        .await?;
+    Ok(())
 }
 
 pub(crate) fn transaction_id(
@@ -617,6 +764,95 @@ mod tests {
             .expect("wallet exists");
         assert_eq!(wallet.reserved_credits, 0);
         assert_eq!(wallet.pending_lago_debits, 5);
+    }
+
+    #[tokio::test]
+    async fn pending_resale_intent_recovers_a_crash_between_layer_writes() {
+        let Some(db) = connect_test_database("billing_settle_multi_layer_intent").await else {
+            return;
+        };
+        create_usage_transaction_index(&db).await;
+        let billing = ServiceBilling {
+            resale_billable: true,
+            resale_metric: BillingMetric::Tokens,
+            lago_resale_metric_code: Some("resale_tokens".to_string()),
+        };
+        let ctx = BillingRouteContext::new(
+            "billing-multi-layer-intent".to_string(),
+            "owner-multi-layer-intent".to_string(),
+            "actor-1".to_string(),
+            None,
+            Some("user-service-1".to_string()),
+            Some("catalog-1".to_string()),
+            Some("llm-test".to_string()),
+            NodeIntent::Direct,
+            "bearer".to_string(),
+            CredentialClass::NyxidManagedMaster,
+            BillingMetric::Bytes,
+            Some(&billing),
+            true,
+        )
+        .with_platform_metering(true);
+        let metered = open(&db, &ctx, None).await.expect("open meter");
+        mark_forwarded(&db, &metered).await.expect("mark forwarded");
+        let finalized_at = Utc::now();
+
+        // Simulate process loss after the atomic coordinator write and before
+        // the resale row is materialized.
+        let platform = super::finalize_layer(
+            &db,
+            &ctx.billing_request_id,
+            BillingLayer::Platform,
+            42,
+            Some("model-before-detach".to_string()),
+            Some(17),
+            finalized_at,
+        )
+        .await
+        .expect("persist complete multi-layer intent")
+        .expect("platform coordinator claimed");
+        assert_eq!(platform.quantity, Some(42));
+        assert_eq!(platform.pending_resale_quantity, Some(17));
+
+        let collection =
+            db.collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME);
+        let resale_before = collection
+            .find_one(doc! {
+                "billing_request_id": &ctx.billing_request_id,
+                "layer": "resale",
+            })
+            .await
+            .expect("find resale row")
+            .expect("resale row exists");
+        assert_eq!(resale_before.quantity, None);
+
+        let recovered = crate::services::billing::reservation::recover_retryable_settlements_at(
+            &db,
+            finalized_at + chrono::Duration::seconds(31),
+        )
+        .await
+        .expect("recover multi-layer settlement intent");
+        assert_eq!(recovered.recovered, 2);
+
+        let rows: Vec<UsageMeterRow> = collection
+            .find(doc! { "billing_request_id": &ctx.billing_request_id })
+            .await
+            .expect("find recovered rows")
+            .try_collect()
+            .await
+            .expect("collect recovered rows");
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| row.released));
+        assert!(rows.iter().any(|row| {
+            row.layer == BillingLayer::Platform
+                && row.quantity == Some(42)
+                && row.pending_resale_quantity.is_none()
+        }));
+        assert!(rows.iter().any(|row| {
+            row.layer == BillingLayer::Resale
+                && row.quantity == Some(17)
+                && row.model.as_deref() == Some("model-before-detach")
+        }));
     }
 
     #[tokio::test]
