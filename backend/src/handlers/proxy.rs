@@ -1124,6 +1124,22 @@ fn compose_pre_resolved_node_ids(
     }
 }
 
+fn enforce_node_route_scope(
+    route: &mut node_routing_service::NodeRoute,
+    allowed_node_ids: &[String],
+) -> AppResult<()> {
+    if !allowed_node_ids.contains(&route.node_id) {
+        return Err(AppError::ApiKeyScopeForbidden(
+            "API key does not have access to this node".to_string(),
+        ));
+    }
+
+    route
+        .fallback_node_ids
+        .retain(|node_id| allowed_node_ids.contains(node_id));
+    Ok(())
+}
+
 async fn preflight_proxy_deny_before_resolution(
     state: &AppState,
     auth_user: &AuthUser,
@@ -1349,10 +1365,22 @@ async fn execute_proxy_inner(
         }
         if !auth_user.allow_all_nodes
             && let Some(route) = node_route.as_mut()
+            && let Err(err) = enforce_node_route_scope(route, &auth_user.allowed_node_ids)
         {
-            route
-                .fallback_node_ids
-                .retain(|nid| auth_user.allowed_node_ids.contains(nid));
+            audit_service::log_for_user(
+                state.db.clone(),
+                auth_user,
+                "proxy_request_denied",
+                Some(serde_json::json!({
+                    "service_id": service_id,
+                    "node_id": route.node_id,
+                    "path": path,
+                    "reason": err.to_string(),
+                    "denial_reason": "api_key_scope_forbidden_node",
+                    "response_status": 403,
+                })),
+            );
+            return Err(err);
         }
 
         // Per-agent credential override: if this request is via an API key and
@@ -4437,9 +4465,9 @@ mod tests {
         ALLOWED_FORWARD_HEADER_PREFIXES, ALLOWED_FORWARD_HEADERS, ALLOWED_WS_FORWARD_HEADERS,
         ConnectionUsageStats, WsPassthroughGuard, add_websocket_usage_provenance,
         apply_agent_attribution_headers, auth_kind_label, collect_forward_headers_with_prefixes,
-        compose_pre_resolved_node_ids, is_chat_completions_proxy_path, is_codex_transport_path,
-        is_ws_upgrade_request, should_enforce_runtime_approval, validate_range_header,
-        websocket_realtime_usage_enabled, websocket_resale_usage,
+        compose_pre_resolved_node_ids, enforce_node_route_scope, is_chat_completions_proxy_path,
+        is_codex_transport_path, is_ws_upgrade_request, should_enforce_runtime_approval,
+        validate_range_header, websocket_realtime_usage_enabled, websocket_resale_usage,
     };
     use crate::models::service_billing::{BillingMetric, ServiceBilling};
     use crate::models::usage_meter::CredentialClass;
@@ -4615,6 +4643,25 @@ mod tests {
         let result = compose_pre_resolved_node_ids("configured", true, vec![]);
 
         assert_eq!(result, vec!["configured".to_string()]);
+    }
+
+    #[test]
+    fn node_scope_rejects_unplanned_fallback_promoted_to_primary() {
+        let mut route = crate::services::node_routing_service::NodeRoute {
+            node_id: "new-binding".to_string(),
+            fallback_node_ids: vec!["planned-fallback".to_string()],
+        };
+
+        let error = enforce_node_route_scope(
+            &mut route,
+            &["configured".to_string(), "planned-fallback".to_string()],
+        )
+        .expect_err("an unplanned promoted node must fail closed");
+
+        assert!(matches!(
+            error,
+            crate::errors::AppError::ApiKeyScopeForbidden(_)
+        ));
     }
 
     #[test]
