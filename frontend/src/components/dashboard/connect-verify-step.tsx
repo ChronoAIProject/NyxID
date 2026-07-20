@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { AlertTriangle, Check, KeyRound, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { CopyableField } from "@/components/shared/copyable-field";
+import { StepHeader } from "@/components/dashboard/step-header";
 import { useCreateApiKey } from "@/hooks/use-api-keys";
 import {
   FIRST_PROXY_CALL_SUCCEEDED_EVENT,
@@ -64,8 +65,9 @@ function proxyBaseUrl(slug: string): string {
 /**
  * Wave-aha-1 A4+ — umbrella-view post-connect setup.
  *
- * The DialogTitle owns the umbrella state ("<service> connected").
- * This component's body morphs per phase:
+ * The inline <StepHeader> owns the umbrella state ("<service> connected")
+ * and doubles as the dialog's DialogTitle. Below it, the body morphs per
+ * phase:
  *
  *   connected      → one-line "you need an Agent Key to use this"
  *                    + Maybe later / Create Agent Key
@@ -163,6 +165,22 @@ export function ConnectVerifyStep({
 
   return (
     <div className="space-y-4 py-2">
+      {/* Umbrella heading — the dialog's real DialogTitle, rendered here in
+          the body (rather than in a DialogHeader above it) so the modal
+          reads as one continuous block. "Service" prefix is intentional per
+          Calvin's ask — it labels the noun so the quoted name isn't
+          dangling. */}
+      <StepHeader
+        slug={createdKey.catalogSlug}
+        title={
+          <>
+            Service <span className="text-muted-foreground">&ldquo;</span>
+            {createdKey.serviceName}
+            <span className="text-muted-foreground">&rdquo;</span> connected
+          </>
+        }
+        description="Connect your AI tools to this service through NyxID."
+      />
       <Body
         phase={phase}
         createdKey={createdKey}
