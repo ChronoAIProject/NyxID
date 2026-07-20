@@ -1833,6 +1833,105 @@ describe("live AG-UI frame taxonomy", () => {
     expect(history.conversation.llm_model).toBe("gpt-test");
   });
 
+  it("treats RUN_STOPPED as a terminal stop, not a truncated stream", async () => {
+    stubFetch(
+      routeCreate,
+      routeStream([
+        { type: "RUN_STARTED" },
+        {
+          type: "TEXT_MESSAGE_START",
+          textMessageStart: { messageId: "m-1", role: "assistant" },
+        },
+        {
+          type: "TEXT_MESSAGE_CONTENT",
+          textMessageContent: { delta: "Partial" },
+        },
+        { type: "RUN_STOPPED", runStopped: { reason: "operator" } },
+      ]),
+    );
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    const events = await collectTurn(transport, "Do something long");
+
+    const terminal = events[events.length - 1];
+    expect(
+      terminal?.event === "turn.completed" && {
+        status: terminal.status,
+        error: terminal.error,
+      },
+    ).toEqual({ status: "cancelled", error: null });
+  });
+
+  it("accepts body-keyed frames with no type tag", async () => {
+    // The reference client accepts either shape for every frame family; a
+    // body-keyed terminal frame falling through to UNKNOWN would leave the
+    // turn looking truncated when it actually completed.
+    stubFetch(
+      routeCreate,
+      routeStream([
+        { runStarted: { actorId: CONVERSATION_ID } },
+        { textMessageStart: { messageId: "m-1", role: "assistant" } },
+        { textMessageContent: { delta: "Body-keyed hello" } },
+        { stepStarted: { stepName: "plan" } },
+        { stepFinished: { stepName: "plan", success: true } },
+        { textMessageEnd: { messageId: "m-1" } },
+        { runFinished: {} },
+      ]),
+    );
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    const events = await collectTurn(transport, "Hello");
+
+    const terminal = events[events.length - 1];
+    expect(
+      terminal?.event === "turn.completed" && {
+        status: terminal.status,
+        error: terminal.error,
+      },
+    ).toEqual({ status: "completed", error: null });
+    const text = blockCompletions(events).find(
+      (block) => block.type === "text",
+    );
+    expect(text?.type === "text" && text.text).toBe("Body-keyed hello");
+    const runFinal = blockCompletions(events).find(
+      (block) => block.type === "run",
+    );
+    expect(runFinal?.type === "run" && runFinal.steps[0]).toMatchObject({
+      status: "done",
+      label: "plan",
+    });
+  });
+
+  it("maps top-level STEP_STARTED/STEP_FINISHED onto the run ledger", async () => {
+    stubFetch(
+      routeCreate,
+      routeStream([
+        { type: "RUN_STARTED" },
+        { type: "STEP_STARTED", stepStarted: { stepName: "collect" } },
+        {
+          type: "STEP_FINISHED",
+          stepFinished: { stepName: "collect", success: false },
+        },
+        { type: "RUN_FINISHED" },
+      ]),
+    );
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    const events = await collectTurn(transport, "Run the workflow");
+
+    const runFinal = blockCompletions(events).find(
+      (block) => block.type === "run",
+    );
+    expect(runFinal?.type === "run" && runFinal.steps[0]).toMatchObject({
+      status: "failed",
+      label: "collect",
+    });
+    expect(runFinal?.type === "run" && runFinal.state).toBe("failed");
+  });
+
   it("maps workflow step customs onto the run ledger", async () => {
     stubFetch(
       routeCreate,

@@ -160,7 +160,15 @@ interface AgUiFrame {
   readonly usage?: UsagePayload;
   readonly mediaContent?: MediaPayload;
   readonly custom?: CustomEnvelope;
+  readonly runStarted?: Record<string, unknown>;
+  readonly runFinished?: Record<string, unknown>;
+  readonly runStopped?: { readonly reason?: string };
   readonly runError?: { readonly code?: string; readonly message?: string };
+  readonly stepStarted?: { readonly stepName?: string };
+  readonly stepFinished?: {
+    readonly stepName?: string;
+    readonly success?: boolean;
+  };
   readonly error?: { readonly code?: string; readonly message?: string };
   readonly message?: string;
 }
@@ -1291,6 +1299,38 @@ export class AevatarAssistantTransport implements AssistantTransport {
         this.finishTurn(conversationId, run, "completed", null);
         return;
       }
+      case "RUN_STOPPED": {
+        // Server-side stop (operator, policy, or an upstream cancel) —
+        // terminal, and NOT a truncated stream: reporting it as one would
+        // tell the user their reply may still be coming when it will not.
+        this.closeOpenMessage(conversationId, run);
+        this.finalizeActivity(conversationId, run, "cancelled");
+        this.emit(conversationId, run, {
+          cursor: this.nextCursor(run),
+          event: "turn.status",
+          turn_id: run.turnId,
+          status: "cancelled",
+        });
+        this.finishTurn(conversationId, run, "cancelled", null);
+        return;
+      }
+      case "STEP_STARTED": {
+        const name = frame.stepStarted?.stepName ?? "workflow-step";
+        this.startRunStep(conversationId, run, name, name);
+        return;
+      }
+      case "STEP_FINISHED": {
+        const step = frame.stepFinished ?? {};
+        const name = step.stepName ?? "workflow-step";
+        this.finishRunStep(
+          conversationId,
+          run,
+          name,
+          step.success !== false,
+          step.success === false ? "Step failed" : "Completed",
+        );
+        return;
+      }
       case "CUSTOM": {
         this.handleCustomFrame(conversationId, run, frame.custom ?? {});
         return;
@@ -1303,9 +1343,21 @@ export class AevatarAssistantTransport implements AssistantTransport {
     }
   }
 
-  /** Frame type, tolerating both `type`-tagged and body-keyed variants. */
+  /**
+   * Frame type, tolerating both `type`-tagged and body-keyed variants.
+   * The reference client accepts either shape for every frame family, so
+   * the fallbacks below mirror its list exactly — a body-keyed
+   * `{runFinished:{}}` that fell through to UNKNOWN would leave the turn
+   * looking truncated when it actually completed.
+   */
   private frameType(frame: AgUiFrame): string {
     if (frame.type) return frame.type.toUpperCase();
+    if (frame.runStarted) return "RUN_STARTED";
+    if (frame.runFinished) return "RUN_FINISHED";
+    if (frame.runStopped) return "RUN_STOPPED";
+    if (frame.runError) return "RUN_ERROR";
+    if (frame.stepStarted) return "STEP_STARTED";
+    if (frame.stepFinished) return "STEP_FINISHED";
     if (frame.textMessageStart) return "TEXT_MESSAGE_START";
     if (frame.textMessageContent) return "TEXT_MESSAGE_CONTENT";
     if (frame.textMessageEnd) return "TEXT_MESSAGE_END";
@@ -1315,7 +1367,6 @@ export class AevatarAssistantTransport implements AssistantTransport {
     if (frame.authorizationRequired) return "AUTHORIZATION_REQUIRED";
     if (frame.usage) return "USAGE";
     if (frame.mediaContent) return "MEDIA_CONTENT";
-    if (frame.runError) return "RUN_ERROR";
     if (frame.custom) return "CUSTOM";
     return "UNKNOWN";
   }
