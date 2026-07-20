@@ -7,7 +7,10 @@ import {
 } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { ApiError } from "@/lib/api-client";
-import { AssistantTurnActiveError } from "@/lib/assistant/errors";
+import {
+  AssistantTurnActiveError,
+  AssistantTurnCancelledError,
+} from "@/lib/assistant/errors";
 import {
   useApprovalRequests,
   useNotificationSettings,
@@ -228,9 +231,81 @@ export function useCreateConversation() {
   });
 }
 
+/**
+ * Delete a conversation (the server runs the composite actor + history-row
+ * delete). Cache surgery instead of invalidation: the transport's local
+ * mirror already dropped the row, so re-reading it is authoritative and a
+ * refetch cannot race the upstream history materialization back in.
+ */
+export function useDeleteConversation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (conversationId: string) =>
+      assistantTransport.deleteConversation(conversationId),
+    onSuccess: async (_result, conversationId) => {
+      activeHandles.delete(conversationId);
+      queryClient.removeQueries({
+        queryKey: assistantKeys.history(conversationId),
+      });
+      queryClient.removeQueries({
+        queryKey: assistantKeys.turn(conversationId),
+      });
+      const conversations = await assistantTransport.listConversations();
+      queryClient.setQueryData<Conversation[]>(
+        assistantKeys.conversations,
+        () => conversations,
+      );
+    },
+  });
+}
+
 export interface SentMessage {
   readonly conversationId: string;
   readonly handle: TurnHandle;
+}
+
+/**
+ * Per-stream turn-event pump: projects transport events into the query
+ * cache. One instance per streamed turn — sends and approval continuations
+ * alike — so its cursor guard is scoped to that stream: a rejected
+ * concurrent send never touches it, and at-least-once duplicates (e.g. a
+ * late "running") cannot regress terminal state.
+ */
+function createTurnEventPump(
+  queryClient: QueryClient,
+  targetId: string,
+): (event: TurnEvent) => void {
+  let lastSeenCursor = 0;
+  return (event) => {
+    if (event.cursor <= lastSeenCursor) return;
+    lastSeenCursor = event.cursor;
+    const turn = turnFromEvent(event);
+    if (turn) {
+      queryClient.setQueryData<ActiveTurn | null>(
+        assistantKeys.turn(targetId),
+        () => turn,
+      );
+    }
+    if (event.event === "turn.completed") {
+      activeHandles.delete(targetId);
+      // The mutation resolved when the stream STARTED, so failures
+      // after that (pre-SSE rejection, truncated stream, RUN_ERROR)
+      // never reject `mutateAsync` — without this toast they exist
+      // only as cached turn state nothing renders, and the chat
+      // looks dead again. Stable id: at-least-once event delivery
+      // must not stack duplicates.
+      if (event.status === "failed" && event.error) {
+        toast.error("The assistant reply failed", {
+          id: `assistant-turn-failed-${event.turn_id}`,
+          description: event.error.message,
+        });
+      }
+    }
+    // Swallow projection failures: after a delete races a cancel-driven
+    // event, the history read legitimately rejects (tombstoned id) and
+    // must not surface as an unhandled rejection.
+    projectTransportState(queryClient, targetId).catch(() => undefined);
+  };
 }
 
 // Single-flight guard for the empty-state auto-create: two sends racing in
@@ -262,40 +337,10 @@ export function useSendMessage(conversationId: string | undefined) {
         await projectTransportState(queryClient, target);
       }
       const targetId = target;
-      // Last-seen per-turn cursor, scoped to THIS send's event stream: a
-      // rejected concurrent send never touches it, and at-least-once
-      // duplicates (e.g. a late "running") cannot regress terminal state.
-      let lastSeenCursor = 0;
       const handle = assistantTransport.sendMessage(
         targetId,
         content,
-        (event) => {
-          if (event.cursor <= lastSeenCursor) return;
-          lastSeenCursor = event.cursor;
-          const turn = turnFromEvent(event);
-          if (turn) {
-            queryClient.setQueryData<ActiveTurn | null>(
-              assistantKeys.turn(targetId),
-              () => turn,
-            );
-          }
-          if (event.event === "turn.completed") {
-            activeHandles.delete(targetId);
-            // The mutation resolved when the stream STARTED, so failures
-            // after that (pre-SSE rejection, truncated stream, RUN_ERROR)
-            // never reject `mutateAsync` — without this toast they exist
-            // only as cached turn state nothing renders, and the chat
-            // looks dead again. Stable id: at-least-once event delivery
-            // must not stack duplicates.
-            if (event.status === "failed" && event.error) {
-              toast.error("The assistant reply failed", {
-                id: `assistant-turn-failed-${event.turn_id}`,
-                description: event.error.message,
-              });
-            }
-          }
-          void projectTransportState(queryClient, targetId);
-        },
+        createTurnEventPump(queryClient, targetId),
       );
       activeHandles.set(targetId, handle);
       await projectTransportState(queryClient, targetId);
@@ -342,7 +387,10 @@ export function useCancelTurn(conversationId: string | undefined) {
   return useMutation({
     mutationFn: async (): Promise<void> => {
       if (!conversationId) return;
-      activeHandles.get(conversationId)?.cancel();
+      // Transport-level lookup, not the handle registry: an approval
+      // continuation's handle only registers after its response headers
+      // arrive, and Stop must abort a request hung before that.
+      assistantTransport.cancelActiveTurn(conversationId);
       activeHandles.delete(conversationId);
       await projectTransportState(queryClient, conversationId);
     },
@@ -360,12 +408,33 @@ export function useDecideApproval(conversationId: string | undefined) {
       readonly approved: boolean;
     }): Promise<void> => {
       if (!conversationId) throw new Error("Select a conversation first.");
-      await assistantTransport.decideApproval(
+      // On the live contract the approve endpoint streams an SSE
+      // continuation of the run; the pump projects its events and the
+      // handle makes the stop button work during it.
+      const handle = await assistantTransport.decideApproval(
         conversationId,
         blockId,
         approved,
+        createTurnEventPump(queryClient, conversationId),
       );
+      if (handle) activeHandles.set(conversationId, handle);
       await projectTransportState(queryClient, conversationId);
+    },
+    // Without this toast a failed approve POST (or an active-turn
+    // rejection) is invisible: the buttons just re-enable and nothing
+    // happens. A user-initiated Stop is an expected outcome, not a
+    // delivery failure — no toast.
+    onError: (error) => {
+      if (error instanceof AssistantTurnCancelledError) return;
+      toast.error("Approval was not delivered", {
+        id: "assistant-approval-failed",
+        description:
+          error instanceof AssistantTurnActiveError
+            ? "Wait for the current reply to finish, then decide again."
+            : error instanceof Error && error.message
+              ? error.message
+              : "The assistant backend did not respond. Try again.",
+      });
     },
   });
 }
