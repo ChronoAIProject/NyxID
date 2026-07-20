@@ -21,6 +21,7 @@ import type {
   TurnEvent,
   TurnHandle,
   TurnReducerState,
+  TurnStatus,
 } from "@/types/assistant";
 import { isTurnActive } from "@/types/assistant";
 
@@ -79,6 +80,12 @@ const MAX_MEDIA_DATA_CHARS = 8_000_000;
 
 const MAX_TOOL_SUMMARY_CHARS = 160;
 
+// A POST can be retried only because `clientRequestId` makes Aevatar an
+// idempotent receiver. Keep the budget deliberately small: one replay covers
+// a dropped delivery without hiding a persistently unhealthy transport.
+const STREAM_DELIVERY_ATTEMPTS = 2;
+const RETRYABLE_STREAM_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
+
 /** AG-UI frame vocabulary observed on `nyxid-chat/conversations/{id}:stream`. */
 interface ToolCallPayload {
   readonly toolCallId?: string;
@@ -107,14 +114,15 @@ interface ToolApprovalPayload {
   readonly stepId?: string;
 }
 
-interface AuthorizationPayload {
-  readonly serviceId?: string;
-  readonly serviceSlug?: string;
-  readonly service_slug?: string;
-  readonly serviceLabel?: string;
-  readonly resource?: string;
-  readonly resourceUri?: string;
-  readonly message?: string;
+type AuthorizationReasonCode =
+  | "NYXID_SERVICE_NOT_CONNECTED"
+  | "NYXID_UNAUTHORIZED";
+
+interface AuthorizationBlocker {
+  readonly serviceSlug: string;
+  readonly serviceLabel: string;
+  readonly reasonCode: AuthorizationReasonCode;
+  readonly safeMessage: string;
 }
 
 interface UsagePayload {
@@ -147,6 +155,7 @@ interface CustomEnvelope {
 interface AgUiFrame {
   readonly type?: string;
   readonly actorId?: string;
+  readonly turnId?: string;
   readonly textMessageStart?: {
     readonly messageId?: string;
     readonly role?: string;
@@ -156,12 +165,18 @@ interface AgUiFrame {
   readonly toolCallStart?: ToolCallPayload;
   readonly toolCallEnd?: ToolCallPayload;
   readonly toolApprovalRequest?: ToolApprovalPayload;
-  readonly authorizationRequired?: AuthorizationPayload;
+  readonly authorizationRequired?: Record<string, unknown>;
   readonly usage?: UsagePayload;
   readonly mediaContent?: MediaPayload;
   readonly custom?: CustomEnvelope;
-  readonly runStarted?: Record<string, unknown>;
-  readonly runFinished?: Record<string, unknown>;
+  readonly runStarted?: {
+    readonly runId?: string;
+    readonly turnId?: string;
+  };
+  readonly runFinished?: {
+    readonly runId?: string;
+    readonly status?: string;
+  };
   readonly runStopped?: { readonly reason?: string };
   readonly runError?: { readonly code?: string; readonly message?: string };
   readonly stepStarted?: { readonly stepName?: string };
@@ -169,8 +184,6 @@ interface AgUiFrame {
     readonly stepName?: string;
     readonly success?: boolean;
   };
-  readonly error?: { readonly code?: string; readonly message?: string };
-  readonly message?: string;
 }
 
 /** Batched completion inside `aevatar.raw.observed` (reference `protocol.js`). */
@@ -222,17 +235,14 @@ interface AevatarHistoryEntry {
   readonly role?: string;
   readonly content?: string | null;
   readonly timestamp?: number;
+  readonly status?: unknown;
+  readonly error?: unknown;
+  readonly turnId?: unknown;
 }
 
 interface StoredConversation {
   conversation: Conversation;
   turnState: TurnReducerState;
-  /**
-   * Aevatar run-session correlation id, minted once per conversation and
-   * sent on every `:stream` body (the reference client keeps one session
-   * per conversation; the field is optional upstream).
-   */
-  sessionId?: string;
 }
 
 interface RunStepState {
@@ -246,7 +256,9 @@ interface RunStepState {
 }
 
 interface RunningTurn {
-  readonly turnId: string;
+  readonly clientRequestId: string;
+  turnId: string | null;
+  turnAnnounced: boolean;
   readonly controller: AbortController;
   readonly onEvent: (event: TurnEvent) => void;
   cursor: number;
@@ -271,7 +283,32 @@ interface RunningTurn {
   promptedConnectSlugs: Map<string, string>;
   waitingForApproval: boolean;
   watchdog: ReturnType<typeof setTimeout> | null;
+  deliveryStarted: boolean;
+  deliveryTerminal:
+    | { readonly kind: "finished"; readonly status: "completed" | "blocked" }
+    | {
+        readonly kind: "error";
+        readonly error: { readonly code: string; readonly message: string };
+      }
+    | { readonly kind: "stopped" }
+    | null;
+  deliveryTerminalCount: number;
+  deliveryProtocolError: {
+    readonly code: string;
+    readonly message: string;
+  } | null;
 }
+
+type StreamConsumptionResult =
+  | { readonly kind: "settled" }
+  | {
+      readonly kind: "retryable";
+      readonly error: { code: string; message: string };
+    }
+  | {
+      readonly kind: "protocol_error";
+      readonly error: { code: string; message: string };
+    };
 
 function newId(prefix: string): string {
   return `${prefix}-${crypto.randomUUID()}`;
@@ -289,6 +326,59 @@ function isoFromEpochMs(epochMs: number | undefined, fallback: string): string {
   return new Date(epochMs).toISOString();
 }
 
+const OPAQUE_TURN_ID_PATTERN = /^[A-Za-z0-9._:-]{1,256}$/;
+
+function safeTurnId(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim();
+  return OPAQUE_TURN_ID_PATTERN.test(normalized) ? normalized : null;
+}
+
+function safeErrorCode(value: unknown, fallback: string): string {
+  return typeof value === "string" && /^[A-Za-z0-9._:-]{1,128}$/.test(value)
+    ? value
+    : fallback;
+}
+
+function safeErrorMessage(value: unknown, fallback: string): string {
+  if (typeof value !== "string" || !value.trim()) return fallback;
+  return redactDisplayText(value.trim()).slice(0, 1_024);
+}
+
+function historyStatus(value: unknown): TurnStatus | undefined {
+  switch (value) {
+    case "running":
+    case "waiting":
+    case "blocked":
+    case "completed":
+    case "failed":
+    case "cancelled":
+      return value;
+    default:
+      return undefined;
+  }
+}
+
+function historyError(
+  value: unknown,
+):
+  | string
+  | { readonly code: string; readonly message: string }
+  | null
+  | undefined {
+  if (value === null) return null;
+  if (typeof value === "string") {
+    return safeErrorMessage(value, "The assistant turn failed.");
+  }
+  if (typeof value !== "object" || value === null) return undefined;
+  const record = value as Record<string, unknown>;
+  if (typeof record["message"] !== "string") return undefined;
+  return {
+    code: safeErrorCode(record["code"], "history_error"),
+    message: safeErrorMessage(record["message"], "The assistant turn failed."),
+  };
+}
+
 function historyEntryToMessage(
   entry: AevatarHistoryEntry,
   index: number,
@@ -296,14 +386,18 @@ function historyEntryToMessage(
   if (entry.role !== "user" && entry.role !== "assistant") return null;
   const id = entry.id ?? `history-${String(index)}`;
   const text = entry.content ?? "";
+  const status = historyStatus(entry.status);
+  const error = historyError(entry.error);
+  const turnId = safeTurnId(entry.turnId);
   return {
     id,
     role: entry.role,
     schema_version: 1,
-    blocks: text
-      ? [{ type: "text", block_id: `${id}-text`, text }]
-      : [],
+    blocks: text ? [{ type: "text", block_id: `${id}-text`, text }] : [],
     created_at: isoFromEpochMs(entry.timestamp, new Date(0).toISOString()),
+    ...(turnId ? { turnId } : {}),
+    ...(status ? { status } : {}),
+    ...(error !== undefined ? { error } : {}),
   };
 }
 
@@ -421,58 +515,6 @@ export function summarizeToolResult(value: unknown): string {
     : compact;
 }
 
-// ---------------------------------------------------------------------------
-// Authorization-failure sniffing (reference `findServiceAuthorizationFailure`):
-// belt-and-braces below the dedicated AUTHORIZATION_REQUIRED frame — some
-// runs only surface the gap inside a tool-result error string.
-// ---------------------------------------------------------------------------
-
-const AUTHORIZATION_FAILURE_MARKERS = [
-  "authorization_required",
-  "service_not_authorized",
-  "service_access_required",
-  "service authorization required",
-  "not authorized for this service",
-  "not authorized for service",
-  "does not have access to this service",
-  "does not have access to service",
-  "service access is not granted",
-  "scoped api keys must use configured services",
-  "invalid_target",
-] as const;
-
-export function findServiceAuthorizationFailure(
-  value: unknown,
-): { serviceSlug: string; message: string } | null {
-  if (value === undefined || value === null || value === "") return null;
-  let text: string;
-  try {
-    text = (typeof value === "string" ? value : JSON.stringify(value))
-      .toLowerCase();
-  } catch {
-    return null;
-  }
-  if (!AUTHORIZATION_FAILURE_MARKERS.some((marker) => text.includes(marker))) {
-    return null;
-  }
-  let explicitSlug = "";
-  if (typeof value === "object" && value !== null) {
-    const record = value as Record<string, unknown>;
-    const candidate = record["serviceSlug"] ?? record["service_slug"];
-    if (typeof candidate === "string") explicitSlug = candidate;
-  }
-  const slug =
-    explicitSlug.trim().toLowerCase() ||
-    (/(?:service|slug)[\s"':=]+([a-z0-9][a-z0-9-]{1,80})/.exec(text)?.[1] ??
-      "");
-  return {
-    serviceSlug: slug,
-    message: slug
-      ? `This request needs a working ${slug} connection. Connect it in NyxID, then ask again.`
-      : "This request needs a NyxID service that is not connected yet. Connect it, then ask again.",
-  };
-}
-
 /**
  * Unwrap a protobuf-`Any`-shaped custom payload (reference `unpackAny`):
  * either `{value: {...}}` or the object itself minus its `@type` marker.
@@ -487,6 +529,43 @@ function unpackAny(payload: unknown): Record<string, unknown> {
   const clone: Record<string, unknown> = { ...record };
   delete clone["@type"];
   return clone;
+}
+
+/**
+ * Accept only the published NyxID blocker contract. Tool prose, generic
+ * authorization frames, and unknown reason codes remain ordinary failures.
+ */
+function parseAuthorizationBlocker(
+  payload: unknown,
+): AuthorizationBlocker | null {
+  const record = unpackAny(payload);
+  const reasonCode = record["reasonCode"];
+  if (
+    reasonCode !== "NYXID_SERVICE_NOT_CONNECTED" &&
+    reasonCode !== "NYXID_UNAUTHORIZED"
+  ) {
+    return null;
+  }
+  const rawSlug = record["serviceSlug"];
+  if (typeof rawSlug !== "string") return null;
+  const serviceSlug = rawSlug.trim().toLowerCase();
+  if (!/^[a-z0-9][a-z0-9-]{0,127}$/.test(serviceSlug)) return null;
+
+  const rawLabel = record["serviceLabel"];
+  const rawMessage = record["safeMessage"];
+  const serviceLabel =
+    typeof rawLabel === "string" && rawLabel.trim()
+      ? safeErrorMessage(rawLabel, humanizeSlug(serviceSlug)).slice(0, 128)
+      : humanizeSlug(serviceSlug);
+  const safeMessage =
+    typeof rawMessage === "string" && rawMessage.trim()
+      ? safeErrorMessage(
+          rawMessage,
+          `Connect or reauthorize ${serviceSlug} to continue.`,
+        )
+      : `Connect or reauthorize ${serviceSlug} to continue.`;
+
+  return { serviceSlug, serviceLabel, reasonCode, safeMessage };
 }
 
 function humanizeSlug(slug: string): string {
@@ -674,23 +753,17 @@ export class AevatarAssistantTransport implements AssistantTransport {
     };
     stored.conversation = {
       ...stored.conversation,
-      title: firstMessage
-        ? normalized.slice(0, 40)
-        : stored.conversation.title,
+      title: firstMessage ? normalized.slice(0, 40) : stored.conversation.title,
       last_message_at: createdAt,
     };
 
     const run = this.newRun(onEvent);
     this.running.set(conversationId, run);
-    this.emit(conversationId, run, {
-      cursor: this.nextCursor(run),
-      event: "turn.status",
-      turn_id: run.turnId,
-      status: "running",
-    });
     void this.streamTurn(conversationId, run, normalized);
     return {
-      turnId: run.turnId,
+      get turnId() {
+        return run.turnId;
+      },
       cancel: () => {
         this.cancelTurn(conversationId, run);
       },
@@ -751,18 +824,15 @@ export class AevatarAssistantTransport implements AssistantTransport {
     // active-turn guards and interleave two streams into one reducer. The
     // reservation's controller doubles as the fetch signal so Stop can
     // abort an approve request hung before headers.
-    const run = this.newRun(onEvent ?? noopEvent);
+    const run = this.newRun(
+      onEvent ?? noopEvent,
+      active?.turnId ?? stored.turnState.activeTurn?.turnId ?? null,
+    );
     // Continuation cursors continue past the previous turn's: the reducer
     // and any still-subscribed pump dedup by strictly-increasing cursor.
     // (Read lastCursor only after pauseForApproval settled the prior turn.)
     run.cursor = stored.turnState.lastCursor;
     this.running.set(conversationId, run);
-    this.emit(conversationId, run, {
-      cursor: this.nextCursor(run),
-      event: "turn.status",
-      turn_id: run.turnId,
-      status: "running",
-    });
 
     let response: Response;
     try {
@@ -778,7 +848,6 @@ export class AevatarAssistantTransport implements AssistantTransport {
           body: JSON.stringify({
             requestId: card.approval_request_id,
             approved,
-            ...(stored.sessionId ? { sessionId: stored.sessionId } : {}),
           }),
           signal: run.controller.signal,
         },
@@ -863,7 +932,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
 
     const contentType = response.headers.get("content-type") ?? "";
     if (response.body && contentType.includes("text/event-stream")) {
-      void this.consumeTurnStream(conversationId, run, response);
+      void this.consumeApprovalContinuation(conversationId, run, response);
     } else {
       // Older backend acknowledging with JSON: nothing further will stream,
       // and there is no live continuation for the caller to hold a handle
@@ -873,7 +942,9 @@ export class AevatarAssistantTransport implements AssistantTransport {
       return null;
     }
     return {
-      turnId: run.turnId,
+      get turnId() {
+        return run.turnId;
+      },
       cancel: () => {
         this.cancelTurn(conversationId, run);
       },
@@ -917,9 +988,6 @@ export class AevatarAssistantTransport implements AssistantTransport {
     this.conversations.set(id, {
       conversation,
       turnState: existing?.turnState ?? EMPTY_TURN_STATE,
-      // Reprojection must not re-mint the run-session id: one session per
-      // conversation is the reference contract.
-      sessionId: existing?.sessionId,
     });
   }
 
@@ -964,17 +1032,19 @@ export class AevatarAssistantTransport implements AssistantTransport {
         activeTurn: existing?.turnState.activeTurn ?? null,
         lastCursor: existing?.turnState.lastCursor ?? 0,
       },
-      // Post-turn history reloads run through here; losing the session id
-      // would silently start a new upstream run-session every turn.
-      sessionId: existing?.sessionId,
     };
     this.conversations.set(conversationId, stored);
     return stored;
   }
 
-  private newRun(onEvent: (event: TurnEvent) => void): RunningTurn {
+  private newRun(
+    onEvent: (event: TurnEvent) => void,
+    turnId: string | null = null,
+  ): RunningTurn {
     return {
-      turnId: newId("turn"),
+      clientRequestId: crypto.randomUUID(),
+      turnId,
+      turnAnnounced: false,
       controller: new AbortController(),
       onEvent,
       cursor: 0,
@@ -993,6 +1063,10 @@ export class AevatarAssistantTransport implements AssistantTransport {
       promptedConnectSlugs: new Map(),
       waitingForApproval: false,
       watchdog: null,
+      deliveryStarted: false,
+      deliveryTerminal: null,
+      deliveryTerminalCount: 0,
+      deliveryProtocolError: null,
     };
   }
 
@@ -1028,47 +1102,83 @@ export class AevatarAssistantTransport implements AssistantTransport {
     run: RunningTurn,
     prompt: string,
   ): Promise<void> {
-    try {
-      const stored = this.conversations.get(conversationId);
-      const sessionId = stored && (stored.sessionId ??= crypto.randomUUID());
-      // Hand-rolled fetch (not `apiClient`): the response is an SSE stream,
-      // and the endpoint 415s without an explicit JSON content type.
-      const response = await fetch(
-        `/api/v1${ASSISTANT_PREFIX}/conversations/${conversationId}/stream`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Accept: "text/event-stream",
+    let finalFailure = {
+      code: "network_error",
+      message: "The assistant stream could not be reached. Try again.",
+    };
+
+    for (let attempt = 0; attempt < STREAM_DELIVERY_ATTEMPTS; attempt += 1) {
+      this.resetDeliveryState(run);
+      let response: Response;
+      try {
+        // Hand-rolled fetch (not `apiClient`): the response is an SSE stream,
+        // and the endpoint 415s without an explicit JSON content type.
+        response = await fetch(
+          `/api/v1${ASSISTANT_PREFIX}/conversations/${conversationId}/stream`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Accept: "text/event-stream",
+            },
+            credentials: "include",
+            body: JSON.stringify({
+              prompt,
+              clientRequestId: run.clientRequestId,
+            }),
+            signal: run.controller.signal,
           },
-          credentials: "include",
-          body: JSON.stringify(sessionId ? { prompt, sessionId } : { prompt }),
-          signal: run.controller.signal,
-        },
-      );
-      if (!response.ok || !response.body) {
-        const bodyText = await response.text().catch(() => "");
-        this.finishTurn(
-          conversationId,
-          run,
-          "failed",
-          streamStartError(response.status, bodyText),
         );
-        return;
+      } catch {
+        // The cancel path aborts the fetch after emitting its own terminal
+        // events; an abort here is not a failure.
+        if (run.finished || run.controller.signal.aborted) return;
+        if (attempt + 1 < STREAM_DELIVERY_ATTEMPTS) continue;
+        break;
       }
-      await this.consumeTurnStream(conversationId, run, response);
-    } catch (error) {
-      // The cancel path aborts the fetch after emitting its own terminal
-      // events; an abort here is not a failure.
-      if (run.finished || run.controller.signal.aborted) return;
-      this.closeOpenMessage(conversationId, run);
-      this.finalizeActivity(conversationId, run, "failed");
-      this.finishTurn(conversationId, run, "failed", {
-        code: "network_error",
-        message:
-          error instanceof Error ? error.message : "The stream failed.",
-      });
+
+      if (!response.ok) {
+        if (
+          RETRYABLE_STREAM_STATUSES.has(response.status) &&
+          attempt + 1 < STREAM_DELIVERY_ATTEMPTS
+        ) {
+          await response.body?.cancel().catch(() => undefined);
+          continue;
+        }
+        const bodyText = await response.text().catch(() => "");
+        finalFailure = streamStartError(response.status, bodyText);
+        break;
+      }
+
+      if (!response.body) {
+        finalFailure = {
+          code: "stream_closed",
+          message: "The assistant stream closed before it started.",
+        };
+        if (attempt + 1 < STREAM_DELIVERY_ATTEMPTS) continue;
+        break;
+      }
+
+      const result = await this.consumeTurnStream(
+        conversationId,
+        run,
+        response,
+      );
+      if (result.kind === "settled" || run.finished) return;
+      finalFailure = result.error;
+      if (
+        result.kind === "retryable" &&
+        attempt + 1 < STREAM_DELIVERY_ATTEMPTS
+      ) {
+        continue;
+      }
+      break;
     }
+
+    if (run.finished || run.controller.signal.aborted) return;
+    this.closeOpenMessage(conversationId, run);
+    this.finalizeActivity(conversationId, run, "failed");
+    this.finishTurn(conversationId, run, "failed", finalFailure);
   }
 
   /**
@@ -1080,16 +1190,22 @@ export class AevatarAssistantTransport implements AssistantTransport {
     conversationId: string,
     run: RunningTurn,
     response: Response,
-  ): Promise<void> {
+  ): Promise<StreamConsumptionResult> {
     if (!response.body) {
-      this.finishTurn(conversationId, run, "completed", null);
-      return;
+      return {
+        kind: "retryable",
+        error: {
+          code: "stream_closed",
+          message: "The assistant stream closed before it started.",
+        },
+      };
     }
     try {
       this.armWatchdog(conversationId, run);
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
+      let reachedTerminal = false;
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -1098,47 +1214,87 @@ export class AevatarAssistantTransport implements AssistantTransport {
         buffer = rest;
         for (const payload of payloads) {
           this.handleAgUiFrame(conversationId, run, payload);
-          if (run.finished) return;
+          if (run.finished) return { kind: "settled" };
+          if (run.deliveryProtocolError) break;
+          if (run.deliveryTerminal) reachedTerminal = true;
+        }
+        if (reachedTerminal) break;
+      }
+      if (!reachedTerminal) {
+        // The final frame may arrive without a trailing blank line; flush it
+        // before judging how the stream ended.
+        buffer += decoder.decode();
+        for (const payload of flushSseBuffer(buffer)) {
+          this.handleAgUiFrame(conversationId, run, payload);
+          if (run.finished) return { kind: "settled" };
+          if (run.deliveryProtocolError) break;
         }
       }
-      // The final frame may arrive without a trailing blank line; flush it
-      // before judging how the stream ended.
-      buffer += decoder.decode();
-      for (const payload of flushSseBuffer(buffer)) {
-        this.handleAgUiFrame(conversationId, run, payload);
-        if (run.finished) return;
+
+      if (run.deliveryProtocolError) {
+        await reader.cancel().catch(() => undefined);
+        return { kind: "protocol_error", error: run.deliveryProtocolError };
       }
-      this.closeOpenMessage(conversationId, run);
+      if (run.deliveryTerminal) {
+        await reader.cancel().catch(() => undefined);
+        this.settleDeliveryTerminal(conversationId, run, run.deliveryTerminal);
+        return { kind: "settled" };
+      }
+
       if (run.waitingForApproval) {
         // EOF at a human gate is a pause, not a truncation: Aevatar may
         // close an idle stream while an approval waits (PRD §3.4). The card
         // stays actionable; the decision starts the continuation stream.
+        this.closeOpenMessage(conversationId, run);
         this.finalizeActivity(conversationId, run, "waiting");
         this.finishTurn(conversationId, run, "completed", null);
-        return;
+        return { kind: "settled" };
       }
       // EOF without RUN_FINISHED / RUN_ERROR is a truncated run (proxy idle
       // kill, upstream drop), not a success. Settle the partial state and
       // report it; the server-side run may still finish, in which case the
       // full reply surfaces on the next history reload.
-      this.finalizeActivity(conversationId, run, "failed");
-      this.finishTurn(conversationId, run, "failed", {
-        code: "stream_closed",
-        message:
-          "The stream ended before the assistant finished. The reply may be incomplete — it will appear in full once the conversation reloads.",
-      });
-    } catch (error) {
-      if (run.finished || run.controller.signal.aborted) return;
-      this.closeOpenMessage(conversationId, run);
-      this.finalizeActivity(conversationId, run, "failed");
-      this.finishTurn(conversationId, run, "failed", {
-        code: "network_error",
-        message:
-          error instanceof Error ? error.message : "The stream failed.",
-      });
+      return {
+        kind: "retryable",
+        error: {
+          code: "stream_closed",
+          message:
+            "The stream ended before the assistant finished. The reply may be incomplete; it will appear in full once the conversation reloads.",
+        },
+      };
+    } catch {
+      if (run.finished || run.controller.signal.aborted) {
+        return { kind: "settled" };
+      }
+      return {
+        kind: "retryable",
+        error: {
+          code: "network_error",
+          message: "The assistant stream was interrupted. Try again.",
+        },
+      };
     } finally {
       this.clearWatchdog(run);
     }
+  }
+
+  private async consumeApprovalContinuation(
+    conversationId: string,
+    run: RunningTurn,
+    response: Response,
+  ): Promise<void> {
+    const result = await this.consumeTurnStream(conversationId, run, response);
+    if (result.kind === "settled" || run.finished) return;
+    this.closeOpenMessage(conversationId, run);
+    this.finalizeActivity(conversationId, run, "failed");
+    this.finishTurn(conversationId, run, "failed", result.error);
+  }
+
+  private resetDeliveryState(run: RunningTurn): void {
+    run.deliveryStarted = false;
+    run.deliveryTerminal = null;
+    run.deliveryTerminalCount = 0;
+    run.deliveryProtocolError = null;
   }
 
   // -------------------------------------------------------------------------
@@ -1194,10 +1350,62 @@ export class AevatarAssistantTransport implements AssistantTransport {
       this.armWatchdog(conversationId, run);
     }
 
+    if (
+      run.deliveryTerminal &&
+      !isKeepalive &&
+      type !== "RUN_FINISHED" &&
+      type !== "RUN_ERROR" &&
+      type !== "RUN_STOPPED"
+    ) {
+      run.deliveryProtocolError = {
+        code: "stream_protocol_error",
+        message: "The assistant stream sent data after its terminal frame.",
+      };
+      return;
+    }
+
+    if (type !== "RUN_STARTED" && !isKeepalive && !run.deliveryStarted) {
+      run.deliveryProtocolError ??= {
+        code: "stream_protocol_error",
+        message: "The assistant stream sent data before identifying the turn.",
+      };
+      return;
+    }
+
     switch (type) {
-      case "RUN_STARTED":
-        // Context only (actorId echoes the conversation); nothing renders.
+      case "RUN_STARTED": {
+        const authoritativeTurnId = safeTurnId(
+          frame.turnId ?? frame.runStarted?.turnId ?? frame.runStarted?.runId,
+        );
+        if (run.deliveryStarted || !authoritativeTurnId) {
+          run.deliveryProtocolError ??= {
+            code: "stream_protocol_error",
+            message: run.deliveryStarted
+              ? "The assistant stream started the same delivery more than once."
+              : "The assistant stream did not provide a valid turn id.",
+          };
+          return;
+        }
+        run.deliveryStarted = true;
+        if (run.turnId && run.turnId !== authoritativeTurnId) {
+          run.deliveryProtocolError = {
+            code: "stream_protocol_error",
+            message: "The assistant replay changed the turn id.",
+          };
+          return;
+        }
+        if (!run.turnId) run.turnId = authoritativeTurnId;
+        if (!run.turnAnnounced) {
+          run.turnAnnounced = true;
+          this.emit(conversationId, run, {
+            cursor: this.nextCursor(run),
+            event: "turn.status",
+            turn_id: authoritativeTurnId,
+            status: "running",
+          });
+        }
         return;
+      }
       case "TEXT_MESSAGE_START": {
         const messageId =
           frame.textMessageStart?.messageId ?? newId("assistant-message");
@@ -1260,11 +1468,9 @@ export class AevatarAssistantTransport implements AssistantTransport {
         return;
       }
       case "AUTHORIZATION_REQUIRED": {
-        this.addConnectCard(
-          conversationId,
-          run,
-          frame.authorizationRequired ?? {},
-        );
+        // Legacy/generic authorization signals are intentionally not blockers.
+        // Only `CUSTOM nyxid.authorization.required` carries NyxID's exact
+        // credential classification contract.
         return;
       }
       case "USAGE": {
@@ -1276,42 +1482,44 @@ export class AevatarAssistantTransport implements AssistantTransport {
         return;
       }
       case "RUN_ERROR": {
-        const error = frame.runError ?? frame.error;
-        this.closeOpenMessage(conversationId, run);
-        this.finalizeActivity(conversationId, run, "failed");
-        this.finishTurn(conversationId, run, "failed", {
-          code: error?.code ?? "run_error",
-          // Upstream error strings are display surfaces too (thread + toast)
-          // and can echo request headers or credentials.
-          message: redactDisplayText(
-            error?.message ?? frame.message ?? "The assistant run failed.",
-          ),
+        const error = frame.runError;
+        this.recordDeliveryTerminal(run, {
+          kind: "error",
+          error: {
+            code: safeErrorCode(error?.code, "run_error"),
+            message: safeErrorMessage(
+              error?.message,
+              "The assistant run failed.",
+            ),
+          },
         });
         return;
       }
       case "RUN_FINISHED": {
-        this.closeOpenMessage(conversationId, run);
-        this.finalizeActivity(
-          conversationId,
-          run,
-          run.waitingForApproval ? "waiting" : "done",
-        );
-        this.finishTurn(conversationId, run, "completed", null);
+        const status = frame.runFinished?.status;
+        if (
+          status !== undefined &&
+          status !== "completed" &&
+          status !== "blocked"
+        ) {
+          run.deliveryProtocolError = {
+            code: "stream_protocol_error",
+            message:
+              "The assistant stream returned an unknown terminal status.",
+          };
+          return;
+        }
+        this.recordDeliveryTerminal(run, {
+          kind: "finished",
+          status: status === "blocked" ? "blocked" : "completed",
+        });
         return;
       }
       case "RUN_STOPPED": {
         // Server-side stop (operator, policy, or an upstream cancel) —
         // terminal, and NOT a truncated stream: reporting it as one would
         // tell the user their reply may still be coming when it will not.
-        this.closeOpenMessage(conversationId, run);
-        this.finalizeActivity(conversationId, run, "cancelled");
-        this.emit(conversationId, run, {
-          cursor: this.nextCursor(run),
-          event: "turn.status",
-          turn_id: run.turnId,
-          status: "cancelled",
-        });
-        this.finishTurn(conversationId, run, "cancelled", null);
+        this.recordDeliveryTerminal(run, { kind: "stopped" });
         return;
       }
       case "STEP_STARTED": {
@@ -1386,14 +1594,11 @@ export class AevatarAssistantTransport implements AssistantTransport {
         // Reasoning exists on the wire but is never rendered or mirrored
         // (reference client records it as "[not displayed]"; PRD §3.8).
         return;
-      case "aevatar.authorization.required":
-      case "nyxid.authorization.required":
-        this.addConnectCard(
-          conversationId,
-          run,
-          payload as AuthorizationPayload,
-        );
+      case "nyxid.authorization.required": {
+        const blocker = parseAuthorizationBlocker(custom.payload);
+        if (blocker) this.addConnectCard(conversationId, run, blocker);
         return;
+      }
       case "aevatar.tool_approval.pending":
         this.addApprovalCard(
           conversationId,
@@ -1426,12 +1631,14 @@ export class AevatarAssistantTransport implements AssistantTransport {
         return;
       }
       case "aevatar.workflow.waiting_signal":
-        this.emit(conversationId, run, {
-          cursor: this.nextCursor(run),
-          event: "turn.status",
-          turn_id: run.turnId,
-          status: "waiting",
-        });
+        if (run.turnId) {
+          this.emit(conversationId, run, {
+            cursor: this.nextCursor(run),
+            event: "turn.status",
+            turn_id: run.turnId,
+            status: "waiting",
+          });
+        }
         return;
       case "aevatar.run.context":
       case "demo.conversation.context":
@@ -1519,11 +1726,6 @@ export class AevatarAssistantTransport implements AssistantTransport {
           ? (receipt.errorMessage ?? receipt.errorCode ?? "Failed")
           : receipt.resultJson,
       ),
-    );
-    this.sniffAuthorizationFailure(
-      conversationId,
-      run,
-      receipt.resultJson ?? receipt.errorMessage,
     );
   }
 
@@ -1667,9 +1869,9 @@ export class AevatarAssistantTransport implements AssistantTransport {
       const index = run.stepKeys.get(key);
       step = index === undefined ? undefined : run.runSteps[index];
     } else {
-      step = [...run.runSteps].reverse().find(
-        (candidate) => candidate.status === "active",
-      );
+      step = [...run.runSteps]
+        .reverse()
+        .find((candidate) => candidate.status === "active");
     }
     if (!step || step.status !== "active") return;
     step.status = "waiting";
@@ -1704,20 +1906,6 @@ export class AevatarAssistantTransport implements AssistantTransport {
         ? summarizeToolResult(payload.result)
         : summarizeToolResult(outcome),
     );
-    this.sniffAuthorizationFailure(conversationId, run, outcome);
-  }
-
-  private sniffAuthorizationFailure(
-    conversationId: string,
-    run: RunningTurn,
-    outcome: unknown,
-  ): void {
-    const failure = findServiceAuthorizationFailure(outcome);
-    if (!failure) return;
-    this.addConnectCard(conversationId, run, {
-      serviceSlug: failure.serviceSlug,
-      message: failure.message,
-    });
   }
 
   // -------------------------------------------------------------------------
@@ -1770,51 +1958,47 @@ export class AevatarAssistantTransport implements AssistantTransport {
       requestId,
     );
     if (run.runBlockId) this.patchRunBlock(conversationId, run);
-    this.emit(conversationId, run, {
-      cursor: this.nextCursor(run),
-      event: "turn.status",
-      turn_id: run.turnId,
-      status: "waiting",
-    });
+    if (run.turnId) {
+      this.emit(conversationId, run, {
+        cursor: this.nextCursor(run),
+        event: "turn.status",
+        turn_id: run.turnId,
+        status: "waiting",
+      });
+    }
   }
 
   private addConnectCard(
     conversationId: string,
     run: RunningTurn,
-    payload: AuthorizationPayload & { readonly message?: string },
+    blocker: AuthorizationBlocker,
   ): void {
-    const rawSlug = (payload.serviceSlug ?? payload.service_slug ?? "").trim();
-    const dedupeKey = rawSlug || "unknown-service";
-    const serviceName = payload.serviceLabel?.trim() || humanizeSlug(rawSlug);
-    const message =
-      payload.message?.trim() ||
-      `Connect ${serviceName} in NyxID, then send your request again.`;
+    const rawSlug = blocker.serviceSlug;
+    const dedupeKey = rawSlug;
+    const serviceName = blocker.serviceLabel;
+    const message = blocker.safeMessage;
 
-    // One card per missing service — but a later, richer signal (typically
-    // the dedicated AUTHORIZATION_REQUIRED frame arriving after the sniffed
-    // tool failure) upgrades the existing card's label and copy in place.
+    // One card per missing service. Replayed typed events update the same card
+    // instead of appending duplicate recovery actions.
     const existingCardId = run.promptedConnectSlugs.get(dedupeKey);
     if (existingCardId) {
-      const label = payload.serviceLabel?.trim() ?? "";
-      const richMessage = payload.message?.trim() ?? "";
-      if (!label && !richMessage) return;
       this.emit(conversationId, run, {
         cursor: this.nextCursor(run),
         event: "block.updated",
         block_id: existingCardId,
         patch: {
-          ...(label ? { service_name: label } : {}),
-          ...(richMessage
-            ? {
-                steps: [
-                  {
-                    title: `Connect ${serviceName}`,
-                    body: redactDisplayText(richMessage),
-                    done: false,
-                  },
-                ],
-              }
-            : {}),
+          service_name: serviceName,
+          reason_code: blocker.reasonCode,
+          steps: [
+            {
+              title:
+                blocker.reasonCode === "NYXID_UNAUTHORIZED"
+                  ? `Reconnect ${serviceName}`
+                  : `Connect ${serviceName}`,
+              body: message,
+              done: false,
+            },
+          ],
         },
       });
       return;
@@ -1841,12 +2025,16 @@ export class AevatarAssistantTransport implements AssistantTransport {
       error_message: null,
       steps: [
         {
-          title: `Connect ${serviceName}`,
-          body: redactDisplayText(message),
+          title:
+            blocker.reasonCode === "NYXID_UNAUTHORIZED"
+              ? `Reconnect ${serviceName}`
+              : `Connect ${serviceName}`,
+          body: message,
           done: false,
         },
       ],
       footer: "Brokered by NyxID · configure in AI Services, then ask again",
+      reason_code: blocker.reasonCode,
     };
     this.appendActivityBlock(conversationId, run, block);
     run.promptedConnectSlugs.set(dedupeKey, block.block_id);
@@ -1946,6 +2134,59 @@ export class AevatarAssistantTransport implements AssistantTransport {
   // Turn finalization.
   // -------------------------------------------------------------------------
 
+  private recordDeliveryTerminal(
+    run: RunningTurn,
+    terminal: NonNullable<RunningTurn["deliveryTerminal"]>,
+  ): void {
+    run.deliveryTerminalCount += 1;
+    if (run.deliveryTerminalCount !== 1) {
+      run.deliveryProtocolError = {
+        code: "stream_protocol_error",
+        message: "The assistant stream sent more than one terminal frame.",
+      };
+      return;
+    }
+    run.deliveryTerminal = terminal;
+  }
+
+  private settleDeliveryTerminal(
+    conversationId: string,
+    run: RunningTurn,
+    terminal: NonNullable<RunningTurn["deliveryTerminal"]>,
+  ): void {
+    this.closeOpenMessage(conversationId, run);
+    switch (terminal.kind) {
+      case "error":
+        this.finalizeActivity(conversationId, run, "failed");
+        this.finishTurn(conversationId, run, "failed", terminal.error);
+        return;
+      case "stopped":
+        this.finalizeActivity(conversationId, run, "cancelled");
+        if (run.turnId) {
+          this.emit(conversationId, run, {
+            cursor: this.nextCursor(run),
+            event: "turn.status",
+            turn_id: run.turnId,
+            status: "cancelled",
+          });
+        }
+        this.finishTurn(conversationId, run, "cancelled", null);
+        return;
+      case "finished":
+        if (terminal.status === "blocked") {
+          this.finalizeActivity(conversationId, run, "blocked");
+          this.finishTurn(conversationId, run, "blocked", null);
+        } else {
+          this.finalizeActivity(
+            conversationId,
+            run,
+            run.waitingForApproval ? "waiting" : "done",
+          );
+          this.finishTurn(conversationId, run, "completed", null);
+        }
+    }
+  }
+
   private closeOpenMessage(conversationId: string, run: RunningTurn): void {
     if (!run.currentMessageId || !run.currentBlockId) return;
     this.emit(conversationId, run, {
@@ -1973,6 +2214,8 @@ export class AevatarAssistantTransport implements AssistantTransport {
    * - `done`      — steps still active are marked done; ledger completes.
    * - `waiting`   — a human gate is open; the ledger parks in
    *                 `awaiting_approval` and undecided cards stay actionable.
+   * - `blocked`   — a typed authorization gate is terminal for the turn;
+   *                 the connection card remains actionable.
    * - `failed`    — active steps fail; undecided approvals cancel; connect
    *                 cards stay actionable (they ARE the recovery path).
    * - `cancelled` — PRD §5.6: every open block reaches a terminal state.
@@ -1980,7 +2223,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
   private finalizeActivity(
     conversationId: string,
     run: RunningTurn,
-    outcome: "done" | "waiting" | "failed" | "cancelled",
+    outcome: "done" | "waiting" | "blocked" | "failed" | "cancelled",
   ): void {
     if (run.runBlockId) {
       for (const step of run.runSteps) {
@@ -1988,7 +2231,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
           step.status =
             outcome === "done"
               ? "done"
-              : outcome === "failed"
+              : outcome === "failed" || outcome === "blocked"
                 ? "failed"
                 : outcome === "cancelled"
                   ? "skipped"
@@ -1998,7 +2241,9 @@ export class AevatarAssistantTransport implements AssistantTransport {
           }
         } else if (
           step.status === "waiting" &&
-          (outcome === "failed" || outcome === "cancelled")
+          (outcome === "blocked" ||
+            outcome === "failed" ||
+            outcome === "cancelled")
         ) {
           // A terminal run must not carry a non-terminal step: an approval
           // that will never be decided (run died / user stopped) is skipped.
@@ -2013,9 +2258,11 @@ export class AevatarAssistantTransport implements AssistantTransport {
             : "completed"
           : outcome === "waiting"
             ? "awaiting_approval"
-            : outcome === "failed"
-              ? "failed"
-              : "cancelled";
+            : outcome === "blocked"
+              ? "awaiting_connection"
+              : outcome === "failed"
+                ? "failed"
+                : "cancelled";
       this.emit(conversationId, run, {
         cursor: this.nextCursor(run),
         event: "block.completed",
@@ -2032,6 +2279,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       if (!block) continue;
       const terminal =
         outcome === "cancelled" ||
+        (outcome === "blocked" && kind === "approval") ||
         (outcome === "failed" && kind === "approval")
           ? toTerminalBlock(block)
           : block;
@@ -2056,7 +2304,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
   private finishTurn(
     conversationId: string,
     run: RunningTurn,
-    status: "completed" | "failed" | "cancelled",
+    status: "blocked" | "completed" | "failed" | "cancelled",
     error: { code: string; message: string } | null,
   ): void {
     if (run.finished) return;
@@ -2121,12 +2369,14 @@ export class AevatarAssistantTransport implements AssistantTransport {
       run.currentBlockId = null;
     }
     this.finalizeActivity(conversationId, run, "cancelled");
-    this.emit(conversationId, run, {
-      cursor: this.nextCursor(run),
-      event: "turn.status",
-      turn_id: run.turnId,
-      status: "cancelled",
-    });
+    if (run.turnId) {
+      this.emit(conversationId, run, {
+        cursor: this.nextCursor(run),
+        event: "turn.status",
+        turn_id: run.turnId,
+        status: "cancelled",
+      });
+    }
     this.finishTurn(conversationId, run, "cancelled", null);
   }
 }

@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   AevatarAssistantTransport,
-  findServiceAuthorizationFailure,
   redactDisplayText,
   summarizeToolResult,
 } from "@/lib/assistant/aevatar-transport";
@@ -15,6 +14,7 @@ import type { ContentBlock, TurnEvent } from "@/types/assistant";
 
 const USER_ID = "add69059-bece-4f0e-9559-99cfd10b47eb";
 const CONVERSATION_ID = "nyxid-chat-f8369965a444433f92ec50e67ad8ee52";
+const TURN_ID = "turn-server-owned-1";
 // NyxID's own assistant mount. No scope segment: the server derives the
 // aevatar scope from the session user (PRD decision 4).
 const ASSISTANT_BASE = "/api/v1/assistant";
@@ -39,7 +39,7 @@ function sseResponse(frames: unknown[]): Response {
 // The exact frame sequence observed live against aevatar's
 // `nyxid-chat/conversations/{id}:stream` on 2026-07-16.
 const OBSERVED_FRAMES = [
-  { type: "RUN_STARTED", actorId: CONVERSATION_ID },
+  { type: "RUN_STARTED", turnId: TURN_ID, actorId: CONVERSATION_ID },
   {
     type: "TEXT_MESSAGE_START",
     textMessageStart: { messageId: "m-1", role: "assistant" },
@@ -235,6 +235,65 @@ describe("AevatarAssistantTransport", () => {
     ]);
   });
 
+  it("preserves validated status, error, and server turnId from history", async () => {
+    stubFetch(
+      routeHistory([
+        {
+          id: "turn-history:assistant",
+          role: "assistant",
+          content: "Connect GitHub to continue.",
+          timestamp: 1784192899074,
+          status: "blocked",
+          error: {
+            code: "NYXID_UNAUTHORIZED",
+            message: "Credential token=secret-value expired.",
+          },
+          turnId: "turn-history",
+        },
+      ]),
+    );
+    const transport = new AevatarAssistantTransport();
+
+    const history = await transport.getHistory(CONVERSATION_ID);
+
+    expect(history.messages[0]).toMatchObject({
+      turnId: "turn-history",
+      status: "blocked",
+      error: {
+        code: "NYXID_UNAUTHORIZED",
+        message: 'Credential token="[redacted]" expired.',
+      },
+    });
+  });
+
+  it("uses RUN_STARTED.turnId as the authoritative handle and event identity", async () => {
+    stubFetch(routeCreate, routeStream(OBSERVED_FRAMES));
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    const events: TurnEvent[] = [];
+    let resolveDone: () => void = () => {};
+    const done = new Promise<void>((resolve) => {
+      resolveDone = resolve;
+    });
+    const handle = transport.sendMessage(CONVERSATION_ID, "Hello", (event) => {
+      events.push(event);
+      if (event.event === "turn.completed") resolveDone();
+    });
+
+    expect(handle.turnId).toBeNull();
+    await done;
+    expect(handle.turnId).toBe(TURN_ID);
+    expect(
+      events
+        .filter(
+          (event) =>
+            event.event === "turn.status" || event.event === "turn.completed",
+        )
+        .map((event) => event.turn_id),
+    ).toEqual([TURN_ID, TURN_ID]);
+  });
+
   it("lists conversations from the Chat History index without a fan-out", async () => {
     const detailFetch = vi.fn();
     stubFetch(
@@ -315,10 +374,10 @@ describe("AevatarAssistantTransport", () => {
     stubFetch(
       routeCreate,
       routeStream([
-        { type: "RUN_STARTED" },
+        { type: "RUN_STARTED", turnId: TURN_ID },
         {
           type: "RUN_ERROR",
-          error: { code: "upstream_timeout", message: "Model timed out" },
+          runError: { code: "upstream_timeout", message: "Model timed out" },
         },
       ]),
     );
@@ -354,9 +413,9 @@ describe("AevatarAssistantTransport", () => {
     expect(terminal?.event === "turn.completed" && terminal.status).toBe(
       "failed",
     );
-    expect(
-      terminal?.event === "turn.completed" && terminal.error?.code,
-    ).toBe("turn_active");
+    expect(terminal?.event === "turn.completed" && terminal.error?.code).toBe(
+      "turn_active",
+    );
   });
 
   it("surfaces the pre-stream error envelope instead of a bare status", async () => {
@@ -417,13 +476,37 @@ describe("AevatarAssistantTransport", () => {
     expect(terminal?.event === "turn.completed" && terminal.status).toBe(
       "failed",
     );
-    expect(
-      terminal?.event === "turn.completed" && terminal.error?.code,
-    ).toBe("stream_closed");
+    expect(terminal?.event === "turn.completed" && terminal.error?.code).toBe(
+      "stream_closed",
+    );
     const history = await transport.getHistory(CONVERSATION_ID);
     expect(history.messages[1]?.blocks).toEqual([
       { type: "text", block_id: "m-1-text", text: "Hello, " },
     ]);
+  });
+
+  it("fails a delivery that publishes more than one terminal frame", async () => {
+    stubFetch(
+      routeCreate,
+      routeStream([
+        { type: "RUN_STARTED", turnId: TURN_ID },
+        { type: "RUN_FINISHED" },
+        {
+          type: "RUN_ERROR",
+          runError: { code: "late_error", message: "Too late" },
+        },
+      ]),
+    );
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    const events = await collectTurn(transport, "Hello");
+
+    expect(events.at(-1)).toMatchObject({
+      event: "turn.completed",
+      status: "failed",
+      error: { code: "stream_protocol_error" },
+    });
   });
 
   it("flushes a final RUN_FINISHED frame that has no trailing blank line", async () => {
@@ -480,11 +563,15 @@ describe("AevatarAssistantTransport", () => {
 
     const events: TurnEvent[] = [];
     const done = new Promise<void>((resolve) => {
-      const handle = transport.sendMessage(CONVERSATION_ID, "Hello", (event) => {
-        events.push(event);
-        if (event.event === "turn.completed") resolve();
-        if (event.event === "block.delta") handle.cancel();
-      });
+      const handle = transport.sendMessage(
+        CONVERSATION_ID,
+        "Hello",
+        (event) => {
+          events.push(event);
+          if (event.event === "turn.completed") resolve();
+          if (event.event === "block.delta") handle.cancel();
+        },
+      );
     });
     await done;
 
@@ -671,7 +758,13 @@ describe("captured production wire shapes", () => {
   const CAPTURED_MESSAGE_ID = "31c82249c61e42239075795cfa9306d9";
 
   it("replays the captured SSE stream byte-for-byte in awkward chunks", async () => {
-    const bytes = new TextEncoder().encode(capturedStream);
+    // The capture predates Aevatar's required server-owned turn identity.
+    // Preserve every captured byte except for adding that contract field.
+    const currentContractStream = capturedStream.replace(
+      `"actorId":"nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae"`,
+      `"turnId":"${TURN_ID}","actorId":"nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae"`,
+    );
+    const bytes = new TextEncoder().encode(currentContractStream);
     // 7-byte chunks split `data:` prefixes, JSON payloads, and the \n\n
     // frame boundary mid-sequence — the incremental parser must not care.
     const CHUNK = 7;
@@ -708,9 +801,7 @@ describe("captured production wire shapes", () => {
       "message.completed",
       "turn.completed",
     ]);
-    const completed = events.find(
-      (event) => event.event === "block.completed",
-    );
+    const completed = events.find((event) => event.event === "block.completed");
     expect(completed?.event === "block.completed" && completed.block).toEqual({
       type: "text",
       block_id: `${CAPTURED_MESSAGE_ID}-text`,
@@ -772,21 +863,17 @@ describe("captured production wire shapes", () => {
     });
     const body = JSON.parse(String(init.body)) as {
       prompt: string;
-      sessionId: string;
+      clientRequestId: string;
+      sessionId?: string;
     };
     expect(body.prompt).toBe("Hello there");
-    // Run-session correlation id (optional upstream; the reference client
-    // sends one per conversation).
-    expect(body.sessionId).toMatch(
+    expect(body.clientRequestId).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
     );
+    expect(body.sessionId).toBeUndefined();
   });
 
-  it("keeps one sessionId per conversation across turns and reprojection", async () => {
-    // Between turns, the real hook reloads history and the conversation
-    // list (`projectTransportState`), both of which rebuild the stored
-    // conversation — the session id must survive that, not just the
-    // straight-line two-sends case.
+  it("uses a new clientRequestId for each logical turn across reprojection", async () => {
     const fetchMock = stubFetch(
       routeCreate,
       routeStream(OBSERVED_FRAMES),
@@ -829,14 +916,96 @@ describe("captured production wire shapes", () => {
     await transport.listConversations();
     await collectTurn(transport, "Second turn");
 
-    const sessionIds = fetchMock.mock.calls
+    const clientRequestIds = fetchMock.mock.calls
       .filter(([input]) => String(input).endsWith("/stream"))
       .map(
         ([, init]) =>
-          (JSON.parse(String(init?.body)) as { sessionId: string }).sessionId,
+          (JSON.parse(String(init?.body)) as { clientRequestId: string })
+            .clientRequestId,
       );
-    expect(sessionIds).toHaveLength(2);
-    expect(sessionIds[0]).toBe(sessionIds[1]);
+    expect(clientRequestIds).toHaveLength(2);
+    expect(clientRequestIds[0]).not.toBe(clientRequestIds[1]);
+  });
+
+  it("reuses one clientRequestId for an automatic transport retry", async () => {
+    let streamAttempts = 0;
+    const fetchMock = vi.fn(
+      (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = String(input);
+        if (
+          url === `${ASSISTANT_BASE}/conversations` &&
+          init?.method === "POST"
+        ) {
+          return Promise.resolve(
+            jsonResponse({ status: "accepted", actorId: CONVERSATION_ID }),
+          );
+        }
+        if (url.endsWith("/stream") && init?.method === "POST") {
+          streamAttempts += 1;
+          if (streamAttempts === 1) {
+            return Promise.reject(new TypeError("connection reset"));
+          }
+          return Promise.resolve(sseResponse(OBSERVED_FRAMES));
+        }
+        return Promise.resolve(jsonResponse({}, 404));
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    const events = await collectTurn(transport, "Retry this delivery");
+
+    expect(events.at(-1)).toMatchObject({
+      event: "turn.completed",
+      turn_id: TURN_ID,
+      status: "completed",
+    });
+    const bodies = fetchMock.mock.calls
+      .filter(([input]) => String(input).endsWith("/stream"))
+      .map(
+        ([, init]) =>
+          JSON.parse(String(init?.body)) as {
+            clientRequestId: string;
+            sessionId?: string;
+          },
+      );
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]?.clientRequestId).toBe(bodies[1]?.clientRequestId);
+    expect(bodies[0]?.sessionId).toBeUndefined();
+  });
+
+  it("retries a successful stream response that has no body", async () => {
+    let streamAttempts = 0;
+    const fetchMock = stubFetch(routeCreate, (url, init) => {
+      if (!url.endsWith("/stream") || init?.method !== "POST") return undefined;
+      streamAttempts += 1;
+      return streamAttempts === 1
+        ? new Response(null, {
+            status: 200,
+            headers: { "Content-Type": "text/event-stream" },
+          })
+        : sseResponse(OBSERVED_FRAMES);
+    });
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    const events = await collectTurn(transport, "Retry the empty delivery");
+
+    expect(events.at(-1)).toMatchObject({
+      event: "turn.completed",
+      turn_id: TURN_ID,
+      status: "completed",
+    });
+    const requestIds = fetchMock.mock.calls
+      .filter(([input]) => String(input).endsWith("/stream"))
+      .map(
+        ([, requestInit]) =>
+          (JSON.parse(String(requestInit?.body)) as { clientRequestId: string })
+            .clientRequestId,
+      );
+    expect(requestIds).toHaveLength(2);
+    expect(requestIds[0]).toBe(requestIds[1]);
   });
 });
 
@@ -864,8 +1033,7 @@ describe("live AG-UI frame taxonomy", () => {
 
   function routeApprove(response: () => Response): FetchRoute {
     return (url, init) =>
-      url ===
-        `${ASSISTANT_BASE}/conversations/${CONVERSATION_ID}/approve` &&
+      url === `${ASSISTANT_BASE}/conversations/${CONVERSATION_ID}/approve` &&
       init?.method === "POST"
         ? response()
         : undefined;
@@ -875,7 +1043,7 @@ describe("live AG-UI frame taxonomy", () => {
     stubFetch(
       routeCreate,
       routeStream([
-        { type: "RUN_STARTED", actorId: CONVERSATION_ID },
+        { type: "RUN_STARTED", turnId: TURN_ID, actorId: CONVERSATION_ID },
         {
           type: "TOOL_CALL_START",
           toolCallStart: { toolCallId: "c1", toolName: "ornn_search_skills" },
@@ -896,9 +1064,7 @@ describe("live AG-UI frame taxonomy", () => {
 
     const events = await collectTurn(transport, "Search skills");
 
-    const runStart = blockStarts(events).find(
-      (block) => block.type === "run",
-    );
+    const runStart = blockStarts(events).find((block) => block.type === "run");
     expect(runStart?.type === "run" && runStart.steps).toEqual([
       {
         index: 1,
@@ -917,31 +1083,32 @@ describe("live AG-UI frame taxonomy", () => {
     );
     expect(patches.length).toBeGreaterThan(0);
     for (const patch of patches) {
-      expect(
-        Array.isArray((patch.patch as { steps?: unknown }).steps),
-      ).toBe(true);
+      expect(Array.isArray((patch.patch as { steps?: unknown }).steps)).toBe(
+        true,
+      );
     }
     const runFinal = blockCompletions(events).find(
       (block) => block.type === "run",
     );
     expect(runFinal?.type === "run" && runFinal.state).toBe("completed");
-    expect(
-      runFinal?.type === "run" && runFinal.steps[0],
-    ).toMatchObject({ status: "done", label: "ornn_search_skills" });
-    expect(
-      runFinal?.type === "run" && runFinal.steps[0]?.meta,
-    ).toContain("found");
+    expect(runFinal?.type === "run" && runFinal.steps[0]).toMatchObject({
+      status: "done",
+      label: "ornn_search_skills",
+    });
+    expect(runFinal?.type === "run" && runFinal.steps[0]?.meta).toContain(
+      "found",
+    );
     const terminal = events[events.length - 1];
     expect(terminal?.event === "turn.completed" && terminal.status).toBe(
       "completed",
     );
   });
 
-  it("turns a tool-level authorization failure into a connect card", async () => {
+  it("keeps policy-denied tool failures ordinary without a connect card", async () => {
     stubFetch(
       routeCreate,
       routeStream([
-        { type: "RUN_STARTED" },
+        { type: "RUN_STARTED", turnId: TURN_ID },
         {
           type: "TOOL_CALL_START",
           toolCallStart: { toolCallId: "c1", toolName: "github_write" },
@@ -951,7 +1118,12 @@ describe("live AG-UI frame taxonomy", () => {
           toolCallEnd: {
             toolCallId: "c1",
             status: "AGENT_TOOL_RECEIPT_STATUS_ERROR",
-            error: "user is not authorized for service api-github",
+            error: {
+              status: 403,
+              error: "forbidden",
+              error_code: 1002,
+              message: "user is not authorized for service api-github",
+            },
           },
         },
         { type: "RUN_FINISHED" },
@@ -962,53 +1134,45 @@ describe("live AG-UI frame taxonomy", () => {
 
     const events = await collectTurn(transport, "Open a PR");
 
-    const card = blockStarts(events).find(
-      (block) => block.type === "connect_card",
-    );
-    expect(card?.type === "connect_card" && card.catalog_slug).toBe("api-github");
-    expect(card?.type === "connect_card" && card.state).toBe(
-      "needs_connection",
-    );
+    expect(
+      blockStarts(events).some((block) => block.type === "connect_card"),
+    ).toBe(false);
     const runFinal = blockCompletions(events).find(
       (block) => block.type === "run",
     );
     expect(runFinal?.type === "run" && runFinal.state).toBe("failed");
-    // The connect card stays actionable after the run settles — it is the
-    // recovery path, not a casualty of the failed step.
-    const cardFinal = blockCompletions(events).find(
-      (block) => block.type === "connect_card",
-    );
-    expect(cardFinal?.type === "connect_card" && cardFinal.state).toBe(
-      "needs_connection",
-    );
+    expect(events.at(-1)).toMatchObject({
+      event: "turn.completed",
+      status: "completed",
+      error: null,
+    });
   });
 
-  it("upgrades a sniffed connect card when the dedicated frame arrives", async () => {
-    // The tool-failure sniffer fires first with generic copy; the dedicated
-    // AUTHORIZATION_REQUIRED frame that follows carries the proper label and
-    // message and must improve the SAME card, not spawn a second one.
+  it("ignores generic and unclassified authorization signals", async () => {
     stubFetch(
       routeCreate,
       routeStream([
-        { type: "RUN_STARTED" },
+        { type: "RUN_STARTED", turnId: TURN_ID },
         {
-          type: "TOOL_CALL_START",
-          toolCallStart: { toolCallId: "c1", toolName: "github_list_prs" },
+          type: "AUTHORIZATION_REQUIRED",
+          authorizationRequired: { serviceSlug: "api-github" },
         },
         {
-          type: "TOOL_CALL_END",
-          toolCallEnd: {
-            toolCallId: "c1",
-            status: "AGENT_TOOL_RECEIPT_STATUS_ERROR",
-            error: "user is not authorized for service api-github",
+          type: "CUSTOM",
+          custom: {
+            name: "aevatar.authorization.required",
+            payload: { serviceSlug: "api-github" },
           },
         },
         {
-          type: "AUTHORIZATION_REQUIRED",
-          authorizationRequired: {
-            serviceSlug: "api-github",
-            serviceLabel: "GitHub",
-            message: "GitHub access is required to list your merged PRs.",
+          type: "CUSTOM",
+          custom: {
+            name: "nyxid.authorization.required",
+            payload: {
+              serviceSlug: "api-github",
+              reasonCode: "POLICY_DENIED",
+              safeMessage: "Policy denied this request.",
+            },
           },
         },
         { type: "RUN_FINISHED" },
@@ -1019,36 +1183,38 @@ describe("live AG-UI frame taxonomy", () => {
 
     const events = await collectTurn(transport, "Summarize PRs");
 
-    const cards = blockStarts(events).filter(
-      (block) => block.type === "connect_card",
-    );
-    expect(cards).toHaveLength(1);
-    const final = blockCompletions(events).find(
-      (block) => block.type === "connect_card",
-    );
-    expect(final?.type === "connect_card" && final.service_name).toBe(
-      "GitHub",
-    );
     expect(
-      final?.type === "connect_card" && final.steps[0]?.body,
-    ).toBe("GitHub access is required to list your merged PRs.");
+      blockStarts(events).some((block) => block.type === "connect_card"),
+    ).toBe(false);
+    expect(events.at(-1)).toMatchObject({ status: "completed" });
   });
 
-  it("maps AUTHORIZATION_REQUIRED to one deduped connect card", async () => {
+  it("maps only the typed NyxID blocker and terminal status to blocked", async () => {
     const authorizationFrame = {
-      type: "AUTHORIZATION_REQUIRED",
-      authorizationRequired: {
-        serviceSlug: "api-github",
-        message: "GitHub access is required for this request.",
+      type: "CUSTOM",
+      custom: {
+        name: "nyxid.authorization.required",
+        payload: {
+          serviceSlug: "api-github",
+          serviceLabel: "GitHub",
+          resourceUri: "/repos/private?access_token=do-not-render",
+          reasonCode: "NYXID_UNAUTHORIZED",
+          safeMessage: "Connect GitHub; token=secret-value is expired.",
+          arbitrarySecret: "must-not-be-copied",
+        },
       },
     };
     stubFetch(
       routeCreate,
       routeStream([
-        { type: "RUN_STARTED" },
+        { type: "RUN_STARTED", turnId: TURN_ID },
         authorizationFrame,
         authorizationFrame,
-        { type: "RUN_FINISHED" },
+        {
+          type: "RUN_FINISHED",
+          turnId: TURN_ID,
+          runFinished: { runId: TURN_ID, status: "blocked" },
+        },
       ]),
     );
     const transport = new AevatarAssistantTransport();
@@ -1061,32 +1227,44 @@ describe("live AG-UI frame taxonomy", () => {
     );
     expect(cards).toHaveLength(1);
     const card = cards[0];
-    expect(card?.type === "connect_card" && card.catalog_slug).toBe("api-github");
-    expect(
-      card?.type === "connect_card" && card.steps[0]?.body,
-    ).toBe("GitHub access is required for this request.");
+    expect(card?.type === "connect_card" && card.catalog_slug).toBe(
+      "api-github",
+    );
+    expect(card?.type === "connect_card" && card.reason_code).toBe(
+      "NYXID_UNAUTHORIZED",
+    );
+    expect(card?.type === "connect_card" && card.steps[0]?.body).toBe(
+      'Connect GitHub; token="[redacted]" is expired.',
+    );
+    expect(JSON.stringify(events)).not.toContain("do-not-render");
+    expect(JSON.stringify(events)).not.toContain("must-not-be-copied");
     const terminal = events[events.length - 1];
     expect(terminal?.event === "turn.completed" && terminal.status).toBe(
-      "completed",
+      "blocked",
     );
   });
 
-  it("maps the CUSTOM authorization.required variant identically", async () => {
+  it("maps a genuinely disconnected service by its canonical slug", async () => {
     stubFetch(
       routeCreate,
       routeStream([
-        { type: "RUN_STARTED" },
+        { type: "RUN_STARTED", turnId: TURN_ID },
         {
           type: "CUSTOM",
           custom: {
             name: "nyxid.authorization.required",
             payload: {
               serviceSlug: "api-lark-bot",
-              message: "Connect your Lark bot first.",
+              serviceLabel: "Lark Bot",
+              reasonCode: "NYXID_SERVICE_NOT_CONNECTED",
+              safeMessage: "Connect your Lark bot first.",
             },
           },
         },
-        { type: "RUN_FINISHED" },
+        {
+          type: "RUN_FINISHED",
+          runFinished: { status: "blocked" },
+        },
       ]),
     );
     const transport = new AevatarAssistantTransport();
@@ -1100,6 +1278,64 @@ describe("live AG-UI frame taxonomy", () => {
     expect(card?.type === "connect_card" && card.catalog_slug).toBe(
       "api-lark-bot",
     );
+    expect(card?.type === "connect_card" && card.catalog_slug).not.toBe(
+      "api-api-lark-bot",
+    );
+    expect(card?.type === "connect_card" && card.reason_code).toBe(
+      "NYXID_SERVICE_NOT_CONNECTED",
+    );
+  });
+
+  it("starts a new logical turn after a blocked delivery", async () => {
+    let delivery = 0;
+    const fetchMock = stubFetch(routeCreate, (url, init) => {
+      if (!url.endsWith("/stream") || init?.method !== "POST") return undefined;
+      delivery += 1;
+      return delivery === 1
+        ? sseResponse([
+            { type: "RUN_STARTED", turnId: TURN_ID },
+            {
+              type: "CUSTOM",
+              custom: {
+                name: "nyxid.authorization.required",
+                payload: {
+                  serviceSlug: "api-github",
+                  serviceLabel: "GitHub",
+                  reasonCode: "NYXID_UNAUTHORIZED",
+                  safeMessage: "Reconnect GitHub to continue.",
+                },
+              },
+            },
+            {
+              type: "RUN_FINISHED",
+              runFinished: { status: "blocked" },
+            },
+          ])
+        : sseResponse([
+            { type: "RUN_STARTED", turnId: "turn-server-owned-2" },
+            { type: "RUN_FINISHED", runFinished: { status: "completed" } },
+          ]);
+    });
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    const blocked = await collectTurn(transport, "Read a private repository");
+    const completed = await collectTurn(transport, "Continue after reconnect");
+
+    expect(blocked.at(-1)).toMatchObject({ status: "blocked" });
+    expect(completed.at(-1)).toMatchObject({
+      status: "completed",
+      turn_id: "turn-server-owned-2",
+    });
+    const requestIds = fetchMock.mock.calls
+      .filter(([input]) => String(input).endsWith("/stream"))
+      .map(
+        ([, init]) =>
+          (JSON.parse(String(init?.body)) as { clientRequestId: string })
+            .clientRequestId,
+      );
+    expect(requestIds).toHaveLength(2);
+    expect(requestIds[0]).not.toBe(requestIds[1]);
   });
 
   it("parks the turn on TOOL_APPROVAL_REQUEST and keeps the card actionable at EOF", async () => {
@@ -1108,7 +1344,7 @@ describe("live AG-UI frame taxonomy", () => {
     stubFetch(
       routeCreate,
       routeStream([
-        { type: "RUN_STARTED" },
+        { type: "RUN_STARTED", turnId: TURN_ID },
         {
           type: "TOOL_APPROVAL_REQUEST",
           toolApprovalRequest: {
@@ -1135,8 +1371,7 @@ describe("live AG-UI frame taxonomy", () => {
     );
     expect(
       events.some(
-        (event) =>
-          event.event === "turn.status" && event.status === "waiting",
+        (event) => event.event === "turn.status" && event.status === "waiting",
       ),
     ).toBe(true);
     const terminal = events[events.length - 1];
@@ -1158,7 +1393,7 @@ describe("live AG-UI frame taxonomy", () => {
     const fetchMock = stubFetch(
       routeCreate,
       routeStream([
-        { type: "RUN_STARTED" },
+        { type: "RUN_STARTED", turnId: TURN_ID },
         {
           type: "TOOL_APPROVAL_REQUEST",
           toolApprovalRequest: { requestId: "req-1", toolName: "lark_post" },
@@ -1166,6 +1401,7 @@ describe("live AG-UI frame taxonomy", () => {
       ]),
       routeApprove(() =>
         sseResponse([
+          { type: "RUN_STARTED", turnId: TURN_ID },
           {
             type: "TEXT_MESSAGE_START",
             textMessageStart: { messageId: "m-2", role: "assistant" },
@@ -1216,7 +1452,7 @@ describe("live AG-UI frame taxonomy", () => {
     ) as { requestId: string; approved: boolean; sessionId?: string };
     expect(approveBody.requestId).toBe("req-1");
     expect(approveBody.approved).toBe(true);
-    expect(approveBody.sessionId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(approveBody.sessionId).toBeUndefined();
 
     // Continuation cursors continue past the prior turn's, so a
     // still-subscribed at-least-once consumer never drops them.
@@ -1234,13 +1470,65 @@ describe("live AG-UI frame taxonomy", () => {
     const text = blockCompletions(events).find(
       (block) => block.type === "text",
     );
-    expect(text?.type === "text" && text.text).toBe(
-      "Posted to #eng-updates.",
-    );
+    expect(text?.type === "text" && text.text).toBe("Posted to #eng-updates.");
     const terminal = events[events.length - 1];
     expect(terminal?.event === "turn.completed" && terminal.status).toBe(
       "completed",
     );
+  });
+
+  it("fails closed when an approval continuation ends without a terminal frame", async () => {
+    stubFetch(
+      routeCreate,
+      routeStream([
+        { type: "RUN_STARTED", turnId: TURN_ID },
+        {
+          type: "TOOL_APPROVAL_REQUEST",
+          toolApprovalRequest: { requestId: "req-truncated" },
+        },
+      ]),
+      routeApprove(() =>
+        sseResponse([
+          { type: "RUN_STARTED", turnId: TURN_ID },
+          {
+            type: "TEXT_MESSAGE_START",
+            textMessageStart: { messageId: "m-truncated", role: "assistant" },
+          },
+          {
+            type: "TEXT_MESSAGE_CONTENT",
+            textMessageContent: { delta: "Partial continuation" },
+          },
+        ]),
+      ),
+      routeHistory([]),
+    );
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+    await collectTurn(transport, "Run an approved action");
+    const history = await transport.getHistory(CONVERSATION_ID);
+    const card = history.messages
+      .flatMap((message) => message.blocks)
+      .find((block) => block.type === "approval_card");
+
+    const events: TurnEvent[] = [];
+    await new Promise<void>((resolve) => {
+      void transport.decideApproval(
+        CONVERSATION_ID,
+        card?.block_id ?? "",
+        true,
+        (event) => {
+          events.push(event);
+          if (event.event === "turn.completed") resolve();
+        },
+      );
+    });
+
+    expect(events.at(-1)).toMatchObject({
+      event: "turn.completed",
+      turn_id: TURN_ID,
+      status: "failed",
+      error: { code: "stream_closed" },
+    });
   });
 
   it("reserves the conversation for the whole approve exchange", async () => {
@@ -1251,7 +1539,7 @@ describe("live AG-UI frame taxonomy", () => {
     stubFetch(
       routeCreate,
       routeStream([
-        { type: "RUN_STARTED" },
+        { type: "RUN_STARTED", turnId: TURN_ID },
         {
           type: "TOOL_APPROVAL_REQUEST",
           toolApprovalRequest: { requestId: "req-slow" },
@@ -1307,7 +1595,7 @@ describe("live AG-UI frame taxonomy", () => {
     stubFetch(
       routeCreate,
       routeStream([
-        { type: "RUN_STARTED" },
+        { type: "RUN_STARTED", turnId: TURN_ID },
         {
           type: "TOOL_CALL_START",
           toolCallStart: { toolCallId: "c1", toolName: "lark_post" },
@@ -1326,9 +1614,10 @@ describe("live AG-UI frame taxonomy", () => {
     const runFinal = blockCompletions(events).find(
       (block) => block.type === "run",
     );
-    expect(
-      runFinal?.type === "run" && runFinal.steps[0],
-    ).toMatchObject({ status: "waiting", approval_request_id: "req-9" });
+    expect(runFinal?.type === "run" && runFinal.steps[0]).toMatchObject({
+      status: "waiting",
+      approval_request_id: "req-9",
+    });
     expect(runFinal?.type === "run" && runFinal.state).toBe(
       "awaiting_approval",
     );
@@ -1343,7 +1632,7 @@ describe("live AG-UI frame taxonomy", () => {
       (url, init) =>
         url === `${ASSISTANT_BASE}/conversations` &&
         (init?.method ?? "GET") === "GET"
-          ? (listCalls += 1,
+          ? ((listCalls += 1),
             jsonResponse({
               conversations:
                 listCalls <= 2
@@ -1371,7 +1660,7 @@ describe("live AG-UI frame taxonomy", () => {
     stubFetch(
       routeCreate,
       routeStream([
-        { type: "RUN_STARTED" },
+        { type: "RUN_STARTED", turnId: TURN_ID },
         {
           type: "TOOL_APPROVAL_REQUEST",
           toolApprovalRequest: { requestId: "req-2" },
@@ -1417,7 +1706,7 @@ describe("live AG-UI frame taxonomy", () => {
     stubFetch(
       routeCreate,
       routeStream([
-        { type: "RUN_STARTED" },
+        { type: "RUN_STARTED", turnId: TURN_ID },
         {
           type: "TOOL_CALL_START",
           toolCallStart: { toolCallId: "c1", toolName: "lark_post" },
@@ -1455,9 +1744,11 @@ describe("live AG-UI frame taxonomy", () => {
         (event.patch as { state?: string }).state === "completed",
     );
     expect(ledgerFlip).toBeDefined();
-    const steps = (ledgerFlip?.patch as {
-      steps?: Array<{ status: string }>;
-    }).steps;
+    const steps = (
+      ledgerFlip?.patch as {
+        steps?: Array<{ status: string }>;
+      }
+    ).steps;
     expect(steps?.[0]?.status).toBe("done");
   });
 
@@ -1468,7 +1759,7 @@ describe("live AG-UI frame taxonomy", () => {
     stubFetch(
       routeCreate,
       routeStream([
-        { type: "RUN_STARTED" },
+        { type: "RUN_STARTED", turnId: TURN_ID },
         {
           type: "TOOL_CALL_START",
           toolCallStart: { toolCallId: "c1", toolName: "tool_one" },
@@ -1538,7 +1829,7 @@ describe("live AG-UI frame taxonomy", () => {
     stubFetch(
       routeCreate,
       routeStream([
-        { type: "RUN_STARTED" },
+        { type: "RUN_STARTED", turnId: TURN_ID },
         {
           type: "TOOL_CALL_START",
           toolCallStart: { toolCallId: "c1", toolName: "lark_post" },
@@ -1549,7 +1840,7 @@ describe("live AG-UI frame taxonomy", () => {
         },
         {
           type: "RUN_ERROR",
-          error: { code: "upstream_died", message: "engine crashed" },
+          runError: { code: "upstream_died", message: "engine crashed" },
         },
       ]),
     );
@@ -1661,7 +1952,7 @@ describe("live AG-UI frame taxonomy", () => {
     stubFetch(
       routeCreate,
       routeStream([
-        { type: "RUN_STARTED" },
+        { type: "RUN_STARTED", turnId: TURN_ID },
         {
           type: "TOOL_APPROVAL_REQUEST",
           toolApprovalRequest: { requestId: "req-hung" },
@@ -1703,9 +1994,7 @@ describe("live AG-UI frame taxonomy", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     transport.cancelActiveTurn(CONVERSATION_ID);
 
-    await expect(pending).rejects.toThrow(
-      "The approval request was stopped.",
-    );
+    await expect(pending).rejects.toThrow("The approval request was stopped.");
     const terminal = events[events.length - 1];
     expect(terminal?.event === "turn.completed" && terminal.status).toBe(
       "cancelled",
@@ -1719,7 +2008,7 @@ describe("live AG-UI frame taxonomy", () => {
     stubFetch(
       routeCreate,
       routeStream([
-        { type: "RUN_STARTED" },
+        { type: "RUN_STARTED", turnId: TURN_ID },
         {
           type: "TOOL_APPROVAL_REQUEST",
           toolApprovalRequest: { requestId: "req-502" },
@@ -1761,16 +2050,16 @@ describe("live AG-UI frame taxonomy", () => {
     const cardAfter = after.messages
       .flatMap((message) => message.blocks)
       .find((block) => block.type === "approval_card");
-    expect(
-      cardAfter?.type === "approval_card" && cardAfter.decision,
-    ).toBe(null);
+    expect(cardAfter?.type === "approval_card" && cardAfter.decision).toBe(
+      null,
+    );
   });
 
   it("mines a raw.observed completion for steps and fallback text, never reasoning", async () => {
     stubFetch(
       routeCreate,
       routeStream([
-        { type: "RUN_STARTED" },
+        { type: "RUN_STARTED", turnId: TURN_ID },
         {
           type: "CUSTOM",
           custom: {
@@ -1820,9 +2109,10 @@ describe("live AG-UI frame taxonomy", () => {
     const runFinal = blockCompletions(events).find(
       (block) => block.type === "run",
     );
-    expect(
-      runFinal?.type === "run" && runFinal.steps[0],
-    ).toMatchObject({ status: "done", label: "ornn_search_skills" });
+    expect(runFinal?.type === "run" && runFinal.steps[0]).toMatchObject({
+      status: "done",
+      label: "ornn_search_skills",
+    });
     const text = blockCompletions(events).find(
       (block) => block.type === "text",
     );
@@ -1837,7 +2127,7 @@ describe("live AG-UI frame taxonomy", () => {
     stubFetch(
       routeCreate,
       routeStream([
-        { type: "RUN_STARTED" },
+        { type: "RUN_STARTED", turnId: TURN_ID },
         {
           type: "TEXT_MESSAGE_START",
           textMessageStart: { messageId: "m-1", role: "assistant" },
@@ -1870,7 +2160,7 @@ describe("live AG-UI frame taxonomy", () => {
     stubFetch(
       routeCreate,
       routeStream([
-        { runStarted: { actorId: CONVERSATION_ID } },
+        { runStarted: { turnId: TURN_ID, actorId: CONVERSATION_ID } },
         { textMessageStart: { messageId: "m-1", role: "assistant" } },
         { textMessageContent: { delta: "Body-keyed hello" } },
         { stepStarted: { stepName: "plan" } },
@@ -1908,7 +2198,7 @@ describe("live AG-UI frame taxonomy", () => {
     stubFetch(
       routeCreate,
       routeStream([
-        { type: "RUN_STARTED" },
+        { type: "RUN_STARTED", turnId: TURN_ID },
         { type: "STEP_STARTED", stepStarted: { stepName: "collect" } },
         {
           type: "STEP_FINISHED",
@@ -1936,7 +2226,7 @@ describe("live AG-UI frame taxonomy", () => {
     stubFetch(
       routeCreate,
       routeStream([
-        { type: "RUN_STARTED" },
+        { type: "RUN_STARTED", turnId: TURN_ID },
         {
           type: "CUSTOM",
           custom: {
@@ -1963,16 +2253,17 @@ describe("live AG-UI frame taxonomy", () => {
       (block) => block.type === "run",
     );
     expect(runFinal?.type === "run" && runFinal.state).toBe("completed");
-    expect(
-      runFinal?.type === "run" && runFinal.steps[0],
-    ).toMatchObject({ status: "done", label: "plan" });
+    expect(runFinal?.type === "run" && runFinal.steps[0]).toMatchObject({
+      status: "done",
+      label: "plan",
+    });
   });
 
   it("embeds MEDIA_CONTENT as a data-URL artifact block", async () => {
     stubFetch(
       routeCreate,
       routeStream([
-        { type: "RUN_STARTED" },
+        { type: "RUN_STARTED", turnId: TURN_ID },
         {
           type: "MEDIA_CONTENT",
           mediaContent: {
@@ -2012,7 +2303,7 @@ describe("live AG-UI frame taxonomy", () => {
               encoder.encode(`data: ${JSON.stringify(frame)}\n\n`),
             );
           };
-          push({ type: "RUN_STARTED" });
+          push({ type: "RUN_STARTED", turnId: TURN_ID });
         },
       });
       stubFetch(routeCreate, (url, init) =>
@@ -2046,9 +2337,9 @@ describe("live AG-UI frame taxonomy", () => {
       expect(terminal?.event === "turn.completed" && terminal.status).toBe(
         "failed",
       );
-      expect(
-        terminal?.event === "turn.completed" && terminal.error?.code,
-      ).toBe("upstream_progress_timeout");
+      expect(terminal?.event === "turn.completed" && terminal.error?.code).toBe(
+        "upstream_progress_timeout",
+      );
     } finally {
       vi.useRealTimers();
     }
@@ -2066,7 +2357,7 @@ describe("live AG-UI frame taxonomy", () => {
               encoder.encode(`data: ${JSON.stringify(frame)}\n\n`),
             );
           };
-          push({ type: "RUN_STARTED" });
+          push({ type: "RUN_STARTED", turnId: TURN_ID });
         },
       });
       stubFetch(routeCreate, (url, init) =>
@@ -2094,30 +2385,30 @@ describe("live AG-UI frame taxonomy", () => {
       });
       // 100s after the reset: under the 120s deadline, so still running.
       await vi.advanceTimersByTimeAsync(100_000);
-      expect(
-        events.some((event) => event.event === "turn.completed"),
-      ).toBe(false);
+      expect(events.some((event) => event.event === "turn.completed")).toBe(
+        false,
+      );
       await vi.advanceTimersByTimeAsync(20_001);
       await done;
 
       const terminal = events[events.length - 1];
-      expect(
-        terminal?.event === "turn.completed" && terminal.error?.code,
-      ).toBe("upstream_progress_timeout");
+      expect(terminal?.event === "turn.completed" && terminal.error?.code).toBe(
+        "upstream_progress_timeout",
+      );
     } finally {
       vi.useRealTimers();
     }
   });
 });
 
-describe("redaction and authorization sniffing", () => {
+describe("redaction and tool summaries", () => {
   it("redacts secret assignments and token shapes from display text", () => {
     expect(
       redactDisplayText('{"api_key":"sk-live-12345","status":"ok"}'),
     ).not.toContain("sk-live-12345");
-    expect(redactDisplayText("Authorization: Bearer abc.def.ghi")).not.toContain(
-      "abc.def.ghi",
-    );
+    expect(
+      redactDisplayText("Authorization: Bearer abc.def.ghi"),
+    ).not.toContain("abc.def.ghi");
     expect(redactDisplayText("key nyxid_ag_supersecret1234")).toContain(
       "[redacted]",
     );
@@ -2158,10 +2449,10 @@ describe("redaction and authorization sniffing", () => {
     stubFetch(
       routeCreate,
       routeStream([
-        { type: "RUN_STARTED" },
+        { type: "RUN_STARTED", turnId: TURN_ID },
         {
           type: "RUN_ERROR",
-          error: {
+          runError: {
             code: "upstream_error",
             message:
               "Downstream 401 with Authorization: Bearer sk.live.abc123 header",
@@ -2187,23 +2478,6 @@ describe("redaction and authorization sniffing", () => {
     const long = summarizeToolResult({ text: "x".repeat(500) });
     expect(long.length).toBeLessThanOrEqual(160);
     expect(long.endsWith("…")).toBe(true);
-  });
-
-  it("detects authorization failures and extracts the slug", () => {
-    expect(
-      findServiceAuthorizationFailure(
-        "user is not authorized for service api-github",
-      ),
-    ).toMatchObject({ serviceSlug: "api-github" });
-    expect(
-      findServiceAuthorizationFailure({
-        error: "invalid_target",
-        service_slug: "ornn-api",
-      }),
-    ).toMatchObject({ serviceSlug: "ornn-api" });
-    expect(findServiceAuthorizationFailure("everything went fine")).toBe(
-      null,
-    );
   });
 });
 
