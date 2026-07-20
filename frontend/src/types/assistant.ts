@@ -52,6 +52,8 @@ export interface ConnectCardContentBlock {
     readonly done: boolean;
   }>;
   readonly footer: string;
+  /** Exact Aevatar authorization blocker classification, when provided. */
+  readonly reason_code?: "NYXID_SERVICE_NOT_CONNECTED" | "NYXID_UNAUTHORIZED";
 }
 
 export interface RunContentBlock {
@@ -110,6 +112,16 @@ export interface AssistantMessage {
   readonly schema_version: number;
   readonly blocks: ContentBlock[];
   readonly created_at: string;
+  /** Server-owned turn metadata retained when hydrating Aevatar history. */
+  readonly turnId?: string;
+  readonly status?: TurnStatus;
+  readonly error?:
+    | string
+    | {
+        readonly code: string;
+        readonly message: string;
+      }
+    | null;
 }
 
 export interface Conversation {
@@ -133,6 +145,7 @@ export interface ConversationHistory {
 export type TurnStatus =
   | "running"
   | "waiting"
+  | "blocked"
   | "completed"
   | "failed"
   | "cancelled";
@@ -180,8 +193,8 @@ export type TurnEvent =
     })
   | (TurnEventBase & {
       readonly event: "turn.completed";
-      readonly turn_id: string;
-      readonly status: "completed" | "failed" | "cancelled";
+      readonly turn_id: string | null;
+      readonly status: "blocked" | "completed" | "failed" | "cancelled";
       readonly error: {
         readonly code: string;
         readonly message: string;
@@ -189,7 +202,7 @@ export type TurnEvent =
     });
 
 export interface ActiveTurn {
-  readonly turnId: string;
+  readonly turnId: string | null;
   readonly status: TurnStatus;
   readonly error: { readonly code: string; readonly message: string } | null;
 }
@@ -201,7 +214,8 @@ export interface TurnReducerState {
 }
 
 export interface TurnHandle {
-  readonly turnId: string;
+  /** Null until Aevatar publishes the authoritative `RUN_STARTED.turnId`. */
+  readonly turnId: string | null;
   cancel(): void;
 }
 

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { TurnReducerState } from "@/types/assistant";
+import { isTurnActive } from "@/types/assistant";
 import { applyTurnEvent, EMPTY_TURN_STATE, toTerminalBlock } from "./stream";
 
 describe("applyTurnEvent", () => {
@@ -75,6 +76,29 @@ describe("applyTurnEvent", () => {
     expect(duplicate).toBe(initial);
     expect(older).toBe(initial);
     expect(initial.activeTurn?.status).toBe("running");
+  });
+
+  it("stores blocked as a terminal turn state", () => {
+    const running = applyTurnEvent(EMPTY_TURN_STATE, {
+      cursor: 1,
+      event: "turn.status",
+      turn_id: "turn-blocked",
+      status: "running",
+    });
+    const blocked = applyTurnEvent(running, {
+      cursor: 2,
+      event: "turn.completed",
+      turn_id: "turn-blocked",
+      status: "blocked",
+      error: null,
+    });
+
+    expect(blocked.activeTurn).toEqual({
+      turnId: "turn-blocked",
+      status: "blocked",
+      error: null,
+    });
+    expect(isTurnActive(blocked.activeTurn?.status)).toBe(false);
   });
 
   it("uses whole-field replacement semantics for block patches", () => {
