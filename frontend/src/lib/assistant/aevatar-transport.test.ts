@@ -1,12 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AevatarAssistantTransport } from "@/lib/assistant/aevatar-transport";
+import {
+  AevatarAssistantTransport,
+  findServiceAuthorizationFailure,
+  redactDisplayText,
+  summarizeToolResult,
+} from "@/lib/assistant/aevatar-transport";
 import { AssistantTurnActiveError } from "@/lib/assistant/errors";
 import { selectAssistantTransportKind } from "@/lib/assistant/transport";
 import capturedHistory from "@/lib/assistant/__fixtures__/aevatar-chat-history.json";
 import capturedStream from "@/lib/assistant/__fixtures__/aevatar-nyxid-chat-stream.sse?raw";
 import { useAuthStore } from "@/stores/auth-store";
 import type { User } from "@/types/api";
-import type { TurnEvent } from "@/types/assistant";
+import type { ContentBlock, TurnEvent } from "@/types/assistant";
 
 const USER_ID = "add69059-bece-4f0e-9559-99cfd10b47eb";
 const CONVERSATION_ID = "nyxid-chat-f8369965a444433f92ec50e67ad8ee52";
@@ -543,6 +548,117 @@ describe("AevatarAssistantTransport", () => {
       expect(String(input)).not.toContain("/proxy/");
     }
   });
+
+  it("deletes a conversation upstream and drops it from the local list", async () => {
+    const routeIndex: FetchRoute = (url, init) =>
+      url === `${ASSISTANT_BASE}/conversations` &&
+      (init?.method ?? "GET") === "GET"
+        ? jsonResponse({ conversations: [] })
+        : undefined;
+    const routeDelete: FetchRoute = (url, init) =>
+      url === `${ASSISTANT_BASE}/conversations/${CONVERSATION_ID}` &&
+      init?.method === "DELETE"
+        ? jsonResponse({})
+        : undefined;
+    const fetchMock = stubFetch(routeCreate, routeIndex, routeDelete);
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+    expect(await transport.listConversations()).toHaveLength(1);
+
+    await transport.deleteConversation(CONVERSATION_ID);
+
+    const deleteCall = fetchMock.mock.calls.find(
+      ([, init]) => (init as RequestInit | undefined)?.method === "DELETE",
+    );
+    expect(String(deleteCall?.[0])).toBe(
+      `${ASSISTANT_BASE}/conversations/${CONVERSATION_ID}`,
+    );
+    expect(await transport.listConversations()).toHaveLength(0);
+  });
+
+  it("keeps the conversation listed when the upstream delete fails", async () => {
+    const routeIndex: FetchRoute = (url, init) =>
+      url === `${ASSISTANT_BASE}/conversations` &&
+      (init?.method ?? "GET") === "GET"
+        ? jsonResponse({ conversations: [] })
+        : undefined;
+    const routeDeleteFailure: FetchRoute = (url, init) =>
+      url === `${ASSISTANT_BASE}/conversations/${CONVERSATION_ID}` &&
+      init?.method === "DELETE"
+        ? jsonResponse(
+            { error: "bad_gateway", error_code: 8002, message: "upstream" },
+            502,
+          )
+        : undefined;
+    stubFetch(routeCreate, routeIndex, routeDeleteFailure);
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    await expect(
+      transport.deleteConversation(CONVERSATION_ID),
+    ).rejects.toThrow();
+
+    // Failed deletes must stay visible and retryable, not vanish locally
+    // while the server still has the conversation.
+    expect(await transport.listConversations()).toHaveLength(1);
+  });
+
+  it("cancels a streaming turn when its conversation is deleted", async () => {
+    // A stream that emits the message start then stays open forever, like
+    // the cancel test above — deleting mid-turn must settle the turn, not
+    // leave the composer waiting on a conversation that no longer exists.
+    const openStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const encoder = new TextEncoder();
+        controller.enqueue(
+          encoder.encode(
+            [
+              `data: ${JSON.stringify(OBSERVED_FRAMES[0])}\n\n`,
+              `data: ${JSON.stringify(OBSERVED_FRAMES[1])}\n\n`,
+              `data: ${JSON.stringify(OBSERVED_FRAMES[2])}\n\n`,
+            ].join(""),
+          ),
+        );
+      },
+    });
+    const routeDelete: FetchRoute = (url, init) =>
+      url === `${ASSISTANT_BASE}/conversations/${CONVERSATION_ID}` &&
+      init?.method === "DELETE"
+        ? jsonResponse({})
+        : undefined;
+    stubFetch(routeCreate, routeDelete, (url, init) =>
+      url.endsWith("/stream") && init?.method === "POST"
+        ? new Response(openStream, {
+            status: 200,
+            headers: { "Content-Type": "text/event-stream" },
+          })
+        : undefined,
+    );
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    const events: TurnEvent[] = [];
+    let deletion: Promise<void> | null = null;
+    const done = new Promise<void>((resolve) => {
+      transport.sendMessage(CONVERSATION_ID, "Hello", (event) => {
+        events.push(event);
+        if (event.event === "turn.completed") resolve();
+        if (event.event === "block.delta") {
+          deletion = transport.deleteConversation(CONVERSATION_ID);
+        }
+      });
+    });
+    await done;
+    await deletion;
+
+    const terminal = events[events.length - 1];
+    expect(terminal?.event === "turn.completed" && terminal.status).toBe(
+      "cancelled",
+    );
+    expect(
+      transport.sendMessage.bind(transport, CONVERSATION_ID, "again", () => {}),
+    ).toThrow("Conversation was not found.");
+  });
 });
 
 // The fixtures under __fixtures__/ are verbatim wire captures taken against
@@ -721,6 +837,682 @@ describe("captured production wire shapes", () => {
       );
     expect(sessionIds).toHaveLength(2);
     expect(sessionIds[0]).toBe(sessionIds[1]);
+  });
+});
+
+// The reference client (eanz17/nyxid-chat `protocol.js`) documents the FULL
+// live AG-UI vocabulary; these tests pin our adapter's mapping of every frame
+// family onto the PRD §3.5 block types the UI renders.
+describe("live AG-UI frame taxonomy", () => {
+  function blockStarts(events: TurnEvent[]): ContentBlock[] {
+    return events
+      .filter(
+        (event): event is Extract<TurnEvent, { event: "block.started" }> =>
+          event.event === "block.started",
+      )
+      .map((event) => event.block);
+  }
+
+  function blockCompletions(events: TurnEvent[]): ContentBlock[] {
+    return events
+      .filter(
+        (event): event is Extract<TurnEvent, { event: "block.completed" }> =>
+          event.event === "block.completed",
+      )
+      .map((event) => event.block);
+  }
+
+  function routeApprove(response: () => Response): FetchRoute {
+    return (url, init) =>
+      url ===
+        `${ASSISTANT_BASE}/conversations/${CONVERSATION_ID}/approve` &&
+      init?.method === "POST"
+        ? response()
+        : undefined;
+  }
+
+  it("maps TOOL_CALL_START/END onto a run step ledger", async () => {
+    stubFetch(
+      routeCreate,
+      routeStream([
+        { type: "RUN_STARTED", actorId: CONVERSATION_ID },
+        {
+          type: "TOOL_CALL_START",
+          toolCallStart: { toolCallId: "c1", toolName: "ornn_search_skills" },
+        },
+        {
+          type: "TOOL_CALL_END",
+          toolCallEnd: {
+            toolCallId: "c1",
+            status: "AGENT_TOOL_RECEIPT_STATUS_SUCCESS",
+            result: { found: true },
+          },
+        },
+        { type: "RUN_FINISHED" },
+      ]),
+    );
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    const events = await collectTurn(transport, "Search skills");
+
+    const runStart = blockStarts(events).find(
+      (block) => block.type === "run",
+    );
+    expect(runStart?.type === "run" && runStart.steps).toEqual([
+      {
+        index: 1,
+        status: "active",
+        label: "ornn_search_skills",
+        meta: "Running",
+        service_slug: null,
+        artifact_id: null,
+        approval_request_id: null,
+      },
+    ]);
+    // §3.7: a patch touching steps carries the complete array.
+    const patches = events.filter(
+      (event): event is Extract<TurnEvent, { event: "block.updated" }> =>
+        event.event === "block.updated",
+    );
+    expect(patches.length).toBeGreaterThan(0);
+    for (const patch of patches) {
+      expect(
+        Array.isArray((patch.patch as { steps?: unknown }).steps),
+      ).toBe(true);
+    }
+    const runFinal = blockCompletions(events).find(
+      (block) => block.type === "run",
+    );
+    expect(runFinal?.type === "run" && runFinal.state).toBe("completed");
+    expect(
+      runFinal?.type === "run" && runFinal.steps[0],
+    ).toMatchObject({ status: "done", label: "ornn_search_skills" });
+    expect(
+      runFinal?.type === "run" && runFinal.steps[0]?.meta,
+    ).toContain("found");
+    const terminal = events[events.length - 1];
+    expect(terminal?.event === "turn.completed" && terminal.status).toBe(
+      "completed",
+    );
+  });
+
+  it("turns a tool-level authorization failure into a connect card", async () => {
+    stubFetch(
+      routeCreate,
+      routeStream([
+        { type: "RUN_STARTED" },
+        {
+          type: "TOOL_CALL_START",
+          toolCallStart: { toolCallId: "c1", toolName: "github_write" },
+        },
+        {
+          type: "TOOL_CALL_END",
+          toolCallEnd: {
+            toolCallId: "c1",
+            status: "AGENT_TOOL_RECEIPT_STATUS_ERROR",
+            error: "user is not authorized for service api-github",
+          },
+        },
+        { type: "RUN_FINISHED" },
+      ]),
+    );
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    const events = await collectTurn(transport, "Open a PR");
+
+    const card = blockStarts(events).find(
+      (block) => block.type === "connect_card",
+    );
+    expect(card?.type === "connect_card" && card.catalog_slug).toBe("github");
+    expect(card?.type === "connect_card" && card.state).toBe(
+      "needs_connection",
+    );
+    const runFinal = blockCompletions(events).find(
+      (block) => block.type === "run",
+    );
+    expect(runFinal?.type === "run" && runFinal.state).toBe("failed");
+    // The connect card stays actionable after the run settles — it is the
+    // recovery path, not a casualty of the failed step.
+    const cardFinal = blockCompletions(events).find(
+      (block) => block.type === "connect_card",
+    );
+    expect(cardFinal?.type === "connect_card" && cardFinal.state).toBe(
+      "needs_connection",
+    );
+  });
+
+  it("maps AUTHORIZATION_REQUIRED to one deduped connect card", async () => {
+    const authorizationFrame = {
+      type: "AUTHORIZATION_REQUIRED",
+      authorizationRequired: {
+        serviceSlug: "api-github",
+        message: "GitHub access is required for this request.",
+      },
+    };
+    stubFetch(
+      routeCreate,
+      routeStream([
+        { type: "RUN_STARTED" },
+        authorizationFrame,
+        authorizationFrame,
+        { type: "RUN_FINISHED" },
+      ]),
+    );
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    const events = await collectTurn(transport, "Summarize my PRs");
+
+    const cards = blockStarts(events).filter(
+      (block) => block.type === "connect_card",
+    );
+    expect(cards).toHaveLength(1);
+    const card = cards[0];
+    expect(card?.type === "connect_card" && card.catalog_slug).toBe("github");
+    expect(
+      card?.type === "connect_card" && card.steps[0]?.body,
+    ).toBe("GitHub access is required for this request.");
+    const terminal = events[events.length - 1];
+    expect(terminal?.event === "turn.completed" && terminal.status).toBe(
+      "completed",
+    );
+  });
+
+  it("maps the CUSTOM authorization.required variant identically", async () => {
+    stubFetch(
+      routeCreate,
+      routeStream([
+        { type: "RUN_STARTED" },
+        {
+          type: "CUSTOM",
+          custom: {
+            name: "nyxid.authorization.required",
+            payload: {
+              serviceSlug: "api-lark-bot",
+              message: "Connect your Lark bot first.",
+            },
+          },
+        },
+        { type: "RUN_FINISHED" },
+      ]),
+    );
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    const events = await collectTurn(transport, "Post to Lark");
+
+    const card = blockStarts(events).find(
+      (block) => block.type === "connect_card",
+    );
+    expect(card?.type === "connect_card" && card.catalog_slug).toBe(
+      "lark-bot",
+    );
+  });
+
+  it("parks the turn on TOOL_APPROVAL_REQUEST and keeps the card actionable at EOF", async () => {
+    // The upstream may close the idle stream while the human gate is open
+    // (PRD §3.4); that is a pause, not a truncated run.
+    stubFetch(
+      routeCreate,
+      routeStream([
+        { type: "RUN_STARTED" },
+        {
+          type: "TOOL_APPROVAL_REQUEST",
+          toolApprovalRequest: {
+            requestId: "req-1",
+            toolName: "lark_post",
+            message: "Post the digest to #eng-updates.",
+          },
+        },
+      ]),
+    );
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    const events = await collectTurn(transport, "Post the digest");
+
+    const card = blockStarts(events).find(
+      (block) => block.type === "approval_card",
+    );
+    expect(card?.type === "approval_card" && card.approval_request_id).toBe(
+      "req-1",
+    );
+    expect(card?.type === "approval_card" && card.body).toBe(
+      "Post the digest to #eng-updates.",
+    );
+    expect(
+      events.some(
+        (event) =>
+          event.event === "turn.status" && event.status === "waiting",
+      ),
+    ).toBe(true);
+    const terminal = events[events.length - 1];
+    expect(
+      terminal?.event === "turn.completed" && {
+        status: terminal.status,
+        error: terminal.error,
+      },
+    ).toEqual({ status: "completed", error: null });
+    const cardFinal = blockCompletions(events).find(
+      (block) => block.type === "approval_card",
+    );
+    expect(cardFinal?.type === "approval_card" && cardFinal.decision).toBe(
+      null,
+    );
+  });
+
+  it("streams the approve endpoint's SSE continuation as a follow-on turn", async () => {
+    const fetchMock = stubFetch(
+      routeCreate,
+      routeStream([
+        { type: "RUN_STARTED" },
+        {
+          type: "TOOL_APPROVAL_REQUEST",
+          toolApprovalRequest: { requestId: "req-1", toolName: "lark_post" },
+        },
+      ]),
+      routeApprove(() =>
+        sseResponse([
+          {
+            type: "TEXT_MESSAGE_START",
+            textMessageStart: { messageId: "m-2", role: "assistant" },
+          },
+          {
+            type: "TEXT_MESSAGE_CONTENT",
+            textMessageContent: { delta: "Posted to #eng-updates." },
+          },
+          { type: "TEXT_MESSAGE_END", textMessageEnd: { messageId: "m-2" } },
+          { type: "RUN_FINISHED" },
+        ]),
+      ),
+      routeHistory([]),
+    );
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+    const firstTurn = await collectTurn(transport, "Post the digest");
+    const lastFirstCursor = firstTurn[firstTurn.length - 1]?.cursor ?? 0;
+    const history = await transport.getHistory(CONVERSATION_ID);
+    const card = history.messages
+      .flatMap((message) => message.blocks)
+      .find((block) => block.type === "approval_card");
+    expect(card).toBeDefined();
+
+    const events: TurnEvent[] = [];
+    const done = new Promise<void>((resolve) => {
+      void transport
+        .decideApproval(
+          CONVERSATION_ID,
+          card?.block_id ?? "",
+          true,
+          (event) => {
+            events.push(event);
+            if (event.event === "turn.completed") resolve();
+          },
+        )
+        .then((handle) => {
+          expect(handle).not.toBeNull();
+        });
+    });
+    await done;
+
+    const approveCall = fetchMock.mock.calls.find(([input]) =>
+      String(input).endsWith("/approve"),
+    );
+    const approveBody = JSON.parse(
+      String((approveCall?.[1] as RequestInit | undefined)?.body),
+    ) as { requestId: string; approved: boolean; sessionId?: string };
+    expect(approveBody.requestId).toBe("req-1");
+    expect(approveBody.approved).toBe(true);
+    expect(approveBody.sessionId).toMatch(/^[0-9a-f-]{36}$/);
+
+    // Continuation cursors continue past the prior turn's, so a
+    // still-subscribed at-least-once consumer never drops them.
+    expect(events[0]?.cursor).toBeGreaterThan(lastFirstCursor);
+    const cursors = events.map((event) => event.cursor);
+    expect(cursors).toEqual([...cursors].sort((a, b) => a - b));
+    const flip = events.find(
+      (event): event is Extract<TurnEvent, { event: "block.updated" }> =>
+        event.event === "block.updated",
+    );
+    expect(flip?.patch).toMatchObject({
+      decision: "approved",
+      decision_channel: "web",
+    });
+    const text = blockCompletions(events).find(
+      (block) => block.type === "text",
+    );
+    expect(text?.type === "text" && text.text).toBe(
+      "Posted to #eng-updates.",
+    );
+    const terminal = events[events.length - 1];
+    expect(terminal?.event === "turn.completed" && terminal.status).toBe(
+      "completed",
+    );
+  });
+
+  it("settles immediately when the approve endpoint acks with JSON", async () => {
+    stubFetch(
+      routeCreate,
+      routeStream([
+        { type: "RUN_STARTED" },
+        {
+          type: "TOOL_APPROVAL_REQUEST",
+          toolApprovalRequest: { requestId: "req-2" },
+        },
+      ]),
+      routeApprove(() => jsonResponse({ accepted: true })),
+      routeHistory([]),
+    );
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+    await collectTurn(transport, "Do the thing");
+    const history = await transport.getHistory(CONVERSATION_ID);
+    const card = history.messages
+      .flatMap((message) => message.blocks)
+      .find((block) => block.type === "approval_card");
+
+    const events: TurnEvent[] = [];
+    await transport.decideApproval(
+      CONVERSATION_ID,
+      card?.block_id ?? "",
+      false,
+      (event) => events.push(event),
+    );
+
+    const flip = events.find(
+      (event): event is Extract<TurnEvent, { event: "block.updated" }> =>
+        event.event === "block.updated",
+    );
+    expect(flip?.patch).toMatchObject({ decision: "denied" });
+    const terminal = events[events.length - 1];
+    expect(terminal?.event === "turn.completed" && terminal.status).toBe(
+      "completed",
+    );
+  });
+
+  it("mines a raw.observed completion for steps and fallback text, never reasoning", async () => {
+    stubFetch(
+      routeCreate,
+      routeStream([
+        { type: "RUN_STARTED" },
+        {
+          type: "CUSTOM",
+          custom: {
+            name: "aevatar.raw.observed",
+            payload: {
+              "@type":
+                "type.googleapis.com/aevatar.workflow.runs.WorkflowObservedEnvelopeCustomPayload",
+              eventId: "evt-1",
+              payloadTypeUrl:
+                "type.googleapis.com/aevatar.ai.RoleChatSessionCompletedEvent",
+              payload: {
+                "@type":
+                  "type.googleapis.com/aevatar.ai.RoleChatSessionCompletedEvent",
+                sessionId: "session-1",
+                content: "All done.",
+                reasoningContent: "private trace",
+                toolCalls: [
+                  {
+                    callId: "call-1",
+                    toolName: "ornn_search_skills",
+                    argumentsJson: '{"query":"nyxid"}',
+                  },
+                ],
+                toolReceipts: [
+                  {
+                    callId: "call-1",
+                    toolName: "ornn_search_skills",
+                    status: "AGENT_TOOL_RECEIPT_STATUS_SUCCESS",
+                    resultJson: '{"found":true}',
+                  },
+                ],
+                usage: { promptTokens: 100, completionTokens: 20 },
+                model: "gpt-test",
+              },
+            },
+          },
+        },
+        { type: "RUN_FINISHED" },
+      ]),
+      routeHistory([]),
+    );
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    const events = await collectTurn(transport, "Search and finish");
+
+    const runFinal = blockCompletions(events).find(
+      (block) => block.type === "run",
+    );
+    expect(
+      runFinal?.type === "run" && runFinal.steps[0],
+    ).toMatchObject({ status: "done", label: "ornn_search_skills" });
+    const text = blockCompletions(events).find(
+      (block) => block.type === "text",
+    );
+    expect(text?.type === "text" && text.text).toBe("All done.");
+    // PRD §3.8: engine reasoning never reaches a rendered event.
+    expect(JSON.stringify(events)).not.toContain("private trace");
+    const history = await transport.getHistory(CONVERSATION_ID);
+    expect(history.conversation.llm_model).toBe("gpt-test");
+  });
+
+  it("maps workflow step customs onto the run ledger", async () => {
+    stubFetch(
+      routeCreate,
+      routeStream([
+        { type: "RUN_STARTED" },
+        {
+          type: "CUSTOM",
+          custom: {
+            name: "aevatar.step.request",
+            payload: { runId: "run-1", stepId: "plan" },
+          },
+        },
+        {
+          type: "CUSTOM",
+          custom: {
+            name: "aevatar.step.completed",
+            payload: { runId: "run-1", stepId: "plan", success: true },
+          },
+        },
+        { type: "RUN_FINISHED" },
+      ]),
+    );
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    const events = await collectTurn(transport, "Plan it");
+
+    const runFinal = blockCompletions(events).find(
+      (block) => block.type === "run",
+    );
+    expect(runFinal?.type === "run" && runFinal.state).toBe("completed");
+    expect(
+      runFinal?.type === "run" && runFinal.steps[0],
+    ).toMatchObject({ status: "done", label: "plan" });
+  });
+
+  it("embeds MEDIA_CONTENT as a data-URL artifact block", async () => {
+    stubFetch(
+      routeCreate,
+      routeStream([
+        { type: "RUN_STARTED" },
+        {
+          type: "MEDIA_CONTENT",
+          mediaContent: {
+            mediaType: "image/png",
+            dataBase64: "aGVsbG8=",
+            name: "chart.png",
+          },
+        },
+        { type: "RUN_FINISHED" },
+      ]),
+    );
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    const events = await collectTurn(transport, "Chart it");
+
+    const artifact = blockStarts(events).find(
+      (block) => block.type === "artifact",
+    );
+    expect(artifact?.type === "artifact" && artifact).toMatchObject({
+      name: "chart.png",
+      mime: "image/png",
+      size_bytes: 6,
+      download_url: "data:image/png;base64,aGVsbG8=",
+    });
+  });
+
+  it("fails a run stalled on keepalives once the 120s watchdog fires", async () => {
+    vi.useFakeTimers();
+    try {
+      const encoder = new TextEncoder();
+      let push: (frame: unknown) => void = () => {};
+      const openStream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          push = (frame) => {
+            controller.enqueue(
+              encoder.encode(`data: ${JSON.stringify(frame)}\n\n`),
+            );
+          };
+          push({ type: "RUN_STARTED" });
+        },
+      });
+      stubFetch(routeCreate, (url, init) =>
+        url.endsWith("/stream") && init?.method === "POST"
+          ? new Response(openStream, {
+              status: 200,
+              headers: { "Content-Type": "text/event-stream" },
+            })
+          : undefined,
+      );
+      const transport = new AevatarAssistantTransport();
+      await transport.createConversation();
+
+      const events: TurnEvent[] = [];
+      const done = new Promise<void>((resolve) => {
+        transport.sendMessage(CONVERSATION_ID, "Hello", (event) => {
+          events.push(event);
+          if (event.event === "turn.completed") resolve();
+        });
+      });
+      // Keepalives keep the socket open but are not progress.
+      await vi.advanceTimersByTimeAsync(60_000);
+      push?.({
+        type: "CUSTOM",
+        custom: { name: "aevatar.nyxid_chat.keepalive", payload: {} },
+      });
+      await vi.advanceTimersByTimeAsync(60_001);
+      await done;
+
+      const terminal = events[events.length - 1];
+      expect(terminal?.event === "turn.completed" && terminal.status).toBe(
+        "failed",
+      );
+      expect(
+        terminal?.event === "turn.completed" && terminal.error?.code,
+      ).toBe("upstream_progress_timeout");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("re-arms the watchdog on real progress frames", async () => {
+    vi.useFakeTimers();
+    try {
+      const encoder = new TextEncoder();
+      let push: (frame: unknown) => void = () => {};
+      const openStream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          push = (frame) => {
+            controller.enqueue(
+              encoder.encode(`data: ${JSON.stringify(frame)}\n\n`),
+            );
+          };
+          push({ type: "RUN_STARTED" });
+        },
+      });
+      stubFetch(routeCreate, (url, init) =>
+        url.endsWith("/stream") && init?.method === "POST"
+          ? new Response(openStream, {
+              status: 200,
+              headers: { "Content-Type": "text/event-stream" },
+            })
+          : undefined,
+      );
+      const transport = new AevatarAssistantTransport();
+      await transport.createConversation();
+
+      const events: TurnEvent[] = [];
+      const done = new Promise<void>((resolve) => {
+        transport.sendMessage(CONVERSATION_ID, "Hello", (event) => {
+          events.push(event);
+          if (event.event === "turn.completed") resolve();
+        });
+      });
+      await vi.advanceTimersByTimeAsync(100_000);
+      push?.({
+        type: "TEXT_MESSAGE_START",
+        textMessageStart: { messageId: "m-1", role: "assistant" },
+      });
+      // 100s after the reset: under the 120s deadline, so still running.
+      await vi.advanceTimersByTimeAsync(100_000);
+      expect(
+        events.some((event) => event.event === "turn.completed"),
+      ).toBe(false);
+      await vi.advanceTimersByTimeAsync(20_001);
+      await done;
+
+      const terminal = events[events.length - 1];
+      expect(
+        terminal?.event === "turn.completed" && terminal.error?.code,
+      ).toBe("upstream_progress_timeout");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("redaction and authorization sniffing", () => {
+  it("redacts secret assignments and token shapes from display text", () => {
+    expect(
+      redactDisplayText('{"api_key":"sk-live-12345","status":"ok"}'),
+    ).not.toContain("sk-live-12345");
+    expect(redactDisplayText("Authorization: Bearer abc.def.ghi")).not.toContain(
+      "abc.def.ghi",
+    );
+    expect(redactDisplayText("key nyxid_ag_supersecret1234")).toContain(
+      "[redacted]",
+    );
+  });
+
+  it("summarizes tool results as compact redacted single lines", () => {
+    expect(summarizeToolResult(undefined)).toBe("Completed");
+    expect(summarizeToolResult({ found: true })).toBe('{"found":true}');
+    const long = summarizeToolResult({ text: "x".repeat(500) });
+    expect(long.length).toBeLessThanOrEqual(160);
+    expect(long.endsWith("…")).toBe(true);
+  });
+
+  it("detects authorization failures and extracts the slug", () => {
+    expect(
+      findServiceAuthorizationFailure(
+        "user is not authorized for service api-github",
+      ),
+    ).toMatchObject({ serviceSlug: "api-github" });
+    expect(
+      findServiceAuthorizationFailure({
+        error: "invalid_target",
+        service_slug: "ornn-api",
+      }),
+    ).toMatchObject({ serviceSlug: "ornn-api" });
+    expect(findServiceAuthorizationFailure("everything went fine")).toBe(
+      null,
+    );
   });
 });
 

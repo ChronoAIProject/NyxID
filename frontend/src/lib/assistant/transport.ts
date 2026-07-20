@@ -44,6 +44,12 @@ class MockAssistantTransport implements AssistantTransport {
     return assistantMockStore.getHistory(conversationId);
   }
 
+  async deleteConversation(conversationId: string): Promise<void> {
+    const script = this.running.get(conversationId);
+    if (script) this.cancelScript(conversationId, script);
+    assistantMockStore.deleteConversation(conversationId);
+  }
+
   sendMessage(
     conversationId: string,
     content: string,
@@ -105,8 +111,11 @@ class MockAssistantTransport implements AssistantTransport {
     conversationId: string,
     blockId: string,
     approved: boolean,
-  ): Promise<void> {
+  ): Promise<TurnHandle | null> {
     assistantMockStore.decideApproval(conversationId, blockId, approved);
+    // The scripted store settles the card synchronously; there is no
+    // continuation stream to hand back.
+    return null;
   }
 
   reset(now: () => number = Date.now): void {

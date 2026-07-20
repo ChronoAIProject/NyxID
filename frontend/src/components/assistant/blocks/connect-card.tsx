@@ -1,3 +1,4 @@
+import { Link } from "@tanstack/react-router";
 import {
   Check,
   Circle,
@@ -92,16 +93,20 @@ export function ConnectCard({
           <div className="mt-4 flex flex-wrap gap-2 pl-[30px]">
             <Tooltip>
               <TooltipTrigger asChild>
-                <Button type="button" variant="primary" size="sm">
-                  {block.auth_kind === "api_key" ? (
-                    <KeyRound />
-                  ) : (
-                    <ExternalLink />
-                  )}
-                  Connect {block.service_name}
+                <Button asChild variant="primary" size="sm">
+                  <Link to="/keys">
+                    {block.auth_kind === "api_key" ? (
+                      <KeyRound />
+                    ) : (
+                      <ExternalLink />
+                    )}
+                    Connect {block.service_name}
+                  </Link>
                 </Button>
               </TooltipTrigger>
-              <TooltipContent>Wired in the API pass</TooltipContent>
+              <TooltipContent>
+                Configure in AI Services, then send your request again
+              </TooltipContent>
             </Tooltip>
           </div>
         )}
