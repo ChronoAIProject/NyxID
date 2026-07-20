@@ -2103,15 +2103,12 @@ async fn execute_proxy_inner(
                             // content-length for client download progress / seeking.
                             let node_is_sse = resp_headers.iter().any(|(k, v)| {
                                 k.eq_ignore_ascii_case("content-type")
-                                    && v.contains("text/event-stream")
+                                    && crate::mw::security_headers::is_sse_media_type(v)
                             });
 
                             for (name, value) in &resp_headers {
                                 let name_lower = name.to_lowercase();
-                                if node_is_sse && name_lower == "content-length" {
-                                    continue;
-                                }
-                                if ALLOWED_RESPONSE_HEADERS.contains(&name_lower.as_str())
+                                if forwardable_response_header(&name_lower, node_is_sse)
                                     && let (Ok(hn), Ok(hv)) = (
                                         axum::http::header::HeaderName::from_bytes(name.as_bytes()),
                                         axum::http::header::HeaderValue::from_bytes(
@@ -2123,6 +2120,7 @@ async fn execute_proxy_inner(
                                 }
                             }
 
+                            // Same anti-buffering opt-out as the direct path:
                             let service_id_owned = service_id.to_string();
                             let node_id_owned = node_id.to_string();
                             let stream_db = state.db.clone();
@@ -2459,11 +2457,14 @@ async fn execute_proxy_inner(
     let status = StatusCode::from_u16(downstream_response.status().as_u16())
         .unwrap_or(StatusCode::BAD_GATEWAY);
 
+    // Same exact, case-insensitive media-type test the response-header
+    // middleware uses, so `content-length` stripping and SSE usage
+    // observation agree with the anti-buffering mark.
     let is_sse = downstream_response
         .headers()
         .get("content-type")
         .and_then(|v| v.to_str().ok())
-        .is_some_and(|ct| ct.contains("text/event-stream"));
+        .is_some_and(crate::mw::security_headers::is_sse_media_type);
     let should_stream = should_stream_response(&downstream_response, status, is_sse);
     let usage_context =
         target
@@ -2488,10 +2489,7 @@ async fn execute_proxy_inner(
     // streaming responses — clients need it for download progress / seeking.
     for (name, value) in downstream_response.headers().iter() {
         let name_lower = name.as_str().to_lowercase();
-        if is_sse && name_lower == "content-length" {
-            continue;
-        }
-        if ALLOWED_RESPONSE_HEADERS.contains(&name_lower.as_str())
+        if forwardable_response_header(&name_lower, is_sse)
             && let Ok(header_name) =
                 axum::http::header::HeaderName::from_bytes(name.as_str().as_bytes())
             && let Ok(header_value) = axum::http::header::HeaderValue::from_bytes(value.as_bytes())
@@ -3085,6 +3083,24 @@ const STREAMING_CONTENT_TYPES: &[&str] = &[
     "image/",
     "application/pdf",
 ];
+
+/// Whether a downstream response header may be forwarded to the client.
+///
+/// SSE drops `content-length`: the length of a stream is unknown, and a
+/// stale upstream value would truncate it. Shared by the direct and
+/// node-routed paths.
+///
+/// `x-accel-buffering` is deliberately absent from the allowlist entirely:
+/// NyxID sets it itself on every SSE response (see
+/// `mw::security_headers`), and forwarding an upstream copy would let an
+/// arbitrary proxied service dictate front-proxy buffering behavior for
+/// non-SSE responses too.
+fn forwardable_response_header(name_lower: &str, is_sse: bool) -> bool {
+    if is_sse && name_lower == "content-length" {
+        return false;
+    }
+    ALLOWED_RESPONSE_HEADERS.contains(&name_lower)
+}
 
 /// Decide whether a downstream response should be streamed to the client
 /// instead of buffered in memory.
@@ -6283,6 +6299,46 @@ mod tests {
     fn allowed_response_headers_includes_range_support() {
         assert!(super::ALLOWED_RESPONSE_HEADERS.contains(&"accept-ranges"));
         assert!(super::ALLOWED_RESPONSE_HEADERS.contains(&"content-range"));
+    }
+
+    /// SSE behind a buffering reverse proxy (nginx defaults to
+    /// `proxy_buffering on`) arrives as one blob at the end. Both proxy
+    /// paths set `X-Accel-Buffering: no` on SSE responses, and the header
+    /// must stay forwardable so an upstream copy survives too — dropping
+    /// either half silently un-streams every assistant/LLM SSE surface.
+    #[test]
+    fn allowed_response_headers_includes_accel_buffering() {
+        // A proxied service must not be able to dictate front-proxy
+        // buffering: NyxID derives `x-accel-buffering` itself for SSE
+        // (mw::security_headers) and never forwards an upstream copy.
+        assert!(!super::ALLOWED_RESPONSE_HEADERS.contains(&"x-accel-buffering"));
+    }
+
+    #[test]
+    fn sse_drops_upstream_content_length() {
+        // The length of a stream is unknown; a stale upstream value would
+        // truncate it.
+        assert!(!super::forwardable_response_header("content-length", true));
+        assert!(super::forwardable_response_header("content-length", false));
+    }
+
+    #[test]
+    fn buffering_hint_is_never_forwarded_from_upstream() {
+        assert!(!super::forwardable_response_header(
+            "x-accel-buffering",
+            true
+        ));
+        assert!(!super::forwardable_response_header(
+            "x-accel-buffering",
+            false
+        ));
+    }
+
+    #[test]
+    fn forwardable_response_header_still_denies_unlisted_headers() {
+        assert!(!super::forwardable_response_header("set-cookie", true));
+        assert!(!super::forwardable_response_header("set-cookie", false));
+        assert!(super::forwardable_response_header("content-type", true));
     }
 
     // ---- STREAMING_CONTENT_TYPES coverage ----
