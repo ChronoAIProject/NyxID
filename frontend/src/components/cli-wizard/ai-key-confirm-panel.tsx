@@ -1172,6 +1172,7 @@ function CatalogConfirmForm({
   }
 
   const needsCredentialInput = shape === "api-key" && entry.requires_credential;
+  const isSupabase = entry.slug === "api-supabase";
   const submitLabel = (() => {
     if (loading) return "Creating...";
     if (viaNode) return "Connect via node";
@@ -1241,20 +1242,30 @@ function CatalogConfirmForm({
         </Field>
 
         {entry.requires_gateway_url ? (
-          <Field label="Instance URL" htmlFor="pair-aikey-url">
+          <Field
+            label={isSupabase ? "Supabase Project URL" : "Instance URL"}
+            htmlFor="pair-aikey-url"
+          >
             <Input
               id="pair-aikey-url"
               value={endpointUrl}
               onChange={(e) => {
                 setEndpointUrl(e.target.value);
               }}
-              placeholder="https://your-instance.example.com"
+              placeholder={
+                isSupabase
+                  ? "https://project-ref.supabase.co"
+                  : "https://your-instance.example.com"
+              }
             />
           </Field>
         ) : null}
 
         {needsCredentialInput && !viaNode ? (
-          <Field label="API key" htmlFor="pair-aikey-credential">
+          <Field
+            label={isSupabase ? "Supabase API key" : "API key"}
+            htmlFor="pair-aikey-credential"
+          >
             <Input
               id="pair-aikey-credential"
               type="password"
@@ -1263,7 +1274,9 @@ function CatalogConfirmForm({
               onChange={(e) => {
                 setCredential(e.target.value);
               }}
-              placeholder="sk-..."
+              placeholder={
+                isSupabase ? "sb_secret_... or sb_publishable_..." : "sk-..."
+              }
             />
             {entry.api_key_url ? (
               <a

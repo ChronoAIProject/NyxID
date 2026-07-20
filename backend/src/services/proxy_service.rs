@@ -106,6 +106,13 @@ const ALLOWED_FORWARD_HEADERS: &[&str] = &[
     "x-request-id",
     "x-correlation-id",
     "range",
+    // PostgREST request controls used by Supabase Data API clients. These
+    // headers select schemas, request representation/count behavior, and
+    // define item ranges; none carry credentials.
+    "prefer",
+    "accept-profile",
+    "content-profile",
+    "range-unit",
     "if-range",
     "if-none-match",
     "if-modified-since",
@@ -2946,6 +2953,16 @@ mod tests {
         assert!(is_allowed_forward_header("content-type"));
         assert!(is_allowed_forward_header("user-agent"));
         assert!(is_allowed_forward_header("range"));
+    }
+
+    #[test]
+    fn forward_allowlist_accepts_postgrest_request_headers() {
+        for header in ["prefer", "accept-profile", "content-profile", "range-unit"] {
+            assert!(
+                is_allowed_forward_header(header),
+                "PostgREST request header must be forwarded: {header}"
+            );
+        }
     }
 
     #[test]

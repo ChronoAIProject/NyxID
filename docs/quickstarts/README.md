@@ -10,5 +10,6 @@ For first-time NyxID setup (Docker stack, hosted signup, account registration), 
 | [**Per-Agent Keys for Claude Code and Codex**](claude-code.md) | Two coding agents on one machine, each scoped to a distinct service and credential, attributed independently in the audit log. | Agent isolation, scoped Agent Keys |
 | [**Reach a Localhost API from a Cloud-Hosted Agent**](node-proxy.md) | A private-host API is reachable from a cloud agent without VPN, port forwarding, or a tunneling service. | Credential Node, outbound-only NAT traversal |
 | [**Wrap a REST API as MCP Tools**](mcp-wrapping.md) | An OpenAPI spec is exposed as typed MCP tools to Claude Code / Cursor / VS Code / Codex with no MCP server code. | OpenAPI → MCP auto-wrap |
+| [**Use Supabase as an AI Agent Database**](supabase.md) | A Supabase project becomes a credential-brokered PostgREST database for scoped AI agents. | Per-user endpoint + encrypted API key |
 
-Every quickstart begins with the same prerequisite step — **Step 0: Get NyxID running and create an Agent Key**. The canonical version lives in the [n8n quickstart](n8n.md#step-0--get-nyxid-running-and-create-an-agent-key); the other three reference it.
+Every quickstart begins with the same prerequisite step — **Step 0: Get NyxID running and create an Agent Key**. The canonical version lives in the [n8n quickstart](n8n.md#step-0--get-nyxid-running-and-create-an-agent-key); the other guides reference it.

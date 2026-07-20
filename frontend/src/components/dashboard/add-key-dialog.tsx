@@ -199,7 +199,14 @@ function composeAwsSigv4Credential(fields: AwsSigv4Fields): string {
 function getCredentialFieldMeta(
   authMethod: string,
   authKeyName: string,
+  catalogSlug?: string,
 ): { readonly label: string; readonly placeholder: string } {
+  if (catalogSlug === "api-supabase") {
+    return {
+      label: "Supabase API Key",
+      placeholder: "sb_secret_... or sb_publishable_...",
+    };
+  }
   if (authMethod === "bot_bearer") {
     return { label: "Bot Token", placeholder: "Discord bot token" };
   }
@@ -619,6 +626,7 @@ function KeyForm({
   const credentialMeta = getCredentialFieldMeta(
     form.authMethod,
     form.authKeyName,
+    catalogEntry?.slug,
   );
   // Live URL-format errors: only once the user has typed something, so an
   // untouched optional field stays quiet.
@@ -633,6 +641,7 @@ function KeyForm({
     !isValidHttpUrl(form.openapiSpecUrl.trim())
       ? "Must be a full URL with a domain, e.g. https://api.example.com/openapi.json"
       : null;
+  const isSupabase = catalogEntry?.slug === "api-supabase";
 
   return (
     <div className="space-y-4">
@@ -854,14 +863,18 @@ function KeyForm({
 
         <div className="space-y-1.5">
           <Label htmlFor="add-key-endpoint">
-            Endpoint URL{" "}
+            {isSupabase ? "Supabase Project URL" : "Endpoint URL"}{" "}
             {(isCustom || catalogEntry?.requires_gateway_url) && (
               <span className="text-destructive">*</span>
             )}
           </Label>
           <Input
             id="add-key-endpoint"
-            placeholder="https://api.example.com/v1"
+            placeholder={
+              isSupabase
+                ? "https://project-ref.supabase.co"
+                : "https://api.example.com/v1"
+            }
             value={form.endpointUrl}
             onChange={(e) => onChange({ endpointUrl: e.target.value })}
             readOnly={!endpointEditable}
@@ -2198,7 +2211,10 @@ export function AddKeyDialog({
     setForm({
       ...INITIAL_FORM,
       label: entry.name,
-      endpointUrl: entry.base_url,
+      // Per-instance entries expose a placeholder base URL in the catalog.
+      // Require the user to provide their real instance instead of silently
+      // submitting the placeholder.
+      endpointUrl: entry.requires_gateway_url ? "" : entry.base_url,
       authMethod: entry.auth_method ?? "bearer",
       authKeyName: entry.auth_key_name ?? "Authorization",
     });
