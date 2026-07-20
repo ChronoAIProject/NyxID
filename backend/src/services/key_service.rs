@@ -10,10 +10,8 @@ use crate::models::agent_service_binding::{
     AgentServiceBinding, COLLECTION_NAME as AGENT_BINDINGS,
 };
 use crate::models::api_key::{ApiKey, COLLECTION_NAME as API_KEYS};
-use crate::models::node::{COLLECTION_NAME as NODES, Node};
-use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
 use crate::redaction::RedactedLen;
-use crate::services::{node_service, org_service, user_service_service};
+use crate::services::api_key_scope_service::{self, ScopeAuthorization};
 
 /// Result returned when a new API key is created.
 /// The `full_key` is shown once and never stored.
@@ -114,130 +112,6 @@ fn validate_api_key_scopes(scopes: &str) -> AppResult<()> {
     Ok(())
 }
 
-#[derive(Clone, Copy)]
-enum ApiKeyScopeAuthorization<'a> {
-    OwnerOnly,
-    ActorPermissions { actor_user_id: &'a str },
-}
-
-impl<'a> ApiKeyScopeAuthorization<'a> {
-    fn for_actor(actor_user_id: Option<&'a str>) -> Self {
-        match actor_user_id {
-            Some(actor_user_id) => Self::ActorPermissions { actor_user_id },
-            None => Self::OwnerOnly,
-        }
-    }
-}
-
-fn service_scope_error(service_id: &str) -> AppError {
-    AppError::ValidationError(format!(
-        "UserService '{}' not found or not permitted for this API key",
-        service_id
-    ))
-}
-
-fn node_scope_error(node_id: &str) -> AppError {
-    AppError::ValidationError(format!(
-        "Node '{}' not found or not permitted for this API key",
-        node_id
-    ))
-}
-
-fn service_is_scopeable_for_actor(
-    service_id: &str,
-    entry: &user_service_service::UserServiceWithSource,
-) -> bool {
-    if entry.service.id != service_id || !entry.service.is_active {
-        return false;
-    }
-
-    match &entry.source {
-        user_service_service::CredentialSource::Personal => true,
-        user_service_service::CredentialSource::Org { allowed, .. } => *allowed,
-    }
-}
-
-/// Validate that all service IDs are active and permitted for this API key.
-///
-/// `OwnerOnly` preserves the legacy storage-owner check used by provisioning
-/// flows and org-owned keys. `ActorPermissions` is for personal key
-/// management: the key remains owned by the actor, but explicit allow-lists
-/// may include org services that `list_user_services_with_sources` already
-/// exposes as proxyable for that actor.
-async fn validate_service_ids(
-    db: &mongodb::Database,
-    key_owner_user_id: &str,
-    service_ids: &[String],
-    authorization: ApiKeyScopeAuthorization<'_>,
-) -> AppResult<()> {
-    if let ApiKeyScopeAuthorization::ActorPermissions { actor_user_id } = authorization
-        && actor_user_id == key_owner_user_id
-    {
-        let visible_services =
-            user_service_service::list_user_services_with_sources(db, actor_user_id).await?;
-        for sid in service_ids {
-            if !visible_services
-                .iter()
-                .any(|entry| service_is_scopeable_for_actor(sid, entry))
-            {
-                return Err(service_scope_error(sid));
-            }
-        }
-        return Ok(());
-    }
-
-    for sid in service_ids {
-        let exists = db
-            .collection::<UserService>(USER_SERVICES)
-            .find_one(doc! { "_id": sid, "user_id": key_owner_user_id, "is_active": true })
-            .await?;
-        if exists.is_none() {
-            return Err(service_scope_error(sid));
-        }
-    }
-    Ok(())
-}
-
-/// Validate that all node IDs are active and permitted for this API key.
-///
-/// Node access has no per-node membership scope in NyxID today; org node
-/// reachability follows the existing node ACL (`node_access_can_read`),
-/// which admits direct owners, org admins, and org members with proxy rights.
-async fn validate_node_ids(
-    db: &mongodb::Database,
-    key_owner_user_id: &str,
-    node_ids: &[String],
-    authorization: ApiKeyScopeAuthorization<'_>,
-) -> AppResult<()> {
-    for nid in node_ids {
-        let node = db
-            .collection::<Node>(NODES)
-            .find_one(doc! { "_id": nid, "is_active": true })
-            .await?;
-        let Some(node) = node else {
-            return Err(node_scope_error(nid));
-        };
-
-        match authorization {
-            ApiKeyScopeAuthorization::ActorPermissions { actor_user_id }
-                if actor_user_id == key_owner_user_id =>
-            {
-                let access =
-                    org_service::resolve_owner_access(db, actor_user_id, &node.user_id).await?;
-                if !node_service::node_access_can_read(&access) {
-                    return Err(node_scope_error(nid));
-                }
-            }
-            _ => {
-                if node.user_id != key_owner_user_id {
-                    return Err(node_scope_error(nid));
-                }
-            }
-        };
-    }
-    Ok(())
-}
-
 /// Determine whether the key should use the scoped `nyxid_ag_` prefix.
 /// A key is scoped if either `allow_all` flag is false.
 fn is_scoped_key(allow_all_services: bool, allow_all_nodes: bool) -> bool {
@@ -295,17 +169,14 @@ pub async fn create_api_key(
         rate_limit_burst,
         platform,
         callback_url,
+        None,
     )
     .await
 }
 
 /// Create a new API key while validating explicit scope IDs against the
-/// permissions of `scope_actor_user_id`.
-///
-/// Use this for personal key management where the storage owner is the
-/// actor and a key may be scoped to org resources that actor can already
-/// proxy. Passing an actor different from the key owner intentionally falls
-/// back to owner-only validation, preserving org-owned key isolation.
+/// permissions of `scope_actor_user_id`. Personal keys may include permitted
+/// org resources under #1133 semantics; org-owned keys remain owner-bound.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_api_key_with_scope_authorization(
     db: &mongodb::Database,
@@ -323,6 +194,7 @@ pub async fn create_api_key_with_scope_authorization(
     rate_limit_burst: Option<u32>,
     platform: Option<&str>,
     callback_url: Option<&str>,
+    scope_plan_digest: Option<&str>,
 ) -> AppResult<CreatedApiKey> {
     if name.is_empty() || name.len() > 200 {
         return Err(AppError::ValidationError(
@@ -338,22 +210,41 @@ pub async fn create_api_key_with_scope_authorization(
     let all_svcs = allow_all_services.unwrap_or(true);
     let all_nodes = allow_all_nodes.unwrap_or(true);
 
+    if let Some(expected_digest) = scope_plan_digest {
+        let actor_user_id = scope_actor_user_id.ok_or_else(|| {
+            AppError::ApiKeyScopePlanOwnerUnsupported(
+                "scope_plan_digest requires an authenticated actor context".to_string(),
+            )
+        })?;
+        api_key_scope_service::verify_scope_plan_precondition(
+            db,
+            actor_user_id,
+            user_id,
+            &svc_ids,
+            &node_ids,
+            all_svcs,
+            all_nodes,
+            expected_digest,
+        )
+        .await?;
+    }
+
     // Validate service/node IDs if restricted
     if !all_svcs {
-        validate_service_ids(
+        api_key_scope_service::validate_service_ids(
             db,
             user_id,
             &svc_ids,
-            ApiKeyScopeAuthorization::for_actor(scope_actor_user_id),
+            ScopeAuthorization::for_actor(scope_actor_user_id),
         )
         .await?;
     }
     if !all_nodes {
-        validate_node_ids(
+        api_key_scope_service::validate_node_ids(
             db,
             user_id,
             &node_ids,
-            ApiKeyScopeAuthorization::for_actor(scope_actor_user_id),
+            ScopeAuthorization::for_actor(scope_actor_user_id),
         )
         .await?;
     }
@@ -514,6 +405,7 @@ pub async fn rotate_api_key_with_scope_authorization(
         old_key.rate_limit_burst,
         old_key.platform.as_deref(),
         old_key.callback_url.as_deref(),
+        None,
     )
     .await?;
 
@@ -555,44 +447,6 @@ pub async fn rotate_api_key_with_scope_authorization(
 }
 
 #[allow(clippy::too_many_arguments)]
-/// Update scope fields on an existing API key.
-pub async fn update_api_key_scope(
-    db: &mongodb::Database,
-    user_id: &str,
-    key_id: &str,
-    name: Option<&str>,
-    description: Option<&str>,
-    scopes: Option<&str>,
-    allowed_service_ids: Option<&[String]>,
-    allowed_node_ids: Option<&[String]>,
-    allow_all_services: Option<bool>,
-    allow_all_nodes: Option<bool>,
-    rate_limit_per_second: Option<Option<u32>>,
-    rate_limit_burst: Option<Option<u32>>,
-    platform: Option<Option<&str>>,
-    callback_url: Option<Option<&str>>,
-) -> AppResult<ApiKey> {
-    update_api_key_scope_with_scope_authorization(
-        db,
-        user_id,
-        None,
-        key_id,
-        name,
-        description,
-        scopes,
-        allowed_service_ids,
-        allowed_node_ids,
-        allow_all_services,
-        allow_all_nodes,
-        rate_limit_per_second,
-        rate_limit_burst,
-        platform,
-        callback_url,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
 /// Update scope fields on an existing API key while validating explicit
 /// service/node IDs against an optional actor permission context.
 pub async fn update_api_key_scope_with_scope_authorization(
@@ -611,6 +465,7 @@ pub async fn update_api_key_scope_with_scope_authorization(
     rate_limit_burst: Option<Option<u32>>,
     platform: Option<Option<&str>>,
     callback_url: Option<Option<&str>>,
+    scope_plan_digest: Option<&str>,
 ) -> AppResult<ApiKey> {
     let existing = db
         .collection::<ApiKey>(API_KEYS)
@@ -632,25 +487,44 @@ pub async fn update_api_key_scope_with_scope_authorization(
     let effective_all_svcs = allow_all_services.unwrap_or(existing.allow_all_services);
     let effective_all_nodes = allow_all_nodes.unwrap_or(existing.allow_all_nodes);
 
+    if let Some(expected_digest) = scope_plan_digest {
+        let actor_user_id = scope_actor_user_id.ok_or_else(|| {
+            AppError::ApiKeyScopePlanOwnerUnsupported(
+                "scope_plan_digest requires an authenticated actor context".to_string(),
+            )
+        })?;
+        api_key_scope_service::verify_scope_plan_precondition(
+            db,
+            actor_user_id,
+            user_id,
+            allowed_service_ids.unwrap_or(&existing.allowed_service_ids),
+            allowed_node_ids.unwrap_or(&existing.allowed_node_ids),
+            effective_all_svcs,
+            effective_all_nodes,
+            expected_digest,
+        )
+        .await?;
+    }
+
     if let Some(sids) = allowed_service_ids
         && !effective_all_svcs
     {
-        validate_service_ids(
+        api_key_scope_service::validate_service_ids(
             db,
             user_id,
             sids,
-            ApiKeyScopeAuthorization::for_actor(scope_actor_user_id),
+            ScopeAuthorization::for_actor(scope_actor_user_id),
         )
         .await?;
     }
     if let Some(nids) = allowed_node_ids
         && !effective_all_nodes
     {
-        validate_node_ids(
+        api_key_scope_service::validate_node_ids(
             db,
             user_id,
             nids,
-            ApiKeyScopeAuthorization::for_actor(scope_actor_user_id),
+            ScopeAuthorization::for_actor(scope_actor_user_id),
         )
         .await?;
     }
@@ -773,11 +647,12 @@ pub async fn validate_api_key(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::node::{NodeMetrics, NodeStatus};
+    use crate::models::node::{COLLECTION_NAME as NODES, Node, NodeMetrics, NodeStatus};
     use crate::models::org_membership::{
         COLLECTION_NAME as ORG_MEMBERSHIPS, OrgMembership, OrgRole,
     };
     use crate::models::user::{COLLECTION_NAME as USERS, UserType};
+    use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
     use crate::test_utils::connect_test_database;
     use crate::test_utils::{test_membership, test_user, test_user_service};
 
@@ -1088,6 +963,7 @@ mod tests {
             None,
             Some("codex"),
             None,
+            None,
         )
         .await
         .expect("member can scope personal key to permitted org resources");
@@ -1138,6 +1014,7 @@ mod tests {
             None,
             Some("codex"),
             None,
+            None,
         )
         .await
         .expect_err("members cannot scope to admin-only org services");
@@ -1184,6 +1061,7 @@ mod tests {
             None,
             Some("codex"),
             None,
+            None,
         )
         .await
         .expect_err("viewers cannot scope personal keys to org nodes");
@@ -1225,6 +1103,7 @@ mod tests {
             None,
             None,
             Some("codex"),
+            None,
             None,
         )
         .await
@@ -1485,11 +1364,13 @@ mod tests {
         )
         .await
         .expect("create key");
-        let updated = update_api_key_scope(
+        let updated = update_api_key_scope_with_scope_authorization(
             &db,
             &user_id,
+            None,
             &created.id,
             Some("new-name"),
+            None,
             None,
             None,
             None,
@@ -1531,9 +1412,10 @@ mod tests {
         )
         .await
         .expect("create key");
-        let updated = update_api_key_scope(
+        let updated = update_api_key_scope_with_scope_authorization(
             &db,
             &user_id,
+            None,
             &created.id,
             None,
             None,
@@ -1545,6 +1427,7 @@ mod tests {
             None,
             None,
             Some(Some("cursor")),
+            None,
             None,
         )
         .await
@@ -1578,9 +1461,10 @@ mod tests {
         .await
         .expect("create key");
         assert_eq!(created.rate_limit_per_second, Some(10));
-        let updated = update_api_key_scope(
+        let updated = update_api_key_scope_with_scope_authorization(
             &db,
             &user_id,
+            None,
             &created.id,
             None,
             None,
@@ -1591,6 +1475,7 @@ mod tests {
             None,
             Some(None), // clear rate_limit_per_second
             Some(None), // clear rate_limit_burst
+            None,
             None,
             None,
         )
