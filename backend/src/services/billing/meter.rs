@@ -103,8 +103,19 @@ pub async fn settle(
     resale: Option<ResaleUsage>,
     model: Option<String>,
 ) -> AppResult<()> {
+    let persisted = persist_settlement_intent(db, metered, platform, resale, model).await?;
+    settle_persisted(db, persisted).await
+}
+
+pub(super) async fn persist_settlement_intent(
+    db: &mongodb::Database,
+    metered: &MeteredProxyContext,
+    platform: PlatformUsage,
+    resale: Option<ResaleUsage>,
+    model: Option<String>,
+) -> AppResult<Vec<UsageMeterRow>> {
     let Some(ctx) = &metered.route else {
-        return Ok(());
+        return Ok(Vec::new());
     };
 
     let mut finalized_rows = Vec::new();
@@ -135,6 +146,13 @@ pub async fn settle(
         finalized_rows.push(row);
     }
 
+    Ok(finalized_rows)
+}
+
+pub(super) async fn settle_persisted(
+    db: &mongodb::Database,
+    finalized_rows: Vec<UsageMeterRow>,
+) -> AppResult<()> {
     let mut first_error = None;
     for row in finalized_rows {
         if let Err(error) = reservation::claim_released_and_settle(db, &row).await {
@@ -533,6 +551,72 @@ mod tests {
             second_reservation.is_none(),
             "pending_lago_debits must reduce availability before Lago sync"
         );
+    }
+
+    #[tokio::test]
+    async fn persisted_settlement_intent_recovers_when_live_apply_never_starts() {
+        let Some(db) = connect_test_database("billing_settle_pre_detachment_intent").await else {
+            return;
+        };
+        create_usage_transaction_index(&db).await;
+        let owner_id = "owner-pre-detachment-intent";
+        insert_wallet(&db, owner_id, 10, 0).await;
+        crate::services::billing::reservation::try_reserve_prepaid(&db, owner_id, 5)
+            .await
+            .expect("reserve")
+            .expect("reserved");
+
+        let ctx = platform_context("billing-pre-detachment-intent", owner_id);
+        let reservation = BillingReservation {
+            owner_id: owner_id.to_string(),
+            wallet_id: format!("wallet-{owner_id}"),
+            total_reserved_credits: 5,
+            layers: vec![crate::services::billing::reservation::LayerReservation {
+                layer: BillingLayer::Platform,
+                reserved_credits: 5,
+            }],
+        };
+        let metered = open(&db, &ctx, Some(&reservation)).await.expect("open");
+        mark_forwarded(&db, &metered).await.expect("mark forwarded");
+
+        let persisted = super::persist_settlement_intent(
+            &db,
+            &metered,
+            PlatformUsage::single_request(1),
+            None,
+            Some("model-before-detach".to_string()),
+        )
+        .await
+        .expect("persist settlement intent");
+        assert_eq!(persisted.len(), 1);
+
+        let row = db
+            .collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
+            .find_one(doc! { "billing_request_id": "billing-pre-detachment-intent" })
+            .await
+            .expect("find persisted row")
+            .expect("persisted row exists");
+        assert_eq!(row.status, UsageStatus::Finalized);
+        assert_eq!(row.quantity, Some(1));
+        assert_eq!(row.model.as_deref(), Some("model-before-detach"));
+        assert!(!row.released);
+
+        let recovered = crate::services::billing::reservation::recover_retryable_settlements_at(
+            &db,
+            row.finalized_at.expect("finalized deadline") + chrono::Duration::seconds(31),
+        )
+        .await
+        .expect("recover persisted settlement intent");
+        assert_eq!(recovered.recovered, 1);
+
+        let wallet = db
+            .collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME)
+            .find_one(doc! { "owner_id": owner_id })
+            .await
+            .expect("find wallet")
+            .expect("wallet exists");
+        assert_eq!(wallet.reserved_credits, 0);
+        assert_eq!(wallet.pending_lago_debits, 5);
     }
 
     #[tokio::test]

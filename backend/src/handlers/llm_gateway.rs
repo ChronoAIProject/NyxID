@@ -121,17 +121,17 @@ fn chatgpt_usage_callback(
         let resale = resale_metric.and_then(|metric| {
             resale_usage_from_optional_reported(metric, usage.as_ref(), total_bytes)
         });
-        settle_meter_async(
+        Box::pin(settle_meter_async(
             billing.clone(),
             metered.clone(),
             llm_platform_usage(usage.as_ref(), total_bytes),
             resale,
             model.clone(),
-        );
+        ))
     })
 }
 
-fn settle_meter_async(
+async fn settle_meter_async(
     billing: std::sync::Arc<crate::services::billing::BillingService>,
     metered: crate::services::billing::MeteredProxyContext,
     platform: PlatformUsage,
@@ -142,23 +142,21 @@ fn settle_meter_async(
         return;
     }
 
-    tokio::spawn(async move {
-        if billing
-            .settle(&metered, platform, resale, model)
-            .await
-            .is_err()
-        {
-            let billing_request_id = metered
-                .route
-                .as_ref()
-                .map(|route| route.billing_request_id.as_str())
-                .unwrap_or("unknown");
-            tracing::warn!(
-                billing_request_id,
-                "Failed to settle LLM usage meter row; durable retry recorded"
-            );
-        }
-    });
+    if billing
+        .settle_deferred(&metered, platform, resale, model)
+        .await
+        .is_err()
+    {
+        let billing_request_id = metered
+            .route
+            .as_ref()
+            .map(|route| route.billing_request_id.as_str())
+            .unwrap_or("unknown");
+        tracing::warn!(
+            billing_request_id,
+            "Failed to persist LLM usage settlement intent"
+        );
+    }
 }
 
 /// Maximum size for upstream response bodies (50 MB).
@@ -1201,7 +1199,8 @@ async fn build_filtered_response(
                     llm_platform_usage(usage.as_ref(), request_len + response_len),
                     resale,
                     context.model,
-                );
+                )
+                .await;
             });
 
             let body = Body::from_stream(ReceiverStream::new(rx));
@@ -1234,7 +1233,8 @@ async fn build_filtered_response(
                 llm_platform_usage(None, request_len + response_len),
                 None,
                 None,
-            );
+            )
+            .await;
         };
         let body = Body::from_stream(body_stream);
         response_builder
@@ -1479,7 +1479,8 @@ async fn build_translated_sse_response(
                                 llm_platform_usage(usage.as_ref(), request_len + response_len),
                                 resale,
                                 usage_context.and_then(|context| context.model),
-                            );
+                            )
+                            .await;
                             return; // client disconnected
                         }
                     }
@@ -1519,7 +1520,8 @@ async fn build_translated_sse_response(
             llm_platform_usage(usage.as_ref(), request_len + response_len),
             resale,
             None,
-        );
+        )
+        .await;
     });
 
     let body = Body::from_stream(ReceiverStream::new(rx));
