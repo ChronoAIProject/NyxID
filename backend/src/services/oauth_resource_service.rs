@@ -2,7 +2,7 @@ use crate::config::AppConfig;
 use crate::errors::{AppError, AppResult};
 use crate::models::org_membership::OrgMembership;
 use crate::models::user_service::UserService;
-use crate::services::{org_role_scope_service, org_service, user_service_service};
+use crate::services::{catalog_service, org_role_scope_service, org_service, user_service_service};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedOAuthResources {
@@ -271,7 +271,22 @@ async fn resolve_single_resource(
         return Ok(service);
     }
 
-    resolve_org_service_by_slug(db, actor_user_id, slug).await
+    match resolve_org_service_by_slug(db, actor_user_id, slug).await {
+        Ok(service) => Ok(service),
+        Err(AppError::InvalidTarget(_)) => {
+            match catalog_service::get_downstream_service_by_slug(db, slug, actor_user_id).await {
+                Ok(catalog_service) => Err(AppError::RequiredServiceNotConnected {
+                    service_slug: catalog_service.slug,
+                    service_name: catalog_service.name,
+                }),
+                Err(AppError::NotFound(_)) => Err(AppError::InvalidTarget(
+                    "resource is unknown or not owned by the user".to_string(),
+                )),
+                Err(err) => Err(err),
+            }
+        }
+        Err(err) => Err(err),
+    }
 }
 
 async fn resolve_org_service_by_slug(
@@ -312,6 +327,7 @@ async fn resolve_org_service_by_slug(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
 
     #[test]
     fn validates_absolute_resource_without_fragment() {
@@ -338,6 +354,44 @@ mod tests {
         assert!(matches!(
             filter_resource_narrowing(&expanded, &granted),
             Err(AppError::InvalidTarget(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn known_catalog_resource_without_user_service_is_actionable() {
+        let Some(db) = crate::test_utils::connect_test_database("oauth_missing_resource").await
+        else {
+            return;
+        };
+        let state = crate::test_utils::test_app_state(db.clone());
+        let suffix = Uuid::new_v4().to_string();
+        let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
+        catalog.id = Uuid::new_v4().to_string();
+        catalog.slug = format!("required-{suffix}");
+        catalog.name = "Required Test Service".to_string();
+        db.collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .insert_one(&catalog)
+        .await
+        .expect("insert catalog service");
+
+        let resource = user_service_resource_uri(&state.config, &catalog.slug);
+        let error = resolve_requested_resources(
+            &db,
+            &state.config,
+            &Uuid::new_v4().to_string(),
+            Some(&[resource]),
+        )
+        .await
+        .expect_err("missing user service must stop authorization");
+
+        assert!(matches!(
+            error,
+            AppError::RequiredServiceNotConnected {
+                service_slug,
+                service_name,
+            } if service_slug == catalog.slug && service_name == catalog.name
         ));
     }
 }

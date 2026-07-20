@@ -92,6 +92,7 @@ pub async fn create_authorization_code(
     code_challenge_method: Option<&str>,
     nonce: Option<&str>,
     external_subject: Option<&ExternalSubjectRef>,
+    binding_grant_id: Option<&str>,
     resource_uris: &[String],
     allowed_service_ids: &[String],
     allow_all_services: bool,
@@ -111,6 +112,7 @@ pub async fn create_authorization_code(
         code_challenge_method: code_challenge_method.map(String::from),
         nonce: nonce.map(String::from),
         external_subject: external_subject.cloned(),
+        binding_grant_id: binding_grant_id.map(String::from),
         resource_uris: resource_uris.to_vec(),
         allowed_service_ids: allowed_service_ids.to_vec(),
         allow_all_services,
@@ -195,6 +197,7 @@ pub struct ExchangedTokens {
     pub granted_scope: String,
     pub user_id: String,
     pub external_subject: Option<ExternalSubjectRef>,
+    pub binding_grant_id: Option<String>,
     pub broker_capability_enabled: bool,
     pub resource_uris: Vec<String>,
     // Populated by the token exchange for the granted per-service access, but not
@@ -482,6 +485,7 @@ pub async fn exchange_authorization_code(
         granted_scope,
         user_id: stored.user_id,
         external_subject: stored.external_subject,
+        binding_grant_id: stored.binding_grant_id,
         broker_capability_enabled,
         resource_uris: token_resource_scope.resource_uris,
         allowed_service_ids: token_resource_scope.allowed_service_ids,
@@ -728,6 +732,7 @@ mod tests {
             Some("S256"),
             Some("nonce-1"),
             Some(&external),
+            Some(&"a".repeat(64)),
             &["https://nyx.example/api/v1/proxy/s/openai".to_string()],
             &["svc-1".to_string()],
             false,
@@ -751,6 +756,7 @@ mod tests {
         assert_eq!(stored.code_challenge_method.as_deref(), Some("S256"));
         assert_eq!(stored.nonce.as_deref(), Some("nonce-1"));
         assert_eq!(stored.external_subject, Some(external));
+        assert_eq!(stored.binding_grant_id, Some("a".repeat(64)));
         assert_eq!(
             stored.resource_uris,
             vec!["https://nyx.example/api/v1/proxy/s/openai".to_string()]
@@ -784,6 +790,7 @@ mod tests {
                 code_challenge_method: None,
                 nonce: None,
                 external_subject: None,
+                binding_grant_id: None,
                 resource_uris: Vec::new(),
                 allowed_service_ids: Vec::new(),
                 allow_all_services: false,
@@ -882,6 +889,7 @@ mod tests {
                 code_challenge_method: None,
                 nonce: None,
                 external_subject: None,
+                binding_grant_id: None,
                 resource_uris: Vec::new(),
                 allowed_service_ids: vec![service_a_id.clone()],
                 allow_all_services: false,
@@ -983,6 +991,7 @@ mod tests {
                 code_challenge_method: None,
                 nonce: None,
                 external_subject: None,
+                binding_grant_id: None,
                 resource_uris: Vec::new(),
                 allowed_service_ids: vec![service_a_id],
                 allow_all_services: false,
@@ -1049,6 +1058,7 @@ mod tests {
                 code_challenge_method: None,
                 nonce: None,
                 external_subject: None,
+                binding_grant_id: None,
                 resource_uris: Vec::new(),
                 allowed_service_ids: Vec::new(),
                 allow_all_services: true,

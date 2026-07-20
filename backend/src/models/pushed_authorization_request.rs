@@ -38,6 +38,9 @@ pub struct PushedAuthorizationRequest {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_subject: Option<ExternalSubjectRef>,
+    /// Existing broker binding grant to review/update, identified by hash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding_grant_id: Option<String>,
     #[serde(default)]
     pub resources: Vec<String>,
 

@@ -68,10 +68,28 @@ export function OAuthConsentPage() {
   useApplyTheme();
   const { data: userServices, isLoading: userServicesLoading } =
     useUserServices();
-  // The consent page renders once per authorize redirect; the query string
-  // never changes within a mount, so URL-derived values are memoized to keep
-  // referential stability for the memos below.
-  const search = useMemo(() => new URLSearchParams(window.location.search), []);
+  // The consent page renders once per authorize redirect; capture every
+  // repeated query value in one immutable snapshot so downstream memos keep
+  // stable array identities across local state updates.
+  const [authorizeQuery] = useState(() => {
+    const search = new URLSearchParams(window.location.search);
+    return {
+      search,
+      resources: search.getAll("resource"),
+      preselectServiceIds: search.getAll("preselect_service_ids"),
+      unmatchedDefaults: search.getAll("unmatched_defaults"),
+      requiredServiceIds: search.getAll("required_service_ids"),
+      currentBindingServiceIds: search.getAll("current_binding_service_ids"),
+    };
+  });
+  const {
+    search,
+    resources,
+    preselectServiceIds,
+    unmatchedDefaults,
+    requiredServiceIds,
+    currentBindingServiceIds,
+  } = authorizeQuery;
 
   const responseType = readParam(search, "response_type");
   const clientId = readParam(search, "client_id");
@@ -87,27 +105,34 @@ export function OAuthConsentPage() {
   const externalSubjectTenant = search.get("external_subject_tenant") ?? "";
   const externalSubjectExternalUserId =
     search.get("external_subject_external_user_id") ?? "";
+  const bindingGrantId = search.get("binding_grant_id") ?? "";
   const consentRequest = search.get("consent_request") ?? "";
-  const resources = useMemo(() => search.getAll("resource"), [search]);
   // Server-resolved hints: the app's declared default services matched to
   // this user (pre-selected), and declared services the user has no match
   // for (informational only).
-  const preselectServiceIds = useMemo(
-    () => search.getAll("preselect_service_ids"),
-    [search],
+  const bindingReview =
+    search.get("binding_review") === "true" && Boolean(bindingGrantId);
+  const currentBindingAllowsAllServices =
+    search.get("current_binding_allow_all_services") === "true";
+  const isLarkBinding = externalSubjectPlatform.toLowerCase() === "lark";
+  const [allowAllServices, setAllowAllServices] = useState(
+    bindingReview && currentBindingAllowsAllServices,
   );
-  const unmatchedDefaults = useMemo(
-    () => search.getAll("unmatched_defaults"),
-    [search],
+  const [customize, setCustomize] = useState(bindingReview);
+  const [selectedServiceIds, setSelectedServiceIds] = useState<
+    readonly string[]
+  >(() =>
+    Array.from(
+      new Set([
+        ...preselectServiceIds,
+        ...currentBindingServiceIds,
+        ...requiredServiceIds,
+      ]),
+    ),
   );
-  const [allowAllServices, setAllowAllServices] = useState(false);
-  const [customize, setCustomize] = useState(false);
-  const [selectedServiceIds, setSelectedServiceIds] =
-    useState<readonly string[]>(preselectServiceIds);
   const [deselectedServiceIds, setDeselectedServiceIds] = useState<
     readonly string[]
   >([]);
-  const [selectedResources, setSelectedResources] = useState(resources);
 
   const missing =
     !responseType ||
@@ -141,17 +166,29 @@ export function OAuthConsentPage() {
     [userServices],
   );
   const resourceSelectedServiceIds = useMemo(() => {
-    const requested = new Set(selectedResources);
+    const requested = new Set(resources);
     return selectableServices
       .filter((service) => requested.has(service.resource_uri))
       .map((service) => service.id);
-  }, [selectableServices, selectedResources]);
+  }, [resources, selectableServices]);
   const effectiveSelectedServiceIds = useMemo(
     () =>
       Array.from(
-        new Set([...resourceSelectedServiceIds, ...selectedServiceIds]),
-      ).filter((id) => !deselectedServiceIds.includes(id)),
-    [deselectedServiceIds, resourceSelectedServiceIds, selectedServiceIds],
+        new Set([
+          ...requiredServiceIds,
+          ...resourceSelectedServiceIds,
+          ...selectedServiceIds,
+        ]),
+      ).filter(
+        (id) =>
+          requiredServiceIds.includes(id) || !deselectedServiceIds.includes(id),
+      ),
+    [
+      deselectedServiceIds,
+      requiredServiceIds,
+      resourceSelectedServiceIds,
+      selectedServiceIds,
+    ],
   );
   const serviceAccess = oauthConsentServiceAccessSchema.parse({
     allow_all_services: allowAllServices,
@@ -171,18 +208,34 @@ export function OAuthConsentPage() {
           orgName: service ? serviceOrgName(service) : null,
           requestedByApp:
             preselectServiceIds.includes(id) ||
-            resourceSelectedServiceIds.includes(id),
+            resourceSelectedServiceIds.includes(id) ||
+            requiredServiceIds.includes(id),
+          requiredByApp:
+            resourceSelectedServiceIds.includes(id) ||
+            requiredServiceIds.includes(id),
+          currentlyAuthorized:
+            currentBindingAllowsAllServices ||
+            currentBindingServiceIds.includes(id),
+          newlySelected:
+            bindingReview &&
+            !currentBindingAllowsAllServices &&
+            !currentBindingServiceIds.includes(id),
         };
       }),
     [
       effectiveSelectedServiceIds,
       preselectServiceIds,
+      requiredServiceIds,
       resourceSelectedServiceIds,
       selectableServices,
+      bindingReview,
+      currentBindingAllowsAllServices,
+      currentBindingServiceIds,
     ],
   );
 
   function toggleService(serviceId: string, checked: boolean) {
+    if (!checked && requiredServiceIds.includes(serviceId)) return;
     setSelectedServiceIds((current) => {
       if (checked) {
         return current.includes(serviceId) ? current : [...current, serviceId];
@@ -195,14 +248,6 @@ export function OAuthConsentPage() {
       }
       return current.includes(serviceId) ? current : [...current, serviceId];
     });
-  }
-
-  function toggleResource(resource: string) {
-    setSelectedResources((current) =>
-      current.includes(resource)
-        ? current.filter((item) => item !== resource)
-        : [...current, resource],
-    );
   }
 
   if (missing) {
@@ -240,10 +285,32 @@ export function OAuthConsentPage() {
           <div className="flex items-center">
             <NyxidLogo className="h-7 w-auto" />
           </div>
-          <CardTitle>Authorize Application</CardTitle>
+          <CardTitle>
+            {bindingReview
+              ? isLarkBinding
+                ? "Review Lark bot access"
+                : "Review application access"
+              : isLarkBinding
+                ? "Authorize Lark bot"
+                : "Authorize application"}
+          </CardTitle>
           <CardDescription>
-            <span className="font-medium text-foreground">{clientName}</span>{" "}
-            wants to access your account via OAuth.
+            {bindingReview ? (
+              <>
+                Review the NyxID services available to{" "}
+                <span className="font-medium text-foreground">
+                  {clientName}
+                </span>
+                .
+              </>
+            ) : (
+              <>
+                <span className="font-medium text-foreground">
+                  {clientName}
+                </span>{" "}
+                wants to access your account via OAuth.
+              </>
+            )}
           </CardDescription>
         </CardHeader>
 
@@ -279,32 +346,6 @@ export function OAuthConsentPage() {
               ))}
             </div>
           </div>
-
-          {resources.length > 0 && (
-            <div className="space-y-2">
-              <p className="text-xs uppercase tracking-wide text-text-tertiary">
-                Requested resources
-              </p>
-              <div className="space-y-2">
-                {resources.map((resource) => (
-                  <label
-                    key={resource}
-                    className="flex items-start gap-3 rounded-lg border border-border bg-muted/50 px-3 py-2"
-                  >
-                    <Checkbox
-                      className="mt-0.5"
-                      aria-label={resource}
-                      checked={selectedResources.includes(resource)}
-                      onCheckedChange={() => toggleResource(resource)}
-                    />
-                    <p className="break-all text-xs text-foreground">
-                      {resource}
-                    </p>
-                  </label>
-                ))}
-              </div>
-            </div>
-          )}
 
           <div className="space-y-2">
             <p className="text-xs uppercase tracking-wide text-text-tertiary">
@@ -354,9 +395,13 @@ export function OAuthConsentPage() {
                 </p>
                 <p className="mt-1 text-xs text-muted-foreground">
                   {serviceAccess.allow_all_services
-                    ? "This app will be able to use all of your available services through the proxy."
+                    ? bindingReview && currentBindingAllowsAllServices
+                      ? "This binding currently authorizes all available services."
+                      : "This app will be able to use all of your available services through the proxy."
                     : summaryServices.length > 0
-                      ? "This app will be able to use these services through the proxy:"
+                      ? bindingReview
+                        ? "Review the current grant and select any additional services."
+                        : "This app will be able to use these services through the proxy:"
                       : "No service access requested. This app only signs you in."}
                 </p>
               </div>
@@ -400,14 +445,29 @@ export function OAuthConsentPage() {
                           </div>
                         )}
                       </div>
-                      {item.requestedByApp && (
-                        <Badge
-                          variant="secondary"
-                          className="shrink-0 text-[10px]"
-                        >
-                          Requested by app
-                        </Badge>
-                      )}
+                      <div className="flex shrink-0 flex-wrap justify-end gap-1">
+                        {item.currentlyAuthorized && bindingReview && (
+                          <Badge variant="secondary" className="text-[10px]">
+                            Authorized now
+                          </Badge>
+                        )}
+                        {item.requiredByApp ? (
+                          <Badge variant="secondary" className="text-[10px]">
+                            Required by app
+                          </Badge>
+                        ) : (
+                          item.requestedByApp && (
+                            <Badge variant="secondary" className="text-[10px]">
+                              Requested by app
+                            </Badge>
+                          )
+                        )}
+                        {item.newlySelected && (
+                          <Badge variant="accent" className="text-[10px]">
+                            New
+                          </Badge>
+                        )}
+                      </div>
                     </div>
                   ))}
                   {unmatchedDefaults.map((name) => (
@@ -458,6 +518,7 @@ export function OAuthConsentPage() {
                               checked={effectiveSelectedServiceIds.includes(
                                 service.id,
                               )}
+                              disabled={requiredServiceIds.includes(service.id)}
                               onCheckedChange={(checked) =>
                                 toggleService(service.id, checked === true)
                               }
@@ -489,6 +550,44 @@ export function OAuthConsentPage() {
                                   </span>
                                 </div>
                               )}
+                              <div className="mt-1 flex flex-wrap gap-1">
+                                {bindingReview &&
+                                  (currentBindingAllowsAllServices ||
+                                    currentBindingServiceIds.includes(
+                                      service.id,
+                                    )) && (
+                                    <Badge
+                                      variant="secondary"
+                                      className="text-[10px]"
+                                    >
+                                      Authorized now
+                                    </Badge>
+                                  )}
+                                {requiredServiceIds.includes(service.id) && (
+                                  <Badge
+                                    variant="secondary"
+                                    className="text-[10px]"
+                                  >
+                                    Required by app
+                                  </Badge>
+                                )}
+                                {bindingReview &&
+                                  effectiveSelectedServiceIds.includes(
+                                    service.id,
+                                  ) &&
+                                  !currentBindingAllowsAllServices &&
+                                  !currentBindingServiceIds.includes(
+                                    service.id,
+                                  ) &&
+                                  !requiredServiceIds.includes(service.id) && (
+                                    <Badge
+                                      variant="accent"
+                                      className="text-[10px]"
+                                    >
+                                      New
+                                    </Badge>
+                                  )}
+                              </div>
                             </div>
                           </div>
                         );
@@ -572,6 +671,13 @@ export function OAuthConsentPage() {
                 value={externalSubjectExternalUserId}
               />
             )}
+            {bindingGrantId && (
+              <input
+                type="hidden"
+                name="binding_grant_id"
+                value={bindingGrantId}
+              />
+            )}
             <input
               type="hidden"
               name="allow_all_services"
@@ -586,14 +692,7 @@ export function OAuthConsentPage() {
                   value={serviceId}
                 />
               ))}
-            {resources.length > 0 && (
-              <input
-                type="hidden"
-                name="resource_selection_present"
-                value="true"
-              />
-            )}
-            {selectedResources.map((resource) => (
+            {resources.map((resource) => (
               <input
                 key={resource}
                 type="hidden"
@@ -608,7 +707,7 @@ export function OAuthConsentPage() {
               name="decision"
               value="deny"
             >
-              Deny
+              {bindingReview ? "Cancel" : "Deny"}
             </Button>
             <Button
               variant="primary"
@@ -616,7 +715,7 @@ export function OAuthConsentPage() {
               name="decision"
               value="allow"
             >
-              Allow
+              {bindingReview ? "Update access" : "Allow"}
             </Button>
           </form>
         </CardContent>

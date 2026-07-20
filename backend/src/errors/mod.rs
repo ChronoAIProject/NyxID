@@ -88,6 +88,12 @@ pub enum AppError {
     #[error("Invalid target: {0}")]
     InvalidTarget(String),
 
+    #[error("Required service is not connected: {service_name} ({service_slug})")]
+    RequiredServiceNotConnected {
+        service_slug: String,
+        service_name: String,
+    },
+
     #[error("Role not found: {0}")]
     RoleNotFound(String),
 
@@ -411,7 +417,8 @@ impl AppError {
             | Self::InvalidDpopProof(_)
             | Self::InvalidRedirectUri
             | Self::InvalidScope(_)
-            | Self::InvalidTarget(_) => StatusCode::BAD_REQUEST,
+            | Self::InvalidTarget(_)
+            | Self::RequiredServiceNotConnected { .. } => StatusCode::BAD_REQUEST,
             Self::RoleNotFound(_) | Self::GroupNotFound(_) | Self::ConsentNotFound => {
                 StatusCode::NOT_FOUND
             }
@@ -542,6 +549,7 @@ impl AppError {
             Self::InvalidScope(_) => 3002,
             Self::InvalidTarget(_) => 3005,
             Self::InvalidDpopProof(_) => 3006,
+            Self::RequiredServiceNotConnected { .. } => 3007,
             Self::RoleNotFound(_) => 4000,
             Self::GroupNotFound(_) => 4001,
             Self::ConsentNotFound => 4002,
@@ -652,7 +660,7 @@ impl AppError {
             Self::PkceVerificationFailed | Self::InvalidRedirectUri => "invalid_grant",
             Self::InvalidDpopProof(_) => "invalid_dpop_proof",
             Self::InvalidScope(_) => "invalid_scope",
-            Self::InvalidTarget(_) => "invalid_target",
+            Self::InvalidTarget(_) | Self::RequiredServiceNotConnected { .. } => "invalid_target",
             Self::Unauthorized(_)
             | Self::AuthenticationFailed(_)
             | Self::ServiceAccountNotFound(_)
@@ -704,6 +712,7 @@ impl AppError {
             Self::InvalidRedirectUri => "invalid_redirect_uri",
             Self::InvalidScope(_) => "invalid_scope",
             Self::InvalidTarget(_) => "invalid_target",
+            Self::RequiredServiceNotConnected { .. } => "required_service_not_connected",
             Self::RoleNotFound(_) => "role_not_found",
             Self::GroupNotFound(_) => "group_not_found",
             Self::ConsentNotFound => "consent_not_found",

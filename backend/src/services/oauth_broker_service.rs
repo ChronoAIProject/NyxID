@@ -80,6 +80,77 @@ pub struct BindingExchangeResult {
 
 const MAX_BROKER_ROTATION_RETRIES: usize = 3;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BindingGrantSnapshot {
+    pub binding_hash: String,
+    pub allowed_service_ids: Vec<String>,
+    pub allow_all_services: bool,
+}
+
+pub fn is_binding_hash(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+/// Resolve the service grant currently held by one browser-reviewed broker
+/// binding. The hash is only an address: ownership is re-validated against the
+/// authenticated NyxID user, OAuth client, and exact external subject before
+/// any grant details are returned.
+pub async fn resolve_binding_grant(
+    db: &mongodb::Database,
+    client_id: &str,
+    user_id: &str,
+    external_subject: &ExternalSubjectRef,
+    binding_hash: &str,
+) -> AppResult<BindingGrantSnapshot> {
+    if !is_binding_hash(binding_hash) {
+        return Err(AppError::InvalidTarget(
+            "binding grant is unavailable for review".to_string(),
+        ));
+    }
+
+    let binding = db
+        .collection::<OauthBrokerBinding>(OAUTH_BROKER_BINDINGS)
+        .find_one(doc! {
+            "_id": binding_hash,
+            "client_id": client_id,
+            "user_id": user_id,
+            "revoked": false,
+        })
+        .await?
+        .ok_or_else(|| {
+            AppError::InvalidTarget("binding grant is unavailable for review".to_string())
+        })?;
+
+    if binding.external_subject.as_ref() != Some(external_subject) {
+        return Err(AppError::InvalidTarget(
+            "binding grant is unavailable for review".to_string(),
+        ));
+    }
+
+    let refresh = db
+        .collection::<RefreshToken>(REFRESH_TOKENS)
+        .find_one(doc! {
+            "jti": &binding.refresh_token_jti,
+            "client_id": client_id,
+            "user_id": user_id,
+            "revoked": false,
+        })
+        .await?
+        .filter(|token| token.expires_at > Utc::now())
+        .ok_or_else(|| {
+            AppError::InvalidTarget("binding grant is unavailable for review".to_string())
+        })?;
+
+    Ok(BindingGrantSnapshot {
+        binding_hash: binding.id,
+        allowed_service_ids: refresh.allowed_service_ids,
+        allow_all_services: refresh.allow_all_services,
+    })
+}
+
 /// Build persisted confirmation material from the sender proofs presented on a
 /// token request. DPoP takes precedence over mTLS, matching token minting.
 pub fn sender_constraint_from_proofs(
@@ -204,6 +275,124 @@ pub async fn create_binding(
         .await?;
 
     Ok((raw_binding_id, binding_hash))
+}
+
+/// Replace the service grant behind an existing binding while preserving its
+/// opaque raw binding credential. The update is optimistic against the active
+/// refresh-token pointer so concurrent broker exchanges either finish first or
+/// retry against the newly rotated binding state.
+#[allow(clippy::too_many_arguments)]
+pub async fn update_binding_grant(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    client_id: &str,
+    user_id: &str,
+    binding_hash: &str,
+    refresh_token: &str,
+    refresh_token_jti: &str,
+    scopes: &[String],
+    external_subject: Option<&ExternalSubjectRef>,
+) -> AppResult<()> {
+    if !is_binding_hash(binding_hash) {
+        return Err(AppError::InvalidTarget(
+            "binding grant is unavailable for update".to_string(),
+        ));
+    }
+
+    let replacement_refresh = db
+        .collection::<RefreshToken>(REFRESH_TOKENS)
+        .find_one(doc! {
+            "jti": refresh_token_jti,
+            "client_id": client_id,
+            "user_id": user_id,
+            "revoked": false,
+        })
+        .await?
+        .ok_or_else(|| {
+            AppError::Internal("replacement refresh token was not persisted".to_string())
+        })?;
+    let encrypted_refresh = encryption_keys
+        .encrypt_with_aad(refresh_token.as_bytes(), binding_hash.as_bytes())
+        .await
+        .map_err(|error| AppError::Internal(format!("broker binding encrypt failed: {error}")))?;
+
+    for _ in 0..MAX_BROKER_ROTATION_RETRIES {
+        let binding = db
+            .collection::<OauthBrokerBinding>(OAUTH_BROKER_BINDINGS)
+            .find_one(doc! {
+                "_id": binding_hash,
+                "client_id": client_id,
+                "user_id": user_id,
+                "revoked": false,
+            })
+            .await?
+            .ok_or_else(|| {
+                AppError::InvalidTarget("binding grant is unavailable for update".to_string())
+            })?;
+
+        if binding.external_subject.as_ref() != external_subject {
+            return Err(AppError::InvalidTarget(
+                "binding grant is unavailable for update".to_string(),
+            ));
+        }
+        if binding.refresh_token_jti == refresh_token_jti {
+            return Ok(());
+        }
+
+        let previous_refresh_jti = binding.refresh_token_jti.clone();
+        let now = Utc::now();
+        let updated = db
+            .collection::<OauthBrokerBinding>(OAUTH_BROKER_BINDINGS)
+            .find_one_and_update(
+                doc! {
+                    "_id": binding_hash,
+                    "client_id": client_id,
+                    "user_id": user_id,
+                    "revoked": false,
+                    "refresh_token_jti": &previous_refresh_jti,
+                    "rotation_version": binding.rotation_version,
+                },
+                doc! { "$set": {
+                    "refresh_token_encrypted": Binary {
+                        subtype: BinarySubtype::Generic,
+                        bytes: encrypted_refresh.clone(),
+                    },
+                    "refresh_token_jti": refresh_token_jti,
+                    "scopes": scopes,
+                    "rotation_version": i64::from(binding.rotation_version) + 1,
+                }},
+            )
+            .await?;
+
+        if updated.is_none() {
+            continue;
+        }
+
+        db.collection::<RefreshToken>(REFRESH_TOKENS)
+            .update_one(
+                doc! { "jti": &previous_refresh_jti, "revoked": false },
+                doc! { "$set": {
+                    "revoked": true,
+                    "replaced_by": &replacement_refresh.id,
+                    "revoked_at": bson::DateTime::from_chrono(now),
+                }},
+            )
+            .await?;
+        return Ok(());
+    }
+
+    db.collection::<RefreshToken>(REFRESH_TOKENS)
+        .update_one(
+            doc! { "jti": refresh_token_jti, "revoked": false },
+            doc! { "$set": {
+                "revoked": true,
+                "revoked_at": bson::DateTime::from_chrono(Utc::now()),
+            }},
+        )
+        .await?;
+    Err(AppError::Conflict(
+        "binding grant changed while authorization was completing".to_string(),
+    ))
 }
 
 /// Fetch a binding's metadata for the owning client. Returns NotFound on
@@ -1269,6 +1458,27 @@ mod tests {
         refresh
     }
 
+    async fn insert_refresh_token_with_grant(
+        db: &mongodb::Database,
+        jti: &str,
+        client_id: &str,
+        user_id: &str,
+        allowed_service_ids: &[&str],
+        allow_all_services: bool,
+    ) -> RefreshToken {
+        let mut refresh = refresh_token_doc(jti, client_id, user_id, false);
+        refresh.allowed_service_ids = allowed_service_ids
+            .iter()
+            .map(|service_id| (*service_id).to_string())
+            .collect();
+        refresh.allow_all_services = allow_all_services;
+        db.collection::<RefreshToken>(REFRESH_TOKENS)
+            .insert_one(&refresh)
+            .await
+            .expect("insert refresh token with grant");
+        refresh
+    }
+
     async fn insert_refresh_token_jwt(
         db: &mongodb::Database,
         jwt_keys: &JwtKeys,
@@ -1556,6 +1766,338 @@ mod tests {
             .await
             .expect("decrypt refresh token");
         assert_eq!(decrypted, b"test-refresh-token-123");
+    }
+
+    #[tokio::test]
+    async fn resolve_binding_grant_returns_active_refresh_service_grant() {
+        let Some(db) = connect_test_database("broker_resolve_grant").await else {
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let raw_binding_id = generate_binding_id();
+        let binding_hash = hash_binding_id(&raw_binding_id);
+        let external_subject = ExternalSubjectRef {
+            platform: "lark".to_string(),
+            tenant: Some("tenant-1".to_string()),
+            external_user_id: "external-user-1".to_string(),
+        };
+
+        insert_refresh_token_with_grant(
+            &db,
+            "grant-current",
+            "client-1",
+            "user-1",
+            &["svc-a", "svc-b"],
+            false,
+        )
+        .await;
+        insert_binding_with_external_subject(
+            &db,
+            &encryption_keys,
+            BindingSeed {
+                raw_binding_id: &raw_binding_id,
+                client_id: "client-1",
+                user_id: "user-1",
+                refresh_token_jti: "grant-current",
+                refresh_token: "refresh-current",
+                scopes: vec!["openid".to_string(), "proxy".to_string()],
+                created_at: Utc::now(),
+                revoked: false,
+                revoke_reason: None,
+            },
+            Some(external_subject.clone()),
+        )
+        .await;
+
+        let snapshot =
+            resolve_binding_grant(&db, "client-1", "user-1", &external_subject, &binding_hash)
+                .await
+                .expect("resolve binding grant");
+
+        assert_eq!(snapshot.binding_hash, binding_hash);
+        assert_eq!(snapshot.allowed_service_ids, vec!["svc-a", "svc-b"]);
+        assert!(!snapshot.allow_all_services);
+    }
+
+    #[tokio::test]
+    async fn resolve_binding_grant_rejects_owner_client_and_external_subject_mismatches() {
+        let Some(db) = connect_test_database("broker_resolve_grant_owner").await else {
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let raw_binding_id = generate_binding_id();
+        let binding_hash = hash_binding_id(&raw_binding_id);
+        let external_subject = ExternalSubjectRef {
+            platform: "lark".to_string(),
+            tenant: Some("tenant-1".to_string()),
+            external_user_id: "external-user-1".to_string(),
+        };
+
+        insert_refresh_token_with_grant(
+            &db,
+            "grant-owned",
+            "client-1",
+            "user-1",
+            &["svc-a"],
+            false,
+        )
+        .await;
+        insert_binding_with_external_subject(
+            &db,
+            &encryption_keys,
+            BindingSeed {
+                raw_binding_id: &raw_binding_id,
+                client_id: "client-1",
+                user_id: "user-1",
+                refresh_token_jti: "grant-owned",
+                refresh_token: "refresh-owned",
+                scopes: vec!["openid".to_string()],
+                created_at: Utc::now(),
+                revoked: false,
+                revoke_reason: None,
+            },
+            Some(external_subject.clone()),
+        )
+        .await;
+
+        let wrong_client =
+            resolve_binding_grant(&db, "client-2", "user-1", &external_subject, &binding_hash)
+                .await;
+        let wrong_user =
+            resolve_binding_grant(&db, "client-1", "user-2", &external_subject, &binding_hash)
+                .await;
+        let wrong_subject = resolve_binding_grant(
+            &db,
+            "client-1",
+            "user-1",
+            &ExternalSubjectRef {
+                platform: "lark".to_string(),
+                tenant: Some("tenant-1".to_string()),
+                external_user_id: "external-user-2".to_string(),
+            },
+            &binding_hash,
+        )
+        .await;
+
+        assert!(matches!(wrong_client, Err(AppError::InvalidTarget(_))));
+        assert!(matches!(wrong_user, Err(AppError::InvalidTarget(_))));
+        assert!(matches!(wrong_subject, Err(AppError::InvalidTarget(_))));
+    }
+
+    #[tokio::test]
+    async fn update_binding_grant_rotates_refresh_in_place() {
+        let Some(db) = connect_test_database("broker_update_grant").await else {
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let raw_binding_id = generate_binding_id();
+        let binding_hash = hash_binding_id(&raw_binding_id);
+        let external_subject = ExternalSubjectRef {
+            platform: "lark".to_string(),
+            tenant: Some("tenant-1".to_string()),
+            external_user_id: "external-user-1".to_string(),
+        };
+
+        insert_refresh_token_with_grant(
+            &db,
+            "grant-old",
+            "client-1",
+            "user-1",
+            &["svc-old"],
+            false,
+        )
+        .await;
+        insert_binding_with_external_subject(
+            &db,
+            &encryption_keys,
+            BindingSeed {
+                raw_binding_id: &raw_binding_id,
+                client_id: "client-1",
+                user_id: "user-1",
+                refresh_token_jti: "grant-old",
+                refresh_token: "refresh-old",
+                scopes: vec!["openid".to_string()],
+                created_at: Utc::now(),
+                revoked: false,
+                revoke_reason: None,
+            },
+            Some(external_subject.clone()),
+        )
+        .await;
+        let replacement = insert_refresh_token_with_grant(
+            &db,
+            "grant-new",
+            "client-1",
+            "user-1",
+            &["svc-new", "svc-required"],
+            false,
+        )
+        .await;
+
+        update_binding_grant(
+            &db,
+            &encryption_keys,
+            "client-1",
+            "user-1",
+            &binding_hash,
+            "refresh-new",
+            "grant-new",
+            &["openid".to_string(), "proxy".to_string()],
+            Some(&external_subject),
+        )
+        .await
+        .expect("update binding grant");
+
+        let binding = load_binding(&db, &binding_hash).await;
+        assert_eq!(binding.id, binding_hash);
+        assert_eq!(binding.refresh_token_jti, "grant-new");
+        assert_eq!(binding.rotation_version, 1);
+        assert_eq!(binding.scopes, vec!["openid", "proxy"]);
+        let decrypted = encryption_keys
+            .decrypt_with_aad(
+                binding
+                    .refresh_token_encrypted
+                    .as_ref()
+                    .expect("encrypted replacement refresh token"),
+                binding.id.as_bytes(),
+            )
+            .await
+            .expect("decrypt replacement refresh token");
+        assert_eq!(decrypted, b"refresh-new");
+
+        let previous = load_refresh_by_jti(&db, "grant-old").await;
+        assert!(previous.revoked);
+        assert_eq!(
+            previous.replaced_by.as_deref(),
+            Some(replacement.id.as_str())
+        );
+        assert!(!load_refresh_by_jti(&db, "grant-new").await.revoked);
+
+        let snapshot =
+            resolve_binding_grant(&db, "client-1", "user-1", &external_subject, &binding.id)
+                .await
+                .expect("resolve updated grant");
+        assert_eq!(
+            snapshot.allowed_service_ids,
+            vec!["svc-new", "svc-required"]
+        );
+        assert!(!snapshot.allow_all_services);
+    }
+
+    #[tokio::test]
+    async fn concurrent_binding_grant_updates_preserve_one_active_refresh_chain() {
+        let Some(db) = connect_test_database("broker_update_grant_concurrent").await else {
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let raw_binding_id = generate_binding_id();
+        let binding_hash = hash_binding_id(&raw_binding_id);
+        let external_subject = ExternalSubjectRef {
+            platform: "lark".to_string(),
+            tenant: Some("tenant-1".to_string()),
+            external_user_id: "external-user-1".to_string(),
+        };
+
+        insert_refresh_token_with_grant(
+            &db,
+            "grant-base",
+            "client-1",
+            "user-1",
+            &["svc-base"],
+            false,
+        )
+        .await;
+        insert_binding_with_external_subject(
+            &db,
+            &encryption_keys,
+            BindingSeed {
+                raw_binding_id: &raw_binding_id,
+                client_id: "client-1",
+                user_id: "user-1",
+                refresh_token_jti: "grant-base",
+                refresh_token: "refresh-base",
+                scopes: vec!["openid".to_string()],
+                created_at: Utc::now(),
+                revoked: false,
+                revoke_reason: None,
+            },
+            Some(external_subject.clone()),
+        )
+        .await;
+        insert_refresh_token_with_grant(&db, "grant-a", "client-1", "user-1", &["svc-a"], false)
+            .await;
+        insert_refresh_token_with_grant(&db, "grant-b", "client-1", "user-1", &["svc-b"], false)
+            .await;
+        let scopes_a = vec!["openid".to_string(), "scope-a".to_string()];
+        let scopes_b = vec!["openid".to_string(), "scope-b".to_string()];
+
+        let (result_a, result_b) = tokio::join!(
+            update_binding_grant(
+                &db,
+                &encryption_keys,
+                "client-1",
+                "user-1",
+                &binding_hash,
+                "refresh-a",
+                "grant-a",
+                &scopes_a,
+                Some(&external_subject),
+            ),
+            update_binding_grant(
+                &db,
+                &encryption_keys,
+                "client-1",
+                "user-1",
+                &binding_hash,
+                "refresh-b",
+                "grant-b",
+                &scopes_b,
+                Some(&external_subject),
+            ),
+        );
+        result_a.expect("first concurrent grant update");
+        result_b.expect("second concurrent grant update");
+
+        let binding = load_binding(&db, &binding_hash).await;
+        assert_eq!(binding.rotation_version, 2);
+        assert!(binding.refresh_token_jti == "grant-a" || binding.refresh_token_jti == "grant-b");
+        let base = load_refresh_by_jti(&db, "grant-base").await;
+        let refresh_a = load_refresh_by_jti(&db, "grant-a").await;
+        let refresh_b = load_refresh_by_jti(&db, "grant-b").await;
+        assert!(base.revoked);
+        assert_eq!(
+            [refresh_a.revoked, refresh_b.revoked]
+                .into_iter()
+                .filter(|revoked| !revoked)
+                .count(),
+            1
+        );
+
+        let (expected_secret, expected_services) = if binding.refresh_token_jti == "grant-a" {
+            assert!(!refresh_a.revoked);
+            assert!(refresh_b.revoked);
+            (b"refresh-a".as_slice(), vec!["svc-a"])
+        } else {
+            assert!(refresh_a.revoked);
+            assert!(!refresh_b.revoked);
+            (b"refresh-b".as_slice(), vec!["svc-b"])
+        };
+        let decrypted = encryption_keys
+            .decrypt_with_aad(
+                binding
+                    .refresh_token_encrypted
+                    .as_ref()
+                    .expect("encrypted final refresh token"),
+                binding.id.as_bytes(),
+            )
+            .await
+            .expect("decrypt final refresh token");
+        assert_eq!(decrypted, expected_secret);
+        let snapshot =
+            resolve_binding_grant(&db, "client-1", "user-1", &external_subject, &binding.id)
+                .await
+                .expect("resolve concurrent winner");
+        assert_eq!(snapshot.allowed_service_ids, expected_services);
     }
 
     #[tokio::test]
