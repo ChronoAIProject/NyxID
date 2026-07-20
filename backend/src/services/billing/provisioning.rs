@@ -400,11 +400,12 @@ mod tests {
     };
 
     use async_trait::async_trait;
-    use mongodb::bson::doc;
+    use mongodb::{IndexModel, bson::doc, options::IndexOptions};
+    use tokio::sync::Barrier;
     use uuid::Uuid;
 
     use crate::models::billing_topup_session::{
-        BillingTopUpSession, COLLECTION_NAME as BILLING_TOPUP_SESSIONS,
+        BillingTopUpSession, BillingTopUpStatus, COLLECTION_NAME as BILLING_TOPUP_SESSIONS,
     };
     use crate::models::billing_wallet::{BillingWallet, COLLECTION_NAME as BILLING_WALLET};
     use crate::models::user::{COLLECTION_NAME as USERS, User, UserProfileConfig, UserType};
@@ -472,6 +473,78 @@ mod tests {
             .expect("count wallets");
         assert_eq!(count, 1);
         assert_eq!(lago.wallet_creates.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn concurrent_wallet_provisioning_persists_one_owner_wallet() {
+        let Some(db) = connect_test_database("billing_provision_wallet_concurrent").await else {
+            return;
+        };
+        db.collection::<BillingWallet>(BILLING_WALLET)
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! { "owner_id": 1 })
+                    .options(IndexOptions::builder().unique(true).build())
+                    .build(),
+            )
+            .await
+            .expect("create unique billing owner index");
+        let owner_id = insert_owner(&db, "concurrent@example.com").await;
+        let lago = FakeLago::with_wallet_barrier(2);
+
+        let (first, second) = tokio::join!(
+            ensure_owner_wallet(&db, &lago, &owner_id, "starter", 7),
+            ensure_owner_wallet(&db, &lago, &owner_id, "starter", 7),
+        );
+        let first = first.expect("first concurrent provision");
+        let second = second.expect("second concurrent provision");
+
+        assert_ne!(first.created, second.created);
+        assert_eq!(first.wallet.id, second.wallet.id);
+        assert_eq!(first.wallet.owner_id, second.wallet.owner_id);
+        assert_eq!(
+            first.wallet.lago_customer_id,
+            second.wallet.lago_customer_id
+        );
+        assert_eq!(lago.wallet_creates.load(Ordering::SeqCst), 2);
+        let count = db
+            .collection::<BillingWallet>(BILLING_WALLET)
+            .count_documents(doc! { "owner_id": &owner_id })
+            .await
+            .expect("count wallets after concurrent provision");
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn wallet_provider_failure_leaves_provisioning_retryable() {
+        let Some(db) = connect_test_database("billing_provision_wallet_provider_failure").await
+        else {
+            return;
+        };
+        let owner_id = insert_owner(&db, "wallet-failure@example.com").await;
+        let lago = FakeLago::with_wallet_failures(1);
+
+        let error = ensure_owner_wallet(&db, &lago, &owner_id, "starter", 7)
+            .await
+            .expect_err("first wallet provider call should fail");
+        assert!(matches!(
+            error,
+            crate::errors::AppError::BillingProviderUnavailable(_)
+        ));
+        assert_eq!(
+            db.collection::<BillingWallet>(BILLING_WALLET)
+                .count_documents(doc! { "owner_id": &owner_id })
+                .await
+                .expect("count wallets after provider failure"),
+            0
+        );
+
+        let retry = ensure_owner_wallet(&db, &lago, &owner_id, "starter", 7)
+            .await
+            .expect("retry wallet provisioning");
+        assert!(retry.created);
+        assert_eq!(retry.wallet.owner_id, owner_id);
+        assert_eq!(lago.wallet_creates.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
@@ -560,10 +633,84 @@ mod tests {
         assert_eq!(session_count, 0);
     }
 
+    #[tokio::test]
+    async fn topup_provider_failure_marks_session_failed_and_allows_retry() {
+        let Some(db) = connect_test_database("billing_topup_provider_failure").await else {
+            return;
+        };
+        let owner_id = insert_owner(&db, "topup-failure@example.com").await;
+        let lago = FakeLago::with_topup_failures(1);
+
+        let error = create_topup_checkout(
+            &db,
+            &lago,
+            &owner_id,
+            "starter",
+            0,
+            50,
+            "topup-provider-failure",
+        )
+        .await
+        .expect_err("first top-up provider call should fail");
+        assert!(matches!(
+            error,
+            crate::errors::AppError::BillingProviderUnavailable(_)
+        ));
+        let failed = db
+            .collection::<BillingTopUpSession>(BILLING_TOPUP_SESSIONS)
+            .find_one(doc! { "owner_id": &owner_id })
+            .await
+            .expect("read failed top-up session")
+            .expect("failed top-up session exists");
+        assert_eq!(failed.status, BillingTopUpStatus::Failed);
+        assert!(failed.payment_url.is_none());
+
+        let retry = create_topup_checkout(
+            &db,
+            &lago,
+            &owner_id,
+            "starter",
+            0,
+            50,
+            "topup-provider-failure",
+        )
+        .await
+        .expect("retry top-up checkout");
+        assert_eq!(retry.session.status, BillingTopUpStatus::CheckoutCreated);
+        assert!(retry.session.payment_url.is_some());
+        assert_eq!(lago.topup_creates.load(Ordering::SeqCst), 2);
+    }
+
     #[derive(Clone, Default)]
     struct FakeLago {
         wallet_creates: Arc<AtomicUsize>,
         topup_creates: Arc<AtomicUsize>,
+        wallet_barrier: Option<Arc<Barrier>>,
+        wallet_failures_remaining: Arc<AtomicUsize>,
+        topup_failures_remaining: Arc<AtomicUsize>,
+    }
+
+    impl FakeLago {
+        fn with_wallet_barrier(parties: usize) -> Self {
+            Self {
+                wallet_barrier: Some(Arc::new(Barrier::new(parties))),
+                ..Self::default()
+            }
+        }
+
+        fn with_wallet_failures(failures: usize) -> Self {
+            Self {
+                wallet_failures_remaining: Arc::new(AtomicUsize::new(failures)),
+                ..Self::default()
+            }
+        }
+
+        fn with_topup_failures(failures: usize) -> Self {
+            Self {
+                topup_failures_remaining: Arc::new(AtomicUsize::new(failures)),
+                ..Self::default()
+            }
+        }
     }
 
     #[async_trait]
@@ -585,6 +732,14 @@ mod tests {
 
         async fn ensure_wallet(&self, customer_id: &str) -> crate::errors::AppResult<LagoWallet> {
             self.wallet_creates.fetch_add(1, Ordering::SeqCst);
+            if let Some(barrier) = &self.wallet_barrier {
+                barrier.wait().await;
+            }
+            if take_failure(&self.wallet_failures_remaining) {
+                return Err(crate::errors::AppError::BillingProviderUnavailable(
+                    "simulated Lago wallet failure".to_string(),
+                ));
+            }
             Ok(LagoWallet {
                 id: format!("{customer_id}:wallet"),
                 balance_credits: 123,
@@ -597,6 +752,11 @@ mod tests {
             _request: &WalletTopUpInput,
         ) -> crate::errors::AppResult<WalletTopUpCheckout> {
             self.topup_creates.fetch_add(1, Ordering::SeqCst);
+            if take_failure(&self.topup_failures_remaining) {
+                return Err(crate::errors::AppError::BillingProviderUnavailable(
+                    "simulated Lago top-up failure".to_string(),
+                ));
+            }
             Ok(WalletTopUpCheckout {
                 wallet_transaction_id: "txn_topup-1".to_string(),
                 lago_invoice_id: Some("invoice_topup-1".to_string()),
@@ -645,6 +805,14 @@ mod tests {
         ) -> crate::errors::AppResult<Vec<Entitlement>> {
             Ok(Vec::new())
         }
+    }
+
+    fn take_failure(remaining: &AtomicUsize) -> bool {
+        remaining
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+                value.checked_sub(1)
+            })
+            .is_ok()
     }
 
     async fn insert_owner(db: &mongodb::Database, email: &str) -> String {

@@ -20,7 +20,6 @@ use crate::services::{
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
-use super::services_helpers::fetch_service;
 use super::ssh_tunnel::authorize_ssh_access_for_operation;
 
 // ---------------------------------------------------------------------------
@@ -106,24 +105,12 @@ pub async fn ssh_exec(
         operation_descriptor::SshOperationKind::Exec,
         Some(&body.command),
     );
-    authorize_ssh_access_for_operation(&state, &auth_user, &service_id, &operation).await?;
+    let auth_context =
+        authorize_ssh_access_for_operation(&state, &auth_user, &service_id, &operation).await?;
 
     let ssh_svc = ssh_service::get_ssh_service(&state.db, &service_id).await?;
-    // Resolve the catalog slug for telemetry -- best-effort so exec
-    // never fails on a telemetry-only DB read.
-    let service_row = fetch_service(&state, &service_id).await.ok();
-    let service_slug = service_row
-        .as_ref()
-        .map(|s| s.slug.clone())
-        .unwrap_or_else(|| service_id.clone());
+    let service_slug = auth_context.service_slug.clone();
     let user_id = auth_user.user_id.to_string();
-    let service_owner_id = service_row
-        .as_ref()
-        .map(|s| s.created_by.clone())
-        .unwrap_or_else(|| user_id.clone());
-    let auth_context =
-        ssh_service::resolve_ssh_auth_context(&state.db, &user_id, &service_id, &service_slug)
-            .await?;
     if auth_context.mode == SshAuthMode::ProxyOnly {
         return Err(AppError::SshAuthModeUnsupportedForOperation(
             "ssh exec is not supported for proxy-only SSH services".to_string(),
@@ -189,10 +176,11 @@ pub async fn ssh_exec(
                 .to_string(),
         )
     })?;
+    let billing_resolution_user_id = auth_user.proxy_resolution_user_id();
     let billing_owner = state
         .billing
         .owner_resolver()
-        .resolve(&user_id, Some(&service_owner_id))
+        .resolve_for_resource(&billing_resolution_user_id, &auth_context.owner_user_id)
         .await?;
     let node_intent = if node_route.fallback_node_ids.is_empty() {
         crate::services::billing::NodeIntent::Node

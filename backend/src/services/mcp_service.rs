@@ -54,6 +54,83 @@ impl McpToolSource {
     }
 }
 
+struct McpBillingRouteContextBuilder {
+    effective_owner_id: String,
+    user_service_id: Option<String>,
+    is_user_service: bool,
+}
+
+impl McpBillingRouteContextBuilder {
+    fn from_user_service_resolution(
+        billing_principal_user_id: &str,
+        resolution: &proxy_service::UserServiceResolution,
+    ) -> Self {
+        Self {
+            effective_owner_id: resolution
+                .org_routing
+                .as_ref()
+                .map(|routing| routing.org_user_id.as_str())
+                .unwrap_or(billing_principal_user_id)
+                .to_string(),
+            user_service_id: Some(resolution.user_service_id.clone()),
+            is_user_service: true,
+        }
+    }
+
+    fn for_platform_service(billing_principal_user_id: &str) -> Self {
+        Self {
+            effective_owner_id: billing_principal_user_id.to_string(),
+            user_service_id: None,
+            is_user_service: false,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn build(
+        self,
+        billing: &crate::services::billing::BillingService,
+        actor_user_id: &str,
+        billing_principal_user_id: &str,
+        api_key_id: Option<&str>,
+        target: &proxy_service::ProxyTarget,
+        node_route: Option<&node_routing_service::NodeRoute>,
+        has_server_credential: bool,
+    ) -> AppResult<crate::services::billing::BillingRouteContext> {
+        let billing_owner = billing
+            .owner_resolver()
+            .resolve_for_resource(billing_principal_user_id, &self.effective_owner_id)
+            .await?;
+        let node_intent = match node_route {
+            Some(route) if !route.fallback_node_ids.is_empty() => {
+                crate::services::billing::NodeIntent::NodeWithFallback
+            }
+            Some(_) => crate::services::billing::NodeIntent::Node,
+            None => crate::services::billing::NodeIntent::Direct,
+        };
+
+        Ok(crate::services::billing::BillingRouteContext::new(
+            uuid::Uuid::new_v4().to_string(),
+            billing_owner.owner_id,
+            actor_user_id.to_string(),
+            api_key_id.map(str::to_string),
+            self.user_service_id,
+            Some(target.service.id.clone()),
+            Some(target.service.slug.clone()),
+            node_intent,
+            target.auth_method.clone(),
+            mcp_credential_class(
+                self.is_user_service,
+                node_route.is_some(),
+                has_server_credential,
+                target,
+            ),
+            BillingMetric::Requests,
+            target.service.billing.as_ref(),
+            billing.resale_enabled(),
+        ))
+    }
+}
+
 /// Agent/scope context carried into [`execute_tool`].
 ///
 /// Mirrors the agent-isolation fields already honored by the REST proxy
@@ -84,7 +161,7 @@ pub struct McpToolService {
 }
 
 fn mcp_credential_class(
-    source: &McpToolSource,
+    is_user_service: bool,
     node_route_active: bool,
     has_server_credential: bool,
     target: &proxy_service::ProxyTarget,
@@ -93,7 +170,7 @@ fn mcp_credential_class(
         CredentialClass::NodeManaged
     } else if target.auth_method == "none" && target.credential.is_empty() {
         CredentialClass::NoAuth
-    } else if source.is_user_service() {
+    } else if is_user_service {
         CredentialClass::UserOwned
     } else if !target.service.requires_user_credential && !target.credential.is_empty() {
         CredentialClass::NyxidManagedMaster
@@ -2371,6 +2448,7 @@ pub async fn execute_tool(
     node_ws_manager: &std::sync::Arc<NodeWsManager>,
     billing: &std::sync::Arc<crate::services::billing::BillingService>,
     user_id: &str,
+    billing_principal_user_id: &str,
     service: &McpToolService,
     endpoint: &McpToolEndpoint,
     arguments: &serde_json::Value,
@@ -2394,7 +2472,8 @@ pub async fn execute_tool(
 
     // Resolve the proxy target and node routing from the fresh resolver result
     // (not cached loader flags -- credential state may have changed).
-    let (target, node_route, has_server_credential) = match &service.source {
+    let (target, node_route, has_server_credential, billing_context_builder) = match &service.source
+    {
         McpToolSource::UserManaged {
             user_service_id, ..
         } => {
@@ -2493,7 +2572,17 @@ pub async fn execute_tool(
             // never bypasses the node for user-managed node-routed tools.
             // (Sixth-round Codex review P1.)
             let has_cred_for_fallback = has_cred && nr.is_none();
-            (resolution.target, nr, has_cred_for_fallback)
+            let billing_context_builder =
+                McpBillingRouteContextBuilder::from_user_service_resolution(
+                    billing_principal_user_id,
+                    &resolution,
+                );
+            (
+                resolution.target,
+                nr,
+                has_cred_for_fallback,
+                billing_context_builder,
+            )
         }
         McpToolSource::Platform {
             downstream_service_id,
@@ -2554,7 +2643,12 @@ pub async fn execute_tool(
             // fallback for binding-based routes. Keep the same semantic
             // here: a transient node failure on a platform service can
             // fall back to direct HTTP if a server credential exists.
-            (t, nr, has_cred)
+            (
+                t,
+                nr,
+                has_cred,
+                McpBillingRouteContextBuilder::for_platform_service(billing_principal_user_id),
+            )
         }
     };
 
@@ -2694,41 +2788,17 @@ pub async fn execute_tool(
     } else {
         build_downstream_request_headers(endpoint, body.is_some())?
     };
-    let billing_owner = billing.owner_resolver().resolve(user_id, None).await?;
-    let node_intent = match &node_route {
-        Some(route) if !route.fallback_node_ids.is_empty() => {
-            crate::services::billing::NodeIntent::NodeWithFallback
-        }
-        Some(_) => crate::services::billing::NodeIntent::Node,
-        None => crate::services::billing::NodeIntent::Direct,
-    };
-    let user_service_id = match &service.source {
-        McpToolSource::UserManaged {
-            user_service_id, ..
-        } => Some(user_service_id.clone()),
-        McpToolSource::Platform { .. } => None,
-    };
-    let catalog_service_id = Some(target.service.id.clone());
-    let billing_ctx = crate::services::billing::BillingRouteContext::new(
-        uuid::Uuid::new_v4().to_string(),
-        billing_owner.owner_id,
-        user_id.to_string(),
-        exec_ctx.api_key_id.map(str::to_string),
-        user_service_id,
-        catalog_service_id,
-        Some(target.service.slug.clone()),
-        node_intent,
-        target.auth_method.clone(),
-        mcp_credential_class(
-            &service.source,
-            node_route.is_some(),
-            has_server_credential,
+    let billing_ctx = billing_context_builder
+        .build(
+            billing.as_ref(),
+            user_id,
+            billing_principal_user_id,
+            exec_ctx.api_key_id,
             &target,
-        ),
-        BillingMetric::Requests,
-        target.service.billing.as_ref(),
-        billing.resale_enabled(),
-    );
+            node_route.as_ref(),
+            has_server_credential,
+        )
+        .await?;
     let metered = billing.open(&billing_ctx).await?;
     let request_len = body.as_ref().map(|body| body.len() as i64).unwrap_or(0);
 
@@ -5207,6 +5277,149 @@ mod tests {
             has_server_credential: true,
         };
         assert!(user.is_user_service());
+    }
+
+    fn mcp_billing_resolution(
+        actor_user_id: &str,
+        org_user_id: Option<&str>,
+    ) -> proxy_service::UserServiceResolution {
+        let service = crate::models::downstream_service::test_helpers::dummy_service();
+        proxy_service::UserServiceResolution {
+            target: proxy_service::ProxyTarget {
+                base_url: service.base_url.clone(),
+                auth_method: service.auth_method.clone(),
+                auth_key_name: service.auth_key_name.clone(),
+                credential: String::new(),
+                service,
+                catalog_default_headers: Vec::new(),
+                user_service_default_headers: Vec::new(),
+                ws_frame_injections: Vec::new(),
+                connection_id: None,
+            },
+            catalog_service_slug: None,
+            node_id: None,
+            user_service_id: "user-service".to_string(),
+            has_server_credential: false,
+            org_routing: org_user_id.map(|org_user_id| proxy_service::OrgRouting {
+                org_user_id: org_user_id.to_string(),
+                member_user_id: actor_user_id.to_string(),
+                membership_id: "membership".to_string(),
+            }),
+            pool_selection: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_personal_billing_attributes_owner_and_actor_to_user() {
+        let Some(db) = crate::test_utils::connect_test_database("mcp_billing_personal").await
+        else {
+            return;
+        };
+        let billing = crate::services::billing::BillingService::new(
+            db,
+            std::sync::Arc::new(crate::test_utils::test_app_config()),
+        );
+        let resolution = mcp_billing_resolution("actor", None);
+
+        let billing_ctx =
+            McpBillingRouteContextBuilder::from_user_service_resolution("actor", &resolution)
+                .build(
+                    &billing,
+                    "actor",
+                    "actor",
+                    None,
+                    &resolution.target,
+                    None,
+                    resolution.has_server_credential,
+                )
+                .await
+                .expect("personal MCP billing context");
+
+        assert_eq!(billing_ctx.billing_owner_id, "actor");
+        assert_eq!(billing_ctx.actor_user_id, "actor");
+        assert_eq!(billing_ctx.user_service_id.as_deref(), Some("user-service"));
+    }
+
+    #[tokio::test]
+    async fn mcp_org_billing_attributes_owner_to_org_and_actor_to_member() {
+        use crate::models::org_membership::{COLLECTION_NAME as ORG_MEMBERSHIPS, OrgRole};
+        use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+
+        let Some(db) = crate::test_utils::connect_test_database("mcp_billing_org").await else {
+            return;
+        };
+        let actor_user_id = uuid::Uuid::new_v4().to_string();
+        let org_user_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(crate::test_utils::test_user(&org_user_id, UserType::Org))
+            .await
+            .expect("insert organization owner");
+        db.collection::<crate::models::org_membership::OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(crate::test_utils::test_membership(
+                &org_user_id,
+                &actor_user_id,
+                OrgRole::Member,
+                None,
+            ))
+            .await
+            .expect("insert organization membership");
+        let billing = crate::services::billing::BillingService::new(
+            db,
+            std::sync::Arc::new(crate::test_utils::test_app_config()),
+        );
+        let resolution = mcp_billing_resolution(&actor_user_id, Some(&org_user_id));
+
+        let billing_ctx = McpBillingRouteContextBuilder::from_user_service_resolution(
+            &actor_user_id,
+            &resolution,
+        )
+        .build(
+            &billing,
+            &actor_user_id,
+            &actor_user_id,
+            None,
+            &resolution.target,
+            None,
+            resolution.has_server_credential,
+        )
+        .await
+        .expect("organization MCP billing context");
+
+        assert_eq!(billing_ctx.billing_owner_id, org_user_id);
+        assert_eq!(billing_ctx.actor_user_id, actor_user_id);
+        assert_ne!(billing_ctx.billing_owner_id, billing_ctx.actor_user_id);
+        assert_eq!(billing_ctx.user_service_id.as_deref(), Some("user-service"));
+    }
+
+    #[tokio::test]
+    async fn mcp_service_account_bills_owner_and_keeps_subject_attribution() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("mcp_billing_service_account").await
+        else {
+            return;
+        };
+        let billing = crate::services::billing::BillingService::new(
+            db,
+            std::sync::Arc::new(crate::test_utils::test_app_config()),
+        );
+        let target = mcp_billing_resolution("owner", None).target;
+
+        let billing_ctx = McpBillingRouteContextBuilder::for_platform_service("owner")
+            .build(
+                &billing,
+                "service-account",
+                "owner",
+                None,
+                &target,
+                None,
+                false,
+            )
+            .await
+            .expect("service-account MCP billing context");
+
+        assert_eq!(billing_ctx.billing_owner_id, "owner");
+        assert_eq!(billing_ctx.actor_user_id, "service-account");
+        assert_ne!(billing_ctx.billing_owner_id, billing_ctx.actor_user_id);
     }
 
     mod public_tools {

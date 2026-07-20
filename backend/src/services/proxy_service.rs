@@ -687,6 +687,9 @@ pub async fn resolve_proxy_target_lenient(
 /// Result of resolving a proxy target from the UserService model.
 pub struct UserServiceResolution {
     pub target: ProxyTarget,
+    /// Immutable catalog identity for protocol-specific adapters. This stays
+    /// canonical when the user-facing `UserService.slug` is disambiguated.
+    pub catalog_service_slug: Option<String>,
     pub node_id: Option<String>,
     pub user_service_id: String,
     pub has_server_credential: bool,
@@ -1696,7 +1699,8 @@ async fn finish_resolution(
     // entry has no defaults set.
     let catalog_default_headers =
         load_catalog_default_headers_for_user_service(db, &user_service).await;
-    let catalog_billing = load_catalog_billing_for_user_service(db, &user_service).await;
+    let (catalog_billing, catalog_service_slug) =
+        load_catalog_metering_for_user_service(db, &user_service).await;
     let catalog_ws_frame_injections =
         load_catalog_ws_frame_injections_for_user_service(db, &user_service).await;
     let effective_ws_frame_injections = if user_service.ws_frame_injections.is_empty() {
@@ -1737,6 +1741,7 @@ async fn finish_resolution(
                 // doesn't apply.
                 connection_id: None,
             },
+            catalog_service_slug: catalog_service_slug.clone(),
             node_id: user_service.node_id.clone(),
             user_service_id: user_service.id.clone(),
             has_server_credential: true,
@@ -1785,6 +1790,7 @@ async fn finish_resolution(
                 ws_frame_injections: effective_ws_frame_injections.clone(),
                 connection_id: None,
             },
+            catalog_service_slug: catalog_service_slug.clone(),
             node_id: user_service.node_id.clone(),
             user_service_id: user_service.id.clone(),
             has_server_credential: true,
@@ -1857,6 +1863,7 @@ async fn finish_resolution(
                 ws_frame_injections: effective_ws_frame_injections.clone(),
                 connection_id: api_key.connection_id.clone(),
             },
+            catalog_service_slug: catalog_service_slug.clone(),
             node_id: user_service.node_id.clone(),
             user_service_id: user_service.id.clone(),
             has_server_credential,
@@ -1907,6 +1914,7 @@ async fn finish_resolution(
             ws_frame_injections: effective_ws_frame_injections,
             connection_id: api_key.connection_id.clone(),
         },
+        catalog_service_slug,
         node_id: user_service.node_id.clone(),
         user_service_id: user_service.id.clone(),
         has_server_credential: true,
@@ -2003,25 +2011,30 @@ async fn load_catalog_ws_frame_injections_for_user_service(
     }
 }
 
-async fn load_catalog_billing_for_user_service(
+async fn load_catalog_metering_for_user_service(
     db: &mongodb::Database,
     user_service: &crate::models::user_service::UserService,
-) -> Option<crate::models::service_billing::ServiceBilling> {
-    let catalog_id = user_service.catalog_service_id.as_deref()?;
+) -> (
+    Option<crate::models::service_billing::ServiceBilling>,
+    Option<String>,
+) {
+    let Some(catalog_id) = user_service.catalog_service_id.as_deref() else {
+        return (None, None);
+    };
     match db
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
         .find_one(doc! { "_id": catalog_id })
         .await
     {
-        Ok(Some(svc)) => svc.billing,
-        Ok(None) => None,
+        Ok(Some(svc)) => (svc.billing, Some(svc.slug)),
+        Ok(None) => (None, None),
         Err(e) => {
             tracing::warn!(
                 catalog_id,
                 error = %e,
-                "Failed to load catalog billing config; proceeding without resale metering"
+                "Failed to load catalog metering metadata; proceeding without resale metering"
             );
-            None
+            (None, None)
         }
     }
 }
@@ -2920,6 +2933,7 @@ fn inject_credential_into_json_body(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::downstream_service::test_helpers::dummy_service;
     use crate::models::org_membership::{
         COLLECTION_NAME as ORG_MEMBERSHIPS, MemberScopeSource, OrgMembership, OrgRole,
     };
@@ -2938,6 +2952,37 @@ mod tests {
     };
     use chrono::Utc;
     use tokio::{net::TcpListener, sync::mpsc};
+
+    #[tokio::test]
+    async fn catalog_metering_keeps_protocol_identity_for_renamed_user_service() {
+        let Some(db) = connect_test_database("proxy_catalog_protocol_identity").await else {
+            eprintln!("skipping catalog protocol identity test: no local MongoDB available");
+            return;
+        };
+
+        let catalog_id = uuid::Uuid::new_v4().to_string();
+        let mut catalog_service = dummy_service();
+        catalog_service.id = catalog_id.clone();
+        catalog_service.slug = "llm-openai".to_string();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(catalog_service)
+            .await
+            .unwrap();
+
+        let user_service = test_user_service(
+            &uuid::Uuid::new_v4().to_string(),
+            &uuid::Uuid::new_v4().to_string(),
+            "llm-openai-2",
+            &uuid::Uuid::new_v4().to_string(),
+            Some(&catalog_id),
+            None,
+        );
+        let (_, catalog_service_slug) =
+            load_catalog_metering_for_user_service(&db, &user_service).await;
+
+        assert_eq!(catalog_service_slug.as_deref(), Some("llm-openai"));
+        assert_ne!(user_service.slug, catalog_service_slug.unwrap());
+    }
 
     // ---- forward header allowlist tests (NyxID#161) ----
 

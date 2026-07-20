@@ -253,7 +253,7 @@ pub async fn llm_proxy_request(
     // always None -- and then fall through to the legacy delegation path
     // with the "Provider ... connection required" error, even though the
     // user has a perfectly valid UserService linked by catalog_service_id.
-    let (target, resolved_via_user_service) =
+    let (target, resolved_via_user_service, owner_for_approval) =
         match proxy_service::resolve_proxy_target_from_user_service(
             &state.db,
             &state.encryption_keys,
@@ -264,7 +264,14 @@ pub async fn llm_proxy_request(
         )
         .await?
         {
-            Some(resolution) => (resolution.target, true),
+            Some(resolution) => {
+                let effective_owner = resolution
+                    .org_routing
+                    .as_ref()
+                    .map(|routing| routing.org_user_id.clone())
+                    .unwrap_or_else(|| user_id_str.clone());
+                (resolution.target, true, Some(effective_owner))
+            }
             None => {
                 // Before the legacy fallback, block org viewers whose
                 // org has any presence for this service so they cannot
@@ -284,22 +291,11 @@ pub async fn llm_proxy_request(
                     &service_id,
                 )
                 .await?;
-                (legacy, false)
+                (legacy, false, None)
             }
         };
-    // Check approval if user has it enabled. The two-tier resolver above
-    // doesn't surface its `org_routing` back to this scope, so we look up
-    // the effective owner separately via `find_effective_service_owner`,
-    // which mirrors the same personal-then-org cascade and returns the
-    // identity the proxy would actually pick. Cheap second lookup; the
-    // alternative is rewiring the resolver to return the org context.
-    let owner_for_approval = proxy_service::find_effective_service_owner(
-        &state.db,
-        &user_id_str,
-        None,
-        Some(&service_id),
-    )
-    .await?;
+    // Check approval against the owner selected by credential resolution.
+    // Legacy credentials are personal, so `None` retains the actor fallback.
     check_llm_approval(
         &state,
         &auth_user,
@@ -316,10 +312,14 @@ pub async fn llm_proxy_request(
     )
     .await?;
 
+    let billing_resolution_user_id = auth_user.proxy_resolution_user_id();
+    let billing_resource_owner_id = owner_for_approval
+        .as_deref()
+        .unwrap_or(&billing_resolution_user_id);
     let billing_owner = state
         .billing
         .owner_resolver()
-        .resolve(&user_id_str, owner_for_approval.as_deref())
+        .resolve_for_resource(&billing_resolution_user_id, billing_resource_owner_id)
         .await?;
     let billing_ctx = crate::services::billing::BillingRouteContext::new(
         uuid::Uuid::new_v4().to_string(),
@@ -717,10 +717,14 @@ pub async fn gateway_request(
     )
     .await?;
 
+    let billing_resolution_user_id = auth_user.proxy_resolution_user_id();
+    let billing_resource_owner_id = effective_owner_for_approval
+        .as_deref()
+        .unwrap_or(&billing_resolution_user_id);
     let billing_owner = state
         .billing
         .owner_resolver()
-        .resolve(&user_id_str, effective_owner_for_approval.as_deref())
+        .resolve_for_resource(&billing_resolution_user_id, billing_resource_owner_id)
         .await?;
     let billing_ctx = crate::services::billing::BillingRouteContext::new(
         uuid::Uuid::new_v4().to_string(),

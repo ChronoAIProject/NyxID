@@ -1146,7 +1146,7 @@ pub enum BillingCommands {
         /// Provision the wallet if it does not exist
         #[arg(long)]
         provision: bool,
-        /// Owner ID to bill, usually an org user ID (admin/member access required)
+        /// Owner ID to manage, usually an org user ID (org admin access required)
         #[arg(long)]
         owner_id: Option<String>,
         #[command(flatten)]
@@ -1168,7 +1168,7 @@ pub enum BillingCommands {
         /// Retry-safe idempotency key
         #[arg(long)]
         idempotency_key: Option<String>,
-        /// Owner ID to bill, usually an org user ID (admin/member access required)
+        /// Owner ID to manage, usually an org user ID (org admin access required)
         #[arg(long)]
         owner_id: Option<String>,
         /// Open checkout URL in the default browser
@@ -1185,7 +1185,7 @@ pub enum BillingCommands {
         /// Fresh retry-safe idempotency key; omit to generate one
         #[arg(long)]
         idempotency_key: Option<String>,
-        /// Owner ID to bill, usually an org user ID (admin/member access required)
+        /// Owner ID to manage, usually an org user ID (org admin access required)
         #[arg(long)]
         owner_id: Option<String>,
         /// Open checkout URL in the default browser
