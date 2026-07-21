@@ -215,6 +215,9 @@ jobs:
       - name: Check RCI backend boundary
         run: bash scripts/check-rci-backend-boundary.sh
 
+      - name: Billing route coverage smoke
+        run: cargo test -p nyxid billing_route_coverage_smoke -- --nocapture
+
       - name: Build backend
         run: cargo build -p nyxid
 

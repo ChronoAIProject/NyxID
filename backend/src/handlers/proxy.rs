@@ -940,6 +940,18 @@ pub(crate) async fn execute_proxy(
     .await
 }
 
+pub(crate) fn enforce_proxy_billing_classification(
+    request: &Request<Body>,
+) -> AppResult<crate::services::billing::route_inventory::BillingEgressPermit> {
+    crate::services::billing::route_inventory::enforce_billing_egress_classification(
+        request
+            .extensions()
+            .get::<crate::services::billing::route_inventory::BillingRoutePolicy>()
+            .copied(),
+        crate::services::billing::BillingIngress::Proxy,
+    )
+}
+
 /// Resolve proxy target and node routing via the old DownstreamService path.
 ///
 /// Returns `(node_route, target, has_server_credential, user_service_id, node_routing_required)`.
@@ -1223,6 +1235,8 @@ async fn execute_proxy_inner(
     pre_resolved: Option<PreResolved>,
     resolved_slug: &mut String,
 ) -> AppResult<Response> {
+    let billing_egress_permit = enforce_proxy_billing_classification(&request)?;
+
     let user_id_str = auth_user.user_id.to_string();
 
     // Per-agent rate limit check (before any work). Emit a
@@ -1498,6 +1512,7 @@ async fn execute_proxy_inner(
         None => crate::services::billing::NodeIntent::Direct,
     };
     let billing_ctx = crate::services::billing::BillingRouteContext::new(
+        crate::services::billing::BillingIngress::Proxy,
         billing_request_id,
         billing_owner.owner_id,
         user_id_str.clone(),
@@ -1889,6 +1904,7 @@ async fn execute_proxy_inner(
                 &proxy_actor_user_id,
                 collect_realtime_llm_usage,
                 metered.clone(),
+                billing_egress_permit,
             )
             .await;
         }
@@ -1908,6 +1924,7 @@ async fn execute_proxy_inner(
             caller_token.as_deref(),
             collect_realtime_llm_usage,
             metered.clone(),
+            billing_egress_permit,
         )
         .await;
     }
@@ -2051,6 +2068,7 @@ async fn execute_proxy_inner(
                     node_id,
                     attempt_request,
                     signing_secret.as_ref().map(|secret| secret.as_slice()),
+                    billing_egress_permit,
                 )
                 .await;
             let latency_ms = start.elapsed().as_millis() as u64;
@@ -2152,15 +2170,9 @@ async fn execute_proxy_inner(
                             // Same anti-buffering opt-out as the direct path:
                             let service_id_owned = service_id.to_string();
                             let node_id_owned = node_id.to_string();
-                            let stream_db = state.db.clone();
                             let stream_billing = state.billing.clone();
                             let stream_metered = metered.clone();
                             let request_len = request_body_len;
-                            let stream_user_id = user_id_str.clone();
-                            let stream_api_key_id = auth_user.api_key_id.clone();
-                            let stream_api_key_name = auth_user.api_key_name.clone();
-                            let stream_ip = auth_user.ip_address.clone();
-                            let stream_ua = auth_user.user_agent.clone();
 
                             // Convert the mpsc receiver into a streaming body.
                             let stream = async_stream::stream! {
@@ -2186,24 +2198,6 @@ async fn execute_proxy_inner(
                                         }
                                         Ok(Some(StreamChunk::Start { .. })) => {
                                             // Duplicate start, ignore
-                                        }
-                                        Ok(Some(StreamChunk::Injected { trigger_kind, frame_index })) => {
-                                            audit_service::log_async(
-                                                stream_db.clone(),
-                                                Some(stream_user_id.clone()),
-                                                "ws_frame_auth_injected".to_string(),
-                                                Some(serde_json::json!({
-                                                    "service_id": service_id_owned,
-                                                    "trigger_kind": trigger_kind,
-                                                    "frame_index_in": frame_index,
-                                                    "routed_via": "node",
-                                                    "node_id": node_id_owned,
-                                                })),
-                                                stream_ip.clone(),
-                                                stream_ua.clone(),
-                                                stream_api_key_id.clone(),
-                                                stream_api_key_name.clone(),
-                                            );
                                         }
                                         Ok(None) => break,
                                         Err(_) => {
@@ -2436,6 +2430,7 @@ async fn execute_proxy_inner(
                 api_key_name: auth_user.api_key_name.clone(),
             }),
             Some(usage_complete),
+            billing_egress_permit,
         )
         .await?;
 
@@ -2480,6 +2475,7 @@ async fn execute_proxy_inner(
         caller_token.as_deref(),
         &state.token_exchange_cache,
         &state.cloud_response_cache,
+        billing_egress_permit,
     )
     .await?;
 
@@ -2940,7 +2936,7 @@ fn resale_usage_from_optional_reported(
     }
 }
 
-fn llm_platform_usage(
+pub(crate) fn llm_platform_usage(
     usage: Option<&llm_usage_service::ReportedLlmUsage>,
     fallback_bytes: i64,
 ) -> PlatformUsage {
@@ -3268,6 +3264,7 @@ async fn connect_downstream_ws(
     identity_headers: &[(String, String)],
     forward_headers: &[(String, String)],
     caller_token: Option<&str>,
+    _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> AppResult<DownstreamWsConnection> {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
@@ -3873,6 +3870,7 @@ async fn handle_ws_passthrough(
     caller_token: Option<&str>,
     collect_realtime_llm_usage: bool,
     metered: crate::services::billing::MeteredProxyContext,
+    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> AppResult<Response> {
     let downstream_url = build_downstream_ws_url(target, path, query, delegated)?;
 
@@ -3899,6 +3897,7 @@ async fn handle_ws_passthrough(
         identity_headers,
         forward_headers,
         caller_token,
+        billing_egress_permit,
     )
     .await?;
     state.billing.mark_forwarded(&metered).await?;
@@ -4008,6 +4007,7 @@ async fn handle_ws_passthrough_via_node(
     proxy_actor_user_id: &str,
     collect_realtime_llm_usage: bool,
     metered: crate::services::billing::MeteredProxyContext,
+    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> AppResult<Response> {
     use crate::services::node_ws_manager::NodeWsProxyRequest;
 
@@ -4133,6 +4133,7 @@ async fn handle_ws_passthrough_via_node(
                 node_id,
                 ws_proxy_request,
                 signing_secret.as_ref().map(|secret| secret.as_slice()),
+                billing_egress_permit,
             )
             .await
         {
@@ -4743,6 +4744,7 @@ mod tests {
 
         MeteredProxyContext {
             route: Some(BillingRouteContext::new(
+                crate::services::billing::BillingIngress::Proxy,
                 "request-1".to_string(),
                 "owner-1".to_string(),
                 "actor-1".to_string(),
@@ -6633,11 +6635,17 @@ mod proxy_resolution_integration_tests {
     }
 
     fn proxy_request(uri: &str) -> Request<Body> {
-        Request::builder()
+        let mut request = Request::builder()
             .method(Method::GET)
             .uri(uri)
             .body(Body::empty())
-            .expect("build proxy request")
+            .expect("build proxy request");
+        request.extensions_mut().insert(
+            crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                crate::services::billing::BillingIngress::Proxy,
+            ),
+        );
+        request
     }
 
     async fn ws_proxy_test_route(
@@ -6659,6 +6667,11 @@ mod proxy_resolution_integration_tests {
     async fn assert_ws_proxy_upgrade(state: AppState, auth: AuthUser, path: &str) {
         let app = Router::new()
             .route("/proxy/s/{slug}/{*path}", get(ws_proxy_test_route))
+            .route_layer(axum::Extension(
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Proxy,
+                ),
+            ))
             .with_state((state, auth));
         let listener = TcpListener::bind("127.0.0.1:0")
             .await

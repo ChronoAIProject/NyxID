@@ -939,6 +939,7 @@ fn build_chatgpt_api_url(api_url: &str, query: Option<&str>) -> String {
 /// When `translate_response` is `true`, Responses API SSE events are
 /// translated back to Chat Completions format. When `false`,
 /// the raw Responses API SSE events are forwarded to the client.
+#[allow(clippy::too_many_arguments)]
 pub async fn send_to_chatgpt(
     translated_body: &serde_json::Value,
     bearer_token: &str,
@@ -947,6 +948,7 @@ pub async fn send_to_chatgpt(
     query: Option<&str>,
     usage_context: Option<UsageAuditContext>,
     usage_complete: Option<UsageCompleteCallback>,
+    _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> AppResult<axum::response::Response> {
     send_to_chatgpt_with_api_url(
         translated_body,
