@@ -940,6 +940,16 @@ pub(crate) async fn execute_proxy(
     .await
 }
 
+pub(crate) fn enforce_proxy_billing_classification(request: &Request<Body>) -> AppResult<()> {
+    crate::services::billing::route_inventory::enforce_billing_egress_classification(
+        request
+            .extensions()
+            .get::<crate::services::billing::route_inventory::BillingRoutePolicy>()
+            .copied(),
+        crate::services::billing::BillingIngress::Proxy,
+    )
+}
+
 /// Resolve proxy target and node routing via the old DownstreamService path.
 ///
 /// Returns `(node_route, target, has_server_credential, user_service_id, node_routing_required)`.
@@ -1223,6 +1233,8 @@ async fn execute_proxy_inner(
     pre_resolved: Option<PreResolved>,
     resolved_slug: &mut String,
 ) -> AppResult<Response> {
+    enforce_proxy_billing_classification(&request)?;
+
     let user_id_str = auth_user.user_id.to_string();
 
     // Per-agent rate limit check (before any work). Emit a
@@ -6635,11 +6647,17 @@ mod proxy_resolution_integration_tests {
     }
 
     fn proxy_request(uri: &str) -> Request<Body> {
-        Request::builder()
+        let mut request = Request::builder()
             .method(Method::GET)
             .uri(uri)
             .body(Body::empty())
-            .expect("build proxy request")
+            .expect("build proxy request");
+        request.extensions_mut().insert(
+            crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                crate::services::billing::BillingIngress::Proxy,
+            ),
+        );
+        request
     }
 
     async fn ws_proxy_test_route(
@@ -6661,6 +6679,11 @@ mod proxy_resolution_integration_tests {
     async fn assert_ws_proxy_upgrade(state: AppState, auth: AuthUser, path: &str) {
         let app = Router::new()
             .route("/proxy/s/{slug}/{*path}", get(ws_proxy_test_route))
+            .route_layer(axum::Extension(
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Proxy,
+                ),
+            ))
             .with_state((state, auth));
         let listener = TcpListener::bind("127.0.0.1:0")
             .await

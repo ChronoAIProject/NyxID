@@ -34,11 +34,32 @@ pub const ALL_BILLING_INGRESSES: &[BillingIngress] = &[
     BillingIngress::SshWebTerminal,
 ];
 
-#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum BillingRoutePolicy {
     Metered(BillingIngress),
     Exempt(&'static str),
+}
+
+pub(crate) fn enforce_billing_egress_classification(
+    policy: Option<BillingRoutePolicy>,
+    expected: BillingIngress,
+) -> crate::errors::AppResult<()> {
+    match policy {
+        Some(BillingRoutePolicy::Metered(actual)) if actual == expected => Ok(()),
+        Some(BillingRoutePolicy::Metered(actual)) => {
+            Err(crate::errors::AppError::Internal(format!(
+                "billing route classification mismatch: expected {}, found {}",
+                expected.as_str(),
+                actual.as_str()
+            )))
+        }
+        Some(BillingRoutePolicy::Exempt(_)) => Err(crate::errors::AppError::Internal(
+            "billing-exempt route attempted downstream forwarding".to_string(),
+        )),
+        None => Err(crate::errors::AppError::Internal(
+            "downstream forwarding route is missing mandatory billing classification".to_string(),
+        )),
+    }
 }
 
 #[cfg(test)]

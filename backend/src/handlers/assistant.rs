@@ -57,7 +57,13 @@ fn synthetic_request(
     if let Some(value) = authorization {
         builder = builder.header(header::AUTHORIZATION, value.clone());
     }
-    builder.body(Body::empty())
+    let mut request = builder.body(Body::empty())?;
+    request.extensions_mut().insert(
+        crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+            crate::services::billing::BillingIngress::Proxy,
+        ),
+    );
+    Ok(request)
 }
 
 /// Whether this call needs the TD-3 forward-token bridge: cookie sessions
@@ -429,6 +435,16 @@ mod tests {
         assert_eq!(
             request.headers().get(header::AUTHORIZATION),
             Some(&HeaderValue::from_static("Bearer nyx_test_token"))
+        );
+        assert_eq!(
+            request
+                .extensions()
+                .get::<crate::services::billing::route_inventory::BillingRoutePolicy>(),
+            Some(
+                &crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Proxy
+                )
+            )
         );
     }
 

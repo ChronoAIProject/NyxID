@@ -17,7 +17,7 @@ use crate::mw::auth::{
 
 macro_rules! register_billing_routes {
     ($router:expr; $(($path:literal, $public_path:literal, $handler:literal, $method_router:expr, $policy:expr)),+ $(,)?) => {
-        $router$(.route($path, $method_router))+
+        $router$(.route($path, $method_router.layer(axum::Extension($policy))))+
     };
 }
 
@@ -1317,7 +1317,12 @@ pub fn build_router(
         .route(
             "/workflow-chat/ws",
             get(handlers::assistant::workflow_chat_ws),
-        );
+        )
+        .route_layer(axum::Extension(
+            crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                crate::services::billing::BillingIngress::Proxy,
+            ),
+        ));
 
     let ssh_billing_routes = ssh_billing_routes!(register_billing_routes, Router::new());
 

@@ -241,6 +241,7 @@ impl LagoApi for FakeLago {
 async fn billing_route_coverage_smoke() {
     assert_route_inventory_matches_router();
     assert_coverage_cases_are_exhaustive();
+    assert_proxy_egress_classification_is_fail_closed();
     let mut exercised_routes = BTreeSet::new();
 
     let Some(db) = connect_test_database("billing_route_coverage").await else {
@@ -1734,6 +1735,33 @@ fn assert_route_inventory_matches_router() {
         "mounted routes and the Metered/Exempt billing inventory must stay identical"
     );
     assert_eq!(mounted.len(), mounted_specs.len());
+}
+
+fn assert_proxy_egress_classification_is_fail_closed() {
+    let request_with_policy = |policy| {
+        let mut request = Request::new(Body::empty());
+        if let Some(policy) = policy {
+            request.extensions_mut().insert(policy);
+        }
+        request
+    };
+
+    let classified = request_with_policy(Some(BillingRoutePolicy::Metered(BillingIngress::Proxy)));
+    assert!(crate::handlers::proxy::enforce_proxy_billing_classification(&classified).is_ok());
+    for policy in [
+        None,
+        Some(BillingRoutePolicy::Exempt("test exemption")),
+        Some(BillingRoutePolicy::Metered(BillingIngress::LlmGateway)),
+    ] {
+        let request = request_with_policy(policy);
+        assert!(
+            matches!(
+                crate::handlers::proxy::enforce_proxy_billing_classification(&request),
+                Err(AppError::Internal(_))
+            ),
+            "unclassified, exempt, or mismatched routes must fail before proxy egress"
+        );
+    }
 }
 
 fn assert_mounted_routes_are_exercised(exercised_routes: &BTreeSet<&str>) {
