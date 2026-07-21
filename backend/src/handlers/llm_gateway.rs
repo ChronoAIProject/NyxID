@@ -65,6 +65,19 @@ pub(crate) fn llm_platform_usage(
     )
 }
 
+pub(crate) fn enforce_llm_billing_classification(
+    request: &Request<Body>,
+    expected: crate::services::billing::BillingIngress,
+) -> AppResult<crate::services::billing::route_inventory::BillingEgressPermit> {
+    crate::services::billing::route_inventory::enforce_billing_egress_classification(
+        request
+            .extensions()
+            .get::<crate::services::billing::route_inventory::BillingRoutePolicy>()
+            .copied(),
+        expected,
+    )
+}
+
 fn supports_stream_options_include_usage(provider_slug: &str) -> bool {
     matches!(provider_slug, "openai" | "deepseek")
 }
@@ -210,6 +223,10 @@ pub async fn llm_proxy_request(
     request: Request<Body>,
 ) -> AppResult<Response> {
     auth_user.ensure_llm_proxy_access()?;
+    let billing_egress_permit = enforce_llm_billing_classification(
+        &request,
+        crate::services::billing::BillingIngress::LlmProvider,
+    )?;
 
     // Per-agent rate limit check
     crate::mw::rate_limit::check_agent_rate_limit(&state.per_agent_limiter, &auth_user)?;
@@ -440,6 +457,7 @@ pub async fn llm_proxy_request(
             query.as_deref(),
             Some(usage_context),
             Some(usage_complete),
+            billing_egress_permit,
         )
         .await?
     } else {
@@ -471,6 +489,7 @@ pub async fn llm_proxy_request(
             None,
             &state.token_exchange_cache,
             &state.cloud_response_cache,
+            billing_egress_permit,
         )
         .await?;
 
@@ -525,6 +544,10 @@ pub async fn gateway_request(
     request: Request<Body>,
 ) -> AppResult<Response> {
     auth_user.ensure_llm_proxy_access()?;
+    let billing_egress_permit = enforce_llm_billing_classification(
+        &request,
+        crate::services::billing::BillingIngress::LlmGateway,
+    )?;
 
     // Per-agent rate limit check
     crate::mw::rate_limit::check_agent_rate_limit(&state.per_agent_limiter, &auth_user)?;
@@ -897,6 +920,7 @@ pub async fn gateway_request(
             query.as_deref(),
             Some(usage_context),
             Some(usage_complete),
+            billing_egress_permit,
         )
         .await?
     } else {
@@ -914,6 +938,7 @@ pub async fn gateway_request(
             None,
             &state.token_exchange_cache,
             &state.cloud_response_cache,
+            billing_egress_permit,
         )
         .await?;
 

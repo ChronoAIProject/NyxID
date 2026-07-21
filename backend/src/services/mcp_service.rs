@@ -2458,6 +2458,7 @@ pub async fn execute_tool(
     token_exchange_cache: &crate::services::provider_token_exchange_service::TokenExchangeCache,
     cloud_response_cache: &crate::services::cloud_response_cache::CloudResponseCache,
     exec_ctx: &McpExecContext<'_>,
+    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> AppResult<(u16, String)> {
     use crate::models::service_account::{COLLECTION_NAME as SERVICE_ACCOUNTS, ServiceAccount};
     use crate::models::user::{COLLECTION_NAME as USERS, User};
@@ -2961,6 +2962,7 @@ pub async fn execute_tool(
         None,
         token_exchange_cache,
         cloud_response_cache,
+        billing_egress_permit,
     )
     .await?;
 

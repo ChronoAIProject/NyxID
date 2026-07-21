@@ -940,7 +940,9 @@ pub(crate) async fn execute_proxy(
     .await
 }
 
-pub(crate) fn enforce_proxy_billing_classification(request: &Request<Body>) -> AppResult<()> {
+pub(crate) fn enforce_proxy_billing_classification(
+    request: &Request<Body>,
+) -> AppResult<crate::services::billing::route_inventory::BillingEgressPermit> {
     crate::services::billing::route_inventory::enforce_billing_egress_classification(
         request
             .extensions()
@@ -1233,7 +1235,7 @@ async fn execute_proxy_inner(
     pre_resolved: Option<PreResolved>,
     resolved_slug: &mut String,
 ) -> AppResult<Response> {
-    enforce_proxy_billing_classification(&request)?;
+    let billing_egress_permit = enforce_proxy_billing_classification(&request)?;
 
     let user_id_str = auth_user.user_id.to_string();
 
@@ -2449,6 +2451,7 @@ async fn execute_proxy_inner(
                 api_key_name: auth_user.api_key_name.clone(),
             }),
             Some(usage_complete),
+            billing_egress_permit,
         )
         .await?;
 
@@ -2493,6 +2496,7 @@ async fn execute_proxy_inner(
         caller_token.as_deref(),
         &state.token_exchange_cache,
         &state.cloud_response_cache,
+        billing_egress_permit,
     )
     .await?;
 

@@ -40,12 +40,19 @@ pub enum BillingRoutePolicy {
     Exempt(&'static str),
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct BillingEgressPermit {
+    _private: (),
+}
+
 pub(crate) fn enforce_billing_egress_classification(
     policy: Option<BillingRoutePolicy>,
     expected: BillingIngress,
-) -> crate::errors::AppResult<()> {
+) -> crate::errors::AppResult<BillingEgressPermit> {
     match policy {
-        Some(BillingRoutePolicy::Metered(actual)) if actual == expected => Ok(()),
+        Some(BillingRoutePolicy::Metered(actual)) if actual == expected => {
+            Ok(BillingEgressPermit { _private: () })
+        }
         Some(BillingRoutePolicy::Metered(actual)) => {
             Err(crate::errors::AppError::Internal(format!(
                 "billing route classification mismatch: expected {}, found {}",
@@ -56,6 +63,23 @@ pub(crate) fn enforce_billing_egress_classification(
         Some(BillingRoutePolicy::Exempt(_)) => Err(crate::errors::AppError::Internal(
             "billing-exempt route attempted downstream forwarding".to_string(),
         )),
+        None => Err(crate::errors::AppError::Internal(
+            "downstream forwarding route is missing mandatory billing classification".to_string(),
+        )),
+    }
+}
+
+pub(crate) fn enforce_billing_exempt_egress_classification(
+    policy: Option<BillingRoutePolicy>,
+) -> crate::errors::AppResult<BillingEgressPermit> {
+    match policy {
+        Some(BillingRoutePolicy::Exempt(_)) => Ok(BillingEgressPermit { _private: () }),
+        Some(BillingRoutePolicy::Metered(actual)) => {
+            Err(crate::errors::AppError::Internal(format!(
+                "metered billing route {} attempted exempt downstream forwarding",
+                actual.as_str()
+            )))
+        }
         None => Err(crate::errors::AppError::Internal(
             "downstream forwarding route is missing mandatory billing classification".to_string(),
         )),

@@ -1,7 +1,7 @@
 use std::convert::Infallible;
 use std::time::Duration;
 
-use axum::extract::State;
+use axum::extract::{Extension, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -654,12 +654,27 @@ fn send_tools_list_changed(state: &AppState, session_id: &str) {
 // POST /mcp -- JSON-RPC request handler
 // ---------------------------------------------------------------------------
 
-pub async fn mcp_post(State(state): State<AppState>, headers: HeaderMap, body: String) -> Response {
+pub async fn mcp_post(
+    State(state): State<AppState>,
+    Extension(billing_route_policy): Extension<
+        crate::services::billing::route_inventory::BillingRoutePolicy,
+    >,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
     // Manual JSON parse for proper JSON-RPC error on malformed input
     let request: JsonRpcRequest = match serde_json::from_str(&body) {
         Ok(r) => r,
         Err(_) => return rpc_error(None, -32700, "Parse error"),
     };
+    let billing_egress_permit =
+        match crate::services::billing::route_inventory::enforce_billing_egress_classification(
+            Some(billing_route_policy),
+            crate::services::billing::BillingIngress::Mcp,
+        ) {
+            Ok(permit) => permit,
+            Err(error) => return app_error_to_rpc(request.id.clone(), &error),
+        };
 
     // `initialize` requires a valid JWT or API key (no session exists yet).
     // All other methods allow session-based auth fallback.
@@ -724,7 +739,15 @@ pub async fn mcp_post(State(state): State<AppState>, headers: HeaderMap, body: S
                 Err(r) => return r,
             };
             let sse_capable = accepts_sse(&headers);
-            handle_tools_call(&state, &auth, sid.as_deref(), &request, sse_capable).await
+            handle_tools_call(
+                &state,
+                &auth,
+                sid.as_deref(),
+                &request,
+                sse_capable,
+                billing_egress_permit,
+            )
+            .await
         }
 
         "ping" => rpc_success(request.id, serde_json::json!({})),
@@ -1110,6 +1133,7 @@ async fn handle_tools_call(
     session_id: Option<&str>,
     request: &JsonRpcRequest,
     client_accepts_sse: bool,
+    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> Response {
     let params = match &request.params {
         Some(p) => p,
@@ -1162,6 +1186,7 @@ async fn handle_tools_call(
                 &arguments,
                 request.id.clone(),
                 client_accepts_sse,
+                billing_egress_permit,
             )
             .await;
         }
@@ -1296,6 +1321,7 @@ async fn handle_tools_call(
         &state.token_exchange_cache,
         &state.cloud_response_cache,
         &exec_ctx,
+        billing_egress_permit,
     )
     .await
     {
@@ -1521,6 +1547,7 @@ async fn handle_meta_call_tool(
     arguments: &serde_json::Value,
     request_id: Option<serde_json::Value>,
     client_accepts_sse: bool,
+    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> Response {
     let tool_name = match arguments.get("tool_name").and_then(|n| n.as_str()) {
         Some(n) if !n.is_empty() => n,
@@ -1650,6 +1677,7 @@ async fn handle_meta_call_tool(
         &state.token_exchange_cache,
         &state.cloud_response_cache,
         &exec_ctx,
+        billing_egress_permit,
     )
     .await
     {
