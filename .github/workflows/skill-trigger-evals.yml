@@ -96,8 +96,11 @@ jobs:
         with:
           node-version: 22
 
-      - name: Install pinned OpenClaw host
-        run: npm install --global --ignore-scripts openclaw@2026.3.28
+      - name: Install locked OpenClaw host
+        working-directory: skills/nyxid/evals
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          echo "$PWD/node_modules/.bin" >> "$GITHUB_PATH"
 
       - name: Pull isolated tool sandbox
         run: docker pull node:22-bookworm-slim
