@@ -109,6 +109,7 @@ impl McpBillingRouteContextBuilder {
         };
 
         Ok(crate::services::billing::BillingRouteContext::new(
+            crate::services::billing::BillingIngress::Mcp,
             uuid::Uuid::new_v4().to_string(),
             billing_owner.owner_id,
             actor_user_id.to_string(),

@@ -55,7 +55,7 @@ fn resale_usage_from_optional_reported(
     }
 }
 
-fn llm_platform_usage(
+pub(crate) fn llm_platform_usage(
     usage: Option<&llm_usage_service::ReportedLlmUsage>,
     fallback_bytes: i64,
 ) -> PlatformUsage {
@@ -332,6 +332,7 @@ pub async fn llm_proxy_request(
         .resolve_for_resource(&billing_resolution_user_id, billing_resource_owner_id)
         .await?;
     let billing_ctx = crate::services::billing::BillingRouteContext::new(
+        crate::services::billing::BillingIngress::LlmProvider,
         uuid::Uuid::new_v4().to_string(),
         billing_owner.owner_id,
         user_id_str.clone(),
@@ -737,6 +738,7 @@ pub async fn gateway_request(
         .resolve_for_resource(&billing_resolution_user_id, billing_resource_owner_id)
         .await?;
     let billing_ctx = crate::services::billing::BillingRouteContext::new(
+        crate::services::billing::BillingIngress::LlmGateway,
         uuid::Uuid::new_v4().to_string(),
         billing_owner.owner_id,
         user_id_str.clone(),

@@ -295,6 +295,7 @@ async fn handle_node_web_terminal(
         crate::services::billing::NodeIntent::NodeWithFallback
     };
     let billing_ctx = crate::services::billing::BillingRouteContext::new(
+        crate::services::billing::BillingIngress::SshWebTerminal,
         uuid::Uuid::new_v4().to_string(),
         billing_owner.owner_id,
         user_id.clone(),

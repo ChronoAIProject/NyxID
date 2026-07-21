@@ -188,6 +188,7 @@ pub async fn ssh_exec(
         crate::services::billing::NodeIntent::NodeWithFallback
     };
     let billing_ctx = crate::services::billing::BillingRouteContext::new(
+        crate::services::billing::BillingIngress::SshExec,
         uuid::Uuid::new_v4().to_string(),
         billing_owner.owner_id,
         user_id.clone(),

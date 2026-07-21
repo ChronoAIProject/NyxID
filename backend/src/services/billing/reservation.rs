@@ -68,6 +68,7 @@ pub async fn gate_and_reserve(
     lago: Option<&dyn LagoApi>,
     ctx: &BillingRouteContext,
     billing_fail_closed: bool,
+    rate_cache_ttl_secs: u64,
 ) -> AppResult<Option<BillingReservation>> {
     if !ctx.has_billable_layers() {
         return Ok(None);
@@ -123,18 +124,7 @@ pub async fn gate_and_reserve(
         ));
     }
 
-    let layers = match estimate_layer_reservations(db, ctx).await {
-        Ok(layers) => layers,
-        Err(AppError::BillingNotConfigured(message)) => {
-            tracing::warn!(
-                owner_id = %ctx.billing_owner_id,
-                error = %message,
-                "Billing reservation is not fully configured; continuing without reservation"
-            );
-            return Ok(None);
-        }
-        Err(error) => return Err(error),
-    };
+    let layers = estimate_layer_reservations(db, ctx, rate_cache_ttl_secs).await?;
     let total_reserved_credits = layers
         .iter()
         .map(|reservation| reservation.reserved_credits)
@@ -1050,6 +1040,7 @@ async fn mark_exhausted_settlement_dead_letter(
 async fn estimate_layer_reservations(
     db: &mongodb::Database,
     ctx: &BillingRouteContext,
+    rate_cache_ttl_secs: u64,
 ) -> AppResult<Vec<LayerReservation>> {
     let mut reservations = Vec::new();
 
@@ -1057,18 +1048,54 @@ async fn estimate_layer_reservations(
         let metric_code = platform_metric_code(ctx.platform_metric);
         reservations.push(LayerReservation {
             layer: BillingLayer::Platform,
-            reserved_credits: estimate_credits(db, metric_code, None, 1).await?,
+            reserved_credits: estimate_fresh_credits(db, metric_code, None, 1, rate_cache_ttl_secs)
+                .await?,
         });
     }
 
     if let Some(resale) = &ctx.resale {
         reservations.push(LayerReservation {
             layer: BillingLayer::Resale,
-            reserved_credits: estimate_credits(db, &resale.lago_metric_code, None, 1).await?,
+            reserved_credits: estimate_fresh_credits(
+                db,
+                &resale.lago_metric_code,
+                None,
+                1,
+                rate_cache_ttl_secs,
+            )
+            .await?,
         });
     }
 
     Ok(reservations)
+}
+
+async fn estimate_fresh_credits(
+    db: &mongodb::Database,
+    lago_metric_code: &str,
+    model: Option<&str>,
+    quantity: i64,
+    rate_cache_ttl_secs: u64,
+) -> AppResult<i64> {
+    if quantity <= 0 {
+        return Ok(0);
+    }
+
+    let rate = find_rate(db, lago_metric_code, model)
+        .await?
+        .ok_or_else(|| {
+            AppError::BillingNotConfigured(format!(
+                "billing rate cache is missing for metric {lago_metric_code}"
+            ))
+        })?;
+    let max_age_secs = i64::try_from(rate_cache_ttl_secs).unwrap_or(i64::MAX);
+    if rate.synced_at < Utc::now() - Duration::seconds(max_age_secs) {
+        return Err(AppError::BillingNotConfigured(format!(
+            "billing rate cache is stale for metric {lago_metric_code}"
+        )));
+    }
+
+    Ok(credits_from_micros(rate.credits_per_unit_micros, quantity))
 }
 
 async fn estimate_credits(
@@ -1219,6 +1246,7 @@ mod tests {
         Entitlement, LagoAck, LagoError, LagoEvent, LagoUsage, OwnerProvisionInput,
     };
     use crate::services::billing::route_context::{BillingRouteContext, NodeIntent};
+    use crate::services::billing::route_inventory::BillingIngress;
     use crate::test_utils::connect_test_database;
 
     use super::{LagoApi, gate_and_reserve, try_reserve_prepaid};
@@ -1324,6 +1352,7 @@ mod tests {
 
     fn route_context(owner_id: &str) -> BillingRouteContext {
         BillingRouteContext::new(
+            BillingIngress::Proxy,
             Uuid::new_v4().to_string(),
             owner_id.to_string(),
             "actor-1".to_string(),
@@ -1397,7 +1426,7 @@ mod tests {
             entitlements: Vec::new(),
         };
 
-        let err = gate_and_reserve(&db, Some(&lago), &route_context(owner_id), false)
+        let err = gate_and_reserve(&db, Some(&lago), &route_context(owner_id), false, 900)
             .await
             .expect_err("missing entitlement must deny");
 
@@ -1413,7 +1442,7 @@ mod tests {
             return;
         };
         let owner_id = "owner-missing-wallet";
-        let reservation = gate_and_reserve(&db, None, &route_context(owner_id), false)
+        let reservation = gate_and_reserve(&db, None, &route_context(owner_id), false, 900)
             .await
             .expect("missing wallet should not deny proxy traffic");
 
@@ -1438,7 +1467,7 @@ mod tests {
             }],
         };
 
-        let reservation = gate_and_reserve(&db, Some(&lago), &route_context(owner_id), false)
+        let reservation = gate_and_reserve(&db, Some(&lago), &route_context(owner_id), false, 900)
             .await
             .expect("gate")
             .expect("reservation");

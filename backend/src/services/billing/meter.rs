@@ -498,6 +498,7 @@ mod tests {
     };
     use crate::services::billing::reservation::BillingReservation;
     use crate::services::billing::route_context::{BillingRouteContext, NodeIntent};
+    use crate::services::billing::route_inventory::BillingIngress;
     use crate::test_utils::connect_test_database;
 
     #[tokio::test]
@@ -521,6 +522,7 @@ mod tests {
             lago_resale_metric_code: Some("resale_tokens".to_string()),
         };
         let ctx = BillingRouteContext::new(
+            BillingIngress::Proxy,
             "billing-request-1".to_string(),
             "owner-1".to_string(),
             "actor-1".to_string(),
@@ -588,6 +590,7 @@ mod tests {
         create_usage_transaction_index(&db).await;
 
         let ctx = BillingRouteContext::new(
+            BillingIngress::LlmProvider,
             "billing-token-request-1".to_string(),
             "owner-1".to_string(),
             "actor-1".to_string(),
@@ -778,6 +781,7 @@ mod tests {
             lago_resale_metric_code: Some("resale_tokens".to_string()),
         };
         let ctx = BillingRouteContext::new(
+            BillingIngress::Proxy,
             "billing-multi-layer-intent".to_string(),
             "owner-multi-layer-intent".to_string(),
             "actor-1".to_string(),
@@ -1300,6 +1304,7 @@ mod tests {
 
     fn platform_context(request_id: &str, owner_id: &str) -> BillingRouteContext {
         BillingRouteContext::new(
+            BillingIngress::Proxy,
             request_id.to_string(),
             owner_id.to_string(),
             "actor-1".to_string(),

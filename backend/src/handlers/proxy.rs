@@ -1498,6 +1498,7 @@ async fn execute_proxy_inner(
         None => crate::services::billing::NodeIntent::Direct,
     };
     let billing_ctx = crate::services::billing::BillingRouteContext::new(
+        crate::services::billing::BillingIngress::Proxy,
         billing_request_id,
         billing_owner.owner_id,
         user_id_str.clone(),
@@ -2940,7 +2941,7 @@ fn resale_usage_from_optional_reported(
     }
 }
 
-fn llm_platform_usage(
+pub(crate) fn llm_platform_usage(
     usage: Option<&llm_usage_service::ReportedLlmUsage>,
     fallback_bytes: i64,
 ) -> PlatformUsage {
@@ -4743,6 +4744,7 @@ mod tests {
 
         MeteredProxyContext {
             route: Some(BillingRouteContext::new(
+                crate::services::billing::BillingIngress::Proxy,
                 "request-1".to_string(),
                 "owner-1".to_string(),
                 "actor-1".to_string(),

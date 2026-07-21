@@ -285,6 +285,7 @@ async fn handle_ssh_socket(
         None => crate::services::billing::NodeIntent::Direct,
     };
     let billing_ctx = crate::services::billing::BillingRouteContext::new(
+        crate::services::billing::BillingIngress::SshTunnel,
         uuid::Uuid::new_v4().to_string(),
         billing_owner.owner_id,
         user_id.clone(),
