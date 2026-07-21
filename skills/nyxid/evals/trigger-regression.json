@@ -1,0 +1,105 @@
+{
+  "schema_version": 1,
+  "skill": "nyxid",
+  "cases": [
+    {
+      "id": "explicit-nyxid-management",
+      "prompt": "Show me which services are configured in NyxID.",
+      "context": {},
+      "expected_selected_skills": ["nyxid"]
+    },
+    {
+      "id": "credential-storage",
+      "prompt": "Store this API credential in the credential broker so agents do not handle the raw key.",
+      "context": {},
+      "expected_selected_skills": ["nyxid"]
+    },
+    {
+      "id": "credential-proxy",
+      "prompt": "Proxy requests to our internal API using the managed credential already stored in NyxID.",
+      "context": {
+        "nyxid_managed_credential_available": true
+      },
+      "expected_selected_skills": ["nyxid"]
+    },
+    {
+      "id": "credential-backed-service-connection",
+      "prompt": "Connect my Anthropic API key as a credential-backed service and keep the key out of the agent process.",
+      "context": {},
+      "expected_selected_skills": ["nyxid"]
+    },
+    {
+      "id": "protected-nyxid-managed-service",
+      "prompt": "Call protected service X using my NyxID-managed credential.",
+      "context": {
+        "protected_downstream": true,
+        "nyxid_managed_credential_available": true,
+        "authenticated_native_paths": []
+      },
+      "expected_selected_skills": ["nyxid"]
+    },
+    {
+      "id": "protected-service-without-native-path",
+      "prompt": "Fetch the private deployment status from service X.",
+      "context": {
+        "protected_downstream": true,
+        "nyxid_managed_credential_available": true,
+        "authenticated_native_paths": []
+      },
+      "expected_selected_skills": ["nyxid"]
+    },
+    {
+      "id": "nyxid-credential-node",
+      "prompt": "Set up a NyxID credential node for this private-network service.",
+      "context": {},
+      "expected_selected_skills": ["nyxid"]
+    },
+    {
+      "id": "nyxid-mcp-management",
+      "prompt": "Configure the NyxID MCP proxy for my connected services.",
+      "context": {},
+      "expected_selected_skills": ["nyxid"]
+    },
+    {
+      "id": "ordinary-external-service",
+      "prompt": "Read the public status page for this external service.",
+      "context": {
+        "protected_downstream": false,
+        "authentication_required": false
+      },
+      "expected_selected_skills": []
+    },
+    {
+      "id": "public-webhook",
+      "prompt": "Call this public webhook with the supplied JSON body.",
+      "context": {
+        "authentication_required": false
+      },
+      "expected_selected_skills": []
+    },
+    {
+      "id": "standard-git-operations",
+      "prompt": "Commit these changes, rebase the branch, and show me the resulting Git log.",
+      "context": {},
+      "expected_selected_skills": []
+    },
+    {
+      "id": "authenticated-gh-issue-creation",
+      "prompt": "Create an issue in repository X using GitHub account Y.",
+      "context": {
+        "authenticated_native_paths": ["local gh authenticated as account Y"],
+        "github_username_purpose": "account selection"
+      },
+      "expected_selected_skills": []
+    },
+    {
+      "id": "github-username-account-selection",
+      "prompt": "Using GitHub username Y, list my open pull requests with the local gh client.",
+      "context": {
+        "authenticated_native_paths": ["local gh authenticated as account Y"],
+        "github_username_purpose": "account selection"
+      },
+      "expected_selected_skills": []
+    }
+  ]
+}

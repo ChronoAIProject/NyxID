@@ -1,7 +1,7 @@
 ---
 name: nyxid
 version: "0.5"
-description: Brokers credentials for downstream services (OpenAI, Anthropic, GitHub, Lark, custom APIs, SSH, MCP) so the agent never sees raw API keys or OAuth tokens. Use whenever the user asks to call, proxy, or authenticate against a third-party API/service, mentions NyxID, asks to "connect", "add a service", "set up an API key", manage credentials/nodes/MCP, send messages through bot platforms, or wire up SSH access. Operate exclusively through the `nyxid` CLI.
+description: Brokers credentials for downstream services so the agent never sees raw API keys or OAuth tokens. Use when the user explicitly mentions NyxID; asks to broker, store, proxy, connect, or manage credentials or a credential-backed service; manages NyxID credential nodes, SSH, MCP, or other NyxID resources; or must call a protected downstream API using an available NyxID-managed credential because no suitable authenticated native path is available. Do not use merely because a service is external, for public or unauthenticated APIs or webhooks, for standard Git operations, or for ordinary GitHub work when local `gh` is authenticated. A GitHub username supplied only to select an account is not a trigger. Operate exclusively through the `nyxid` CLI.
 metadata:
   category: tool-based
   tool-list:
@@ -173,7 +173,21 @@ All requests are made through the `nyxid` CLI, which connects to the NyxID insta
 
 ## Model Invocation Note
 
-This skill may be invoked autonomously by the agent when a user request involves an external service. The agent discovers available services through NyxID and routes requests through the proxy without prompting for raw credentials. Users can disable this skill in their OpenClaw configuration to opt out.
+Invoke this skill autonomously only for explicit NyxID or credential-brokering intent, or when a protected downstream call must use an available NyxID-managed credential because no suitable authenticated native path is available. Check the available native path and its authentication state before selecting NyxID on the latter basis. Once selected, discover available services through NyxID and route credential-backed requests through the proxy without prompting for raw credentials.
+
+Positive examples:
+
+- "Store or proxy this API credential through NyxID."
+- "Call protected service X using my NyxID-managed credential."
+- "Set up a NyxID credential node for this private service."
+
+Negative examples:
+
+- "Call this public webhook." Externality alone is not credential-brokering intent.
+- "Commit these changes and rebase the branch." Standard Git operations do not require NyxID.
+- "Create an issue in repository X using GitHub account Y." When local `gh` is already authenticated, use it directly; the username selects an account and does not trigger NyxID.
+
+Users can disable this skill in their OpenClaw configuration to opt out.
 
 ## Trust Statement
 

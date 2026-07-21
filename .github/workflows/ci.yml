@@ -62,6 +62,7 @@ jobs:
       frontend: ${{ steps.filter.outputs.frontend }}
       sdk: ${{ steps.filter.outputs.sdk }}
       wizard: ${{ steps.filter.outputs.wizard }}
+      skills: ${{ steps.filter.outputs.skills }}
       ci: ${{ steps.filter.outputs.ci }}
     steps:
       - uses: actions/checkout@v6
@@ -117,6 +118,11 @@ jobs:
             sdk:
               - 'sdk/**'
               - '.node-version'
+            # Skill descriptions are the model-side routing contract. Changes
+            # here must run the trigger-regression evaluator even when no
+            # application package changed.
+            skills:
+              - 'skills/**'
             # Inputs hashed by `cli/tests/wizard_bundle_freshness.rs`:
             #   - every file listed in `cli/src/wizard/bundle-meta/index.manifest`
             #     (always under `frontend/`).
@@ -361,6 +367,30 @@ jobs:
           cache-dependency-path: sdk/package-lock.json
       - run: npm ci
       - run: npm run build
+
+  # ---------------------------------------------------------------------------
+  # Skill routing: exercise the canonical trigger description through an
+  # actual model selector. The expected decisions remain outside the model
+  # prompt and cover both credential-brokering activations and native/public
+  # paths that must not select NyxID.
+  # ---------------------------------------------------------------------------
+  skill-trigger-evals:
+    name: Skill Trigger Evaluations
+    needs: changes
+    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.skills == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      models: read
+    steps:
+      - uses: actions/checkout@v6
+      - name: Run NyxID model trigger evaluations
+        env:
+          NYXID_SKILL_EVAL_API_KEY: ${{ github.token }}
+          NYXID_SKILL_EVAL_BASE_URL: https://models.github.ai/inference
+          NYXID_SKILL_EVAL_MODEL: openai/gpt-4.1-mini
+        run: ruby skills/nyxid/evals/run_trigger_evals.rb
 
   # ===========================================================================
   # Code coverage gates (issue #785).
@@ -714,6 +744,7 @@ jobs:
       - frontend
       - wizard-bundle-freshness
       - sdk
+      - skill-trigger-evals
       - coverage-backend
       - coverage-cli
       - coverage-frontend
@@ -735,6 +766,7 @@ jobs:
             frontend=${{ needs.frontend.result }}
             wizard-bundle-freshness=${{ needs.wizard-bundle-freshness.result }}
             sdk=${{ needs.sdk.result }}
+            skill-trigger-evals=${{ needs.skill-trigger-evals.result }}
             coverage-backend=${{ needs.coverage-backend.result }}
             coverage-cli=${{ needs.coverage-cli.result }}
             coverage-frontend=${{ needs.coverage-frontend.result }}
