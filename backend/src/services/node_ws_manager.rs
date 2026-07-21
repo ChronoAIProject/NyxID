@@ -61,11 +61,6 @@ pub enum StreamChunk {
     End,
     /// Stream error
     Error(String),
-    /// Node reports that it injected a WS auth frame locally.
-    Injected {
-        trigger_kind: String,
-        frame_index: usize,
-    },
 }
 
 /// Result of sending a proxy request: either a complete response or a streaming channel.

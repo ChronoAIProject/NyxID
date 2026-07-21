@@ -60,6 +60,7 @@ fn server_error_msg(message: &str) -> String {
 
 const DEFAULT_WEB_TERMINAL_IDLE_TIMEOUT_SECS: u64 = 1800;
 
+#[allow(clippy::too_many_arguments)]
 pub async fn ssh_web_terminal(
     State(state): State<AppState>,
     Extension(billing_route_policy): Extension<

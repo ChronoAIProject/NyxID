@@ -2170,15 +2170,9 @@ async fn execute_proxy_inner(
                             // Same anti-buffering opt-out as the direct path:
                             let service_id_owned = service_id.to_string();
                             let node_id_owned = node_id.to_string();
-                            let stream_db = state.db.clone();
                             let stream_billing = state.billing.clone();
                             let stream_metered = metered.clone();
                             let request_len = request_body_len;
-                            let stream_user_id = user_id_str.clone();
-                            let stream_api_key_id = auth_user.api_key_id.clone();
-                            let stream_api_key_name = auth_user.api_key_name.clone();
-                            let stream_ip = auth_user.ip_address.clone();
-                            let stream_ua = auth_user.user_agent.clone();
 
                             // Convert the mpsc receiver into a streaming body.
                             let stream = async_stream::stream! {
@@ -2204,24 +2198,6 @@ async fn execute_proxy_inner(
                                         }
                                         Ok(Some(StreamChunk::Start { .. })) => {
                                             // Duplicate start, ignore
-                                        }
-                                        Ok(Some(StreamChunk::Injected { trigger_kind, frame_index })) => {
-                                            audit_service::log_async(
-                                                stream_db.clone(),
-                                                Some(stream_user_id.clone()),
-                                                "ws_frame_auth_injected".to_string(),
-                                                Some(serde_json::json!({
-                                                    "service_id": service_id_owned,
-                                                    "trigger_kind": trigger_kind,
-                                                    "frame_index_in": frame_index,
-                                                    "routed_via": "node",
-                                                    "node_id": node_id_owned,
-                                                })),
-                                                stream_ip.clone(),
-                                                stream_ua.clone(),
-                                                stream_api_key_id.clone(),
-                                                stream_api_key_name.clone(),
-                                            );
                                         }
                                         Ok(None) => break,
                                         Err(_) => {

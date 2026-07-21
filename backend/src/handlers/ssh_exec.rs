@@ -91,6 +91,7 @@ pub struct SshExecResponse {
     ),
     tag = "SSH"
 )]
+#[allow(clippy::too_many_arguments)]
 pub async fn ssh_exec(
     State(state): State<AppState>,
     Extension(billing_route_policy): Extension<
