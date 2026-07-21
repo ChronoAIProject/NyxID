@@ -658,6 +658,7 @@ fn normalized_set(values: &[String], field_name: &str) -> AppResult<Vec<String>>
 /// Recompute and enforce a scope-plan snapshot before an API-key mutation.
 /// The submitted grants must be the exact sets from the plan; otherwise the
 /// mutation fails closed with a typed stale-plan conflict.
+#[allow(clippy::too_many_arguments)]
 pub async fn verify_scope_plan_precondition(
     db: &mongodb::Database,
     actor_user_id: &str,
