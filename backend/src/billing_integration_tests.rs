@@ -17,7 +17,7 @@ use mongodb::IndexModel;
 use mongodb::bson::{self, doc};
 use mongodb::options::IndexOptions;
 use sha2::Sha256;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -709,13 +709,9 @@ async fn billing_service_lifecycle_regression() {
 
         let (usage, expected_quantity) = usage_for(case);
         service
-            .settle(&metered, usage.clone(), None, None)
-            .await
-            .expect("settle route");
-        service
             .settle(&metered, usage, None, None)
             .await
-            .expect("idempotent settle replay");
+            .expect("settle route");
 
         let settled = usage_row(&db, &request_id).await;
         assert_eq!(settled.status, UsageStatus::Finalized);
@@ -729,7 +725,7 @@ async fn billing_service_lifecycle_regression() {
                 .await
                 .expect("count route rows"),
             1,
-            "settle replay must not create another charge for {}",
+            "settlement must create one charge for {}",
             case.scenario
         );
 
@@ -904,43 +900,68 @@ async fn card_backed_wallet_cannot_reserve_past_the_overdraft_cap() {
 }
 
 #[tokio::test]
-async fn settle_failure_is_replayed_once_by_reconcile() {
+async fn mounted_route_settlement_failure_is_replayed_once_by_reconcile() {
     let Some(db) = connect_test_database("billing_route_settle_recovery").await else {
         return;
     };
     create_usage_index(&db).await;
     insert_fresh_rates(&db).await;
-    let service = billing_service(&db, Arc::new(FakeLago::default()), 0);
     let owner_id = insert_owner(&db).await;
-    let request_id = Uuid::new_v4().to_string();
-    let case = CoverageCase {
-        ingress: BillingIngress::Mcp,
-        scenario: "settle-recovery",
-        node_intent: NodeIntent::Direct,
-        metric: BillingMetric::Requests,
-    };
-    let metered = service
-        .open(&route_context(&case, &request_id, &owner_id))
+    let (downstream_url, forwarded_request, release_response, downstream) =
+        start_controlled_billing_downstream().await;
+    let service = insert_route_service(
+        &db,
+        &owner_id,
+        "billing-recovery-route",
+        &downstream_url,
+        None,
+        None,
+    )
+    .await;
+    let state = billing_route_state(db.clone(), Arc::new(FakeLago::default()), 0);
+    let token = route_access_token(&state, &owner_id);
+    let (_, private) = crate::routes::build_router(
+        state.config.proxy_max_body_size,
+        state.config.public_proxy_max_body_size,
+    );
+    let app = private.with_state(state.clone());
+
+    let route = tokio::spawn(async move {
+        app.oneshot(route_request(
+            Method::GET,
+            "/api/v1/proxy/s/billing-recovery-route/blocked",
+            &token,
+            Body::empty(),
+        ))
         .await
-        .expect("open MCP meter");
-    service
-        .mark_forwarded(&metered)
+        .expect("call mounted recovery route")
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), forwarded_request)
         .await
-        .expect("mark MCP forwarded");
+        .expect("mounted route reached controlled downstream")
+        .expect("controlled downstream reported request");
+
+    let forwarded = usage_row_for_service(&db, &service.slug).await;
+    assert_eq!(forwarded.status, UsageStatus::Forwarded);
+    assert!(forwarded.forwarded);
+    assert!(!forwarded.released);
+    assert_eq!(forwarded.quantity, None);
+
     let held_wallet = wallet(&db, &owner_id).await;
     db.collection::<BillingWallet>(BILLING_WALLET)
         .delete_one(doc! { "_id": &held_wallet.id })
         .await
         .expect("remove wallet to force settlement failure");
 
-    assert!(
-        service
-            .settle(&metered, PlatformUsage::single_request(9), None, None)
-            .await
-            .is_err()
-    );
-    let failed = usage_row(&db, &request_id).await;
+    release_response
+        .send(())
+        .expect("release controlled downstream response");
+    let response = route.await.expect("mounted recovery route task");
+    assert!(response.status().is_server_error());
+
+    let failed = usage_row_for_service(&db, &service.slug).await;
     assert_eq!(failed.status, UsageStatus::Failed);
+    assert!(failed.forwarded);
     assert!(!failed.released);
     assert_eq!(failed.quantity, Some(1));
 
@@ -958,23 +979,35 @@ async fn settle_failure_is_replayed_once_by_reconcile() {
         .await
         .expect("make settlement retry due");
 
-    let stats = service
+    let stats = state
+        .billing
         .reconciler()
         .run_once()
         .await
         .expect("reconcile failed settlement");
     assert_eq!(stats.recovered_settlements, 1);
-    let recovered = usage_row(&db, &request_id).await;
+    let recovered = usage_row_for_service(&db, &service.slug).await;
     assert_eq!(recovered.status, UsageStatus::Finalized);
     assert!(recovered.released);
 
-    service
-        .settle(&metered, PlatformUsage::single_request(9), None, None)
+    let replay = state
+        .billing
+        .reconciler()
+        .run_once()
         .await
-        .expect("replay completed settle");
+        .expect("replay completed reconcile sweep");
+    assert_eq!(replay.recovered_settlements, 0);
+    assert_eq!(
+        db.collection::<UsageMeterRow>(USAGE_METER)
+            .count_documents(doc! { "billing_request_id": &recovered.billing_request_id })
+            .await
+            .expect("count recovered route rows"),
+        1
+    );
     let saved_wallet = wallet(&db, &owner_id).await;
     assert_eq!(saved_wallet.reserved_credits, 0);
     assert_eq!(saved_wallet.pending_lago_debits, 1);
+    downstream.abort();
 }
 
 #[tokio::test]
@@ -1039,6 +1072,53 @@ async fn start_billing_downstream() -> (String, tokio::task::JoinHandle<()>) {
             .expect("serve billing downstream");
     });
     (format!("http://{address}"), server)
+}
+
+async fn start_controlled_billing_downstream() -> (
+    String,
+    oneshot::Receiver<()>,
+    oneshot::Sender<()>,
+    tokio::task::JoinHandle<()>,
+) {
+    let (forwarded_tx, forwarded_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let forwarded_tx = Arc::new(tokio::sync::Mutex::new(Some(forwarded_tx)));
+    let release_rx = Arc::new(tokio::sync::Mutex::new(Some(release_rx)));
+    let app = Router::new().fallback(any({
+        let forwarded_tx = forwarded_tx.clone();
+        let release_rx = release_rx.clone();
+        move || {
+            let forwarded_tx = forwarded_tx.clone();
+            let release_rx = release_rx.clone();
+            async move {
+                if let Some(forwarded_tx) = forwarded_tx.lock().await.take() {
+                    let _ = forwarded_tx.send(());
+                }
+                if let Some(release_rx) = release_rx.lock().await.take() {
+                    let _ = release_rx.await;
+                }
+                Json(serde_json::json!({"ok": true}))
+            }
+        }
+    }));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind controlled billing downstream");
+    let address = listener
+        .local_addr()
+        .expect("controlled billing downstream address");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("serve controlled billing downstream");
+    });
+    (
+        format!("http://{address}"),
+        forwarded_rx,
+        release_tx,
+        server,
+    )
 }
 
 async fn start_billing_ws_downstream() -> (String, tokio::task::JoinHandle<()>) {
@@ -1125,9 +1205,10 @@ async fn exercise_mounted_websocket(address: &str, path: &str, token: &str) {
         .await
         .expect("send mounted WebSocket frame");
     while let Some(message) = socket.next().await {
-        match message.expect("read mounted WebSocket frame") {
-            tokio_tungstenite::tungstenite::Message::Close(_) => break,
-            _ => {}
+        if let tokio_tungstenite::tungstenite::Message::Close(_) =
+            message.expect("read mounted WebSocket frame")
+        {
+            break;
         }
     }
 }
@@ -1646,23 +1727,11 @@ async fn assert_route_settled_count(
 
 fn assert_route_inventory_matches_router() {
     let mounted_specs = crate::routes::mounted_billing_route_inventory();
-    let mounted: BTreeSet<(&str, &str, BillingIngress)> = mounted_specs
-        .iter()
-        .filter_map(|entry| match entry.policy {
-            BillingRoutePolicy::Metered(ingress) => Some((entry.handler, entry.route, ingress)),
-            BillingRoutePolicy::Exempt(_) => None,
-        })
-        .collect();
-    let classified: BTreeSet<(&str, &str, BillingIngress)> = BILLING_ROUTE_INVENTORY
-        .iter()
-        .filter_map(|entry| match entry.policy {
-            BillingRoutePolicy::Metered(ingress) => Some((entry.handler, entry.route, ingress)),
-            BillingRoutePolicy::Exempt(_) => None,
-        })
-        .collect();
+    let mounted: BTreeSet<_> = mounted_specs.iter().copied().collect();
+    let classified: BTreeSet<_> = BILLING_ROUTE_INVENTORY.iter().copied().collect();
     assert_eq!(
         mounted, classified,
-        "mounted metered routes and the billing inventory must stay identical"
+        "mounted routes and the Metered/Exempt billing inventory must stay identical"
     );
     assert_eq!(mounted.len(), mounted_specs.len());
 }
@@ -1670,7 +1739,10 @@ fn assert_route_inventory_matches_router() {
 fn assert_mounted_routes_are_exercised(exercised_routes: &BTreeSet<&str>) {
     let mounted_routes: BTreeSet<&str> = crate::routes::mounted_billing_route_inventory()
         .iter()
-        .map(|entry| entry.route)
+        .filter_map(|entry| match entry.policy {
+            BillingRoutePolicy::Metered(_) => Some(entry.route),
+            BillingRoutePolicy::Exempt(_) => None,
+        })
         .collect();
     assert_eq!(
         exercised_routes, &mounted_routes,
@@ -1800,6 +1872,14 @@ async fn usage_row(db: &mongodb::Database, request_id: &str) -> UsageMeterRow {
         .await
         .expect("query usage row")
         .expect("usage row exists")
+}
+
+async fn usage_row_for_service(db: &mongodb::Database, service_slug: &str) -> UsageMeterRow {
+    db.collection::<UsageMeterRow>(USAGE_METER)
+        .find_one(doc! { "service_slug": service_slug })
+        .await
+        .expect("query route usage row")
+        .expect("route usage row exists")
 }
 
 async fn assert_no_usage_row(db: &mongodb::Database, request_id: &str) {

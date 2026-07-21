@@ -337,7 +337,6 @@ async fn finalize_layer(
     let model_for_row = model.clone();
     let mut set = doc! {
         "status": "finalized",
-        "forwarded": true,
         "quantity": quantity,
         "released": false,
         "model": model_for_row,
@@ -353,7 +352,7 @@ async fn finalize_layer(
             doc! {
                 "billing_request_id": billing_request_id,
                 "layer": layer.as_transaction_suffix(),
-                "status": { "$in": ["reserved", "forwarded"] },
+                "status": "forwarded",
             },
             doc! { "$set": set },
         )

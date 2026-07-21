@@ -35,23 +35,22 @@ pub const ALL_BILLING_INGRESSES: &[BillingIngress] = &[
 ];
 
 #[cfg(test)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum BillingRoutePolicy {
     Metered(BillingIngress),
     Exempt(&'static str),
 }
 
 #[cfg(test)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BillingRouteSpec {
     pub handler: &'static str,
     pub route: &'static str,
     pub policy: BillingRoutePolicy,
 }
 
-// Metered entries mirror the declarations that mount the routes; the coverage
-// smoke requires exact equality. Exempt entries document forwarding-adjacent
-// control-plane routes.
+// Every entry mirrors the declaration that mounts the route; the coverage
+// smoke requires exact Metered/Exempt equality.
 #[cfg(test)]
 pub const BILLING_ROUTE_INVENTORY: &[BillingRouteSpec] = &[
     BillingRouteSpec {
