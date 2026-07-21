@@ -49,9 +49,9 @@ pub struct BillingRouteSpec {
     pub policy: BillingRoutePolicy,
 }
 
-// Every handler in a forwarding-sensitive route family must appear here. The
-// coverage smoke test compares this inventory with routes.rs, so adding a new
-// route in one of those families requires an explicit Metered or Exempt choice.
+// Metered entries mirror the declarations that mount the routes; the coverage
+// smoke requires exact equality. Exempt entries document forwarding-adjacent
+// control-plane routes.
 #[cfg(test)]
 pub const BILLING_ROUTE_INVENTORY: &[BillingRouteSpec] = &[
     BillingRouteSpec {
@@ -193,17 +193,4 @@ pub const BILLING_ROUTE_INVENTORY: &[BillingRouteSpec] = &[
         route: "/api/v1/oracle/sessions/{conversation_id}/close",
         policy: BillingRoutePolicy::Exempt("relay control plane; no downstream dispatch"),
     },
-];
-
-#[cfg(test)]
-pub const BILLING_SENSITIVE_HANDLER_PREFIXES: &[&str] = &[
-    "handlers::llm_gateway::",
-    "handlers::proxy::",
-    "handlers::mcp_transport::",
-    "handlers::ssh_exec::",
-    "handlers::ssh_tunnel::",
-    "handlers::ssh_web_terminal::",
-    "handlers::public_proxy::",
-    "handlers::public_mcp::",
-    "handlers::oracle_tasks::",
 ];
