@@ -372,28 +372,30 @@ jobs:
       - run: npm run build
 
   # ---------------------------------------------------------------------------
-  # Skill routing: exercise the canonical trigger description through an
-  # actual model selector. The expected decisions remain outside the model
-  # prompt and cover both credential-brokering activations and native/public
-  # paths that must not select NyxID.
+  # Skill routing: validate the candidate inputs and publish them as inert
+  # data. The credentialed model run is performed by skill-trigger-evals.yml,
+  # whose workflow_run trigger always uses trusted default-branch code.
   # ---------------------------------------------------------------------------
   skill-trigger-evals:
-    name: Skill Trigger Evaluations
+    name: Skill Trigger Evaluation Payload
     needs: changes
     if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.skills == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       contents: read
-      models: read
     steps:
       - uses: actions/checkout@v6
-      - name: Run NyxID model trigger evaluations
-        env:
-          NYXID_SKILL_EVAL_API_KEY: ${{ github.token }}
-          NYXID_SKILL_EVAL_BASE_URL: https://models.github.ai/inference
-          NYXID_SKILL_EVAL_MODEL: openai/gpt-4.1-mini
-        run: ruby skills/nyxid/evals/run_trigger_evals.rb
+      - name: Validate NyxID trigger evaluation inputs
+        run: ruby skills/nyxid/evals/run_trigger_evals.rb --validate-only
+      - name: Upload NyxID trigger evaluation inputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: nyxid-skill-trigger-candidate
+          path: |
+            skills/nyxid/SKILL.md
+            skills/nyxid/evals/trigger-regression.json
+          if-no-files-found: error
 
   # ===========================================================================
   # Code coverage gates (issue #785).

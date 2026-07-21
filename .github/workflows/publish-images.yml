@@ -41,7 +41,6 @@ jobs:
     uses: ./.github/workflows/ci.yml
     permissions:
       contents: read
-      models: read
     with:
       # The publish gate is a release validation, not a PR check, so path
       # filtering must not skip anything. Force the full suite to run

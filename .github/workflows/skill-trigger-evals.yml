@@ -1,0 +1,81 @@
+# Live skill selection needs a model-capable token, so it must not execute the
+# pull request's workflow or evaluator code. CI uploads only candidate data;
+# this workflow_run consumer executes the trusted default-branch evaluator.
+# See https://securitylab.github.com/resources/github-actions-preventing-pwn-requests/.
+name: Skill Trigger Evaluations
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: read
+  models: read
+  pull-requests: read
+
+jobs:
+  evaluate:
+    name: OpenClaw Skill Selection
+    if: github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Determine whether trusted evaluation is required
+        id: paths
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prs = context.payload.workflow_run.pull_requests;
+            if (!Array.isArray(prs) || prs.length !== 1) {
+              core.setFailed('Expected exactly one pull request for the completed CI run.');
+              return;
+            }
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              ...context.repo,
+              pull_number: prs[0].number,
+              per_page: 100,
+            });
+            const relevant = files.some(({ filename }) =>
+              filename.startsWith('skills/') || filename.startsWith('.github/workflows/'));
+            core.setOutput('relevant', String(relevant));
+
+      - name: Check out trusted evaluator
+        if: steps.paths.outputs.relevant == 'true'
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Download candidate data
+        if: steps.paths.outputs.relevant == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: nyxid-skill-trigger-candidate
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: candidate
+
+      - name: Set up Node.js
+        if: steps.paths.outputs.relevant == 'true'
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Install pinned OpenClaw host
+        if: steps.paths.outputs.relevant == 'true'
+        run: npm install --global --ignore-scripts openclaw@2026.3.28
+
+      - name: Pull isolated tool sandbox
+        if: steps.paths.outputs.relevant == 'true'
+        run: docker pull node:22-bookworm-slim
+
+      - name: Exercise native OpenClaw skill selection
+        if: steps.paths.outputs.relevant == 'true'
+        env:
+          NYXID_SKILL_EVAL_API_KEY: ${{ github.token }}
+          NYXID_SKILL_EVAL_GH_TOKEN: ${{ github.token }}
+        run: >-
+          ruby skills/nyxid/evals/run_trigger_evals.rb
+          --candidate-root candidate
