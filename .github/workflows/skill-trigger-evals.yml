@@ -10,17 +10,20 @@ on:
     types: [completed]
 
 permissions:
-  actions: read
   contents: read
-  models: read
-  pull-requests: read
 
 jobs:
-  evaluate:
-    name: OpenClaw Skill Selection
+  prepare:
+    name: Prepare PR Check
     if: github.event.workflow_run.event == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      checks: write
+      pull-requests: read
+    outputs:
+      check_id: ${{ steps.check.outputs.id }}
+      relevant: ${{ steps.paths.outputs.relevant }}
     steps:
       - name: Determine whether trusted evaluation is required
         id: paths
@@ -40,16 +43,47 @@ jobs:
             const relevant = files.some(({ filename }) =>
               filename.startsWith('skills/') || filename.startsWith('.github/workflows/'));
             core.setOutput('relevant', String(relevant));
+            core.setOutput('head_sha', prs[0].head.sha);
 
-      - name: Check out trusted evaluator
+      - name: Start PR trigger evaluation check
+        id: check
         if: steps.paths.outputs.relevant == 'true'
+        uses: actions/github-script@v7
+        env:
+          PR_HEAD_SHA: ${{ steps.paths.outputs.head_sha }}
+        with:
+          script: |
+            const { data: check } = await github.rest.checks.create({
+              ...context.repo,
+              name: 'NyxID Skill Trigger Evaluations',
+              head_sha: process.env.PR_HEAD_SHA,
+              status: 'in_progress',
+              details_url: context.payload.workflow_run.html_url,
+              output: {
+                title: 'NyxID skill trigger evaluation in progress',
+                summary: 'Running the trusted OpenClaw trigger-regression evaluator.',
+              },
+            });
+            core.setOutput('id', String(check.id));
+
+  evaluate:
+    name: OpenClaw Skill Selection
+    needs: prepare
+    if: needs.prepare.outputs.relevant == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+      models: read
+    steps:
+      - name: Check out trusted evaluator
         uses: actions/checkout@v6
         with:
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
 
       - name: Download candidate data
-        if: steps.paths.outputs.relevant == 'true'
         uses: actions/download-artifact@v4
         with:
           name: nyxid-skill-trigger-candidate
@@ -58,24 +92,53 @@ jobs:
           path: candidate
 
       - name: Set up Node.js
-        if: steps.paths.outputs.relevant == 'true'
         uses: actions/setup-node@v6
         with:
           node-version: 22
 
       - name: Install pinned OpenClaw host
-        if: steps.paths.outputs.relevant == 'true'
         run: npm install --global --ignore-scripts openclaw@2026.3.28
 
       - name: Pull isolated tool sandbox
-        if: steps.paths.outputs.relevant == 'true'
         run: docker pull node:22-bookworm-slim
 
       - name: Exercise native OpenClaw skill selection
-        if: steps.paths.outputs.relevant == 'true'
         env:
           NYXID_SKILL_EVAL_API_KEY: ${{ github.token }}
           NYXID_SKILL_EVAL_GH_TOKEN: ${{ github.token }}
         run: >-
           ruby skills/nyxid/evals/run_trigger_evals.rb
           --candidate-root candidate
+
+  report:
+    name: Report PR Check
+    needs: [prepare, evaluate]
+    if: always() && needs.prepare.outputs.check_id != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      checks: write
+    steps:
+      - name: Complete PR trigger evaluation check
+        uses: actions/github-script@v7
+        env:
+          CHECK_RUN_ID: ${{ needs.prepare.outputs.check_id }}
+          EVALUATION_STATUS: ${{ needs.evaluate.result }}
+        with:
+          script: |
+            const succeeded = process.env.EVALUATION_STATUS === 'success';
+            await github.rest.checks.update({
+              ...context.repo,
+              check_run_id: Number(process.env.CHECK_RUN_ID),
+              status: 'completed',
+              conclusion: succeeded ? 'success' : 'failure',
+              completed_at: new Date().toISOString(),
+              output: {
+                title: succeeded
+                  ? 'NyxID skill trigger evaluations passed'
+                  : 'NyxID skill trigger evaluations failed',
+                summary: succeeded
+                  ? 'All trusted OpenClaw trigger-regression evaluations passed.'
+                  : `The trusted evaluator ended with job status ${process.env.EVALUATION_STATUS}.`,
+              },
+            });
