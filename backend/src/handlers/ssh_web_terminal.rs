@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use axum::{
     extract::{
-        ConnectInfo, Path, Query, State,
+        ConnectInfo, Extension, Path, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::HeaderMap,
@@ -62,6 +62,9 @@ const DEFAULT_WEB_TERMINAL_IDLE_TIMEOUT_SECS: u64 = 1800;
 
 pub async fn ssh_web_terminal(
     State(state): State<AppState>,
+    Extension(billing_route_policy): Extension<
+        crate::services::billing::route_inventory::BillingRoutePolicy,
+    >,
     auth_user: AuthUser,
     Path(service_id): Path<String>,
     Query(query): Query<WebTerminalQuery>,
@@ -69,6 +72,11 @@ pub async fn ssh_web_terminal(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> AppResult<Response> {
+    let billing_egress_permit =
+        crate::services::billing::route_inventory::enforce_billing_egress_classification(
+            Some(billing_route_policy),
+            crate::services::billing::BillingIngress::SshWebTerminal,
+        )?;
     let auth_context = authorize_ssh_access(&state, &auth_user, &service_id).await?;
     let ssh_svc = ssh_service::get_ssh_service(&state.db, &service_id).await?;
     if auth_context.mode == SshAuthMode::ProxyOnly {
@@ -138,6 +146,7 @@ pub async fn ssh_web_terminal(
                 client_meta,
                 tele,
                 auth_context.owner_user_id,
+                billing_egress_permit,
             )
             .await;
         })
@@ -160,6 +169,7 @@ async fn handle_web_terminal(
     client_meta: (Option<String>, Option<String>),
     tele: TelemetryContext,
     resource_owner_id: String,
+    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) {
     let _ = &session_guard;
     let user_id = auth_user.user_id.to_string();
@@ -225,6 +235,7 @@ async fn handle_web_terminal(
             tele,
             resource_owner_id,
             billing_resolution_user_id,
+            billing_egress_permit,
         )
         .await;
     } else {
@@ -272,6 +283,7 @@ async fn handle_node_web_terminal(
     tele: TelemetryContext,
     resource_owner_id: String,
     billing_resolution_user_id: String,
+    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) {
     let all_node_ids: Vec<&str> = std::iter::once(node_route.node_id.as_str())
         .chain(node_route.fallback_node_ids.iter().map(|id| id.as_str()))
@@ -381,6 +393,7 @@ async fn handle_node_web_terminal(
                     rows,
                 },
                 signing_secret.as_ref().map(|s| s.as_slice()),
+                billing_egress_permit,
             )
             .await
         {

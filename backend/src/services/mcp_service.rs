@@ -2881,7 +2881,12 @@ pub async fn execute_tool(
 
             billing.mark_forwarded(&metered).await?;
             match node_ws_manager
-                .send_proxy_request(nid, attempt, signing_secret.as_ref().map(|s| s.as_slice()))
+                .send_proxy_request(
+                    nid,
+                    attempt,
+                    signing_secret.as_ref().map(|s| s.as_slice()),
+                    billing_egress_permit,
+                )
                 .await
             {
                 Ok(ProxyResponseType::Complete(resp)) => {

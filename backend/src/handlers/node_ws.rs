@@ -2698,6 +2698,15 @@ mod tests {
                     body: None,
                 },
                 None,
+                crate::services::billing::route_inventory::enforce_billing_egress_classification(
+                    Some(
+                        crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                            crate::services::billing::BillingIngress::Proxy,
+                        ),
+                    ),
+                    crate::services::billing::BillingIngress::Proxy,
+                )
+                .expect("test billing route classification must be valid"),
             )
             .await
             .expect("streaming response");

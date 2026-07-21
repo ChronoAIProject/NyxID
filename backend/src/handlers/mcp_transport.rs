@@ -1200,7 +1200,14 @@ async fn handle_tools_call(
                 );
             }
             if tool_name == "nyx__ssh_exec" {
-                return handle_mcp_ssh_exec(state, auth, &arguments, request.id.clone()).await;
+                return handle_mcp_ssh_exec(
+                    state,
+                    auth,
+                    &arguments,
+                    request.id.clone(),
+                    billing_egress_permit,
+                )
+                .await;
             }
             return handle_mcp_ssh_list(state, auth, request.id.clone()).await;
         }
@@ -2282,6 +2289,7 @@ async fn handle_mcp_ssh_exec(
     auth: &McpAuthContext,
     arguments: &serde_json::Value,
     request_id: Option<serde_json::Value>,
+    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> Response {
     let service_ref = match arguments.get("service").and_then(|s| s.as_str()) {
         Some(s) if !s.is_empty() => s,
@@ -2403,7 +2411,15 @@ async fn handle_mcp_ssh_exec(
     };
 
     // Reuse the core logic from the ssh_exec module
-    let result = execute_ssh_command_internal(state, auth, &service_id, &ssh_svc, &body).await;
+    let result = execute_ssh_command_internal(
+        state,
+        auth,
+        &service_id,
+        &ssh_svc,
+        &body,
+        billing_egress_permit,
+    )
+    .await;
 
     match result {
         Ok(response) => {
@@ -2571,6 +2587,7 @@ async fn execute_ssh_command_internal(
     service_id: &str,
     ssh_svc: &crate::models::downstream_service::SshServiceConfig,
     body: &super::ssh_exec::SshExecRequest,
+    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> Result<super::ssh_exec::SshExecResponse, crate::errors::AppError> {
     use crate::errors::AppError;
     use crate::services::{node_routing_service, node_service};
@@ -2669,6 +2686,7 @@ async fn execute_ssh_command_internal(
                     timeout_secs,
                 },
                 signing_secret.as_ref().map(|s| s.as_slice()),
+                billing_egress_permit,
             )
             .await
         {

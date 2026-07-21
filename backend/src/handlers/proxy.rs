@@ -1904,6 +1904,7 @@ async fn execute_proxy_inner(
                 &proxy_actor_user_id,
                 collect_realtime_llm_usage,
                 metered.clone(),
+                billing_egress_permit,
             )
             .await;
         }
@@ -1923,6 +1924,7 @@ async fn execute_proxy_inner(
             caller_token.as_deref(),
             collect_realtime_llm_usage,
             metered.clone(),
+            billing_egress_permit,
         )
         .await;
     }
@@ -2066,6 +2068,7 @@ async fn execute_proxy_inner(
                     node_id,
                     attempt_request,
                     signing_secret.as_ref().map(|secret| secret.as_slice()),
+                    billing_egress_permit,
                 )
                 .await;
             let latency_ms = start.elapsed().as_millis() as u64;
@@ -3285,6 +3288,7 @@ async fn connect_downstream_ws(
     identity_headers: &[(String, String)],
     forward_headers: &[(String, String)],
     caller_token: Option<&str>,
+    _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> AppResult<DownstreamWsConnection> {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
@@ -3890,6 +3894,7 @@ async fn handle_ws_passthrough(
     caller_token: Option<&str>,
     collect_realtime_llm_usage: bool,
     metered: crate::services::billing::MeteredProxyContext,
+    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> AppResult<Response> {
     let downstream_url = build_downstream_ws_url(target, path, query, delegated)?;
 
@@ -3916,6 +3921,7 @@ async fn handle_ws_passthrough(
         identity_headers,
         forward_headers,
         caller_token,
+        billing_egress_permit,
     )
     .await?;
     state.billing.mark_forwarded(&metered).await?;
@@ -4025,6 +4031,7 @@ async fn handle_ws_passthrough_via_node(
     proxy_actor_user_id: &str,
     collect_realtime_llm_usage: bool,
     metered: crate::services::billing::MeteredProxyContext,
+    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> AppResult<Response> {
     use crate::services::node_ws_manager::NodeWsProxyRequest;
 
@@ -4150,6 +4157,7 @@ async fn handle_ws_passthrough_via_node(
                 node_id,
                 ws_proxy_request,
                 signing_secret.as_ref().map(|secret| secret.as_slice()),
+                billing_egress_permit,
             )
             .await
         {
