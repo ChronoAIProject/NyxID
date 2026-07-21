@@ -28,7 +28,7 @@ use crate::models::billing_wallet::{
     BillingWallet, COLLECTION_NAME as BILLING_WALLET, CollectionState, PlanKind,
 };
 use crate::models::downstream_service::{
-    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, SshServiceConfig,
+    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
 };
 use crate::models::node::{COLLECTION_NAME as NODES, Node, NodeMetrics, NodeStatus};
 use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
@@ -50,7 +50,7 @@ use crate::services::billing::route_inventory::{
     ALL_BILLING_INGRESSES, BILLING_ROUTE_INVENTORY, BillingIngress, BillingRoutePolicy,
 };
 use crate::services::billing::{BillingRouteContext, BillingService, NodeIntent};
-use crate::services::node_ws_manager::{NodeOutboundMessage, NodeProxyResponse};
+use crate::services::node_ws_manager::{NodeOutboundMessage, NodeProxyResponse, NodeSshExecResult};
 use crate::test_utils::{
     connect_test_database, test_app_config, test_app_state_with_config, test_user,
     test_user_endpoint, test_user_service,
@@ -500,7 +500,7 @@ async fn billing_route_coverage_smoke() {
     );
     node_mcp_request
         .headers_mut()
-        .insert("mcp-session-id", mcp_session_id);
+        .insert("mcp-session-id", mcp_session_id.clone());
     let node_mcp_response = call_mounted_route(&app, node_mcp_request).await;
     assert!(
         !String::from_utf8_lossy(&node_mcp_response).contains("\"isError\":true"),
@@ -554,7 +554,7 @@ async fn billing_route_coverage_smoke() {
 
     let (ssh_host, ssh_port, ssh_target) = start_billing_ssh_target().await;
     let (direct_ssh, direct_ssh_binding) = insert_ssh_route_service(
-        &db,
+        &state,
         &owner_id,
         "billing-direct-ssh-route",
         &ssh_host,
@@ -574,7 +574,7 @@ async fn billing_route_coverage_smoke() {
     ssh_target.await.expect("direct SSH target");
 
     let (node_tunnel, node_tunnel_binding) = insert_ssh_route_service(
-        &db,
+        &state,
         &owner_id,
         "billing-node-ssh-route",
         "node-ssh-route.invalid",
@@ -600,7 +600,7 @@ async fn billing_route_coverage_smoke() {
     assert_route_settled(&db, &node_tunnel_binding.slug, BillingMetric::Bytes).await;
 
     let (node_shell, node_shell_binding) = insert_ssh_route_service(
-        &db,
+        &state,
         &owner_id,
         "billing-node-shell-route",
         "node-shell-route.invalid",
@@ -639,6 +639,53 @@ async fn billing_route_coverage_smoke() {
     node_exec_responder.await.expect("node SSH exec responder");
     assert_route_settled(&db, &node_shell_binding.slug, BillingMetric::Bytes).await;
     exercised_routes.insert("/api/v1/ssh/{service_id}/exec");
+
+    let (_mcp_ssh, mcp_ssh_binding) = insert_ssh_route_service(
+        &state,
+        &owner_id,
+        "billing-mcp-ssh-route",
+        "mcp-ssh-route.invalid",
+        22,
+        SshAuthMode::Cert,
+        Some(&node.id),
+    )
+    .await;
+    let (mcp_ssh_tx, mcp_ssh_rx) = mpsc::channel(256);
+    state
+        .node_ws_manager
+        .register_connection(&node.id, mcp_ssh_tx);
+    let mcp_ssh_responder = spawn_node_ssh_cert_exec_responder(&state, &node.id, mcp_ssh_rx);
+    let mcp_ssh_body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+            "name": "nyx__ssh_exec",
+            "arguments": {
+                "service": mcp_ssh_binding.slug,
+                "command": "echo route-boundary",
+                "principal": "route",
+                "timeout_secs": 5,
+            },
+        },
+    });
+    let mut mcp_ssh_request = route_request(
+        Method::POST,
+        "/mcp",
+        &token,
+        Body::from(mcp_ssh_body.to_string()),
+    );
+    mcp_ssh_request
+        .headers_mut()
+        .insert("mcp-session-id", mcp_session_id);
+    let mcp_ssh_response = call_mounted_route(&app, mcp_ssh_request).await;
+    assert!(
+        !String::from_utf8_lossy(&mcp_ssh_response).contains("\"isError\":true"),
+        "mounted MCP SSH exec failed: {}",
+        String::from_utf8_lossy(&mcp_ssh_response)
+    );
+    mcp_ssh_responder.await.expect("MCP SSH exec responder");
+    assert_route_settled(&db, &mcp_ssh_binding.slug, BillingMetric::Requests).await;
 
     let (node_terminal_tx, node_terminal_rx) = mpsc::channel(256);
     state
@@ -1373,7 +1420,7 @@ async fn insert_route_node(state: &crate::AppState, owner_id: &str, name: &str) 
 }
 
 async fn insert_ssh_route_service(
-    db: &mongodb::Database,
+    state: &crate::AppState,
     owner_id: &str,
     slug: &str,
     host: &str,
@@ -1381,6 +1428,7 @@ async fn insert_ssh_route_service(
     auth_mode: SshAuthMode,
     node_id: Option<&str>,
 ) -> (DownstreamService, UserService) {
+    let db = &state.db;
     let mut service = crate::models::downstream_service::test_helpers::dummy_service();
     service.id = Uuid::new_v4().to_string();
     service.slug = format!("_ssh_{}", Uuid::new_v4().simple());
@@ -1389,16 +1437,24 @@ async fn insert_ssh_route_service(
     service.service_type = "ssh".to_string();
     service.visibility = "private".to_string();
     service.created_by = owner_id.to_string();
-    service.ssh_config = Some(SshServiceConfig {
-        host: host.to_string(),
-        port,
-        ssh_auth_mode: auth_mode,
-        certificate_auth_enabled: false,
-        certificate_ttl_minutes: 30,
-        allowed_principals: vec!["route".to_string()],
-        ca_private_key_encrypted: None,
-        ca_public_key: None,
-    });
+    let allowed_principals = vec!["route".to_string()];
+    service.ssh_config = Some(
+        crate::services::ssh_service::build_ssh_config(
+            &state.encryption_keys,
+            &service.id,
+            None,
+            crate::services::ssh_service::SshConfigInput {
+                host,
+                port,
+                certificate_auth_enabled: auth_mode.certificate_auth_enabled(),
+                ssh_auth_mode: Some(auth_mode),
+                certificate_ttl_minutes: 30,
+                allowed_principals: &allowed_principals,
+            },
+        )
+        .await
+        .expect("build route SSH config"),
+    );
     db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
         .insert_one(&service)
         .await
@@ -1572,6 +1628,40 @@ fn spawn_node_ssh_exec_responder(
             b"route-boundary\n".to_vec(),
         );
         manager.deliver_ssh_node_exec_close(&node_id, request_id, 0, 1, false);
+    })
+}
+
+fn spawn_node_ssh_cert_exec_responder(
+    state: &crate::AppState,
+    node_id: &str,
+    mut receiver: mpsc::Receiver<NodeOutboundMessage>,
+) -> tokio::task::JoinHandle<()> {
+    let manager = state.node_ws_manager.clone();
+    let node_id = node_id.to_string();
+    tokio::spawn(async move {
+        let Some(NodeOutboundMessage::Text(message)) = receiver.recv().await else {
+            panic!("expected outbound certificate SSH exec");
+        };
+        let parsed: serde_json::Value =
+            serde_json::from_str(&message).expect("parse outbound certificate SSH exec");
+        assert_eq!(parsed["type"].as_str(), Some("ssh_exec"));
+        let request_id = parsed["request_id"]
+            .as_str()
+            .expect("certificate SSH exec request id")
+            .to_string();
+        manager.deliver_ssh_exec_result(
+            &node_id,
+            NodeSshExecResult {
+                request_id,
+                exit_code: 0,
+                stdout: "route-boundary\n".to_string(),
+                stderr: String::new(),
+                duration_ms: 1,
+                timed_out: false,
+                error: None,
+                error_code: None,
+            },
+        );
     })
 }
 

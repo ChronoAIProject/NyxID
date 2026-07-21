@@ -2590,6 +2590,8 @@ async fn execute_ssh_command_internal(
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> Result<super::ssh_exec::SshExecResponse, crate::errors::AppError> {
     use crate::errors::AppError;
+    use crate::models::service_billing::{BillingMetric, PlatformUsage};
+    use crate::models::usage_meter::CredentialClass;
     use crate::services::{node_routing_service, node_service};
 
     let user_id = auth.user_id.as_str();
@@ -2628,6 +2630,39 @@ async fn execute_ssh_command_internal(
                 .to_string(),
         )
     })?;
+
+    let user_service =
+        user_service_service::find_by_catalog_service_id(&state.db, user_id, service_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound("SSH service not found".to_string()))?;
+    let billing_owner = state
+        .billing
+        .owner_resolver()
+        .resolve_for_resource(auth.billing_principal_user_id(), &user_service.user_id)
+        .await?;
+    let node_intent = if node_route.fallback_node_ids.is_empty() {
+        crate::services::billing::NodeIntent::Node
+    } else {
+        crate::services::billing::NodeIntent::NodeWithFallback
+    };
+    let billing_ctx = crate::services::billing::BillingRouteContext::new(
+        crate::services::billing::BillingIngress::Mcp,
+        uuid::Uuid::new_v4().to_string(),
+        billing_owner.owner_id,
+        user_id.to_string(),
+        auth.api_key_id.clone(),
+        Some(user_service.id),
+        Some(service_id.to_string()),
+        Some(user_service.slug),
+        node_intent,
+        "ssh".to_string(),
+        CredentialClass::NodeManaged,
+        BillingMetric::Requests,
+        None,
+        false,
+    );
+    let metered = state.billing.open(&billing_ctx).await?;
+    let request_len = command.len() as i64;
 
     // Session limiting
     let session_guard = state.ssh_session_manager.try_acquire(user_id)?;
@@ -2671,6 +2706,7 @@ async fn execute_ssh_command_internal(
             None
         };
 
+        state.billing.mark_forwarded(&metered).await?;
         match state
             .node_ws_manager
             .exec_ssh_command(
@@ -2691,6 +2727,17 @@ async fn execute_ssh_command_internal(
             .await
         {
             Ok(result) => {
+                state
+                    .billing
+                    .settle(
+                        &metered,
+                        PlatformUsage::single_request(
+                            request_len + result.stdout.len() as i64 + result.stderr.len() as i64,
+                        ),
+                        None,
+                        None,
+                    )
+                    .await?;
                 let _ = &session_guard;
                 drop(session_guard);
 
