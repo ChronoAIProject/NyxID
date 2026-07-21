@@ -1,6 +1,6 @@
 use axum::{
     Json,
-    extract::{ConnectInfo, Path, State},
+    extract::{ConnectInfo, Extension, Path, State},
     http::HeaderMap,
 };
 use serde::{Deserialize, Serialize};
@@ -91,8 +91,12 @@ pub struct SshExecResponse {
     ),
     tag = "SSH"
 )]
+#[allow(clippy::too_many_arguments)]
 pub async fn ssh_exec(
     State(state): State<AppState>,
+    Extension(billing_route_policy): Extension<
+        crate::services::billing::route_inventory::BillingRoutePolicy,
+    >,
     auth_user: AuthUser,
     tele: TelemetryContext,
     Path(service_id): Path<String>,
@@ -100,6 +104,12 @@ pub async fn ssh_exec(
     headers: HeaderMap,
     Json(body): Json<SshExecRequest>,
 ) -> AppResult<Json<SshExecResponse>> {
+    let billing_egress_permit =
+        crate::services::billing::route_inventory::enforce_billing_egress_classification(
+            Some(billing_route_policy),
+            crate::services::billing::BillingIngress::SshExec,
+        )?;
+
     // -- Auth --
     let operation = operation_descriptor::build_ssh_descriptor(
         operation_descriptor::SshOperationKind::Exec,
@@ -188,6 +198,7 @@ pub async fn ssh_exec(
         crate::services::billing::NodeIntent::NodeWithFallback
     };
     let billing_ctx = crate::services::billing::BillingRouteContext::new(
+        crate::services::billing::BillingIngress::SshExec,
         uuid::Uuid::new_v4().to_string(),
         billing_owner.owner_id,
         user_id.clone(),
@@ -276,6 +287,7 @@ pub async fn ssh_exec(
                             timeout_secs,
                         },
                         signing_secret.as_ref().map(|s| s.as_slice()),
+                        billing_egress_permit,
                     )
                     .await
             }
@@ -295,6 +307,7 @@ pub async fn ssh_exec(
                             host_key_sha256: None,
                         },
                         signing_secret.as_ref().map(|s| s.as_slice()),
+                        billing_egress_permit,
                     )
                     .await
             }

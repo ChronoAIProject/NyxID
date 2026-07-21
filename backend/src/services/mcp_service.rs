@@ -109,6 +109,7 @@ impl McpBillingRouteContextBuilder {
         };
 
         Ok(crate::services::billing::BillingRouteContext::new(
+            crate::services::billing::BillingIngress::Mcp,
             uuid::Uuid::new_v4().to_string(),
             billing_owner.owner_id,
             actor_user_id.to_string(),
@@ -2457,6 +2458,7 @@ pub async fn execute_tool(
     token_exchange_cache: &crate::services::provider_token_exchange_service::TokenExchangeCache,
     cloud_response_cache: &crate::services::cloud_response_cache::CloudResponseCache,
     exec_ctx: &McpExecContext<'_>,
+    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> AppResult<(u16, String)> {
     use crate::models::service_account::{COLLECTION_NAME as SERVICE_ACCOUNTS, ServiceAccount};
     use crate::models::user::{COLLECTION_NAME as USERS, User};
@@ -2879,7 +2881,12 @@ pub async fn execute_tool(
 
             billing.mark_forwarded(&metered).await?;
             match node_ws_manager
-                .send_proxy_request(nid, attempt, signing_secret.as_ref().map(|s| s.as_slice()))
+                .send_proxy_request(
+                    nid,
+                    attempt,
+                    signing_secret.as_ref().map(|s| s.as_slice()),
+                    billing_egress_permit,
+                )
                 .await
             {
                 Ok(ProxyResponseType::Complete(resp)) => {
@@ -2909,10 +2916,6 @@ pub async fn execute_tool(
                             StreamChunk::End => break,
                             StreamChunk::Error(e) => {
                                 return Ok((502, format!("Node streaming error: {e}")));
-                            }
-                            StreamChunk::Injected { .. } => {
-                                // Metadata-only WS auth injection signal; MCP streaming
-                                // responses must not include it in the response body.
                             }
                         }
                     }
@@ -2960,6 +2963,7 @@ pub async fn execute_tool(
         None,
         token_exchange_cache,
         cloud_response_cache,
+        billing_egress_permit,
     )
     .await?;
 

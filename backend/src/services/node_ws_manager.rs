@@ -61,11 +61,6 @@ pub enum StreamChunk {
     End,
     /// Stream error
     Error(String),
-    /// Node reports that it injected a WS auth frame locally.
-    Injected {
-        trigger_kind: String,
-        frame_index: usize,
-    },
 }
 
 /// Result of sending a proxy request: either a complete response or a streaming channel.
@@ -1242,11 +1237,12 @@ impl NodeWsManager {
     /// Send a proxy request to a node and wait for the response.
     /// If `signing_secret` is provided, the request is HMAC-signed.
     /// Returns either a complete response or a streaming channel.
-    pub async fn send_proxy_request(
+    pub(crate) async fn send_proxy_request(
         &self,
         node_id: &str,
         request: NodeProxyRequest,
         signing_secret: Option<&[u8]>,
+        _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
     ) -> AppResult<ProxyResponseType> {
         let conn = self
             .connections
@@ -1354,11 +1350,12 @@ impl NodeWsManager {
     }
 
     /// Open an SSH tunnel on a connected node and await the open acknowledgement.
-    pub async fn open_ssh_tunnel(
+    pub(crate) async fn open_ssh_tunnel(
         &self,
         node_id: &str,
         request: NodeSshTunnelRequest,
         signing_secret: Option<&[u8]>,
+        _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
     ) -> AppResult<mpsc::Receiver<SshTunnelChunk>> {
         let conn = self
             .connections
@@ -2210,11 +2207,12 @@ impl NodeWsManager {
 
     /// Execute an SSH command on a connected node and wait for the result.
     /// If `signing_secret` is provided, the request is HMAC-signed.
-    pub async fn exec_ssh_command(
+    pub(crate) async fn exec_ssh_command(
         &self,
         node_id: &str,
         request: NodeSshExecRequest,
         signing_secret: Option<&[u8]>,
+        _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
     ) -> AppResult<NodeSshExecResult> {
         let conn = self
             .connections
@@ -2318,11 +2316,12 @@ impl NodeWsManager {
 
     /// Execute an SSH command on a connected node using a node-local SSH key.
     /// If `signing_secret` is provided, the request is HMAC-signed.
-    pub async fn exec_ssh_node_key_command(
+    pub(crate) async fn exec_ssh_node_key_command(
         &self,
         node_id: &str,
         request: NodeSshNodeKeyExecRequest,
         signing_secret: Option<&[u8]>,
+        _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
     ) -> AppResult<NodeSshExecResult> {
         let conn = self
             .connections
@@ -2528,11 +2527,12 @@ impl NodeWsManager {
     // ---- Web terminal session management ----
 
     /// Open a web terminal session on a connected node and await the started acknowledgement.
-    pub async fn open_web_terminal(
+    pub(crate) async fn open_web_terminal(
         &self,
         node_id: &str,
         request: NodeWebTerminalRequest,
         signing_secret: Option<&[u8]>,
+        _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
     ) -> AppResult<mpsc::Receiver<WebTerminalChunk>> {
         let conn = self
             .connections
@@ -2813,11 +2813,12 @@ impl NodeWsManager {
 
     /// Open a WS proxy session through a connected node.
     /// Sends `ws_proxy_open` and waits for `ws_proxy_opened` or error.
-    pub async fn open_ws_proxy(
+    pub(crate) async fn open_ws_proxy(
         &self,
         node_id: &str,
         request: NodeWsProxyRequest,
         signing_secret: Option<&[u8]>,
+        _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
     ) -> AppResult<NodeWsProxySession> {
         let conn = self
             .connections
@@ -3211,6 +3212,16 @@ mod tests {
     use super::*;
     use serde_json::Value;
 
+    fn billing_egress_permit(
+        ingress: crate::services::billing::BillingIngress,
+    ) -> crate::services::billing::route_inventory::BillingEgressPermit {
+        crate::services::billing::route_inventory::enforce_billing_egress_classification(
+            Some(crate::services::billing::route_inventory::BillingRoutePolicy::Metered(ingress)),
+            ingress,
+        )
+        .expect("test billing route classification must be valid")
+    }
+
     #[test]
     fn register_and_check_connected() {
         let mgr = NodeWsManager::new(30, 100);
@@ -3269,6 +3280,7 @@ mod tests {
                         rows: 24,
                     },
                     None,
+                    billing_egress_permit(crate::services::billing::BillingIngress::SshWebTerminal),
                 )
                 .await
         });
@@ -3553,6 +3565,7 @@ mod tests {
                     body: None,
                 },
                 None,
+                billing_egress_permit(crate::services::billing::BillingIngress::Proxy),
             )
             .await
             .expect("streaming response");
@@ -3617,6 +3630,7 @@ mod tests {
                     body: None,
                 },
                 None,
+                billing_egress_permit(crate::services::billing::BillingIngress::Proxy),
             )
             .await
             .expect("streaming response");
@@ -3683,6 +3697,7 @@ mod tests {
                     body: None,
                 },
                 None,
+                billing_egress_permit(crate::services::billing::BillingIngress::Proxy),
             )
             .await
         {
@@ -3738,6 +3753,7 @@ mod tests {
                     body: None,
                 },
                 None,
+                billing_egress_permit(crate::services::billing::BillingIngress::Proxy),
             )
             .await
         {
@@ -3793,6 +3809,7 @@ mod tests {
                         port: 22,
                     },
                     None,
+                    billing_egress_permit(crate::services::billing::BillingIngress::SshTunnel),
                 )
                 .await
             }
@@ -3844,6 +3861,7 @@ mod tests {
                         port: 22,
                     },
                     None,
+                    billing_egress_permit(crate::services::billing::BillingIngress::SshTunnel),
                 )
                 .await
             }
@@ -3895,6 +3913,7 @@ mod tests {
                         port: 22,
                     },
                     Some(&signing_secret),
+                    billing_egress_permit(crate::services::billing::BillingIngress::SshTunnel),
                 )
                 .await
             }
