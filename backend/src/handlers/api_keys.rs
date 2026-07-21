@@ -23,7 +23,7 @@ use crate::models::node::{COLLECTION_NAME as NODES, Node};
 use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
 use crate::mw::auth::AuthUser;
-use crate::services::{key_service, org_service};
+use crate::services::{api_key_scope_service, key_service, org_service};
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 // --- Request / Response types ---
@@ -132,6 +132,10 @@ pub struct CreateApiKeyRequest {
     /// see org-owned services directly. The caller must be an admin of
     /// the target org.
     pub target_org_id: Option<String>,
+    /// Snapshot precondition returned by `POST /api/v1/api-keys/scope-plan`.
+    /// When present, the grants must exactly match the current plan and both
+    /// `allow_all_*` flags must be false.
+    pub scope_plan_digest: Option<String>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -163,6 +167,18 @@ pub struct UpdateApiKeyRequest {
         deserialize_with = "crate::models::nullable_field::deserialize"
     )]
     pub callback_url: Option<Option<String>>,
+    /// Snapshot precondition returned by `POST /api/v1/api-keys/scope-plan`.
+    /// The update is rejected if authorization or configured routes changed.
+    pub scope_plan_digest: Option<String>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ApiKeyScopePlanRequest {
+    /// Exact `UserService.id` values to grant. Duplicates are rejected.
+    pub selected_service_ids: Vec<String>,
+    /// Intended organization key owner. Omit for a personal key owned by the
+    /// authenticated actor. The actor must be an admin of this exact org.
+    pub target_org_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -1089,6 +1105,44 @@ pub async fn get_key_usage(
     Ok(Json(response))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/api-keys/scope-plan",
+    request_body = ApiKeyScopePlanRequest,
+    responses(
+        (status = 200, description = "Complete effective grants for the selected UserService resources", body = api_key_scope_service::EffectiveScopePlan),
+        (status = 400, description = "Duplicate input or unsupported owner", body = crate::errors::ErrorResponse),
+        (status = 401, description = "Authentication required", body = crate::errors::ErrorResponse),
+        (status = 403, description = "Selected resource or intended owner is denied", body = crate::errors::ErrorResponse),
+        (status = 404, description = "Selected resource or intended owner was not found", body = crate::errors::ErrorResponse),
+        (status = 409, description = "A configured route cannot be resolved", body = crate::errors::ErrorResponse)
+    ),
+    security(("bearer_auth" = [])),
+    tag = "API Keys"
+)]
+/// POST /api/v1/api-keys/scope-plan
+///
+/// Returns a caller-scoped snapshot of the exact constrained Agent Key
+/// service and node sets. The snapshot includes every active configured node
+/// candidate, regardless of current online or WebSocket state. Pass its
+/// `normalized_grant_digest` as `scope_plan_digest` when creating or updating
+/// the key so NyxID revalidates authorization and route configuration.
+pub async fn plan_key_scope(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Json(body): Json<ApiKeyScopePlanRequest>,
+) -> AppResult<Json<api_key_scope_service::EffectiveScopePlan>> {
+    let actor = auth_user.user_id.to_string();
+    let plan = api_key_scope_service::build_scope_plan(
+        &state.db,
+        &actor,
+        body.target_org_id.as_deref(),
+        &body.selected_service_ids,
+    )
+    .await?;
+    Ok(Json(plan))
+}
+
 /// Parse an optional expiry date string. Accepts RFC 3339 datetime
 /// (e.g. "2026-04-01T00:00:00Z") or date-only (e.g. "2026-04-01").
 fn parse_expires_at(s: &str) -> AppResult<DateTime<Utc>> {
@@ -1152,33 +1206,20 @@ pub async fn create_key(
 
     let actor = auth_user.user_id.to_string();
 
-    // If `target_org_id` is set, write the key under the org's user_id so
-    // every admin of that org can manage it and every consumer of the key
-    // authenticates as the org. The caller must be an admin of the target.
-    // `allowed_service_ids`/`allowed_node_ids` scopes are then validated
-    // against the org's owned resources, which is the intended behavior --
-    // an org-owned API key can only scope to org-owned services.
-    let user_id_str = if let Some(target_org_id) = body.target_org_id.as_deref() {
-        let access = org_service::resolve_owner_access(&state.db, &actor, target_org_id).await?;
-        if !access.can_write() {
-            return Err(AppError::OrgRoleInsufficient(
-                "you must be an admin of the target org to create API keys under it".to_string(),
-            ));
-        }
-        target_org_id.to_string()
-    } else {
-        actor.clone()
-    };
+    // Resolve the intended storage owner through the same typed authority as
+    // scope planning. In particular, `target_org_id` must identify an org and
+    // the actor must have admin access to that exact owner.
+    let user_id_str = api_key_scope_service::resolve_scope_owner_id(
+        &state.db,
+        &actor,
+        body.target_org_id.as_deref(),
+    )
+    .await?;
 
-    let scope_actor = if user_id_str == actor {
-        Some(actor.as_str())
-    } else {
-        None
-    };
     let created = key_service::create_api_key_with_scope_authorization(
         &state.db,
         &user_id_str,
-        scope_actor,
+        Some(&actor),
         &body.name,
         scopes,
         expires_at,
@@ -1191,6 +1232,7 @@ pub async fn create_key(
         body.rate_limit_burst,
         body.platform.as_deref(),
         body.callback_url.as_deref(),
+        body.scope_plan_digest.as_deref(),
     )
     .await?;
 
@@ -1258,49 +1300,25 @@ pub async fn update_key(
     let actor = auth_user.user_id.to_string();
     let user_id_str = resolve_api_key_write_owner(&state, &actor, &key_id).await?;
 
-    let scope_actor = if user_id_str == actor {
-        Some(actor.as_str())
-    } else {
-        None
-    };
-    let updated = if let Some(scope_actor) = scope_actor {
-        key_service::update_api_key_scope_with_scope_authorization(
-            &state.db,
-            &user_id_str,
-            Some(scope_actor),
-            &key_id,
-            body.name.as_deref(),
-            body.description.as_deref(),
-            body.scopes.as_deref(),
-            body.allowed_service_ids.as_deref(),
-            body.allowed_node_ids.as_deref(),
-            body.allow_all_services,
-            body.allow_all_nodes,
-            body.rate_limit_per_second,
-            body.rate_limit_burst,
-            body.platform.as_ref().map(|platform| platform.as_deref()),
-            body.callback_url.as_ref().map(|url| url.as_deref()),
-        )
-        .await?
-    } else {
-        key_service::update_api_key_scope(
-            &state.db,
-            &user_id_str,
-            &key_id,
-            body.name.as_deref(),
-            body.description.as_deref(),
-            body.scopes.as_deref(),
-            body.allowed_service_ids.as_deref(),
-            body.allowed_node_ids.as_deref(),
-            body.allow_all_services,
-            body.allow_all_nodes,
-            body.rate_limit_per_second,
-            body.rate_limit_burst,
-            body.platform.as_ref().map(|platform| platform.as_deref()),
-            body.callback_url.as_ref().map(|url| url.as_deref()),
-        )
-        .await?
-    };
+    let updated = key_service::update_api_key_scope_with_scope_authorization(
+        &state.db,
+        &user_id_str,
+        Some(&actor),
+        &key_id,
+        body.name.as_deref(),
+        body.description.as_deref(),
+        body.scopes.as_deref(),
+        body.allowed_service_ids.as_deref(),
+        body.allowed_node_ids.as_deref(),
+        body.allow_all_services,
+        body.allow_all_nodes,
+        body.rate_limit_per_second,
+        body.rate_limit_burst,
+        body.platform.as_ref().map(|platform| platform.as_deref()),
+        body.callback_url.as_ref().map(|url| url.as_deref()),
+        body.scope_plan_digest.as_deref(),
+    )
+    .await?;
 
     let enriched = enrich_api_keys_batch(&state, &actor, &[updated]).await?;
     Ok(Json(enriched.into_iter().next().unwrap()))

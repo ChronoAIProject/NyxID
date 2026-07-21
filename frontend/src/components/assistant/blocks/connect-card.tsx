@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { ExternalLink, KeyRound } from "lucide-react";
+import { useNavigate } from "@tanstack/react-router";
+import { ExternalLink, KeyRound, RefreshCw } from "lucide-react";
 import { AddKeyDialog } from "@/components/dashboard/add-key-dialog";
 import { ServiceIcon } from "@/components/service-icon";
 import { Badge } from "@/components/ui/badge";
@@ -22,23 +23,44 @@ const STATE_LABEL: Record<ConnectCardContentBlock["state"], string> = {
  * glyph registry the AI Services page uses — `catalog_slug` is the raw
  * NyxID service slug (`api-github`, `llm-openai`) passed straight through.
  *
- * Connecting happens IN PLACE: the button opens the shared AddKeyDialog
- * (the /keys connect wizard) with this service preselected — the assistant
- * thread never navigates away. The dialog's create invalidates the shared
- * keys query, so the card flips to Connected live on success.
+ * New connections and OAuth reauthorization happen in place through the
+ * shared AddKeyDialog. Existing non-OAuth credentials route to their key
+ * detail because credential rotation is owned by that management surface.
  */
 export function ConnectCard({
   block,
 }: {
   readonly block: ConnectCardContentBlock;
 }) {
+  const navigate = useNavigate();
   const [dialogOpen, setDialogOpen] = useState(false);
   const { data: keys } = useKeys();
+  const matchingKey =
+    (block.key_id
+      ? (keys ?? []).find((key) => key.id === block.key_id)
+      : undefined) ??
+    (keys ?? []).find((key) => key.catalog_service_slug === block.catalog_slug);
+  const needsReauthorization = block.reason_code === "NYXID_UNAUTHORIZED";
+  const canManageMatchingKey =
+    matchingKey !== undefined &&
+    !matchingKey.auto_connected &&
+    !(
+      matchingKey.credential_source?.type === "org" &&
+      matchingKey.credential_source.role !== "admin"
+    );
+  const reconnectKey =
+    needsReauthorization &&
+    canManageMatchingKey &&
+    (matchingKey.credential_type === "oauth2" ||
+      matchingKey.auth_method === "oauth2" ||
+      matchingKey.auth_method === "oidc")
+      ? matchingKey
+      : null;
   const connectedNow =
+    !needsReauthorization &&
     block.catalog_slug !== "custom" &&
     (keys ?? []).some(
-      (key) =>
-        key.is_active && key.catalog_service_slug === block.catalog_slug,
+      (key) => key.is_active && key.catalog_service_slug === block.catalog_slug,
     );
   const connected = connectedNow || block.state === "connected";
   const failed =
@@ -46,6 +68,14 @@ export function ConnectCard({
   const guidance = connected
     ? "Connected — send your request again."
     : (block.error_message ?? block.steps[0]?.body ?? block.subtitle);
+  const actionLabel = reconnectKey
+    ? "Reconnect"
+    : needsReauthorization && matchingKey
+      ? "Manage"
+      : "Connect";
+  const stateLabel = needsReauthorization
+    ? "Reauthorization required"
+    : STATE_LABEL[block.state];
 
   return (
     <section className="flex items-center gap-3 rounded-xl border border-border/70 bg-card px-4 py-3">
@@ -60,7 +90,7 @@ export function ConnectCard({
           <Badge
             variant={connected ? "success" : failed ? "destructive" : "warning"}
           >
-            {connected ? "Connected" : STATE_LABEL[block.state]}
+            {connected ? "Connected" : stateLabel}
           </Badge>
         </div>
         <p className="truncate text-[11px] text-muted-foreground">{guidance}</p>
@@ -71,19 +101,35 @@ export function ConnectCard({
           size="sm"
           className="shrink-0"
           onClick={() => {
+            if (needsReauthorization && matchingKey && !reconnectKey) {
+              void navigate({
+                to: "/keys/$keyId",
+                params: { keyId: matchingKey.id },
+              });
+              return;
+            }
             setDialogOpen(true);
           }}
         >
-          {block.auth_kind === "api_key" ? <KeyRound /> : <ExternalLink />}
-          Connect
+          {reconnectKey ? (
+            <RefreshCw />
+          ) : block.auth_kind === "api_key" ? (
+            <KeyRound />
+          ) : (
+            <ExternalLink />
+          )}
+          {actionLabel}
         </Button>
       )}
       <AddKeyDialog
         open={dialogOpen}
         onOpenChange={setDialogOpen}
         prefillSlug={
-          block.catalog_slug !== "custom" ? block.catalog_slug : undefined
+          !reconnectKey && block.catalog_slug !== "custom"
+            ? block.catalog_slug
+            : undefined
         }
+        reconnectKey={reconnectKey}
       />
     </section>
   );

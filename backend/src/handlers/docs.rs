@@ -375,7 +375,18 @@ mod tests {
         assert_eq!(value["info"]["title"], "nyxid");
         assert_eq!(value["info"]["version"], env!("CARGO_PKG_VERSION"));
         assert!(value["paths"]["/api/v1/demo"].is_object());
+        assert!(value["paths"]["/api/v1/api-keys/scope-plan"]["post"].is_object());
+        assert_eq!(
+            value["paths"]["/api/v1/api-keys/scope-plan"]["post"]["security"][0]["bearer_auth"],
+            serde_json::json!([])
+        );
         assert!(value["components"]["schemas"].is_object());
+        assert!(value["components"]["schemas"]["ApiKeyScopePlanRequest"].is_object());
+        assert!(value["components"]["schemas"]["EffectiveScopePlan"].is_object());
+        assert_eq!(
+            value["components"]["securitySchemes"]["bearer_auth"]["scheme"],
+            "bearer"
+        );
     }
 
     #[tokio::test]

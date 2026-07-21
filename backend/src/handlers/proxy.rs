@@ -1124,6 +1124,22 @@ fn compose_pre_resolved_node_ids(
     }
 }
 
+fn enforce_node_route_scope(
+    route: &mut node_routing_service::NodeRoute,
+    allowed_node_ids: &[String],
+) -> AppResult<()> {
+    if !allowed_node_ids.contains(&route.node_id) {
+        return Err(AppError::ApiKeyScopeForbidden(
+            "API key does not have access to this node".to_string(),
+        ));
+    }
+
+    route
+        .fallback_node_ids
+        .retain(|node_id| allowed_node_ids.contains(node_id));
+    Ok(())
+}
+
 async fn preflight_proxy_deny_before_resolution(
     state: &AppState,
     auth_user: &AuthUser,
@@ -1349,10 +1365,22 @@ async fn execute_proxy_inner(
         }
         if !auth_user.allow_all_nodes
             && let Some(route) = node_route.as_mut()
+            && let Err(err) = enforce_node_route_scope(route, &auth_user.allowed_node_ids)
         {
-            route
-                .fallback_node_ids
-                .retain(|nid| auth_user.allowed_node_ids.contains(nid));
+            audit_service::log_for_user(
+                state.db.clone(),
+                auth_user,
+                "proxy_request_denied",
+                Some(serde_json::json!({
+                    "service_id": service_id,
+                    "node_id": route.node_id,
+                    "path": path,
+                    "reason": err.to_string(),
+                    "denial_reason": "api_key_scope_forbidden_node",
+                    "response_status": 403,
+                })),
+            );
+            return Err(err);
         }
 
         // Per-agent credential override: if this request is via an API key and
@@ -2047,7 +2075,8 @@ async fn execute_proxy_inner(
                                 llm_platform_usage(None, request_len + response_len),
                                 None,
                                 None,
-                            );
+                            )
+                            .await;
                             let status = StatusCode::from_u16(node_response.status)
                                 .unwrap_or(StatusCode::BAD_GATEWAY);
                             let mut response_builder = Response::builder().status(status);
@@ -2194,7 +2223,8 @@ async fn execute_proxy_inner(
                                     llm_platform_usage(None, request_len + response_len),
                                     None,
                                     None,
-                                );
+                                )
+                                .await;
                             };
 
                             response_builder
@@ -2556,7 +2586,8 @@ async fn execute_proxy_inner(
                                     llm_platform_usage(usage.as_ref(), request_len + response_len),
                                     resale,
                                     stream_usage_context.model.clone(),
-                                );
+                                )
+                                .await;
                                 return;
                             }
                         }
@@ -2587,7 +2618,8 @@ async fn execute_proxy_inner(
                                 llm_platform_usage(usage.as_ref(), request_len + response_len),
                                 resale,
                                 stream_usage_context.model.clone(),
-                            );
+                            )
+                            .await;
                             let _ = tx
                                 .send(Err(std::io::Error::other(format!(
                                     "upstream stream error: {e}"
@@ -2616,7 +2648,8 @@ async fn execute_proxy_inner(
                                 llm_platform_usage(usage.as_ref(), request_len + response_len),
                                 resale,
                                 stream_usage_context.model.clone(),
-                            );
+                            )
+                            .await;
                             return;
                         }
                         Err(_) => {
@@ -2645,7 +2678,8 @@ async fn execute_proxy_inner(
                                 llm_platform_usage(usage.as_ref(), request_len + response_len),
                                 resale,
                                 stream_usage_context.model.clone(),
-                            );
+                            )
+                            .await;
                             return;
                         }
                     }
@@ -2702,7 +2736,8 @@ async fn execute_proxy_inner(
                     llm_platform_usage(None, request_len + response_len),
                     None,
                     None,
-                );
+                )
+                .await;
             };
             let body = Body::from_stream(stream);
             response_builder
@@ -3030,17 +3065,17 @@ fn chatgpt_usage_callback(
         let resale = resale_metric.and_then(|metric| {
             resale_usage_from_optional_reported(metric, usage.as_ref(), total_bytes)
         });
-        settle_meter_async(
+        Box::pin(settle_meter_async(
             billing.clone(),
             metered.clone(),
             llm_platform_usage(usage.as_ref(), total_bytes),
             resale,
             model.clone(),
-        );
+        ))
     })
 }
 
-fn settle_meter_async(
+async fn settle_meter_async(
     billing: std::sync::Arc<crate::services::billing::BillingService>,
     metered: crate::services::billing::MeteredProxyContext,
     platform: PlatformUsage,
@@ -3051,11 +3086,21 @@ fn settle_meter_async(
         return;
     }
 
-    tokio::spawn(async move {
-        if let Err(error) = billing.settle(&metered, platform, resale, model).await {
-            tracing::warn!(error = %error, "Failed to settle usage meter row");
-        }
-    });
+    if billing
+        .settle_deferred(&metered, platform, resale, model)
+        .await
+        .is_err()
+    {
+        let billing_request_id = metered
+            .route
+            .as_ref()
+            .map(|route| route.billing_request_id.as_str())
+            .unwrap_or("unknown");
+        tracing::warn!(
+            billing_request_id,
+            "Failed to persist usage settlement intent"
+        );
+    }
 }
 
 /// Threshold below which non-error responses are buffered (so small API
@@ -3920,7 +3965,8 @@ async fn handle_ws_passthrough(
                 platform_usage,
                 resale_usage,
                 None,
-            );
+            )
+            .await;
 
             let mut disconnect_event = serde_json::json!({
                 "service_id": sid,
@@ -4211,7 +4257,8 @@ async fn handle_ws_passthrough_via_node(
                 platform_usage,
                 resale_usage,
                 None,
-            );
+            )
+            .await;
 
             let mut disconnect_event = serde_json::json!({
                 "service_id": sid,
@@ -4437,9 +4484,9 @@ mod tests {
         ALLOWED_FORWARD_HEADER_PREFIXES, ALLOWED_FORWARD_HEADERS, ALLOWED_WS_FORWARD_HEADERS,
         ConnectionUsageStats, WsPassthroughGuard, add_websocket_usage_provenance,
         apply_agent_attribution_headers, auth_kind_label, collect_forward_headers_with_prefixes,
-        compose_pre_resolved_node_ids, is_chat_completions_proxy_path, is_codex_transport_path,
-        is_ws_upgrade_request, should_enforce_runtime_approval, validate_range_header,
-        websocket_realtime_usage_enabled, websocket_resale_usage,
+        compose_pre_resolved_node_ids, enforce_node_route_scope, is_chat_completions_proxy_path,
+        is_codex_transport_path, is_ws_upgrade_request, should_enforce_runtime_approval,
+        validate_range_header, websocket_realtime_usage_enabled, websocket_resale_usage,
     };
     use crate::models::service_billing::{BillingMetric, ServiceBilling};
     use crate::models::usage_meter::CredentialClass;
@@ -4615,6 +4662,25 @@ mod tests {
         let result = compose_pre_resolved_node_ids("configured", true, vec![]);
 
         assert_eq!(result, vec!["configured".to_string()]);
+    }
+
+    #[test]
+    fn node_scope_rejects_unplanned_fallback_promoted_to_primary() {
+        let mut route = crate::services::node_routing_service::NodeRoute {
+            node_id: "new-binding".to_string(),
+            fallback_node_ids: vec!["planned-fallback".to_string()],
+        };
+
+        let error = enforce_node_route_scope(
+            &mut route,
+            &["configured".to_string(), "planned-fallback".to_string()],
+        )
+        .expect_err("an unplanned promoted node must fail closed");
+
+        assert!(matches!(
+            error,
+            crate::errors::AppError::ApiKeyScopeForbidden(_)
+        ));
     }
 
     #[test]
