@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use axum::{
     Json,
     extract::{
-        ConnectInfo, Path, State,
+        ConnectInfo, Extension, Path, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::HeaderMap,
@@ -162,12 +162,20 @@ pub async fn issue_ssh_certificate(
 )]
 pub async fn ssh_tunnel_ws(
     State(state): State<AppState>,
+    Extension(billing_route_policy): Extension<
+        crate::services::billing::route_inventory::BillingRoutePolicy,
+    >,
     auth_user: AuthUser,
     Path(service_id): Path<String>,
     ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> AppResult<Response> {
+    let billing_egress_permit =
+        crate::services::billing::route_inventory::enforce_billing_egress_classification(
+            Some(billing_route_policy),
+            crate::services::billing::BillingIngress::SshTunnel,
+        )?;
     let auth_context = authorize_ssh_access(&state, &auth_user, &service_id).await?;
     let ssh_service = ssh_service::get_ssh_service(&state.db, &service_id).await?;
     let service_slug = auth_context.service_slug.clone();
@@ -214,6 +222,7 @@ pub async fn ssh_tunnel_ws(
                 client_meta,
                 tele,
                 auth_context.owner_user_id,
+                billing_egress_permit,
             )
             .await;
         })
@@ -232,6 +241,7 @@ async fn handle_ssh_socket(
     client_meta: TunnelClientMeta,
     tele: TelemetryContext,
     resource_owner_id: String,
+    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) {
     // Held for Drop-based session count cleanup for the tunnel lifetime.
     let _ = &session_guard;
@@ -285,6 +295,7 @@ async fn handle_ssh_socket(
         None => crate::services::billing::NodeIntent::Direct,
     };
     let billing_ctx = crate::services::billing::BillingRouteContext::new(
+        crate::services::billing::BillingIngress::SshTunnel,
         uuid::Uuid::new_v4().to_string(),
         billing_owner.owner_id,
         user_id.clone(),
@@ -332,6 +343,7 @@ async fn handle_ssh_socket(
             node_route,
             tele,
             metered,
+            billing_egress_permit,
         )
         .await;
         return;
@@ -628,6 +640,7 @@ async fn handle_node_ssh_socket(
     node_route: crate::services::node_routing_service::NodeRoute,
     tele: TelemetryContext,
     metered: crate::services::billing::MeteredProxyContext,
+    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) {
     let all_node_ids: Vec<&str> = std::iter::once(node_route.node_id.as_str())
         .chain(node_route.fallback_node_ids.iter().map(|id| id.as_str()))
@@ -670,6 +683,7 @@ async fn handle_node_ssh_socket(
                     port: ssh_service.port,
                 },
                 signing_secret.as_ref().map(|secret| secret.as_slice()),
+                billing_egress_permit,
             )
             .await
         {

@@ -379,6 +379,7 @@ mod tests {
                 client_secret_hash: hash_token(""),
                 redirect_uris: vec!["https://app.example/callback".to_string()],
                 allowed_scopes: "openid profile email".to_string(),
+                scope_provenance: Default::default(),
                 grant_types: "authorization_code".to_string(),
                 client_type: "public".to_string(),
                 is_active: true,

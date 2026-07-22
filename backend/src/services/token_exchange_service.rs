@@ -432,6 +432,7 @@ mod tests {
                 client_secret_hash: crate::crypto::token::hash_token(client_secret),
                 redirect_uris: vec!["http://localhost/callback".to_string()],
                 allowed_scopes: "openid".to_string(),
+                scope_provenance: Default::default(),
                 grant_types: "authorization_code refresh_token".to_string(),
                 client_type: "confidential".to_string(),
                 is_active: true,
@@ -540,6 +541,11 @@ mod tests {
                 "/proxy/s/{slug}/{*path}",
                 any(crate::handlers::proxy::proxy_request_by_slug),
             )
+            .route_layer(axum::Extension(
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Proxy,
+                ),
+            ))
             .with_state(state);
         let response = app
             .oneshot(

@@ -221,6 +221,21 @@ pub enum AppError {
     #[error("API key scope not found: {0}")]
     ApiKeyScopeNotFound(String),
 
+    #[error("API key scope plan resource not found: {0}")]
+    ApiKeyScopePlanNotFound(String),
+
+    #[error("API key scope plan denied: {0}")]
+    ApiKeyScopePlanDenied(String),
+
+    #[error("API key scope plan owner unsupported: {0}")]
+    ApiKeyScopePlanOwnerUnsupported(String),
+
+    #[error("API key scope plan route unresolved: {0}")]
+    ApiKeyScopePlanRouteUnresolved(String),
+
+    #[error("API key scope plan stale: {0}")]
+    ApiKeyScopePlanStale(String),
+
     #[error("Device code not found")]
     DeviceCodeNotFound,
 
@@ -460,6 +475,12 @@ impl AppError {
             Self::ApiKeyScopeForbidden(_) => StatusCode::FORBIDDEN,
             Self::ApiKeyScopeInactive => StatusCode::FORBIDDEN,
             Self::ApiKeyScopeNotFound(_) => StatusCode::NOT_FOUND,
+            Self::ApiKeyScopePlanNotFound(_) => StatusCode::NOT_FOUND,
+            Self::ApiKeyScopePlanDenied(_) => StatusCode::FORBIDDEN,
+            Self::ApiKeyScopePlanOwnerUnsupported(_) => StatusCode::BAD_REQUEST,
+            Self::ApiKeyScopePlanRouteUnresolved(_) | Self::ApiKeyScopePlanStale(_) => {
+                StatusCode::CONFLICT
+            }
             Self::DeviceCodeNotFound => StatusCode::BAD_REQUEST,
             Self::DeviceCodeExpired => StatusCode::GONE,
             Self::DevicePollSignatureInvalid(_) => StatusCode::FORBIDDEN,
@@ -589,6 +610,11 @@ impl AppError {
             Self::ApiKeyScopeForbidden(_) => 9000,
             Self::ApiKeyScopeInactive => 9001,
             Self::ApiKeyScopeNotFound(_) => 9002,
+            Self::ApiKeyScopePlanNotFound(_) => 9003,
+            Self::ApiKeyScopePlanDenied(_) => 9004,
+            Self::ApiKeyScopePlanOwnerUnsupported(_) => 9005,
+            Self::ApiKeyScopePlanRouteUnresolved(_) => 9006,
+            Self::ApiKeyScopePlanStale(_) => 9007,
             Self::DeviceCodeNotFound => 9500,
             Self::DeviceCodeExpired => 9501,
             Self::DevicePollSignatureInvalid(_) => 9502,
@@ -752,6 +778,11 @@ impl AppError {
             Self::ApiKeyScopeForbidden(_) => "api_key_scope_forbidden",
             Self::ApiKeyScopeInactive => "api_key_scope_inactive",
             Self::ApiKeyScopeNotFound(_) => "api_key_scope_not_found",
+            Self::ApiKeyScopePlanNotFound(_) => "api_key_scope_plan_not_found",
+            Self::ApiKeyScopePlanDenied(_) => "api_key_scope_plan_denied",
+            Self::ApiKeyScopePlanOwnerUnsupported(_) => "api_key_scope_plan_owner_unsupported",
+            Self::ApiKeyScopePlanRouteUnresolved(_) => "api_key_scope_plan_route_unresolved",
+            Self::ApiKeyScopePlanStale(_) => "api_key_scope_plan_stale",
             Self::DeviceCodeNotFound => "device_code_not_found",
             Self::DeviceCodeExpired => "device_code_expired",
             Self::DevicePollSignatureInvalid(_) => "device_poll_signature_invalid",
@@ -1213,6 +1244,11 @@ mod tests {
             AppError::ApiKeyScopeForbidden("".into()).error_code(),
             AppError::ApiKeyScopeInactive.error_code(),
             AppError::ApiKeyScopeNotFound("".into()).error_code(),
+            AppError::ApiKeyScopePlanNotFound("".into()).error_code(),
+            AppError::ApiKeyScopePlanDenied("".into()).error_code(),
+            AppError::ApiKeyScopePlanOwnerUnsupported("".into()).error_code(),
+            AppError::ApiKeyScopePlanRouteUnresolved("".into()).error_code(),
+            AppError::ApiKeyScopePlanStale("".into()).error_code(),
             AppError::DeviceCodeNotFound.error_code(),
             AppError::DeviceCodeExpired.error_code(),
             AppError::DevicePollSignatureInvalid("".into()).error_code(),
@@ -1990,6 +2026,47 @@ mod tests {
             AppError::InvalidScope("bad".into()).oauth_status(),
             StatusCode::BAD_REQUEST
         );
+    }
+
+    #[test]
+    fn scope_plan_errors_have_stable_typed_mappings() {
+        let cases = [
+            (
+                AppError::ApiKeyScopePlanNotFound("missing".into()),
+                StatusCode::NOT_FOUND,
+                "api_key_scope_plan_not_found",
+                9003,
+            ),
+            (
+                AppError::ApiKeyScopePlanDenied("denied".into()),
+                StatusCode::FORBIDDEN,
+                "api_key_scope_plan_denied",
+                9004,
+            ),
+            (
+                AppError::ApiKeyScopePlanOwnerUnsupported("owner".into()),
+                StatusCode::BAD_REQUEST,
+                "api_key_scope_plan_owner_unsupported",
+                9005,
+            ),
+            (
+                AppError::ApiKeyScopePlanRouteUnresolved("route".into()),
+                StatusCode::CONFLICT,
+                "api_key_scope_plan_route_unresolved",
+                9006,
+            ),
+            (
+                AppError::ApiKeyScopePlanStale("stale".into()),
+                StatusCode::CONFLICT,
+                "api_key_scope_plan_stale",
+                9007,
+            ),
+        ];
+        for (error, status, key, code) in cases {
+            assert_eq!(error.status_code(), status);
+            assert_eq!(error.error_key(), key);
+            assert_eq!(error.error_code(), code);
+        }
     }
 
     async fn response_json(err: AppError) -> (StatusCode, Value) {

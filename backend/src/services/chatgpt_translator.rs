@@ -21,10 +21,11 @@ use crate::services::llm_usage_service::{
 };
 use crate::services::sse_parser;
 
-pub type UsageCompleteCallback =
-    std::sync::Arc<dyn Fn(Option<ReportedLlmUsage>, i64) + Send + Sync>;
+pub type UsageCompleteCallback = std::sync::Arc<
+    dyn Fn(Option<ReportedLlmUsage>, i64) -> futures::future::BoxFuture<'static, ()> + Send + Sync,
+>;
 
-fn finalize_usage_capture(
+async fn finalize_usage_capture(
     usage_context: Option<UsageAuditContext>,
     usage_complete: Option<UsageCompleteCallback>,
     usage: Option<ReportedLlmUsage>,
@@ -36,7 +37,7 @@ fn finalize_usage_capture(
         log_reported_usage_async(context, usage);
     }
     if let Some(complete) = usage_complete {
-        complete(usage, response_len.max(0));
+        complete(usage, response_len.max(0)).await;
     }
 }
 
@@ -938,6 +939,7 @@ fn build_chatgpt_api_url(api_url: &str, query: Option<&str>) -> String {
 /// When `translate_response` is `true`, Responses API SSE events are
 /// translated back to Chat Completions format. When `false`,
 /// the raw Responses API SSE events are forwarded to the client.
+#[allow(clippy::too_many_arguments)]
 pub async fn send_to_chatgpt(
     translated_body: &serde_json::Value,
     bearer_token: &str,
@@ -946,6 +948,7 @@ pub async fn send_to_chatgpt(
     query: Option<&str>,
     usage_context: Option<UsageAuditContext>,
     usage_complete: Option<UsageCompleteCallback>,
+    _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> AppResult<axum::response::Response> {
     send_to_chatgpt_with_api_url(
         translated_body,
@@ -1014,7 +1017,7 @@ async fn send_to_chatgpt_with_api_url(
     // the ChatGPT backend rejected (e.g. unsupported parameter for a model).
     if !status.is_success() {
         let error_body = response.text().await.unwrap_or_default();
-        finalize_usage_capture(None, usage_complete, None, error_body.len() as i64);
+        finalize_usage_capture(None, usage_complete, None, error_body.len() as i64).await;
         tracing::warn!(
             "ChatGPT backend returned HTTP {status}: {}",
             truncate_for_log(&error_body, 1000),
@@ -1097,7 +1100,8 @@ async fn send_to_chatgpt_with_api_url(
                                     usage_complete.clone(),
                                     usage_accumulator.finalize(),
                                     response_len,
-                                );
+                                )
+                                .await;
                                 return;
                             }
                         }
@@ -1109,7 +1113,8 @@ async fn send_to_chatgpt_with_api_url(
                                 usage_complete.clone(),
                                 usage_accumulator.finalize(),
                                 response_len,
-                            );
+                            )
+                            .await;
                             return;
                         }
                     }
@@ -1156,7 +1161,8 @@ async fn send_to_chatgpt_with_api_url(
                                 usage_complete.clone(),
                                 usage_accumulator.finalize(),
                                 response_len,
-                            );
+                            )
+                            .await;
                             return;
                         }
 
@@ -1167,7 +1173,8 @@ async fn send_to_chatgpt_with_api_url(
                                 usage_complete.clone(),
                                 usage_accumulator.finalize(),
                                 response_len,
-                            );
+                            )
+                            .await;
                             return;
                         }
                     }
@@ -1207,7 +1214,8 @@ async fn send_to_chatgpt_with_api_url(
                 usage_complete,
                 usage_accumulator.finalize(),
                 response_len,
-            );
+            )
+            .await;
         });
 
         let body = Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx));
@@ -1289,7 +1297,8 @@ async fn send_to_chatgpt_with_api_url(
             usage_complete,
             usage,
             body_bytes.len() as i64,
-        );
+        )
+        .await;
 
         axum::http::Response::builder()
             .status(StatusCode::OK)

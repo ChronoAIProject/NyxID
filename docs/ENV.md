@@ -79,11 +79,30 @@ NyxID writes a durable `usage_meter` ledger, can push finalized rows into Lago, 
 | `LAGO_PLAN_CODE` | `starter` | Lago plan code used by owner wallet provisioning/backfill when creating the owner's subscription. |
 | `LAGO_WEBHOOK_SECRET` | *(empty)* | Lago webhook verification secret for `POST /api/v1/webhooks/lago`; redacted from config debug output. Required to accept Lago-originated wallet/subscription updates. |
 | `BILLING_RECONCILE_INTERVAL_SECS` | `300` | Reconcile sweep interval. Set `0` to disable event push/reconcile sweeps. |
-| `BILLING_RATE_CACHE_TTL_SECS` | `900` | Read-only rate cache TTL for approximate display/reservation sizing. |
+| `BILLING_RATE_CACHE_TTL_SECS` | `900` | Maximum age of a read-only rate used for reservation sizing. A missing or older rate rejects a billable request before forwarding. |
 | `BILLING_RESERVATION_ABANDON_SECS` | `600` | Grace before never-forwarded reserved rows are marked `abandoned`. |
-| `BILLING_DEFAULT_OVERDRAFT_CAP_CREDITS` | `0` | Default overdraft cap reserved for later phases. |
-| `BILLING_FAIL_CLOSED` | `false` | Operator fail-closed override reserved for later phases. |
+| `BILLING_DEFAULT_OVERDRAFT_CAP_CREDITS` | `0` | Hard default overdraft cap copied to newly provisioned wallets. The shared-store reservation gate enforces the wallet's cap atomically. |
+| `BILLING_FAIL_CLOSED` | `false` | Incident kill switch. When `BILLING_ENABLED=true`, rejects billable forwarding even when Lago is healthy; when billing is disabled it has no effect. |
 | `BILLING_RESALE_ENABLED` | `false` | Explicit opt-in for the dormant catalog resale layer. Resale still also requires `ServiceBilling.resale_billable=true` and final `CredentialClass::NyxidManagedMaster`. |
+
+### Billing flag matrix
+
+`BILLING_ENABLED`, `BILLING_RESALE_ENABLED`, and `BILLING_FAIL_CLOSED` are independent. `BILLING_ENABLED` controls platform metering, wallet provisioning, and the reservation gate; it does not implicitly enable catalog resale. `BILLING_RESALE_ENABLED` controls only the resale ledger layer, and `BILLING_FAIL_CLOSED` is consulted only when `BILLING_ENABLED=true`.
+
+| `BILLING_ENABLED` | `BILLING_RESALE_ENABLED` | `BILLING_FAIL_CLOSED` | Effective behavior |
+|---|---|---|---|
+| `false` | `false` | `false` | Billing is dark: no platform or resale `usage_meter` rows and no wallet gate. |
+| `false` | `false` | `true` | Same as above; the fail-closed switch is inactive while billing is disabled. |
+| `false` | `true` | `false` | Resale shadow capture only for an eligible NyxID-managed credential. There is no wallet provisioning or reservation gate. |
+| `false` | `true` | `true` | Same resale shadow-capture mode; the fail-closed switch remains inactive. |
+| `true` | `false` | `false` | Platform metering and wallet reservation are active; catalog resale is off. |
+| `true` | `true` | `false` | Platform metering and eligible catalog resale are both active and cross the same durable settlement boundary. |
+| `true` | `false` | `true` | Billable forwarding is stopped with a billing-provider error. Use only as an incident kill switch. |
+| `true` | `true` | `true` | Same stop behavior; no platform or resale request is forwarded. |
+
+The Lago client is configured only when both `LAGO_API_URL` and `LAGO_API_KEY` are non-empty. With `BILLING_ENABLED=true`, `BILLING_FAIL_CLOSED=false`, and no Lago client, existing chargeable wallets degrade to unreserved meter-only capture and missing wallets cannot be auto-provisioned. `LAGO_WEBHOOK_SECRET` is independent of outbound client configuration: it authenticates inbound `/api/v1/webhooks/lago` calls and must be set to accept wallet or entitlement updates. `LAGO_PLAN_CODE` selects the subscription created during provisioning; `BILLING_RECONCILE_INTERVAL_SECS=0` disables both usage push and settlement recovery sweeps.
+
+The intended production configuration is `BILLING_ENABLED=true`, `BILLING_FAIL_CLOSED=false`, both Lago client variables set, `LAGO_WEBHOOK_SECRET` set, a non-zero reconcile interval, and fresh rate-cache rows for every enabled metric. Set `BILLING_RESALE_ENABLED=true` only when catalog resale is intentionally offered. A rollout may use the resale-only shadow mode to inspect ledger quantities, but it does not enforce funding and must not be represented as charging.
 
 Billing policy for public and relay paths:
 

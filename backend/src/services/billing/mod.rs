@@ -5,6 +5,7 @@ pub mod provisioning;
 pub mod reconcile;
 pub mod reservation;
 pub mod route_context;
+pub mod route_inventory;
 pub mod webhook;
 
 use std::sync::Arc;
@@ -19,6 +20,7 @@ use mongodb::bson::doc;
 pub use meter::MeteredProxyContext;
 pub use owner_resolver::BillingOwnerResolver;
 pub use route_context::{BillingRouteContext, NodeIntent};
+pub use route_inventory::BillingIngress;
 
 #[derive(Clone)]
 pub struct BillingService {
@@ -50,7 +52,11 @@ impl BillingService {
     }
 
     #[cfg(test)]
-    fn new_with_lago(db: DbHandle, config: Arc<AppConfig>, lago: Arc<dyn LagoApi>) -> Self {
+    pub(crate) fn new_with_lago(
+        db: DbHandle,
+        config: Arc<AppConfig>,
+        lago: Arc<dyn LagoApi>,
+    ) -> Self {
         Self {
             db: db.clone(),
             config,
@@ -164,6 +170,7 @@ impl BillingService {
                 self.lago.as_deref(),
                 &ctx,
                 self.config.billing_fail_closed,
+                self.config.billing_rate_cache_ttl_secs,
             )
             .await?
         } else {
@@ -215,6 +222,32 @@ impl BillingService {
         meter::settle(&self.db, metered, platform, resale, model).await
     }
 
+    pub(crate) async fn settle_deferred(
+        &self,
+        metered: &MeteredProxyContext,
+        platform: crate::models::service_billing::PlatformUsage,
+        resale: Option<crate::models::service_billing::ResaleUsage>,
+        model: Option<String>,
+    ) -> AppResult<()> {
+        let billing_request_id = metered
+            .route
+            .as_ref()
+            .map(|route| route.billing_request_id.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+        let persisted =
+            meter::persist_settlement_intent(&self.db, metered, platform, resale, model).await?;
+        let db = self.db.clone();
+        tokio::spawn(async move {
+            if meter::settle_persisted(&db, persisted).await.is_err() {
+                tracing::warn!(
+                    billing_request_id,
+                    "Failed to settle usage meter row; durable retry recorded"
+                );
+            }
+        });
+        Ok(())
+    }
+
     pub async fn fail(&self, metered: &MeteredProxyContext, reason: &str) -> AppResult<()> {
         meter::fail(&self.db, metered, reason).await
     }
@@ -237,7 +270,9 @@ mod tests {
     use crate::services::billing::lago_client::{
         Entitlement, LagoAck, LagoError, LagoEvent, LagoUsage, LagoWallet, OwnerProvisionInput,
     };
-    use crate::services::billing::{BillingRouteContext, BillingService, NodeIntent};
+    use crate::services::billing::{
+        BillingIngress, BillingRouteContext, BillingService, NodeIntent,
+    };
     use crate::services::role_service;
     use crate::test_utils::{connect_test_database, test_app_config};
 
@@ -255,6 +290,7 @@ mod tests {
             lago_resale_metric_code: Some("resale_requests".to_string()),
         };
         let ctx = BillingRouteContext::new(
+            BillingIngress::Proxy,
             Uuid::new_v4().to_string(),
             owner_id.to_string(),
             "actor-1".to_string(),
@@ -301,6 +337,7 @@ mod tests {
         config.billing_enabled = true;
         let service = BillingService::new(db.clone(), std::sync::Arc::new(config));
         let ctx = BillingRouteContext::new(
+            BillingIngress::Proxy,
             Uuid::new_v4().to_string(),
             owner_id.to_string(),
             "actor-1".to_string(),
@@ -356,6 +393,7 @@ mod tests {
         let lago = Arc::new(FakeLago::default());
         let service = BillingService::new_with_lago(db.clone(), Arc::new(config), lago.clone());
         let ctx = BillingRouteContext::new(
+            BillingIngress::Proxy,
             Uuid::new_v4().to_string(),
             owner.user_id.clone(),
             owner.user_id.clone(),

@@ -1903,6 +1903,26 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     usage_meter
         .create_index(
             IndexModel::builder()
+                .keys(doc! {
+                    "status": 1,
+                    "released": 1,
+                    "settlement_next_retry_at": 1,
+                    "finalized_at": 1,
+                })
+                .build(),
+        )
+        .await?;
+    usage_meter
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "pending_resale_quantity": 1 })
+                .options(IndexOptions::builder().sparse(true).build())
+                .build(),
+        )
+        .await?;
+    usage_meter
+        .create_index(
+            IndexModel::builder()
                 .keys(doc! { "billing_owner_id": 1, "created_at": -1 })
                 .build(),
         )
