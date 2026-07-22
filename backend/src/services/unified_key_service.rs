@@ -3140,6 +3140,7 @@ mod tests {
 
     fn sample_api_key(credential_type: &str) -> UserApiKey {
         UserApiKey {
+            credential_source: None,
             id: "key-1".to_string(),
             user_id: "user-1".to_string(),
             label: "Test".to_string(),
@@ -5708,6 +5709,7 @@ mod tests {
         let now = Utc::now();
         db.collection::<UserApiKey>(USER_API_KEYS)
             .insert_one(UserApiKey {
+                credential_source: None,
                 id: stripped_key_id.clone(),
                 user_id: user_id.clone(),
                 label: "Legacy".to_string(),

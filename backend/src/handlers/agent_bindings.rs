@@ -470,6 +470,7 @@ mod tests {
 
     fn fixture_user_api_key(id: &str, user_id: &str) -> UserApiKey {
         UserApiKey {
+            credential_source: None,
             id: id.to_string(),
             user_id: user_id.to_string(),
             label: "test-credential".to_string(),

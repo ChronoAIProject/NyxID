@@ -188,6 +188,20 @@ export interface CatalogEntry {
   readonly device_code_format: string | null;
   readonly oauth_client_id: string | null;
   readonly client_id_param_name: string | null;
+  /**
+   * The platform ships OAuth app credentials for this provider (ciphertext
+   * presence only — not proof the flow works end-to-end). With
+   * `credential_mode: "both"` this drives the one-click connect path: the
+   * dialog skips the BYO Custom-App form and goes straight to the provider
+   * hand-off. Absent (older backend) → treated as false, BYO form shown.
+   */
+  readonly has_platform_oauth_credentials?: boolean;
+  /**
+   * Scopes the shared platform OAuth app is permitted to request. On the
+   * one-click path the picker disables any scope not in this list (they need
+   * "your own OAuth app"). Absent when no platform allowlist is curated.
+   */
+  readonly platform_scope_allowlist?: readonly string[] | null;
   readonly requires_credential: boolean;
   /** Declared credential fields for `token_exchange` services. When set,
    *  the dialog renders one input per field (text vs password depending on

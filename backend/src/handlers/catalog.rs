@@ -93,6 +93,14 @@ pub struct CatalogEntryResponse {
     pub oauth_client_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_id_param_name: Option<String>,
+    /// Platform OAuth app credentials are provisioned for this provider
+    /// (ciphertext presence only). With `credential_mode` "both" this drives
+    /// the one-click connect path; the BYO form is the fallback when false.
+    pub has_platform_oauth_credentials: bool,
+    /// Scopes the shared platform OAuth app may request. The picker disables
+    /// non-listed scopes on the platform path (they need "your own OAuth app").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub platform_scope_allowlist: Option<Vec<String>>,
     /// Whether this catalog entry needs credential setup before it can be used
     pub requires_credential: bool,
     // --- Rich metadata for AI agent discovery ---
@@ -312,6 +320,8 @@ fn catalog_entry_response(
         extra_auth_params: entry.extra_auth_params,
         oauth_client_id: entry.oauth_client_id,
         client_id_param_name: entry.client_id_param_name,
+        has_platform_oauth_credentials: entry.has_platform_oauth_credentials,
+        platform_scope_allowlist: entry.platform_scope_allowlist,
         requires_credential: entry.requires_credential,
         openapi_spec_url: entry.openapi_spec_url,
         asyncapi_spec_url: entry.asyncapi_spec_url,
@@ -870,6 +880,8 @@ mod tests {
             extra_auth_params: None,
             oauth_client_id: None,
             client_id_param_name: None,
+            has_platform_oauth_credentials: false,
+            platform_scope_allowlist: None,
             requires_credential: true,
             openapi_spec_url: None,
             asyncapi_spec_url: None,

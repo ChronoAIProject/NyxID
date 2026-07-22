@@ -512,8 +512,11 @@ async fn generic_oauth_callback_impl(
             auth_user.as_ref().map(|u| u.user_id.to_string()),
             "provider_oauth_callback_failed".to_string(),
             Some(serde_json::json!({
-                "error": error,
-                "error_description": &query.error_description,
+                // Provider-controlled strings are normalized, never stored
+                // raw (B6): the code collapses to a known RFC 6749 value and
+                // the description is recorded as presence only.
+                "error": normalized_oauth_error_code(error),
+                "error_description_present": query.error_description.is_some(),
                 "failed_placeholders": failed_placeholders,
                 "state_lookup_error": state_lookup_error,
             })),
@@ -1150,6 +1153,25 @@ fn safe_provider_error_message(error: &str, error_description: Option<&str>) -> 
     safe_error_message(&AppError::BadRequest(message.to_string()))
 }
 
+/// RFC 6749 §4.1.2.1 error codes we recognize from provider callbacks.
+/// Audit rows persist only this normalized code — `error` and
+/// `error_description` are provider-controlled strings and must never be
+/// stored raw (docs/ONE_CLICK_OAUTH_CONNECTORS_SPEC.md B6).
+fn normalized_oauth_error_code(error: &str) -> &'static str {
+    match error {
+        "access_denied" => "access_denied",
+        "invalid_request" => "invalid_request",
+        "unauthorized_client" => "unauthorized_client",
+        "unsupported_response_type" => "unsupported_response_type",
+        "invalid_scope" => "invalid_scope",
+        "server_error" => "server_error",
+        "temporarily_unavailable" => "temporarily_unavailable",
+        "invalid_client" => "invalid_client",
+        "invalid_grant" => "invalid_grant",
+        _ => "unrecognized",
+    }
+}
+
 async fn sync_provider_credentials_to_unified_keys(
     state: &AppState,
     user_id: &str,
@@ -1346,6 +1368,7 @@ mod tests {
     fn test_pending_oauth_api_key(key_id: &str, user_id: &str, provider_id: &str) -> UserApiKey {
         let now = Utc::now();
         UserApiKey {
+            credential_source: None,
             id: key_id.to_string(),
             user_id: user_id.to_string(),
             label: "GitHub OAuth".to_string(),

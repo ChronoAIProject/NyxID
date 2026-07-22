@@ -171,7 +171,24 @@ pub async fn create_api_key(
 
     let now = Utc::now();
 
+    // Durable OAuth-client provenance (fixes the "NyxID managed is advisory
+    // only" gap): BYO creds present -> "byo"; an OAuth/device-code connection
+    // minted without BYO creds is the platform/managed path -> "platform";
+    // everything else (api_key, node-managed, ssh) -> None. Initiation and
+    // reconnect read this to force the correct client and never fall through
+    // "both"-mode precedence to a user's legacy provider-level BYO row.
+    let credential_source: Option<String> = if params.oauth_client_id.is_some() {
+        Some("byo".to_string())
+    } else if matches!(params.credential_type, "oauth2" | "device_code")
+        && params.connection_id.is_some()
+    {
+        Some("platform".to_string())
+    } else {
+        None
+    };
+
     let api_key = UserApiKey {
+        credential_source,
         id: Uuid::new_v4().to_string(),
         user_id: user_id.to_string(),
         label: params.label.to_string(),
@@ -241,6 +258,7 @@ pub async fn create_api_key_from_provider_token(
     let now = Utc::now();
 
     let api_key = UserApiKey {
+        credential_source: None,
         id: Uuid::new_v4().to_string(),
         user_id: user_id.to_string(),
         label: label.to_string(),
@@ -1001,6 +1019,53 @@ fn optional_binary_bson(bytes: Option<&Vec<u8>>) -> bson::Bson {
     }
 }
 
+/// Persist the BYO OAuth client that is about to authorize a
+/// multi-connection add onto the connection's `UserApiKey` row
+/// (docs/ONE_CLICK_OAUTH_CONNECTORS_SPEC.md D1/B3).
+///
+/// Refresh (`refresh_user_api_key_in_place`) and reconnect read client
+/// credentials off the key first, so embedding at initiation pins them to
+/// the client that actually issued the grant — editing the legacy
+/// provider-level BYO row or provisioning a platform app later must not
+/// silently switch the refresh client. The filter only matches a key
+/// without embedded credentials: user-typed Custom App creds on the
+/// connection are never clobbered.
+pub async fn embed_byo_oauth_client_on_connection(
+    db: &mongodb::Database,
+    connection_id: &str,
+    client_id_encrypted: Vec<u8>,
+    client_secret_encrypted: Option<Vec<u8>>,
+) -> AppResult<()> {
+    let result = db
+        .collection::<UserApiKey>(COLLECTION_NAME)
+        .update_one(
+            doc! {
+                "connection_id": connection_id,
+                "user_oauth_client_id_encrypted": bson::Bson::Null,
+            },
+            doc! { "$set": {
+                "user_oauth_client_id_encrypted":
+                    optional_binary_bson(Some(&client_id_encrypted)),
+                "user_oauth_client_secret_encrypted":
+                    optional_binary_bson(client_secret_encrypted.as_ref()),
+                "updated_at": bson::DateTime::from_chrono(Utc::now()),
+            }},
+        )
+        .await?;
+
+    // Fail loudly if the placeholder vanished (deletion/race) or already
+    // carried creds: silently returning Ok would let the later refresh fall
+    // back to the current platform client -- the exact wrong-client bug B3
+    // exists to prevent. The caller aborts initiation rather than mint a
+    // grant whose refresh provenance is not pinned.
+    if result.matched_count == 0 {
+        return Err(AppError::Internal(format!(
+            "BYO credential embed matched no pending connection key (connection_id={connection_id})"
+        )));
+    }
+    Ok(())
+}
+
 fn optional_string_bson(value: Option<&str>) -> bson::Bson {
     match value {
         Some(text) => bson::Bson::String(text.to_string()),
@@ -1219,6 +1284,7 @@ mod tests {
 
     fn sample_key(credential_type: &str) -> UserApiKey {
         UserApiKey {
+            credential_source: None,
             id: "key-1".to_string(),
             user_id: "user-1".to_string(),
             label: "Sample".to_string(),
@@ -1297,6 +1363,7 @@ mod tests {
 
         db.collection::<UserApiKey>(super::COLLECTION_NAME)
             .insert_one(UserApiKey {
+                credential_source: None,
                 id: api_key_id.clone(),
                 user_id: org_id.clone(),
                 label: "Org Codex".to_string(),
@@ -2398,6 +2465,7 @@ mod tests {
 
         db.collection::<UserApiKey>(super::COLLECTION_NAME)
             .insert_one(UserApiKey {
+                credential_source: None,
                 id: key_id.clone(),
                 user_id: user_id.clone(),
                 label: "Multi-conn Codex".to_string(),
@@ -2935,6 +3003,7 @@ mod tests {
 
         db.collection::<UserApiKey>(super::COLLECTION_NAME)
             .insert_one(UserApiKey {
+                credential_source: None,
                 id: key_id.clone(),
                 user_id: uuid::Uuid::new_v4().to_string(),
                 label: "k".to_string(),
@@ -3006,6 +3075,7 @@ mod tests {
 
         db.collection::<UserApiKey>(super::COLLECTION_NAME)
             .insert_one(UserApiKey {
+                credential_source: None,
                 id: key_id.clone(),
                 user_id: uuid::Uuid::new_v4().to_string(),
                 label: "preserve-on-reauth".to_string(),
@@ -3248,6 +3318,7 @@ mod tests {
 
         db.collection::<UserApiKey>(super::COLLECTION_NAME)
             .insert_one(UserApiKey {
+                credential_source: None,
                 id: key_id.clone(),
                 user_id: uuid::Uuid::new_v4().to_string(),
                 label: "revoked codex".to_string(),
@@ -3319,6 +3390,7 @@ mod tests {
         for (key_id, conn_id) in [(&key_a, &conn_a), (&key_b, &conn_b)] {
             db.collection::<UserApiKey>(super::COLLECTION_NAME)
                 .insert_one(UserApiKey {
+                    credential_source: None,
                     id: key_id.clone(),
                     user_id: user_id.clone(),
                     label: format!("Key for {conn_id}"),
@@ -5348,6 +5420,122 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(String::from_utf8(cred_bytes).unwrap(), "user:pass");
+    }
+
+    #[tokio::test]
+    async fn embed_byo_oauth_client_errors_when_no_pending_connection() {
+        // The matched_count guard (B3 fix): embedding onto a connection that
+        // vanished (or already carries creds) must FAIL loudly, not silently
+        // return Ok — otherwise a later refresh would fall back to the platform
+        // client and mint the wrong-client grant.
+        let Some(db) = connect_test_database("user_api_key_embed_guard").await else {
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        // A pending connection key with no embedded creds.
+        let key = super::create_api_key(
+            &db,
+            &enc,
+            &user_id,
+            super::CreateApiKeyParams {
+                label: "k",
+                credential_type: "oauth2",
+                credential: "",
+                access_token: None,
+                refresh_token: None,
+                token_scopes: None,
+                expires_at: None,
+                provider_config_id: Some("prov"),
+                connection_id: Some("conn-1"),
+                oauth_client_id: None,
+                oauth_client_secret: None,
+                status: "pending_auth",
+                source: None,
+                source_id: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Matching connection -> succeeds and embeds.
+        let cid_enc = enc.encrypt(b"byo-id").await.unwrap();
+        super::embed_byo_oauth_client_on_connection(&db, "conn-1", cid_enc, None)
+            .await
+            .expect("embed onto matching pending connection should succeed");
+        let after = db
+            .collection::<super::UserApiKey>(super::COLLECTION_NAME)
+            .find_one(mongodb::bson::doc! { "_id": &key.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(after.user_oauth_client_id_encrypted.is_some());
+
+        // No such connection -> hard error (matched_count == 0).
+        let cid_enc2 = enc.encrypt(b"byo-id").await.unwrap();
+        let err = super::embed_byo_oauth_client_on_connection(&db, "does-not-exist", cid_enc2, None)
+            .await
+            .expect_err("embed onto a missing connection must error");
+        assert!(
+            matches!(err, crate::errors::AppError::Internal(_)),
+            "got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_api_key_stamps_credential_source() {
+        let Some(db) = connect_test_database("user_api_key_cred_source").await else {
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        async fn mk<'a>(
+            db: &mongodb::Database,
+            enc: &crate::crypto::aes::EncryptionKeys,
+            user_id: &str,
+            credential_type: &'a str,
+            connection_id: Option<&'a str>,
+            byo_id: Option<&'a str>,
+            byo_secret: Option<&'a str>,
+        ) -> super::UserApiKey {
+            super::create_api_key(
+                db,
+                enc,
+                user_id,
+                super::CreateApiKeyParams {
+                    label: "k",
+                    credential_type,
+                    credential: "",
+                    access_token: None,
+                    refresh_token: None,
+                    token_scopes: None,
+                    expires_at: None,
+                    provider_config_id: Some("prov"),
+                    connection_id,
+                    oauth_client_id: byo_id,
+                    oauth_client_secret: byo_secret,
+                    status: "pending_auth",
+                    source: None,
+                    source_id: None,
+                },
+            )
+            .await
+            .unwrap()
+        }
+
+        // Managed OAuth connection (connection_id, no BYO) -> "platform".
+        let platform = mk(&db, &enc, &user_id, "oauth2", Some("c1"), None, None).await;
+        assert_eq!(platform.credential_source.as_deref(), Some("platform"));
+
+        // BYO OAuth connection (client creds supplied) -> "byo".
+        let byo = mk(&db, &enc, &user_id, "oauth2", Some("c2"), Some("id"), Some("sec")).await;
+        assert_eq!(byo.credential_source.as_deref(), Some("byo"));
+
+        // Non-OAuth key -> None.
+        let api = mk(&db, &enc, &user_id, "api_key", None, None, None).await;
+        assert_eq!(api.credential_source, None);
     }
 
     #[tokio::test]

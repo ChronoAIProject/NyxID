@@ -2506,6 +2506,7 @@ mod tests {
 
     fn make_blank_api_key() -> UserApiKey {
         UserApiKey {
+            credential_source: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             label: "test".to_string(),

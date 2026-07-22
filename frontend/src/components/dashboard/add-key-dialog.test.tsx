@@ -94,6 +94,12 @@ vi.mock("@/hooks/use-nodes", () => ({
 vi.mock("@/hooks/use-orgs", () => ({
   useOrgs: () => ({ data: [] }),
 }));
+// The BYO credential form (OAuthCredentialsStep) renders
+// OAuthCallbackGuidance, whose useRuntimeConfig would need a real
+// QueryClientProvider. The platform one-click tests reach that form.
+vi.mock("@/hooks/use-runtime-config", () => ({
+  useRuntimeConfig: () => ({ data: undefined, isLoading: false }),
+}));
 
 vi.mock("@tanstack/react-router", () => ({
   useNavigate: () => mockNavigate,
@@ -364,6 +370,151 @@ describe("AddKeyDialog — catalog template path", () => {
     );
     expect(toastFns.success).not.toHaveBeenCalledWith("Key created");
     expect(mockNavigate).not.toHaveBeenCalled();
+  });
+});
+
+describe("AddKeyDialog — platform one-click path (credential_mode=both)", () => {
+  const PLATFORM_OAUTH_ENTRY = {
+    ...OAUTH_ENTRY,
+    credential_mode: "both",
+    has_platform_oauth_credentials: true,
+  } as unknown as CatalogEntry;
+
+  const BYO_ONLY_BOTH_ENTRY = {
+    ...OAUTH_ENTRY,
+    credential_mode: "both",
+    has_platform_oauth_credentials: false,
+  } as unknown as CatalogEntry;
+
+  // Open the routing screen for a platform entry (choice cards live here now).
+  async function gotoRouting(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(screen.getByRole("button", { name: /GitHub/i }));
+    // The OAuth-client choice is merged into the routing screen (Direct
+    // selected by default), with NyxID managed pre-selected.
+    expect(
+      screen.getByRole("radio", { name: /NyxID managed/i }),
+    ).toHaveAttribute("aria-checked", "true");
+  }
+
+  it("shows the OAuth-client choice on the routing screen; managed reaches one-click connect", async () => {
+    catalog.entries = [PLATFORM_OAUTH_ENTRY];
+    const user = userEvent.setup();
+    render(<AddKeyDialog open onOpenChange={vi.fn()} />);
+
+    await gotoRouting(user);
+    // Default (managed) → connect step, no client-ID/secret form.
+    await user.click(screen.getByRole("button", { name: "Next: Connect" }));
+    expect(
+      screen.getByRole("button", { name: /Connect with GitHub/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/Setup GitHub credentials/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("hides the OAuth-client choice and goes to the BYO form when platform credentials are absent", async () => {
+    catalog.entries = [BYO_ONLY_BOTH_ENTRY];
+    const user = userEvent.setup();
+    render(<AddKeyDialog open onOpenChange={vi.fn()} />);
+
+    await user.click(screen.getByRole("button", { name: /GitHub/i }));
+    // No managed option → no choice cards on the routing screen.
+    expect(
+      screen.queryByRole("radio", { name: /NyxID managed/i }),
+    ).not.toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: /Next: Enter Credentials/i }),
+    );
+    expect(screen.getByText(/Setup GitHub credentials/i)).toBeInTheDocument();
+  });
+
+  it("self-managed card opens the BYO form and Back returns to routing", async () => {
+    catalog.entries = [PLATFORM_OAUTH_ENTRY];
+    const user = userEvent.setup();
+    render(<AddKeyDialog open onOpenChange={vi.fn()} />);
+
+    await gotoRouting(user);
+    await user.click(screen.getByRole("radio", { name: /Your own OAuth app/i }));
+    await user.click(
+      screen.getByRole("button", { name: /Next: Enter Credentials/i }),
+    );
+    expect(screen.getByText(/Setup GitHub credentials/i)).toBeInTheDocument();
+
+    // Back returns to the merged routing screen (choice cards visible again).
+    await user.click(screen.getByRole("button", { name: /^Back$/i }));
+    expect(
+      screen.getByRole("radio", { name: /NyxID managed/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("radio", { name: /Your own OAuth app/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("gates non-allowlisted scope pills on the managed path", async () => {
+    catalog.entries = [
+      {
+        ...PLATFORM_OAUTH_ENTRY,
+        default_scopes: ["read:user"],
+        scope_catalog: [
+          { scope: "read:user", label: "Read profile", description: "Read profile." },
+          { scope: "delete_repo", label: "Delete repos", description: "Delete repositories.", sensitive: true },
+        ],
+        platform_scope_allowlist: ["read:user", "user:email"],
+      } as unknown as CatalogEntry,
+    ];
+    const user = userEvent.setup();
+    render(<AddKeyDialog open onOpenChange={vi.fn()} />);
+
+    await gotoRouting(user);
+    await user.click(screen.getByRole("button", { name: "Next: Connect" }));
+
+    // Allowlisted pill selectable; non-allowlisted disabled with the marker —
+    // the user can never select a scope the shared app would reject.
+    expect(screen.getByRole("button", { name: /Read profile/i })).toBeEnabled();
+    const gated = screen.getByRole("button", { name: /Delete repos/i });
+    expect(gated).toBeDisabled();
+    expect(gated).toHaveTextContent(/own app/i);
+  });
+
+  it("requires the client secret when choosing self-managed on a platform-capable entry", async () => {
+    catalog.entries = [PLATFORM_OAUTH_ENTRY];
+    const user = userEvent.setup();
+    render(<AddKeyDialog open onOpenChange={vi.fn()} />);
+
+    await gotoRouting(user);
+    await user.click(screen.getByRole("radio", { name: /Your own OAuth app/i }));
+    await user.click(
+      screen.getByRole("button", { name: /Next: Enter Credentials/i }),
+    );
+
+    // ID alone must not enable Continue — an id-only submit would silently
+    // ride the platform app instead of the user's own.
+    await user.type(screen.getByLabelText(/Client ID/i), "Ov23li-my-own-app");
+    expect(
+      screen.getByRole("button", { name: /Continue to Authentication/i }),
+    ).toBeDisabled();
+    await user.type(screen.getByLabelText(/Client Secret/i), "s3cret");
+    expect(
+      screen.getByRole("button", { name: /Continue to Authentication/i }),
+    ).toBeEnabled();
+  });
+
+  it("Back from the managed connect step returns to the routing screen", async () => {
+    catalog.entries = [PLATFORM_OAUTH_ENTRY];
+    const user = userEvent.setup();
+    render(<AddKeyDialog open onOpenChange={vi.fn()} />);
+
+    await gotoRouting(user);
+    await user.click(screen.getByRole("button", { name: "Next: Connect" }));
+    await user.click(screen.getByRole("button", { name: /^Back$/i }));
+
+    // The merged routing screen, not the BYO form the managed path never showed.
+    expect(
+      screen.getByRole("radio", { name: /NyxID managed/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/Setup GitHub credentials/i),
+    ).not.toBeInTheDocument();
   });
 });
 

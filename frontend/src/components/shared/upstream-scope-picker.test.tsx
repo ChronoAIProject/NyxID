@@ -18,6 +18,7 @@ function Harness({
   lockedScopes,
   grantedScopes,
   providerName,
+  platformAllowlist,
   onChangeSpy,
 }: {
   catalog?: ScopeCatalogEntry[];
@@ -26,6 +27,7 @@ function Harness({
   lockedScopes?: string[];
   grantedScopes?: string[];
   providerName?: string;
+  platformAllowlist?: readonly string[] | null;
   onChangeSpy?: (s: readonly string[]) => void;
 }) {
   const [value, setValue] = useState<readonly string[]>(initial);
@@ -37,6 +39,7 @@ function Harness({
       lockedScopes={lockedScopes}
       grantedScopes={grantedScopes}
       providerName={providerName}
+      platformAllowlist={platformAllowlist}
       onChange={(next) => {
         onChangeSpy?.(next);
         setValue(next);
@@ -235,5 +238,48 @@ describe("UpstreamScopePicker", () => {
     const pill = screen.getByRole("button", { name: /offline_access/i });
     expect(pill).toHaveAttribute("aria-pressed", "true");
     expect(pill).toHaveTextContent(/default/i);
+  });
+
+  // ── Platform-app allowlist gating (one-click connectors) ────────
+
+  it("disables scopes outside the platform allowlist with an own-app marker", () => {
+    render(
+      <Harness
+        platformAllowlist={["tweet.read"]}
+        providerName="Twitter / X"
+      />,
+    );
+    const allowed = screen.getByRole("button", { name: /Read posts/i });
+    const gated = screen.getByRole("button", { name: /Upload media/i });
+    expect(allowed).toBeEnabled();
+    expect(gated).toBeDisabled();
+    expect(gated).toHaveTextContent(/own app/i);
+    // Legend explains the marker + points at the BYO path.
+    expect(
+      screen.getByText(/aren.t offered on NyxID.s shared/i),
+    ).toBeInTheDocument();
+  });
+
+  it("does not gate anything when platformAllowlist is absent (BYO path)", () => {
+    render(<Harness platformAllowlist={null} />);
+    expect(screen.getByRole("button", { name: /Upload media/i })).toBeEnabled();
+    expect(screen.queryByText(/own app/i)).not.toBeInTheDocument();
+  });
+
+  it("rejects custom scopes outside the platform allowlist instead of adding them", async () => {
+    const onChange = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <Harness platformAllowlist={["tweet.read"]} onChangeSpy={onChange} />,
+    );
+    await user.type(
+      screen.getByPlaceholderText(/custom.scope/i),
+      "admin.sneaky",
+    );
+    await user.click(screen.getByRole("button", { name: /^Add$/i }));
+    expect(onChange).not.toHaveBeenCalled();
+    expect(
+      screen.getByText(/not available on NyxID.s shared app/i),
+    ).toBeInTheDocument();
   });
 });

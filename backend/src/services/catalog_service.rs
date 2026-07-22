@@ -64,6 +64,18 @@ pub struct CatalogEntry {
     pub extra_auth_params: Option<HashMap<String, String>>,
     pub oauth_client_id: Option<String>,
     pub client_id_param_name: Option<String>,
+    /// Whether the platform ships OAuth app credentials for this provider
+    /// (client_id + secret ciphertext present for `oauth2`, client_id for
+    /// `device_code`; via `provider_has_admin_oauth_credentials`). Drives the
+    /// one-click connect path for `credential_mode` "both"/"admin". Presence
+    /// of ciphertext only -- not proof the flow works end-to-end.
+    pub has_platform_oauth_credentials: bool,
+    /// Scopes the shared platform OAuth app is permitted to request
+    /// (`scope_catalog::platform_scope_allowlist`). `None` when no platform
+    /// allowlist is curated. The connect UI uses this to disable non-grantable
+    /// scope pills on the platform path (rest route to "use your own app"),
+    /// instead of letting the user select a scope the backend will reject.
+    pub platform_scope_allowlist: Option<Vec<String>>,
     /// Whether this catalog entry needs credential setup instead of direct no-auth access.
     pub requires_credential: bool,
     // --- Rich metadata for AI agent discovery ---
@@ -100,6 +112,7 @@ fn build_catalog_entry(
     provider: Option<&ProviderConfig>,
     spr: Option<&ServiceProviderRequirement>,
     oauth_client_id: Option<String>,
+    platform_secret_present: bool,
 ) -> CatalogEntry {
     // A service requires a credential if:
     // 1. It requires per-user credentials (connection services), OR
@@ -107,6 +120,7 @@ fn build_catalog_entry(
     // 3. It has auth_method "none" but an SPR exists (uses master credentials)
     let requires_credential =
         svc.requires_user_credential || svc.auth_method != "none" || spr.is_some();
+    let platform_client_id_present = oauth_client_id.is_some();
     CatalogEntry {
         service_type: svc.service_type.clone(),
         ssh_host: svc.ssh_config.as_ref().map(|c| c.host.clone()),
@@ -162,6 +176,25 @@ fn build_catalog_entry(
         extra_auth_params: provider.and_then(|p| p.extra_auth_params.clone()),
         oauth_client_id,
         client_id_param_name: provider.and_then(|p| p.client_id_param_name.clone()),
+        has_platform_oauth_credentials: provider.is_some_and(|p| {
+            crate::services::user_credentials_service::provider_has_admin_oauth_credentials(p)
+                // Belt-and-braces on top of the write-path validation (which
+                // rejects empty credentials): a legacy oauth2 row whose stored
+                // client_id decrypts to empty must not advertise one-click.
+                // `oauth_client_id` is the already-decrypted value for
+                // admin/both modes and maps empty -> None; `user` mode never
+                // decrypts it, but never shows the managed card either.
+                // oauth2 requires BOTH a non-empty client_id (decrypted here)
+                // AND a non-empty client_secret; device_code needs only the
+                // client_id (public client). `user` mode never shows the card.
+                && (p.provider_type != "oauth2"
+                    || p.credential_mode == "user"
+                    || (platform_client_id_present && platform_secret_present))
+        }),
+        platform_scope_allowlist: provider.and_then(|p| {
+            crate::services::scope_catalog::platform_scope_allowlist(&p.slug)
+                .map(|scopes| scopes.iter().map(|s| (*s).to_string()).collect())
+        }),
         requires_credential,
         openapi_spec_url: svc.openapi_spec_url,
         asyncapi_spec_url: svc.asyncapi_spec_url,
@@ -191,11 +224,31 @@ async fn decrypt_provider_client_id(
     let decrypted = encryption_keys.decrypt(encrypted).await?;
     let client_id = String::from_utf8(decrypted)
         .map_err(|_| AppError::Internal("Failed to decode provider client_id".to_string()))?;
-    if client_id.is_empty() {
+    // Whitespace-only counts as absent so a malformed legacy row never
+    // advertises a one-click app or builds a broken authorize URL.
+    if client_id.trim().is_empty() {
         Ok(None)
     } else {
         Ok(Some(client_id))
     }
+}
+
+/// Whether the provider's stored platform client_secret decrypts to a
+/// non-empty (trimmed) value. Complements `decrypt_provider_client_id`: a
+/// pre-B5 legacy row could hold a real client_id but an encrypted empty
+/// secret, which would break token exchange -- so the managed-card gate must
+/// require BOTH to be genuinely present, not merely ciphertext-present.
+async fn provider_platform_secret_nonempty(
+    provider: &ProviderConfig,
+    encryption_keys: &EncryptionKeys,
+) -> AppResult<bool> {
+    let Some(encrypted) = provider.client_secret_encrypted.as_ref() else {
+        return Ok(false);
+    };
+    let decrypted = encryption_keys.decrypt(encrypted).await?;
+    let secret = String::from_utf8(decrypted)
+        .map_err(|_| AppError::Internal("Failed to decode provider client_secret".to_string()))?;
+    Ok(!secret.trim().is_empty())
 }
 
 /// MongoDB filter for visibility that hides private services from non-owners.
@@ -331,8 +384,23 @@ async fn list_catalog_filtered(
             }
             _ => None,
         };
+        // Platform client_secret must also decrypt to non-empty for oauth2
+        // before the managed card is offered (P1-3). device_code public
+        // clients have no secret, so only client_id gates them.
+        let platform_secret_present = match provider {
+            Some(p) if p.credential_mode != "user" && p.provider_type == "oauth2" => {
+                provider_platform_secret_nonempty(p, encryption_keys).await?
+            }
+            _ => false,
+        };
 
-        resolved_entries.push(build_catalog_entry(svc, provider, spr, oauth_client_id));
+        resolved_entries.push(build_catalog_entry(
+            svc,
+            provider,
+            spr,
+            oauth_client_id,
+            platform_secret_present,
+        ));
     }
 
     Ok(resolved_entries)
@@ -502,12 +570,19 @@ pub async fn get_catalog_entry(
         }
         _ => None,
     };
+    let platform_secret_present = match provider.as_ref() {
+        Some(p) if p.credential_mode != "user" && p.provider_type == "oauth2" => {
+            provider_platform_secret_nonempty(p, encryption_keys).await?
+        }
+        _ => false,
+    };
 
     Ok(build_catalog_entry(
         svc,
         provider.as_ref(),
         spr.as_ref(),
         oauth_client_id,
+        platform_secret_present,
     ))
 }
 

@@ -47,6 +47,20 @@ pub struct UserApiKey {
     #[serde(default, with = "crate::models::bson_bytes::optional")]
     pub user_oauth_client_secret_encrypted: Option<Vec<u8>>,
 
+    /// Which OAuth client authorizes this connection, set at creation and
+    /// authoritative for initiation/reconnect/refresh:
+    /// - `"platform"` -- NyxID's shared OAuth app; resolution MUST use the
+    ///   provider's current (centrally-rotatable) credentials and MUST NOT
+    ///   fall through to the user's own BYO credentials.
+    /// - `"byo"` -- the user's own OAuth app; creds are embedded on this row.
+    /// - `None` -- legacy/pre-feature row; resolution keeps the historical
+    ///   `credential_mode`-based precedence.
+    /// This makes the managed-vs-BYO choice durable so a user with legacy
+    /// provider-level BYO credentials who picked "NyxID managed" is not
+    /// silently routed through their own app (and reconnect can't flip it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_source: Option<String>,
+
     /// "active" | "expired" | "revoked" | "failed" | "refresh_failed" | "pending_auth"
     pub status: String,
     #[serde(default, with = "bson_datetime::optional")]
@@ -88,6 +102,7 @@ mod tests {
     #[test]
     fn bson_roundtrip_api_key() {
         let key = UserApiKey {
+            credential_source: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             label: "Production Key".to_string(),
@@ -122,6 +137,7 @@ mod tests {
     fn bson_roundtrip_oauth2() {
         let conn_id = uuid::Uuid::new_v4().to_string();
         let key = UserApiKey {
+            credential_source: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             label: "GitHub OAuth".to_string(),
