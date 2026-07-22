@@ -148,6 +148,10 @@ export function AssistantPage({
               active &&
               history.data?.messages.at(-1)?.role !== "assistant"
             }
+            streaming={
+              active &&
+              history.data?.messages.at(-1)?.role === "assistant"
+            }
             onDecideApproval={(blockId, approved) =>
               decideApproval.mutateAsync({ blockId, approved })
             }
