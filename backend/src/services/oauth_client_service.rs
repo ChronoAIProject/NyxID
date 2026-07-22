@@ -44,7 +44,8 @@ pub const DEFAULT_ALLOWED_SCOPES: &str = "openid profile email";
 /// etc.) that request RBAC claims pass scope validation. Token issuance is
 /// still gated by what the client requests at `/oauth/authorize` and what the
 /// user consents to.
-pub const DEFAULT_MCP_ALLOWED_SCOPES: &str = "openid profile email roles groups proxy";
+pub const DEFAULT_MCP_ALLOWED_SCOPES: &str =
+    "openid profile email roles groups proxy offline_access";
 
 pub const ADMIN_CLIENT_TYPE_FILTERS: &[&str] = &["public", "confidential", "other"];
 pub const ADMIN_CREATOR_TYPE_FILTERS: &[&str] =
@@ -229,6 +230,7 @@ pub async fn seed_default_clients(db: &mongodb::Database) -> AppResult<()> {
         client_secret_hash: "NONE".to_string(),
         redirect_uris: vec![],
         allowed_scopes: DEFAULT_MCP_ALLOWED_SCOPES.to_string(),
+        scope_provenance: crate::models::oauth_client::ScopeProvenance::Defaulted,
         grant_types: "authorization_code".to_string(),
         client_type: "public".to_string(),
         is_active: true,
@@ -339,6 +341,7 @@ pub async fn create_client(
     created_by: &str,
     delegation_scopes: &str,
     allowed_scopes: &str,
+    scope_provenance: crate::models::oauth_client::ScopeProvenance,
     broker_capability_enabled: bool,
     revocation_webhook_url: Option<&str>,
     revocation_webhook_secret_encrypted: Option<Vec<u8>>,
@@ -361,6 +364,7 @@ pub async fn create_client(
         client_secret_hash: secret_hash,
         redirect_uris: redirect_uris.to_vec(),
         allowed_scopes: allowed_scopes.to_string(),
+        scope_provenance,
         grant_types: "authorization_code".to_string(),
         client_type: client_type.to_string(),
         is_active: true,
@@ -2236,6 +2240,80 @@ mod tests {
     }
 
     #[test]
+    fn default_mcp_scopes_include_offline_access() {
+        assert!(
+            DEFAULT_MCP_ALLOWED_SCOPES
+                .split_whitespace()
+                .any(|s| s == OFFLINE_ACCESS_SCOPE),
+            "NyxID#1222: defaulted MCP clients need offline_access for refresh tokens"
+        );
+    }
+
+    #[test]
+    fn discovery_scopes_are_subset_of_known_scopes() {
+        // Supported/registered coherence (NyxID#1222): everything discovery
+        // advertises must be a scope validation accepts, so the layers can
+        // never silently diverge again.
+        for scope in crate::handlers::oidc_discovery::OPENID_CONFIGURATION_SCOPES_SUPPORTED {
+            assert!(
+                KNOWN_OIDC_SCOPES.contains(scope),
+                "discovery advertises unknown scope: {scope}"
+            );
+        }
+        for scope in crate::handlers::oidc_discovery::OAUTH_AUTHORIZATION_SERVER_SCOPES_SUPPORTED {
+            assert!(
+                KNOWN_OIDC_SCOPES.contains(scope),
+                "discovery advertises unknown scope: {scope}"
+            );
+        }
+        for scope in DEFAULT_MCP_ALLOWED_SCOPES.split_whitespace() {
+            assert!(
+                KNOWN_OIDC_SCOPES.contains(&scope),
+                "MCP default contains unknown scope: {scope}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_client_rows_deserialize_as_unknown_legacy_with_scopes_untouched() {
+        use crate::test_utils::connect_test_database;
+        // NyxID#1222: rows that predate provenance tracking must come back
+        // as UnknownLegacy with allowed_scopes byte-identical — proving the
+        // schema change alone never widens or rewrites legacy rows.
+        let Some(db) = connect_test_database("oauth_legacy_provenance").await else {
+            return;
+        };
+        let raw = bson::doc! {
+            "_id": "legacy-provenance-client",
+            "client_name": "Legacy",
+            "client_secret_hash": "NONE",
+            "redirect_uris": ["http://localhost/cb"],
+            "allowed_scopes": "openid email",
+            "grant_types": "authorization_code",
+            "client_type": "public",
+            "is_active": true,
+            "created_at": bson::DateTime::now(),
+            "updated_at": bson::DateTime::now(),
+        };
+        db.collection::<bson::Document>(OAUTH_CLIENTS)
+            .insert_one(raw)
+            .await
+            .expect("insert raw legacy row");
+
+        let client = db
+            .collection::<OauthClient>(OAUTH_CLIENTS)
+            .find_one(bson::doc! { "_id": "legacy-provenance-client" })
+            .await
+            .expect("query")
+            .expect("row exists");
+        assert_eq!(
+            client.scope_provenance,
+            crate::models::oauth_client::ScopeProvenance::UnknownLegacy
+        );
+        assert_eq!(client.allowed_scopes, "openid email");
+    }
+
+    #[test]
     fn merge_returns_none_when_defaults_already_present() {
         let merged = merge_missing_default_mcp_scopes(DEFAULT_MCP_ALLOWED_SCOPES).unwrap();
         assert!(merged.is_none(), "no-op when nothing is missing");
@@ -2310,6 +2388,7 @@ mod tests {
                 client_secret_hash: "NONE".to_string(),
                 redirect_uris: vec![],
                 allowed_scopes: allowed_scopes.to_string(),
+                scope_provenance: Default::default(),
                 grant_types: "authorization_code".to_string(),
                 client_type: "public".to_string(),
                 is_active,
@@ -2376,6 +2455,7 @@ mod tests {
                 client_secret_hash: "NONE".to_string(),
                 redirect_uris: vec![],
                 allowed_scopes: allowed_scopes.to_string(),
+                scope_provenance: Default::default(),
                 grant_types: "authorization_code".to_string(),
                 client_type: "public".to_string(),
                 is_active: true,
@@ -2901,6 +2981,7 @@ mod tests {
                     client_secret_hash: "NONE".to_string(),
                     redirect_uris: vec!["http://localhost:3000/callback".to_string()],
                     allowed_scopes: DEFAULT_ALLOWED_SCOPES.to_string(),
+                    scope_provenance: Default::default(),
                     grant_types: "authorization_code".to_string(),
                     client_type: "public".to_string(),
                     is_active: true,
@@ -3151,6 +3232,7 @@ mod tests {
                     client_secret_hash: "NONE".to_string(),
                     redirect_uris: vec![],
                     allowed_scopes: "openid profile email proxy".to_string(),
+                    scope_provenance: Default::default(),
                     grant_types: "authorization_code".to_string(),
                     client_type: "public".to_string(),
                     is_active: true,
