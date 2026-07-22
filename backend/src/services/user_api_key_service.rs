@@ -5474,9 +5474,10 @@ mod tests {
 
         // No such connection -> hard error (matched_count == 0).
         let cid_enc2 = enc.encrypt(b"byo-id").await.unwrap();
-        let err = super::embed_byo_oauth_client_on_connection(&db, "does-not-exist", cid_enc2, None)
-            .await
-            .expect_err("embed onto a missing connection must error");
+        let err =
+            super::embed_byo_oauth_client_on_connection(&db, "does-not-exist", cid_enc2, None)
+                .await
+                .expect_err("embed onto a missing connection must error");
         assert!(
             matches!(err, crate::errors::AppError::Internal(_)),
             "got {err:?}"
@@ -5530,7 +5531,16 @@ mod tests {
         assert_eq!(platform.credential_source.as_deref(), Some("platform"));
 
         // BYO OAuth connection (client creds supplied) -> "byo".
-        let byo = mk(&db, &enc, &user_id, "oauth2", Some("c2"), Some("id"), Some("sec")).await;
+        let byo = mk(
+            &db,
+            &enc,
+            &user_id,
+            "oauth2",
+            Some("c2"),
+            Some("id"),
+            Some("sec"),
+        )
+        .await;
         assert_eq!(byo.credential_source.as_deref(), Some("byo"));
 
         // Non-OAuth key -> None.

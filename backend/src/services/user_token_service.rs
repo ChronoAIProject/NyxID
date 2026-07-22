@@ -3595,7 +3595,10 @@ mod tests {
         // legacy provider-level BYO credential row -> resolve_oauth_credentials
         // must prefer the BYO client, and initiation must pin it onto the key.
         let provider_id = Uuid::new_v4().to_string();
-        let plat_cid = encryption_keys.encrypt(b"platform-client-id").await.unwrap();
+        let plat_cid = encryption_keys
+            .encrypt(b"platform-client-id")
+            .await
+            .unwrap();
         let plat_sec = encryption_keys.encrypt(b"platform-secret").await.unwrap();
         let mut provider = make_test_provider(
             &provider_id,
@@ -3616,21 +3619,26 @@ mod tests {
         let connection_id = key.connection_id.clone().unwrap();
 
         // Legacy user-level BYO credential for (user, provider).
-        let byo_cid = encryption_keys.encrypt(b"user-byo-client-id").await.unwrap();
+        let byo_cid = encryption_keys
+            .encrypt(b"user-byo-client-id")
+            .await
+            .unwrap();
         let byo_sec = encryption_keys.encrypt(b"user-byo-secret").await.unwrap();
         db.collection::<crate::models::user_provider_credentials::UserProviderCredentials>(
             crate::models::user_provider_credentials::COLLECTION_NAME,
         )
-        .insert_one(&crate::models::user_provider_credentials::UserProviderCredentials {
-            id: Uuid::new_v4().to_string(),
-            user_id: user_id.clone(),
-            provider_config_id: provider_id.clone(),
-            client_id_encrypted: Some(byo_cid),
-            client_secret_encrypted: Some(byo_sec),
-            label: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        })
+        .insert_one(
+            &crate::models::user_provider_credentials::UserProviderCredentials {
+                id: Uuid::new_v4().to_string(),
+                user_id: user_id.clone(),
+                provider_config_id: provider_id.clone(),
+                client_id_encrypted: Some(byo_cid),
+                client_secret_encrypted: Some(byo_sec),
+                label: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            },
+        )
         .await
         .unwrap();
 
@@ -3664,10 +3672,18 @@ mod tests {
             .unwrap()
             .unwrap();
         let embedded_cid = encryption_keys
-            .decrypt(updated.user_oauth_client_id_encrypted.as_ref().expect("embedded"))
+            .decrypt(
+                updated
+                    .user_oauth_client_id_encrypted
+                    .as_ref()
+                    .expect("embedded"),
+            )
             .await
             .unwrap();
-        assert_eq!(String::from_utf8(embedded_cid).unwrap(), "user-byo-client-id");
+        assert_eq!(
+            String::from_utf8(embedded_cid).unwrap(),
+            "user-byo-client-id"
+        );
     }
 
     #[tokio::test]
@@ -3683,7 +3699,10 @@ mod tests {
         let encryption_keys = test_encryption_keys();
 
         let provider_id = Uuid::new_v4().to_string();
-        let plat_cid = encryption_keys.encrypt(b"platform-client-id").await.unwrap();
+        let plat_cid = encryption_keys
+            .encrypt(b"platform-client-id")
+            .await
+            .unwrap();
         let plat_sec = encryption_keys.encrypt(b"platform-secret").await.unwrap();
         let mut provider = make_test_provider(
             &provider_id,
@@ -3711,21 +3730,26 @@ mod tests {
 
         // The user ALSO has a legacy provider-level BYO row — "both" precedence
         // would pick this if the pin were not honored.
-        let byo_cid = encryption_keys.encrypt(b"legacy-byo-client-id").await.unwrap();
+        let byo_cid = encryption_keys
+            .encrypt(b"legacy-byo-client-id")
+            .await
+            .unwrap();
         let byo_sec = encryption_keys.encrypt(b"legacy-byo-secret").await.unwrap();
         db.collection::<crate::models::user_provider_credentials::UserProviderCredentials>(
             crate::models::user_provider_credentials::COLLECTION_NAME,
         )
-        .insert_one(&crate::models::user_provider_credentials::UserProviderCredentials {
-            id: Uuid::new_v4().to_string(),
-            user_id: key.user_id.clone(),
-            provider_config_id: provider_id.clone(),
-            client_id_encrypted: Some(byo_cid),
-            client_secret_encrypted: Some(byo_sec),
-            label: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        })
+        .insert_one(
+            &crate::models::user_provider_credentials::UserProviderCredentials {
+                id: Uuid::new_v4().to_string(),
+                user_id: key.user_id.clone(),
+                provider_config_id: provider_id.clone(),
+                client_id_encrypted: Some(byo_cid),
+                client_secret_encrypted: Some(byo_sec),
+                label: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            },
+        )
         .await
         .unwrap();
 
@@ -3783,7 +3807,10 @@ mod tests {
         // Provider now has a platform app (ops provisioned it after the user
         // connected with their own).
         let provider_id = Uuid::new_v4().to_string();
-        let plat_cid = encryption_keys.encrypt(b"platform-client-id").await.unwrap();
+        let plat_cid = encryption_keys
+            .encrypt(b"platform-client-id")
+            .await
+            .unwrap();
         let plat_sec = encryption_keys.encrypt(b"platform-secret").await.unwrap();
         let mut provider = make_test_provider(
             &provider_id,

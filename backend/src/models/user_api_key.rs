@@ -55,6 +55,7 @@ pub struct UserApiKey {
     /// - `"byo"` -- the user's own OAuth app; creds are embedded on this row.
     /// - `None` -- legacy/pre-feature row; resolution keeps the historical
     ///   `credential_mode`-based precedence.
+    ///
     /// This makes the managed-vs-BYO choice durable so a user with legacy
     /// provider-level BYO credentials who picked "NyxID managed" is not
     /// silently routed through their own app (and reconnect can't flip it).

@@ -1121,7 +1121,10 @@ mod tests {
             "https://www.googleapis.com/auth/gmail.readonly",
             "https://www.googleapis.com/auth/spreadsheets",
         ] {
-            assert!(!google.contains(&s), "google allowlist must not include {s}");
+            assert!(
+                !google.contains(&s),
+                "google allowlist must not include {s}"
+            );
         }
     }
 
