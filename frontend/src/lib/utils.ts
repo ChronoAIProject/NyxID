@@ -30,6 +30,23 @@ export function formatDateTime(dateStr: string | null | undefined): string {
   }).format(date);
 }
 
+/**
+ * Wall-clock time (`HH:MM`, 24-hour) for a single message. Used by the chat
+ * thread to stamp each turn. Returns "" for missing/invalid input so callers
+ * can omit the element entirely. Live-streamed messages carry a client-clock
+ * `created_at`; reloaded history carries the backend timestamp.
+ */
+export function formatClockTime(dateStr: string | null | undefined): string {
+  if (!dateStr) return "";
+  const date = new Date(dateStr);
+  if (Number.isNaN(date.getTime())) return "";
+  return new Intl.DateTimeFormat("en-US", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(date);
+}
+
 export function formatRelativeTime(dateStr: string | null | undefined): string {
   if (!dateStr) return "N/A";
   const date = new Date(dateStr);
