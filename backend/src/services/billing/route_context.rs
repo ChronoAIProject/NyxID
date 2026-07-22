@@ -1,6 +1,8 @@
 use crate::models::service_billing::{BillingMetric, ResaleSpec, ServiceBilling};
 use crate::models::usage_meter::CredentialClass;
 
+use super::route_inventory::BillingIngress;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NodeIntent {
     Direct,
@@ -10,6 +12,7 @@ pub enum NodeIntent {
 
 #[derive(Clone, Debug)]
 pub struct BillingRouteContext {
+    pub ingress: BillingIngress,
     pub billing_request_id: String,
     pub billing_owner_id: String,
     pub actor_user_id: String,
@@ -29,6 +32,7 @@ pub struct BillingRouteContext {
 impl BillingRouteContext {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
+        ingress: BillingIngress,
         billing_request_id: String,
         billing_owner_id: String,
         actor_user_id: String,
@@ -52,6 +56,7 @@ impl BillingRouteContext {
             .flatten();
 
         Self {
+            ingress,
             billing_request_id,
             billing_owner_id,
             actor_user_id,
@@ -93,6 +98,7 @@ mod tests {
     use crate::models::service_billing::{BillingMetric, ServiceBilling};
     use crate::models::usage_meter::CredentialClass;
     use crate::services::billing::route_context::{BillingRouteContext, NodeIntent};
+    use crate::services::billing::route_inventory::BillingIngress;
 
     fn context_for(credential_class: CredentialClass) -> BillingRouteContext {
         let billing = ServiceBilling {
@@ -101,6 +107,7 @@ mod tests {
             lago_resale_metric_code: Some("resale_tokens".to_string()),
         };
         BillingRouteContext::new(
+            BillingIngress::Proxy,
             "request-1".to_string(),
             "owner-1".to_string(),
             "actor-1".to_string(),
@@ -142,6 +149,7 @@ mod tests {
             lago_resale_metric_code: Some("resale_tokens".to_string()),
         };
         let ctx = BillingRouteContext::new(
+            BillingIngress::Proxy,
             "request-1".to_string(),
             "owner-1".to_string(),
             "actor-1".to_string(),

@@ -1,7 +1,7 @@
 use std::convert::Infallible;
 use std::time::Duration;
 
-use axum::extract::State;
+use axum::extract::{Extension, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -654,12 +654,27 @@ fn send_tools_list_changed(state: &AppState, session_id: &str) {
 // POST /mcp -- JSON-RPC request handler
 // ---------------------------------------------------------------------------
 
-pub async fn mcp_post(State(state): State<AppState>, headers: HeaderMap, body: String) -> Response {
+pub async fn mcp_post(
+    State(state): State<AppState>,
+    Extension(billing_route_policy): Extension<
+        crate::services::billing::route_inventory::BillingRoutePolicy,
+    >,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
     // Manual JSON parse for proper JSON-RPC error on malformed input
     let request: JsonRpcRequest = match serde_json::from_str(&body) {
         Ok(r) => r,
         Err(_) => return rpc_error(None, -32700, "Parse error"),
     };
+    let billing_egress_permit =
+        match crate::services::billing::route_inventory::enforce_billing_egress_classification(
+            Some(billing_route_policy),
+            crate::services::billing::BillingIngress::Mcp,
+        ) {
+            Ok(permit) => permit,
+            Err(error) => return app_error_to_rpc(request.id.clone(), &error),
+        };
 
     // `initialize` requires a valid JWT or API key (no session exists yet).
     // All other methods allow session-based auth fallback.
@@ -724,7 +739,15 @@ pub async fn mcp_post(State(state): State<AppState>, headers: HeaderMap, body: S
                 Err(r) => return r,
             };
             let sse_capable = accepts_sse(&headers);
-            handle_tools_call(&state, &auth, sid.as_deref(), &request, sse_capable).await
+            handle_tools_call(
+                &state,
+                &auth,
+                sid.as_deref(),
+                &request,
+                sse_capable,
+                billing_egress_permit,
+            )
+            .await
         }
 
         "ping" => rpc_success(request.id, serde_json::json!({})),
@@ -1110,6 +1133,7 @@ async fn handle_tools_call(
     session_id: Option<&str>,
     request: &JsonRpcRequest,
     client_accepts_sse: bool,
+    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> Response {
     let params = match &request.params {
         Some(p) => p,
@@ -1162,6 +1186,7 @@ async fn handle_tools_call(
                 &arguments,
                 request.id.clone(),
                 client_accepts_sse,
+                billing_egress_permit,
             )
             .await;
         }
@@ -1175,7 +1200,14 @@ async fn handle_tools_call(
                 );
             }
             if tool_name == "nyx__ssh_exec" {
-                return handle_mcp_ssh_exec(state, auth, &arguments, request.id.clone()).await;
+                return handle_mcp_ssh_exec(
+                    state,
+                    auth,
+                    &arguments,
+                    request.id.clone(),
+                    billing_egress_permit,
+                )
+                .await;
             }
             return handle_mcp_ssh_list(state, auth, request.id.clone()).await;
         }
@@ -1296,6 +1328,7 @@ async fn handle_tools_call(
         &state.token_exchange_cache,
         &state.cloud_response_cache,
         &exec_ctx,
+        billing_egress_permit,
     )
     .await
     {
@@ -1521,6 +1554,7 @@ async fn handle_meta_call_tool(
     arguments: &serde_json::Value,
     request_id: Option<serde_json::Value>,
     client_accepts_sse: bool,
+    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> Response {
     let tool_name = match arguments.get("tool_name").and_then(|n| n.as_str()) {
         Some(n) if !n.is_empty() => n,
@@ -1650,6 +1684,7 @@ async fn handle_meta_call_tool(
         &state.token_exchange_cache,
         &state.cloud_response_cache,
         &exec_ctx,
+        billing_egress_permit,
     )
     .await
     {
@@ -2254,6 +2289,7 @@ async fn handle_mcp_ssh_exec(
     auth: &McpAuthContext,
     arguments: &serde_json::Value,
     request_id: Option<serde_json::Value>,
+    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> Response {
     let service_ref = match arguments.get("service").and_then(|s| s.as_str()) {
         Some(s) if !s.is_empty() => s,
@@ -2375,7 +2411,15 @@ async fn handle_mcp_ssh_exec(
     };
 
     // Reuse the core logic from the ssh_exec module
-    let result = execute_ssh_command_internal(state, auth, &service_id, &ssh_svc, &body).await;
+    let result = execute_ssh_command_internal(
+        state,
+        auth,
+        &service_id,
+        &ssh_svc,
+        &body,
+        billing_egress_permit,
+    )
+    .await;
 
     match result {
         Ok(response) => {
@@ -2543,8 +2587,11 @@ async fn execute_ssh_command_internal(
     service_id: &str,
     ssh_svc: &crate::models::downstream_service::SshServiceConfig,
     body: &super::ssh_exec::SshExecRequest,
+    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> Result<super::ssh_exec::SshExecResponse, crate::errors::AppError> {
     use crate::errors::AppError;
+    use crate::models::service_billing::{BillingMetric, PlatformUsage};
+    use crate::models::usage_meter::CredentialClass;
     use crate::services::{node_routing_service, node_service};
 
     let user_id = auth.user_id.as_str();
@@ -2583,6 +2630,39 @@ async fn execute_ssh_command_internal(
                 .to_string(),
         )
     })?;
+
+    let user_service =
+        user_service_service::find_by_catalog_service_id(&state.db, user_id, service_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound("SSH service not found".to_string()))?;
+    let billing_owner = state
+        .billing
+        .owner_resolver()
+        .resolve_for_resource(auth.billing_principal_user_id(), &user_service.user_id)
+        .await?;
+    let node_intent = if node_route.fallback_node_ids.is_empty() {
+        crate::services::billing::NodeIntent::Node
+    } else {
+        crate::services::billing::NodeIntent::NodeWithFallback
+    };
+    let billing_ctx = crate::services::billing::BillingRouteContext::new(
+        crate::services::billing::BillingIngress::Mcp,
+        uuid::Uuid::new_v4().to_string(),
+        billing_owner.owner_id,
+        user_id.to_string(),
+        auth.api_key_id.clone(),
+        Some(user_service.id),
+        Some(service_id.to_string()),
+        Some(user_service.slug),
+        node_intent,
+        "ssh".to_string(),
+        CredentialClass::NodeManaged,
+        BillingMetric::Requests,
+        None,
+        false,
+    );
+    let metered = state.billing.open(&billing_ctx).await?;
+    let request_len = command.len() as i64;
 
     // Session limiting
     let session_guard = state.ssh_session_manager.try_acquire(user_id)?;
@@ -2626,6 +2706,7 @@ async fn execute_ssh_command_internal(
             None
         };
 
+        state.billing.mark_forwarded(&metered).await?;
         match state
             .node_ws_manager
             .exec_ssh_command(
@@ -2641,10 +2722,22 @@ async fn execute_ssh_command_internal(
                     timeout_secs,
                 },
                 signing_secret.as_ref().map(|s| s.as_slice()),
+                billing_egress_permit,
             )
             .await
         {
             Ok(result) => {
+                state
+                    .billing
+                    .settle(
+                        &metered,
+                        PlatformUsage::single_request(
+                            request_len + result.stdout.len() as i64 + result.stderr.len() as i64,
+                        ),
+                        None,
+                        None,
+                    )
+                    .await?;
                 let _ = &session_guard;
                 drop(session_guard);
 

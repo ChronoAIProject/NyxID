@@ -15,6 +15,334 @@ use crate::mw::auth::{
     reject_service_account_tokens,
 };
 
+macro_rules! register_billing_routes {
+    ($router:expr; $(($path:literal, $public_path:literal, $handler:literal, $method_router:expr, $policy:expr)),+ $(,)?) => {
+        $router$(.route($path, $method_router.layer(axum::Extension($policy))))+
+    };
+}
+
+#[cfg(test)]
+macro_rules! collect_billing_route_specs {
+    ($router:expr; $(($path:literal, $public_path:literal, $handler:literal, $method_router:expr, $policy:expr)),+ $(,)?) => {{
+        let _ = $router;
+        vec![$(
+            crate::services::billing::route_inventory::BillingRouteSpec {
+                handler: $handler,
+                route: $public_path,
+                policy: $policy,
+            }
+        ),+]
+    }};
+}
+
+macro_rules! llm_billing_routes {
+    ($apply:ident, $router:expr) => {
+        $apply!($router;
+            (
+                "/gateway/v1/{*path}",
+                "/api/v1/llm/gateway/v1/{*path}",
+                "handlers::llm_gateway::gateway_request",
+                axum::routing::any(handlers::llm_gateway::gateway_request),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::LlmGateway
+                )
+            ),
+            (
+                "/{provider_slug}/v1/{*path}",
+                "/api/v1/llm/{provider_slug}/v1/{*path}",
+                "handlers::llm_gateway::llm_proxy_request",
+                axum::routing::any(handlers::llm_gateway::llm_proxy_request),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::LlmProvider
+                )
+            ),
+            (
+                "/status",
+                "/api/v1/llm/status",
+                "handlers::llm_gateway::llm_status",
+                get(handlers::llm_gateway::llm_status),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Exempt(
+                    "control-plane discovery; no downstream request"
+                )
+            ),
+        )
+    };
+}
+
+macro_rules! proxy_billing_routes {
+    ($apply:ident, $router:expr) => {
+        $apply!($router;
+            (
+                "/proxy/s/{slug}/{*path}",
+                "/api/v1/proxy/s/{slug}/{*path}",
+                "handlers::proxy::proxy_request_by_slug",
+                axum::routing::any(handlers::proxy::proxy_request_by_slug),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Proxy
+                )
+            ),
+            (
+                "/proxy/s/{slug}",
+                "/api/v1/proxy/s/{slug}",
+                "handlers::proxy::proxy_request_by_slug_root",
+                axum::routing::any(handlers::proxy::proxy_request_by_slug_root),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Proxy
+                )
+            ),
+            (
+                "/proxy/{service_id}/{*path}",
+                "/api/v1/proxy/{service_id}/{*path}",
+                "handlers::proxy::proxy_request",
+                axum::routing::any(handlers::proxy::proxy_request),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Proxy
+                )
+            ),
+            (
+                "/proxy/{service_id}",
+                "/api/v1/proxy/{service_id}",
+                "handlers::proxy::proxy_request_root",
+                axum::routing::any(handlers::proxy::proxy_request_root),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Proxy
+                )
+            ),
+            (
+                "/proxy/services",
+                "/api/v1/proxy/services",
+                "handlers::proxy::list_proxy_services",
+                get(handlers::proxy::list_proxy_services),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Exempt(
+                    "control-plane discovery; no downstream request"
+                )
+            ),
+        )
+    };
+}
+
+macro_rules! ssh_billing_routes {
+    ($apply:ident, $router:expr) => {
+        $apply!($router;
+            (
+                "/ssh/{service_id}/exec",
+                "/api/v1/ssh/{service_id}/exec",
+                "handlers::ssh_exec::ssh_exec",
+                post(handlers::ssh_exec::ssh_exec),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::SshExec
+                )
+            ),
+            (
+                "/ssh/{service_id}",
+                "/api/v1/ssh/{service_id}",
+                "handlers::ssh_tunnel::ssh_tunnel_ws",
+                get(handlers::ssh_tunnel::ssh_tunnel_ws),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::SshTunnel
+                )
+            ),
+            (
+                "/ssh/{service_id}/terminal",
+                "/api/v1/ssh/{service_id}/terminal",
+                "handlers::ssh_web_terminal::ssh_web_terminal",
+                get(handlers::ssh_web_terminal::ssh_web_terminal),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::SshWebTerminal
+                )
+            ),
+            (
+                "/ssh/{service_id}/certificate",
+                "/api/v1/ssh/{service_id}/certificate",
+                "handlers::ssh_tunnel::issue_ssh_certificate",
+                post(handlers::ssh_tunnel::issue_ssh_certificate),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Exempt(
+                    "credential control plane; no downstream SSH session"
+                )
+            ),
+        )
+    };
+}
+
+macro_rules! mcp_billing_routes {
+    ($apply:ident, $router:expr) => {
+        $apply!($router;
+            (
+                "/mcp",
+                "/mcp (POST)",
+                "handlers::mcp_transport::mcp_post",
+                post(handlers::mcp_transport::mcp_post),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Mcp
+                )
+            ),
+            (
+                "/mcp",
+                "/mcp (GET)",
+                "handlers::mcp_transport::mcp_get",
+                get(handlers::mcp_transport::mcp_get),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Exempt(
+                    "session transport control; tool dispatch meters POST"
+                )
+            ),
+            (
+                "/mcp",
+                "/mcp (DELETE)",
+                "handlers::mcp_transport::mcp_delete",
+                delete(handlers::mcp_transport::mcp_delete),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Exempt(
+                    "session teardown; no downstream request"
+                )
+            ),
+        )
+    };
+}
+
+macro_rules! public_proxy_billing_routes {
+    ($apply:ident, $router:expr) => {
+        $apply!($router;
+            (
+                "/public/s/{slug}/{*path}",
+                "/public/s/{slug}/{*path}",
+                "handlers::public_proxy::public_proxy_request",
+                axum::routing::any(handlers::public_proxy::public_proxy_request),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Exempt(
+                    "block-not-meter; billable anonymous services are invalid"
+                )
+            ),
+            (
+                "/public/s/{slug}",
+                "/public/s/{slug}",
+                "handlers::public_proxy::public_proxy_request_root",
+                axum::routing::any(handlers::public_proxy::public_proxy_request_root),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Exempt(
+                    "block-not-meter; billable anonymous services are invalid"
+                )
+            ),
+        )
+    };
+}
+
+macro_rules! public_mcp_billing_routes {
+    ($apply:ident, $router:expr) => {
+        $apply!($router;
+            (
+                "/public/mcp",
+                "/public/mcp",
+                "handlers::public_mcp::public_mcp_post",
+                post(handlers::public_mcp::public_mcp_post),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Exempt(
+                    "discovery-only; public tools/call never forwards"
+                )
+            ),
+        )
+    };
+}
+
+macro_rules! oracle_billing_routes {
+    ($apply:ident, $router:expr) => {
+        $apply!($router;
+            (
+                "/pools/{id_or_slug}/tasks",
+                "/api/v1/oracle/pools/{id_or_slug}/tasks",
+                "handlers::oracle_tasks::submit_task",
+                post(handlers::oracle_tasks::submit_task),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Exempt(
+                    "user-supplied browser worker capacity"
+                )
+            ),
+            (
+                "/pools/{id_or_slug}/attach",
+                "/api/v1/oracle/pools/{id_or_slug}/attach",
+                "handlers::oracle_tasks::attach_conversation",
+                post(handlers::oracle_tasks::attach_conversation),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Exempt(
+                    "user-supplied browser worker capacity"
+                )
+            ),
+            (
+                "/pools/{id_or_slug}/extract",
+                "/api/v1/oracle/pools/{id_or_slug}/extract",
+                "handlers::oracle_tasks::extract_url",
+                post(handlers::oracle_tasks::extract_url),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Exempt(
+                    "user-supplied browser worker capacity"
+                )
+            ),
+            (
+                "/pools/{id_or_slug}/status",
+                "/api/v1/oracle/pools/{id_or_slug}/status",
+                "handlers::oracle_tasks::pool_status",
+                get(handlers::oracle_tasks::pool_status),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Exempt(
+                    "relay control plane; no downstream dispatch"
+                )
+            ),
+            (
+                "/tasks/{task_id}",
+                "/api/v1/oracle/tasks/{task_id}",
+                "handlers::oracle_tasks::get_task",
+                get(handlers::oracle_tasks::get_task),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Exempt(
+                    "relay control plane; no downstream dispatch"
+                )
+            ),
+            (
+                "/tasks/{task_id}/cancel",
+                "/api/v1/oracle/tasks/{task_id}/cancel",
+                "handlers::oracle_tasks::cancel_task",
+                post(handlers::oracle_tasks::cancel_task),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Exempt(
+                    "relay control plane; no downstream dispatch"
+                )
+            ),
+            (
+                "/sessions",
+                "/api/v1/oracle/sessions",
+                "handlers::oracle_tasks::list_sessions",
+                get(handlers::oracle_tasks::list_sessions),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Exempt(
+                    "relay control plane; no downstream dispatch"
+                )
+            ),
+            (
+                "/sessions/{conversation_id}",
+                "/api/v1/oracle/sessions/{conversation_id}",
+                "handlers::oracle_tasks::get_session",
+                get(handlers::oracle_tasks::get_session),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Exempt(
+                    "relay control plane; no downstream dispatch"
+                )
+            ),
+            (
+                "/sessions/{conversation_id}/close",
+                "/api/v1/oracle/sessions/{conversation_id}/close",
+                "handlers::oracle_tasks::close_session",
+                post(handlers::oracle_tasks::close_session),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Exempt(
+                    "relay control plane; no downstream dispatch"
+                )
+            ),
+        )
+    };
+}
+
+#[cfg(test)]
+pub(crate) fn mounted_billing_route_inventory()
+-> Vec<crate::services::billing::route_inventory::BillingRouteSpec> {
+    let mut routes = llm_billing_routes!(collect_billing_route_specs, ());
+    routes.extend(proxy_billing_routes!(collect_billing_route_specs, ()));
+    routes.extend(ssh_billing_routes!(collect_billing_route_specs, ()));
+    routes.extend(mcp_billing_routes!(collect_billing_route_specs, ()));
+    routes.extend(public_proxy_billing_routes!(
+        collect_billing_route_specs,
+        ()
+    ));
+    routes.extend(public_mcp_billing_routes!(collect_billing_route_specs, ()));
+    routes.extend(oracle_billing_routes!(collect_billing_route_specs, ()));
+    routes
+}
+
 /// Per RFC 9207 / OAuth 2.0 for Browser-Based Apps, the token endpoint,
 /// userinfo endpoint, and discovery documents MUST be accessible from any
 /// origin so that public SPA clients can call them directly.
@@ -259,16 +587,7 @@ pub fn build_router(
     // dedicated, more restrictive per-user rate limiter for LLM routes (e.g., 5
     // req/s per user) to prevent API quota burn and separate LLM traffic from
     // lightweight auth requests.
-    let llm_routes = Router::new()
-        .route("/status", get(handlers::llm_gateway::llm_status))
-        .route(
-            "/gateway/v1/{*path}",
-            axum::routing::any(handlers::llm_gateway::gateway_request),
-        )
-        .route(
-            "/{provider_slug}/v1/{*path}",
-            axum::routing::any(handlers::llm_gateway::llm_proxy_request),
-        );
+    let llm_routes = llm_billing_routes!(register_billing_routes, Router::new());
 
     let sa_admin_routes = Router::new()
         .route(
@@ -877,35 +1196,12 @@ pub fn build_router(
 
     // Proxy pass-through routes allow larger request bodies than the rest of the API.
     // Use RequestBodyLimitLayer so manual Request<Body> handlers are also protected.
-    let proxy_passthrough_routes = Router::new()
-        .route(
-            "/proxy/s/{slug}/{*path}",
-            axum::routing::any(handlers::proxy::proxy_request_by_slug),
-        )
-        .route(
-            "/proxy/s/{slug}",
-            axum::routing::any(handlers::proxy::proxy_request_by_slug_root),
-        )
-        .route(
-            "/proxy/{service_id}/{*path}",
-            axum::routing::any(handlers::proxy::proxy_request),
-        )
-        .route(
-            "/proxy/{service_id}",
-            axum::routing::any(handlers::proxy::proxy_request_root),
-        )
+    let proxy_passthrough_routes = proxy_billing_routes!(register_billing_routes, Router::new())
         .layer(RequestBodyLimitLayer::new(proxy_max_body_size));
 
-    let public_passthrough_routes = Router::new()
-        .route(
-            "/public/s/{slug}/{*path}",
-            axum::routing::any(handlers::public_proxy::public_proxy_request),
-        )
-        .route(
-            "/public/s/{slug}",
-            axum::routing::any(handlers::public_proxy::public_proxy_request_root),
-        )
-        .layer(RequestBodyLimitLayer::new(public_proxy_max_body_size));
+    let public_passthrough_routes =
+        public_proxy_billing_routes!(register_billing_routes, Router::new())
+            .layer(RequestBodyLimitLayer::new(public_proxy_max_body_size));
 
     // LLM gateway routes get a moderate limit (10 MB for LLM payloads).
     let llm_routes = llm_routes.layer(RequestBodyLimitLayer::new(10 * 1024 * 1024));
@@ -955,7 +1251,6 @@ pub fn build_router(
             "/proxy/services/{service_id}/asyncapi.json",
             get(handlers::docs::service_asyncapi_json),
         )
-        .route("/proxy/services", get(handlers::proxy::list_proxy_services))
         .route("/demo", get(handlers::demo::get_demo))
         .nest("/channel-relay", channel_relay_routes)
         .nest("/channel-events", channel_event_routes)
@@ -966,50 +1261,23 @@ pub fn build_router(
     // tokens via the shared layer below). Submits can carry a PDF
     // attachment as base64, so this router gets a 16 MiB body cap instead
     // of the app-wide 1 MiB.
-    let oracle_consumer_routes = Router::new()
-        .route(
-            "/pools",
-            get(handlers::oracle_pools::list_pools).post(handlers::oracle_pools::create_pool),
-        )
-        .route(
-            "/pools/{id_or_slug}",
-            get(handlers::oracle_pools::get_pool).patch(handlers::oracle_pools::update_pool),
-        )
-        .route(
-            "/pools/{id_or_slug}/rotate-token",
-            post(handlers::oracle_pools::rotate_token),
-        )
-        .route(
-            "/pools/{id_or_slug}/tasks",
-            post(handlers::oracle_tasks::submit_task),
-        )
-        .route(
-            "/pools/{id_or_slug}/attach",
-            post(handlers::oracle_tasks::attach_conversation),
-        )
-        .route(
-            "/pools/{id_or_slug}/extract",
-            post(handlers::oracle_tasks::extract_url),
-        )
-        .route(
-            "/pools/{id_or_slug}/status",
-            get(handlers::oracle_tasks::pool_status),
-        )
-        .route("/tasks/{task_id}", get(handlers::oracle_tasks::get_task))
-        .route(
-            "/tasks/{task_id}/cancel",
-            post(handlers::oracle_tasks::cancel_task),
-        )
-        .route("/sessions", get(handlers::oracle_tasks::list_sessions))
-        .route(
-            "/sessions/{conversation_id}",
-            get(handlers::oracle_tasks::get_session),
-        )
-        .route(
-            "/sessions/{conversation_id}/close",
-            post(handlers::oracle_tasks::close_session),
-        )
-        .layer(DefaultBodyLimit::max(16 * 1024 * 1024));
+    let oracle_consumer_routes = oracle_billing_routes!(
+        register_billing_routes,
+        Router::new()
+            .route(
+                "/pools",
+                get(handlers::oracle_pools::list_pools).post(handlers::oracle_pools::create_pool),
+            )
+            .route(
+                "/pools/{id_or_slug}",
+                get(handlers::oracle_pools::get_pool).patch(handlers::oracle_pools::update_pool),
+            )
+            .route(
+                "/pools/{id_or_slug}/rotate-token",
+                post(handlers::oracle_pools::rotate_token),
+            )
+    )
+    .layer(DefaultBodyLimit::max(16 * 1024 * 1024));
 
     // Routes accessible by both users and service accounts (block delegated tokens)
     let api_v1_shared = Router::new()
@@ -1049,7 +1317,14 @@ pub fn build_router(
         .route(
             "/workflow-chat/ws",
             get(handlers::assistant::workflow_chat_ws),
-        );
+        )
+        .route_layer(axum::Extension(
+            crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                crate::services::billing::BillingIngress::Proxy,
+            ),
+        ));
+
+    let ssh_billing_routes = ssh_billing_routes!(register_billing_routes, Router::new());
 
     // Routes that BLOCK service account tokens (human-only endpoints)
     let api_v1_human_only = Router::new()
@@ -1075,19 +1350,7 @@ pub fn build_router(
         .route("/docs/catalog", get(handlers::docs::catalog_ui))
         .route("/docs/openapi.json", get(handlers::docs::openapi_json))
         .route("/docs/asyncapi.json", get(handlers::docs::asyncapi_json))
-        .route(
-            "/ssh/{service_id}/certificate",
-            post(handlers::ssh_tunnel::issue_ssh_certificate),
-        )
-        .route(
-            "/ssh/{service_id}",
-            get(handlers::ssh_tunnel::ssh_tunnel_ws),
-        )
-        .route("/ssh/{service_id}/exec", post(handlers::ssh_exec::ssh_exec))
-        .route(
-            "/ssh/{service_id}/terminal",
-            get(handlers::ssh_web_terminal::ssh_web_terminal),
-        )
+        .merge(ssh_billing_routes)
         .nest("/sessions", session_routes)
         .nest("/mcp", mcp_routes)
         .nest("/developer", developer_routes)
@@ -1218,14 +1481,10 @@ pub fn build_router(
         // WebSocket endpoint for node agents. Auth happens in-message (not middleware).
         // Rate limiting: global per-IP rate limiter covers HTTP upgrade requests.
         // Connection limiting: NodeWsManager enforces max concurrent connections.
-        .route("/api/v1/nodes/ws", get(handlers::node_ws::ws_handler))
-        .route("/public/mcp", post(handlers::public_mcp::public_mcp_post))
-        .route(
-            "/mcp",
-            post(handlers::mcp_transport::mcp_post)
-                .get(handlers::mcp_transport::mcp_get)
-                .delete(handlers::mcp_transport::mcp_delete),
-        );
+        .route("/api/v1/nodes/ws", get(handlers::node_ws::ws_handler));
+
+    let private = mcp_billing_routes!(register_billing_routes, private);
+    let private = public_mcp_billing_routes!(register_billing_routes, private);
 
     (public_oauth, private)
 }

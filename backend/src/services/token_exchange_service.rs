@@ -540,6 +540,11 @@ mod tests {
                 "/proxy/s/{slug}/{*path}",
                 any(crate::handlers::proxy::proxy_request_by_slug),
             )
+            .route_layer(axum::Extension(
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Proxy,
+                ),
+            ))
             .with_state(state);
         let response = app
             .oneshot(

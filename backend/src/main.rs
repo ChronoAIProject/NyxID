@@ -25,6 +25,9 @@ mod telemetry;
 #[cfg(test)]
 mod test_utils;
 
+#[cfg(test)]
+mod billing_integration_tests;
+
 use std::sync::Arc;
 
 /// Install `aws_lc_rs` as the rustls process-wide crypto provider.

@@ -40,6 +40,13 @@ async fn execute_public_proxy(
     path: String,
     request: Request<Body>,
 ) -> AppResult<Response<Body>> {
+    let billing_egress_permit =
+        crate::services::billing::route_inventory::enforce_billing_exempt_egress_classification(
+            request
+                .extensions()
+                .get::<crate::services::billing::route_inventory::BillingRoutePolicy>()
+                .copied(),
+        )?;
     let request_path = request.uri().path().to_string();
     let client_ip = crate::mw::rate_limit::enforce_public_ip_rate_limit(
         &state.public_proxy_limiter,
@@ -102,6 +109,7 @@ async fn execute_public_proxy(
         None,
         &state.token_exchange_cache,
         &state.cloud_response_cache,
+        billing_egress_permit,
     )
     .await?;
 
@@ -487,15 +495,26 @@ mod tests {
             }
         }
 
+        fn classified_public_request(mut request: Request<Body>) -> Request<Body> {
+            request.extensions_mut().insert(
+                crate::services::billing::route_inventory::BillingRoutePolicy::Exempt(
+                    "block-not-meter; billable anonymous services are invalid",
+                ),
+            );
+            request
+        }
+
         fn proxy_request_with_credentials() -> Request<Body> {
-            Request::builder()
-                .method("GET")
-                .uri("/public/s/pub/public/echo")
-                .header(axum::http::header::AUTHORIZATION, "Bearer client-secret")
-                .header(axum::http::header::COOKIE, "sid=abc")
-                .header("user-agent", "test-agent")
-                .body(Body::empty())
-                .unwrap()
+            classified_public_request(
+                Request::builder()
+                    .method("GET")
+                    .uri("/public/s/pub/public/echo")
+                    .header(axum::http::header::AUTHORIZATION, "Bearer client-secret")
+                    .header(axum::http::header::COOKIE, "sid=abc")
+                    .header("user-agent", "test-agent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
         }
 
         /// A matching enabled rule forwards to the downstream; inbound caller
@@ -647,13 +666,15 @@ mod tests {
                 .expect("insert service");
             let state = test_app_state(db);
 
-            let request = Request::builder()
-                .method("GET")
-                .uri("/public/s/pub/public/echo")
-                .header(axum::http::header::CONNECTION, "Upgrade")
-                .header(axum::http::header::UPGRADE, "websocket")
-                .body(Body::empty())
-                .unwrap();
+            let request = classified_public_request(
+                Request::builder()
+                    .method("GET")
+                    .uri("/public/s/pub/public/echo")
+                    .header(axum::http::header::CONNECTION, "Upgrade")
+                    .header(axum::http::header::UPGRADE, "websocket")
+                    .body(Body::empty())
+                    .unwrap(),
+            );
 
             let err = execute_public_proxy(
                 state,
@@ -681,11 +702,13 @@ mod tests {
                 .expect("insert service");
             let state = test_app_state(db);
 
-            let request = Request::builder()
-                .method("GET")
-                .uri("/public/s/pub/private/secret")
-                .body(Body::empty())
-                .unwrap();
+            let request = classified_public_request(
+                Request::builder()
+                    .method("GET")
+                    .uri("/public/s/pub/private/secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            );
 
             let err = execute_public_proxy(
                 state,

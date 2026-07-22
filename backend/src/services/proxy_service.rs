@@ -2458,6 +2458,7 @@ pub async fn forward_request(
     token_exchange_cache: &TokenExchangeCache,
     // In-memory response cache for cloud-billing auth methods (NyxID#716).
     cloud_response_cache: &CloudResponseCache,
+    _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> AppResult<reqwest::Response> {
     let mut all_delegated = delegated_credentials;
     extend_with_path_credential(&mut all_delegated, target);
@@ -2952,6 +2953,47 @@ mod tests {
     };
     use chrono::Utc;
     use tokio::{net::TcpListener, sync::mpsc};
+
+    #[allow(clippy::too_many_arguments)]
+    async fn forward_request(
+        client: &Client,
+        target: &ProxyTarget,
+        method: reqwest::Method,
+        path: &str,
+        query: Option<&str>,
+        headers: reqwest::header::HeaderMap,
+        body: ProxyBody,
+        identity_headers: Vec<(String, String)>,
+        delegated_credentials: Vec<DelegatedCredential>,
+        caller_token: Option<&str>,
+        token_exchange_cache: &TokenExchangeCache,
+        cloud_response_cache: &CloudResponseCache,
+    ) -> AppResult<reqwest::Response> {
+        super::forward_request(
+            client,
+            target,
+            method,
+            path,
+            query,
+            headers,
+            body,
+            identity_headers,
+            delegated_credentials,
+            caller_token,
+            token_exchange_cache,
+            cloud_response_cache,
+            crate::services::billing::route_inventory::enforce_billing_egress_classification(
+                Some(
+                    crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                        crate::services::billing::BillingIngress::Proxy,
+                    ),
+                ),
+                crate::services::billing::BillingIngress::Proxy,
+            )
+            .expect("test forwarding policy must be valid"),
+        )
+        .await
+    }
 
     #[tokio::test]
     async fn catalog_metering_keeps_protocol_identity_for_renamed_user_service() {
