@@ -2969,9 +2969,15 @@ pub async fn register_client(
     // DCR is used by MCP clients (Cursor, Claude Code, etc.) which need the
     // `proxy` scope to call `/mcp` (enforced in handlers/mcp_transport.rs).
     // Use the MCP scope set so the resulting access tokens pass that check.
-    let allowed_scopes = match body.scope.as_deref().map(str::trim) {
-        Some(scope) if !scope.is_empty() => oauth_client_service::validate_allowed_scopes(scope)?,
-        _ => oauth_client_service::DEFAULT_MCP_ALLOWED_SCOPES.to_string(),
+    let (allowed_scopes, scope_provenance) = match body.scope.as_deref().map(str::trim) {
+        Some(scope) if !scope.is_empty() => (
+            oauth_client_service::validate_allowed_scopes(scope)?,
+            crate::models::oauth_client::ScopeProvenance::Explicit,
+        ),
+        _ => (
+            oauth_client_service::DEFAULT_MCP_ALLOWED_SCOPES.to_string(),
+            crate::models::oauth_client::ScopeProvenance::Defaulted,
+        ),
     };
     if state.broker_require_admin_capability()
         && allowed_scopes
@@ -2991,6 +2997,7 @@ pub async fn register_client(
         "dynamic_registration",
         "",
         &allowed_scopes,
+        scope_provenance,
         false,
         None,
         None,
@@ -3221,6 +3228,7 @@ mod tests {
                 "https://app.example/callback".to_string(),
             ],
             allowed_scopes: allowed_scopes.to_string(),
+            scope_provenance: Default::default(),
             grant_types: "authorization_code refresh_token".to_string(),
             client_type: "public".to_string(),
             is_active: true,
@@ -4142,6 +4150,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn register_client_default_scopes_include_offline_access_with_defaulted_provenance() {
+        let Some(db) = connect_test_database("oauth_dcr_default_offline_access").await else {
+            return;
+        };
+        let state = test_app_state(db.clone());
+
+        let (status, Json(response)) = register_client(
+            State(state),
+            Json(RegisterClientRequest {
+                client_name: Some("MCP Client".to_string()),
+                redirect_uris: Some(vec!["http://localhost/callback".to_string()]),
+                grant_types: None,
+                response_types: None,
+                token_endpoint_auth_method: Some("none".to_string()),
+                scope: None,
+            }),
+        )
+        .await
+        .expect("register client");
+
+        assert_eq!(status, StatusCode::CREATED);
+        let client = db
+            .collection::<OauthClient>(OAUTH_CLIENTS)
+            .find_one(doc! { "_id": &response.client_id })
+            .await
+            .expect("query client")
+            .expect("client exists");
+        assert!(
+            client
+                .allowed_scopes
+                .split_whitespace()
+                .any(|s| s == oauth_client_service::OFFLINE_ACCESS_SCOPE),
+            "defaulted DCR client must be granted offline_access (NyxID#1222); got: {}",
+            client.allowed_scopes
+        );
+        assert_eq!(
+            client.scope_provenance,
+            crate::models::oauth_client::ScopeProvenance::Defaulted
+        );
+        // The user-visible repro: authorize resolving offline_access succeeds.
+        oauth_service::resolve_authorize_scope(
+            Some("openid profile email offline_access"),
+            &client.allowed_scopes,
+        )
+        .expect("offline_access must resolve for defaulted DCR clients");
+    }
+
+    #[tokio::test]
+    async fn register_client_explicit_narrow_scope_stays_narrow_with_explicit_provenance() {
+        let Some(db) = connect_test_database("oauth_dcr_explicit_narrow").await else {
+            return;
+        };
+        let state = test_app_state(db.clone());
+
+        let (status, Json(response)) = register_client(
+            State(state),
+            Json(RegisterClientRequest {
+                client_name: Some("Narrow Client".to_string()),
+                redirect_uris: Some(vec!["http://localhost/callback".to_string()]),
+                grant_types: None,
+                response_types: None,
+                token_endpoint_auth_method: Some("none".to_string()),
+                scope: Some("openid email".to_string()),
+            }),
+        )
+        .await
+        .expect("register client");
+
+        assert_eq!(status, StatusCode::CREATED);
+        let client = db
+            .collection::<OauthClient>(OAUTH_CLIENTS)
+            .find_one(doc! { "_id": &response.client_id })
+            .await
+            .expect("query client")
+            .expect("client exists");
+        assert_eq!(client.allowed_scopes, "openid email");
+        assert_eq!(
+            client.scope_provenance,
+            crate::models::oauth_client::ScopeProvenance::Explicit
+        );
+        // Least privilege preserved: offline_access was not requested at
+        // registration, so authorize must still reject it.
+        assert!(
+            oauth_service::resolve_authorize_scope(
+                Some("openid offline_access"),
+                &client.allowed_scopes,
+            )
+            .is_err(),
+            "explicitly narrow client must not gain offline_access"
+        );
+    }
+
+    #[tokio::test]
     async fn register_client_rejects_broker_scope_when_admin_capability_required() {
         let Some(db) = connect_test_database("oauth_dcr_broker_scope_strict").await else {
             return;
@@ -4996,6 +5097,7 @@ mod tests {
                 client_secret_hash: String::new(),
                 redirect_uris: vec!["http://localhost/callback".to_string()],
                 allowed_scopes: "openid".to_string(),
+                scope_provenance: Default::default(),
                 grant_types: "authorization_code refresh_token".to_string(),
                 client_type: "public".to_string(),
                 is_active: true,
@@ -5363,6 +5465,7 @@ mod tests {
             client_secret_hash: "NONE".to_string(),
             redirect_uris: vec!["http://localhost/cb".to_string()],
             allowed_scopes: "openid".to_string(),
+            scope_provenance: Default::default(),
             grant_types: "authorization_code".to_string(),
             client_type: "public".to_string(),
             is_active: true,
