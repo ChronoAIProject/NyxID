@@ -43,9 +43,11 @@ import {
   AlertCircle,
   Server,
   Terminal,
+  KeyRound,
 } from "lucide-react";
 import { toast } from "sonner";
 import { ServiceIcon } from "@/components/service-icon";
+import { NyxidIcon } from "@/components/brand/nyxid-icon";
 import { StepHeader } from "@/components/dashboard/step-header";
 import {
   ConnectVerifyStep,
@@ -452,6 +454,8 @@ function RoutingStep({
   onViaNode,
   onBack,
   isSshOnly,
+  clientSource,
+  onClientSourceChange,
 }: {
   readonly catalogEntry: CatalogEntry | null;
   readonly form: FormState;
@@ -460,12 +464,22 @@ function RoutingStep({
   readonly onViaNode: () => void;
   readonly onBack: () => void;
   readonly isSshOnly: boolean;
+  /** Selected OAuth client source (managed vs self) — only meaningful when
+   *  the entry offers the choice and routing is Direct. */
+  readonly clientSource: "managed" | "self";
+  readonly onClientSourceChange: (source: "managed" | "self") => void;
 }) {
   const { data: nodes, isLoading } = useNodes();
   const onlineNodes = nodes?.filter((n) => n.status === "online") ?? [];
   const [routingChoice, setRoutingChoice] = useState<"direct" | "node">(
     isSshOnly ? "node" : "direct",
   );
+  // Node-routed services do their OAuth on the node agent, so the managed-vs-
+  // self choice only applies to the Direct path (F5, merged into this screen).
+  const offersClientChoice = Boolean(
+    catalogEntry && entryOffersClientSourceChoice(catalogEntry),
+  );
+  const showClientChoice = routingChoice === "direct" && offersClientChoice;
 
   function handleNext() {
     if (routingChoice === "node" && !form.nodeId) return;
@@ -580,6 +594,48 @@ function RoutingStep({
         )}
       </div>
 
+      {showClientChoice && (
+        <div className="space-y-3">
+          <Label>Which OAuth app authorizes this?</Label>
+          <div role="radiogroup" aria-label="OAuth client" className="grid grid-cols-2 gap-3">
+            <button
+              type="button"
+              role="radio"
+              aria-checked={clientSource === "managed"}
+              onClick={() => onClientSourceChange("managed")}
+              className={`flex flex-col items-center gap-2 rounded-lg border-2 p-4 text-center transition-colors duration-300 ${
+                clientSource === "managed"
+                  ? "border-primary bg-primary/5"
+                  : "border-border hover:border-white/[0.15]"
+              }`}
+            >
+              <NyxidIcon className="h-5 w-5" />
+              <span className="text-xs font-medium">NyxID managed</span>
+              <span className="text-[10px] text-muted-foreground">
+                One click. NyxID’s OAuth app handles authorization. Curated scopes.
+              </span>
+            </button>
+            <button
+              type="button"
+              role="radio"
+              aria-checked={clientSource === "self"}
+              onClick={() => onClientSourceChange("self")}
+              className={`flex flex-col items-center gap-2 rounded-lg border-2 p-4 text-center transition-colors duration-300 ${
+                clientSource === "self"
+                  ? "border-primary bg-primary/5"
+                  : "border-border hover:border-white/[0.15]"
+              }`}
+            >
+              <KeyRound className="h-5 w-5" />
+              <span className="text-xs font-medium">Your own OAuth app</span>
+              <span className="text-[10px] text-muted-foreground">
+                Use your own client credentials. Full scope control.
+              </span>
+            </button>
+          </div>
+        </div>
+      )}
+
       <Button
         variant="primary"
         className="w-full"
@@ -588,7 +644,16 @@ function RoutingStep({
       >
         {routingChoice === "node"
           ? "Next: Node Setup"
-          : "Next: Enter Credentials"}
+          : showClientChoice
+            ? clientSource === "managed"
+              ? "Next: Connect"
+              : "Next: Enter Credentials"
+            : catalogEntry &&
+                (catalogEntry.provider_type === "oauth2" ||
+                  catalogEntry.provider_type === "device_code") &&
+                !entryNeedsByoCredentials(catalogEntry)
+              ? "Next: Connect"
+              : "Next: Enter Credentials"}
       </Button>
     </div>
   );
@@ -1293,11 +1358,47 @@ async function cleanupPendingAuthKey(
   }
 }
 
+/**
+ * Whether this catalog entry needs the BYO Custom-App credential form before
+ * the provider hand-off. `both`-mode providers with a provisioned platform
+ * OAuth app skip it (one-click connect,
+ * docs/ONE_CLICK_OAUTH_CONNECTORS_SPEC.md); BYO stays reachable through the
+ * "Use your own OAuth app" secondary action on the OAuth step. An absent
+ * `has_platform_oauth_credentials` (older backend) falls back to the form.
+ */
+function entryNeedsByoCredentials(entry: CatalogEntry): boolean {
+  if (entry.credential_mode === "user") return true;
+  return (
+    entry.credential_mode === "both" &&
+    entry.has_platform_oauth_credentials !== true
+  );
+}
+
+/**
+ * Whether the user is offered an explicit choice between NyxID-managed and
+ * self-managed OAuth clients (the `client_source` selection step). Only `both`
+ * mode with a provisioned platform app supports BOTH sources; `admin` is
+ * managed-only (no BYO), `user`/`both`-without-creds is self-only, and neither
+ * needs a choice screen.
+ */
+function entryOffersClientSourceChoice(entry: CatalogEntry): boolean {
+  const isOAuthLike =
+    (entry.provider_type === "oauth2" ||
+      entry.provider_type === "device_code") &&
+    Boolean(entry.provider_config_id);
+  return (
+    isOAuthLike &&
+    entry.credential_mode === "both" &&
+    entry.has_platform_oauth_credentials === true
+  );
+}
+
 function OAuthStep({
   catalogEntry,
   ensureKey,
   onKeyCleared,
   onBack,
+  platformScopeAllowlist,
   targetOrgId,
   reconnectMode,
   lockedScopes = [],
@@ -1307,6 +1408,12 @@ function OAuthStep({
   readonly ensureKey: () => Promise<KeyInfo>;
   readonly onKeyCleared: () => void;
   readonly onBack: () => void;
+  /**
+   * When this connection rides the shared platform app, the scopes it may
+   * request (`platform_scope_allowlist`). Passed only on the platform path so
+   * the picker disables non-grantable pills; `null` on BYO/reconnect.
+   */
+  readonly platformScopeAllowlist?: readonly string[] | null;
   /** When set, initiate the OAuth flow under this org's scope. */
   readonly targetOrgId: string | null;
   readonly reconnectMode: boolean;
@@ -1334,13 +1441,21 @@ function OAuthStep({
   async function handleConnect() {
     if (!catalogEntry.provider_config_id) return;
     setError(null);
+    // On the managed path, never submit a scope the shared app can't grant —
+    // catalog defaults may include scopes outside the allowlist (e.g. a Google
+    // row that carried Drive from its BYO era). The picker shows those gated,
+    // but we also drop them from the submitted set so a plain Connect can't be
+    // rejected by the backend allowlist for scopes the user never chose.
+    const submittedScopes = platformScopeAllowlist
+      ? selectedScopes.filter((s) => platformScopeAllowlist.includes(s))
+      : selectedScopes;
     let key: KeyInfo | null = null;
     try {
       key = await ensureKey();
       const response = await initiateOAuth.mutateAsync({
         providerId: catalogEntry.provider_config_id,
         redirectPath: `/keys/${key.id}`,
-        scopeOverride: selectedScopes,
+        scopeOverride: submittedScopes,
         // Multi-connection: thread the placeholder's id so the OAuth
         // callback writes the resulting tokens straight onto THIS
         // `UserApiKey` (via its `connection_id`) instead of taking
@@ -1388,6 +1503,7 @@ function OAuthStep({
         lockedScopes={lockedScopes}
         grantedScopes={reconnectMode ? grantedScopes : undefined}
         providerName={catalogEntry.name}
+        platformAllowlist={platformScopeAllowlist}
         idPrefix="oauth-scope"
       />
 
@@ -1415,6 +1531,7 @@ function OAuthStep({
           </>
         )}
       </Button>
+
     </div>
   );
 }
@@ -1975,8 +2092,24 @@ function OAuthCredentialsStep({
   const [clientSecret, setClientSecret] = useState("");
   const [error, setError] = useState<string | null>(null);
 
+  // A platform-capable entry only reaches this form when the user explicitly
+  // chose "Use your own OAuth app". `buildCatalogKeyParams` drops the pair
+  // unless BOTH halves are present, so an id-only submit would silently fall
+  // back to the platform app — the opposite of what the user asked for.
+  // Require the full pair there. BYO-required entries keep the optional
+  // secret (PKCE public clients, e.g. Twitter, legitimately have none).
+  const requireSecret =
+    catalogEntry.provider_type === "oauth2" &&
+    !entryNeedsByoCredentials(catalogEntry);
+
   function handleSave() {
     if (!catalogEntry.provider_config_id) return;
+    if (requireSecret && !clientSecret.trim()) {
+      setError(
+        "This provider needs both the Client ID and Client Secret of your OAuth app — otherwise the connection would silently use NyxID's shared app instead of yours.",
+      );
+      return;
+    }
     setError(null);
     const trimmedId = clientId.trim();
     const trimmedSecret = clientSecret.trim();
@@ -2041,11 +2174,18 @@ function OAuthCredentialsStep({
         </div>
 
         <div className="space-y-1.5">
-          <Label htmlFor="oauth-client-secret">Client Secret</Label>
+          <Label htmlFor="oauth-client-secret">
+            Client Secret{" "}
+            {requireSecret ? <span className="text-destructive">*</span> : null}
+          </Label>
           <Input
             id="oauth-client-secret"
             type="password"
-            placeholder="Your OAuth app Client Secret (optional for public clients)"
+            placeholder={
+              requireSecret
+                ? "Your OAuth app Client Secret"
+                : "Your OAuth app Client Secret (optional for public clients)"
+            }
             value={clientSecret}
             onChange={(e) => setClientSecret(e.target.value)}
             autoComplete="off"
@@ -2057,7 +2197,7 @@ function OAuthCredentialsStep({
         variant="primary"
         className="w-full"
         onClick={handleSave}
-        disabled={!clientId.trim()}
+        disabled={!clientId.trim() || (requireSecret && !clientSecret.trim())}
       >
         Continue to Authentication
       </Button>
@@ -2168,6 +2308,11 @@ export function AddKeyDialog({
   // app-credentials.md` §6.1.
   const [byoOAuthClientId, setByoOAuthClientId] = useState<string | null>(null);
   const [byoOAuthClientSecret, setByoOAuthClientSecret] = useState<string | null>(null);
+  // OAuth client source chosen inline on the routing screen (F5). Only used
+  // for entries that offer the choice; defaults to the managed one-click app.
+  const [clientSource, setClientSource] = useState<"managed" | "self">(
+    "managed",
+  );
   // Captured at POST /keys success so the new `verify` step (wave-aha-1
   // A4) can fire its probe and the Done/View-details buttons know where
   // to navigate. Stays null until a successful create.
@@ -2186,6 +2331,7 @@ export function AddKeyDialog({
     setTargetOrgId(null);
     setByoOAuthClientId(null);
     setByoOAuthClientSecret(null);
+    setClientSource("managed");
     setCreatedKey(null);
     appliedPrefillRef.current = null;
   }
@@ -2200,6 +2346,11 @@ export function AddKeyDialog({
   function handleSelectCatalog(entry: CatalogEntry) {
     setSelectedEntry(entry);
     setAuthKey(null);
+    // Fresh entry → default back to the managed one-click choice so a prior
+    // "your own app" selection can't leak into a different provider's flow.
+    setClientSource("managed");
+    setByoOAuthClientId(null);
+    setByoOAuthClientSecret(null);
     setForm({
       ...INITIAL_FORM,
       label: entry.name,
@@ -2281,15 +2432,25 @@ export function AddKeyDialog({
       return;
     }
 
-    const needsUserCreds =
-      selectedEntry.credential_mode === "user" ||
-      selectedEntry.credential_mode === "both";
+    // The managed-vs-self OAuth choice is made inline on the routing screen
+    // (F5, merged): for entries offering the choice, `clientSource` decides.
+    // Self-managed → the BYO credential form; NyxID-managed → connect (drop
+    // any cached BYO creds so the shared client is used). Entries without a
+    // choice fall back to their single valid path.
+    const useSelfManaged = entryOffersClientSourceChoice(selectedEntry)
+      ? clientSource === "self"
+      : entryNeedsByoCredentials(selectedEntry);
+
+    if (!useSelfManaged) {
+      setByoOAuthClientId(null);
+      setByoOAuthClientSecret(null);
+    }
 
     if (
       selectedEntry.provider_type === "oauth2" &&
       selectedEntry.provider_config_id
     ) {
-      setStep(needsUserCreds ? "oauth_credentials" : "oauth");
+      setStep(useSelfManaged ? "oauth_credentials" : "oauth");
       return;
     }
 
@@ -2297,7 +2458,7 @@ export function AddKeyDialog({
       selectedEntry.provider_type === "device_code" &&
       selectedEntry.provider_config_id
     ) {
-      setStep(needsUserCreds ? "oauth_credentials" : "device_code");
+      setStep(useSelfManaged ? "oauth_credentials" : "device_code");
       return;
     }
 
@@ -2610,6 +2771,8 @@ export function AddKeyDialog({
               selectedEntry?.service_type === "ssh" ||
               form.serviceType === "ssh"
             }
+            clientSource={clientSource}
+            onClientSourceChange={setClientSource}
           />
         )}
 
@@ -2638,7 +2801,14 @@ export function AddKeyDialog({
         {step === "oauth_credentials" && selectedEntry && (
           <OAuthCredentialsStep
             catalogEntry={selectedEntry}
-            onBack={() => setStep("routing")}
+            onBack={() => {
+              // The OAuth-client choice lives on the routing screen now, so
+              // Back returns there. Clear any typed BYO values so re-picking
+              // managed is clean.
+              setByoOAuthClientId(null);
+              setByoOAuthClientSecret(null);
+              setStep("routing");
+            }}
             onComplete={(clientId, clientSecret) => {
               // Multi-connection: cache the user-typed Custom App
               // credentials on the parent so the eventual `POST /keys`
@@ -2673,18 +2843,28 @@ export function AddKeyDialog({
                 ? (reconnectKey?.granted_scopes ?? [])
                 : []
             }
-            onBack={() =>
-              isReconnect
-                ? handleOpenChange(false)
-                : setStep(
-                    selectedEntry.credential_mode === "user" ||
-                      selectedEntry.credential_mode === "both"
-                      ? "oauth_credentials"
-                      : form.nodeId.trim()
-                        ? "node_setup"
-                        : "routing",
-                  )
+            platformScopeAllowlist={
+              // Gate scope pills only when this connection rides the shared
+              // platform app: managed path (not switched to BYO), fresh add.
+              !isReconnect &&
+              !entryNeedsByoCredentials(selectedEntry) &&
+              byoOAuthClientId === null
+                ? (selectedEntry.platform_scope_allowlist ?? null)
+                : null
             }
+            onBack={() => {
+              if (isReconnect) {
+                handleOpenChange(false);
+                return;
+              }
+              // Self-managed (BYO creds cached) → back to the credential form.
+              if (byoOAuthClientId !== null) {
+                setStep("oauth_credentials");
+                return;
+              }
+              // Managed / node → back to the (merged) routing screen.
+              setStep(form.nodeId.trim() ? "node_setup" : "routing");
+            }}
           />
         )}
 
@@ -2701,18 +2881,17 @@ export function AddKeyDialog({
                 ? (reconnectKey?.granted_scopes ?? [])
                 : []
             }
-            onBack={() =>
-              isReconnect
-                ? handleOpenChange(false)
-                : setStep(
-                    selectedEntry.credential_mode === "user" ||
-                      selectedEntry.credential_mode === "both"
-                      ? "oauth_credentials"
-                      : form.nodeId.trim()
-                        ? "node_setup"
-                        : "routing",
-                  )
-            }
+            onBack={() => {
+              if (isReconnect) {
+                handleOpenChange(false);
+                return;
+              }
+              if (byoOAuthClientId !== null) {
+                setStep("oauth_credentials");
+                return;
+              }
+              setStep(form.nodeId.trim() ? "node_setup" : "routing");
+            }}
             onComplete={handleAuthComplete}
           />
         )}

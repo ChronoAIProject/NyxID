@@ -6842,6 +6842,7 @@ mod proxy_resolution_integration_tests {
             .db
             .collection::<UserApiKey>(USER_API_KEYS)
             .insert_one(UserApiKey {
+                credential_source: None,
                 id: api_key_id.clone(),
                 user_id: owner_user_id.to_string(),
                 label: "Org GCP SA".to_string(),

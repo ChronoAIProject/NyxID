@@ -619,7 +619,25 @@ pub async fn initiate_oauth_connect(
     // `(user, provider)`. Falls through to `resolve_oauth_credentials`
     // for legacy connections, codex-style provider-owned device-code
     // flows, and "both"-mode adds without BYO.
-    let resolved = if let Some(conn_id) = connection_id
+    // Durable client-source override (fixes "NyxID managed is advisory only"):
+    // a connection pinned to `credential_source = "platform"` MUST resolve the
+    // provider's shared credentials and never fall through "both"-mode
+    // precedence to the user's own BYO row. Reconnect inherits this because it
+    // threads the same connection_id.
+    let pinned_source = match connection_id {
+        Some(conn_id) => {
+            user_credentials_service::connection_credential_source(db, conn_id).await?
+        }
+        None => None,
+    };
+
+    let mut used_connection_byo = false;
+    let mut used_platform = false;
+    let resolved = if pinned_source.as_deref() == Some("platform") {
+        used_platform = true;
+        user_credentials_service::resolve_platform_oauth_credentials(encryption_keys, &provider)
+            .await?
+    } else if let Some(conn_id) = connection_id
         && let Some(conn_creds) = user_credentials_service::resolve_connection_oauth_credentials(
             db,
             encryption_keys,
@@ -627,11 +645,65 @@ pub async fn initiate_oauth_connect(
         )
         .await?
     {
+        used_connection_byo = true;
         conn_creds
     } else {
         user_credentials_service::resolve_oauth_credentials(db, encryption_keys, &provider, user_id)
             .await?
     };
+
+    // Platform-client scope allowlist (spec D5/B4): a request riding NyxID's
+    // shared platform OAuth app may only ask for vetted scopes. BYO flows
+    // stay free-form — connection-level Custom Apps set `used_connection_byo`,
+    // legacy user-level creds set `credential_user_id`. Enforced against the
+    // exact scope string the redirect would carry (`resolve_scope_param`).
+    let is_platform_flow =
+        used_platform || (!used_connection_byo && resolved.credential_user_id.is_none());
+    if is_platform_flow
+        && let Some(allowlist) =
+            crate::services::scope_catalog::platform_scope_allowlist(&provider.slug)
+        && let Some(scope_str) = resolve_scope_param(
+            provider.default_scopes.as_ref(),
+            additional_scopes,
+            scope_override,
+        )
+    {
+        let disallowed: Vec<&str> = scope_str
+            .split_whitespace()
+            .filter(|s| !allowlist.contains(s))
+            .collect();
+        if !disallowed.is_empty() {
+            return Err(AppError::ValidationError(format!(
+                "The scope(s) {} are not enabled for NyxID's shared {} OAuth app. \
+                 Connect with your own OAuth app to request them.",
+                disallowed.join(", "),
+                provider.name
+            )));
+        }
+    }
+
+    // Durable BYO provenance (spec D1/B3): a multi-connection add that
+    // resolved legacy provider-level BYO credentials embeds them onto the
+    // connection's UserApiKey before redirecting, so refresh and reconnect
+    // keep using the client that issues this grant even if the legacy row
+    // changes or a platform app is provisioned later.
+    if let Some(conn_id) = connection_id
+        && !used_connection_byo
+        && resolved.credential_user_id.is_some()
+    {
+        let cid_enc = encryption_keys
+            .encrypt(resolved.client_id.as_bytes())
+            .await?;
+        let sec_enc = match resolved.client_secret.as_deref() {
+            Some(sec) => Some(encryption_keys.encrypt(sec.as_bytes()).await?),
+            None => None,
+        };
+        crate::services::user_api_key_service::embed_byo_oauth_client_on_connection(
+            db, conn_id, cid_enc, sec_enc,
+        )
+        .await?;
+    }
+
     let client_id = resolved.client_id;
 
     // Create state for CSRF protection
@@ -3476,6 +3548,7 @@ mod tests {
         };
         let now = Utc::now();
         let key = UserApiKey {
+            credential_source: None,
             id: key_id,
             user_id: Uuid::new_v4().to_string(),
             label: "test-key".to_string(),
@@ -3503,6 +3576,360 @@ mod tests {
             .await
             .unwrap();
         key
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // initiate_oauth_connect: BYO provenance embed (B3) + platform scope
+    // allowlist (B4) — the one-click connector invariants
+    // ───────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn initiate_embeds_legacy_byo_creds_onto_connection_key() {
+        let Some(db) = connect_test_database("initiate_embed_byo").await else {
+            eprintln!("skipping initiate embed test: no local MongoDB available");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+
+        // Provider in "both" mode WITH platform creds, but the user also has a
+        // legacy provider-level BYO credential row -> resolve_oauth_credentials
+        // must prefer the BYO client, and initiation must pin it onto the key.
+        let provider_id = Uuid::new_v4().to_string();
+        let plat_cid = encryption_keys
+            .encrypt(b"platform-client-id")
+            .await
+            .unwrap();
+        let plat_sec = encryption_keys.encrypt(b"platform-secret").await.unwrap();
+        let mut provider = make_test_provider(
+            &provider_id,
+            "https://example.com/token",
+            Some(plat_cid),
+            Some(plat_sec),
+        );
+        provider.credential_mode = "both".to_string();
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(&provider)
+            .await
+            .unwrap();
+
+        // The connection placeholder carries NO embedded creds yet.
+        let key =
+            insert_pending_user_api_key(&db, &encryption_keys, &provider_id, None, None).await;
+        let user_id = key.user_id.clone();
+        let connection_id = key.connection_id.clone().unwrap();
+
+        // Legacy user-level BYO credential for (user, provider).
+        let byo_cid = encryption_keys
+            .encrypt(b"user-byo-client-id")
+            .await
+            .unwrap();
+        let byo_sec = encryption_keys.encrypt(b"user-byo-secret").await.unwrap();
+        db.collection::<crate::models::user_provider_credentials::UserProviderCredentials>(
+            crate::models::user_provider_credentials::COLLECTION_NAME,
+        )
+        .insert_one(
+            &crate::models::user_provider_credentials::UserProviderCredentials {
+                id: Uuid::new_v4().to_string(),
+                user_id: user_id.clone(),
+                provider_config_id: provider_id.clone(),
+                client_id_encrypted: Some(byo_cid),
+                client_secret_encrypted: Some(byo_sec),
+                label: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let auth_url = super::initiate_oauth_connect(
+            &db,
+            &encryption_keys,
+            "http://localhost:3001",
+            &user_id,
+            &provider_id,
+            None,
+            Some("/keys"),
+            &[],
+            None,
+            Some(&connection_id),
+        )
+        .await
+        .expect("initiation should succeed");
+
+        // The redirect carries the BYO client id, not the platform one.
+        assert!(
+            auth_url.contains("user-byo-client-id"),
+            "authorize URL must use the resolved BYO client"
+        );
+
+        // And the BYO creds are now embedded on the connection key, so refresh
+        // and reconnect stay on the client that issues this grant.
+        let updated = db
+            .collection::<UserApiKey>(USER_API_KEYS)
+            .find_one(doc! { "_id": &key.id })
+            .await
+            .unwrap()
+            .unwrap();
+        let embedded_cid = encryption_keys
+            .decrypt(
+                updated
+                    .user_oauth_client_id_encrypted
+                    .as_ref()
+                    .expect("embedded"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(embedded_cid).unwrap(),
+            "user-byo-client-id"
+        );
+    }
+
+    #[tokio::test]
+    async fn initiate_managed_forces_platform_despite_legacy_byo() {
+        // P0: a connection pinned to credential_source="platform" (the "NyxID
+        // managed" choice) must use the provider's platform client even when
+        // the user ALSO has a legacy provider-level BYO credential row — which
+        // "both"-mode precedence would otherwise prefer.
+        let Some(db) = connect_test_database("initiate_managed_forces_platform").await else {
+            eprintln!("skipping managed-forces-platform test: no local MongoDB available");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+
+        let provider_id = Uuid::new_v4().to_string();
+        let plat_cid = encryption_keys
+            .encrypt(b"platform-client-id")
+            .await
+            .unwrap();
+        let plat_sec = encryption_keys.encrypt(b"platform-secret").await.unwrap();
+        let mut provider = make_test_provider(
+            &provider_id,
+            "https://example.com/token",
+            Some(plat_cid),
+            Some(plat_sec),
+        );
+        provider.credential_mode = "both".to_string();
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(&provider)
+            .await
+            .unwrap();
+
+        // Managed connection: no embedded BYO, pinned source = "platform".
+        let key =
+            insert_pending_user_api_key(&db, &encryption_keys, &provider_id, None, None).await;
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .update_one(
+                doc! { "_id": &key.id },
+                doc! { "$set": { "credential_source": "platform" } },
+            )
+            .await
+            .unwrap();
+        let connection_id = key.connection_id.clone().unwrap();
+
+        // The user ALSO has a legacy provider-level BYO row — "both" precedence
+        // would pick this if the pin were not honored.
+        let byo_cid = encryption_keys
+            .encrypt(b"legacy-byo-client-id")
+            .await
+            .unwrap();
+        let byo_sec = encryption_keys.encrypt(b"legacy-byo-secret").await.unwrap();
+        db.collection::<crate::models::user_provider_credentials::UserProviderCredentials>(
+            crate::models::user_provider_credentials::COLLECTION_NAME,
+        )
+        .insert_one(
+            &crate::models::user_provider_credentials::UserProviderCredentials {
+                id: Uuid::new_v4().to_string(),
+                user_id: key.user_id.clone(),
+                provider_config_id: provider_id.clone(),
+                client_id_encrypted: Some(byo_cid),
+                client_secret_encrypted: Some(byo_sec),
+                label: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let auth_url = super::initiate_oauth_connect(
+            &db,
+            &encryption_keys,
+            "http://localhost:3001",
+            &key.user_id,
+            &provider_id,
+            None,
+            Some("/keys"),
+            &[],
+            None,
+            Some(&connection_id),
+        )
+        .await
+        .expect("initiation should succeed");
+
+        assert!(
+            auth_url.contains("platform-client-id"),
+            "managed pin must use the platform client, got: {auth_url}"
+        );
+        assert!(
+            !auth_url.contains("legacy-byo-client-id"),
+            "managed pin must NOT fall through to the user's legacy BYO client"
+        );
+
+        // The platform connection is never re-embedded with creds (stays
+        // centrally rotatable).
+        let after = db
+            .collection::<UserApiKey>(USER_API_KEYS)
+            .find_one(doc! { "_id": &key.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            after.user_oauth_client_id_encrypted.is_none(),
+            "platform connection must not embed client credentials"
+        );
+    }
+
+    #[tokio::test]
+    async fn initiate_byo_reconnect_stays_on_own_client_after_platform_provisioned() {
+        // Reconnect provenance (Qwen MISSING #1): a connection created BYO must
+        // keep using the user's own client on reconnect, even after ops later
+        // provisions a platform app on the same provider. Reconnect threads the
+        // existing key's connection_id; the embedded BYO creds + credential_source
+        // must win over "both"-mode / platform.
+        let Some(db) = connect_test_database("initiate_byo_reconnect_stays").await else {
+            eprintln!("skipping byo-reconnect test: no local MongoDB available");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+
+        // Provider now has a platform app (ops provisioned it after the user
+        // connected with their own).
+        let provider_id = Uuid::new_v4().to_string();
+        let plat_cid = encryption_keys
+            .encrypt(b"platform-client-id")
+            .await
+            .unwrap();
+        let plat_sec = encryption_keys.encrypt(b"platform-secret").await.unwrap();
+        let mut provider = make_test_provider(
+            &provider_id,
+            "https://example.com/token",
+            Some(plat_cid),
+            Some(plat_sec),
+        );
+        provider.credential_mode = "both".to_string();
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(&provider)
+            .await
+            .unwrap();
+
+        // Existing BYO connection: embedded own-app creds + source pinned "byo".
+        let key = insert_pending_user_api_key(
+            &db,
+            &encryption_keys,
+            &provider_id,
+            Some("my-own-client-id"),
+            Some("my-own-secret"),
+        )
+        .await;
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .update_one(
+                doc! { "_id": &key.id },
+                doc! { "$set": { "credential_source": "byo" } },
+            )
+            .await
+            .unwrap();
+        let connection_id = key.connection_id.clone().unwrap();
+
+        // Reconnect = initiate again threading the same connection_id.
+        let auth_url = super::initiate_oauth_connect(
+            &db,
+            &encryption_keys,
+            "http://localhost:3001",
+            &key.user_id,
+            &provider_id,
+            None,
+            Some("/keys"),
+            &[],
+            None,
+            Some(&connection_id),
+        )
+        .await
+        .expect("reconnect should succeed");
+
+        assert!(
+            auth_url.contains("my-own-client-id"),
+            "BYO reconnect must keep the user's own client, got: {auth_url}"
+        );
+        assert!(
+            !auth_url.contains("platform-client-id"),
+            "BYO reconnect must NOT flip to the platform client"
+        );
+    }
+
+    #[tokio::test]
+    async fn initiate_rejects_non_allowlisted_scope_on_platform_app() {
+        let Some(db) = connect_test_database("initiate_scope_gate").await else {
+            eprintln!("skipping scope-gate test: no local MongoDB available");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+
+        // GitHub-slug provider, platform creds present, no BYO -> the platform
+        // scope allowlist applies. `delete_repo` is off the list.
+        let provider_id = Uuid::new_v4().to_string();
+        let plat_cid = encryption_keys.encrypt(b"gh-client-id").await.unwrap();
+        let plat_sec = encryption_keys.encrypt(b"gh-secret").await.unwrap();
+        let mut provider = make_test_provider(
+            &provider_id,
+            "https://github.com/login/oauth/access_token",
+            Some(plat_cid),
+            Some(plat_sec),
+        );
+        provider.slug = "github".to_string();
+        provider.credential_mode = "both".to_string();
+        provider.authorization_url = Some("https://github.com/login/oauth/authorize".to_string());
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(&provider)
+            .await
+            .unwrap();
+        let key =
+            insert_pending_user_api_key(&db, &encryption_keys, &provider_id, None, None).await;
+        let connection_id = key.connection_id.clone().unwrap();
+
+        // A non-allowlisted scope is rejected before any redirect is built.
+        let err = super::initiate_oauth_connect(
+            &db,
+            &encryption_keys,
+            "http://localhost:3001",
+            &key.user_id,
+            &provider_id,
+            None,
+            None,
+            &[],
+            Some(&["read:user".to_string(), "delete_repo".to_string()]),
+            Some(&connection_id),
+        )
+        .await
+        .expect_err("delete_repo must be rejected on the shared app");
+        assert!(matches!(err, AppError::ValidationError(_)), "got {err:?}");
+
+        // An allowlisted-only selection succeeds.
+        super::initiate_oauth_connect(
+            &db,
+            &encryption_keys,
+            "http://localhost:3001",
+            &key.user_id,
+            &provider_id,
+            None,
+            None,
+            &[],
+            Some(&["read:user".to_string(), "repo".to_string()]),
+            Some(&connection_id),
+        )
+        .await
+        .expect("allowlisted scopes should pass");
     }
 
     #[tokio::test]
@@ -3842,6 +4269,7 @@ mod tests {
 
         let now = Utc::now();
         let key = UserApiKey {
+            credential_source: None,
             id: Uuid::new_v4().to_string(),
             user_id: Uuid::new_v4().to_string(),
             label: "no-refresh-token".to_string(),
@@ -4715,6 +5143,7 @@ mod tests {
             None
         };
         let key = UserApiKey {
+            credential_source: None,
             id: Uuid::new_v4().to_string(),
             user_id: Uuid::new_v4().to_string(),
             label: "sweep-key".to_string(),

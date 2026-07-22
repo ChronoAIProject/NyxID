@@ -465,6 +465,7 @@ mod tests {
     fn make_gcp_key(sa_json_enc: Vec<u8>) -> UserApiKey {
         let now = Utc::now();
         UserApiKey {
+            credential_source: None,
             id: Uuid::new_v4().to_string(),
             user_id: Uuid::new_v4().to_string(),
             label: "GCP Service Account".to_string(),

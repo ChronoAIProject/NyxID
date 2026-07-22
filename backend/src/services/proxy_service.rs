@@ -3436,6 +3436,7 @@ mod tests {
         let encrypted = keys.encrypt(override_secret.as_bytes()).await.unwrap();
         db.collection::<UserApiKey>(USER_API_KEYS)
             .insert_one(UserApiKey {
+                credential_source: None,
                 id: override_credential_id.clone(),
                 user_id: user_id.clone(),
                 label: "agent-specific-key".to_string(),
@@ -5516,6 +5517,7 @@ mod tests {
     #[test]
     fn missing_credential_error_oauth2_with_provider() {
         let key = UserApiKey {
+            credential_source: None,
             id: "k".into(),
             user_id: "u".into(),
             label: "l".into(),
@@ -5545,6 +5547,7 @@ mod tests {
     #[test]
     fn missing_credential_error_api_key() {
         let key = UserApiKey {
+            credential_source: None,
             id: "k".into(),
             user_id: "u".into(),
             label: "l".into(),

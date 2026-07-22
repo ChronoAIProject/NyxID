@@ -378,6 +378,35 @@ pub fn supports_user_credentials(provider: &ProviderConfig) -> bool {
 /// `credential_user_id` field is unused there). Keeping the refresh
 /// path's existing implementation avoids needing to deserialize twice
 /// in the hot path.
+/// The authoritative OAuth-client source recorded on a connection's key
+/// (`"platform"` | `"byo"` | `None` for legacy). Drives forced-platform
+/// resolution at initiation/reconnect so a "NyxID managed" choice is never
+/// overridden by a user's legacy provider-level BYO credentials.
+pub async fn connection_credential_source(
+    db: &mongodb::Database,
+    connection_id: &str,
+) -> AppResult<Option<String>> {
+    use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
+    use mongodb::bson::doc;
+
+    let key = db
+        .collection::<UserApiKey>(USER_API_KEYS)
+        .find_one(doc! { "connection_id": connection_id })
+        .await?;
+    Ok(key.and_then(|k| k.credential_source))
+}
+
+/// Resolve the provider's own (platform/admin) OAuth client credentials,
+/// bypassing every user-credential lookup. Used when a connection is pinned
+/// to `credential_source = "platform"`; the credentials stay centrally
+/// rotatable on `ProviderConfig` (never copied onto the key).
+pub async fn resolve_platform_oauth_credentials(
+    encryption_keys: &EncryptionKeys,
+    provider: &ProviderConfig,
+) -> AppResult<ResolvedOAuthCredentials> {
+    decrypt_provider_credentials(encryption_keys, provider).await
+}
+
 pub async fn resolve_connection_oauth_credentials(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
@@ -437,6 +466,7 @@ mod tests {
 
     fn placeholder_key(connection_id: &str) -> UserApiKey {
         UserApiKey {
+            credential_source: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             label: "test".to_string(),

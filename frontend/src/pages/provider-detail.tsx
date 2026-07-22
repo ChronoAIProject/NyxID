@@ -164,7 +164,7 @@ export function ProviderDetailPage() {
               badgeVariant={provider.supports_pkce ? "success" : "secondary"}
             />
             {provider.default_scopes && provider.default_scopes.length > 0 && (
-              <div className="flex items-start justify-between text-[12px]">
+              <div className="flex items-start justify-between px-4 py-2.5 text-[12px]">
                 <span className="text-muted-foreground">Default Scopes</span>
                 <div className="flex flex-wrap gap-1 justify-end max-w-[60%]">
                   {provider.default_scopes.map((scope) => (
@@ -211,7 +211,7 @@ export function ProviderDetailPage() {
               />
             )}
             {provider.default_scopes && provider.default_scopes.length > 0 && (
-              <div className="flex items-start justify-between text-[12px]">
+              <div className="flex items-start justify-between px-4 py-2.5 text-[12px]">
                 <span className="text-muted-foreground">Default Scopes</span>
                 <div className="flex flex-wrap gap-1 justify-end max-w-[60%]">
                   {provider.default_scopes.map((scope) => (

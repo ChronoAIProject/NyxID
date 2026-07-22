@@ -54,6 +54,15 @@ export interface UpstreamScopePickerProps {
    * Falls back to "the provider".
    */
   readonly providerName?: string;
+  /**
+   * When set, the connection rides NyxID's shared platform OAuth app and may
+   * only request these scopes (`platform_scope_allowlist`). Scopes outside the
+   * list render disabled with a "needs your own OAuth app" hint, and custom
+   * entries outside it are rejected — so the user never selects a scope the
+   * backend will reject. `null`/unset = no gating (BYO or non-platform paths,
+   * where the user consents on their own app).
+   */
+  readonly platformAllowlist?: readonly string[] | null;
 }
 
 /** A pill row entry resolved from catalog ∪ defaults ∪ locked ∪ custom. */
@@ -129,11 +138,18 @@ export function UpstreamScopePicker({
   lockedScopes = [],
   grantedScopes,
   providerName,
+  platformAllowlist,
 }: UpstreamScopePickerProps) {
   const [customInput, setCustomInput] = useState("");
   const selected = new Set(value);
   const locked = new Set(lockedScopes);
   const pills = buildPills(catalog, defaultScopes, value, lockedScopes);
+  // Platform-path gating: a scope not on the shared app's allowlist cannot be
+  // selected here (it would be rejected at initiation). `null` allowlist =
+  // no gating. Already-granted (locked) scopes are never gated — they exist.
+  const allowset = platformAllowlist ? new Set(platformAllowlist) : null;
+  const isGated = (scope: string, isLocked: boolean) =>
+    allowset !== null && !isLocked && !allowset.has(scope);
 
   // Edit-mode change summary (NyxID#917): when editing an existing connection,
   // diff the current selection against what's already granted. `labelFor` maps
@@ -160,9 +176,23 @@ export function UpstreamScopePicker({
     onChange(pills.map((p) => p.scope).filter((s) => next.has(s)));
   }
 
+  const [customError, setCustomError] = useState<string | null>(null);
+
   function addCustom() {
     const parsed = parseAdditionalScopes(customInput);
     if (parsed.length === 0) return;
+    // On the platform path, reject custom scopes outside the shared app's
+    // allowlist here rather than letting initiation fail after selection.
+    if (allowset !== null) {
+      const blocked = parsed.filter((s) => !allowset.has(s));
+      if (blocked.length > 0) {
+        setCustomError(
+          `${blocked.join(", ")} — not available on NyxID's shared app. Use your own OAuth app to request ${blocked.length > 1 ? "these" : "it"}.`,
+        );
+        return;
+      }
+    }
+    setCustomError(null);
     const next = [...value];
     for (const s of parsed) {
       if (!next.includes(s)) next.push(s);
@@ -177,28 +207,33 @@ export function UpstreamScopePicker({
       {pills.length > 0 ? (
         <div role="group" aria-label="Scopes" className="flex flex-wrap gap-1.5">
           {pills.map((p) => {
-            const isOn = selected.has(p.scope) || p.locked;
+            const gated = isGated(p.scope, p.locked);
+            const isOn = (selected.has(p.scope) || p.locked) && !gated;
             return (
               <button
                 key={p.scope}
                 type="button"
                 aria-pressed={isOn}
-                disabled={p.locked}
+                disabled={p.locked || gated}
                 title={
-                  p.locked
-                    ? `${p.description ?? p.scope} — already granted; can't be removed here`
-                    : (p.description ?? p.scope)
+                  gated
+                    ? `${p.description ?? p.scope} — available only with your own OAuth app`
+                    : p.locked
+                      ? `${p.description ?? p.scope} — already granted; can't be removed here`
+                      : (p.description ?? p.scope)
                 }
                 onClick={() => {
                   toggle(p.scope);
                 }}
                 className={
                   "group inline-flex max-w-full items-center gap-1.5 rounded-full border px-3 py-1.5 text-left text-[12px] transition-colors " +
-                  (p.locked
-                    ? "cursor-default border-primary/60 bg-primary/10 text-foreground"
-                    : isOn
-                      ? "border-primary bg-primary/15 text-foreground"
-                      : "border-border bg-transparent text-muted-foreground hover:border-primary/50 hover:bg-muted/40")
+                  (gated
+                    ? "cursor-not-allowed border-dashed border-border/60 bg-transparent text-muted-foreground/50"
+                    : p.locked
+                      ? "cursor-default border-primary/60 bg-primary/10 text-foreground"
+                      : isOn
+                        ? "border-primary bg-primary/15 text-foreground"
+                        : "border-border bg-transparent text-muted-foreground hover:border-primary/50 hover:bg-muted/40")
                 }
               >
                 {p.sensitive ? (
@@ -215,7 +250,11 @@ export function UpstreamScopePicker({
                   </>
                 ) : null}
                 <span className="truncate">{p.label}</span>
-                {p.locked ? (
+                {gated ? (
+                  <span className="shrink-0 text-[11px] italic text-muted-foreground/70">
+                    own app
+                  </span>
+                ) : p.locked ? (
                   <span className="shrink-0 text-[11px] text-muted-foreground">
                     granted
                   </span>
@@ -240,6 +279,14 @@ export function UpstreamScopePicker({
             className="h-1.5 w-1.5 shrink-0 rounded-full bg-warning"
           />
           Dot marks a write or admin-level scope.
+        </p>
+      ) : null}
+
+      {allowset !== null && pills.some((p) => isGated(p.scope, p.locked)) ? (
+        <p className="text-[11px] text-muted-foreground">
+          Scopes marked “own app” aren’t offered on NyxID’s shared{" "}
+          {providerName ?? "provider"} app. Connect with your own OAuth app to
+          request them.
         </p>
       ) : null}
 
@@ -272,6 +319,9 @@ export function UpstreamScopePicker({
           Add
         </Button>
       </div>
+      {customError ? (
+        <p className="text-[11px] text-destructive">{customError}</p>
+      ) : null}
       {grantedSet && hasChanges ? (
         <div className="flex flex-col gap-1 rounded-lg border border-border bg-muted/40 px-3 py-2 text-[12px]">
           <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">

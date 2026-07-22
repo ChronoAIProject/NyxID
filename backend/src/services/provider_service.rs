@@ -22,9 +22,11 @@ use crate::models::user_provider_credentials::COLLECTION_NAME as USER_PROVIDER_C
 use crate::models::user_provider_token::COLLECTION_NAME as USER_PROVIDER_TOKENS;
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
 
+// `google` and `github` are deliberately NOT in this list: they run in
+// `credential_mode: "both"` (platform OAuth app with BYO override, see
+// docs/ONE_CLICK_OAUTH_CONNECTORS_SPEC.md), and this startup migration would
+// otherwise revert an ops-provisioned "both" back to "user" on every restart.
 const SEEDED_USER_CREDENTIAL_OAUTH_PROVIDER_SLUGS: &[&str] = &[
-    "google",
-    "github",
     "facebook",
     "discord",
     "spotify",
@@ -597,7 +599,10 @@ pub async fn seed_default_providers(
                 "https://developers.google.com/identity/protocols/oauth2".to_string(),
             ),
             is_active: true,
-            credential_mode: "user".to_string(),
+            // "both": BYO wins when present, otherwise the ops-provisioned
+            // platform OAuth app (one-click connect). Excluded from
+            // SEEDED_USER_CREDENTIAL_OAUTH_PROVIDER_SLUGS above.
+            credential_mode: "both".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
             extra_auth_params: Some(HashMap::from([
                 ("access_type".to_string(), "offline".to_string()),
@@ -639,7 +644,10 @@ pub async fn seed_default_providers(
             icon_url: None,
             documentation_url: Some("https://docs.github.com/en/apps/oauth-apps".to_string()),
             is_active: true,
-            credential_mode: "user".to_string(),
+            // "both": BYO wins when present, otherwise the ops-provisioned
+            // platform OAuth app (one-click connect). Excluded from
+            // SEEDED_USER_CREDENTIAL_OAUTH_PROVIDER_SLUGS above.
+            credential_mode: "both".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
@@ -2136,7 +2144,7 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
     DefaultServiceSeed {
         provider_slug: "github",
         service_slug: "api-github",
-        service_name: "GitHub API",
+        service_name: "GitHub OAuth",
         base_url: "https://api.github.com",
         injection_method: "bearer",
         injection_key: "Authorization",
@@ -3026,6 +3034,30 @@ pub async fn seed_default_services(
         );
     }
 
+    // Rename seeded OAuth service display names to their current defaults on
+    // existing deployments (the insert-only seed loop below never revisits an
+    // existing row). Guarded on the exact old name so an admin who customized
+    // the display name is never clobbered. Extend this table as OAuth service
+    // names are clarified one by one.
+    const SERVICE_NAME_RENAMES: &[(&str, &str, &str)] = &[
+        // (slug, old default name, new default name)
+        ("api-github", "GitHub API", "GitHub OAuth"),
+    ];
+    for (slug, old_name, new_name) in SERVICE_NAME_RENAMES {
+        let renamed = service_col
+            .update_one(
+                doc! { "slug": slug, "name": old_name },
+                doc! { "$set": {
+                    "name": new_name,
+                    "updated_at": bson::DateTime::from_chrono(now),
+                }},
+            )
+            .await?;
+        if renamed.modified_count > 0 {
+            tracing::info!(slug, new_name, "Renamed seeded OAuth service display name");
+        }
+    }
+
     // Backfill capability + streaming flags for seeded services whose
     // WebSocket / streaming support is known at the proxy layer but was
     // not captured on the original seed row (e.g. llm-openclaw). The
@@ -3740,6 +3772,7 @@ pub struct TelegramWidgetProviderInput {
 }
 
 /// Fields that can be updated on a provider config.
+#[derive(Default)]
 pub struct ProviderUpdateInput {
     pub name: Option<String>,
     pub description: Option<String>,
@@ -3764,6 +3797,12 @@ pub struct ProviderUpdateInput {
     pub extra_auth_params: Option<HashMap<String, String>>,
     pub device_code_format: Option<String>,
     pub client_id_param_name: Option<String>,
+    /// Explicitly remove the stored platform OAuth client credentials
+    /// (`$unset` both ciphertext fields). The only way to clear them --
+    /// omitting `client_id`/`client_secret` preserves, and empty strings
+    /// are rejected. Incident-response path for a compromised connector
+    /// secret (docs/ONE_CLICK_OAUTH_CONNECTORS_SPEC.md B5).
+    pub clear_client_credentials: Option<bool>,
 }
 
 /// Create a new provider configuration. Admin only.
@@ -3828,23 +3867,36 @@ pub async fn create_provider(
     let id = Uuid::new_v4().to_string();
     let now = Utc::now();
 
+    // Reject empty/whitespace client credentials on create, matching the
+    // update path (B5). An accidental "" must not become encrypted emptiness
+    // that later reads as `has_platform_oauth_credentials = true`.
+    fn encrypt_nonempty_credential(value: Option<&String>) -> AppResult<Option<&str>> {
+        match value {
+            Some(v) if v.trim().is_empty() => Err(AppError::ValidationError(
+                "OAuth client_id / client_secret must not be empty".to_string(),
+            )),
+            Some(v) => Ok(Some(v.trim())),
+            None => Ok(None),
+        }
+    }
+
     // Encrypt OAuth credentials if provided
     let (client_id_enc, client_secret_enc) = if let Some(ref oauth) = oauth_config {
-        let cid = match oauth.client_id.as_ref() {
+        let cid = match encrypt_nonempty_credential(oauth.client_id.as_ref())? {
             Some(value) => Some(encryption_keys.encrypt(value.as_bytes()).await?),
             None => None,
         };
-        let csec = match oauth.client_secret.as_ref() {
+        let csec = match encrypt_nonempty_credential(oauth.client_secret.as_ref())? {
             Some(value) => Some(encryption_keys.encrypt(value.as_bytes()).await?),
             None => None,
         };
         (cid, csec)
     } else if let Some(ref dc) = device_code_config {
-        let cid = match dc.client_id.as_ref() {
+        let cid = match encrypt_nonempty_credential(dc.client_id.as_ref())? {
             Some(value) => Some(encryption_keys.encrypt(value.as_bytes()).await?),
             None => None,
         };
-        let csec = match dc.client_secret.as_ref() {
+        let csec = match encrypt_nonempty_credential(dc.client_secret.as_ref())? {
             Some(value) => Some(encryption_keys.encrypt(value.as_bytes()).await?),
             None => None,
         };
@@ -3991,6 +4043,43 @@ pub async fn update_provider(
         ));
     }
 
+    // Platform-credential hygiene (spec B5): reject empty values (an
+    // accidental "" must not become encrypted emptiness that reads as
+    // "configured"), require the oauth2 pair together, and make clearing an
+    // explicit, separate operation.
+    let clearing_credentials = updates.clear_client_credentials == Some(true);
+    if clearing_credentials && (updates.client_id.is_some() || updates.client_secret.is_some()) {
+        return Err(AppError::ValidationError(
+            "clear_client_credentials cannot be combined with client_id/client_secret".to_string(),
+        ));
+    }
+    if let Some(ref cid) = updates.client_id
+        && cid.trim().is_empty()
+    {
+        return Err(AppError::ValidationError(
+            "client_id must not be empty; use clear_client_credentials to remove platform credentials".to_string(),
+        ));
+    }
+    if let Some(ref csec) = updates.client_secret
+        && csec.trim().is_empty()
+    {
+        return Err(AppError::ValidationError(
+            "client_secret must not be empty; use clear_client_credentials to remove platform credentials".to_string(),
+        ));
+    }
+    if existing.provider_type == "oauth2"
+        && (updates.client_id.is_some() || updates.client_secret.is_some())
+    {
+        let cid_present = updates.client_id.is_some() || existing.client_id_encrypted.is_some();
+        let sec_present =
+            updates.client_secret.is_some() || existing.client_secret_encrypted.is_some();
+        if cid_present != sec_present {
+            return Err(AppError::ValidationError(
+                "oauth2 platform credentials must form a client_id + client_secret pair; supply the missing half in the same request".to_string(),
+            ));
+        }
+    }
+
     let now = Utc::now();
     let mut set_doc = doc! {
         "updated_at": bson::DateTime::from_chrono(now),
@@ -4018,7 +4107,7 @@ pub async fn update_provider(
         set_doc.insert("default_scopes", scopes);
     }
     if let Some(ref cid) = updates.client_id {
-        let enc = encryption_keys.encrypt(cid.as_bytes()).await?;
+        let enc = encryption_keys.encrypt(cid.trim().as_bytes()).await?;
         set_doc.insert(
             "client_id_encrypted",
             bson::Binary {
@@ -4031,7 +4120,7 @@ pub async fn update_provider(
         let secret_value = if existing.provider_type == "telegram_widget" {
             normalize_telegram_bot_token(csec)?
         } else {
-            csec.clone()
+            csec.trim().to_string()
         };
         let enc = encryption_keys.encrypt(secret_value.as_bytes()).await?;
         set_doc.insert(
@@ -4117,9 +4206,18 @@ pub async fn update_provider(
 
     use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
 
+    let update_doc = if clearing_credentials {
+        doc! {
+            "$set": set_doc,
+            "$unset": { "client_id_encrypted": "", "client_secret_encrypted": "" },
+        }
+    } else {
+        doc! { "$set": set_doc }
+    };
+
     let updated = db
         .collection::<ProviderConfig>(COLLECTION_NAME)
-        .find_one_and_update(doc! { "_id": provider_id }, doc! { "$set": set_doc })
+        .find_one_and_update(doc! { "_id": provider_id }, update_doc)
         .with_options(
             FindOneAndUpdateOptions::builder()
                 .return_document(ReturnDocument::After)
@@ -5479,6 +5577,7 @@ mod tests {
                 extra_auth_params: None,
                 device_code_format: None,
                 client_id_param_name: None,
+                clear_client_credentials: None,
             },
         )
         .await
@@ -5550,6 +5649,7 @@ mod tests {
                 extra_auth_params: None,
                 device_code_format: None,
                 client_id_param_name: None,
+                clear_client_credentials: None,
             },
         )
         .await
@@ -5592,6 +5692,7 @@ mod tests {
                 extra_auth_params: None,
                 device_code_format: None,
                 client_id_param_name: None,
+                clear_client_credentials: None,
             },
         )
         .await
@@ -5666,6 +5767,7 @@ mod tests {
                 extra_auth_params: None,
                 device_code_format: None,
                 client_id_param_name: None,
+                clear_client_credentials: None,
             },
         )
         .await
@@ -5732,6 +5834,7 @@ mod tests {
                 extra_auth_params: None,
                 device_code_format: None,
                 client_id_param_name: None,
+                clear_client_credentials: None,
             },
         )
         .await
@@ -5783,6 +5886,7 @@ mod tests {
                 extra_auth_params: None,
                 device_code_format: None,
                 client_id_param_name: None,
+                clear_client_credentials: None,
             },
         )
         .await
@@ -5849,6 +5953,7 @@ mod tests {
                 extra_auth_params: None,
                 device_code_format: None,
                 client_id_param_name: None,
+                clear_client_credentials: None,
             },
         )
         .await
@@ -5915,6 +6020,7 @@ mod tests {
                 extra_auth_params: None,
                 device_code_format: Some("magic".to_string()),
                 client_id_param_name: None,
+                clear_client_credentials: None,
             },
         )
         .await
@@ -5990,6 +6096,7 @@ mod tests {
                 extra_auth_params: None,
                 device_code_format: None,
                 client_id_param_name: None,
+                clear_client_credentials: None,
             },
         )
         .await
@@ -6074,6 +6181,7 @@ mod tests {
                 )])),
                 device_code_format: None,
                 client_id_param_name: None,
+                clear_client_credentials: None,
             },
         )
         .await
@@ -6404,6 +6512,280 @@ mod tests {
         }
     }
 
+    // ── credential_mode "both" survives restarts (one-click connectors) ──
+
+    #[tokio::test]
+    async fn seed_keeps_google_github_both_across_restarts() {
+        let Some(db) = connect_test_database("prov_svc_both_restart").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let collection = db.collection::<ProviderConfig>(COLLECTION_NAME);
+
+        // Fresh install seeds "both"; a second startup (migrations re-run)
+        // must not revert it to "user".
+        super::seed_default_providers(&db, &enc).await.unwrap();
+        super::seed_default_providers(&db, &enc).await.unwrap();
+
+        for slug in ["google", "github"] {
+            let p = collection
+                .find_one(doc! { "slug": slug })
+                .await
+                .unwrap()
+                .unwrap_or_else(|| panic!("{slug} should be seeded"));
+            assert_eq!(
+                p.credential_mode, "both",
+                "{slug} must stay credential_mode=both across startup seed runs"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn seed_does_not_revert_ops_patched_both() {
+        let Some(db) = connect_test_database("prov_svc_ops_patch").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let collection = db.collection::<ProviderConfig>(COLLECTION_NAME);
+        super::seed_default_providers(&db, &enc).await.unwrap();
+
+        // Legacy deployment state: rows predate the "both" seed and sit at
+        // "user"; ops then PATCHes them to "both" to enable the platform app.
+        collection
+            .update_many(
+                doc! { "slug": { "$in": ["google", "github"] } },
+                doc! { "$set": { "credential_mode": "user" } },
+            )
+            .await
+            .unwrap();
+        collection
+            .update_many(
+                doc! { "slug": { "$in": ["google", "github"] } },
+                doc! { "$set": { "credential_mode": "both" } },
+            )
+            .await
+            .unwrap();
+
+        // Restart: the social_user_mode_migration must leave them alone...
+        super::seed_default_providers(&db, &enc).await.unwrap();
+        for slug in ["google", "github"] {
+            let p = collection
+                .find_one(doc! { "slug": slug })
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                p.credential_mode, "both",
+                "restart must not revert ops-patched {slug} back to user"
+            );
+        }
+
+        // ...while still enforcing "user" for slugs that remain in
+        // SEEDED_USER_CREDENTIAL_OAUTH_PROVIDER_SLUGS.
+        collection
+            .update_one(
+                doc! { "slug": "discord" },
+                doc! { "$set": { "credential_mode": "admin" } },
+            )
+            .await
+            .unwrap();
+        super::seed_default_providers(&db, &enc).await.unwrap();
+        let discord = collection
+            .find_one(doc! { "slug": "discord" })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            discord.credential_mode, "user",
+            "listed social slugs must still be migrated back to user"
+        );
+    }
+
+    // ── platform-credential hygiene (spec B5) ──────────────────────
+
+    async fn create_bare_oauth2_provider(
+        db: &mongodb::Database,
+        enc: &crate::crypto::aes::EncryptionKeys,
+        prefix: &str,
+    ) -> ProviderConfig {
+        let slug = format!("{prefix}-{}", Uuid::new_v4());
+        super::create_provider(
+            db,
+            enc,
+            "Hygiene",
+            &slug,
+            "oauth2",
+            "both",
+            "client_secret_post",
+            Some(super::OAuthProviderInput {
+                authorization_url: "https://example.com/authorize".to_string(),
+                token_url: "https://example.com/token".to_string(),
+                revocation_url: None,
+                default_scopes: None,
+                client_id: None,
+                client_secret: None,
+                supports_pkce: false,
+            }),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "test",
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn update_provider_rejects_empty_client_credentials() {
+        let Some(db) = connect_test_database("prov_svc_empty_creds").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let created = create_bare_oauth2_provider(&db, &enc, "empty-creds").await;
+
+        for (cid, csec) in [
+            (Some("  ".to_string()), Some("secret".to_string())),
+            (Some("id".to_string()), Some("".to_string())),
+        ] {
+            let err = super::update_provider(
+                &db,
+                &enc,
+                &created.id,
+                super::ProviderUpdateInput {
+                    client_id: cid,
+                    client_secret: csec,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("empty credential values must be rejected");
+            assert!(matches!(err, AppError::ValidationError(_)), "got {err:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn update_provider_requires_oauth2_credential_pair() {
+        let Some(db) = connect_test_database("prov_svc_cred_pair").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let created = create_bare_oauth2_provider(&db, &enc, "cred-pair").await;
+
+        // Half a pair on a provider with no stored other half: rejected.
+        let err = super::update_provider(
+            &db,
+            &enc,
+            &created.id,
+            super::ProviderUpdateInput {
+                client_id: Some("cid-only".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("oauth2 client_id without client_secret must be rejected");
+        assert!(matches!(err, AppError::ValidationError(_)), "got {err:?}");
+
+        // The full pair together: accepted.
+        let updated = super::update_provider(
+            &db,
+            &enc,
+            &created.id,
+            super::ProviderUpdateInput {
+                client_id: Some("cid".to_string()),
+                client_secret: Some("sec".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(updated.client_id_encrypted.is_some());
+        assert!(updated.client_secret_encrypted.is_some());
+
+        // Rotating one half is fine once the other is stored.
+        let rotated = super::update_provider(
+            &db,
+            &enc,
+            &created.id,
+            super::ProviderUpdateInput {
+                client_secret: Some("sec-2".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(rotated.client_secret_encrypted.is_some());
+    }
+
+    #[tokio::test]
+    async fn update_provider_clear_client_credentials() {
+        let Some(db) = connect_test_database("prov_svc_clear_creds").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let created = create_bare_oauth2_provider(&db, &enc, "clear-creds").await;
+
+        super::update_provider(
+            &db,
+            &enc,
+            &created.id,
+            super::ProviderUpdateInput {
+                client_id: Some("cid".to_string()),
+                client_secret: Some("sec".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        // Combining clear with new values is ambiguous: rejected.
+        let err = super::update_provider(
+            &db,
+            &enc,
+            &created.id,
+            super::ProviderUpdateInput {
+                client_id: Some("cid-2".to_string()),
+                client_secret: Some("sec-2".to_string()),
+                clear_client_credentials: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("clear + set must be rejected");
+        assert!(matches!(err, AppError::ValidationError(_)), "got {err:?}");
+
+        // Explicit clear removes both ciphertext fields (incident response).
+        let cleared = super::update_provider(
+            &db,
+            &enc,
+            &created.id,
+            super::ProviderUpdateInput {
+                clear_client_credentials: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(cleared.client_id_encrypted.is_none());
+        assert!(cleared.client_secret_encrypted.is_none());
+        assert!(
+            !crate::services::user_credentials_service::provider_has_admin_oauth_credentials(
+                &cleared
+            ),
+            "cleared provider must not report platform credentials"
+        );
+    }
+
     // ── seed_default_services idempotency ──────────────────────────
 
     #[tokio::test]
@@ -6647,6 +7029,7 @@ mod tests {
                 extra_auth_params: Some(params.clone()),
                 device_code_format: None,
                 client_id_param_name: None,
+                clear_client_credentials: None,
             },
         )
         .await
@@ -6725,6 +7108,7 @@ mod tests {
                 extra_auth_params: None,
                 device_code_format: None,
                 client_id_param_name: None,
+                clear_client_credentials: None,
             },
         )
         .await
@@ -6760,6 +7144,7 @@ mod tests {
                 extra_auth_params: None,
                 device_code_format: None,
                 client_id_param_name: None,
+                clear_client_credentials: None,
             },
         )
         .await
@@ -6830,6 +7215,7 @@ mod tests {
                     extra_auth_params: None,
                     device_code_format: Some(format.to_string()),
                     client_id_param_name: None,
+                    clear_client_credentials: None,
                 },
             )
             .await
@@ -7008,6 +7394,7 @@ mod tests {
                 extra_auth_params: None,
                 device_code_format: None,
                 client_id_param_name: None,
+                clear_client_credentials: None,
             },
         )
         .await

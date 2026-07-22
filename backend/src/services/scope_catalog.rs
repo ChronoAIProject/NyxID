@@ -81,6 +81,55 @@ pub fn removal_capability(slug: &str) -> ScopeRemoval {
     }
 }
 
+/// Scopes a request may carry when it rides NyxID's shared platform OAuth
+/// app (docs/ONE_CLICK_OAUTH_CONNECTORS_SPEC.md, D5/B4).
+///
+/// This is a **positive allowlist**, enforced default-deny: a scope reaches
+/// the shared app only if it appears here. Anything absent — an admin scope,
+/// or a scope GitHub/Google introduces after this list was written — fails
+/// closed and routes the user to their own OAuth app (BYO), where they
+/// consent on their own client and the blast radius is their own account.
+/// `None` = no platform app curated for this provider, so platform-flow
+/// enforcement does not apply.
+///
+/// This is defense-in-depth + a branding guardrail (the shared app's consent
+/// screen shows "NyxID" to every user), NOT a hard capability boundary: once
+/// connected, an agent with a NyxID key wields the token's full authority
+/// through the proxy. Per-operation scoping and short-lived tokens (GitHub
+/// App) are the real boundaries — tracked as follow-ups.
+///
+/// Deliberately NOT derived from the display-oriented `sensitive` flags below:
+/// Google's verification classification is a separate, manually maintained
+/// decision. Google stays identity-only until the Phase 2 verification pass.
+pub fn platform_scope_allowlist(slug: &str) -> Option<&'static [&'static str]> {
+    match slug {
+        // Identity only until aelf completes Google app verification; every
+        // useful Google API scope (Drive/Gmail/Sheets/Calendar) is sensitive
+        // or restricted and gated by Google review -> BYO for now.
+        "google" => Some(&["openid", "email", "profile"]),
+        // Curated-broad: common recoverable read + authoring capabilities are
+        // one-click. Excluded (-> BYO): `write:org` (alters org membership /
+        // teams) and `delete_repo` (irreversible). Admin/hook/key/codespace/
+        // security scopes are absent here and thus default-denied even if a
+        // user free-form-types them. `public_repo` is included as the strictly
+        // narrower subset of the already-allowed `repo`.
+        "github" => Some(&[
+            "read:user",
+            "user:email",
+            "read:org",
+            "repo",
+            "public_repo",
+            "repo:status",
+            "gist",
+            "workflow",
+            "notifications",
+            "read:packages",
+            "write:packages",
+        ]),
+        _ => None,
+    }
+}
+
 /// Curated available-scope menu for a provider, keyed by its `ProviderConfig`
 /// slug (e.g. `twitter`, `google`, `github`). Returns `None` for providers
 /// with no curated catalog (api_key providers, `openai`-format device-code
@@ -1016,6 +1065,76 @@ mod tests {
                     e.scope
                 );
             }
+        }
+    }
+
+    #[test]
+    fn platform_allowlist_covers_seeded_defaults() {
+        // The seeded default scopes must always pass the platform-flow
+        // allowlist, or a plain "Connect" with no extra scopes would fail.
+        let google = platform_scope_allowlist("google").unwrap();
+        for s in ["openid", "email", "profile"] {
+            assert!(google.contains(&s), "google allowlist missing default {s}");
+        }
+        let github = platform_scope_allowlist("github").unwrap();
+        for s in ["read:user", "user:email"] {
+            assert!(github.contains(&s), "github allowlist missing default {s}");
+        }
+    }
+
+    #[test]
+    fn platform_allowlist_excludes_github_destructive_and_admin() {
+        // Positive default-deny: write:org and delete_repo (and any admin/
+        // hook/key scope not on the list) must NOT ride the shared app.
+        let github = platform_scope_allowlist("github").unwrap();
+        for s in [
+            "write:org",
+            "admin:org",
+            "delete_repo",
+            "delete:packages",
+            "admin:repo_hook",
+            "write:repo_hook",
+            "admin:public_key",
+            "write:public_key",
+            "admin:ssh_signing_key",
+            "admin:enterprise",
+            "security_events",
+            "codespace:secrets",
+            // A scope GitHub might add later must fail closed, not open.
+            "some:future:scope",
+        ] {
+            assert!(
+                !github.contains(&s),
+                "github shared-app allowlist must exclude {s}"
+            );
+        }
+    }
+
+    #[test]
+    fn platform_allowlist_excludes_google_sensitive_scopes() {
+        // Phase 1 launches unverified: no Drive/Gmail/Sheets-class scopes may
+        // ride the shared platform app until the Google verification pass.
+        let google = platform_scope_allowlist("google").unwrap();
+        for s in [
+            "https://www.googleapis.com/auth/drive",
+            "https://www.googleapis.com/auth/drive.readonly",
+            "https://www.googleapis.com/auth/gmail.readonly",
+            "https://www.googleapis.com/auth/spreadsheets",
+        ] {
+            assert!(
+                !google.contains(&s),
+                "google allowlist must not include {s}"
+            );
+        }
+    }
+
+    #[test]
+    fn platform_allowlist_absent_for_uncurated_providers() {
+        for slug in ["twitter", "slack", "discord", "openai-codex", "lark"] {
+            assert!(
+                platform_scope_allowlist(slug).is_none(),
+                "{slug} has no platform allowlist and must not be enforced"
+            );
         }
     }
 }

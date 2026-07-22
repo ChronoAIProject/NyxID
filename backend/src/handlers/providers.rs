@@ -88,6 +88,9 @@ pub struct UpdateProviderRequest {
     pub extra_auth_params: Option<std::collections::HashMap<String, String>>,
     pub device_code_format: Option<String>,
     pub client_id_param_name: Option<String>,
+    /// Explicitly remove stored platform OAuth client credentials. Cannot be
+    /// combined with `client_id`/`client_secret` in the same request.
+    pub clear_client_credentials: Option<bool>,
 }
 
 impl std::fmt::Debug for UpdateProviderRequest {
@@ -573,7 +576,9 @@ pub async fn update_provider(
         extra_auth_params: body.extra_auth_params,
         device_code_format: body.device_code_format,
         client_id_param_name: body.client_id_param_name,
+        clear_client_credentials: body.clear_client_credentials,
     };
+    let cleared_credentials = updates.clear_client_credentials == Some(true);
 
     let updated =
         provider_service::update_provider(&state.db, &state.encryption_keys, &provider_id, updates)
@@ -583,7 +588,10 @@ pub async fn update_provider(
         state.db.clone(),
         &auth_user,
         "provider_updated",
-        Some(serde_json::json!({ "provider_id": &provider_id })),
+        Some(serde_json::json!({
+            "provider_id": &provider_id,
+            "cleared_client_credentials": cleared_credentials,
+        })),
     );
 
     Ok(Json(provider_to_response(updated)))

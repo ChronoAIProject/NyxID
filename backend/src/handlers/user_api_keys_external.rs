@@ -479,6 +479,7 @@ mod tests {
 
     fn fixture_external_key(key_id: &str, user_id: &str, label: &str) -> UserApiKey {
         UserApiKey {
+            credential_source: None,
             id: key_id.to_string(),
             user_id: user_id.to_string(),
             label: label.to_string(),
