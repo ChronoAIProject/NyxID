@@ -432,6 +432,7 @@ mod tests {
                 client_secret_hash: crate::crypto::token::hash_token(client_secret),
                 redirect_uris: vec!["http://localhost/callback".to_string()],
                 allowed_scopes: "openid".to_string(),
+                scope_provenance: Default::default(),
                 grant_types: "authorization_code refresh_token".to_string(),
                 client_type: "confidential".to_string(),
                 is_active: true,

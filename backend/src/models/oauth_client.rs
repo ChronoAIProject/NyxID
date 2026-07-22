@@ -1,6 +1,23 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// How this client's `allowed_scopes` were determined at creation
+/// (NyxID#1222). Durable provenance so future scope-policy changes can
+/// distinguish inherited defaults from explicit choices — the missing
+/// discriminator that made retroactive scope migrations unsound.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ScopeProvenance {
+    /// The registration/creation request explicitly supplied `scope`.
+    Explicit,
+    /// The request omitted `scope`; the server default was applied.
+    Defaulted,
+    /// Row predates provenance tracking; origin is unknowable and the
+    /// row must never be widened retroactively.
+    #[default]
+    UnknownLegacy,
+}
+
 pub const COLLECTION_NAME: &str = "oauth_clients";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -14,6 +31,10 @@ pub struct OauthClient {
     pub redirect_uris: Vec<String>,
     /// Space-separated allowed scopes
     pub allowed_scopes: String,
+    /// Provenance of `allowed_scopes` (NyxID#1222); legacy rows without
+    /// the field deserialize as `UnknownLegacy` and are never widened.
+    #[serde(default)]
+    pub scope_provenance: ScopeProvenance,
     /// "authorization_code", "client_credentials", etc.
     pub grant_types: String,
     /// "confidential" or "public"
@@ -59,6 +80,7 @@ mod tests {
             client_secret_hash: "abc123".to_string(),
             redirect_uris: vec!["http://localhost:3000/callback".to_string()],
             allowed_scopes: "openid profile email".to_string(),
+            scope_provenance: Default::default(),
             grant_types: "authorization_code".to_string(),
             client_type: "confidential".to_string(),
             is_active: true,
@@ -123,6 +145,7 @@ mod tests {
             client_secret_hash: "abc123".to_string(),
             redirect_uris: vec!["http://localhost:3000/callback".to_string()],
             allowed_scopes: "openid".to_string(),
+            scope_provenance: Default::default(),
             grant_types: "authorization_code".to_string(),
             client_type: "confidential".to_string(),
             is_active: true,
@@ -155,6 +178,7 @@ mod tests {
             client_secret_hash: "abc123".to_string(),
             redirect_uris: vec!["http://localhost:3000/callback".to_string()],
             allowed_scopes: "openid profile email".to_string(),
+            scope_provenance: Default::default(),
             grant_types: "authorization_code".to_string(),
             client_type: "confidential".to_string(),
             is_active: true,
