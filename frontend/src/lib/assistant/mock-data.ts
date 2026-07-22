@@ -678,8 +678,7 @@ export function createScriptedTurn(
   const chunks = [
     "I checked the current conversation context. ",
     "The next action will stay behind NyxID's credential broker, ",
-    "use only the service scopes already granted, ",
-    "and remain visible in the audit trail. ",
+    "use only the service scopes already granted, and remain visible in the audit trail. ",
     "This mock turn is ready for the API transport swap.",
   ];
   const finalBlock: ContentBlock = {
@@ -687,6 +686,19 @@ export function createScriptedTurn(
     block_id: blockId,
     text: chunks.join(""),
   };
+
+  // A live tool call so the preview exercises TOOL_CALL_START -> TOOL_CALL_END:
+  // the step appears active, settles to done, and the finished ledger stays on
+  // screen (it must never vanish when the call ends). Appended after the text
+  // block (which stays blocks[0]) so it renders as a second block below.
+  const runBlockId = `${blockId}-run`;
+  const toolStep = {
+    index: 1,
+    label: "lark.postMessage",
+    service_slug: "lark-bot",
+    artifact_id: null,
+    approval_request_id: null,
+  } as const;
 
   return [
     { cursor: 1, event: "turn.status", turn_id: turnId, status: "running" },
@@ -711,14 +723,47 @@ export function createScriptedTurn(
       text: chunk,
     })),
     {
-      cursor: 9,
+      cursor: 8,
       event: "block.completed",
       block_id: blockId,
       block: finalBlock,
     },
-    { cursor: 10, event: "message.completed", message_id: messageId },
+    // TOOL_CALL_START — the tool step appears, active/spinning.
     {
-      cursor: 11,
+      cursor: 9,
+      event: "block.started",
+      message_id: messageId,
+      block_id: runBlockId,
+      index: 1,
+      block: {
+        type: "run",
+        block_id: runBlockId,
+        title: "RUN",
+        steps_total: 1,
+        steps_complete: 0,
+        state: "running",
+        steps: [{ ...toolStep, status: "active", meta: "Running" }],
+      },
+    },
+    // TOOL_CALL_END — the step settles to done and the finished tool call stays
+    // on screen (persisted, not removed).
+    {
+      cursor: 10,
+      event: "block.completed",
+      block_id: runBlockId,
+      block: {
+        type: "run",
+        block_id: runBlockId,
+        title: "RUN",
+        steps_total: 1,
+        steps_complete: 1,
+        state: "completed",
+        steps: [{ ...toolStep, status: "done", meta: "Posted to #payments-oncall" }],
+      },
+    },
+    { cursor: 11, event: "message.completed", message_id: messageId },
+    {
+      cursor: 12,
       event: "turn.completed",
       turn_id: turnId,
       status: "completed",
