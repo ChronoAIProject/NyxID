@@ -33,12 +33,34 @@ import type { ConnectCardContentBlock } from "@/types/assistant";
  * of a line.
  */
 const CONNECT_FENCE = /^```[ \t]*nyxid:connect[ \t]*$/;
-/** Opening delimiter of any fenced code block: 3+ backticks or 3+ tildes. */
-const FENCE_OPEN = /^(`{3,}|~{3,})/;
+/**
+ * Opening delimiter of any fenced code block: 3+ backticks or 3+ tildes,
+ * indented up to three spaces. CommonMark allows that indentation, and a
+ * column-zero-only matcher misses ` ```markdown ` — letting a marker quoted
+ * inside it escape into live parsing.
+ */
+const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})/;
 /** A bare run of fence characters — a candidate close. */
-const FENCE_CLOSE = /^(`{3,}|~{3,})[ \t]*$/;
+const FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
 /** Longest prefix a partially-streamed marker opener can have. */
 const MARKER_OPENER = "```nyxid:connect";
+
+/**
+ * Could this partial line still grow into a marker opener?
+ *
+ * Must track `CONNECT_FENCE` exactly. When the two disagree the streamed
+ * projection shrinks: a form the guard doesn't recognise renders as prose,
+ * then the parser claims it as a marker and takes it back — which corrupts
+ * the transport's suffix diff. `` ``` nyxid:connec `` (space after the
+ * backticks) was exactly that gap.
+ */
+function couldOpenMarker(line: string): boolean {
+  if (line.length === 0) return false;
+  if (CONNECT_FENCE.test(line)) return true;
+  // Collapse the grammar's optional interstitial whitespace before comparing.
+  const canonical = line.replace(/^```[ \t]+/, "```");
+  return MARKER_OPENER.startsWith(canonical);
+}
 /** NyxID catalog slugs: `api-github`, `llm-openai`, `lark_bot`. */
 const SLUG = /^[a-z0-9][a-z0-9_-]{0,80}$/;
 
@@ -228,16 +250,13 @@ export function renderableText(source: string): string {
   // text is emitted whole at message end regardless.
   const lastNewline = text.lastIndexOf("\n");
   const trailingLine = text.slice(lastNewline + 1);
-  // Withhold the trailing *partial* line only when it is still a viable
-  // prefix of the marker opener — "``", "```nyxid:conn". Anything else,
-  // including ordinary inline code and ```` ```ts ````, streams immediately.
-  // Withholding more than this needlessly stalls prose; withholding less
-  // lets a growing opener render and then need retracting, which breaks the
-  // transport's suffix diff.
-  const safeSource =
-    trailingLine.length > 0 && MARKER_OPENER.startsWith(trailingLine)
-      ? text.slice(0, lastNewline + 1)
-      : text;
+  // Withhold the trailing *partial* line only when it could still become a
+  // marker opener. Anything else — ordinary inline code, ```` ```ts ```` —
+  // streams immediately. Withholding more needlessly stalls prose;
+  // withholding less lets a growing opener render and then need retracting.
+  const safeSource = couldOpenMarker(trailingLine)
+    ? text.slice(0, lastNewline + 1)
+    : text;
   return (
     splitConnectMarkers(safeSource, { allowPartial: true })
       .filter((segment) => segment.kind === "text")

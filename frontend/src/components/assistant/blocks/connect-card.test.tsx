@@ -271,3 +271,28 @@ describe("ConnectCard catalog resolution", () => {
     expect(screen.getByText("Authorizing")).toBeInTheDocument();
   });
 });
+
+describe("ConnectCard recovery paths", () => {
+  it("keeps Manage reachable when the catalog 404s but the key still exists", () => {
+    // Regression: the 404 guard hid every action, including one that needs no
+    // catalog at all — stranding a key the user still owns.
+    mocks.catalogError = new ApiError(404, {
+      error: "not_found",
+      error_code: 404,
+      message: "no such service",
+    });
+    mocks.keys = [
+      {
+        id: "key-api-token",
+        catalog_service_slug: "api-github",
+        is_active: true,
+        auto_connected: false,
+        credential_type: "api_key",
+        auth_method: "bearer",
+      },
+    ];
+    render(<ConnectCard block={blocker("NYXID_UNAUTHORIZED")} />);
+
+    expect(screen.getByRole("button", { name: "Manage" })).toBeInTheDocument();
+  });
+});

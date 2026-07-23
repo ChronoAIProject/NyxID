@@ -225,6 +225,10 @@ describe("renderableText", () => {
     'emoji 😀 then\n```nyxid:connect\n{"catalog_slug":"api-github"}\n```',
     "trailing `backtick",
     "no marker at all",
+    // Opener forms the grammar accepts but a naive literal guard misses.
+    'Before\n``` nyxid:connect\n{"catalog_slug":"api-github"}\n```\nAfter',
+    'Before\n```\tnyxid:connect\n{"catalog_slug":"api-github"}\n```',
+    'Before\n```nyxid:connect  \n{"catalog_slug":"api-github"}\n```',
   ];
 
   it.each(SAMPLES.map((sample, index) => [index, sample] as const))(
@@ -323,5 +327,63 @@ describe("adversarial payloads", () => {
       expect(renderableText(source)).toBe("");
       expect(splitConnectMarkers(source)).toEqual([]);
     }
+  });
+});
+
+describe("opener grammar and guard agree", () => {
+  // If `CONNECT_FENCE` accepts a form the streaming guard doesn't recognise,
+  // that form renders as prose and is then reclaimed as a marker — a shrink
+  // that corrupts the transport's suffix diff.
+  const OPENERS = [
+    "```nyxid:connect",
+    "``` nyxid:connect",
+    "```\tnyxid:connect",
+    "```nyxid:connect ",
+    "```  nyxid:connect  ",
+  ];
+
+  it.each(OPENERS)("%j is monotonic while streaming", (opener) => {
+    const full = `Before\n${opener}\n{"catalog_slug":"api-github"}\n\`\`\`\nAfter`;
+    let previous = "";
+    for (let cut = 0; cut <= full.length; cut += 1) {
+      const current = renderableText(full.slice(0, cut));
+      expect(
+        current.startsWith(previous),
+        `shrank at ${String(cut)}: ${JSON.stringify(previous)} -> ${JSON.stringify(current)}`,
+      ).toBe(true);
+      previous = current;
+    }
+    expect(previous).toBe("Before\nAfter");
+  });
+});
+
+describe("indented ordinary fences still quote their contents", () => {
+  // CommonMark allows a fence opener indented up to three spaces. Anchoring
+  // the matcher at column zero let a marker inside ` ```markdown ` escape.
+  it.each([" ", "  ", "   "])(
+    "a fence indented by %j guards a nested marker",
+    (indent) => {
+      const source = [
+        `${indent}\`\`\`markdown`,
+        "```nyxid:connect",
+        JSON.stringify({ catalog_slug: "api-github" }),
+        "```",
+        `${indent}\`\`\``,
+      ].join("\n");
+
+      expect(hasConnectMarker(source)).toBe(false);
+    },
+  );
+
+  it("a tilde fence indented by two spaces guards a nested marker", () => {
+    const source = [
+      "  ~~~markdown",
+      "```nyxid:connect",
+      JSON.stringify({ catalog_slug: "api-github" }),
+      "```",
+      "  ~~~",
+    ].join("\n");
+
+    expect(hasConnectMarker(source)).toBe(false);
   });
 });

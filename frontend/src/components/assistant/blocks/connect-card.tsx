@@ -116,10 +116,12 @@ export function ConnectCard({
     : authorizing
       ? STATE_LABEL.waiting_for_provider
       : STATE_LABEL[block.state];
-  // Withhold the action only for a *fresh* connect, where picking the wrong
+  // Catalog state gates only a *fresh* connect, where picking the wrong
   // modality from the block's hint is the risk. Reconnect and Manage key off
-  // an existing NyxID row, so they don't need the catalog at all.
+  // an existing NyxID row and need no catalog — hiding them on a 404 would
+  // strip the only recovery path from a key the user still owns.
   const awaitingCatalog = catalogPending && matchingKey === undefined;
+  const blockedByCatalog = unresolvableSlug && matchingKey === undefined;
 
   return (
     <section className="flex items-center gap-3 rounded-xl border border-border/70 bg-card px-4 py-3">
@@ -150,7 +152,7 @@ export function ConnectCard({
       </div>
       {/* Hidden while an authorization is already in flight: a second click
           would mint a second placeholder key for the same service. */}
-      {!connected && !unresolvableSlug && !authorizing && !awaitingCatalog && (
+      {!connected && !blockedByCatalog && !authorizing && !awaitingCatalog && (
         <Button
           variant="primary"
           size="sm"

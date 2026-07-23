@@ -30,6 +30,26 @@ function blockId(block: unknown): string {
   return "unsupported-block";
 }
 
+/**
+ * A text block with nothing in it.
+ *
+ * The transport always leads an assistant message with a text block, even when
+ * the message opens with a connect card, so the live and reloaded block lists
+ * stay identical (that convergence is what lets cards survive a reload). Such a
+ * block has no content to show and must not occupy a row.
+ */
+function isEmptyTextBlock(block: unknown): boolean {
+  return (
+    typeof block === "object" &&
+    block !== null &&
+    "type" in block &&
+    block.type === "text" &&
+    "text" in block &&
+    typeof block.text === "string" &&
+    block.text.trim() === ""
+  );
+}
+
 function isTextBlock(block: unknown): boolean {
   return (
     typeof block === "object" &&
@@ -268,6 +288,12 @@ export function ChatThread({
                           const isLastBlock =
                             isLastMessage &&
                             index === message.blocks.length - 1;
+                          // A message that opens with a connect card still
+                          // carries an empty leading text block, so the live
+                          // and reloaded block lists stay identical. Rendering
+                          // its wrapper would add a `space-y-3` gap above the
+                          // card for no content.
+                          if (isEmptyTextBlock(block)) return null;
                           return (
                             <div key={`${blockId(block)}-${String(index)}`}>
                               {renderBlock(
