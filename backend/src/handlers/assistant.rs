@@ -294,6 +294,13 @@ pub async fn list_conversations(
 }
 
 /// `GET /api/v1/assistant/conversations/{id}` -- transcript.
+///
+/// The body is opaque here: NyxID never parses or reshapes it. Aevatar PR
+/// #2923 wrapped the flat `[StoredChatMessage]` array in
+/// `{messages, stateVersion}`, and both shapes stream through this route
+/// unmodified -- the client owns the decoding (see the transcript reader in
+/// `frontend/src/lib/assistant/aevatar-transport.ts`). Keeping the route
+/// shape-agnostic is what lets Aevatar and NyxID deploy independently.
 pub async fn get_history(
     State(state): State<AppState>,
     auth_user: AuthUser,

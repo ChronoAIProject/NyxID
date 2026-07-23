@@ -1,5 +1,6 @@
 import { apiClient } from "@/lib/api-client";
 import {
+  AssistantProtocolError,
   AssistantTurnActiveError,
   AssistantTurnCancelledError,
 } from "@/lib/assistant/errors";
@@ -240,6 +241,32 @@ interface AevatarHistoryEntry {
   readonly turnId?: unknown;
 }
 
+/**
+ * Transcript read (`chat-history/conversations/{id}`), in both shapes we
+ * accept.
+ *
+ * Aevatar PR #2923 wrapped the flat array in `{messages, stateVersion}`, where
+ * `stateVersion` is the conversation read model's materialized watermark. The
+ * legacy array stays accepted because NyxID and Aevatar deploy independently:
+ * committing to one shape breaks chat either now or the moment Aevatar ships.
+ *
+ * REMOVE the array branch once every supported Aevatar environment is
+ * confirmed on the wrapped contract — not after a single prod probe.
+ *
+ * `stateVersion` is deliberately **ignored** — not read, not validated, not
+ * stored. It is the continuation watermark for `POST /api/chat`, and NyxID's
+ * production transport is `nyxid-chat/…:stream`, which has no such parameter.
+ * Storing an unread watermark would be state nobody maintains
+ * (`mergeIndexEntry` rebuilds `StoredConversation` and would silently drop
+ * it), and *requiring* it would turn a field with zero consumers into an
+ * outage. Acceptance is therefore keyed only on array-valued `messages`.
+ * `stateVersion` becomes load-bearing only if the transport migrates to
+ * `/api/chat`.
+ */
+type AevatarHistoryResponse =
+  | readonly AevatarHistoryEntry[]
+  | { readonly messages?: unknown; readonly stateVersion?: unknown };
+
 interface StoredConversation {
   conversation: Conversation;
   turnState: TurnReducerState;
@@ -399,6 +426,31 @@ function historyEntryToMessage(
     ...(status ? { status } : {}),
     ...(error !== undefined ? { error } : {}),
   };
+}
+
+/**
+ * Narrow a transcript read to its message entries, or reject it.
+ *
+ * Strict on purpose. A permissive reader that degraded `{}` or
+ * `{messages: null}` to an empty transcript would render "no messages" for a
+ * broken upstream — the same silent failure the `stateVersion` wrapper caused
+ * against the old array-typed reader. An empty array (or an empty wrapped
+ * `messages`) remains a valid answer meaning deleted / not yet materialized /
+ * zero turns; only a body that is neither accepted shape is a protocol error.
+ */
+function readHistoryEntries(
+  body: AevatarHistoryResponse,
+): readonly AevatarHistoryEntry[] {
+  if (Array.isArray(body)) return body;
+  if (body && typeof body === "object") {
+    const { messages } = body as { readonly messages?: unknown };
+    if (Array.isArray(messages)) {
+      return messages as readonly AevatarHistoryEntry[];
+    }
+  }
+  throw new AssistantProtocolError(
+    "The conversation history response did not match the expected shape.",
+  );
 }
 
 function deriveTitle(messages: AssistantMessage[]): string | null {
@@ -684,19 +736,31 @@ export class AevatarAssistantTransport implements AssistantTransport {
         has_more: false,
       };
     }
-    let stored: StoredConversation | undefined;
+    let stored: StoredConversation;
     try {
       stored = await this.loadHistory(conversationId);
-    } catch {
+    } catch (error) {
+      // Delete wins over every other outcome, including the throws below:
+      // once the conversation is tombstoned, "not found" is the answer, not
+      // whatever the doomed read happened to fail with.
+      if (this.deletedConversationIds.has(conversationId)) {
+        throw new Error("Conversation was not found.");
+      }
+      // A contract break must reach the user. Swallowing it here is what
+      // turned the PR #2923 array→`{messages, stateVersion}` change into a
+      // blank transcript instead of a visible failure.
+      if (error instanceof AssistantProtocolError) throw error;
+      // Transient failures (network, 5xx) may serve the local mirror — but
+      // only when it holds a real transcript. A conversation the index
+      // merged in carries `EMPTY_TURN_STATE`, and answering with that would
+      // dress a failed read as a legitimately empty chat.
+      if (!existing || existing.turnState.messages.length === 0) throw error;
       stored = existing;
     }
     // Re-check AFTER the await: a delete completing while the history
     // request was in flight must not be answered with the pre-delete
     // snapshot captured above (the fallback `existing`).
     if (this.deletedConversationIds.has(conversationId)) {
-      throw new Error("Conversation was not found.");
-    }
-    if (!stored) {
       throw new Error("Conversation was not found.");
     }
     return {
@@ -994,7 +1058,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
   private async loadHistory(
     conversationId: string,
   ): Promise<StoredConversation> {
-    const entries = await assistantApi.get<AevatarHistoryEntry[]>(
+    const body = await assistantApi.get<AevatarHistoryResponse>(
       `${ASSISTANT_PREFIX}/conversations/${conversationId}`,
     );
     // The conversation may have been deleted while this request was in
@@ -1003,6 +1067,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     if (this.deletedConversationIds.has(conversationId)) {
       throw new Error("Conversation was not found.");
     }
+    const entries = readHistoryEntries(body);
     const existing = this.conversations.get(conversationId);
     const messages = entries
       .map((entry, index) => historyEntryToMessage(entry, index))
