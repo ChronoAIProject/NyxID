@@ -3,6 +3,12 @@ import {
   AssistantTurnActiveError,
   AssistantTurnCancelledError,
 } from "@/lib/assistant/errors";
+import {
+  connectMarkerToBlock,
+  hasConnectMarker,
+  renderableText,
+  splitConnectMarkers,
+} from "@/lib/assistant/connect-fence";
 import { drainSseBuffer, flushSseBuffer } from "@/lib/assistant/sse";
 import {
   applyTurnEvent,
@@ -265,6 +271,8 @@ interface RunningTurn {
   currentMessageId: string | null;
   currentBlockId: string | null;
   accumulatedText: string;
+  /** Prose already forwarded as `block.delta`; markers are withheld. */
+  emittedText: string;
   finished: boolean;
   /** Any assistant text streamed this turn (gates the batched-content fallback). */
   sawText: boolean;
@@ -379,6 +387,58 @@ function historyError(
   };
 }
 
+/**
+ * Project one message's stored text into typed blocks.
+ *
+ * This is the only reason connect cards survive a reload. Aevatar's history
+ * returns a flat `content` string per message and the FE may call nothing but
+ * chat + history, so a card that lived only in a live SSE frame is gone the
+ * moment the tab reloads — precisely when it matters, since "I'll go fetch my
+ * API key" is the most likely time for a user to navigate away.
+ *
+ * Messages with no marker keep the exact single-text-block shape they had
+ * before, so nothing that doesn't use markers changes behaviour.
+ */
+function textToBlocks(text: string, messageId: string): readonly ContentBlock[] {
+  if (!hasConnectMarker(text)) {
+    return [{ type: "text", block_id: `${messageId}-text`, text }];
+  }
+  const segments = splitConnectMarkers(text);
+  // The live path opens `${messageId}-text` on TEXT_MESSAGE_START, before it
+  // can know whether the message even begins with prose. So the canonical
+  // projection ALWAYS leads with that block — empty when the message opens
+  // with a marker — and both paths agree block-for-block. Without this the
+  // two diverge in order and id, and a reload silently reshuffles the
+  // transcript.
+  const leading = segments[0]?.kind === "text" ? segments[0].text : "";
+  const blocks: ContentBlock[] = [
+    { type: "text", block_id: `${messageId}-text`, text: leading },
+  ];
+  let textIndex = 1;
+  let connectIndex = 0;
+  for (const segment of segments.slice(
+    segments[0]?.kind === "text" ? 1 : 0,
+  )) {
+    if (segment.kind === "text") {
+      blocks.push({
+        type: "text",
+        block_id: `${messageId}-text-${String(textIndex)}`,
+        text: segment.text,
+      });
+      textIndex += 1;
+    } else if (segment.kind === "connect") {
+      blocks.push(
+        connectMarkerToBlock(
+          segment.marker,
+          `${messageId}-connect-${String(connectIndex)}`,
+        ),
+      );
+      connectIndex += 1;
+    }
+  }
+  return blocks;
+}
+
 function historyEntryToMessage(
   entry: AevatarHistoryEntry,
   index: number,
@@ -393,7 +453,13 @@ function historyEntryToMessage(
     id,
     role: entry.role,
     schema_version: 1,
-    blocks: text ? [{ type: "text", block_id: `${id}-text`, text }] : [],
+    // Markers are Aevatar-authored, so only assistant messages carry them;
+    // a user pasting the encoding into chat must never mint a card.
+    blocks: text
+      ? entry.role === "assistant"
+        ? [...textToBlocks(text, id)]
+        : [{ type: "text", block_id: `${id}-text`, text }]
+      : [],
     created_at: isoFromEpochMs(entry.timestamp, new Date(0).toISOString()),
     ...(turnId ? { turnId } : {}),
     ...(status ? { status } : {}),
@@ -1051,6 +1117,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       currentMessageId: null,
       currentBlockId: null,
       accumulatedText: "",
+      emittedText: "",
       finished: false,
       sawText: false,
       activityMessageId: null,
@@ -1408,6 +1475,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
         run.currentMessageId = messageId;
         run.currentBlockId = `${messageId}-text`;
         run.accumulatedText = "";
+        run.emittedText = "";
         this.emit(conversationId, run, {
           cursor: this.nextCursor(run),
           event: "message.started",
@@ -1429,11 +1497,20 @@ export class AevatarAssistantTransport implements AssistantTransport {
         if (!delta || !run.currentBlockId) return;
         run.accumulatedText += delta;
         run.sawText = true;
+        // Stream only text the user should see. A connect marker is
+        // structure, not prose: emitting it raw would flash half-written
+        // JSON into the transcript before the card replaces it at message
+        // end. `renderableText` withholds the marker (and anything after an
+        // unterminated one), so we forward just the newly-safe suffix.
+        const safeText = renderableText(run.accumulatedText);
+        if (safeText.length <= run.emittedText.length) return;
+        const pending = safeText.slice(run.emittedText.length);
+        run.emittedText = safeText;
         this.emit(conversationId, run, {
           cursor: this.nextCursor(run),
           event: "block.delta",
           block_id: run.currentBlockId,
-          text: delta,
+          text: pending,
         });
         return;
       }
@@ -2185,24 +2262,52 @@ export class AevatarAssistantTransport implements AssistantTransport {
 
   private closeOpenMessage(conversationId: string, run: RunningTurn): void {
     if (!run.currentMessageId || !run.currentBlockId) return;
+    const messageId = run.currentMessageId;
+    // One projection for both paths. `textToBlocks` is the same function
+    // `historyEntryToMessage` uses, so the blocks a live turn produces are
+    // block-for-block identical to what a reload replays — same order, same
+    // ids, same text. Deriving them separately here is how they drift.
+    const blocks = textToBlocks(run.accumulatedText, messageId);
+    const [leadingBlock, ...appended] = blocks;
+
+    // The leading block is already open from TEXT_MESSAGE_START; complete it
+    // in place under its existing id rather than starting a second one.
     this.emit(conversationId, run, {
       cursor: this.nextCursor(run),
       event: "block.completed",
       block_id: run.currentBlockId,
-      block: {
-        type: "text",
-        block_id: run.currentBlockId,
-        text: run.accumulatedText,
-      },
+      block:
+        leadingBlock?.type === "text"
+          ? { ...leadingBlock, block_id: run.currentBlockId }
+          : { type: "text", block_id: run.currentBlockId, text: "" },
     });
+
+    appended.forEach((block, offset) => {
+      this.emit(conversationId, run, {
+        cursor: this.nextCursor(run),
+        event: "block.started",
+        message_id: messageId,
+        block_id: block.block_id,
+        index: offset + 1,
+        block,
+      });
+      this.emit(conversationId, run, {
+        cursor: this.nextCursor(run),
+        event: "block.completed",
+        block_id: block.block_id,
+        block,
+      });
+    });
+
     this.emit(conversationId, run, {
       cursor: this.nextCursor(run),
       event: "message.completed",
-      message_id: run.currentMessageId,
+      message_id: messageId,
     });
     run.currentMessageId = null;
     run.currentBlockId = null;
     run.accumulatedText = "";
+    run.emittedText = "";
   }
 
   /**

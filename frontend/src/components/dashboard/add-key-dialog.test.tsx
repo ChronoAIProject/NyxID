@@ -17,9 +17,13 @@ const {
   mockApiDelete,
   mockHardRedirect,
   mockNavigate,
+  pendingKeyStatus,
   toastFns,
 } = vi.hoisted(() => ({
   catalog: { entries: [] as unknown[] },
+  // Status the OAuth step's placeholder-key poll observes. `null` = still
+  // `pending_auth` (the user hasn't finished at the provider yet).
+  pendingKeyStatus: { value: null as string | null },
   createKeyMutate: vi.fn(),
   createKeyMutateAsync: vi.fn(),
   // Wave-aha-1 A4+ — the verify step auto-mints an Agent Key. The mock
@@ -42,6 +46,15 @@ vi.mock("@/hooks/use-keys", () => ({
     mutate: createKeyMutate,
     mutateAsync: createKeyMutateAsync,
     isPending: false,
+  }),
+  KEY_AUTH_ACTIVE: "active",
+  KEY_AUTH_FAILED: "failed",
+  // The OAuth step polls the placeholder key while the user authorizes in
+  // another tab. Tests drive the observed status through `pendingKeyStatus`.
+  useKeyAuthorizationStatus: () => ({
+    data: pendingKeyStatus.value
+      ? { status: pendingKeyStatus.value }
+      : undefined,
   }),
 }));
 
@@ -176,6 +189,7 @@ function makeReconnectKey(overrides: Partial<KeyInfo> = {}): KeyInfo {
 beforeEach(() => {
   vi.clearAllMocks();
   catalog.entries = [OPENAI_ENTRY];
+  pendingKeyStatus.value = null;
   createKeyMutateAsync.mockResolvedValue({ id: "created-service-1" });
   initiateOAuthMutateAsync.mockResolvedValue({
     authorization_url: "https://provider.example/oauth",
@@ -546,9 +560,66 @@ describe("AddKeyDialog — reconnect path", () => {
     expect(createKeyMutate).not.toHaveBeenCalled();
     expect(createKeyMutateAsync).not.toHaveBeenCalled();
     expect(mockApiDelete).not.toHaveBeenCalled();
-    expect(mockHardRedirect).toHaveBeenCalledWith(
+    // The dialog must NOT navigate the whole tab away: the assistant's
+    // in-chat connect card cannot survive its own tab going to GitHub.
+    // Authorization is handed off through an explicit link instead, and the
+    // placeholder key is polled in place.
+    expect(mockHardRedirect).not.toHaveBeenCalled();
+    const authorizeLink = await screen.findByRole("link", {
+      name: /Open GitHub/i,
+    });
+    expect(authorizeLink).toHaveAttribute(
+      "href",
       "https://provider.example/oauth",
     );
+    expect(authorizeLink).toHaveAttribute("target", "_blank");
+    expect(screen.getByRole("status")).toHaveTextContent(/Waiting for GitHub/i);
+  });
+
+  it("reports success in place once the polled placeholder key goes active", async () => {
+    catalog.entries = [OAUTH_ENTRY];
+    pendingKeyStatus.value = "active";
+    const user = userEvent.setup();
+    render(
+      <AddKeyDialog
+        open
+        onOpenChange={vi.fn()}
+        reconnectKey={makeReconnectKey()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /Connect with GitHub/i }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("status")).toHaveTextContent(/Connected/i);
+    });
+    expect(mockHardRedirect).not.toHaveBeenCalled();
+  });
+
+  it("offers a retry when the provider denies authorization", async () => {
+    catalog.entries = [OAUTH_ENTRY];
+    pendingKeyStatus.value = "failed";
+    const user = userEvent.setup();
+    render(
+      <AddKeyDialog
+        open
+        onOpenChange={vi.fn()}
+        reconnectKey={makeReconnectKey()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /Connect with GitHub/i }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("status")).toHaveTextContent(
+        /denied or expired/i,
+      );
+    });
+    // Back to the scope picker so a retry mints a fresh authorization.
+    await user.click(screen.getByRole("button", { name: /Try again/i }));
+    expect(
+      screen.getByRole("button", { name: /Connect with GitHub/i }),
+    ).toBeInTheDocument();
   });
 
   it("passes targetOrgId for admin org-owned OAuth reconnects", async () => {
