@@ -2679,3 +2679,433 @@ describe("transport selection", () => {
     ).toBe("aevatar");
   });
 });
+
+describe("connect markers in assistant messages", () => {
+  const MARKER = [
+    "```nyxid:connect",
+    JSON.stringify({ catalog_slug: "api-github", reason: "read merged PRs" }),
+    "```",
+  ].join("\n");
+
+  function connectCards(blocks: readonly ContentBlock[]): ContentBlock[] {
+    return blocks.filter((block) => block.type === "connect_card");
+  }
+
+  it("renders cards from stored history — the reload path", async () => {
+    // The whole point of the in-text encoding: the FE may call only chat and
+    // history, so a card that lived in a live SSE frame is gone after a
+    // reload. Re-splitting the stored string brings it back.
+    stubFetch(
+      routeHistory([
+        {
+          id: "m1",
+          role: "user",
+          content: "Summarise my merged PRs",
+          timestamp: 1784192889074,
+        },
+        {
+          id: "m2",
+          role: "assistant",
+          content: `I need GitHub first.\n${MARKER}\nThen I'll summarise.`,
+          timestamp: 1784192899074,
+        },
+      ]),
+    );
+    const transport = new AevatarAssistantTransport();
+
+    const history = await transport.getHistory(CONVERSATION_ID);
+
+    const assistant = history.messages.find((m) => m.id === "m2");
+    expect(assistant?.blocks.map((b) => b.type)).toEqual([
+      "text",
+      "connect_card",
+      "text",
+    ]);
+    const card = connectCards(assistant?.blocks ?? [])[0];
+    expect(card).toMatchObject({
+      type: "connect_card",
+      catalog_slug: "api-github",
+      state: "needs_connection",
+    });
+    // The raw encoding must never survive into rendered prose.
+    for (const block of assistant?.blocks ?? []) {
+      if (block.type === "text") {
+        expect(block.text).not.toContain("nyxid:connect");
+      }
+    }
+  });
+
+  it("never mints a card from a user message", async () => {
+    // Markers are Aevatar-authored. A user pasting the encoding into chat
+    // must not be able to conjure a connect card.
+    stubFetch(
+      routeHistory([
+        { id: "m1", role: "user", content: MARKER, timestamp: 1784192889074 },
+      ]),
+    );
+    const transport = new AevatarAssistantTransport();
+
+    const history = await transport.getHistory(CONVERSATION_ID);
+
+    expect(connectCards(history.messages[0]?.blocks ?? [])).toHaveLength(0);
+  });
+
+  it("leaves marker-free history byte-identical", async () => {
+    stubFetch(
+      routeHistory([
+        {
+          id: "m1",
+          role: "assistant",
+          content: "Nothing to connect here.",
+          timestamp: 1784192889074,
+        },
+      ]),
+    );
+    const transport = new AevatarAssistantTransport();
+
+    const history = await transport.getHistory(CONVERSATION_ID);
+
+    expect(history.messages[0]?.blocks).toEqual([
+      { type: "text", block_id: "m1-text", text: "Nothing to connect here." },
+    ]);
+  });
+
+  it("emits a card from the live stream and keeps the encoding out of prose", async () => {
+    stubFetch(
+      routeCreate,
+      routeStream([
+        { type: "RUN_STARTED", turnId: TURN_ID, actorId: CONVERSATION_ID },
+        { type: "TEXT_MESSAGE_START", textMessageStart: { messageId: "m9" } },
+        {
+          type: "TEXT_MESSAGE_CONTENT",
+          textMessageContent: { delta: "I need GitHub first.\n" },
+        },
+        { type: "TEXT_MESSAGE_CONTENT", textMessageContent: { delta: MARKER } },
+        { type: "TEXT_MESSAGE_END" },
+        { type: "RUN_FINISHED" },
+      ]),
+      routeHistory([]),
+    );
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    const events = await collectTurn(transport, "Summarise my merged PRs");
+
+    const started = events
+      .filter(
+        (e): e is Extract<TurnEvent, { event: "block.started" }> =>
+          e.event === "block.started",
+      )
+      .map((e) => e.block);
+    expect(connectCards(started)).toHaveLength(1);
+    expect(connectCards(started)[0]).toMatchObject({
+      catalog_slug: "api-github",
+    });
+
+    // No streamed delta may carry the raw encoding.
+    for (const event of events) {
+      if (event.event === "block.delta") {
+        expect(event.text).not.toContain("nyxid:connect");
+      }
+    }
+  });
+
+  it("withholds a half-written marker while it streams", async () => {
+    stubFetch(
+      routeCreate,
+      routeStream([
+        { type: "RUN_STARTED", turnId: TURN_ID, actorId: CONVERSATION_ID },
+        { type: "TEXT_MESSAGE_START", textMessageStart: { messageId: "m9" } },
+        {
+          type: "TEXT_MESSAGE_CONTENT",
+          textMessageContent: { delta: "Hold on.\n``" },
+        },
+        {
+          type: "TEXT_MESSAGE_CONTENT",
+          textMessageContent: { delta: "`nyxid:conn" },
+        },
+        {
+          type: "TEXT_MESSAGE_CONTENT",
+          textMessageContent: { delta: `ect\n{"catalog_slug":"api-github"}\n` },
+        },
+        { type: "TEXT_MESSAGE_CONTENT", textMessageContent: { delta: "```" } },
+        { type: "TEXT_MESSAGE_END" },
+        { type: "RUN_FINISHED" },
+      ]),
+      routeHistory([]),
+    );
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    const events = await collectTurn(transport, "go");
+
+    // Deltas are append-only prose; the partial fence never leaks, so the
+    // transcript never shows text it must later retract.
+    const streamed = events
+      .filter(
+        (e): e is Extract<TurnEvent, { event: "block.delta" }> =>
+          e.event === "block.delta",
+      )
+      .map((e) => e.text)
+      .join("");
+    expect(streamed.trim()).toBe("Hold on.");
+    expect(streamed).not.toContain("nyxid");
+    expect(streamed).not.toContain("`");
+
+    const started = events
+      .filter(
+        (e): e is Extract<TurnEvent, { event: "block.started" }> =>
+          e.event === "block.started",
+      )
+      .map((e) => e.block);
+    expect(connectCards(started)).toHaveLength(1);
+  });
+});
+
+describe("live/history convergence for connect markers", () => {
+  // The design rests on one property: what a live turn renders and what a
+  // reload replays must be the same blocks. Codex's review found they were
+  // not — the live path derived its own ordering and ids. These cases pin it.
+  const CASES: ReadonlyArray<readonly [string, string]> = [
+    [
+      "marker first",
+      '```nyxid:connect\n{"catalog_slug":"api-github"}\n```\nAfter',
+    ],
+    [
+      "marker last",
+      'Before\n```nyxid:connect\n{"catalog_slug":"api-github"}\n```',
+    ],
+    ["marker only", '```nyxid:connect\n{"catalog_slug":"api-github"}\n```'],
+    [
+      "text card text",
+      'Before\n```nyxid:connect\n{"catalog_slug":"api-github"}\n```\nAfter',
+    ],
+    [
+      "adjacent markers",
+      '```nyxid:connect\n{"catalog_slug":"api-github"}\n```\n```nyxid:connect\n{"catalog_slug":"api-lark-bot"}\n```',
+    ],
+    ["no marker", "Plain prose only."],
+  ];
+
+  /** Split into `size`-char deltas — real streams do not arrive whole. */
+  function chunks(content: string, size: number): string[] {
+    if (size <= 0) return [content];
+    const out: string[] = [];
+    for (let at = 0; at < content.length; at += size) {
+      out.push(content.slice(at, at + size));
+    }
+    return out.length > 0 ? out : [""];
+  }
+
+  // Chunk size 0 = one whole delta. 1 exercises the worst case: every marker
+  // character arrives separately, so the partial-marker guard and the suffix
+  // diff are hit at every boundary.
+  const CHUNKINGS = [0, 1, 3, 7];
+
+  it.each(
+    CASES.flatMap(([label, content]) =>
+      CHUNKINGS.map(
+        (size) =>
+          [`${label} (chunk ${String(size)})`, content, size] as const,
+      ),
+    ),
+  )("%s", async (_label, content, chunkSize) => {
+    stubFetch(
+      routeCreate,
+      routeStream([
+        { type: "RUN_STARTED", turnId: TURN_ID, actorId: CONVERSATION_ID },
+        { type: "TEXT_MESSAGE_START", textMessageStart: { messageId: "mX" } },
+        ...chunks(content, chunkSize).map((delta) => ({
+          type: "TEXT_MESSAGE_CONTENT",
+          textMessageContent: { delta },
+        })),
+        { type: "TEXT_MESSAGE_END" },
+        { type: "RUN_FINISHED" },
+      ]),
+      routeHistory([]),
+    );
+    const liveTransport = new AevatarAssistantTransport();
+    await liveTransport.createConversation();
+    const events = await collectTurn(liveTransport, "go");
+
+    // Final state of every block this message produced, in emission order.
+    const order: string[] = [];
+    const finals = new Map<string, ContentBlock>();
+    for (const event of events) {
+      if (event.event === "block.completed") {
+        if (!finals.has(event.block_id)) order.push(event.block_id);
+        finals.set(event.block_id, event.block);
+      }
+    }
+    const liveBlocks = order
+      .filter((id) => id.startsWith("mX"))
+      .map((id) => finals.get(id));
+
+    // History: the same text, replayed through the reload path.
+    stubFetch(
+      routeHistory([
+        {
+          id: "mX",
+          role: "assistant",
+          content,
+          timestamp: 1784192899074,
+        },
+      ]),
+    );
+    const historyTransport = new AevatarAssistantTransport();
+    const history = await historyTransport.getHistory(CONVERSATION_ID);
+    const historyBlocks = history.messages.find((m) => m.id === "mX")?.blocks;
+
+    expect(liveBlocks).toEqual(historyBlocks);
+
+    // Whatever the chunking, raw marker syntax must never reach the stream.
+    for (const event of events) {
+      if (event.event === "block.delta") {
+        expect(event.text).not.toContain("nyxid:connect");
+      }
+    }
+  });
+});
+
+describe("cancel runs the same projection as a normal close", () => {
+  const MARKER = [
+    "```nyxid:connect",
+    JSON.stringify({ catalog_slug: "api-github", reason: "read PRs" }),
+    "```",
+  ].join("\n");
+
+  /** A stream that emits some deltas then stays open until cancelled. */
+  function hangingStream(deltas: readonly string[]): FetchRoute {
+    return (url, init) => {
+      if (!url.endsWith("/stream") || init?.method !== "POST") return undefined;
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          const encoder = new TextEncoder();
+          const frames = [
+            { type: "RUN_STARTED", turnId: TURN_ID, actorId: CONVERSATION_ID },
+            { type: "TEXT_MESSAGE_START", textMessageStart: { messageId: "mC" } },
+            ...deltas.map((delta) => ({
+              type: "TEXT_MESSAGE_CONTENT",
+              textMessageContent: { delta },
+            })),
+          ];
+          controller.enqueue(
+            encoder.encode(
+              frames.map((f) => `data: ${JSON.stringify(f)}\n\n`).join(""),
+            ),
+          );
+        },
+      });
+      return new Response(body, {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      });
+    };
+  }
+
+  async function cancelAfterDeltas(
+    deltas: readonly string[],
+  ): Promise<TurnEvent[]> {
+    stubFetch(routeCreate, hangingStream(deltas), routeHistory([]));
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+    const events: TurnEvent[] = [];
+    let seen = 0;
+    await new Promise<void>((resolve) => {
+      const handle = transport.sendMessage(CONVERSATION_ID, "go", (event) => {
+        events.push(event);
+        if (event.event === "turn.completed") resolve();
+        if (event.event === "block.delta") {
+          seen += 1;
+          // Cancel once every delta the transport chose to emit has landed.
+          if (seen >= 1) setTimeout(() => handle.cancel(), 0);
+        }
+      });
+      // A message that is only a marker emits no delta at all — cancel anyway.
+      setTimeout(() => handle.cancel(), 20);
+    });
+    return events;
+  }
+
+  it("emits the card when a turn is cancelled after a complete marker", async () => {
+    // Previously cancel bypassed the splitter entirely: no card was emitted
+    // live, but a reload produced one — the two disagreed.
+    const events = await cancelAfterDeltas([`Need GitHub.\n${MARKER}`]);
+
+    const blocks = events
+      .filter(
+        (e): e is Extract<TurnEvent, { event: "block.completed" }> =>
+          e.event === "block.completed",
+      )
+      .map((e) => e.block);
+    expect(blocks.some((block) => block.type === "connect_card")).toBe(true);
+  });
+
+  it("never leaks raw marker syntax when cancelled mid-message", async () => {
+    const events = await cancelAfterDeltas([`Need GitHub.\n${MARKER}`]);
+
+    for (const event of events) {
+      if (event.event === "block.delta") {
+        expect(event.text).not.toContain("nyxid:connect");
+      }
+      if (event.event === "block.completed" && event.block.type === "text") {
+        expect(event.block.text).not.toContain("nyxid:connect");
+      }
+    }
+  });
+});
+
+describe("connect markers survive the PR #2923 wrapped transcript", () => {
+  // Merge-point coverage: main taught `loadHistory` to accept
+  // `{messages, stateVersion}`; this branch taught `historyEntryToMessage` to
+  // project markers into blocks. Neither side tested the two together, and the
+  // reload path — the whole reason the marker is carried in the text — runs
+  // through both.
+  const MARKER = [
+    "```nyxid:connect",
+    JSON.stringify({ catalog_slug: "api-github", reason: "read PRs" }),
+    "```",
+  ].join("\n");
+
+  const ENTRIES = [
+    {
+      id: "w1",
+      role: "assistant",
+      content: `Need GitHub.\n${MARKER}\nThen I'll continue.`,
+      timestamp: 1784192899074,
+    },
+  ];
+
+  it("renders the card from the wrapped shape", async () => {
+    stubFetch((url, init) =>
+      url.startsWith(`${ASSISTANT_BASE}/conversations/`) &&
+      (init?.method ?? "GET") === "GET"
+        ? jsonResponse({ messages: ENTRIES, stateVersion: 42 })
+        : undefined,
+    );
+    const transport = new AevatarAssistantTransport();
+
+    const history = await transport.getHistory(CONVERSATION_ID);
+
+    const blocks = history.messages.find((m) => m.id === "w1")?.blocks ?? [];
+    expect(blocks.map((b) => b.type)).toEqual([
+      "text",
+      "connect_card",
+      "text",
+    ]);
+  });
+
+  it("renders identically from the legacy flat array", async () => {
+    stubFetch(routeHistory(ENTRIES));
+    const transport = new AevatarAssistantTransport();
+
+    const history = await transport.getHistory(CONVERSATION_ID);
+
+    const blocks = history.messages.find((m) => m.id === "w1")?.blocks ?? [];
+    expect(blocks.map((b) => b.type)).toEqual([
+      "text",
+      "connect_card",
+      "text",
+    ]);
+  });
+});
