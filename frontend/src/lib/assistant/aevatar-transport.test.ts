@@ -113,11 +113,14 @@ function routeStream(frames: unknown[]): FetchRoute {
       : undefined;
 }
 
-function routeHistory(entries: unknown[]): FetchRoute {
+// `body` is the whole transcript response, not just its entries: the reader
+// accepts the legacy flat array and the PR #2923 `{messages, stateVersion}`
+// wrapper, and must reject anything else.
+function routeHistory(body: unknown): FetchRoute {
   return (url, init) =>
     url.startsWith(`${ASSISTANT_BASE}/conversations/`) &&
     (init?.method ?? "GET") === "GET"
-      ? jsonResponse(entries)
+      ? jsonResponse(body)
       : undefined;
 }
 
@@ -863,6 +866,80 @@ describe("captured production wire shapes", () => {
       "Name two colors. Answer in two short sen",
     );
   });
+
+  // Aevatar PR #2923 wrapped the transcript in `{messages, stateVersion}`.
+  // Both shapes must map to the identical transcript, and the wrapper must
+  // not be confused with a body that merely happens to be an object.
+  it("maps the PR #2923 wrapped transcript identically to the legacy array", async () => {
+    stubFetch(
+      routeHistory({ messages: capturedHistory, stateVersion: 7 }),
+    );
+    const transport = new AevatarAssistantTransport();
+
+    const wrapped = await transport.getHistory(CONVERSATION_ID);
+
+    stubFetch(routeHistory(capturedHistory));
+    const legacy = await new AevatarAssistantTransport().getHistory(
+      CONVERSATION_ID,
+    );
+    expect(wrapped.messages).toEqual(legacy.messages);
+    expect(wrapped.conversation.title).toBe(legacy.conversation.title);
+  });
+
+  it.each([
+    ["with a stateVersion", { messages: [], stateVersion: 0 }],
+    // Acceptance is keyed ONLY on array-valued `messages`. `stateVersion` has
+    // zero consumers on the `:stream` transport, so requiring it would turn a
+    // field we never read into an outage.
+    ["without a stateVersion", { messages: [] }],
+  ])(
+    "treats an empty wrapped transcript %s as a valid empty conversation",
+    async (_label, body) => {
+      // The contract's "empty is a real answer" rule (deleted / not yet
+      // materialized / zero turns) survives the wrapper — it must not be
+      // mistaken for a shape violation.
+      stubFetch(routeHistory(body));
+      const transport = new AevatarAssistantTransport();
+
+      const history = await transport.getHistory(CONVERSATION_ID);
+
+      expect(history.messages).toEqual([]);
+    },
+  );
+
+  it.each([
+    ["no messages field", {}],
+    ["a null messages field", { messages: null }],
+    ["a non-array messages field", { messages: { "0": {} } }],
+    ["a bare string", "nyxid-chat-f836"],
+  ])(
+    "surfaces a transcript response with %s instead of rendering it empty",
+    async (_label, body) => {
+      // The regression this whole change exists for: an unrecognized body
+      // must NOT be laundered into "this chat has no messages". The index
+      // has already merged the conversation in (mirror present but empty),
+      // which is exactly the state the old catch-all fallback dressed up as
+      // a successful empty read.
+      stubFetch(
+        (url, init) =>
+          url === `${ASSISTANT_BASE}/conversations` &&
+          (init?.method ?? "GET") === "GET"
+            ? jsonResponse({
+                conversations: [
+                  { id: CONVERSATION_ID, title: "Server title" },
+                ],
+              })
+            : undefined,
+        routeHistory(body),
+      );
+      const transport = new AevatarAssistantTransport();
+      await transport.listConversations();
+
+      await expect(transport.getHistory(CONVERSATION_ID)).rejects.toThrow(
+        /did not match the expected shape/,
+      );
+    },
+  );
 
   it("sends the exact request shape the aevatar stream endpoint requires", async () => {
     const fetchMock = stubFetch(routeCreate, routeStream(OBSERVED_FRAMES));
@@ -1971,6 +2048,54 @@ describe("live AG-UI frame taxonomy", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     await transport.deleteConversation(CONVERSATION_ID);
     releaseHistory();
+
+    await expect(pendingRead).rejects.toThrow("Conversation was not found.");
+  });
+
+  it("answers not-found, not the read failure, when a delete lands mid-read and the read then fails", async () => {
+    // Fourth-pass codex P2: narrowing the getHistory catch added two early
+    // throws that could bypass the post-await tombstone check. Delete must
+    // still win — with an index-only mirror (EMPTY_TURN_STATE), a read that
+    // rejects after the delete must report "not found", not the transport
+    // failure.
+    let rejectHistory: (error: Error) => void = () => {};
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? "GET";
+        if (url === `${ASSISTANT_BASE}/conversations` && method === "GET") {
+          return Promise.resolve(
+            jsonResponse({
+              conversations: [{ id: CONVERSATION_ID, title: "Server title" }],
+            }),
+          );
+        }
+        if (
+          url === `${ASSISTANT_BASE}/conversations/${CONVERSATION_ID}` &&
+          method === "DELETE"
+        ) {
+          return Promise.resolve(jsonResponse({}));
+        }
+        if (
+          url === `${ASSISTANT_BASE}/conversations/${CONVERSATION_ID}` &&
+          method === "GET"
+        ) {
+          return new Promise<Response>((_resolve, reject) => {
+            rejectHistory = reject;
+          });
+        }
+        return Promise.resolve(jsonResponse({}, 404));
+      }),
+    );
+    const transport = new AevatarAssistantTransport();
+    // Index-only mirror: no turn ever ran, so `turnState` is EMPTY_TURN_STATE.
+    await transport.listConversations();
+
+    const pendingRead = transport.getHistory(CONVERSATION_ID);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await transport.deleteConversation(CONVERSATION_ID);
+    rejectHistory(new Error("network down"));
 
     await expect(pendingRead).rejects.toThrow("Conversation was not found.");
   });
