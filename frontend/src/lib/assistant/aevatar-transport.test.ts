@@ -2762,14 +2762,38 @@ describe("live/history convergence for connect markers", () => {
     ["no marker", "Plain prose only."],
   ];
 
-  it.each(CASES)("%s", async (_label, content) => {
-    // Live: replay the message as one delta, collect the resulting blocks.
+  /** Split into `size`-char deltas — real streams do not arrive whole. */
+  function chunks(content: string, size: number): string[] {
+    if (size <= 0) return [content];
+    const out: string[] = [];
+    for (let at = 0; at < content.length; at += size) {
+      out.push(content.slice(at, at + size));
+    }
+    return out.length > 0 ? out : [""];
+  }
+
+  // Chunk size 0 = one whole delta. 1 exercises the worst case: every marker
+  // character arrives separately, so the partial-marker guard and the suffix
+  // diff are hit at every boundary.
+  const CHUNKINGS = [0, 1, 3, 7];
+
+  it.each(
+    CASES.flatMap(([label, content]) =>
+      CHUNKINGS.map(
+        (size) =>
+          [`${label} (chunk ${String(size)})`, content, size] as const,
+      ),
+    ),
+  )("%s", async (_label, content, chunkSize) => {
     stubFetch(
       routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID, actorId: CONVERSATION_ID },
         { type: "TEXT_MESSAGE_START", textMessageStart: { messageId: "mX" } },
-        { type: "TEXT_MESSAGE_CONTENT", textMessageContent: { delta: content } },
+        ...chunks(content, chunkSize).map((delta) => ({
+          type: "TEXT_MESSAGE_CONTENT",
+          textMessageContent: { delta },
+        })),
         { type: "TEXT_MESSAGE_END" },
         { type: "RUN_FINISHED" },
       ]),
@@ -2808,5 +2832,12 @@ describe("live/history convergence for connect markers", () => {
     const historyBlocks = history.messages.find((m) => m.id === "mX")?.blocks;
 
     expect(liveBlocks).toEqual(historyBlocks);
+
+    // Whatever the chunking, raw marker syntax must never reach the stream.
+    for (const event of events) {
+      if (event.event === "block.delta") {
+        expect(event.text).not.toContain("nyxid:connect");
+      }
+    }
   });
 });
