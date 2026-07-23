@@ -258,3 +258,70 @@ describe("renderableText", () => {
     expect(renderableText(full)).toBe("Before.\nAfter.");
   });
 });
+
+describe("adversarial payloads", () => {
+  it("ignores a marker inside an indented code block", () => {
+    const source = [
+      "Example:",
+      "",
+      "    ```nyxid:connect",
+      '    {"catalog_slug":"api-github"}',
+      "    ```",
+    ].join("\n");
+
+    expect(hasConnectMarker(source)).toBe(false);
+  });
+
+  it("cannot be used to pollute the prototype or forge a block type", () => {
+    const source = [
+      "```nyxid:connect",
+      '{"catalog_slug":"api-github","__proto__":{"polluted":true},"type":"evil"}',
+      "```",
+    ].join("\n");
+
+    const segment = splitConnectMarkers(source)[0];
+    expect(segment?.kind).toBe("connect");
+    if (segment?.kind !== "connect") return;
+    const block = connectMarkerToBlock(segment.marker, "b1");
+
+    // The block is constructed field by field, so nothing from the payload
+    // can override `type` or reach Object.prototype.
+    expect(block.type).toBe("connect_card");
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+  });
+
+  it("rejects non-object JSON bodies", () => {
+    for (const body of ["[1,2,3]", '"a string"', "42", "null", "true"]) {
+      expect(hasConnectMarker(`\`\`\`nyxid:connect\n${body}\n\`\`\``)).toBe(
+        false,
+      );
+    }
+  });
+
+  it("coerces non-string reason and scopes without crashing", () => {
+    const source = [
+      "```nyxid:connect",
+      '{"catalog_slug":"a","reason":{"x":1},"requested_scopes":"notarray"}',
+      "```",
+    ].join("\n");
+
+    const segment = splitConnectMarkers(source)[0];
+    expect(segment?.kind).toBe("connect");
+    if (segment?.kind !== "connect") return;
+    expect(segment.marker.reason).toBe("");
+    expect(segment.marker.requestedScopes).toEqual([]);
+  });
+
+  it("handles a lone CR as a line separator", () => {
+    const source = 'a\r```nyxid:connect\r{"catalog_slug":"api-github"}\r```';
+    expect(renderableText(source)).not.toContain("nyxid:connect");
+    expect(hasConnectMarker(source)).toBe(true);
+  });
+
+  it("is safe on empty and whitespace-only input", () => {
+    for (const source of ["", "   ", "\n\n", "\r\n"]) {
+      expect(renderableText(source)).toBe("");
+      expect(splitConnectMarkers(source)).toEqual([]);
+    }
+  });
+});
