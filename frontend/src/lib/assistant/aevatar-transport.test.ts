@@ -2841,3 +2841,91 @@ describe("live/history convergence for connect markers", () => {
     }
   });
 });
+
+describe("cancel runs the same projection as a normal close", () => {
+  const MARKER = [
+    "```nyxid:connect",
+    JSON.stringify({ catalog_slug: "api-github", reason: "read PRs" }),
+    "```",
+  ].join("\n");
+
+  /** A stream that emits some deltas then stays open until cancelled. */
+  function hangingStream(deltas: readonly string[]): FetchRoute {
+    return (url, init) => {
+      if (!url.endsWith("/stream") || init?.method !== "POST") return undefined;
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          const encoder = new TextEncoder();
+          const frames = [
+            { type: "RUN_STARTED", turnId: TURN_ID, actorId: CONVERSATION_ID },
+            { type: "TEXT_MESSAGE_START", textMessageStart: { messageId: "mC" } },
+            ...deltas.map((delta) => ({
+              type: "TEXT_MESSAGE_CONTENT",
+              textMessageContent: { delta },
+            })),
+          ];
+          controller.enqueue(
+            encoder.encode(
+              frames.map((f) => `data: ${JSON.stringify(f)}\n\n`).join(""),
+            ),
+          );
+        },
+      });
+      return new Response(body, {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      });
+    };
+  }
+
+  async function cancelAfterDeltas(
+    deltas: readonly string[],
+  ): Promise<TurnEvent[]> {
+    stubFetch(routeCreate, hangingStream(deltas), routeHistory([]));
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+    const events: TurnEvent[] = [];
+    let seen = 0;
+    await new Promise<void>((resolve) => {
+      const handle = transport.sendMessage(CONVERSATION_ID, "go", (event) => {
+        events.push(event);
+        if (event.event === "turn.completed") resolve();
+        if (event.event === "block.delta") {
+          seen += 1;
+          // Cancel once every delta the transport chose to emit has landed.
+          if (seen >= 1) setTimeout(() => handle.cancel(), 0);
+        }
+      });
+      // A message that is only a marker emits no delta at all — cancel anyway.
+      setTimeout(() => handle.cancel(), 20);
+    });
+    return events;
+  }
+
+  it("emits the card when a turn is cancelled after a complete marker", async () => {
+    // Previously cancel bypassed the splitter entirely: no card was emitted
+    // live, but a reload produced one — the two disagreed.
+    const events = await cancelAfterDeltas([`Need GitHub.\n${MARKER}`]);
+
+    const blocks = events
+      .filter(
+        (e): e is Extract<TurnEvent, { event: "block.completed" }> =>
+          e.event === "block.completed",
+      )
+      .map((e) => e.block);
+    expect(blocks.some((block) => block.type === "connect_card")).toBe(true);
+  });
+
+  it("never leaks raw marker syntax when cancelled mid-message", async () => {
+    const events = await cancelAfterDeltas([`Need GitHub.\n${MARKER}`]);
+
+    for (const event of events) {
+      if (event.event === "block.delta") {
+        expect(event.text).not.toContain("nyxid:connect");
+      }
+      if (event.event === "block.completed" && event.block.type === "text") {
+        expect(event.block.text).not.toContain("nyxid:connect");
+      }
+    }
+  });
+});

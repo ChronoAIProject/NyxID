@@ -2443,6 +2443,17 @@ export class AevatarAssistantTransport implements AssistantTransport {
     run.controller.abort();
     this.clearWatchdog(run);
     if (run.currentBlockId) {
+      // Cancel runs the SAME projection as a normal message close. Two things
+      // go wrong otherwise: the partial text is emitted raw, so a marker the
+      // streaming path deliberately withheld leaks into the transcript as
+      // visible prose; and any card in the cancelled text is never emitted, so
+      // stopping a turn and then reloading it show different transcripts.
+      const messageId = run.currentMessageId;
+      const projected = textToBlocks(
+        run.accumulatedText,
+        messageId ?? run.currentBlockId,
+      );
+      const [leadingBlock, ...appended] = projected;
       const stored = this.conversations.get(conversationId);
       const openBlock = stored?.turnState.messages
         .flatMap((message) => message.blocks)
@@ -2451,23 +2462,40 @@ export class AevatarAssistantTransport implements AssistantTransport {
         cursor: this.nextCursor(run),
         event: "block.completed",
         block_id: run.currentBlockId,
-        block: openBlock
-          ? toTerminalBlock(openBlock)
-          : {
-              type: "text",
-              block_id: run.currentBlockId,
-              text: run.accumulatedText,
-            },
+        block:
+          leadingBlock?.type === "text"
+            ? { ...leadingBlock, block_id: run.currentBlockId }
+            : openBlock
+              ? toTerminalBlock(openBlock)
+              : { type: "text", block_id: run.currentBlockId, text: "" },
       });
-      if (run.currentMessageId) {
+      if (messageId) {
+        appended.forEach((block, offset) => {
+          this.emit(conversationId, run, {
+            cursor: this.nextCursor(run),
+            event: "block.started",
+            message_id: messageId,
+            block_id: block.block_id,
+            index: offset + 1,
+            block,
+          });
+          this.emit(conversationId, run, {
+            cursor: this.nextCursor(run),
+            event: "block.completed",
+            block_id: block.block_id,
+            block: toTerminalBlock(block),
+          });
+        });
         this.emit(conversationId, run, {
           cursor: this.nextCursor(run),
           event: "message.completed",
-          message_id: run.currentMessageId,
+          message_id: messageId,
         });
       }
       run.currentMessageId = null;
       run.currentBlockId = null;
+      run.accumulatedText = "";
+      run.emittedText = "";
     }
     this.finalizeActivity(conversationId, run, "cancelled");
     if (run.turnId) {
