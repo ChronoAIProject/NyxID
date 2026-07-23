@@ -119,7 +119,9 @@ pub async fn oauth_protected_resource(State(state): State<AppState>) -> Json<ser
     Json(serde_json::json!({
         "resource": format!("{base}/mcp"),
         "authorization_servers": [base],
-        "scopes_supported": ["openid", "profile", "email", "proxy"],
+        // Aligned with DEFAULT_MCP_ALLOWED_SCOPES (NyxID#1222/#1226): clients
+        // use this list to decide which scopes to request.
+        "scopes_supported": ["openid", "profile", "email", "roles", "groups", "proxy", "offline_access"],
         "bearer_methods_supported": ["header"],
     }))
 }
@@ -147,6 +149,31 @@ mod tests {
     fn public_discovery_scopes_do_not_include_broker_binding_scope() {
         assert!(!OPENID_CONFIGURATION_SCOPES_SUPPORTED.contains(&BROKER_BINDING_SCOPE));
         assert!(!OAUTH_AUTHORIZATION_SERVER_SCOPES_SUPPORTED.contains(&BROKER_BINDING_SCOPE));
+    }
+
+    #[tokio::test]
+    async fn protected_resource_metadata_advertises_mcp_default_scopes() {
+        // NyxID#1226: clients pick their requested scopes from this list, so
+        // it must cover everything a defaulted MCP DCR client is granted.
+        let mut state = crate::test_utils::test_app_state_no_db().await;
+        state.config.base_url = "https://id.example.test".to_string();
+
+        let axum::Json(value) = oauth_protected_resource(State(state)).await;
+        assert_eq!(value["resource"], "https://id.example.test/mcp");
+        let scopes: Vec<&str> = value["scopes_supported"]
+            .as_array()
+            .expect("scopes_supported array")
+            .iter()
+            .filter_map(|scope| scope.as_str())
+            .collect();
+        for scope in
+            crate::services::oauth_client_service::DEFAULT_MCP_ALLOWED_SCOPES.split_whitespace()
+        {
+            assert!(
+                scopes.contains(&scope),
+                "protected-resource metadata missing MCP default scope: {scope}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -281,7 +308,15 @@ mod tests {
         );
         assert_eq!(
             value["scopes_supported"],
-            serde_json::json!(["openid", "profile", "email", "proxy"])
+            serde_json::json!([
+                "openid",
+                "profile",
+                "email",
+                "roles",
+                "groups",
+                "proxy",
+                "offline_access"
+            ])
         );
         assert_eq!(
             value["bearer_methods_supported"],
