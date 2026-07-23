@@ -296,3 +296,93 @@ describe("ConnectCard recovery paths", () => {
     expect(screen.getByRole("button", { name: "Manage" })).toBeInTheDocument();
   });
 });
+
+describe("ConnectCard acknowledges the full block contract", () => {
+  // Basic, deliberately unstyled rendering. The point is that no §3.5 field is
+  // silently dropped — the visual pass comes later.
+  it("shows the device code and verification URL", () => {
+    mocks.catalogEntry = {
+      slug: "api-github",
+      name: "GitHub",
+      provider_type: "device_code",
+    };
+    render(
+      <ConnectCard
+        block={{
+          ...blocker("NYXID_SERVICE_NOT_CONNECTED"),
+          device_user_code: "WDJB-MJHT",
+          device_verification_url: "https://github.com/login/device",
+        }}
+      />,
+    );
+
+    expect(screen.getByText("WDJB-MJHT")).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: /github\.com\/login\/device/ }),
+    ).toHaveAttribute("href", "https://github.com/login/device");
+  });
+
+  it("lists a multi-step wizard rather than only its first line", () => {
+    render(
+      <ConnectCard
+        block={{
+          ...blocker("NYXID_SERVICE_NOT_CONNECTED"),
+          steps: [
+            { title: "Authorize NyxID", body: "Approve access.", done: true },
+            { title: "NyxID seals the credential", body: "", done: false },
+            { title: "Task resumes", body: "", done: false },
+          ],
+        }}
+      />,
+    );
+
+    expect(screen.getByText(/NyxID seals the credential/)).toBeInTheDocument();
+    expect(screen.getByText(/Task resumes/)).toBeInTheDocument();
+  });
+
+  it("shows requested scopes, and granted ones once they exist", () => {
+    const base = blocker("NYXID_SERVICE_NOT_CONNECTED");
+    const { rerender } = render(
+      <ConnectCard block={{ ...base, requested_scopes: ["repo"] }} />,
+    );
+    expect(screen.getByText(/Requests: repo/)).toBeInTheDocument();
+
+    rerender(
+      <ConnectCard
+        block={{
+          ...base,
+          requested_scopes: ["repo"],
+          granted_scopes: ["repo", "read:user"],
+        }}
+      />,
+    );
+    expect(screen.getByText(/Granted: repo, read:user/)).toBeInTheDocument();
+  });
+
+  it("renders the broker footer", () => {
+    render(
+      <ConnectCard
+        block={{
+          ...blocker("NYXID_SERVICE_NOT_CONNECTED"),
+          footer: "Brokered by NyxID · revoke anytime",
+        }}
+      />,
+    );
+
+    expect(screen.getByText(/Brokered by NyxID/)).toBeInTheDocument();
+  });
+
+  it("stays compact when the block carries no extra detail", () => {
+    render(
+      <ConnectCard
+        block={{
+          ...blocker("NYXID_SERVICE_NOT_CONNECTED"),
+          footer: "",
+          requested_scopes: [],
+        }}
+      />,
+    );
+
+    expect(screen.queryByText(/Requests:/)).not.toBeInTheDocument();
+  });
+});

@@ -43,19 +43,39 @@ export function ArtifactBlock({
             className={`h-4 w-4 shrink-0 text-text-tertiary transition-transform ${open ? "rotate-90" : ""}`}
           />
         </button>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
+        {/* §3.5 gives the block a `download_url`; honour it when the producer
+            sends one. Until then the control stays visible but inert, and says
+            so rather than 404ing on an empty href. */}
+        {block.download_url ? (
+          <Button asChild variant="ghost" size="icon">
+            <a
+              href={block.download_url}
+              download={block.name}
+              target="_blank"
+              rel="noopener noreferrer"
               aria-label={`Download ${block.name}`}
             >
               <Download />
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent>Wired in the API pass</TooltipContent>
-        </Tooltip>
+            </a>
+          </Button>
+        ) : (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                disabled
+                aria-label={`Download ${block.name}`}
+              >
+                <Download />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              This artifact carries no download URL yet
+            </TooltipContent>
+          </Tooltip>
+        )}
       </div>
       {open && block.preview && (
         <pre className="whitespace-pre-wrap border-t border-border/50 bg-overlay px-4 py-3 font-mono text-[10px] leading-relaxed text-muted-foreground">

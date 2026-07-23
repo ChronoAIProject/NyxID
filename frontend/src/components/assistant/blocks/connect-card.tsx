@@ -123,8 +123,22 @@ export function ConnectCard({
   const awaitingCatalog = catalogPending && matchingKey === undefined;
   const blockedByCatalog = unresolvableSlug && matchingKey === undefined;
 
+  // Contract fields the compact row has no place for. Rendered plainly —
+  // deliberately unstyled for now — so a block carrying them is not silently
+  // dropped on the floor. The visual pass comes later; what matters today is
+  // that the FE honours every field §3.5 defines.
+  const extraSteps = block.steps.length > 1 ? block.steps : [];
+  const showDeviceCode =
+    !connected &&
+    Boolean(block.device_user_code ?? block.device_verification_url);
+  const showScopes =
+    block.requested_scopes.length > 0 || (block.granted_scopes?.length ?? 0) > 0;
+  const hasDetail =
+    showDeviceCode || extraSteps.length > 0 || showScopes || Boolean(block.footer);
+
   return (
-    <section className="flex items-center gap-3 rounded-xl border border-border/70 bg-card px-4 py-3">
+    <section className="rounded-xl border border-border/70 bg-card">
+      <div className="flex items-center gap-3 px-4 py-3">
       <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-hairline bg-overlay-strong">
         <ServiceIcon slug={block.catalog_slug} size="sm" />
       </div>
@@ -178,6 +192,57 @@ export function ConnectCard({
           {actionLabel}
         </Button>
       )}
+      </div>
+
+      {hasDetail && (
+        <div className="space-y-2 border-t border-border/50 px-4 py-2.5 text-[11px] text-muted-foreground">
+          {showDeviceCode && (
+            <div className="space-y-1">
+              {block.device_user_code && (
+                <p>
+                  Enter code{" "}
+                  <code className="rounded bg-overlay px-1 py-0.5 font-mono text-foreground">
+                    {block.device_user_code}
+                  </code>
+                </p>
+              )}
+              {block.device_verification_url && (
+                <a
+                  href={block.device_verification_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 text-foreground underline underline-offset-2"
+                >
+                  {block.device_verification_url}
+                  <ExternalLink className="h-3 w-3" />
+                </a>
+              )}
+            </div>
+          )}
+
+          {extraSteps.length > 0 && (
+            <ol className="space-y-0.5">
+              {extraSteps.map((step, index) => (
+                <li key={`${step.title}-${String(index)}`}>
+                  {step.done ? "✓" : `${String(index + 1)}.`} {step.title}
+                  {step.body ? ` — ${step.body}` : ""}
+                </li>
+              ))}
+            </ol>
+          )}
+
+          {showScopes && (
+            <p>
+              {(block.granted_scopes?.length ?? 0) > 0
+                ? `Granted: ${(block.granted_scopes ?? []).join(", ")}`
+                : `Requests: ${block.requested_scopes.join(", ")}`}
+            </p>
+          )}
+
+          {block.footer && <p className="text-text-tertiary">{block.footer}</p>}
+        </div>
+      )}
+
       <AddKeyDialog
         open={dialogOpen}
         onOpenChange={setDialogOpen}
