@@ -3054,3 +3054,58 @@ describe("cancel runs the same projection as a normal close", () => {
     }
   });
 });
+
+describe("connect markers survive the PR #2923 wrapped transcript", () => {
+  // Merge-point coverage: main taught `loadHistory` to accept
+  // `{messages, stateVersion}`; this branch taught `historyEntryToMessage` to
+  // project markers into blocks. Neither side tested the two together, and the
+  // reload path — the whole reason the marker is carried in the text — runs
+  // through both.
+  const MARKER = [
+    "```nyxid:connect",
+    JSON.stringify({ catalog_slug: "api-github", reason: "read PRs" }),
+    "```",
+  ].join("\n");
+
+  const ENTRIES = [
+    {
+      id: "w1",
+      role: "assistant",
+      content: `Need GitHub.\n${MARKER}\nThen I'll continue.`,
+      timestamp: 1784192899074,
+    },
+  ];
+
+  it("renders the card from the wrapped shape", async () => {
+    stubFetch((url, init) =>
+      url.startsWith(`${ASSISTANT_BASE}/conversations/`) &&
+      (init?.method ?? "GET") === "GET"
+        ? jsonResponse({ messages: ENTRIES, stateVersion: 42 })
+        : undefined,
+    );
+    const transport = new AevatarAssistantTransport();
+
+    const history = await transport.getHistory(CONVERSATION_ID);
+
+    const blocks = history.messages.find((m) => m.id === "w1")?.blocks ?? [];
+    expect(blocks.map((b) => b.type)).toEqual([
+      "text",
+      "connect_card",
+      "text",
+    ]);
+  });
+
+  it("renders identically from the legacy flat array", async () => {
+    stubFetch(routeHistory(ENTRIES));
+    const transport = new AevatarAssistantTransport();
+
+    const history = await transport.getHistory(CONVERSATION_ID);
+
+    const blocks = history.messages.find((m) => m.id === "w1")?.blocks ?? [];
+    expect(blocks.map((b) => b.type)).toEqual([
+      "text",
+      "connect_card",
+      "text",
+    ]);
+  });
+});
