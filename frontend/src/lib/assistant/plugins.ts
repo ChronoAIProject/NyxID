@@ -19,8 +19,12 @@ export interface ConnectorCardItem {
   /** Footer meta shown for not-yet-added items (e.g. "api key", "oauth"). */
   readonly meta: string;
   readonly added: boolean;
-  /** Added items only: UserService id for the `/keys/$keyId` manage page. */
-  readonly manageKeyId?: string;
+  /**
+   * Added items only: every UserService id behind this card. A service with
+   * several credentials keeps them all here so the manage modal can show them
+   * together rather than handing the user off to the Studio keys list.
+   */
+  readonly manageKeyIds?: readonly string[];
   /** Available items only: catalog slug for the `/keys?slug=` connect deep link. */
   readonly connectSlug?: string;
 }
@@ -86,7 +90,7 @@ function addedServiceItem(
         ? `${String(group.length)} connections`
         : first.credential_type.replaceAll("_", " "),
     added: true,
-    manageKeyId: group.length === 1 ? first.id : undefined,
+    manageKeyIds: group.map((key) => key.id),
   };
 }
 
@@ -102,7 +106,7 @@ function addedCustomItem(key: KeyInfo): ConnectorCardItem {
       `Connected through the NyxID proxy (${key.endpoint_url}).`,
     meta: key.credential_type.replaceAll("_", " "),
     added: true,
-    manageKeyId: key.id,
+    manageKeyIds: [key.id],
   };
 }
 
