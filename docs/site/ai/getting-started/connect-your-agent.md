@@ -155,6 +155,7 @@ nyxid mcp config --tool generic   # raw MCP URL only
 After the client authenticates, you should see NyxID's meta-tools:
 
 - `nyx__discover_services` — browse the catalog
+- `nyx__list_connected_services` — enumerate services already connected to your account
 - `nyx__connect_service` — add a service from within the agent
 - `nyx__search_tools` — find tools across connected services
 - `nyx__call_tool` — invoke any connected service endpoint
