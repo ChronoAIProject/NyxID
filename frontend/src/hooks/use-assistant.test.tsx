@@ -9,7 +9,7 @@ import {
   assistantTransport,
   resetAssistantTransport,
 } from "@/lib/assistant/transport";
-import type { ConversationHistory } from "@/types/assistant";
+import type { Conversation, ConversationHistory } from "@/types/assistant";
 import {
   assistantKeys,
   describeSendFailure,
@@ -17,6 +17,7 @@ import {
   useAssistantTurn,
   useCancelTurn,
   useConversation,
+  useCreateConversation,
   useDecideApproval,
   useSendMessage,
   type SentMessage,
@@ -174,6 +175,43 @@ describe("assistant hooks", () => {
     expect(fulfilled).toHaveLength(1);
     expect(rejected).toHaveLength(1);
     expect(String(rejected[0]?.reason)).toMatch(/already active/i);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+    createSpy.mockRestore();
+    unmount();
+    queryClient.clear();
+  });
+
+  it("shares one conversation between the New chat button and a racing send", async () => {
+    // "New chat" navigates optimistically, so the draft thread accepts a
+    // send while its actor is still being provisioned. The button's create
+    // and the empty-state auto-create must resolve to the SAME actor —
+    // otherwise the message streams into an orphan the sidebar never shows.
+    const { queryClient, Wrapper } = createHarness();
+    const createSpy = vi.spyOn(assistantTransport, "createConversation");
+    const { result, unmount } = renderHook(
+      () => ({
+        create: useCreateConversation(),
+        send: useSendMessage(undefined),
+      }),
+      { wrapper: Wrapper },
+    );
+
+    let created: Conversation | null = null;
+    let sent: SentMessage | null = null;
+    await act(async () => {
+      const createPromise = result.current.create.mutateAsync();
+      const sendPromise = result.current.send.mutateAsync("Sent mid-provision.");
+      await vi.advanceTimersByTimeAsync(0);
+      [created, sent] = await Promise.all([createPromise, sendPromise]);
+    });
+
+    expect(createSpy).toHaveBeenCalledTimes(1);
+    expect((sent as SentMessage | null)?.conversationId).toBe(
+      (created as Conversation | null)?.id,
+    );
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(2_000);

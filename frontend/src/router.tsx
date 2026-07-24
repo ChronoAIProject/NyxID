@@ -17,6 +17,7 @@ import { useAuthStore } from "@/stores/auth-store";
 import { hasAdminRead } from "@/types/api";
 import { shouldRedirectFromBilling } from "@/lib/billing-availability";
 import { normalizeAdminOAuthClientSearch } from "@/lib/admin-oauth-clients";
+import { parseAssistantSearch } from "@/lib/assistant/search";
 
 import {
   LandingPage,
@@ -290,9 +291,10 @@ const assistantBeforeLoad = async ({
 const assistantRoute = createRoute({
   path: "/assistant",
   getParentRoute: () => rootRoute,
-  validateSearch: (search: Record<string, unknown>): { c?: string } => ({
-    ...(typeof search.c === "string" ? { c: search.c } : {}),
-  }),
+  // Shared with AssistantPage so the router and the page agree on what
+  // `?draft` means; a param dropped here makes the optimistic "New chat"
+  // navigation a silent no-op.
+  validateSearch: parseAssistantSearch,
   beforeLoad: assistantBeforeLoad,
   component: AssistantPage,
 });

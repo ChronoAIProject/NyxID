@@ -1,5 +1,5 @@
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
-import { useNavigate, useRouterState } from "@tanstack/react-router";
+import { useNavigate, useRouter, useRouterState } from "@tanstack/react-router";
 import { toast } from "sonner";
 import { AssistantShell } from "@/components/assistant/assistant-shell";
 import { AssistantSidebar } from "@/components/assistant/assistant-sidebar";
@@ -18,6 +18,7 @@ import {
   useDeleteConversation,
   useSendMessage,
 } from "@/hooks/use-assistant";
+import { parseAssistantSearch } from "@/lib/assistant/search";
 import { isTurnActive } from "@/types/assistant";
 
 export function AssistantPage({
@@ -26,11 +27,17 @@ export function AssistantPage({
   readonly view?: "chat" | "plugins" | "approvals";
 }) {
   const navigate = useNavigate();
+  const router = useRouter();
+  // Two selectors returning primitives rather than one returning an object:
+  // a fresh object identity would re-render the page on every router tick.
   const selectedFromSearch = useRouterState({
-    select: (state) => {
-      const search = state.location.search as Record<string, unknown>;
-      return typeof search.c === "string" ? search.c : undefined;
-    },
+    select: (state) =>
+      parseAssistantSearch(state.location.search as Record<string, unknown>).c,
+  });
+  const drafting = useRouterState({
+    select: (state) =>
+      parseAssistantSearch(state.location.search as Record<string, unknown>)
+        .draft === true,
   });
   const conversations = useConversations();
   // The composer floats over the thread, so the thread has to know how tall it
@@ -57,8 +64,13 @@ export function AssistantPage({
     ) {
       return selectedFromSearch;
     }
+    // A draft is a deliberately empty thread painted before its actor
+    // exists, so it must NOT fall through to the newest chat — that
+    // fallback is what makes a plain `/assistant` land on your last
+    // conversation, and it would make "New chat" look like it did nothing.
+    if (drafting) return undefined;
     return items[0]?.id;
-  }, [conversations.data, selectedFromSearch]);
+  }, [conversations.data, drafting, selectedFromSearch]);
   const history = useConversation(selectedId);
   const turn = useAssistantTurn(selectedId);
   const createConversation = useCreateConversation();
@@ -67,16 +79,52 @@ export function AssistantPage({
   const decideApproval = useDecideApproval(selectedId);
   const deleteConversation = useDeleteConversation();
 
-  function selectConversation(conversationId: string) {
+  function selectConversation(conversationId: string, replace = false) {
     void navigate({
       to: "/assistant" as never,
       search: { c: conversationId } as never,
+      replace,
     });
   }
 
+  /**
+   * The click paints the empty thread immediately (`?draft`), then
+   * provisions the actor in the background and swaps in `?c=<id>` once it
+   * lands. Awaiting the create first made the button spin through three
+   * sequential round trips — create, history, list — before anything moved,
+   * and a failure resolved to nothing at all: no navigation, no message,
+   * just a button that stopped spinning.
+   *
+   * `replace` on the swap keeps Back going where the user came from rather
+   * than to the draft URL of a chat that now exists. The live router read
+   * (not the render-time `drafting`) is deliberate: if they navigated on —
+   * Plugins, another chat, or a send that already claimed this actor — the
+   * late resolve must not yank them back.
+   */
   async function createNewChat() {
-    const conversation = await createConversation.mutateAsync();
-    selectConversation(conversation.id);
+    void navigate({
+      to: "/assistant" as never,
+      search: { draft: true } as never,
+    });
+    try {
+      const conversation = await createConversation.mutateAsync();
+      const stillDrafting =
+        router.state.location.pathname === "/assistant" &&
+        parseAssistantSearch(
+          router.state.location.search as Record<string, unknown>,
+        ).draft === true;
+      if (stillDrafting) selectConversation(conversation.id, true);
+    } catch (error) {
+      // The draft stays put and the composer's auto-create retries the
+      // provision on first send, so this is a recoverable failure — but an
+      // unsaid one reads as the button being broken.
+      toast.error("Could not start a new chat", {
+        description:
+          error instanceof Error && error.message
+            ? error.message
+            : "The assistant backend did not respond. Send a message to try again.",
+      });
+    }
   }
 
   // Deleting the URL-addressed conversation must also drop `?c=`, or the
