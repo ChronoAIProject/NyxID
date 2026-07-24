@@ -1144,7 +1144,8 @@ pub fn generate_tool_definitions(
         name: "nyx__discover_services".to_string(),
         description: "Browse available services you can connect to on this NyxID instance. \
             Returns services you are NOT yet connected to. For services you are already \
-            connected to, use nyx__list_connected_services."
+            connected to, use nyx__list_connected_services. Services that require no \
+            credential are auto-connected and appear there."
             .to_string(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -1165,7 +1166,8 @@ pub fn generate_tool_definitions(
     tools.push(McpToolDefinition {
         name: "nyx__list_connected_services".to_string(),
         description: "List services you are already connected to, including services that \
-            are currently unavailable. This is the complement of nyx__discover_services."
+            are currently unavailable. Services that require no credential are auto-connected \
+            and appear here. This is the complement of nyx__discover_services."
             .to_string(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -3175,15 +3177,24 @@ pub async fn discover_services(
     query: Option<&str>,
     category: Option<&str>,
 ) -> AppResult<serde_json::Value> {
-    // Load old-model connections
+    // Load all old-model connections so an inactive row can distinguish an
+    // explicit disconnect from an auto-connected service with no row.
     let connections: Vec<UserServiceConnection> = db
         .collection::<UserServiceConnection>(CONNECTIONS)
-        .find(doc! { "user_id": user_id, "is_active": true })
+        .find(doc! { "user_id": user_id })
         .await?
         .try_collect()
         .await?;
 
-    let connected_ids: HashSet<&str> = connections.iter().map(|c| c.service_id.as_str()).collect();
+    let connected_ids: HashSet<&str> = connections
+        .iter()
+        .filter(|connection| connection.is_active)
+        .map(|connection| connection.service_id.as_str())
+        .collect();
+    let connection_ids: HashSet<&str> = connections
+        .iter()
+        .map(|connection| connection.service_id.as_str())
+        .collect();
 
     // Load new-model AI Services -- exclude catalog services already provisioned
     let user_services: Vec<UserService> = db
@@ -3224,6 +3235,11 @@ pub async fn discover_services(
         .filter(|svc| {
             // Already connected via old model
             if connected_ids.contains(svc.id.as_str()) {
+                return false;
+            }
+            // Credential-free services are auto-connected unless an inactive
+            // connection row records an explicit disconnect.
+            if !svc.requires_user_credential && !connection_ids.contains(svc.id.as_str()) {
                 return false;
             }
             // Already provisioned as a UserService (by catalog ID or slug match)
@@ -3637,6 +3653,86 @@ mod tests {
         assert_eq!(unavailable["executable"], false);
         assert_eq!(unavailable["source"], "user_service");
         assert_eq!(unavailable["is_generic_proxy"], true);
+    }
+
+    #[tokio::test]
+    async fn discover_and_connected_services_are_disjoint_for_auto_connect_states() {
+        let Some(db) = connect_test_database("mcp_auto_connect_complement").await else {
+            eprintln!("skipping MCP auto-connect test: no local MongoDB available");
+            return;
+        };
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let auto_connected_id = uuid::Uuid::new_v4().to_string();
+        let auto_disconnected_id = uuid::Uuid::new_v4().to_string();
+        let credential_required_id = uuid::Uuid::new_v4().to_string();
+
+        let mut auto_connected = dummy_service();
+        auto_connected.id = auto_connected_id.clone();
+        auto_connected.name = "Auto Connected".to_string();
+        auto_connected.slug = "auto-connected".to_string();
+        auto_connected.requires_user_credential = false;
+
+        let mut auto_disconnected = dummy_service();
+        auto_disconnected.id = auto_disconnected_id.clone();
+        auto_disconnected.name = "Auto Disconnected".to_string();
+        auto_disconnected.slug = "auto-disconnected".to_string();
+        auto_disconnected.requires_user_credential = false;
+
+        let mut credential_required = dummy_service();
+        credential_required.id = credential_required_id.clone();
+        credential_required.name = "Credential Required".to_string();
+        credential_required.slug = "credential-required".to_string();
+        credential_required.requires_user_credential = true;
+
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_many(vec![auto_connected, auto_disconnected, credential_required])
+            .await
+            .expect("insert discovery services");
+
+        db.collection::<UserServiceConnection>(CONNECTIONS)
+            .insert_one(UserServiceConnection {
+                id: uuid::Uuid::new_v4().to_string(),
+                user_id: user_id.clone(),
+                service_id: auto_disconnected_id.clone(),
+                credential_encrypted: None,
+                credential_type: None,
+                credential_label: None,
+                metadata: None,
+                is_active: false,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .expect("insert explicit disconnect");
+
+        let node_ws_manager = NodeWsManager::new(30, 100);
+        let loaded =
+            load_user_tools_all_scoped(&db, &node_ws_manager, &user_id, NodeScope::Unrestricted)
+                .await
+                .expect("load connected services");
+        let connected = list_connected_services(&loaded, None);
+        let discover = discover_services(&db, &user_id, None, Some("connection"))
+            .await
+            .expect("discover services");
+
+        let service_ids = |result: &serde_json::Value| -> HashSet<String> {
+            result["services"]
+                .as_array()
+                .expect("services array")
+                .iter()
+                .filter_map(|service| service["service_id"].as_str().map(str::to_string))
+                .collect()
+        };
+        let connected_ids = service_ids(&connected);
+        let discover_ids = service_ids(&discover);
+
+        assert_eq!(connected_ids, HashSet::from([auto_connected_id]));
+        assert_eq!(
+            discover_ids,
+            HashSet::from([auto_disconnected_id, credential_required_id])
+        );
+        assert!(connected_ids.is_disjoint(&discover_ids));
     }
 
     // -- generate_tool_definitions tests --
