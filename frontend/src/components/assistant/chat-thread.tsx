@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef } from "react";
+import { Fragment, useCallback, useEffect, useRef } from "react";
 import { AlertCircle } from "lucide-react";
 import { NyxidIcon } from "@/components/brand/nyxid-icon";
 import { ApprovalCard } from "@/components/assistant/blocks/approval-card";
@@ -149,10 +149,16 @@ function ThinkingRow() {
   );
 }
 
+// Slack, in px, within which the thread still counts as "following" the tail.
+// Below it the reader has deliberately scrolled up and must not be yanked back
+// while the assistant streams.
+const FOLLOW_THRESHOLD = 48;
+
 export function ChatThread({
   messages,
   thinking = false,
   streaming = false,
+  bottomInset = 0,
   onDecideApproval,
 }: {
   readonly messages: readonly AssistantMessage[];
@@ -168,23 +174,56 @@ export function ChatThread({
    * reads as live typing rather than a frozen partial answer.
    */
   readonly streaming?: boolean;
+  /**
+   * Height in px of the composer floating over the thread. Turns are allowed to
+   * scroll behind it (ChatGPT-style), so the thread reserves this much room at
+   * the tail and dissolves into it over the same distance.
+   */
+  readonly bottomInset?: number;
   readonly onDecideApproval: (
     blockId: string,
     approved: boolean,
   ) => Promise<void>;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const following = useRef(true);
+  const lastSentId = useRef<string | undefined>(undefined);
+
+  const handleScroll = useCallback(() => {
+    const element = scrollRef.current;
+    if (!element) return;
+    following.current =
+      element.scrollHeight - element.scrollTop - element.clientHeight <
+      FOLLOW_THRESHOLD;
+  }, []);
 
   useEffect(() => {
     const element = scrollRef.current;
-    if (element) element.scrollTop = element.scrollHeight;
-  }, [messages, thinking, streaming]);
+    if (!element) return;
+    // Sending always pulls the view back to the tail; only assistant streaming
+    // respects a deliberate scroll-up. Keyed on the message id so the poll loop
+    // re-rendering the same turn doesn't keep yanking a reader back down.
+    const latest = messages.at(-1);
+    if (latest?.role === "user" && latest.id !== lastSentId.current) {
+      lastSentId.current = latest.id;
+      following.current = true;
+    }
+    if (following.current) element.scrollTop = element.scrollHeight;
+  }, [messages, thinking, streaming, bottomInset]);
 
   const groups = groupMessages(messages);
 
+  // Opaque down to the top of the composer, then dissolved to nothing by the
+  // bottom edge — content passing behind the composer fades out instead of
+  // being clipped by a hard line.
+  const fadeMask = `linear-gradient(to bottom, #000 0, #000 calc(100% - ${String(bottomInset)}px), transparent 100%)`;
+
   if (messages.length === 0) {
     return (
-      <div className="flex flex-1 items-center justify-center px-6 text-center">
+      <div
+        className="flex flex-1 items-center justify-center px-6 text-center"
+        style={{ paddingBottom: `${String(bottomInset)}px` }}
+      >
         <div>
           <div className="mx-auto flex h-10 w-10 items-center justify-center rounded-xl border border-nyx-secondary-400/20 bg-nyx-secondary-400/[0.06]">
             <NyxidIcon className="h-5 w-5" />
@@ -204,9 +243,14 @@ export function ChatThread({
     <div className="relative flex min-h-0 flex-1 flex-col">
       <div
         ref={scrollRef}
+        onScroll={handleScroll}
         className="@container min-h-0 flex-1 overflow-y-auto overscroll-contain"
+        style={{ maskImage: fadeMask, WebkitMaskImage: fadeMask }}
       >
-        <div className="mx-auto flex w-full max-w-[680px] flex-col gap-6 px-4 py-6 sm:px-6 sm:py-8">
+        <div
+          className="mx-auto flex w-full max-w-[680px] flex-col gap-6 px-4 py-6 sm:px-6 sm:py-8"
+          style={{ paddingBottom: `calc(${String(bottomInset)}px + 1.5rem)` }}
+        >
           {groups.map((group, groupIndex) => {
             const first = group.messages[0];
             const time = formatClockTime(first?.created_at);
@@ -289,16 +333,6 @@ export function ChatThread({
           {thinking ? <ThinkingRow /> : null}
         </div>
       </div>
-      {/*
-        Very-thin scroll fade so the last turn dissolves into the composer
-        instead of hard-cutting at its top edge. Fades to the page background
-        (which the composer also sits on); pointer-events-none so it never
-        eats clicks on the content beneath it.
-      */}
-      <div
-        aria-hidden
-        className="pointer-events-none absolute inset-x-0 bottom-0 h-4 bg-gradient-to-t from-background to-transparent"
-      />
     </div>
   );
 }

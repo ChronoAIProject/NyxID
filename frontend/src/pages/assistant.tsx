@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { toast } from "sonner";
 import { AssistantShell } from "@/components/assistant/assistant-shell";
@@ -33,6 +33,22 @@ export function AssistantPage({
     },
   });
   const conversations = useConversations();
+  // The composer floats over the thread, so the thread has to know how tall it
+  // currently is — it grows with the draft — to reserve the matching tail room
+  // and place its fade.
+  const composerRef = useRef<HTMLDivElement>(null);
+  const [composerHeight, setComposerHeight] = useState(0);
+
+  useLayoutEffect(() => {
+    const element = composerRef.current;
+    if (!element || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver((entries) => {
+      setComposerHeight(entries[0]?.contentRect.height ?? 0);
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [view]);
+
   const selectedId = useMemo(() => {
     const items = conversations.data ?? [];
     if (
@@ -132,7 +148,7 @@ export function AssistantPage({
 
   return (
     <AssistantShell title={title} sidebar={sidebar}>
-      <div className="flex h-full min-h-0 flex-col bg-background">
+      <div className="relative flex h-full min-h-0 flex-col bg-background">
         {history.isLoading ? (
           <div className="flex flex-1 items-center justify-center text-[12px] text-text-tertiary">
             Loading conversation...
@@ -144,6 +160,7 @@ export function AssistantPage({
         ) : (
           <ChatThread
             messages={history.data?.messages ?? []}
+            bottomInset={composerHeight}
             thinking={
               active &&
               history.data?.messages.at(-1)?.role !== "assistant"
@@ -157,12 +174,14 @@ export function AssistantPage({
             }
           />
         )}
-        <ChatComposer
-          active={active}
-          sending={sendMessage.isPending}
-          onSend={handleSend}
-          onStop={() => cancelTurn.mutateAsync()}
-        />
+        <div ref={composerRef} className="absolute inset-x-0 bottom-0 z-10">
+          <ChatComposer
+            active={active}
+            sending={sendMessage.isPending}
+            onSend={handleSend}
+            onStop={() => cancelTurn.mutateAsync()}
+          />
+        </div>
       </div>
     </AssistantShell>
   );
