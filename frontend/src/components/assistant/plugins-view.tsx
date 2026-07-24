@@ -1,16 +1,7 @@
 import { useMemo, useState } from "react";
-import { Link } from "@tanstack/react-router";
-import { Plus, Search } from "lucide-react";
+import { ArrowRight, Plus, Search } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { AddKeyDialog } from "@/components/dashboard/add-key-dialog";
@@ -62,149 +53,109 @@ function PluginTile({
   );
 }
 
-/** Full-description detail view for a card, with the card's own primary action.
- *  The action node is the identical element the card renders, so Connect /
- *  Manage / Install keep their exact handlers (including the manage-modal vs
- *  /keys-link split). Any action click also closes this dialog, so the
- *  manage/add-service modal it opens is never stacked on top of it. */
-function PluginDetailDialog({
-  item,
-  addedBadge,
-  action,
-  onClose,
-}: {
-  readonly item: PluginCardShape;
-  readonly addedBadge: "Connected" | "Installed";
-  readonly action: React.ReactNode;
-  readonly onClose: () => void;
-}) {
-  return (
-    <Dialog open onOpenChange={(next) => (next ? undefined : onClose())}>
-      <DialogContent className="max-w-md">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2.5">
-            <PluginTile>
-              {item.iconSlug ? (
-                <ServiceIcon slug={item.iconSlug} size="md" />
-              ) : (
-                item.initial
-              )}
-            </PluginTile>
-            <span className="min-w-0 flex-1">
-              <span className="block truncate">{item.name}</span>
-              <span className="block text-[10px] font-normal uppercase tracking-[0.5px] text-text-tertiary">
-                {item.category}
-              </span>
-            </span>
-            {item.added && <Badge variant="success">{addedBadge}</Badge>}
-          </DialogTitle>
-        </DialogHeader>
-
-        <DialogDescription className="whitespace-pre-line break-words text-[12px] text-muted-foreground">
-          {item.description}
-        </DialogDescription>
-
-        <DialogFooter className="sm:items-center sm:justify-between">
-          <span className="font-mono text-[10px] text-text-tertiary">
-            {item.meta}
-          </span>
-          <span onClick={onClose}>{action}</span>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
+/**
+ * A catalog card with exactly one call to action: the card itself. Clicking
+ * anywhere runs the primary action — Connect for an unconnected service,
+ * Manage for a connected one — rather than staging a detail view in front of
+ * it. `actionLabel` is the card's own affordance; it is deliberately a label,
+ * not a nested button, so the whole surface stays a single hit target.
+ *
+ * A card with no `onActivate` (an installed skill, whose management isn't
+ * built yet) renders inert: not focusable, no pointer affordance.
+ */
 function PluginCard({
   item,
   addedBadge,
   addedMeta,
-  addedAction,
-  availableAction,
+  actionLabel,
+  onActivate,
 }: {
   readonly item: PluginCardShape;
   readonly addedBadge: "Connected" | "Installed";
   /** Extra mono note next to the added badge (e.g. "2 connections"). */
   readonly addedMeta?: string;
-  readonly addedAction: React.ReactNode;
-  readonly availableAction: React.ReactNode;
+  readonly actionLabel: string;
+  readonly onActivate?: () => void;
 }) {
-  const [expanded, setExpanded] = useState(false);
-  const action = item.added ? addedAction : availableAction;
+  const interactive = Boolean(onActivate);
 
   return (
-    <>
-      {/* Clickable surface, not a <button>: the card holds its own action
-          button/link, which may not nest inside one. Same role/tabIndex/keydown
-          pattern the dashboard list cards use (api-key-table, channel-bots). */}
-      <div
-        role="button"
-        tabIndex={0}
-        aria-label={`${item.name} details`}
-        onClick={() => setExpanded(true)}
-        onKeyDown={(event) => {
-          if (event.key === "Enter" || event.key === " ") {
-            event.preventDefault();
-            setExpanded(true);
+    <div
+      {...(interactive
+        ? {
+            role: "button",
+            tabIndex: 0,
+            "aria-label": `${actionLabel} ${item.name}`,
+            onClick: onActivate,
+            onKeyDown: (event: React.KeyboardEvent) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                onActivate?.();
+              }
+            },
           }
-        }}
-        className={`flex ${CARD_HEIGHT} cursor-pointer flex-col gap-2.5 rounded-xl border border-border bg-card p-4 text-left transition-colors hover:border-hairline-strong`}
-      >
-        <div className="flex items-start gap-2.5">
-          <PluginTile>
-            {item.iconSlug ? (
-              <ServiceIcon slug={item.iconSlug} size="md" />
-            ) : (
-              item.initial
-            )}
-          </PluginTile>
-          <div className="min-w-0">
-            <p className="truncate text-[13px] font-medium text-foreground">
-              {item.name}
-            </p>
-            <p className="text-[10px] uppercase tracking-[0.5px] text-text-tertiary">
-              {item.category}
-            </p>
-          </div>
-        </div>
-        <p className="flex-1 break-words text-[12px] leading-[17px] text-muted-foreground line-clamp-3">
-          {item.description}
-        </p>
-        <div className="flex shrink-0 items-center justify-between gap-2">
-          {item.added ? (
-            <span className="flex min-w-0 items-center gap-2">
-              <Badge variant="success">{addedBadge}</Badge>
-              {addedMeta && (
-                <span className="truncate font-mono text-[10px] text-text-tertiary">
-                  {addedMeta}
-                </span>
-              )}
-            </span>
+        : {})}
+      // The clamped description is the only truncated text on the card, and
+      // the card no longer expands — the native tooltip keeps the full copy
+      // reachable without a second surface.
+      title={item.description}
+      className={`group flex ${CARD_HEIGHT} flex-col gap-2.5 rounded-xl border border-border bg-card p-4 text-left transition-colors ${
+        interactive ? "cursor-pointer hover:border-hairline-strong" : ""
+      }`}
+    >
+      <div className="flex items-start gap-2.5">
+        <PluginTile>
+          {item.iconSlug ? (
+            <ServiceIcon slug={item.iconSlug} size="md" />
           ) : (
-            <span className="font-mono text-[10px] text-text-tertiary">
-              {item.meta}
-            </span>
+            item.initial
           )}
-          {/* The inline action stays a plain action: it must not also expand. */}
-          <span
-            className="shrink-0"
-            onClick={(event) => event.stopPropagation()}
-            onKeyDown={(event) => event.stopPropagation()}
-          >
-            {action}
-          </span>
+        </PluginTile>
+        <div className="min-w-0">
+          <p className="truncate text-[13px] font-medium text-foreground">
+            {item.name}
+          </p>
+          <p className="text-[10px] uppercase tracking-[0.5px] text-text-tertiary">
+            {item.category}
+          </p>
         </div>
       </div>
-
-      {expanded && (
-        <PluginDetailDialog
-          item={item}
-          addedBadge={addedBadge}
-          action={action}
-          onClose={() => setExpanded(false)}
-        />
-      )}
-    </>
+      {/* The spacer absorbs the card's slack so the action row stays pinned to
+          the bottom; the clamp lives on the text itself, or `flex-1` would
+          stretch the box past three lines and clip a fourth mid-glyph. */}
+      <div className="min-h-0 flex-1">
+        <p className="break-words text-[12px] leading-[17px] text-muted-foreground line-clamp-3">
+          {item.description}
+        </p>
+      </div>
+      <div className="flex shrink-0 items-center justify-between gap-2">
+        {item.added ? (
+          <span className="flex min-w-0 items-center gap-2">
+            <Badge variant="success">{addedBadge}</Badge>
+            {addedMeta && (
+              <span className="truncate font-mono text-[10px] text-text-tertiary">
+                {addedMeta}
+              </span>
+            )}
+          </span>
+        ) : (
+          <span className="font-mono text-[10px] text-text-tertiary">
+            {item.meta}
+          </span>
+        )}
+        <span
+          aria-hidden
+          className={`flex shrink-0 items-center gap-1 text-[12px] transition-colors ${
+            interactive
+              ? "text-muted-foreground group-hover:text-foreground"
+              : "text-text-tertiary"
+          }`}
+        >
+          {actionLabel}
+          {interactive && <ArrowRight className="h-3 w-3" />}
+        </span>
+      </div>
+    </div>
   );
 }
 
@@ -276,44 +227,22 @@ function ConnectorCard({
   onConnect,
 }: {
   readonly item: ConnectorCardItem;
-  readonly onManage: (keyId: string) => void;
+  readonly onManage: (cardId: string) => void;
   readonly onConnect: (slug: string) => void;
 }) {
+  const connectSlug = item.connectSlug;
   return (
     <PluginCard
       item={item}
       addedBadge="Connected"
-      addedMeta={item.manageKeyId ? undefined : item.meta}
-      addedAction={
-        item.manageKeyId ? (
-          // Single-connection service: manage in a compact modal in-place.
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() => onManage(item.manageKeyId as string)}
-          >
-            Manage
-          </Button>
-        ) : (
-          // Multi-connection service: which credential is ambiguous, so send
-          // to the Studio keys list (filtered) rather than a single-key modal.
-          <Button asChild variant="outline" size="sm">
-            <Link to="/keys">Manage</Link>
-          </Button>
-        )
-      }
-      availableAction={
-        item.connectSlug ? (
-          <Button
-            type="button"
-            variant="primary"
-            size="sm"
-            onClick={() => onConnect(item.connectSlug as string)}
-          >
-            Connect
-          </Button>
-        ) : null
+      addedMeta={(item.manageKeyIds?.length ?? 0) > 1 ? item.meta : undefined}
+      actionLabel={item.added ? "Manage" : "Connect"}
+      onActivate={
+        item.added
+          ? () => onManage(item.id)
+          : connectSlug
+            ? () => onConnect(connectSlug)
+            : undefined
       }
     />
   );
@@ -322,13 +251,17 @@ function ConnectorCard({
 function ConnectorsTab({ query }: { readonly query: string }) {
   const keysQuery = useKeys();
   const catalogQuery = useCatalog();
-  const [manageKeyId, setManageKeyId] = useState<string | null>(null);
+  const [manageCardId, setManageCardId] = useState<string | null>(null);
   const [connectSlug, setConnectSlug] = useState<string | null>(null);
 
   const items = useMemo(
     () => deriveConnectorItems(keysQuery.data ?? [], catalogQuery.data ?? []),
     [keysQuery.data, catalogQuery.data],
   );
+  // Resolved from the live list rather than snapshotted at open time, so
+  // revoking one of several connections updates the modal in place, and
+  // revoking the last one unmounts it.
+  const manageItem = items.added.find((item) => item.id === manageCardId);
 
   if (keysQuery.isLoading || catalogQuery.isLoading) return <LoadingGrid />;
 
@@ -370,7 +303,7 @@ function ConnectorsTab({ query }: { readonly query: string }) {
                   <ConnectorCard
                     key={item.id}
                     item={item}
-                    onManage={setManageKeyId}
+                    onManage={setManageCardId}
                     onConnect={setConnectSlug}
                   />
                 ))}
@@ -393,7 +326,7 @@ function ConnectorsTab({ query }: { readonly query: string }) {
               <ConnectorCard
                 key={item.id}
                 item={item}
-                onManage={setManageKeyId}
+                onManage={setManageCardId}
                 onConnect={setConnectSlug}
               />
             ))}
@@ -401,10 +334,12 @@ function ConnectorsTab({ query }: { readonly query: string }) {
         </>
       )}
 
-      {manageKeyId !== null && (
+      {manageItem && (
         <ManageConnectionModal
-          keyId={manageKeyId}
-          onClose={() => setManageKeyId(null)}
+          keyIds={manageItem.manageKeyIds ?? []}
+          serviceName={manageItem.name}
+          iconSlug={manageItem.iconSlug}
+          onClose={() => setManageCardId(null)}
         />
       )}
 
@@ -451,20 +386,11 @@ function SkillsTab({ query }: { readonly query: string }) {
         key={item.id}
         item={item}
         addedBadge="Installed"
-        addedAction={
-          <Button type="button" variant="outline" size="sm" disabled>
-            Manage
-          </Button>
-        }
-        availableAction={
-          <Button
-            type="button"
-            variant="primary"
-            size="sm"
-            onClick={() => setAddedIds(addSkill(item.id))}
-          >
-            Install
-          </Button>
+        actionLabel={item.added ? "Manage" : "Install"}
+        // Skill management isn't built yet, so an installed skill's card is
+        // inert rather than offering an action that does nothing.
+        onActivate={
+          item.added ? undefined : () => setAddedIds(addSkill(item.id))
         }
       />
     );
