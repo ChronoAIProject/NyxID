@@ -1,6 +1,6 @@
 # AI-Driven — Let Your Agent Connect a Service for You
 
-Use Claude Code, Codex, or Cursor to call NyxID's MCP meta-tools (`nyx__discover_services`, `nyx__connect_service`, `nyx__call_tool`) and connect a service end-to-end.
+Use Claude Code, Codex, or Cursor to call NyxID's MCP meta-tools (`nyx__discover_services`, `nyx__list_connected_services`, `nyx__connect_service`, `nyx__call_tool`) and connect a service end-to-end.
 
 This path involves more moving parts than the [Web UI](web-ui.md) or [CLI](cli.md) — MCP setup, agent prompt interpretation, model behavior. If this is your **first** service ever, prefer the Web UI. If you already have one working service, this path is faster than clicking through the dashboard for service two and beyond.
 
@@ -31,7 +31,7 @@ The first run opens your browser to authenticate (OAuth) and stores a session.
 
 ### What you should see after this step
 
-Your agent now sees NyxID's meta-tools: `nyx__discover_services`, `nyx__connect_service`, `nyx__search_tools`, `nyx__call_tool`. These are NyxID itself — not yet a connected downstream service.
+Your agent now sees NyxID's core meta-tools: `nyx__discover_services`, `nyx__list_connected_services`, `nyx__connect_service`, `nyx__search_tools`, `nyx__call_tool`. These are NyxID itself — not yet a connected downstream service.
 
 ## Step 2 — Paste this prompt into your agent
 

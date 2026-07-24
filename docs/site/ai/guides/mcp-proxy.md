@@ -17,13 +17,14 @@ Each service endpoint becomes one MCP tool. Tool names follow the pattern `{serv
 
 The `operationId` comes from the service's OpenAPI spec. If no `operationId` is set, NyxID generates a name from the HTTP method and path (e.g. `post_v1_chat_completions`). Adding `operationId` to spec entries produces cleaner tool names.
 
-In addition to per-service tools, NyxID always surfaces four meta-tools:
+In addition to per-service tools, NyxID always surfaces five core meta-tools:
 
 | Tool | Purpose |
 |---|---|
-| `nyx__discover_services` | Browse the catalog and list connected services |
+| `nyx__discover_services` | Browse catalog services that are not connected |
+| `nyx__list_connected_services` | Enumerate connected services and their current availability |
 | `nyx__connect_service` | Add a service from within the agent |
-| `nyx__search_tools` | Fuzzy-search across all available tools |
+| `nyx__search_tools` | Search across all available tools |
 | `nyx__call_tool` | Invoke any tool by name with arbitrary arguments |
 
 ## Connecting a service via the agent
