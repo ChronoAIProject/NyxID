@@ -221,10 +221,27 @@ export function useAssistantTurn(conversationId: string | undefined) {
   });
 }
 
+/**
+ * Single-flight guard around actor creation, shared by every path that can
+ * allocate one: the "New chat" button and the empty-state auto-create in
+ * `useSendMessage`. Both are legitimately in flight at once now that the
+ * button navigates optimistically — the user can type and send into the
+ * draft thread before the actor lands — and without one promise between
+ * them that send would allocate a second actor and stream into it.
+ */
+let pendingCreate: Promise<Conversation> | null = null;
+
+function createConversationOnce(): Promise<Conversation> {
+  pendingCreate ??= assistantTransport.createConversation().finally(() => {
+    pendingCreate = null;
+  });
+  return pendingCreate;
+}
+
 export function useCreateConversation() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: () => assistantTransport.createConversation(),
+    mutationFn: () => createConversationOnce(),
     onSuccess: async (conversation) => {
       await projectTransportState(queryClient, conversation.id);
     },
@@ -308,12 +325,6 @@ function createTurnEventPump(
   };
 }
 
-// Single-flight guard for the empty-state auto-create: two sends racing in
-// before React commits the disabled/sending state must share ONE created
-// conversation (the second is then rejected by the active-turn guard)
-// instead of allocating two actors and streaming into both.
-let pendingAutoCreate: Promise<Conversation> | null = null;
-
 /**
  * Send a message into the bound conversation — or, when no conversation is
  * selected (the "New chat" empty state), create one first and send there.
@@ -327,12 +338,11 @@ export function useSendMessage(conversationId: string | undefined) {
     mutationFn: async (content: string): Promise<SentMessage> => {
       let target = conversationId;
       if (!target) {
-        pendingAutoCreate ??= assistantTransport
-          .createConversation()
-          .finally(() => {
-            pendingAutoCreate = null;
-          });
-        const conversation = await pendingAutoCreate;
+        // Shares `createConversationOnce` with the "New chat" button: two
+        // sends racing before React commits the disabled state, or a send
+        // landing mid-provision, all resolve to the SAME actor (the losers
+        // are then rejected by the active-turn guard).
+        const conversation = await createConversationOnce();
         target = conversation.id;
         await projectTransportState(queryClient, target);
       }
