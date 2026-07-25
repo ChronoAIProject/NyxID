@@ -13,12 +13,13 @@ import {
   useCancelTurn,
   useConversation,
   useConversations,
-  useCreateConversation,
   useDecideApproval,
   useDeleteConversation,
   useSendMessage,
 } from "@/hooks/use-assistant";
 import { isTurnActive } from "@/types/assistant";
+
+const NEW_CHAT_SEARCH_VALUE = "new";
 
 export function AssistantPage({
   view = "chat",
@@ -35,6 +36,7 @@ export function AssistantPage({
   const conversations = useConversations();
   const selectedId = useMemo(() => {
     const items = conversations.data ?? [];
+    if (selectedFromSearch === NEW_CHAT_SEARCH_VALUE) return undefined;
     if (
       selectedFromSearch &&
       items.some((item) => item.id === selectedFromSearch)
@@ -45,7 +47,6 @@ export function AssistantPage({
   }, [conversations.data, selectedFromSearch]);
   const history = useConversation(selectedId);
   const turn = useAssistantTurn(selectedId);
-  const createConversation = useCreateConversation();
   const sendMessage = useSendMessage(selectedId);
   const cancelTurn = useCancelTurn(selectedId);
   const decideApproval = useDecideApproval(selectedId);
@@ -58,9 +59,11 @@ export function AssistantPage({
     });
   }
 
-  async function createNewChat() {
-    const conversation = await createConversation.mutateAsync();
-    selectConversation(conversation.id);
+  function createNewChat() {
+    void navigate({
+      to: "/assistant" as never,
+      search: { c: NEW_CHAT_SEARCH_VALUE } as never,
+    });
   }
 
   // Deleting the URL-addressed conversation must also drop `?c=`, or the
@@ -112,11 +115,11 @@ export function AssistantPage({
       conversations={conversations.data ?? []}
       activeConversationId={view === "chat" ? selectedId : undefined}
       activeView={view}
-      creating={createConversation.isPending}
+      creating={false}
       deletingId={
         deleteConversation.isPending ? deleteConversation.variables : undefined
       }
-      onNewChat={() => void createNewChat()}
+      onNewChat={createNewChat}
       onSelect={selectConversation}
       onDelete={(conversationId) => void handleDelete(conversationId)}
     />
