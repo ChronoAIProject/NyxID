@@ -27,6 +27,7 @@ export function ChatComposer({
 }) {
   const [content, setContent] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const composingRef = useRef(false);
 
   // Grow the textarea to fit the draft, capped at MAX_ROWS.
   useLayoutEffect(() => {
@@ -67,7 +68,11 @@ export function ChatComposer({
   }
 
   function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
-    if (event.key === "Enter" && !event.shiftKey) {
+    const isComposing =
+      composingRef.current ||
+      event.nativeEvent.isComposing ||
+      event.keyCode === 229;
+    if (event.key === "Enter" && !event.shiftKey && !isComposing) {
       event.preventDefault();
       void submit();
     }
@@ -83,6 +88,12 @@ export function ChatComposer({
           ref={textareaRef}
           value={content}
           onChange={(event) => setContent(event.target.value)}
+          onCompositionStart={() => {
+            composingRef.current = true;
+          }}
+          onCompositionEnd={() => {
+            composingRef.current = false;
+          }}
           onKeyDown={handleKeyDown}
           disabled={active}
           rows={1}
