@@ -1057,11 +1057,11 @@ async fn send_to_chatgpt_with_api_url(
                 loop {
                     let next = tokio::select! {
                         biased;
-                        next = byte_stream.next() => next,
                         () = tx.closed() => {
                             downstream_closed = true;
                             break;
-                        }
+                        },
+                        next = byte_stream.next() => next,
                     };
                     let Some(chunk_result) = next else {
                         break;
@@ -1139,11 +1139,11 @@ async fn send_to_chatgpt_with_api_url(
                 loop {
                     let next = tokio::select! {
                         biased;
-                        next = byte_stream.next() => next,
                         () = tx.closed() => {
                             downstream_closed = true;
                             break;
-                        }
+                        },
+                        next = byte_stream.next() => next,
                     };
                     let Some(chunk_result) = next else {
                         break;
