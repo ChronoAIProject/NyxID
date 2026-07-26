@@ -12,6 +12,9 @@ use tokio_stream::wrappers::ReceiverStream;
 use utoipa::ToSchema;
 
 use crate::AppState;
+use crate::downstream_disconnect::{
+    CancelOnDropStream, request_cancellation, until_client_disconnect,
+};
 use crate::errors::{AppError, AppResult};
 use crate::models::service_account::{COLLECTION_NAME as SERVICE_ACCOUNTS, ServiceAccount};
 use crate::models::service_billing::{BillingMetric, PlatformUsage, ResaleUsage};
@@ -85,6 +88,14 @@ fn emit_proxy_error_telemetry(
             status,
         },
     );
+}
+
+fn proxy_client_disconnected(service_id: &str) -> AppError {
+    tracing::debug!(
+        service_id,
+        "Cancelled upstream proxy work after downstream client disconnected"
+    );
+    AppError::Internal("Downstream client disconnected".to_string())
 }
 
 /// Stable string label for the auth method that issued this proxy request.
@@ -1235,6 +1246,7 @@ async fn execute_proxy_inner(
     pre_resolved: Option<PreResolved>,
     resolved_slug: &mut String,
 ) -> AppResult<Response> {
+    let downstream_cancellation = request_cancellation(&request);
     let billing_egress_permit = enforce_proxy_billing_classification(&request)?;
 
     let user_id_str = auth_user.user_id.to_string();
@@ -2413,26 +2425,30 @@ async fn execute_proxy_inner(
         );
 
         state.billing.mark_forwarded(&metered).await?;
-        let mut response = chatgpt_translator::send_to_chatgpt(
-            &translated.body,
-            &bearer_token,
-            is_streaming,
-            is_chat_completions_path,
-            query.as_deref(),
-            Some(llm_usage_service::UsageAuditContext {
-                db: state.db.clone(),
-                user_id: user_id_str.clone(),
-                provider_slug: None,
-                service_id: Some(service_id.to_string()),
-                model,
-                path: path.to_string(),
-                api_key_id: auth_user.api_key_id.clone(),
-                api_key_name: auth_user.api_key_name.clone(),
-            }),
-            Some(usage_complete),
-            billing_egress_permit,
+        let mut response = until_client_disconnect(
+            &downstream_cancellation,
+            chatgpt_translator::send_to_chatgpt(
+                &translated.body,
+                &bearer_token,
+                is_streaming,
+                is_chat_completions_path,
+                query.as_deref(),
+                Some(llm_usage_service::UsageAuditContext {
+                    db: state.db.clone(),
+                    user_id: user_id_str.clone(),
+                    provider_slug: None,
+                    service_id: Some(service_id.to_string()),
+                    model,
+                    path: path.to_string(),
+                    api_key_id: auth_user.api_key_id.clone(),
+                    api_key_name: auth_user.api_key_name.clone(),
+                }),
+                Some(usage_complete),
+                billing_egress_permit,
+            ),
         )
-        .await?;
+        .await
+        .map_err(|_| proxy_client_disconnected(service_id))??;
 
         let status = response.status();
 
@@ -2462,22 +2478,26 @@ async fn execute_proxy_inner(
 
     // Reuse the shared reqwest::Client from AppState for connection pooling.
     state.billing.mark_forwarded(&metered).await?;
-    let downstream_response = proxy_service::forward_request(
-        &state.http_client,
-        &target,
-        reqwest_method,
-        path,
-        query.as_deref(),
-        reqwest_headers,
-        proxy_service::ProxyBody::Buffered(body),
-        identity_headers,
-        delegated,
-        caller_token.as_deref(),
-        &state.token_exchange_cache,
-        &state.cloud_response_cache,
-        billing_egress_permit,
+    let downstream_response = until_client_disconnect(
+        &downstream_cancellation,
+        proxy_service::forward_request(
+            &state.http_client,
+            &target,
+            reqwest_method,
+            path,
+            query.as_deref(),
+            reqwest_headers,
+            proxy_service::ProxyBody::Buffered(body),
+            identity_headers,
+            delegated,
+            caller_token.as_deref(),
+            &state.token_exchange_cache,
+            &state.cloud_response_cache,
+            billing_egress_permit,
+        ),
     )
-    .await?;
+    .await
+    .map_err(|_| proxy_client_disconnected(service_id))??;
 
     // Convert reqwest Response back to axum Response
     let status = StatusCode::from_u16(downstream_response.status().as_u16())
@@ -2538,6 +2558,7 @@ async fn execute_proxy_inner(
             let stream_metered = metered.clone();
             let request_len = request_body_len;
             let resale_metric = billing_ctx.resale.as_ref().map(|spec| spec.metric);
+            let task_cancellation = downstream_cancellation.clone();
 
             tokio::spawn(async move {
                 let mut sse_buffer = String::new();
@@ -2546,8 +2567,39 @@ async fn execute_proxy_inner(
                 let mut response_len: i64 = 0;
 
                 loop {
-                    match tokio::time::timeout(idle_timeout, upstream_stream.next()).await {
-                        Ok(Some(Ok(bytes))) => {
+                    let next = until_client_disconnect(
+                        &task_cancellation,
+                        tokio::time::timeout(idle_timeout, upstream_stream.next()),
+                    )
+                    .await;
+                    match next {
+                        Err(_) => {
+                            drop(upstream_stream);
+                            let usage = usage_accumulator.finalize();
+                            if let Some(usage) = usage.clone() {
+                                llm_usage_service::log_reported_usage_async(
+                                    stream_usage_context.clone(),
+                                    usage,
+                                );
+                            }
+                            let resale = resale_metric.and_then(|metric| {
+                                resale_usage_from_optional_reported(
+                                    metric,
+                                    usage.as_ref(),
+                                    request_len + response_len,
+                                )
+                            });
+                            settle_meter_async(
+                                stream_billing,
+                                stream_metered,
+                                llm_platform_usage(usage.as_ref(), request_len + response_len),
+                                resale,
+                                stream_usage_context.model.clone(),
+                            )
+                            .await;
+                            return;
+                        }
+                        Ok(Ok(Some(Ok(bytes)))) => {
                             response_len += bytes.len() as i64;
                             sse_buffer.push_str(&String::from_utf8_lossy(&bytes));
                             while let Some(event) = parse_sse_event(&mut sse_buffer) {
@@ -2562,6 +2614,7 @@ async fn execute_proxy_inner(
                             }
 
                             if tx.send(Ok(bytes)).await.is_err() {
+                                drop(upstream_stream);
                                 let usage = usage_accumulator.finalize();
                                 if let Some(usage) = usage.clone() {
                                     llm_usage_service::log_reported_usage_async(
@@ -2587,7 +2640,7 @@ async fn execute_proxy_inner(
                                 return;
                             }
                         }
-                        Ok(Some(Err(e))) => {
+                        Ok(Ok(Some(Err(e)))) => {
                             tracing::error!(
                                 service_id = %service_id_owned,
                                 error = %e,
@@ -2623,7 +2676,7 @@ async fn execute_proxy_inner(
                                 .await;
                             return;
                         }
-                        Ok(None) => {
+                        Ok(Ok(None)) => {
                             let usage = usage_accumulator.finalize();
                             if let Some(usage) = usage.clone() {
                                 llm_usage_service::log_reported_usage_async(
@@ -2648,7 +2701,7 @@ async fn execute_proxy_inner(
                             .await;
                             return;
                         }
-                        Err(_) => {
+                        Ok(Err(_)) => {
                             tracing::warn!(
                                 service_id = %service_id_owned,
                                 idle_timeout_secs,
@@ -2682,7 +2735,10 @@ async fn execute_proxy_inner(
                 }
             });
 
-            let body = Body::from_stream(ReceiverStream::new(rx));
+            let body = Body::from_stream(CancelOnDropStream::new(
+                ReceiverStream::new(rx),
+                downstream_cancellation.clone(),
+            ));
             response_builder
                 .body(body)
                 .map_err(|e| AppError::Internal(format!("Failed to build response: {e}")))?
@@ -2735,17 +2791,23 @@ async fn execute_proxy_inner(
                 )
                 .await;
             };
-            let body = Body::from_stream(stream);
+            let body = Body::from_stream(CancelOnDropStream::new(
+                stream,
+                downstream_cancellation.clone(),
+            ));
             response_builder
                 .body(body)
                 .map_err(|e| AppError::Internal(format!("Failed to build response: {e}")))?
         }
     } else {
         // Buffer small / error responses so we can log diagnostics.
-        let response_body = downstream_response
-            .bytes()
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to read downstream response: {e}")))?;
+        let response_body =
+            until_client_disconnect(&downstream_cancellation, downstream_response.bytes())
+                .await
+                .map_err(|_| proxy_client_disconnected(service_id))?
+                .map_err(|e| {
+                    AppError::Internal(format!("Failed to read downstream response: {e}"))
+                })?;
 
         if !status.is_success() {
             let body_preview =
