@@ -92,6 +92,11 @@ const AUDIT_LOG_COLUMNS: readonly DataTableColumn<AdminAuditLogSortField>[] = [
     defaultWidth: 240,
   },
   {
+    field: "service",
+    label: "Service",
+    defaultWidth: 200,
+  },
+  {
     field: "api_key_name",
     label: "Agent",
     defaultWidth: 180,
@@ -105,9 +110,8 @@ const AUDIT_LOG_COLUMNS: readonly DataTableColumn<AdminAuditLogSortField>[] = [
   },
   {
     field: "user_id",
-    label: "User ID",
+    label: "User",
     defaultWidth: 300,
-    cellClassName: "font-mono text-[11px] text-muted-foreground",
   },
   {
     field: "api_key_id",
@@ -136,6 +140,9 @@ const AUDIT_LOG_COLUMNS: readonly DataTableColumn<AdminAuditLogSortField>[] = [
 const DEFAULT_COLUMN_SORT: Record<AdminAuditLogSortField, AdminAuditLogSort> = {
   created_at: "-created_at",
   event_type: "event_type",
+  // Never reaches the server: the `service` header is disabled because the
+  // backend doesn't advertise service sorts (resolved at read time).
+  service: "service",
   api_key_name: "api_key_name",
   status: "-status",
   user_id: "user_id",
@@ -155,6 +162,38 @@ type AuditLogSearchEditTarget =
 function responseStatus(entry: AdminAuditLogEntry): number | null {
   const value = entry.event_data?.response_status;
   return typeof value === "number" ? value : null;
+}
+
+interface ServiceDisplay {
+  readonly name: string | null;
+  readonly slug: string | null;
+}
+
+/** Prefer the server-resolved name/slug; fall back to raw event_data refs so
+ * entries still render while an older backend is deployed. */
+function associatedService(entry: {
+  readonly event_data: Record<string, unknown> | null;
+  readonly service_name?: string | null;
+  readonly service_slug?: string | null;
+}): ServiceDisplay | null {
+  const name = entry.service_name ?? null;
+  let slug = entry.service_slug ?? null;
+  if (!slug) {
+    const data = entry.event_data;
+    const rawSlug = data?.service_slug;
+    const rawId = data?.service_id;
+    if (typeof rawSlug === "string" && rawSlug.length > 0) slug = rawSlug;
+    else if (typeof rawId === "string" && rawId.length > 0) slug = rawId;
+  }
+  if (!name && !slug) return null;
+  return { name, slug };
+}
+
+function userDisplayName(entry: {
+  readonly user_display_name?: string | null;
+  readonly user_email?: string | null;
+}): string | null {
+  return entry.user_display_name ?? entry.user_email ?? null;
 }
 
 function statusVariant(
@@ -482,6 +521,31 @@ export function AdminAuditLogPage() {
             {entry.event_type}
           </span>
         );
+      case "service": {
+        const service = associatedService(entry);
+        return service ? (
+          <div className="min-w-0">
+            {service.name && (
+              <p
+                className="truncate text-sm font-medium text-foreground"
+                title={service.name}
+              >
+                {service.name}
+              </p>
+            )}
+            {service.slug && (
+              <p
+                className="truncate font-mono text-[11px] text-muted-foreground"
+                title={service.slug}
+              >
+                {service.slug}
+              </p>
+            )}
+          </div>
+        ) : (
+          <EmptyCell />
+        );
+      }
       case "api_key_name":
         return entry.api_key_name ? (
           <DataTableBadgeCell>
@@ -508,14 +572,28 @@ export function AdminAuditLogPage() {
           </DataTableBadgeCell>
         );
       }
-      case "user_id":
-        return entry.user_id ? (
-          <span className="line-clamp-2 break-all" title={entry.user_id}>
-            {entry.user_id}
-          </span>
-        ) : (
-          <EmptyCell />
+      case "user_id": {
+        if (!entry.user_id) return <EmptyCell />;
+        const name = userDisplayName(entry);
+        return (
+          <div className="min-w-0">
+            {name && (
+              <p
+                className="truncate text-sm font-medium text-foreground"
+                title={name}
+              >
+                {name}
+              </p>
+            )}
+            <p
+              className="truncate font-mono text-[11px] text-muted-foreground"
+              title={entry.user_id}
+            >
+              {entry.user_id}
+            </p>
+          </div>
         );
+      }
       case "api_key_id":
         return entry.api_key_id ? (
           <span className="line-clamp-2 break-all" title={entry.api_key_id}>
