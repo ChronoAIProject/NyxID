@@ -449,7 +449,10 @@ async fn billing_route_coverage_smoke() {
             "name": "nyx__call_tool",
             "arguments": {
                 "tool_name": "billing-mcp-route__request",
-                "arguments": {"method": "GET", "path": "/buffered"},
+                "arguments": {
+                    "method": "GET",
+                    "path": "/mcp-query?tag=a&tag=b&name=Nyx%20ID&empty="
+                },
             },
         },
     });
@@ -488,7 +491,10 @@ async fn billing_route_coverage_smoke() {
             "name": "nyx__call_tool",
             "arguments": {
                 "tool_name": "billing-node-mcp-route__request",
-                "arguments": {"method": "GET", "path": "/buffered"},
+                "arguments": {
+                    "method": "GET",
+                    "path": "/mcp-query?tag=a&tag=b&name=Nyx%20ID&empty="
+                },
             },
         },
     });
@@ -1087,6 +1093,13 @@ async fn lago_webhook_signature_is_verified_at_the_mounted_route() {
 
 async fn start_billing_downstream() -> (String, tokio::task::JoinHandle<()>) {
     async fn respond(request: Request<Body>) -> axum::response::Response {
+        if request.uri().path() == "/mcp-query" {
+            assert_eq!(
+                request.uri().query(),
+                Some("tag=a&tag=b&name=Nyx%20ID&empty=")
+            );
+        }
+
         if request.uri().path().contains("stream") {
             return (
                 [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
@@ -1509,6 +1522,13 @@ fn spawn_node_http_responder(
                 .as_str()
                 .expect("node proxy request id");
             let path = parsed["path"].as_str().unwrap_or_default();
+
+            if path == "mcp-query" {
+                assert_eq!(
+                    parsed["query"].as_str(),
+                    Some("tag=a&tag=b&name=Nyx%20ID&empty=")
+                );
+            }
 
             if path.contains("stream") {
                 assert!(manager.deliver_stream_start(
