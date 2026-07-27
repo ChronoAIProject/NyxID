@@ -970,12 +970,19 @@ describe("captured production wire shapes", () => {
     const body = JSON.parse(String(init.body)) as {
       prompt: string;
       clientRequestId: string;
+      type: string;
       sessionId?: string;
     };
     expect(body.prompt).toBe("Hello there");
     expect(body.clientRequestId).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
     );
+    expect(body.type).toBe("text");
+    expect(Object.keys(body).sort()).toEqual([
+      "clientRequestId",
+      "prompt",
+      "type",
+    ]);
     expect(body.sessionId).toBeUndefined();
   });
 
@@ -1072,12 +1079,20 @@ describe("captured production wire shapes", () => {
       .map(
         ([, init]) =>
           JSON.parse(String(init?.body)) as {
+            prompt: string;
             clientRequestId: string;
+            type: string;
             sessionId?: string;
           },
       );
     expect(bodies).toHaveLength(2);
     expect(bodies[0]?.clientRequestId).toBe(bodies[1]?.clientRequestId);
+    expect(bodies[0]).toEqual({
+      prompt: "Retry this delivery",
+      clientRequestId: bodies[0]?.clientRequestId,
+      type: "text",
+    });
+    expect(bodies[1]).toEqual(bodies[0]);
     expect(bodies[0]?.sessionId).toBeUndefined();
   });
 
