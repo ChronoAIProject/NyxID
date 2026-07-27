@@ -120,6 +120,16 @@ pub fn approve_path(user_id: &str, conversation_id: &str) -> AppResult<String> {
     ))
 }
 
+/// `nyxid-chat/conversations/{id}:stop` -- stop active work (202-accepted
+/// control command; Aevatar commits a stop fence before any successor
+/// operation may start).
+pub fn stop_path(user_id: &str, conversation_id: &str) -> AppResult<String> {
+    Ok(format!(
+        "{}:stop",
+        conversation_path(user_id, conversation_id)?
+    ))
+}
+
 /// `v1/chat/completions` -- OpenAI-compatible surface. Scope-free: the
 /// endpoint is stateless and carries its history in the request body.
 pub fn completions_path() -> String {
@@ -213,6 +223,10 @@ mod tests {
             format!("api/scopes/{USER}/nyxid-chat/conversations/{CONV}:approve")
         );
         assert_eq!(
+            stop_path(USER, CONV).unwrap(),
+            format!("api/scopes/{USER}/nyxid-chat/conversations/{CONV}:stop")
+        );
+        assert_eq!(
             history_index_path(USER),
             format!("api/scopes/{USER}/chat-history")
         );
@@ -239,6 +253,7 @@ mod tests {
             );
             assert!(stream_path(USER, bad).is_err());
             assert!(approve_path(USER, bad).is_err());
+            assert!(stop_path(USER, bad).is_err());
         }
         assert!(history_path(USER, &"a".repeat(129)).is_err());
     }

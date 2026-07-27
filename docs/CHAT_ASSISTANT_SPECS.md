@@ -59,9 +59,11 @@ sessions + proxy-only identity handling). Changes:
   envelopes surface as the turn error (401/403 keeps the auth-specific,
   you-are-still-signed-in copy); EOF without `RUN_FINISHED`/`RUN_ERROR` is a
   failed `stream_closed` turn (was: silently reported success); the final
-  unterminated SSE frame is flushed; bare-`\r` framing normalized; every
-  `:stream` body carries a per-conversation `sessionId` (optional upstream,
-  reference-aligned).
+  unterminated SSE frame is flushed; bare-`\r` framing normalized.
+  *(Correction, 2026-07-28: this cut originally described a per-conversation
+  `sessionId` on the `:stream` body. That field was never shipped, and the
+  current Aevatar contract deprecates and ignores it — the body is
+  `{type:"text", prompt, clientRequestId}`; see cut 6.)*
 - **Reference-mandated aevatar row config** (README, nyxid-chat):
   `identity_propagation_mode:"jwt"`, `identity_jwt_audience:"urn:aevatar:api"`,
   `inject_delegation_token:true`, `forward_access_token:false`. Prod row drift
@@ -137,6 +139,42 @@ changed (approach reviewed by codex `gpt-5.6-sol`, session
 - **Not done (out of scope):** migrating the production transport from `:stream`
   to `POST /api/chat` + `aevatar.chat.context`. That is a transport rewrite and
   belongs with `CHAT_REWORK_SPEC.md`.
+
+## Implemented in cut 6 (2026-07-28 — `feature/integrate` alignment: `:stop` pass-through)
+
+The authoritative Aevatar contract is now `aevatarAI/aevatar` branch
+`feature/integrate` (`docs/canon/nyxid-chat-api.md` + the
+`agents/Aevatar.GAgents.NyxidChat` host), superseding the `eanz17/nyxid-chat`
+sample. A full conformance pass (2026-07-27) against that branch found the
+stream-body `type` discriminator gap (fixed in #1251: body is
+`{type:"text", prompt, clientRequestId}`; `sessionId` is deprecated and
+ignored upstream) and the missing stop control. This cut adds the stop:
+
+- **Backend:** `POST /api/v1/assistant/conversations/{id}/stop` →
+  `…/nyxid-chat/conversations/{id}:stop` (`stop_path` in
+  `assistant_service.rs`, `stop_turn` in `handlers/assistant.rs`, same
+  `forward()`/`execute_proxy` funnel, body forwarded verbatim). Aevatar
+  answers `202 {status:"accepted", requestId, commandId, correlationId,
+  stateUrl}` and commits a stop fence: no later old-plan LLM round or tool
+  may start.
+- **Frontend:** `cancelTurn` and the stream watchdog now fire a best-effort
+  `POST …/stop` with `{turnId, stopRequestId, clientRequestId,
+  expectedStateVersion: 0}` (fresh UUID control identities;
+  `expectedStateVersion <= 0` skips the optimistic-concurrency fence
+  upstream, which the transport does not track). Only fires once the server
+  announced a `turnId`; failures are swallowed — the pre-existing
+  client-abort behavior is the floor. The approval pause
+  (`pauseForApproval`) deliberately does **not** stop: the server turn is
+  waiting for the decision.
+- **Known remaining `feature/integrate` gaps (deliberate, recorded):**
+  `:steer`, per-step `:retry`/`:skip`, the conditional
+  `GET …/conversations/{id}/state` query, the `nyxid.task.*` /
+  `nyxid.action.request` CUSTOM frames (ignored by the FE), and the
+  NyxID-owned `GET /api/v1/assistant/actions` registry (schema v4) with the
+  `action.continue` stream body. The registry is default-disabled on the
+  Aevatar side (`Aevatar:NyxId:AssistantActions:Enabled=false`, fails closed
+  `NYXID_ACTION_UNSUPPORTED`), so its absence is compatible until the
+  browser-action handoff is scheduled.
 
 ## Implemented in cut 4 (2026-07-18 — TD-3 interim bridge: marker-hardened forward token)
 
@@ -353,6 +391,7 @@ workflow/`/api/chat` chats persist?
 | `DELETE /api/v1/assistant/conversations/{id}` | actor delete **+** history-row delete | composite — **implemented** (cut 3) |
 | `POST /api/v1/assistant/conversations/{id}/stream` | `...:stream` (AG-UI SSE) | unchanged |
 | `POST /api/v1/assistant/conversations/{id}/approve` | `...:approve` | unchanged |
+| `POST /api/v1/assistant/conversations/{id}/stop` | `...:stop` | **added** (cut 6) — 202-accepted stop fence |
 | `POST /api/v1/assistant/completions` | `v1/chat/completions` | unchanged |
 | `POST /api/v1/assistant/workflow-chat` | `api/chat` | unchanged; body forwarded verbatim (TD-2) |
 | `GET /api/v1/assistant/workflow-chat/ws` | `api/ws/chat` | unchanged (TD-2) |

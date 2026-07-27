@@ -1312,6 +1312,10 @@ pub fn build_router(
             "/conversations/{conversation_id}/approve",
             post(handlers::assistant::decide_approval),
         )
+        .route(
+            "/conversations/{conversation_id}/stop",
+            post(handlers::assistant::stop_turn),
+        )
         .route("/completions", post(handlers::assistant::completions))
         .route("/workflow-chat", post(handlers::assistant::workflow_chat))
         .route(

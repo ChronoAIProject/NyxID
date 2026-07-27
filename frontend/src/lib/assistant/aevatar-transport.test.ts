@@ -628,6 +628,165 @@ describe("AevatarAssistantTransport", () => {
     ]);
   });
 
+  it("fires a best-effort server-side stop carrying the turn identity on cancel", async () => {
+    const openStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const encoder = new TextEncoder();
+        controller.enqueue(
+          encoder.encode(
+            [
+              `data: ${JSON.stringify(OBSERVED_FRAMES[0])}\n\n`,
+              `data: ${JSON.stringify(OBSERVED_FRAMES[1])}\n\n`,
+              `data: ${JSON.stringify(OBSERVED_FRAMES[2])}\n\n`,
+            ].join(""),
+          ),
+        );
+      },
+    });
+    const stopBodies: Array<Record<string, unknown>> = [];
+    let streamClientRequestId: string | undefined;
+    stubFetch(
+      routeCreate,
+      (url, init) => {
+        if (
+          url === `${ASSISTANT_BASE}/conversations/${CONVERSATION_ID}/stop` &&
+          init?.method === "POST"
+        ) {
+          stopBodies.push(
+            JSON.parse(String(init.body)) as Record<string, unknown>,
+          );
+          return jsonResponse({ status: "accepted" }, 202);
+        }
+        return undefined;
+      },
+      (url, init) => {
+        if (url.endsWith("/stream") && init?.method === "POST") {
+          streamClientRequestId = (
+            JSON.parse(String(init.body)) as { clientRequestId: string }
+          ).clientRequestId;
+          return new Response(openStream, {
+            status: 200,
+            headers: { "Content-Type": "text/event-stream" },
+          });
+        }
+        return undefined;
+      },
+    );
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    await new Promise<void>((resolve) => {
+      const handle = transport.sendMessage(
+        CONVERSATION_ID,
+        "Hello",
+        (event) => {
+          if (event.event === "turn.completed") resolve();
+          if (event.event === "block.delta") handle.cancel();
+        },
+      );
+    });
+    // The stop POST is fire-and-forget; give its microtask a beat to land.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(stopBodies).toHaveLength(1);
+    const stop = stopBodies[0];
+    expect(stop?.turnId).toBe(TURN_ID);
+    expect(stop?.expectedStateVersion).toBe(0);
+    // Fresh control identities: neither reuses the turn's clientRequestId.
+    expect(stop?.stopRequestId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(stop?.clientRequestId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(stop?.stopRequestId).not.toBe(stop?.clientRequestId);
+    expect(stop?.clientRequestId).not.toBe(streamClientRequestId);
+  });
+
+  it("sends no server-side stop when cancel lands before RUN_STARTED", async () => {
+    // A stream that never announces the turn: there is no committed turn
+    // identity to address, so cancel must stay a pure client-side abort.
+    const silentStream = new ReadableStream<Uint8Array>({ start() {} });
+    const fetchMock = stubFetch(routeCreate, (url, init) =>
+      url.endsWith("/stream") && init?.method === "POST"
+        ? new Response(silentStream, {
+            status: 200,
+            headers: { "Content-Type": "text/event-stream" },
+          })
+        : undefined,
+    );
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    await new Promise<void>((resolve) => {
+      const handle = transport.sendMessage(
+        CONVERSATION_ID,
+        "Hello",
+        (event) => {
+          if (event.event === "turn.completed") resolve();
+        },
+      );
+      setTimeout(() => handle.cancel(), 0);
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const stopCalls = fetchMock.mock.calls.filter(([input]) =>
+      String(input).endsWith("/stop"),
+    );
+    expect(stopCalls).toHaveLength(0);
+  });
+
+  it("keeps the local cancel settled when the server-side stop fails", async () => {
+    const openStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const encoder = new TextEncoder();
+        controller.enqueue(
+          encoder.encode(
+            [
+              `data: ${JSON.stringify(OBSERVED_FRAMES[0])}\n\n`,
+              `data: ${JSON.stringify(OBSERVED_FRAMES[1])}\n\n`,
+              `data: ${JSON.stringify(OBSERVED_FRAMES[2])}\n\n`,
+            ].join(""),
+          ),
+        );
+      },
+    });
+    stubFetch(
+      routeCreate,
+      (url, init) =>
+        url.endsWith("/stop") && init?.method === "POST"
+          ? jsonResponse(
+              { error: "internal", error_code: 1006, message: "boom" },
+              500,
+            )
+          : undefined,
+      (url, init) =>
+        url.endsWith("/stream") && init?.method === "POST"
+          ? new Response(openStream, {
+              status: 200,
+              headers: { "Content-Type": "text/event-stream" },
+            })
+          : undefined,
+    );
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    const events: TurnEvent[] = [];
+    await new Promise<void>((resolve) => {
+      const handle = transport.sendMessage(
+        CONVERSATION_ID,
+        "Hello",
+        (event) => {
+          events.push(event);
+          if (event.event === "turn.completed") resolve();
+          if (event.event === "block.delta") handle.cancel();
+        },
+      );
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const terminal = events[events.length - 1];
+    expect(terminal?.event === "turn.completed" && terminal.status).toBe(
+      "cancelled",
+    );
+  });
+
   it("throws when deciding an approval for an unknown block", async () => {
     stubFetch(routeHistory([]));
     const transport = new AevatarAssistantTransport();

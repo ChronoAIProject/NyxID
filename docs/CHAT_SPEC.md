@@ -65,6 +65,7 @@ verified `AuthUser.user_id` — the browser cannot address another user's scope.
 | `DELETE /assistant/conversations/{id}` | actor delete **+** history-row delete | composite, 404-tolerant on each side |
 | `POST /assistant/conversations/{id}/stream` | `…/nyxid-chat/conversations/{id}:stream` | AG-UI SSE turn, streamed unbuffered |
 | `POST /assistant/conversations/{id}/approve` | `…:approve` | approval decision (SSE response) |
+| `POST /assistant/conversations/{id}/stop` | `…:stop` | stop control (`{turnId, stopRequestId, clientRequestId, expectedStateVersion}`, 202-accepted; Aevatar commits a stop fence). Fired best-effort by the frontend on cancel and on the stream watchdog |
 | `POST /assistant/completions` | `v1/chat/completions` | OpenAI-compatible (retained, unused by the UI) |
 | `POST /assistant/workflow-chat` | `api/chat` | ad-hoc workflow chat (retained, unused by the UI). Body forwarded verbatim, so Aevatar PR #2923's continuation contract falls on the **caller**: continuing a conversation now requires `conversation:{conversationId, minimumStateVersion>0}` (omit it and Aevatar answers `503 CHAT_HISTORY_RESERVATION_UNAVAILABLE`; unknown id answers `404 CONVERSATION_NOT_FOUND`), and the caller must stop splicing transcript into `prompt` — the backend injects server history itself |
 | `GET /assistant/workflow-chat/ws` | `api/ws/chat` | WS twin (retained, unused by the UI) |

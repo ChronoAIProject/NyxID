@@ -1438,6 +1438,10 @@ export class AevatarAssistantTransport implements AssistantTransport {
     this.clearWatchdog(run);
     if (run.finished || run.waitingForApproval) return;
     run.watchdog = setTimeout(() => {
+      // A hung run holds the conversation actor: without a server-side stop
+      // the next send fails with ACTIVE_TURN_REQUIRES_STEERING until the
+      // run reaches its own terminal. Best-effort, like user cancel.
+      this.requestServerStop(conversationId, run);
       this.closeOpenMessage(conversationId, run);
       this.finalizeActivity(conversationId, run, "failed");
       this.finishTurn(conversationId, run, "failed", {
@@ -2501,15 +2505,18 @@ export class AevatarAssistantTransport implements AssistantTransport {
   }
 
   /**
-   * Client-side stop: aevatar's nyxid-chat surface has no cancel endpoint,
-   * so cancelling aborts the SSE fetch and settles the local turn per the
-   * PRD stop-flow — every open block reaches a terminal state (§5.6). The
-   * server-side run may still finish; its full reply then surfaces on the
-   * next history reload.
+   * Stop flow: aborts the SSE fetch, settles the local turn per the PRD
+   * stop-flow — every open block reaches a terminal state (§5.6) — and,
+   * when the server has announced a turn, fires a best-effort `:stop`
+   * control command so Aevatar commits a stop fence instead of running the
+   * turn to its own terminal. The stop is 202-accepted and asynchronous
+   * upstream; if it fails or never fires, the pre-existing behavior stands
+   * (the run finishes server-side and surfaces on the next history reload).
    */
   private cancelTurn(conversationId: string, run: RunningTurn): void {
     if (run.finished) return;
     run.controller.abort();
+    this.requestServerStop(conversationId, run);
     this.clearWatchdog(run);
     if (run.currentBlockId) {
       // Cancel runs the SAME projection as a normal message close. Two things
@@ -2576,5 +2583,28 @@ export class AevatarAssistantTransport implements AssistantTransport {
       });
     }
     this.finishTurn(conversationId, run, "cancelled", null);
+  }
+
+  /**
+   * Best-effort server-side stop (the `feature/integrate` `:stop` control
+   * contract): a fresh `stopRequestId` per intent keeps the command
+   * idempotent upstream, and `expectedStateVersion: 0` skips the
+   * optimistic-concurrency fence — the transport does not track actor
+   * state versions. Requires the server-announced `turnId`: before
+   * RUN_STARTED there is no committed turn to address, and aborting the
+   * fetch is the only cancellation available. Failures are swallowed —
+   * stop is an upgrade over the previous client-only cancel, never a new
+   * failure mode.
+   */
+  private requestServerStop(conversationId: string, run: RunningTurn): void {
+    if (!run.turnId) return;
+    void assistantApi
+      .post<unknown>(`${ASSISTANT_PREFIX}/conversations/${conversationId}/stop`, {
+        turnId: run.turnId,
+        stopRequestId: crypto.randomUUID(),
+        clientRequestId: crypto.randomUUID(),
+        expectedStateVersion: 0,
+      })
+      .catch(() => undefined);
   }
 }

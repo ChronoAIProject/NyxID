@@ -8,7 +8,7 @@
 //! Every route is an explicit mapping onto one Aevatar path. A blanket
 //! `/{*path}` pass-through would expose all ~248 routes of Aevatar's spec
 //! (admin, workflow, and streaming-proxy surfaces included) through a
-//! session-authed mount; the assistant needs nine.
+//! session-authed mount; the assistant needs ten.
 //!
 //! Forwarding goes through `proxy::execute_proxy`, so credential injection,
 //! identity propagation, per-agent rate limiting, approval gating, and audit
@@ -373,6 +373,23 @@ pub async fn decide_approval(
     request: Request<Body>,
 ) -> AppResult<Response> {
     let path = assistant_service::approve_path(&auth_user.user_id.to_string(), &conversation_id)?;
+    forward(&state, &auth_user, path, request).await
+}
+
+/// `POST /api/v1/assistant/conversations/{id}/stop` -- stop active work.
+///
+/// Forwards the caller's control body (`turnId`, `stopRequestId`,
+/// `clientRequestId`, `expectedStateVersion`) verbatim to Aevatar's `:stop`
+/// route. Aevatar answers 202-accepted and commits a stop fence; without this
+/// route, cancel is a client-side abort only and the server run keeps
+/// executing until its own terminal.
+pub async fn stop_turn(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(conversation_id): Path<String>,
+    request: Request<Body>,
+) -> AppResult<Response> {
+    let path = assistant_service::stop_path(&auth_user.user_id.to_string(), &conversation_id)?;
     forward(&state, &auth_user, path, request).await
 }
 
