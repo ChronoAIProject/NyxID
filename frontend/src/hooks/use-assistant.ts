@@ -39,10 +39,6 @@ export const assistantKeys = {
   workspace: [...ROOT, "workspace"] as const,
 } as const;
 
-// Live-update cadence for real approval data. Pending requests are
-// time-sensitive (they expire), so they poll faster than history.
-const PENDING_APPROVALS_POLL_MS = 5_000;
-const APPROVAL_HISTORY_POLL_MS = 15_000;
 // One page comfortably above anything a single user accumulates as
 // simultaneously-pending; the badge uses the server-side total anyway.
 const PENDING_APPROVALS_PAGE_SIZE = 50;
@@ -84,14 +80,15 @@ function turnFromEvent(event: TurnEvent): ActiveTurn | undefined {
 }
 
 /**
- * Pending approval requests, polled so requests raised (or decided) from
- * anywhere — agents hitting the proxy, Telegram, mobile, another tab —
- * appear live. Shares its query cache with the sidebar badge.
+ * Pending approval requests. Shares its query cache with the sidebar badge.
+ *
+ * Polling is intentionally off: liveness for requests raised (or decided)
+ * elsewhere — agents hitting the proxy, Telegram, mobile, another tab — is
+ * moving to a server-pushed SSE stream. Until that lands, the list refreshes
+ * on mount, on window focus, and on any local decision.
  */
 function usePendingApprovalRequests() {
-  return useApprovalRequests(1, PENDING_APPROVALS_PAGE_SIZE, "pending", {
-    refetchIntervalMs: PENDING_APPROVALS_POLL_MS,
-  });
+  return useApprovalRequests(1, PENDING_APPROVALS_PAGE_SIZE, "pending");
 }
 
 /**
@@ -101,12 +98,7 @@ function usePendingApprovalRequests() {
 export function useAssistantApprovals() {
   const settings = useNotificationSettings();
   const pendingQuery = usePendingApprovalRequests();
-  const historyQuery = useApprovalRequests(
-    1,
-    APPROVAL_HISTORY_PAGE_SIZE,
-    undefined,
-    { refetchIntervalMs: APPROVAL_HISTORY_POLL_MS },
-  );
+  const historyQuery = useApprovalRequests(1, APPROVAL_HISTORY_PAGE_SIZE);
 
   // Grant-mode approvals create a reusable grant with the user-configured
   // expiry; surface that duration on the card so "approve" is informed.
@@ -157,7 +149,7 @@ export function useWorkspaceCounts() {
 
 // One stable sonner id for the whole surface: refetches and the history query
 // failing alongside the list update this toast instead of stacking a new one
-// every poll.
+// on every refetch.
 const TRANSPORT_TOAST_ID = "assistant-transport-unavailable";
 
 /**
