@@ -952,10 +952,7 @@ fn audit_log_filter_options(event_types: Vec<String>) -> AuditLogFilterOptions {
 
 /// A column filtered only by free text, because its values are unbounded
 /// (UUIDs, IPs, User-Agent strings) and cannot be offered as checkboxes.
-fn audit_log_text_filter_field(
-    key: &'static str,
-    label: &'static str,
-) -> AuditLogFilterField {
+fn audit_log_text_filter_field(key: &'static str, label: &'static str) -> AuditLogFilterField {
     debug_assert!(
         audit_log_filter_takes_custom_text(key),
         "a text filter must map to a stored column the server can match against",

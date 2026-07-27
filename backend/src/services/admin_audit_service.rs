@@ -974,8 +974,18 @@ mod tests {
         let filter = admin_audit_filter(&p).expect("filter");
         let branches = filter.get_array("$or").expect("$or");
         assert_eq!(branches.len(), 2);
-        assert!(branches[0].as_document().expect("doc").contains_key("api_key_id"));
-        assert!(branches[1].as_document().expect("doc").contains_key("api_key_name"));
+        assert!(
+            branches[0]
+                .as_document()
+                .expect("doc")
+                .contains_key("api_key_id")
+        );
+        assert!(
+            branches[1]
+                .as_document()
+                .expect("doc")
+                .contains_key("api_key_name")
+        );
     }
 
     #[test]
@@ -1023,10 +1033,7 @@ mod tests {
         let bounds = filter.get_document("created_at").expect("created_at");
         assert_eq!(
             bounds.get_datetime("$lt").expect("$lt").to_string(),
-            midnight_utc(
-                NaiveDate::from_ymd_opt(2026, 7, 2).expect("valid date")
-            )
-            .to_string()
+            midnight_utc(NaiveDate::from_ymd_opt(2026, 7, 2).expect("valid date")).to_string()
         );
     }
 
