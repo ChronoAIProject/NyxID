@@ -1257,6 +1257,10 @@ export class AevatarAssistantTransport implements AssistantTransport {
             body: JSON.stringify({
               prompt,
               clientRequestId: run.clientRequestId,
+              // Aevatar NyxIdChatEndpoints.Streaming.cs:58 uses an ordinal
+              // discriminator comparison, so a normal turn requires this
+              // exact lowercase value.
+              type: "text",
             }),
             signal: run.controller.signal,
           },
