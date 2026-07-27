@@ -1070,7 +1070,7 @@ fn build_generic_proxy_endpoint(service_label: &str) -> McpToolEndpoint {
         endpoint_id: String::new(),
         name: "request".to_string(),
         description: Some(format!(
-            "Make an HTTP request to {service_label}. Specify the method, path, and optional JSON body."
+            "Make an HTTP request to {service_label}. Specify the method, path, optional raw query string, and optional JSON body."
         )),
         method: "POST".to_string(),
         path: String::new(),
@@ -1096,7 +1096,11 @@ fn build_generic_proxy_input_schema() -> serde_json::Value {
             },
             "path": {
                 "type": "string",
-                "description": "Request path (e.g., /v1/chat/completions)"
+                "description": "Request path, optionally including a raw query string (e.g., /stats?period=today)"
+            },
+            "query": {
+                "type": "string",
+                "description": "Optional raw query string without the leading ?. Preserves repeated keys and percent-encoding; omit when path includes a query string."
             },
             "body": {
                 "description": "Request body (JSON object). Omit for GET/DELETE requests."
@@ -3014,16 +3018,43 @@ pub async fn execute_tool(
 }
 
 /// Build proxy arguments from a generic proxy tool call.
-/// Extracts method, path, and body from the tool arguments directly.
+/// Extracts method, path, query, and body from the tool arguments directly.
 fn build_generic_proxy_args(args: &serde_json::Value) -> AppResult<ProxyArgs> {
-    let path = match args.get("path").and_then(|v| v.as_str()) {
-        Some(p) => p.trim_start_matches('/').to_string(),
+    let requested_path = match args.get("path").and_then(|v| v.as_str()) {
+        Some(path) => path,
         None => {
             return Err(AppError::BadRequest(
                 "Missing required parameter: path".to_string(),
             ));
         }
     };
+
+    let (path, embedded_query) = match requested_path.split_once('?') {
+        Some((path, query)) => (path, Some(query)),
+        None => (requested_path, None),
+    };
+    let explicit_query = match args.get("query") {
+        Some(serde_json::Value::String(query)) => Some(query.as_str()),
+        Some(_) => {
+            return Err(AppError::BadRequest(
+                "Invalid parameter: query must be a string".to_string(),
+            ));
+        }
+        None => None,
+    };
+
+    if embedded_query.is_some() && explicit_query.is_some() {
+        return Err(AppError::BadRequest(
+            "Specify query parameters either in path or query, not both".to_string(),
+        ));
+    }
+
+    let query = embedded_query.or(explicit_query);
+    if query.is_some_and(|query| query.contains('#')) {
+        return Err(AppError::BadRequest("Invalid proxy path".to_string()));
+    }
+    proxy_service::validate_requested_proxy_path(path)?;
+    let path = path.trim_start_matches('/').to_string();
 
     let method = parse_proxy_method(args.get("method").and_then(|v| v.as_str()).unwrap_or("GET"))?;
 
@@ -3039,7 +3070,7 @@ fn build_generic_proxy_args(args: &serde_json::Value) -> AppResult<ProxyArgs> {
         Some(bytes::Bytes::from(bytes))
     });
 
-    Ok((method, path, None, Vec::new(), body))
+    Ok((method, path, query.map(str::to_string), Vec::new(), body))
 }
 
 fn parse_proxy_method(method: &str) -> AppResult<reqwest::Method> {
@@ -5590,6 +5621,77 @@ mod tests {
         let schema = build_generic_proxy_input_schema();
         let required = schema["required"].as_array().unwrap();
         assert!(required.contains(&serde_json::Value::String("path".into())));
+        assert_eq!(schema["properties"]["query"]["type"], "string");
+        assert!(!required.contains(&serde_json::Value::String("query".into())));
+    }
+
+    #[test]
+    fn build_generic_proxy_args_separates_embedded_query_verbatim() {
+        let (method, path, query, headers, body) = build_generic_proxy_args(&serde_json::json!({
+            "path": "/stats?tag=a&tag=b&name=Nyx%20ID&empty="
+        }))
+        .expect("embedded query should be accepted");
+
+        assert_eq!(method, reqwest::Method::GET);
+        assert_eq!(path, "stats");
+        assert_eq!(query.as_deref(), Some("tag=a&tag=b&name=Nyx%20ID&empty="));
+        assert!(headers.is_empty());
+        assert!(body.is_none());
+    }
+
+    #[test]
+    fn build_generic_proxy_args_accepts_explicit_raw_query() {
+        let (_, path, query, _, _) = build_generic_proxy_args(&serde_json::json!({
+            "path": "stats",
+            "query": "redirect=/search?q=nyx&empty="
+        }))
+        .expect("explicit raw query should be accepted");
+
+        assert_eq!(path, "stats");
+        assert_eq!(query.as_deref(), Some("redirect=/search?q=nyx&empty="));
+    }
+
+    #[test]
+    fn build_generic_proxy_args_rejects_ambiguous_or_fragmented_query() {
+        let ambiguous = build_generic_proxy_args(&serde_json::json!({
+            "path": "stats?period=today",
+            "query": "limit=10"
+        }))
+        .expect_err("dual query sources should be rejected");
+        assert!(matches!(
+            ambiguous,
+            AppError::BadRequest(message) if message.contains("either in path or query")
+        ));
+
+        for args in [
+            serde_json::json!({"path": "stats?period=today#summary"}),
+            serde_json::json!({"path": "stats", "query": "period=today#summary"}),
+        ] {
+            let error =
+                build_generic_proxy_args(&args).expect_err("URI fragments should not be forwarded");
+            assert!(matches!(
+                error,
+                AppError::BadRequest(message) if message == "Invalid proxy path"
+            ));
+        }
+    }
+
+    #[test]
+    fn build_generic_proxy_args_preserves_path_security_checks() {
+        for path in [
+            "https://example.test/stats?period=today",
+            "//example.test/stats?period=today",
+            "a/../stats?period=today",
+            "stats%3Fperiod%3Dtoday",
+            "stats#summary",
+        ] {
+            let error = build_generic_proxy_args(&serde_json::json!({"path": path}))
+                .expect_err("unsafe request target should be rejected");
+            assert!(
+                matches!(error, AppError::BadRequest(message) if message == "Invalid proxy path"),
+                "unexpected error for {path}"
+            );
+        }
     }
 
     #[test]
