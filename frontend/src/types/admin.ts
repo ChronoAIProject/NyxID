@@ -123,6 +123,7 @@ export interface CreateUserResponse {
 
 export interface AdminAuditLogEntry {
   readonly id: string;
+  readonly seq?: number | null;
   readonly user_id: string | null;
   readonly api_key_id: string | null;
   readonly api_key_name: string | null;
@@ -133,11 +134,101 @@ export interface AdminAuditLogEntry {
   readonly created_at: string;
 }
 
+export type AdminAuditLogSortField =
+  | "created_at"
+  | "event_type"
+  | "api_key_name"
+  | "api_key_id"
+  | "user_id"
+  | "ip_address"
+  | "user_agent"
+  | "status";
+
+export type AdminAuditLogSort =
+  | AdminAuditLogSortField
+  | `-${AdminAuditLogSortField}`;
+
+export type AdminAuditLogStatusFilter = "2xx" | "3xx" | "4xx" | "5xx" | "none";
+export type AdminAuditLogActorFilter = "user" | "agent" | "anonymous";
+
+export type AdminAuditLogFilterKey =
+  | "event_type"
+  | "status"
+  | "actor"
+  | "created_at"
+  // Text-only filters: one per remaining table column, matched as a `contains`.
+  | "api_key_name"
+  | "user_id"
+  | "api_key_id"
+  | "ip_address"
+  | "user_agent";
+
+export type AdminAuditLogFilterSelections =
+  DataTableFilterSelections<AdminAuditLogFilterKey>;
+export type AdminAuditLogFilterValueType = DataTableFilterValueType;
+export type AdminAuditLogFilterOperator = DataTableFilterOperator;
+export type AdminAuditLogFilterOption = DataTableFilterOption;
+export type AdminAuditLogFilterField =
+  DataTableFilterField<AdminAuditLogFilterKey>;
+
+export type AdminAuditLogSearchFieldKey =
+  | "event_type"
+  | "user_id"
+  | "api_key"
+  | "ip_address"
+  | "user_agent";
+
+export type AdminAuditLogSearchField =
+  DataTableSearchField<AdminAuditLogSearchFieldKey>;
+export type AdminAuditLogSearchFilter =
+  DataTableSearchGroup<AdminAuditLogSearchFieldKey>;
+
+export interface AdminAuditLogFilterOptions {
+  readonly sorts?: readonly AdminAuditLogSort[];
+  readonly fields?: readonly AdminAuditLogFilterField[];
+  readonly search_fields?: readonly AdminAuditLogSearchField[];
+}
+
 export interface AdminAuditLogListResponse {
   readonly entries: readonly AdminAuditLogEntry[];
   readonly total: number;
   readonly page: number;
   readonly per_page: number;
+  /** Absent on older backends that predate the admin table controls. */
+  readonly filter_options?: AdminAuditLogFilterOptions;
+}
+
+export type AdminAuditLogPerPage = 10 | 25 | 50 | 100;
+
+export interface AdminAuditLogListParams {
+  readonly page: number;
+  readonly per_page: AdminAuditLogPerPage;
+  readonly search?: string;
+  readonly search_filters?: string;
+  readonly custom_filters?: string;
+  readonly event_type?: string;
+  readonly status?: string;
+  readonly actor?: string;
+  readonly created_dates?: string;
+  readonly created_from?: string;
+  readonly created_to?: string;
+  readonly sort: AdminAuditLogSort;
+}
+
+/** Canonical URL state for the audit-log table. */
+export interface AdminAuditLogSearchState {
+  readonly page?: number;
+  readonly per_page?: AdminAuditLogPerPage;
+  readonly search?: string;
+  readonly search_filters?: string;
+  readonly custom_filters?: string;
+  readonly event_type?: string;
+  readonly status?: string;
+  readonly actor?: string;
+  readonly created_dates?: string;
+  readonly created_from?: string;
+  readonly created_to?: string;
+  readonly sort?: AdminAuditLogSort;
 }
 
 // ── Admin OAuth clients / broker rollout settings ──

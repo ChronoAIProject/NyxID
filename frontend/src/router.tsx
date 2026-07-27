@@ -16,6 +16,7 @@ import { BillingRouteGuard } from "@/components/billing-route-guard";
 import { useAuthStore } from "@/stores/auth-store";
 import { hasAdminRead } from "@/types/api";
 import { shouldRedirectFromBilling } from "@/lib/billing-availability";
+import { normalizeAdminAuditLogSearch } from "@/lib/admin-audit-log";
 import { normalizeAdminOAuthClientSearch } from "@/lib/admin-oauth-clients";
 import { parseAssistantSearch } from "@/lib/assistant/search";
 
@@ -803,6 +804,7 @@ const adminAuditLogRoute = createRoute({
   path: "audit-log",
   getParentRoute: () => adminLayout,
   component: AdminAuditLogPage,
+  validateSearch: normalizeAdminAuditLogSearch,
 });
 
 const adminInviteCodesRoute = createRoute({

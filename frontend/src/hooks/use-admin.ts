@@ -1,4 +1,9 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  keepPreviousData,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import type {
   AdminUser,
@@ -12,6 +17,7 @@ import type {
   RevokeSessionsResponse,
   CreateUserRequest,
   CreateUserResponse,
+  AdminAuditLogListParams,
   AdminAuditLogListResponse,
 } from "@/types/admin";
 import type { PlatformRole } from "@/types/api";
@@ -62,31 +68,35 @@ export function useAdminUserSessions(userId: string) {
   });
 }
 
-export function useAdminAuditLog(
-  page: number,
-  perPage: number,
-  filters?: {
-    readonly userId?: string;
-    readonly apiKeyId?: string;
-  },
-) {
+export function useAdminAuditLog(params: AdminAuditLogListParams) {
   return useQuery({
-    queryKey: ["admin", "audit-log", page, perPage, filters?.userId, filters?.apiKeyId],
+    queryKey: ["admin", "audit-log", params],
     queryFn: async (): Promise<AdminAuditLogListResponse> => {
-      const params = new URLSearchParams({
-        page: String(page),
-        per_page: String(perPage),
+      const query = new URLSearchParams({
+        page: String(params.page),
+        per_page: String(params.per_page),
+        sort: params.sort,
       });
-      if (filters?.userId) {
-        params.set("user_id", filters.userId);
+      if (params.search) query.set("search", params.search);
+      if (params.search_filters) {
+        query.set("search_filters", params.search_filters);
       }
-      if (filters?.apiKeyId) {
-        params.set("api_key_id", filters.apiKeyId);
+      if (params.custom_filters) {
+        query.set("custom_filters", params.custom_filters);
       }
+      if (params.event_type) query.set("event_type", params.event_type);
+      if (params.status) query.set("status", params.status);
+      if (params.actor) query.set("actor", params.actor);
+      if (params.created_dates) {
+        query.set("created_dates", params.created_dates);
+      }
+      if (params.created_from) query.set("created_from", params.created_from);
+      if (params.created_to) query.set("created_to", params.created_to);
       return api.get<AdminAuditLogListResponse>(
-        `/admin/audit-log?${params.toString()}`,
+        `/admin/audit-log?${query.toString()}`,
       );
     },
+    placeholderData: keepPreviousData,
   });
 }
 
