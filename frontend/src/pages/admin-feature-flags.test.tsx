@@ -37,7 +37,6 @@ function flagFixture(
     key: "experimental:ai-assistant",
     description: "AI Assistant chat surface.",
     default_enabled: false,
-    org_manageable: true,
     global_override: null,
     org_overrides: [],
     user_overrides: [],

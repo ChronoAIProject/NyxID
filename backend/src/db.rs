@@ -73,6 +73,7 @@ pub async fn create_connection(config: &AppConfig) -> Result<DbHandle, mongodb::
 
     backfill_downstream_service_types(&db).await?;
     migrate_legacy_api_spec_url(&db).await?;
+    migrate_remove_org_scoped_feature_flag_overrides(&db).await?;
     backfill_onboarding_state(&db).await?;
 
     Ok(db)
@@ -2374,6 +2375,31 @@ async fn backfill_org_scope_sources(db: &Database) -> Result<(), mongodb::error:
         );
     }
 
+    Ok(())
+}
+
+/// Drop role- and member-scoped feature-flag override rows left behind by the
+/// removed org self-serve surface. No management surface can list or clear
+/// them anymore (the platform-admin API only writes global, per-user, and
+/// org-wide targets), so leaving them in place would silently keep affecting
+/// resolution with no way to see why. Org-wide rows are kept — they are the
+/// platform-admin org rollout targeting.
+async fn migrate_remove_org_scoped_feature_flag_overrides(
+    db: &Database,
+) -> Result<(), mongodb::error::Error> {
+    let overrides = db.collection::<Document>("feature_flag_overrides");
+    let removed = overrides
+        .delete_many(doc! {
+            "org_user_id": { "$type": "string" },
+            "target_kind": { "$in": ["role", "user"] },
+        })
+        .await?;
+    if removed.deleted_count > 0 {
+        tracing::info!(
+            count = removed.deleted_count,
+            "Removed org role/member feature-flag overrides from the retired org self-serve surface"
+        );
+    }
     Ok(())
 }
 
