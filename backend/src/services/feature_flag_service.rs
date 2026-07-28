@@ -1111,9 +1111,10 @@ mod tests {
             eprintln!("skipping feature flag service test: no local MongoDB available");
             return;
         };
-        let err = set_platform_org_override(&db, &Uuid::new_v4().to_string(), "nope", true, "actor")
-            .await
-            .expect_err("unknown flag rejected");
+        let err =
+            set_platform_org_override(&db, &Uuid::new_v4().to_string(), "nope", true, "actor")
+                .await
+                .expect_err("unknown flag rejected");
         assert!(matches!(err, AppError::BadRequest(_)));
     }
 
