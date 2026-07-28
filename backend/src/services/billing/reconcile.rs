@@ -8,13 +8,16 @@ use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
 
 use crate::config::AppConfig;
 use crate::errors::AppResult;
+use crate::models::billing_wallet::{BillingWallet, COLLECTION_NAME as BILLING_WALLET};
 use crate::models::usage_meter::{COLLECTION_NAME as USAGE_METER, UsageMeterRow};
 
 use super::lago_client::{LagoApi, LagoError, LagoErrorKind, LagoEvent};
 use super::reservation;
+use super::webhook;
 
 const PUSH_GRACE_SECS: i64 = 30;
 const MAX_RECONCILE_PUSH_BATCH: i64 = 100;
+const MAX_WALLET_REFRESH_BATCH: i64 = 100;
 const ACKED_RETENTION_DAYS: i64 = 30;
 
 #[derive(Clone)]
@@ -33,6 +36,7 @@ pub struct ReconcileStats {
     pub abandoned: u64,
     pub recovered_settlements: u64,
     pub drift_alerts: u64,
+    pub wallet_balance_refreshes: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -69,7 +73,71 @@ impl BillingReconciler {
         self.push_unacked(lago.as_ref(), &mut stats).await?;
         self.compare_finalized_usage(lago.as_ref(), &mut stats)
             .await?;
+        self.refresh_wallet_balances(lago.as_ref(), &mut stats)
+            .await?;
         Ok(stats)
+    }
+
+    /// Pull wallet balances from Lago into the local cache. Webhooks are the
+    /// primary balance signal, but deployments Lago cannot reach (or missed
+    /// deliveries) would otherwise never converge.
+    async fn refresh_wallet_balances(
+        &self,
+        lago: &dyn LagoApi,
+        stats: &mut ReconcileStats,
+    ) -> AppResult<()> {
+        let wallets: Vec<BillingWallet> = self
+            .db
+            .collection::<BillingWallet>(BILLING_WALLET)
+            .find(doc! {})
+            .sort(doc! { "balance_synced_at": 1 })
+            .limit(MAX_WALLET_REFRESH_BATCH)
+            .await?
+            .try_collect()
+            .await?;
+
+        for wallet in wallets {
+            match lago.wallet_balance(&wallet.lago_customer_id).await {
+                Ok(balance_credits) => {
+                    // OSS Lago never refreshes credits_ongoing_balance (the
+                    // clock job is premium-gated), so the synced balance
+                    // ignores usage accrued this period until the invoice
+                    // settles. Subtract the period's current_usage ourselves;
+                    // cents convert 1:1 to credits (wallet rate_amount is 1)
+                    // and partial credits round up against availability.
+                    let accrued_credits = match wallet.lago_subscription_id.as_deref() {
+                        Some(subscription_id) => lago
+                            .current_usage(&wallet.lago_customer_id, subscription_id)
+                            .await
+                            .ok()
+                            .and_then(|usage| {
+                                super::lago_client::extract_current_usage_amount_cents(&usage.raw)
+                            })
+                            .map(|cents| (cents.max(0) + 99) / 100)
+                            .unwrap_or(0),
+                        None => 0,
+                    };
+                    if webhook::refresh_wallet_balance(
+                        &self.db,
+                        &wallet.lago_customer_id,
+                        balance_credits.saturating_sub(accrued_credits),
+                    )
+                    .await?
+                    .is_some()
+                    {
+                        stats.wallet_balance_refreshes += 1;
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        owner_id = %wallet.owner_id,
+                        error = %error,
+                        "Billing wallet balance refresh from Lago failed"
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 
     async fn abandon_unforwarded_reserved(&self) -> AppResult<u64> {
@@ -96,8 +164,26 @@ impl BillingReconciler {
             .try_collect()
             .await?;
 
+        // Events pushed without an external_subscription_id are stored by
+        // Lago but never attached to a subscription's charges, so usage
+        // silently aggregates to zero. Resolve each owner's subscription
+        // from the local wallet, memoized for the batch.
+        let mut subscriptions: BTreeMap<String, Option<String>> = BTreeMap::new();
         for row in rows {
-            let Some(event) = LagoEvent::from_usage_row(&row, None) else {
+            let subscription_id = match subscriptions.get(&row.billing_owner_id) {
+                Some(cached) => cached.clone(),
+                None => {
+                    let resolved = self
+                        .db
+                        .collection::<BillingWallet>(BILLING_WALLET)
+                        .find_one(doc! { "owner_id": &row.billing_owner_id })
+                        .await?
+                        .and_then(|wallet| wallet.lago_subscription_id);
+                    subscriptions.insert(row.billing_owner_id.clone(), resolved.clone());
+                    resolved
+                }
+            };
+            let Some(event) = LagoEvent::from_usage_row(&row, subscription_id) else {
                 mark_dead_letter(
                     &self.db,
                     &row.id,
