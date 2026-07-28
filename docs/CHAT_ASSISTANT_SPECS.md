@@ -170,11 +170,16 @@ ignored upstream) and the missing stop control. This cut adds the stop:
   Aevatar before the fence commits; (b) a cancel that lands before
   `RUN_STARTED` defers its abort (bounded `PRE_START_STOP_WINDOW_MS`) so
   the announcing frame can still deliver the `turnId` the stop needs.
+- **Backend (cut 6b):** the remaining conversation-control surfaces are now
+  pass-throughs too — `:steer`, `GET …/state` (cursors ride the forwarded
+  query string), and per-step `:retry`/`:skip` (turn/step path segments
+  validated with the conversation-id grammar). No UI consumers yet: steering
+  and step controls need task-frame rendering (the FE currently ignores
+  `nyxid.task.*` CUSTOM frames), and reconnect-via-state is a follow-up.
 - **Known remaining `feature/integrate` gaps (deliberate, recorded):**
-  `:steer`, per-step `:retry`/`:skip`, the conditional
-  `GET …/conversations/{id}/state` query, the `nyxid.task.*` /
-  `nyxid.action.request` CUSTOM frames (ignored by the FE), and the
-  NyxID-owned `GET /api/v1/assistant/actions` registry (schema v4) with the
+  FE rendering of the `nyxid.task.*` / `nyxid.action.request` CUSTOM frames,
+  FE consumers for steer/retry/skip/state, and the NyxID-owned
+  `GET /api/v1/assistant/actions` registry (schema v4) with the
   `action.continue` stream body. The registry is default-disabled on the
   Aevatar side (`Aevatar:NyxId:AssistantActions:Enabled=false`, fails closed
   `NYXID_ACTION_UNSUPPORTED`), so its absence is compatible until the
@@ -396,6 +401,10 @@ workflow/`/api/chat` chats persist?
 | `POST /api/v1/assistant/conversations/{id}/stream` | `...:stream` (AG-UI SSE) | unchanged |
 | `POST /api/v1/assistant/conversations/{id}/approve` | `...:approve` | unchanged |
 | `POST /api/v1/assistant/conversations/{id}/stop` | `...:stop` | **added** (cut 6) — 202-accepted stop fence |
+| `POST /api/v1/assistant/conversations/{id}/steer` | `...:steer` | **added** (cut 6) — steering control, no UI consumer yet |
+| `GET /api/v1/assistant/conversations/{id}/state` | `.../state` | **added** (cut 6) — conditional state query, cursors via query string |
+| `POST .../turns/{turn}/steps/{step}/retry` | `...:retry` | **added** (cut 6) — per-step retry, no UI consumer yet |
+| `POST .../turns/{turn}/steps/{step}/skip` | `...:skip` | **added** (cut 6) — per-step skip, no UI consumer yet |
 | `POST /api/v1/assistant/completions` | `v1/chat/completions` | unchanged |
 | `POST /api/v1/assistant/workflow-chat` | `api/chat` | unchanged; body forwarded verbatim (TD-2) |
 | `GET /api/v1/assistant/workflow-chat/ws` | `api/ws/chat` | unchanged (TD-2) |

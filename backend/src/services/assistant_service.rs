@@ -130,6 +130,73 @@ pub fn stop_path(user_id: &str, conversation_id: &str) -> AppResult<String> {
     ))
 }
 
+/// `nyxid-chat/conversations/{id}:steer` -- redirect active work
+/// (202-accepted; Aevatar serializes the steering fence and starts a
+/// server-owned continuation turn at a safe checkpoint).
+pub fn steer_path(user_id: &str, conversation_id: &str) -> AppResult<String> {
+    Ok(format!(
+        "{}:steer",
+        conversation_path(user_id, conversation_id)?
+    ))
+}
+
+/// `nyxid-chat/conversations/{id}/state` -- conditional current-state query
+/// (GET; `afterStateVersion` / `turnId` cursors ride the forwarded query
+/// string). This is the contract's reconnect surface: clients poll it
+/// instead of replaying events.
+pub fn state_path(user_id: &str, conversation_id: &str) -> AppResult<String> {
+    Ok(format!(
+        "{}/state",
+        conversation_path(user_id, conversation_id)?
+    ))
+}
+
+/// Turn/step ids share the conversation-id grammar: opaque server-issued
+/// handles, so anything carrying a separator is a caller reshaping the URL.
+fn validate_control_segment(segment: &str) -> AppResult<()> {
+    let valid = !segment.is_empty()
+        && segment.len() <= 128
+        && segment
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if !valid {
+        return Err(AppError::BadRequest("Invalid turn or step id.".to_string()));
+    }
+    Ok(())
+}
+
+/// `nyxid-chat/conversations/{id}/turns/{turn}/steps/{step}:retry` --
+/// retry one failed/interrupted step (202-accepted control command).
+pub fn retry_path(
+    user_id: &str,
+    conversation_id: &str,
+    turn_id: &str,
+    step_id: &str,
+) -> AppResult<String> {
+    validate_control_segment(turn_id)?;
+    validate_control_segment(step_id)?;
+    Ok(format!(
+        "{}/turns/{turn_id}/steps/{step_id}:retry",
+        conversation_path(user_id, conversation_id)?
+    ))
+}
+
+/// `nyxid-chat/conversations/{id}/turns/{turn}/steps/{step}:skip` -- skip
+/// one optional step (202-accepted control command).
+pub fn skip_path(
+    user_id: &str,
+    conversation_id: &str,
+    turn_id: &str,
+    step_id: &str,
+) -> AppResult<String> {
+    validate_control_segment(turn_id)?;
+    validate_control_segment(step_id)?;
+    Ok(format!(
+        "{}/turns/{turn_id}/steps/{step_id}:skip",
+        conversation_path(user_id, conversation_id)?
+    ))
+}
+
 /// `v1/chat/completions` -- OpenAI-compatible surface. Scope-free: the
 /// endpoint is stateless and carries its history in the request body.
 pub fn completions_path() -> String {
@@ -227,6 +294,26 @@ mod tests {
             format!("api/scopes/{USER}/nyxid-chat/conversations/{CONV}:stop")
         );
         assert_eq!(
+            steer_path(USER, CONV).unwrap(),
+            format!("api/scopes/{USER}/nyxid-chat/conversations/{CONV}:steer")
+        );
+        assert_eq!(
+            state_path(USER, CONV).unwrap(),
+            format!("api/scopes/{USER}/nyxid-chat/conversations/{CONV}/state")
+        );
+        assert_eq!(
+            retry_path(USER, CONV, "turn-1", "step_a").unwrap(),
+            format!(
+                "api/scopes/{USER}/nyxid-chat/conversations/{CONV}/turns/turn-1/steps/step_a:retry"
+            )
+        );
+        assert_eq!(
+            skip_path(USER, CONV, "turn-1", "step_a").unwrap(),
+            format!(
+                "api/scopes/{USER}/nyxid-chat/conversations/{CONV}/turns/turn-1/steps/step_a:skip"
+            )
+        );
+        assert_eq!(
             history_index_path(USER),
             format!("api/scopes/{USER}/chat-history")
         );
@@ -254,6 +341,13 @@ mod tests {
             assert!(stream_path(USER, bad).is_err());
             assert!(approve_path(USER, bad).is_err());
             assert!(stop_path(USER, bad).is_err());
+            assert!(steer_path(USER, bad).is_err());
+            assert!(state_path(USER, bad).is_err());
+            // Escaping turn/step segments is rejected the same way.
+            assert!(retry_path(USER, CONV, bad, "step_a").is_err());
+            assert!(retry_path(USER, CONV, "turn-1", bad).is_err());
+            assert!(skip_path(USER, CONV, bad, "step_a").is_err());
+            assert!(skip_path(USER, CONV, "turn-1", bad).is_err());
         }
         assert!(history_path(USER, &"a".repeat(129)).is_err());
     }
