@@ -153,7 +153,6 @@ export function AssistantSidebar({
   conversations,
   activeConversationId,
   activeView = "chat",
-  creating,
   deletingId,
   onNewChat,
   onSelect,
@@ -162,7 +161,6 @@ export function AssistantSidebar({
   readonly conversations: readonly Conversation[];
   readonly activeConversationId: string | undefined;
   readonly activeView?: "chat" | "plugins" | "approvals";
-  readonly creating: boolean;
   readonly deletingId?: string;
   readonly onNewChat: () => void;
   readonly onSelect: (conversationId: string) => void;
@@ -176,11 +174,12 @@ export function AssistantSidebar({
   return (
     <div className="flex h-full min-h-0 flex-col bg-background">
       <div className="p-2.5">
+        {/* No loading state: "New chat" is navigation only — it issues no
+            requests. The conversation is allocated lazily by the first send. */}
         <Button
           type="button"
           variant="primary"
           className="w-full"
-          isLoading={creating}
           onClick={onNewChat}
         >
           <Plus />

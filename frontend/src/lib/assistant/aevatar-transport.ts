@@ -1,4 +1,4 @@
-import { apiClient } from "@/lib/api-client";
+import { ApiError, apiClient } from "@/lib/api-client";
 import {
   AssistantProtocolError,
   AssistantTurnActiveError,
@@ -941,11 +941,27 @@ export class AevatarAssistantTransport implements AssistantTransport {
       // turned the PR #2923 array→`{messages, stateVersion}` change into a
       // blank transcript instead of a visible failure.
       if (error instanceof AssistantProtocolError) throw error;
+      // Nothing local to answer with.
+      if (!existing) throw error;
+      // 404 is the EXPECTED answer for a conversation that has not yet
+      // completed a turn. The two upstream halves materialize at different
+      // times: `nyxid-chat` mints the actor at create, while the
+      // `chat-history` row is only written when a turn reaches a terminal.
+      // Aevatar's `HandleGetConversation` maps a missing read-model document
+      // to 404 — NOT to an empty array — so every brand-new conversation
+      // 404s here, as does the window between a turn's terminal frame and
+      // its history materialization. For a conversation we already hold,
+      // that is "no server transcript yet", and the local mirror is the
+      // truthful answer rather than a failure.
+      const noServerTranscriptYet =
+        error instanceof ApiError && error.status === 404;
       // Transient failures (network, 5xx) may serve the local mirror — but
       // only when it holds a real transcript. A conversation the index
       // merged in carries `EMPTY_TURN_STATE`, and answering with that would
       // dress a failed read as a legitimately empty chat.
-      if (!existing || existing.turnState.messages.length === 0) throw error;
+      if (!noServerTranscriptYet && existing.turnState.messages.length === 0) {
+        throw error;
+      }
       stored = existing;
     }
     // Re-check AFTER the await: a delete completing while the history
