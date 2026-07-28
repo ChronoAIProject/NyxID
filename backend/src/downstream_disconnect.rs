@@ -11,6 +11,7 @@ use axum::{
     Extension, Router,
     extract::ConnectInfo,
     http::Request,
+    middleware::AddExtension,
     serve::{IncomingStream, Listener},
 };
 use futures::Stream;
@@ -19,7 +20,7 @@ use tokio::{
     net::{TcpListener, TcpStream},
 };
 use tokio_util::sync::CancellationToken;
-use tower::Service;
+use tower::{Layer, Service};
 
 /// Connection-level cancellation propagated from the server transport.
 ///
@@ -250,8 +251,14 @@ impl DisconnectAwareMakeService {
     }
 }
 
+/// The per-connection service: the shared `Router` wrapped in the two
+/// connection-scoped extensions. Naming the wrapper type rather than `Router`
+/// is what keeps connection setup O(1) — see `call` below.
+type ConnectionService =
+    AddExtension<AddExtension<Router, ConnectInfo<SocketAddr>>, ClientConnectionCancellation>;
+
 impl Service<IncomingStream<'_, DisconnectAwareListener>> for DisconnectAwareMakeService {
-    type Response = Router;
+    type Response = ConnectionService;
     type Error = Infallible;
     type Future = Ready<Result<Self::Response, Self::Error>>;
 
@@ -262,11 +269,19 @@ impl Service<IncomingStream<'_, DisconnectAwareListener>> for DisconnectAwareMak
     fn call(&mut self, stream: IncomingStream<'_, DisconnectAwareListener>) -> Self::Future {
         let peer = *stream.remote_addr();
         let cancellation = stream.io().cancellation.clone();
-        let service = Router::layer(self.app.clone(), Extension(ConnectInfo(peer)));
-        let service = Router::layer(
-            service,
-            Extension(ClientConnectionCancellation::new(cancellation)),
-        );
+        // `Layer::layer` wraps the router as a whole, so cloning it is one
+        // `Arc` bump and this whole function is a handful of bytes.
+        //
+        // Do NOT reach for the inherent `Router::layer` here. It rebuilds the
+        // router instead of wrapping it: `into_inner()` cannot unwrap the `Arc`
+        // while `self.app` still holds a reference, so it deep-clones the path
+        // tree, then re-boxes every endpoint and every method handler within it.
+        // On this hot path that costs hundreds of KiB and ~100µs per accepted
+        // connection, retained for as long as the connection lives — which for
+        // node-agent WebSockets and SSE streams is hours. This mirrors what
+        // axum's own `into_make_service_with_connect_info` does.
+        let service = Extension(ConnectInfo(peer)).layer(self.app.clone());
+        let service = Extension(ClientConnectionCancellation::new(cancellation)).layer(service);
         ready(Ok(service))
     }
 }
