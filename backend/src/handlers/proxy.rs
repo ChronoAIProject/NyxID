@@ -53,6 +53,7 @@ fn proxy_error_telemetry_fields(err: &AppError) -> (u16, u32) {
         AppError::NodeProxyTimeout => (504, 8002),
         AppError::NodeCredentialMissing(_) => (502, 8004),
         AppError::WsProxyDownstream(_) => (502, 8005),
+        AppError::ClientDisconnected => (499, 8012),
         AppError::ApiKeyScopeForbidden(_) => (403, 9000),
         AppError::ApiKeyScopeInactive => (403, 9001),
         AppError::ApiKeyScopeNotFound(_) => (404, 9002),
@@ -95,7 +96,10 @@ fn proxy_client_disconnected(service_id: &str) -> AppError {
         service_id,
         "Cancelled upstream proxy work after downstream client disconnected"
     );
-    AppError::Internal("Downstream client disconnected".to_string())
+    // Deliberately not `Internal`: the client hanging up is not a server fault,
+    // and this response is never written anywhere. Reporting it as a 500 turns
+    // ordinary client cancellation into false error-rate signal.
+    AppError::ClientDisconnected
 }
 
 /// Stable string label for the auth method that issued this proxy request.
@@ -3226,7 +3230,15 @@ const STREAM_SIZE_THRESHOLD: u64 = 256 * 1024;
 /// Cap on the bounded response copy kept for LLM usage extraction when a
 /// chunked JSON body streams through the passthrough branch. Bodies larger
 /// than this fall back to the byte-based token estimate.
-const USAGE_CAPTURE_MAX_BYTES: usize = 2 * 1024 * 1024;
+///
+/// This buffer is a second copy of the body, retained for the lifetime of the
+/// response and multiplied by in-flight LLM request concurrency, so the cap is
+/// what bounds the handler's worst-case footprint. 512 KiB of JSON is on the
+/// order of 100k output tokens in a single non-streaming completion — past what
+/// providers will return in one response — so real bodies stay under it. Going
+/// over is not a billing regression: the fallback byte estimate is what every
+/// one of these responses used before usage capture existed.
+const USAGE_CAPTURE_MAX_BYTES: usize = 512 * 1024;
 
 /// Content types that should always be streamed regardless of size.
 const STREAMING_CONTENT_TYPES: &[&str] = &[
@@ -5863,6 +5875,23 @@ mod tests {
         assert_eq!(
             proxy_error_telemetry_fields(&AppError::WsProxyDownstream("x".into())),
             (502, 8005)
+        );
+    }
+
+    /// Cancelled work must not land in the proxy error rate as a 500 — that is
+    /// what `proxy_client_disconnected` used to do via `AppError::Internal`.
+    #[test]
+    fn proxy_error_telemetry_fields_client_disconnected() {
+        use super::{proxy_client_disconnected, proxy_error_telemetry_fields};
+        use crate::errors::AppError;
+
+        assert!(matches!(
+            proxy_client_disconnected("svc-1"),
+            AppError::ClientDisconnected
+        ));
+        assert_eq!(
+            proxy_error_telemetry_fields(&AppError::ClientDisconnected),
+            (499, 8012)
         );
     }
 
