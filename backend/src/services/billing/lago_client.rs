@@ -42,6 +42,7 @@ pub trait LagoApi: Send + Sync {
 pub struct LagoClient {
     base_url: String,
     api_key: String,
+    payment_provider_code: Option<String>,
     http: reqwest::Client,
 }
 
@@ -69,8 +70,16 @@ impl LagoClient {
         Ok(Self {
             base_url,
             api_key,
+            payment_provider_code: None,
             http,
         })
+    }
+
+    /// Link newly created customers to this Lago payment provider connection
+    /// (a "stripe" connection code) so top-up checkout URLs can be generated.
+    pub fn with_payment_provider_code(mut self, code: Option<String>) -> Self {
+        self.payment_provider_code = code;
+        self
     }
 
     fn url(&self, path: &str) -> String {
@@ -140,13 +149,19 @@ impl LagoApi for LagoClient {
             return Ok(owner.external_customer_id.clone());
         }
 
-        let body = json!({
-            "customer": {
-                "external_id": owner.external_customer_id,
-                "name": owner.name,
-                "email": owner.email,
-            }
+        let mut customer = json!({
+            "external_id": owner.external_customer_id,
+            "name": owner.name,
+            "email": owner.email,
         });
+        if let Some(code) = &self.payment_provider_code {
+            customer["billing_configuration"] = json!({
+                "payment_provider": "stripe",
+                "payment_provider_code": code,
+                "sync_with_provider": true,
+            });
+        }
+        let body = json!({ "customer": customer });
         match self
             .json_request(reqwest::Method::POST, "customers", Some(body))
             .await
@@ -198,6 +213,9 @@ impl LagoApi for LagoClient {
             "wallet": {
                 "external_customer_id": customer_id,
                 "currency": "USD",
+                // Lago requires a credit-to-currency rate on wallet creation;
+                // NyxID credits are denominated 1:1 with the wallet currency.
+                "rate_amount": "1",
             }
         });
         match self
@@ -229,12 +247,14 @@ impl LagoApi for LagoClient {
         let body = json!({
             "wallet_transaction": {
                 "wallet_id": wallet_id,
-                "paid_credits": request.amount_credits,
+                // Lago validates credit amounts as decimal strings and
+                // rejects JSON numbers with invalid_paid_credits.
+                "paid_credits": request.amount_credits.to_string(),
                 // granted_credits are FREE/promotional in Lago and ADDITIVE to
                 // paid_credits. A paid top-up must grant ONLY the purchased
                 // amount, so this is 0; otherwise the customer receives 2N
                 // credits for an N payment. See #1050.
-                "granted_credits": 0,
+                "granted_credits": "0",
                 "external_id": request.external_id,
                 "invoice_requires_successful_payment": true,
             }
@@ -341,7 +361,7 @@ impl LagoApi for LagoClient {
             )
             .await
             .map_err(lago_error_to_app)?;
-        extract_wallet_balance_credits(&value).ok_or_else(|| {
+        extract_active_wallet_balance_credits(&value).ok_or_else(|| {
             AppError::BillingProviderUnavailable(
                 "Lago wallet balance response did not include a balance".to_string(),
             )
@@ -388,7 +408,7 @@ impl LagoClient {
             )
             .await
             .map_err(lago_error_to_app)?;
-        Ok(extract_wallet(&value))
+        Ok(extract_active_wallet(&value))
     }
 
     async fn generate_wallet_transaction_payment_url(
@@ -578,7 +598,15 @@ impl LagoError {
 
     fn from_response(status: StatusCode, json: Value, raw_text: String) -> Self {
         let code = lago_error_code(&json);
-        let message = lago_error_message(&json).unwrap_or(raw_text);
+        // Keep Lago's error_details in the message: a bare "Unprocessable
+        // Entity" hides which field validation failed.
+        let message = match (lago_error_message(&json), json.get("error_details")) {
+            (Some(message), Some(details)) if !details.is_null() => {
+                format!("{message}: {details}")
+            }
+            (Some(message), _) => message,
+            (None, _) => raw_text,
+        };
         let kind = classify_lago_failure(status, code.as_deref(), &json);
         Self {
             status: Some(status),
@@ -589,12 +617,11 @@ impl LagoError {
     }
 
     pub fn is_conflict_like(&self) -> bool {
-        self.status == Some(StatusCode::CONFLICT)
-            || (self.status == Some(StatusCode::UNPROCESSABLE_ENTITY)
-                && matches!(
-                    self.code.as_deref(),
-                    Some("value_already_exist" | "validation_errors")
-                ))
+        // A 422 is a conflict only when classification saw a duplicate
+        // indicator in the body; other validation errors (e.g. a missing
+        // required field) must surface instead of being read back as an
+        // existing resource.
+        self.status == Some(StatusCode::CONFLICT) || self.kind == LagoErrorKind::Duplicate
     }
 }
 
@@ -671,8 +698,11 @@ pub fn extract_wallet_balance_credits(value: &Value) -> Option<i64> {
         json_i64_path(
             wallet,
             &[
-                "credits_balance",
+                // Prefer the ongoing balance: Lago decrements credits_balance
+                // only when a period invoice settles, while ongoing reflects
+                // usage as it accrues — the number a prepaid gate cares about.
                 "credits_ongoing_balance",
+                "credits_balance",
                 "credits_ongoing_usage_balance",
                 "ongoing_balance",
                 "balance_credits",
@@ -680,6 +710,46 @@ pub fn extract_wallet_balance_credits(value: &Value) -> Option<i64> {
             ],
         )
     })
+}
+
+/// Extract the accrued period usage in cents from a Lago current_usage
+/// response (`{"customer_usage": {"total_amount_cents": ...}}`).
+pub fn extract_current_usage_amount_cents(value: &Value) -> Option<i64> {
+    let usage = value.get("customer_usage").unwrap_or(value);
+    usage
+        .get("total_amount_cents")
+        .and_then(json_i64_value)
+        .or_else(|| usage.get("amount_cents").and_then(json_i64_value))
+}
+
+/// Pick the first non-terminated wallet from a Lago wallets list response.
+/// Lago keeps terminated wallets in the collection and may list them before
+/// the active one; wallets without a status field count as active. Returns
+/// None when the response is not a wallets list.
+fn active_wallet_value(value: &Value) -> Option<&Value> {
+    match value.get("wallets") {
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter(|item| item.is_object())
+            .find(|item| item.get("status").and_then(Value::as_str) != Some("terminated")),
+        _ => None,
+    }
+}
+
+/// Extract a wallet from a Lago wallets list, skipping terminated entries.
+pub fn extract_active_wallet(value: &Value) -> Option<LagoWallet> {
+    if matches!(value.get("wallets"), Some(Value::Array(_))) {
+        return active_wallet_value(value).and_then(extract_wallet);
+    }
+    extract_wallet(value)
+}
+
+/// Extract a balance from a Lago wallets list, skipping terminated entries.
+pub fn extract_active_wallet_balance_credits(value: &Value) -> Option<i64> {
+    if matches!(value.get("wallets"), Some(Value::Array(_))) {
+        return active_wallet_value(value).and_then(extract_wallet_balance_credits);
+    }
+    extract_wallet_balance_credits(value)
 }
 
 pub fn extract_wallet(value: &Value) -> Option<LagoWallet> {
@@ -896,8 +966,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        LagoApi, LagoClient, LagoErrorKind, LagoEvent, LagoEventProperties, OwnerProvisionInput,
-        classify_lago_failure, extract_wallet_balance_credits, subscription_external_id,
+        LagoApi, LagoClient, LagoError, LagoErrorKind, LagoEvent, LagoEventProperties,
+        OwnerProvisionInput, classify_lago_failure, extract_active_wallet,
+        extract_wallet_balance_credits, subscription_external_id,
     };
 
     async fn spawn_lago_mock(app: axum::Router) -> String {
@@ -929,6 +1000,60 @@ mod tests {
             ),
             LagoErrorKind::Duplicate
         );
+    }
+
+    #[test]
+    fn validation_error_without_duplicate_indicator_is_not_conflict_like() {
+        let body = json!({
+            "status": 422,
+            "error": "Unprocessable Entity",
+            "code": "validation_errors",
+            "error_details": { "rate_amount": ["is not a number"] }
+        });
+        let error = LagoError::from_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            body.clone(),
+            body.to_string(),
+        );
+
+        assert!(!error.is_conflict_like());
+    }
+
+    #[test]
+    fn validation_error_with_duplicate_indicator_is_conflict_like() {
+        let body = json!({
+            "status": 422,
+            "error": "Unprocessable Entity",
+            "code": "validation_errors",
+            "error_details": { "external_id": ["value_already_exist"] }
+        });
+        let error = LagoError::from_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            body.clone(),
+            body.to_string(),
+        );
+
+        assert!(error.is_conflict_like());
+    }
+
+    #[test]
+    fn extract_active_wallet_skips_terminated_wallets() {
+        let body = json!({
+            "wallets": [
+                { "lago_id": "w-terminated", "status": "terminated", "credits_balance": "5.0" },
+                { "lago_id": "w-active", "status": "active", "credits_balance": "3.0" }
+            ]
+        });
+
+        let wallet = extract_active_wallet(&body).expect("active wallet");
+        assert_eq!(wallet.id, "w-active");
+
+        let all_terminated = json!({
+            "wallets": [
+                { "lago_id": "w-terminated", "status": "terminated", "credits_balance": "5.0" }
+            ]
+        });
+        assert!(extract_active_wallet(&all_terminated).is_none());
     }
 
     #[test]
@@ -1009,6 +1134,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ensure_customer_links_payment_provider_when_configured() {
+        async fn get_customer() -> axum::http::StatusCode {
+            axum::http::StatusCode::NOT_FOUND
+        }
+
+        async fn create_customer(
+            axum::Json(body): axum::Json<serde_json::Value>,
+        ) -> axum::Json<serde_json::Value> {
+            let billing = &body["customer"]["billing_configuration"];
+            assert_eq!(billing["payment_provider"].as_str(), Some("stripe"));
+            assert_eq!(billing["payment_provider_code"].as_str(), Some("sandbox"));
+            assert_eq!(billing["sync_with_provider"].as_bool(), Some(true));
+            axum::Json(json!({ "customer": { "external_id": "owner-1" } }))
+        }
+
+        let base_url = spawn_lago_mock(
+            axum::Router::new()
+                .route(
+                    "/api/v1/customers/owner-1",
+                    axum::routing::get(get_customer),
+                )
+                .route("/api/v1/customers", axum::routing::post(create_customer)),
+        )
+        .await;
+        let client = LagoClient::new(base_url, "test-key".to_string())
+            .expect("client")
+            .with_payment_provider_code(Some("sandbox".to_string()));
+
+        let customer_id = client
+            .ensure_customer(&OwnerProvisionInput {
+                external_customer_id: "owner-1".to_string(),
+                name: Some("Owner One".to_string()),
+                email: None,
+            })
+            .await
+            .expect("ensure customer");
+
+        assert_eq!(customer_id, "owner-1");
+    }
+
+    #[tokio::test]
     async fn wallet_balance_reads_by_external_customer_id() {
         async fn get_wallet(
             axum::extract::Query(query): axum::extract::Query<
@@ -1047,10 +1213,11 @@ mod tests {
             // Bug #1050: granted_credits are FREE/promotional in Lago, so a paid
             // top-up must grant ONLY the paid amount — granted_credits MUST be 0,
             // otherwise the customer receives 2N credits for an N payment.
-            assert_eq!(wt["paid_credits"].as_i64(), Some(500), "paid_credits");
+            // Amounts are decimal strings: Lago rejects JSON numbers.
+            assert_eq!(wt["paid_credits"].as_str(), Some("500"), "paid_credits");
             assert_eq!(
-                wt["granted_credits"].as_i64(),
-                Some(0),
+                wt["granted_credits"].as_str(),
+                Some("0"),
                 "granted_credits must be 0 for a paid top-up"
             );
             assert_eq!(
@@ -1111,10 +1278,10 @@ mod tests {
             axum::Json(body): axum::Json<serde_json::Value>,
         ) -> axum::Json<serde_json::Value> {
             let wt = &body["wallet_transaction"];
-            assert_eq!(wt["paid_credits"].as_i64(), Some(500), "paid_credits");
+            assert_eq!(wt["paid_credits"].as_str(), Some("500"), "paid_credits");
             assert_eq!(
-                wt["granted_credits"].as_i64(),
-                Some(0),
+                wt["granted_credits"].as_str(),
+                Some("0"),
                 "granted_credits must be 0 for a paid top-up"
             );
             assert_eq!(

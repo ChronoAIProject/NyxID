@@ -5743,6 +5743,7 @@ mod tests {
             node_id: None,
             user_service_id: "user-service".to_string(),
             has_server_credential: false,
+            master_credential: false,
             org_routing: org_user_id.map(|org_user_id| proxy_service::OrgRouting {
                 org_user_id: org_user_id.to_string(),
                 member_user_id: actor_user_id.to_string(),
