@@ -81,6 +81,17 @@ const MAX_MESSAGE_CHARS = 32_768;
 // have no deadline the client can impose.
 const STREAM_PROGRESS_TIMEOUT_MS = 120_000;
 
+// How long a follow-up send or delete waits on an in-flight `:stop` before
+// proceeding anyway. Serializing behind the stop keeps a fast follow-up from
+// racing the fence upstream (HTTP request ordering is not guaranteed across
+// connections); the bound keeps a hung stop from wedging the composer.
+const STOP_FENCE_WAIT_MS = 2_000;
+
+// How long a pre-RUN_STARTED cancel keeps the reader alive waiting for the
+// frame that names the server turn. Without it the abort would discard the
+// only chance to learn the turnId, leaving the upstream run uncancellable.
+const PRE_START_STOP_WINDOW_MS = 5_000;
+
 // Inline media larger than this (base64 chars ≈ 6 MB decoded) is summarized
 // as text instead of being embedded as a data: URL artifact.
 const MAX_MEDIA_DATA_CHARS = 8_000_000;
@@ -291,6 +302,12 @@ interface RunStepState {
 interface RunningTurn {
   readonly clientRequestId: string;
   turnId: string | null;
+  /**
+   * A cancel landed before RUN_STARTED delivered the server turn id. The
+   * reader stays alive (bounded) so the announcing frame can still arrive;
+   * the RUN_STARTED handler then submits the stop and aborts.
+   */
+  stopPendingStart: boolean;
   turnAnnounced: boolean;
   readonly controller: AbortController;
   readonly onEvent: (event: TurnEvent) => void;
@@ -718,6 +735,12 @@ export class AevatarAssistantTransport implements AssistantTransport {
   private readonly conversations = new Map<string, StoredConversation>();
   private readonly running = new Map<string, RunningTurn>();
   /**
+   * In-flight `:stop` per conversation. Follow-up sends and the composite
+   * delete serialize behind it (bounded by STOP_FENCE_WAIT_MS) so a fast
+   * next action cannot reach Aevatar before the stop fence commits.
+   */
+  private readonly pendingStops = new Map<string, Promise<void>>();
+  /**
    * Tombstones for server-accepted deletes: the Chat History index is
    * eventually consistent, so stale list/history responses can still carry
    * a row we just deleted. Tombstones are PERMANENT for the transport's
@@ -779,6 +802,9 @@ export class AevatarAssistantTransport implements AssistantTransport {
     // call retires both upstream surfaces.
     const run = this.running.get(conversationId);
     if (run) this.cancelTurn(conversationId, run);
+    // The cancel above may have fired a `:stop`; let its fence commit before
+    // the actor delete races the still-active work upstream.
+    await this.awaitPendingStop(conversationId);
     await assistantApi.del(
       `${ASSISTANT_PREFIX}/conversations/${conversationId}`,
     );
@@ -1175,6 +1201,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     return {
       clientRequestId: crypto.randomUUID(),
       turnId,
+      stopPendingStart: false,
       turnAnnounced: false,
       controller: new AbortController(),
       onEvent,
@@ -1234,12 +1261,19 @@ export class AevatarAssistantTransport implements AssistantTransport {
     run: RunningTurn,
     prompt: string,
   ): Promise<void> {
+    // Serialize behind a previous turn's in-flight stop so this send cannot
+    // arrive upstream before the fence commits.
+    await this.awaitPendingStop(conversationId);
+
     let finalFailure = {
       code: "network_error",
       message: "The assistant stream could not be reached. Try again.",
     };
 
     for (let attempt = 0; attempt < STREAM_DELIVERY_ATTEMPTS; attempt += 1) {
+      // A cancel can settle the run between attempts (the pre-RUN_STARTED
+      // path defers its abort); a finished run must never re-POST.
+      if (run.finished || run.controller.signal.aborted) return;
       this.resetDeliveryState(run);
       let response: Response;
       try {
@@ -1531,6 +1565,15 @@ export class AevatarAssistantTransport implements AssistantTransport {
           return;
         }
         if (!run.turnId) run.turnId = authoritativeTurnId;
+        if (run.stopPendingStart) {
+          // A cancel landed before this frame named the turn. Deliver the
+          // stop it was waiting on, then drop the connection — the local
+          // turn already settled as cancelled.
+          run.stopPendingStart = false;
+          this.requestServerStop(conversationId, run);
+          run.controller.abort();
+          return;
+        }
         if (!run.turnAnnounced) {
           run.turnAnnounced = true;
           this.emit(conversationId, run, {
@@ -2505,18 +2548,29 @@ export class AevatarAssistantTransport implements AssistantTransport {
   }
 
   /**
-   * Stop flow: aborts the SSE fetch, settles the local turn per the PRD
-   * stop-flow — every open block reaches a terminal state (§5.6) — and,
-   * when the server has announced a turn, fires a best-effort `:stop`
+   * Stop flow: settles the local turn per the PRD stop-flow — every open
+   * block reaches a terminal state (§5.6) — and fires a best-effort `:stop`
    * control command so Aevatar commits a stop fence instead of running the
-   * turn to its own terminal. The stop is 202-accepted and asynchronous
-   * upstream; if it fails or never fires, the pre-existing behavior stands
-   * (the run finishes server-side and surfaces on the next history reload).
+   * turn to its own terminal. When the server has already announced the
+   * turn, the fetch aborts immediately and the stop goes out with that
+   * turnId. When cancel lands BEFORE RUN_STARTED, the reader is kept alive
+   * (bounded) so the announcing frame can still deliver the turnId the stop
+   * needs; the RUN_STARTED handler then stops and aborts. The stop is
+   * 202-accepted and asynchronous upstream; if it fails or never fires, the
+   * pre-existing behavior stands (the run finishes server-side and surfaces
+   * on the next history reload).
    */
   private cancelTurn(conversationId: string, run: RunningTurn): void {
     if (run.finished) return;
-    run.controller.abort();
-    this.requestServerStop(conversationId, run);
+    if (run.turnId) {
+      run.controller.abort();
+      this.requestServerStop(conversationId, run);
+    } else {
+      run.stopPendingStart = true;
+      setTimeout(() => {
+        if (!run.controller.signal.aborted) run.controller.abort();
+      }, PRE_START_STOP_WINDOW_MS);
+    }
     this.clearWatchdog(run);
     if (run.currentBlockId) {
       // Cancel runs the SAME projection as a normal message close. Two things
@@ -2590,21 +2644,50 @@ export class AevatarAssistantTransport implements AssistantTransport {
    * contract): a fresh `stopRequestId` per intent keeps the command
    * idempotent upstream, and `expectedStateVersion: 0` skips the
    * optimistic-concurrency fence — the transport does not track actor
-   * state versions. Requires the server-announced `turnId`: before
-   * RUN_STARTED there is no committed turn to address, and aborting the
-   * fetch is the only cancellation available. Failures are swallowed —
-   * stop is an upgrade over the previous client-only cancel, never a new
-   * failure mode.
+   * state versions. Requires the server-announced `turnId` (a
+   * pre-RUN_STARTED cancel defers here via `stopPendingStart`). Failures
+   * are swallowed — stop is an upgrade over the previous client-only
+   * cancel, never a new failure mode — but the in-flight request is
+   * tracked in `pendingStops` so follow-up sends and deletes serialize
+   * behind the fence.
    */
   private requestServerStop(conversationId: string, run: RunningTurn): void {
     if (!run.turnId) return;
-    void assistantApi
-      .post<unknown>(`${ASSISTANT_PREFIX}/conversations/${conversationId}/stop`, {
-        turnId: run.turnId,
-        stopRequestId: crypto.randomUUID(),
-        clientRequestId: crypto.randomUUID(),
-        expectedStateVersion: 0,
-      })
-      .catch(() => undefined);
+    const pending = assistantApi
+      .post<unknown>(
+        `${ASSISTANT_PREFIX}/conversations/${conversationId}/stop`,
+        {
+          turnId: run.turnId,
+          stopRequestId: crypto.randomUUID(),
+          clientRequestId: crypto.randomUUID(),
+          expectedStateVersion: 0,
+        },
+      )
+      .then(
+        () => undefined,
+        () => undefined,
+      );
+    this.pendingStops.set(conversationId, pending);
+    void pending.then(() => {
+      if (this.pendingStops.get(conversationId) === pending) {
+        this.pendingStops.delete(conversationId);
+      }
+    });
+  }
+
+  /**
+   * Wait (bounded) for this conversation's in-flight `:stop` to be
+   * accepted upstream before the next send or delete goes out. Without
+   * this, a fast follow-up can reach Aevatar ahead of the stop — request
+   * ordering across HTTP connections is not guaranteed — and fail with
+   * ACTIVE_TURN_REQUIRES_STEERING.
+   */
+  private async awaitPendingStop(conversationId: string): Promise<void> {
+    const pending = this.pendingStops.get(conversationId);
+    if (!pending) return;
+    await Promise.race([
+      pending,
+      new Promise<void>((resolve) => setTimeout(resolve, STOP_FENCE_WAIT_MS)),
+    ]);
   }
 }

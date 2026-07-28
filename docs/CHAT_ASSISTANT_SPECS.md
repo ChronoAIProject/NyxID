@@ -161,11 +161,15 @@ ignored upstream) and the missing stop control. This cut adds the stop:
   `POST …/stop` with `{turnId, stopRequestId, clientRequestId,
   expectedStateVersion: 0}` (fresh UUID control identities;
   `expectedStateVersion <= 0` skips the optimistic-concurrency fence
-  upstream, which the transport does not track). Only fires once the server
-  announced a `turnId`; failures are swallowed — the pre-existing
-  client-abort behavior is the floor. The approval pause
+  upstream, which the transport does not track). Failures are swallowed —
+  the pre-existing client-abort behavior is the floor. The approval pause
   (`pauseForApproval`) deliberately does **not** stop: the server turn is
-  waiting for the decision.
+  waiting for the decision. Two codex (gpt-5.6-sol) P1s hardened the
+  timing: (a) follow-up sends and the composite delete serialize behind
+  the in-flight stop (bounded `STOP_FENCE_WAIT_MS`) so they cannot reach
+  Aevatar before the fence commits; (b) a cancel that lands before
+  `RUN_STARTED` defers its abort (bounded `PRE_START_STOP_WINDOW_MS`) so
+  the announcing frame can still deliver the `turnId` the stop needs.
 - **Known remaining `feature/integrate` gaps (deliberate, recorded):**
   `:steer`, per-step `:retry`/`:skip`, the conditional
   `GET …/conversations/{id}/state` query, the `nyxid.task.*` /

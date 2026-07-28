@@ -699,9 +699,11 @@ describe("AevatarAssistantTransport", () => {
     expect(stop?.clientRequestId).not.toBe(streamClientRequestId);
   });
 
-  it("sends no server-side stop when cancel lands before RUN_STARTED", async () => {
-    // A stream that never announces the turn: there is no committed turn
-    // identity to address, so cancel must stay a pure client-side abort.
+  it("sends no server-side stop when the turn is never announced", async () => {
+    // A stream that never sends RUN_STARTED: there is never a turn identity
+    // to address, so no stop can go out. (The reader lingers briefly after
+    // the local settle — PRE_START_STOP_WINDOW_MS — in case the announcing
+    // frame is still in flight; see the next test for that path.)
     const silentStream = new ReadableStream<Uint8Array>({ start() {} });
     const fetchMock = stubFetch(routeCreate, (url, init) =>
       url.endsWith("/stream") && init?.method === "POST"
@@ -730,6 +732,152 @@ describe("AevatarAssistantTransport", () => {
       String(input).endsWith("/stop"),
     );
     expect(stopCalls).toHaveLength(0);
+  });
+
+  it("delivers the deferred stop once RUN_STARTED names the turn after a pre-start cancel", async () => {
+    // Aevatar may have accepted the stream even though RUN_STARTED has not
+    // reached the browser yet. Cancel must not discard the only chance to
+    // learn the turnId: the reader stays alive, and the late RUN_STARTED
+    // triggers the stop before the connection drops.
+    let streamController:
+      | ReadableStreamDefaultController<Uint8Array>
+      | undefined;
+    const lateStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        streamController = controller;
+      },
+    });
+    const stopBodies: Array<Record<string, unknown>> = [];
+    stubFetch(
+      routeCreate,
+      (url, init) => {
+        if (url.endsWith("/stop") && init?.method === "POST") {
+          stopBodies.push(
+            JSON.parse(String(init.body)) as Record<string, unknown>,
+          );
+          return jsonResponse({ status: "accepted" }, 202);
+        }
+        return undefined;
+      },
+      (url, init) =>
+        url.endsWith("/stream") && init?.method === "POST"
+          ? new Response(lateStream, {
+              status: 200,
+              headers: { "Content-Type": "text/event-stream" },
+            })
+          : undefined,
+    );
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    const events: TurnEvent[] = [];
+    const handle = transport.sendMessage(CONVERSATION_ID, "Hello", (event) =>
+      events.push(event),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    handle.cancel();
+
+    // The local turn settles immediately; no stop yet (no turnId).
+    expect(events[events.length - 1]?.event).toBe("turn.completed");
+    expect(stopBodies).toHaveLength(0);
+
+    if (!streamController) throw new Error("stream never started");
+    streamController.enqueue(
+      new TextEncoder().encode(
+        `data: ${JSON.stringify(OBSERVED_FRAMES[0])}\n\n`,
+      ),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    expect(stopBodies).toHaveLength(1);
+    expect(stopBodies[0]?.turnId).toBe(TURN_ID);
+    expect(stopBodies[0]?.expectedStateVersion).toBe(0);
+  });
+
+  it("serializes a follow-up send behind the in-flight stop", async () => {
+    // The stop fence must commit upstream before the next :stream goes out;
+    // otherwise the follow-up can arrive first and fail with
+    // ACTIVE_TURN_REQUIRES_STEERING. Hold the stop 202 pending and assert
+    // the second send waits for it.
+    const encoder = new TextEncoder();
+    const firstStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            [
+              `data: ${JSON.stringify(OBSERVED_FRAMES[0])}\n\n`,
+              `data: ${JSON.stringify(OBSERVED_FRAMES[1])}\n\n`,
+              `data: ${JSON.stringify(OBSERVED_FRAMES[2])}\n\n`,
+            ].join(""),
+          ),
+        );
+      },
+    });
+    let releaseStop: (() => void) | undefined;
+    let streamCalls = 0;
+    const mock = vi.fn(
+      (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = String(input);
+        if (url === `${ASSISTANT_BASE}/conversations` && init?.method === "POST") {
+          return Promise.resolve(
+            jsonResponse({ status: "accepted", actorId: CONVERSATION_ID }),
+          );
+        }
+        if (url.endsWith("/stop") && init?.method === "POST") {
+          return new Promise<Response>((resolve) => {
+            releaseStop = () =>
+              resolve(jsonResponse({ status: "accepted" }, 202));
+          });
+        }
+        if (url.endsWith("/stream") && init?.method === "POST") {
+          streamCalls += 1;
+          return Promise.resolve(
+            streamCalls === 1
+              ? new Response(firstStream, {
+                  status: 200,
+                  headers: { "Content-Type": "text/event-stream" },
+                })
+              : sseResponse(OBSERVED_FRAMES),
+          );
+        }
+        return Promise.resolve(
+          jsonResponse(
+            { error: "not_found", error_code: -1, message: "404" },
+            404,
+          ),
+        );
+      },
+    );
+    vi.stubGlobal("fetch", mock);
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    await new Promise<void>((resolve) => {
+      const handle = transport.sendMessage(
+        CONVERSATION_ID,
+        "First turn",
+        (event) => {
+          if (event.event === "turn.completed") resolve();
+          if (event.event === "block.delta") handle.cancel();
+        },
+      );
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(releaseStop).toBeDefined();
+    expect(streamCalls).toBe(1);
+
+    // Follow-up send: must NOT reach /stream while the stop is pending.
+    const followUp = new Promise<void>((resolve) => {
+      transport.sendMessage(CONVERSATION_ID, "Second turn", (event) => {
+        if (event.event === "turn.completed") resolve();
+      });
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(streamCalls).toBe(1);
+
+    releaseStop?.();
+    await followUp;
+    expect(streamCalls).toBe(2);
   });
 
   it("keeps the local cancel settled when the server-side stop fails", async () => {
