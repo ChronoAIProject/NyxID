@@ -3230,7 +3230,15 @@ const STREAM_SIZE_THRESHOLD: u64 = 256 * 1024;
 /// Cap on the bounded response copy kept for LLM usage extraction when a
 /// chunked JSON body streams through the passthrough branch. Bodies larger
 /// than this fall back to the byte-based token estimate.
-const USAGE_CAPTURE_MAX_BYTES: usize = 2 * 1024 * 1024;
+///
+/// This buffer is a second copy of the body, retained for the lifetime of the
+/// response and multiplied by in-flight LLM request concurrency, so the cap is
+/// what bounds the handler's worst-case footprint. 512 KiB of JSON is on the
+/// order of 100k output tokens in a single non-streaming completion — past what
+/// providers will return in one response — so real bodies stay under it. Going
+/// over is not a billing regression: the fallback byte estimate is what every
+/// one of these responses used before usage capture existed.
+const USAGE_CAPTURE_MAX_BYTES: usize = 512 * 1024;
 
 /// Content types that should always be streamed regardless of size.
 const STREAMING_CONTENT_TYPES: &[&str] = &[
