@@ -8,6 +8,11 @@ use serde_json::{Value, json};
 use crate::errors::{AppError, AppResult};
 
 const HTTP_TIMEOUT_SECS: u64 = 20;
+/// Lago attaches invoices to wallet transactions asynchronously; the payment
+/// URL endpoint 422s until then. ~2.4s of retries covers a busy worker while
+/// keeping the interactive checkout call responsive.
+const PAYMENT_URL_MAX_ATTEMPTS: u32 = 5;
+const PAYMENT_URL_RETRY_DELAY_MS: u64 = 600;
 
 #[async_trait]
 pub trait LagoApi: Send + Sync {
@@ -415,17 +420,36 @@ impl LagoClient {
         &self,
         wallet_transaction_id: &str,
     ) -> AppResult<WalletTransactionPaymentDetails> {
-        let value = self
-            .json_request(
-                reqwest::Method::POST,
-                &format!(
-                    "wallet_transactions/{}/payment_url",
-                    urlencoding::encode(wallet_transaction_id)
-                ),
-                None,
-            )
-            .await
-            .map_err(lago_error_to_app)?;
+        let path = format!(
+            "wallet_transactions/{}/payment_url",
+            urlencoding::encode(wallet_transaction_id)
+        );
+        let mut attempt = 0;
+        let value = loop {
+            attempt += 1;
+            match self.json_request(reqwest::Method::POST, &path, None).await {
+                Ok(value) => break value,
+                // Lago attaches the invoice to a wallet transaction
+                // asynchronously: immediately after creation, the payment
+                // URL endpoint rejects with this code until Lago's worker
+                // catches up. Retry briefly before surfacing the error.
+                Err(error)
+                    if attempt < PAYMENT_URL_MAX_ATTEMPTS
+                        && error.status == Some(StatusCode::UNPROCESSABLE_ENTITY)
+                        && error
+                            .message
+                            .contains("wallet_transaction_has_no_attached_invoice") =>
+                {
+                    tracing::debug!(
+                        wallet_transaction_id,
+                        attempt,
+                        "Lago invoice not attached yet; retrying payment URL"
+                    );
+                    tokio::time::sleep(Duration::from_millis(PAYMENT_URL_RETRY_DELAY_MS)).await;
+                }
+                Err(error) => return Err(lago_error_to_app(error)),
+            }
+        };
         extract_wallet_transaction_payment_details(&value).ok_or_else(|| {
             AppError::BillingProviderUnavailable(
                 "Lago wallet transaction payment URL response did not include a payment URL"
@@ -1000,6 +1024,91 @@ mod tests {
             ),
             LagoErrorKind::Duplicate
         );
+    }
+
+    #[tokio::test]
+    async fn payment_url_retries_until_lago_attaches_the_invoice() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let handler_calls = calls.clone();
+        let base_url = spawn_lago_mock(axum::Router::new().route(
+            "/api/v1/wallet_transactions/txn-race/payment_url",
+            axum::routing::post(move || {
+                let calls = handler_calls.clone();
+                async move {
+                    if calls.fetch_add(1, AtomicOrdering::SeqCst) < 2 {
+                        (
+                            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                            axum::Json(json!({
+                                "status": 422,
+                                "error": "Unprocessable Entity",
+                                "code": "validation_errors",
+                                "error_details": {
+                                    "base": ["wallet_transaction_has_no_attached_invoice"]
+                                }
+                            })),
+                        )
+                    } else {
+                        (
+                            axum::http::StatusCode::OK,
+                            axum::Json(json!({
+                                "wallet_transaction_payment_details": {
+                                    "payment_url": "https://pay.example/ready",
+                                    "payment_provider": "stripe"
+                                }
+                            })),
+                        )
+                    }
+                }
+            }),
+        ))
+        .await;
+        let client = LagoClient::new(base_url, "test-key".to_string()).expect("client");
+
+        let details = client
+            .generate_wallet_transaction_payment_url("txn-race")
+            .await
+            .expect("payment url after retries");
+
+        assert_eq!(details.payment_url, "https://pay.example/ready");
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn payment_url_does_not_retry_other_validation_errors() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let handler_calls = calls.clone();
+        let base_url = spawn_lago_mock(axum::Router::new().route(
+            "/api/v1/wallet_transactions/txn-bad/payment_url",
+            axum::routing::post(move || {
+                let calls = handler_calls.clone();
+                async move {
+                    calls.fetch_add(1, AtomicOrdering::SeqCst);
+                    (
+                        axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                        axum::Json(json!({
+                            "status": 422,
+                            "error": "Unprocessable Entity",
+                            "code": "validation_errors",
+                            "error_details": { "base": ["no_linked_payment_provider"] }
+                        })),
+                    )
+                }
+            }),
+        ))
+        .await;
+        let client = LagoClient::new(base_url, "test-key".to_string()).expect("client");
+
+        let error = client
+            .generate_wallet_transaction_payment_url("txn-bad")
+            .await
+            .expect_err("non-race validation errors fail fast");
+
+        assert!(error.to_string().contains("no_linked_payment_provider"));
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
     }
 
     #[test]
