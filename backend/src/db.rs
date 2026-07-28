@@ -259,6 +259,16 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .build(),
         )
         .await?;
+    // Non-partial slug lookup for read paths that must also see inactive
+    // services (e.g. admin audit-log enrichment); the partial unique index
+    // above only covers `is_active: true` rows and cannot serve those queries.
+    services
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "slug": 1, "is_active": 1 })
+                .build(),
+        )
+        .await?;
     services
         .create_index(
             IndexModel::builder()
