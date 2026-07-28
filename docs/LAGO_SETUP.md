@@ -57,11 +57,30 @@ Customers created by NyxID are linked to the Stripe connection only when
 `LAGO_PAYMENT_PROVIDER_CODE` is set at creation time. Customers provisioned
 before that must be linked manually (Lago UI: customer -> payment provider).
 
-## 3. Rate cache (required, manual for now)
+## 3. Rate cache (automatic)
 
 The reservation gate sizes credit holds from the `billing_rate_cache`
-MongoDB collection. The sweep that should mirror Lago's plan charges is not
-implemented, so rows must be seeded manually and kept "fresh" by a long TTL:
+MongoDB collection. The reconcile sweep mirrors the plan's **standard**
+charges into it every cycle (`BILLING_RECONCILE_INTERVAL_SECS`, default
+300s) and once immediately at startup, so no manual seeding is needed and
+the default `BILLING_RATE_CACHE_TTL_SECS` of 900s works as intended.
+Details of the refresh:
+
+- Only `standard` charge model prices are mirrored; other models are
+  skipped with a warning (they cannot map to a single per-unit rate).
+- Platform metrics the plan does not price refresh to `0`: unpriced in
+  Lago means free, so the gate stays open without reserving credits.
+- A failed or empty plan fetch leaves existing rows untouched; the TTL
+  remains the backstop against sizing reservations on stale prices.
+- 1 credit = 1 USD (wallets are created with `rate_amount: "1"`), so a
+  charge amount of `0.000005` becomes `credits_per_unit_micros: 5`.
+
+Lago stays the pricing authority: the cache only sizes holds and the
+overdraft cap; invoices always bill at Lago's current prices. Changing a
+charge price in Lago propagates to the cache within one sweep cycle.
+
+If the sweep is disabled (`BILLING_RECONCILE_INTERVAL_SECS=0`), fall back
+to seeding rows manually and setting `BILLING_RATE_CACHE_TTL_SECS` high:
 
 ```javascript
 db.billing_rate_cache.insertOne({
@@ -71,14 +90,6 @@ db.billing_rate_cache.insertOne({
   synced_at: new Date(),
 })
 ```
-
-Seed one row per metric you price (unpriced metrics can use `0`, which
-reserves nothing but keeps the gate open). Set
-`BILLING_RATE_CACHE_TTL_SECS` high (e.g. `31536000`); with the default 900s
-the rows go stale in 15 minutes and billable requests are rejected with
-"billing rate cache is stale". Keep `credits_per_unit_micros` in sync with
-the Lago charge price manually. 1 credit = 1 USD (wallets are created with
-`rate_amount: "1"`).
 
 ## 4. What gets charged
 
@@ -125,7 +136,7 @@ Services page -> Edit -> Billing, or `PUT /api/v1/services/{id}` with
 | Top-up fails `no_linked_payment_provider` | Customer not linked to the Stripe connection (section 2.4) |
 | Events visible in Lago but usage aggregates to zero | Events pushed without `external_subscription_id`; fixed in reconcile — update NyxID |
 | Balance never changes | See section 5; also confirm the Lago `clock` scheduler and a worker consuming the `clock` queue are running |
-| Billable requests rejected with stale/missing rate | `billing_rate_cache` row missing or older than `BILLING_RATE_CACHE_TTL_SECS` (section 3) |
+| Billable requests rejected with stale/missing rate | Reconcile sweep not running (`BILLING_RECONCILE_INTERVAL_SECS=0`) or plan fetch failing; see section 3 |
 
 Lago error bodies (`error_details`) are surfaced in NyxID's
 `Billing provider unavailable` messages, so backend logs identify the
