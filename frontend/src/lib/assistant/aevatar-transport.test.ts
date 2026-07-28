@@ -1294,6 +1294,53 @@ describe("AevatarAssistantTransport", () => {
     }
   });
 
+  it("normalizes numeric index timestamps so multi-row lists sort and sends work", async () => {
+    // Live-stack repro: the chat-history index carries epoch-ms NUMBERS;
+    // with 2+ conversations the sidebar sort called localeCompare on a
+    // number and every send died with "Message not sent". (A one-row list
+    // never invokes the comparator, which is why single-conversation
+    // smoke tests missed it.)
+    stubFetch(
+      routeCreate,
+      (url, init) =>
+        url === `${ASSISTANT_BASE}/conversations` &&
+        (init?.method ?? "GET") === "GET"
+          ? jsonResponse({
+              conversations: [
+                {
+                  id: "conv-old",
+                  title: "Older chat",
+                  createdAt: 1784192889074,
+                  updatedAt: 1784192899074,
+                  messageCount: 2,
+                },
+                {
+                  id: "conv-new",
+                  title: "Newer chat",
+                  createdAt: 1784192989074,
+                  updatedAt: 1784192999074,
+                  messageCount: 4,
+                },
+              ],
+            })
+          : undefined,
+      routeStream(OBSERVED_FRAMES),
+    );
+    const transport = new AevatarAssistantTransport();
+
+    const list = await transport.listConversations();
+    expect(list.map((c) => c.id)).toEqual(["conv-new", "conv-old"]);
+    for (const conversation of list) {
+      expect(typeof conversation.last_message_at).toBe("string");
+      expect(typeof conversation.created_at).toBe("string");
+    }
+
+    // A send with multiple rows in the mirror must still complete.
+    await transport.createConversation();
+    const events = await collectTurn(transport, "Does sending still work?");
+    expect(events[events.length - 1]?.event).toBe("turn.completed");
+  });
+
   it("coalesces concurrent deletes onto one in-flight operation", async () => {
     // Regression (codex round 6): a Set-style reservation let an
     // overlapping delete clear the flag while the other DELETE was still

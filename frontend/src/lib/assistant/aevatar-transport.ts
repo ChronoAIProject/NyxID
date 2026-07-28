@@ -237,11 +237,31 @@ interface RoleChatCompletion {
 interface AevatarHistoryIndexEntry {
   readonly id?: string;
   readonly title?: string;
-  readonly createdAt?: string;
-  readonly updatedAt?: string;
+  /** Observed as both ISO strings and epoch-ms numbers upstream. */
+  readonly createdAt?: string | number;
+  readonly updatedAt?: string | number;
   readonly messageCount?: number;
   readonly llmRoute?: string | null;
   readonly llmModel?: string | null;
+}
+
+/**
+ * Normalize an index timestamp to an ISO string. The chat-history index
+ * has been observed sending epoch-ms numbers (message timestamps in the
+ * same API are epoch ms too); a number leaking into
+ * `Conversation.last_message_at` crashes the sidebar sort's
+ * `localeCompare` — which only fires once the list has 2+ rows, so a
+ * single-conversation smoke test never sees it.
+ */
+function indexTimestampToIso(
+  value: string | number | undefined,
+  fallback: string,
+): string {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return new Date(value).toISOString();
+  }
+  if (typeof value === "string" && value) return value;
+  return fallback;
 }
 
 interface AevatarConversationListResponse {
@@ -798,7 +818,12 @@ export class AevatarAssistantTransport implements AssistantTransport {
     }
     return [...this.conversations.values()]
       .map((stored) => stored.conversation)
-      .sort((a, b) => b.last_message_at.localeCompare(a.last_message_at));
+      .sort((a, b) =>
+        // Timestamps are normalized to ISO strings at the index boundary;
+        // String() keeps a stray non-string from crashing the whole list
+        // (ISO strings order identically either way).
+        String(b.last_message_at).localeCompare(String(a.last_message_at)),
+      );
   }
 
   async createConversation(): Promise<Conversation> {
@@ -1211,13 +1236,14 @@ export class AevatarAssistantTransport implements AssistantTransport {
       return;
     }
     const epoch0 = new Date(0).toISOString();
-    const createdAt =
-      entry.createdAt ?? existing?.conversation.created_at ?? epoch0;
-    const lastMessageAt =
-      entry.updatedAt ??
-      entry.createdAt ??
-      existing?.conversation.last_message_at ??
-      createdAt;
+    const createdAt = indexTimestampToIso(
+      entry.createdAt,
+      existing?.conversation.created_at ?? epoch0,
+    );
+    const lastMessageAt = indexTimestampToIso(
+      entry.updatedAt ?? entry.createdAt,
+      existing?.conversation.last_message_at ?? createdAt,
+    );
     const title =
       entry.title?.trim() || existing?.conversation.title || "Conversation";
     const conversation: Conversation = {
