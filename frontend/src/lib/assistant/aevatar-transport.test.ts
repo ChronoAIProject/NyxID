@@ -870,6 +870,82 @@ describe("AevatarAssistantTransport", () => {
     expect(streamCalls).toBe(2);
   });
 
+  it("holds the pre-start fence beyond two seconds (full pre-start window)", async () => {
+    // Regression (codex round 3): an outer 2s race on awaitPendingStop
+    // abandoned the fence before the 5s pre-start window elapsed, letting
+    // a follow-up overtake a RUN_STARTED that arrived between seconds 2
+    // and 5. The fence must hold for the placeholder's full lifetime.
+    let streamController:
+      | ReadableStreamDefaultController<Uint8Array>
+      | undefined;
+    const lateStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        streamController = controller;
+      },
+    });
+    let stopCalls = 0;
+    let streamCalls = 0;
+    const mock = vi.fn(
+      (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = String(input);
+        if (url === `${ASSISTANT_BASE}/conversations` && init?.method === "POST") {
+          return Promise.resolve(
+            jsonResponse({ status: "accepted", actorId: CONVERSATION_ID }),
+          );
+        }
+        if (url.endsWith("/stop") && init?.method === "POST") {
+          stopCalls += 1;
+          return Promise.resolve(jsonResponse({ status: "accepted" }, 202));
+        }
+        if (url.endsWith("/stream") && init?.method === "POST") {
+          streamCalls += 1;
+          return Promise.resolve(
+            streamCalls === 1
+              ? new Response(lateStream, {
+                  status: 200,
+                  headers: { "Content-Type": "text/event-stream" },
+                })
+              : sseResponse(OBSERVED_FRAMES),
+          );
+        }
+        return Promise.resolve(
+          jsonResponse(
+            { error: "not_found", error_code: -1, message: "404" },
+            404,
+          ),
+        );
+      },
+    );
+    vi.stubGlobal("fetch", mock);
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    const handle = transport.sendMessage(CONVERSATION_ID, "First", () => {});
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    handle.cancel(); // pre-start cancel installs the fence
+
+    const followUp = new Promise<void>((resolve) => {
+      transport.sendMessage(CONVERSATION_ID, "Second", (event) => {
+        if (event.event === "turn.completed") resolve();
+      });
+    });
+    // Past the old 2s cliff: the fence must still be holding.
+    await new Promise((resolve) => setTimeout(resolve, 2_300));
+    expect(streamCalls).toBe(1);
+
+    // RUN_STARTED at ~2.4s (inside the 5s window): stop fires, fence
+    // lifts, follow-up proceeds.
+    if (!streamController) throw new Error("stream never started");
+    streamController.enqueue(
+      new TextEncoder().encode(
+        `data: ${JSON.stringify(OBSERVED_FRAMES[0])}\n\n`,
+      ),
+    );
+    await followUp;
+    expect(stopCalls).toBe(1);
+    expect(streamCalls).toBe(2);
+  }, 15_000);
+
   it("serializes a follow-up send behind the in-flight stop", async () => {
     // The stop fence must commit upstream before the next :stream goes out;
     // otherwise the follow-up can arrive first and fail with

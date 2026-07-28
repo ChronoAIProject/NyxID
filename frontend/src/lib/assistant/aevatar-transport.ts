@@ -81,12 +81,6 @@ const MAX_MESSAGE_CHARS = 32_768;
 // have no deadline the client can impose.
 const STREAM_PROGRESS_TIMEOUT_MS = 120_000;
 
-// How long a follow-up send or delete waits on an in-flight `:stop` before
-// proceeding anyway. Serializing behind the stop keeps a fast follow-up from
-// racing the fence upstream (HTTP request ordering is not guaranteed across
-// connections); the bound keeps a hung stop from wedging the composer.
-const STOP_FENCE_WAIT_MS = 2_000;
-
 // How long a pre-RUN_STARTED cancel keeps the reader alive waiting for the
 // frame that names the server turn. Without it the abort would discard the
 // only chance to learn the turnId, leaving the upstream run uncancellable.
@@ -746,9 +740,11 @@ export class AevatarAssistantTransport implements AssistantTransport {
   private readonly conversations = new Map<string, StoredConversation>();
   private readonly running = new Map<string, RunningTurn>();
   /**
-   * In-flight `:stop` per conversation. Follow-up sends and the composite
-   * delete serialize behind it (bounded by STOP_FENCE_WAIT_MS) so a fast
-   * next action cannot reach Aevatar before the stop fence commits.
+   * In-flight `:stop` fence per conversation. Follow-up sends and the
+   * composite delete serialize behind it so a fast next action cannot
+   * reach Aevatar before the stop fence commits. Every entry is
+   * self-bounded (stop deadline / pre-start window), so waiters await it
+   * directly.
    */
   private readonly pendingStops = new Map<string, Promise<void>>();
   /**
@@ -1486,6 +1482,10 @@ export class AevatarAssistantTransport implements AssistantTransport {
       // A hung run holds the conversation actor: without a server-side stop
       // the next send fails with ACTIVE_TURN_REQUIRES_STEERING until the
       // run reaches its own terminal. Best-effort, like user cancel.
+      // Pre-RUN_STARTED this is a no-op BY DESIGN: after a full watchdog
+      // period of silence there is no addressable turn identity, and no
+      // announcing frame is coming — unlike a user cancel, which defers
+      // its abort for a bounded window because the frame may be in flight.
       this.requestServerStop(conversationId, run);
       this.closeOpenMessage(conversationId, run);
       this.finalizeActivity(conversationId, run, "failed");
@@ -2719,18 +2719,21 @@ export class AevatarAssistantTransport implements AssistantTransport {
   }
 
   /**
-   * Wait (bounded) for this conversation's in-flight `:stop` to be
-   * accepted upstream before the next send or delete goes out. Without
-   * this, a fast follow-up can reach Aevatar ahead of the stop — request
-   * ordering across HTTP connections is not guaranteed — and fail with
-   * ACTIVE_TURN_REQUIRES_STEERING.
+   * Wait for this conversation's in-flight `:stop` fence before the next
+   * send or delete goes out. Without this, a fast follow-up can reach
+   * Aevatar ahead of the stop — request ordering across HTTP connections
+   * is not guaranteed — and fail with ACTIVE_TURN_REQUIRES_STEERING.
+   *
+   * Awaited DIRECTLY, no outer race: every tracked promise is
+   * self-bounded — a real stop by its STOP_REQUEST_DEADLINE_MS abort, a
+   * pre-start placeholder by the PRE_START_STOP_WINDOW_MS expiry (plus,
+   * when RUN_STARTED lands late in the window, the chained stop's own
+   * deadline). An outer bound shorter than the placeholder lifetime would
+   * reopen the exact overtake the fence exists to prevent.
    */
   private async awaitPendingStop(conversationId: string): Promise<void> {
     const pending = this.pendingStops.get(conversationId);
     if (!pending) return;
-    await Promise.race([
-      pending,
-      new Promise<void>((resolve) => setTimeout(resolve, STOP_FENCE_WAIT_MS)),
-    ]);
+    await pending;
   }
 }

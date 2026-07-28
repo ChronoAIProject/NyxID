@@ -166,14 +166,23 @@ ignored upstream) and the missing stop control. This cut adds the stop:
   (`pauseForApproval`) deliberately does **not** stop: the server turn is
   waiting for the decision. Two codex (gpt-5.6-sol) P1s hardened the
   timing: (a) follow-up sends and the composite delete serialize behind
-  the in-flight stop (bounded `STOP_FENCE_WAIT_MS`) so they cannot reach
-  Aevatar before the fence commits; (b) a cancel that lands before
-  `RUN_STARTED` defers its abort (bounded `PRE_START_STOP_WINDOW_MS`) so
-  the announcing frame can still deliver the `turnId` the stop needs.
+  the in-flight stop fence so they cannot reach Aevatar before the fence
+  commits — awaited directly, since every fence entry is self-bounded
+  (the stop request carries `STOP_REQUEST_DEADLINE_MS`, the pre-start
+  placeholder expires with `PRE_START_STOP_WINDOW_MS`); (b) a cancel that
+  lands before `RUN_STARTED` installs that placeholder synchronously and
+  defers its abort so the announcing frame can still deliver the `turnId`
+  the stop needs. The 120s watchdog's pre-`RUN_STARTED` abort stays
+  client-only by design: after that much silence there is no addressable
+  turn identity, and no announcing frame is coming.
 - **Backend (cut 6b):** the remaining conversation-control surfaces are now
   pass-throughs too — `:steer`, `GET …/state` (cursors ride the forwarded
-  query string), and per-step `:retry`/`:skip` (turn/step path segments
-  validated with the conversation-id grammar). No UI consumers yet: steering
+  query string), and per-step `:retry`/`:skip`. Turn/step path segments
+  follow the upstream control-identity grammar (≤128 UTF-16 code units, no
+  whitespace/control chars, none of `/ \ ? #`) and are percent-encoded on
+  interpolation; `%` and dot-only segments are documented NyxID narrowings
+  (fail closed here instead of deeper in the proxy's repeat-decode
+  hardening). No UI consumers yet: steering
   and step controls need task-frame rendering (the FE currently ignores
   `nyxid.task.*` CUSTOM frames), and reconnect-via-state is a follow-up.
 - **Known remaining `feature/integrate` gaps (deliberate, recorded):**

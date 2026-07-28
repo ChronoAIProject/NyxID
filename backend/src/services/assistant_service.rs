@@ -152,17 +152,26 @@ pub fn state_path(user_id: &str, conversation_id: &str) -> AppResult<String> {
 }
 
 /// Turn/step ids follow the upstream control-identity grammar
-/// (`TryValidateControlIdentity`): at most 128 chars, no whitespace or
-/// control characters, and none of `/ \ ? #`. Anything else the server may
-/// legitimately issue (`turn.v2`, `step:3`, …) must round-trip, so accepted
+/// (`TryValidateControlIdentity`): at most 128 UTF-16 code units (the C#
+/// `string.Length` the upstream counts — NOT bytes, so 65 `é`s pass), no
+/// whitespace or control characters, and none of `/ \ ? #`. Accepted
 /// segments are percent-encoded before interpolation — an unencoded `:`
 /// inside a step id would collide with the `:retry`/`:skip` suffix parse.
+///
+/// Two documented NyxID narrowings of the upstream grammar, both
+/// fail-closed here rather than deeper with a less precise error:
+/// - `%` is rejected: the proxy's path hardening repeat-decodes nested
+///   escapes, so a literal `%2F`-shaped id would be 400'd downstream even
+///   double-encoded.
+/// - dot-only segments (`.`, `..`) are rejected: they form
+///   traversal-shaped path segments if any later layer normalizes.
 fn encode_control_segment(segment: &str) -> AppResult<String> {
     let valid = !segment.is_empty()
-        && segment.len() <= 128
-        && segment
-            .chars()
-            .all(|c| !c.is_whitespace() && !c.is_control() && !matches!(c, '/' | '\\' | '?' | '#'));
+        && segment.encode_utf16().count() <= 128
+        && segment.chars().all(|c| {
+            !c.is_whitespace() && !c.is_control() && !matches!(c, '/' | '\\' | '?' | '#' | '%')
+        })
+        && !segment.chars().all(|c| c == '.');
     if !valid {
         return Err(AppError::BadRequest("Invalid turn or step id.".to_string()));
     }
@@ -326,14 +335,10 @@ mod tests {
                 "api/scopes/{USER}/nyxid-chat/conversations/{CONV}/turns/turn.v2/steps/step%3A3:retry"
             )
         );
-        // A literal `%` also round-trips (doubly-encoded), so a caller
-        // cannot smuggle traversal via pre-encoded sequences.
-        assert_eq!(
-            skip_path(USER, CONV, "turn-1", "%2e%2e").unwrap(),
-            format!(
-                "api/scopes/{USER}/nyxid-chat/conversations/{CONV}/turns/turn-1/steps/%252e%252e:skip"
-            )
-        );
+        // Non-ASCII identities count UTF-16 code units like the upstream
+        // C# validator: 65 `é`s are 65 units (130 UTF-8 bytes) and pass.
+        let accented = "é".repeat(65);
+        assert!(retry_path(USER, CONV, &accented, "step_a").is_ok());
     }
 
     #[test]
@@ -341,6 +346,9 @@ mod tests {
         // The control-identity grammar forbids whitespace, control chars,
         // and `/ \ ? #` (upstream `TryValidateControlIdentity`); everything
         // else is accepted and percent-encoded.
+        // `%` and dot-only segments are documented NyxID narrowings of the
+        // upstream grammar: nested escapes would be 400'd by the proxy's
+        // repeat-decode hardening, and `.`/`..` are traversal-shaped.
         for bad in [
             "",
             "abc/def",
@@ -350,6 +358,10 @@ mod tests {
             "abc def",
             "tab\there",
             "\u{7}bell",
+            "%2e%2e",
+            "a%2Fb",
+            ".",
+            "..",
         ] {
             assert!(
                 retry_path(USER, CONV, bad, "step_a").is_err(),
