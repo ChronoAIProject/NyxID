@@ -765,14 +765,15 @@ export class AevatarAssistantTransport implements AssistantTransport {
    */
   private readonly deletedConversationIds = new Set<string>();
   /**
-   * Deletion-in-progress reservation: set before the delete's cancel and
-   * fence wait, cleared when the delete settles (the tombstone takes over
-   * on success). Sends and approvals are rejected while present —
-   * otherwise a successor turn admitted during the fence wait can
-   * dispatch its stream before the DELETE and recreate the actor the
-   * user asked to remove.
+   * Deletion-in-progress reservation: the one in-flight delete operation
+   * per conversation, installed before the delete's cancel and fence wait
+   * and cleared when it settles (the tombstone takes over on success).
+   * Sends and approvals are rejected while present — otherwise a
+   * successor turn admitted during the fence wait can dispatch its stream
+   * before the DELETE and recreate the actor the user asked to remove.
+   * Concurrent deletes coalesce onto the stored promise.
    */
-  private readonly deletingConversationIds = new Set<string>();
+  private readonly deletingConversations = new Map<string, Promise<void>>();
   private listFetchedAt = 0;
 
   async listConversations(): Promise<Conversation[]> {
@@ -829,8 +830,12 @@ export class AevatarAssistantTransport implements AssistantTransport {
     // the terminal synchronously, so without the reservation a successor
     // send admitted during the fence wait could dispatch its stream before
     // the DELETE and recreate the actor the user asked to remove.
-    this.deletingConversationIds.add(conversationId);
-    try {
+    // Concurrent deletes COALESCE onto the one in-flight operation — a
+    // flag-style reservation is not ownership-safe (an overlapping call's
+    // failure would clear it while the other DELETE is still in flight).
+    const inFlight = this.deletingConversations.get(conversationId);
+    if (inFlight) return inFlight;
+    const operation = (async () => {
       const run = this.running.get(conversationId);
       if (run) this.cancelTurn(conversationId, run);
       // The cancel above may have fired a `:stop`; let its fence commit
@@ -843,10 +848,15 @@ export class AevatarAssistantTransport implements AssistantTransport {
       // the conversation listed and retryable.
       this.conversations.delete(conversationId);
       this.deletedConversationIds.add(conversationId);
+    })();
+    this.deletingConversations.set(conversationId, operation);
+    try {
+      await operation;
     } finally {
       // On success the tombstone takes over; on failure the conversation
-      // becomes usable (and retryable) again.
-      this.deletingConversationIds.delete(conversationId);
+      // becomes usable (and retryable) again. Only this owner clears the
+      // reservation — coalesced callers returned the shared promise above.
+      this.deletingConversations.delete(conversationId);
     }
   }
 
@@ -907,7 +917,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     if (!stored) {
       throw new Error("Conversation was not found.");
     }
-    if (this.deletingConversationIds.has(conversationId)) {
+    if (this.deletingConversations.has(conversationId)) {
       throw new Error("This conversation is being deleted.");
     }
     if (
@@ -990,7 +1000,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     approved: boolean,
     onEvent?: (event: TurnEvent) => void,
   ): Promise<TurnHandle | null> {
-    if (this.deletingConversationIds.has(conversationId)) {
+    if (this.deletingConversations.has(conversationId)) {
       throw new Error("This conversation is being deleted.");
     }
     const stored = this.conversations.get(conversationId);

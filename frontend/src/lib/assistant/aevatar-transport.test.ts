@@ -1129,6 +1129,56 @@ describe("AevatarAssistantTransport", () => {
     ).toThrow("Conversation was not found.");
   });
 
+  it("coalesces concurrent deletes onto one in-flight operation", async () => {
+    // Regression (codex round 6): a Set-style reservation let an
+    // overlapping delete clear the flag while the other DELETE was still
+    // in flight, re-admitting sends. Concurrent deletes must share one
+    // operation — one DELETE on the wire, both callers settle together.
+    let releaseDelete: (() => void) | undefined;
+    let deleteCalls = 0;
+    const mock = vi.fn(
+      (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = String(input);
+        if (url === `${ASSISTANT_BASE}/conversations` && init?.method === "POST") {
+          return Promise.resolve(
+            jsonResponse({ status: "accepted", actorId: CONVERSATION_ID }),
+          );
+        }
+        if (init?.method === "DELETE") {
+          deleteCalls += 1;
+          return new Promise<Response>((resolve) => {
+            releaseDelete = () => resolve(jsonResponse({}));
+          });
+        }
+        return Promise.resolve(
+          jsonResponse(
+            { error: "not_found", error_code: -1, message: "404" },
+            404,
+          ),
+        );
+      },
+    );
+    vi.stubGlobal("fetch", mock);
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    const first = transport.deleteConversation(CONVERSATION_ID);
+    const second = transport.deleteConversation(CONVERSATION_ID);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(deleteCalls).toBe(1);
+    // While the shared delete is in flight, sends stay rejected.
+    expect(() =>
+      transport.sendMessage(CONVERSATION_ID, "Sneaky send", () => {}),
+    ).toThrow("This conversation is being deleted.");
+
+    releaseDelete?.();
+    await Promise.all([first, second]);
+    expect(deleteCalls).toBe(1);
+    expect(() =>
+      transport.sendMessage(CONVERSATION_ID, "After delete", () => {}),
+    ).toThrow("Conversation was not found.");
+  });
+
   it("holds an approval decision behind the in-flight stop fence", async () => {
     // Regression (codex round 5): decideApproval dispatched /approve
     // without awaiting the conversation's pending stop, so the approval
