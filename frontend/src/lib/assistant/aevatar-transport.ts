@@ -764,6 +764,15 @@ export class AevatarAssistantTransport implements AssistantTransport {
    * retire and resurrects the conversation.
    */
   private readonly deletedConversationIds = new Set<string>();
+  /**
+   * Deletion-in-progress reservation: set before the delete's cancel and
+   * fence wait, cleared when the delete settles (the tombstone takes over
+   * on success). Sends and approvals are rejected while present —
+   * otherwise a successor turn admitted during the fence wait can
+   * dispatch its stream before the DELETE and recreate the actor the
+   * user asked to remove.
+   */
+  private readonly deletingConversationIds = new Set<string>();
   private listFetchedAt = 0;
 
   async listConversations(): Promise<Conversation[]> {
@@ -815,18 +824,30 @@ export class AevatarAssistantTransport implements AssistantTransport {
     // reference client's abort-then-delete order. The server side is the
     // #1199 composite delete (actor + history row, 404-tolerant), so one
     // call retires both upstream surfaces.
-    const run = this.running.get(conversationId);
-    if (run) this.cancelTurn(conversationId, run);
-    // The cancel above may have fired a `:stop`; let its fence commit before
-    // the actor delete races the still-active work upstream.
-    await this.awaitPendingStop(conversationId);
-    await assistantApi.del(
-      `${ASSISTANT_PREFIX}/conversations/${conversationId}`,
-    );
-    // Local removal only after the server accepted: a failed delete keeps
-    // the conversation listed and retryable.
-    this.conversations.delete(conversationId);
-    this.deletedConversationIds.add(conversationId);
+    //
+    // Reserve the conversation for the whole delete: the cancel below emits
+    // the terminal synchronously, so without the reservation a successor
+    // send admitted during the fence wait could dispatch its stream before
+    // the DELETE and recreate the actor the user asked to remove.
+    this.deletingConversationIds.add(conversationId);
+    try {
+      const run = this.running.get(conversationId);
+      if (run) this.cancelTurn(conversationId, run);
+      // The cancel above may have fired a `:stop`; let its fence commit
+      // before the actor delete races the still-active work upstream.
+      await this.awaitPendingStop(conversationId);
+      await assistantApi.del(
+        `${ASSISTANT_PREFIX}/conversations/${conversationId}`,
+      );
+      // Local removal only after the server accepted: a failed delete keeps
+      // the conversation listed and retryable.
+      this.conversations.delete(conversationId);
+      this.deletedConversationIds.add(conversationId);
+    } finally {
+      // On success the tombstone takes over; on failure the conversation
+      // becomes usable (and retryable) again.
+      this.deletingConversationIds.delete(conversationId);
+    }
   }
 
   async getHistory(conversationId: string): Promise<ConversationHistory> {
@@ -885,6 +906,9 @@ export class AevatarAssistantTransport implements AssistantTransport {
     const stored = this.conversations.get(conversationId);
     if (!stored) {
       throw new Error("Conversation was not found.");
+    }
+    if (this.deletingConversationIds.has(conversationId)) {
+      throw new Error("This conversation is being deleted.");
     }
     if (
       this.running.has(conversationId) ||
@@ -966,6 +990,9 @@ export class AevatarAssistantTransport implements AssistantTransport {
     approved: boolean,
     onEvent?: (event: TurnEvent) => void,
   ): Promise<TurnHandle | null> {
+    if (this.deletingConversationIds.has(conversationId)) {
+      throw new Error("This conversation is being deleted.");
+    }
     const stored = this.conversations.get(conversationId);
     const card = stored?.turnState.messages
       .flatMap((message) => message.blocks)
@@ -1004,6 +1031,16 @@ export class AevatarAssistantTransport implements AssistantTransport {
     // (Read lastCursor only after pauseForApproval settled the prior turn.)
     run.cursor = stored.turnState.lastCursor;
     this.running.set(conversationId, run);
+
+    // Reservation first, THEN the fence: the approve must not overtake a
+    // prior turn's still-pending stop upstream, and the reservation keeps
+    // concurrent sends out while this waits. A cancel landing during the
+    // wait settles the run before anything was dispatched — bail with no
+    // continuation rather than posting a decision for a cancelled flow.
+    await this.awaitPendingStop(conversationId);
+    if (run.finished || run.controller.signal.aborted) {
+      return null;
+    }
 
     let response: Response;
     try {
@@ -1594,24 +1631,22 @@ export class AevatarAssistantTransport implements AssistantTransport {
           run.stopPendingStart = false;
           const releaseFence = run.resolvePreStartFence;
           run.resolvePreStartFence = undefined;
-          let stopInstalled = false;
+          let stop: Promise<void> | null = null;
           try {
-            this.requestServerStop(conversationId, run);
-            stopInstalled = true;
+            stop = this.requestServerStop(conversationId, run);
           } finally {
             if (releaseFence) {
-              if (stopInstalled) {
-                // The placeholder lifts only once the real stop settles, so
-                // a waiter serialized on it cannot overtake the fence
-                // commit.
-                void (
-                  this.pendingStops.get(conversationId) ?? Promise.resolve()
-                ).then(releaseFence);
+              if (stop) {
+                // The placeholder lifts only once the real stop settles
+                // (chained on the RAW stop, never the composed map entry —
+                // the entry contains the placeholder itself and chaining
+                // onto it would deadlock), so a waiter serialized on the
+                // fence cannot overtake the fence commit.
+                void stop.then(releaseFence);
               } else {
-                // The stop never launched (synchronous throw): the map may
-                // still hold the placeholder itself — chaining onto it
-                // would deadlock. Retire it outright.
-                this.pendingStops.delete(conversationId);
+                // The stop never launched (synchronous throw): release the
+                // placeholder outright; the composed entry retires itself
+                // once every component has settled.
                 releaseFence();
               }
             }
@@ -2623,17 +2658,17 @@ export class AevatarAssistantTransport implements AssistantTransport {
       // RUN_STARTED names the turn, but a follow-up send or delete must
       // already serialize behind the eventual stop. Lifted when the
       // deferred stop settles, or when the window expires without a turn.
+      // trackFence COMPOSES with any live entry instead of replacing it.
       const fence = new Promise<void>((resolve) => {
         run.resolvePreStartFence = resolve;
       });
-      this.pendingStops.set(conversationId, fence);
+      this.trackFence(conversationId, fence);
       setTimeout(() => {
         if (run.stopPendingStart) {
-          // No RUN_STARTED inside the window: nothing to stop.
+          // No RUN_STARTED inside the window: nothing to stop. Resolve
+          // only — the composed map entry retires itself once every
+          // component has settled.
           run.stopPendingStart = false;
-          if (this.pendingStops.get(conversationId) === fence) {
-            this.pendingStops.delete(conversationId);
-          }
           run.resolvePreStartFence?.();
           run.resolvePreStartFence = undefined;
         }
@@ -2720,8 +2755,11 @@ export class AevatarAssistantTransport implements AssistantTransport {
    * tracked in `pendingStops` so follow-up sends and deletes serialize
    * behind the fence.
    */
-  private requestServerStop(conversationId: string, run: RunningTurn): void {
-    if (!run.turnId) return;
+  private requestServerStop(
+    conversationId: string,
+    run: RunningTurn,
+  ): Promise<void> | null {
+    if (!run.turnId) return null;
     // Own deadline: a server that accepts but never answers must not pin
     // the pendingStops entry (and tax every later send with the full fence
     // wait). A manual controller instead of AbortSignal.timeout so this
@@ -2749,9 +2787,25 @@ export class AevatarAssistantTransport implements AssistantTransport {
       () => clearTimeout(deadlineTimer),
       () => clearTimeout(deadlineTimer),
     );
-    this.pendingStops.set(conversationId, pending);
-    void pending.then(() => {
-      if (this.pendingStops.get(conversationId) === pending) {
+    this.trackFence(conversationId, pending);
+    return pending;
+  }
+
+  /**
+   * Register a fence component for the conversation, COMPOSING with any
+   * live entry rather than replacing it — no control path may drop a
+   * still-pending fence someone else could be relying on. Every component
+   * is self-bounded, so the composition is too; the entry retires itself
+   * once everything it covers has settled.
+   */
+  private trackFence(conversationId: string, component: Promise<void>): void {
+    const prior = this.pendingStops.get(conversationId);
+    const tracked = prior
+      ? Promise.all([prior, component]).then(() => undefined)
+      : component;
+    this.pendingStops.set(conversationId, tracked);
+    void tracked.then(() => {
+      if (this.pendingStops.get(conversationId) === tracked) {
         this.pendingStops.delete(conversationId);
       }
     });
