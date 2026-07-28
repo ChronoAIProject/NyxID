@@ -21,6 +21,7 @@ const {
     pathname: "/assistant",
     search: {} as Record<string, unknown>,
     conversations: [] as Conversation[],
+    historyError: false,
   },
 }));
 
@@ -93,7 +94,8 @@ vi.mock("@/hooks/use-assistant", () => ({
         }
       : undefined,
     isLoading: false,
-    isError: false,
+    isError: state.historyError,
+    error: undefined,
   }),
   useAssistantTurn: () => ({ data: null }),
   useCreateConversation: () => ({
@@ -113,6 +115,7 @@ vi.mock("@/hooks/use-assistant", () => ({
   }),
   useWorkspaceCounts: () => ({ data: { artifacts: 0, pendingApprovals: 0 } }),
   describeSendFailure: () => ({ message: "Message not sent", description: "" }),
+  describeHistoryError: () => "This conversation has no saved transcript yet.",
 }));
 
 vi.mock("sonner", () => ({
@@ -139,13 +142,12 @@ beforeEach(() => {
   state.pathname = "/assistant";
   state.search = {};
   state.conversations = [EXISTING];
+  state.historyError = false;
 });
 
 describe("AssistantPage new chat", () => {
-  it("navigates to the draft thread before the actor is provisioned", async () => {
+  it("navigates to the draft thread", async () => {
     const user = userEvent.setup();
-    // Never resolves: the point is that the UI moves without waiting.
-    mockCreateMutateAsync.mockReturnValue(new Promise(() => {}));
     renderPage();
 
     await user.click(screen.getByRole("button", { name: /New chat/ }));
@@ -155,61 +157,35 @@ describe("AssistantPage new chat", () => {
     );
   });
 
-  it("swaps the draft for the conversation id once the create lands", async () => {
+  it("provisions nothing on click — the click is navigation only", async () => {
+    // An empty conversation has no server-side representation: the
+    // chat-history transcript 404s until a turn materializes a row. Creating
+    // the actor here and swapping to `?c=<id>` is what made every new chat
+    // fail its first history read. Allocation belongs to the first send.
     const user = userEvent.setup();
-    mockCreateMutateAsync.mockResolvedValue({ ...EXISTING, id: "conv-new" });
     renderPage();
 
-    // The optimistic navigation is what puts the app in draft; mirror it,
-    // since the router is stubbed.
-    state.search = { draft: true };
     await user.click(screen.getByRole("button", { name: /New chat/ }));
 
-    await waitFor(() => {
-      expect(mockNavigate).toHaveBeenCalledWith(
-        expect.objectContaining({ search: { c: "conv-new" }, replace: true }),
-      );
-    });
+    expect(mockCreateMutateAsync).not.toHaveBeenCalled();
+    expect(mockNavigate).toHaveBeenCalledTimes(1);
   });
 
-  it("does not yank the user back when they navigated away mid-create", async () => {
+  it("allocates on first send and follows the returned conversation", async () => {
     const user = userEvent.setup();
-    let resolveCreate: (conversation: Conversation) => void = () => {};
-    mockCreateMutateAsync.mockReturnValue(
-      new Promise<Conversation>((resolve) => {
-        resolveCreate = resolve;
-      }),
+    mockSendMutateAsync.mockResolvedValue({ conversationId: "conv-new" });
+    state.search = { draft: true };
+    renderPage();
+
+    await user.type(screen.getByRole("textbox"), "hello");
+    await user.click(screen.getByRole("button", { name: /send/i }));
+
+    await waitFor(() => {
+      expect(mockSendMutateAsync).toHaveBeenCalledWith("hello");
+    });
+    expect(mockNavigate).toHaveBeenCalledWith(
+      expect.objectContaining({ search: { c: "conv-new" } }),
     );
-    renderPage();
-
-    state.search = { draft: true };
-    await user.click(screen.getByRole("button", { name: /New chat/ }));
-    mockNavigate.mockClear();
-
-    // They opened another chat while the actor was still provisioning.
-    state.search = { c: EXISTING.id };
-    resolveCreate({ ...EXISTING, id: "conv-new" });
-
-    await waitFor(() => {
-      expect(mockCreateMutateAsync).toHaveBeenCalled();
-    });
-    expect(mockNavigate).not.toHaveBeenCalled();
-  });
-
-  it("says a failed create out loud instead of stopping silently", async () => {
-    const user = userEvent.setup();
-    mockCreateMutateAsync.mockRejectedValue(new Error("aevatar is down"));
-    renderPage();
-
-    state.search = { draft: true };
-    await user.click(screen.getByRole("button", { name: /New chat/ }));
-
-    await waitFor(() => {
-      expect(mockToastError).toHaveBeenCalledWith(
-        "Could not start a new chat",
-        expect.objectContaining({ description: "aevatar is down" }),
-      );
-    });
   });
 
   it("renders the empty draft thread rather than falling back to the newest chat", () => {
@@ -217,6 +193,21 @@ describe("AssistantPage new chat", () => {
     renderPage();
 
     expect(screen.getByRole("heading", { name: "New chat" })).toBeInTheDocument();
+  });
+
+  it("reports a failed transcript read without taking the chat away", () => {
+    // Replacing the whole thread with an error hid the composer too, so the
+    // chat looked dead even though sending still works — the turn streams
+    // into the conversation actor, a different surface from the transcript.
+    state.historyError = true;
+    state.search = { c: EXISTING.id };
+    renderPage();
+
+    expect(screen.getByRole("status")).toHaveTextContent(
+      /no saved transcript yet/i,
+    );
+    // Still usable: the composer is present and the thread still rendered.
+    expect(screen.getByRole("textbox")).toBeInTheDocument();
   });
 
   it("still falls back to the newest chat when there is no draft", () => {

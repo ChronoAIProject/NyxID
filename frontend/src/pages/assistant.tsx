@@ -1,5 +1,5 @@
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
-import { useNavigate, useRouter, useRouterState } from "@tanstack/react-router";
+import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { toast } from "sonner";
 import { AssistantShell } from "@/components/assistant/assistant-shell";
 import { AssistantSidebar } from "@/components/assistant/assistant-sidebar";
@@ -8,12 +8,12 @@ import { ChatThread } from "@/components/assistant/chat-thread";
 import { ApprovalsView } from "@/components/assistant/approvals-view";
 import { PluginsView } from "@/components/assistant/plugins-view";
 import {
+  describeHistoryError,
   describeSendFailure,
   useAssistantTurn,
   useCancelTurn,
   useConversation,
   useConversations,
-  useCreateConversation,
   useDecideApproval,
   useDeleteConversation,
   useSendMessage,
@@ -27,7 +27,6 @@ export function AssistantPage({
   readonly view?: "chat" | "plugins" | "approvals";
 }) {
   const navigate = useNavigate();
-  const router = useRouter();
   // Two selectors returning primitives rather than one returning an object:
   // a fresh object identity would re-render the page on every router tick.
   const selectedFromSearch = useRouterState({
@@ -73,7 +72,6 @@ export function AssistantPage({
   }, [conversations.data, drafting, selectedFromSearch]);
   const history = useConversation(selectedId);
   const turn = useAssistantTurn(selectedId);
-  const createConversation = useCreateConversation();
   const sendMessage = useSendMessage(selectedId);
   const cancelTurn = useCancelTurn(selectedId);
   const decideApproval = useDecideApproval(selectedId);
@@ -88,43 +86,28 @@ export function AssistantPage({
   }
 
   /**
-   * The click paints the empty thread immediately (`?draft`), then
-   * provisions the actor in the background and swaps in `?c=<id>` once it
-   * lands. Awaiting the create first made the button spin through three
-   * sequential round trips — create, history, list — before anything moved,
-   * and a failure resolved to nothing at all: no navigation, no message,
-   * just a button that stopped spinning.
+   * "New chat" is navigation only — it issues NO requests.
    *
-   * `replace` on the swap keeps Back going where the user came from rather
-   * than to the draft URL of a chat that now exists. The live router read
-   * (not the render-time `drafting`) is deliberate: if they navigated on —
-   * Plugins, another chat, or a send that already claimed this actor — the
-   * late resolve must not yank them back.
+   * An empty conversation has no server-side representation on any upstream
+   * surface: the `chat-history` transcript 404s, the `nyxid-chat` registry
+   * lists ids without titles, and `/state` 404s until the controller commits
+   * something. So there is nothing to fetch and nothing to show that the
+   * client cannot paint itself. Aevatar's own reference client
+   * (`apps/aevatar-console-web`) never calls create either — it allocates the
+   * conversation with the first message.
+   *
+   * Provisioning eagerly here is what broke new chat: the create landed, the
+   * swap to `?c=<id>` re-enabled the history query, and the transcript read
+   * 404'd because no turn had ever materialized a history row. Allocation now
+   * happens lazily on first send via `useSendMessage`'s `createConversationOnce`
+   * single-flight, and `handleSend` navigates to the id it returns — so the
+   * first history read only ever runs against a conversation that has a turn.
    */
-  async function createNewChat() {
+  function createNewChat() {
     void navigate({
       to: "/assistant" as never,
       search: { draft: true } as never,
     });
-    try {
-      const conversation = await createConversation.mutateAsync();
-      const stillDrafting =
-        router.state.location.pathname === "/assistant" &&
-        parseAssistantSearch(
-          router.state.location.search as Record<string, unknown>,
-        ).draft === true;
-      if (stillDrafting) selectConversation(conversation.id, true);
-    } catch (error) {
-      // The draft stays put and the composer's auto-create retries the
-      // provision on first send, so this is a recoverable failure — but an
-      // unsaid one reads as the button being broken.
-      toast.error("Could not start a new chat", {
-        description:
-          error instanceof Error && error.message
-            ? error.message
-            : "The assistant backend did not respond. Send a message to try again.",
-      });
-    }
   }
 
   // Deleting the URL-addressed conversation must also drop `?c=`, or the
@@ -176,7 +159,6 @@ export function AssistantPage({
       conversations={conversations.data ?? []}
       activeConversationId={view === "chat" ? selectedId : undefined}
       activeView={view}
-      creating={createConversation.isPending}
       deletingId={
         deleteConversation.isPending ? deleteConversation.variables : undefined
       }
@@ -197,13 +179,24 @@ export function AssistantPage({
   return (
     <AssistantShell title={title} sidebar={sidebar}>
       <div className="relative flex h-full min-h-0 flex-col bg-background">
+        {/* A failed transcript read is REPORTED, never blocking. It used to
+            replace the whole thread, which also took the composer's context
+            away and made the chat look dead — even though sending still
+            works: the turn streams into the conversation actor, which is a
+            different upstream surface from the chat-history transcript.
+            The notice sits above a still-usable thread and composer. */}
+        {history.isError ? (
+          <div
+            role="status"
+            className="border-b border-border/60 bg-destructive/5 px-6 py-2 text-center text-[12px] text-destructive"
+          >
+            {describeHistoryError(history.error)} You can keep chatting — new
+            messages are unaffected.
+          </div>
+        ) : null}
         {history.isLoading ? (
           <div className="flex flex-1 items-center justify-center text-[12px] text-text-tertiary">
             Loading conversation...
-          </div>
-        ) : history.isError ? (
-          <div className="flex flex-1 items-center justify-center px-6 text-center text-[12px] text-destructive">
-            Failed to load this conversation.
           </div>
         ) : (
           <ChatThread

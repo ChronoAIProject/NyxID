@@ -4135,3 +4135,51 @@ describe("connect markers survive the PR #2923 wrapped transcript", () => {
     ]);
   });
 });
+
+describe("a conversation with no committed turn has no server transcript", () => {
+  // The two upstream halves materialize at different times: `nyxid-chat`
+  // mints the actor at create, while the `chat-history` row is only written
+  // when a turn reaches a terminal. Aevatar's `HandleGetConversation` maps a
+  // missing read-model document to 404 — NOT to an empty array — so a
+  // freshly created conversation 404s here by design. Treating that as a
+  // failure is what made every new chat dead-end on "Failed to load this
+  // conversation" (observed in prod, 2026-07-28).
+  it("serves an empty transcript when the history row does not exist yet", async () => {
+    // Only the create is routed; stubFetch answers everything else 404.
+    stubFetch(routeCreate);
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+
+    const history = await transport.getHistory(conversation.id);
+
+    expect(history.messages).toEqual([]);
+    expect(history.conversation.id).toBe(CONVERSATION_ID);
+  });
+
+  it("still rejects a 404 for a conversation it has never seen", async () => {
+    stubFetch(routeCreate);
+    const transport = new AevatarAssistantTransport();
+
+    await expect(
+      transport.getHistory("nyxid-chat-never-created"),
+    ).rejects.toThrow();
+  });
+
+  it("still rejects a transient failure on a conversation with no local transcript", async () => {
+    // 5xx is a real read failure, not the not-yet-materialized state — it
+    // must not be dressed up as a legitimately empty chat.
+    stubFetch(routeCreate, (url, init) =>
+      url.startsWith(`${ASSISTANT_BASE}/conversations/`) &&
+      (init?.method ?? "GET") === "GET"
+        ? jsonResponse(
+            { error: "internal", error_code: -1, message: "boom" },
+            500,
+          )
+        : undefined,
+    );
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+
+    await expect(transport.getHistory(conversation.id)).rejects.toThrow();
+  });
+});

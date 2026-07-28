@@ -42,7 +42,6 @@ function renderSidebar() {
       <AssistantSidebar
         conversations={[CONVERSATION]}
         activeConversationId={CONVERSATION.id}
-        creating={false}
         onNewChat={vi.fn()}
         onSelect={onSelect}
         onDelete={onDelete}

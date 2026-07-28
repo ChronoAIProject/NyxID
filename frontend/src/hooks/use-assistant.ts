@@ -46,22 +46,42 @@ const APPROVAL_HISTORY_PAGE_SIZE = 20;
 
 const activeHandles = new Map<string, TurnHandle>();
 
+/**
+ * Warm the query cache from the transport. BEST EFFORT, and deliberately
+ * non-throwing.
+ *
+ * This runs on the send path (before and after the stream starts), so a
+ * failure here used to abort the send itself: the two reads shared one
+ * `Promise.all`, and a rejected transcript read took the whole projection —
+ * and its caller — down with it. That is how a transcript 404 stopped the
+ * stream POST from ever being issued.
+ *
+ * Each half now projects independently and a rejection is swallowed: the
+ * cache simply keeps whatever it already had. Failures are NOT hidden from
+ * the user — `useConversation`/`useConversations` run the same reads as real
+ * queries and surface their own error state; this function only declines to
+ * make a cache-warming failure fatal to an unrelated flow.
+ */
 async function projectTransportState(
   queryClient: QueryClient,
   conversationId: string,
 ): Promise<void> {
-  const [history, conversations] = await Promise.all([
+  const [history, conversations] = await Promise.allSettled([
     assistantTransport.getHistory(conversationId),
     assistantTransport.listConversations(),
   ]);
-  queryClient.setQueryData<ConversationHistory>(
-    assistantKeys.history(conversationId),
-    () => history,
-  );
-  queryClient.setQueryData<Conversation[]>(
-    assistantKeys.conversations,
-    () => conversations,
-  );
+  if (history.status === "fulfilled") {
+    queryClient.setQueryData<ConversationHistory>(
+      assistantKeys.history(conversationId),
+      () => history.value,
+    );
+  }
+  if (conversations.status === "fulfilled") {
+    queryClient.setQueryData<Conversation[]>(
+      assistantKeys.conversations,
+      () => conversations.value,
+    );
+  }
   await queryClient.invalidateQueries({ queryKey: assistantKeys.workspace });
 }
 
@@ -176,6 +196,27 @@ export function describeTransportError(error: unknown): {
     message: "Could not load your chats",
     description: "The assistant backend did not respond. Retrying shortly.",
   };
+}
+
+/**
+ * One line for the non-blocking transcript-read notice. Deliberately short:
+ * it renders inline above a working thread, not as a full-page failure.
+ *
+ * A 404 is called out separately because it is not really a fault — the
+ * conversation actor and its chat-history row materialize at different times
+ * upstream, so a conversation with no completed turn has no transcript to
+ * return. Saying "failed" there would be a lie.
+ */
+export function describeHistoryError(error: unknown): string {
+  if (error instanceof ApiError) {
+    if (error.status === 404) {
+      return "This conversation has no saved transcript yet.";
+    }
+    if (error.status === 401 || error.status === 403) {
+      return "The chat backend rejected the request for this transcript.";
+    }
+  }
+  return "Could not load earlier messages in this conversation.";
 }
 
 function useTransportErrorToast(isError: boolean, error: unknown): void {
