@@ -1214,59 +1214,84 @@ describe("AevatarAssistantTransport", () => {
     expect(deleteCalls).toBe(1);
   });
 
-  it("rejects both delete callers when the DELETE dies, and stays retryable", async () => {
-    // Regression (codex round 7): the delete carried no deadline, so an
+  it("aborts a hung DELETE at its own deadline and stays retryable", async () => {
+    // Regression (codex rounds 7-8): the delete carried no deadline, so an
     // accepted-but-unanswered DELETE pinned the reservation forever and
-    // locked the conversation. The request now aborts on its own deadline;
-    // this simulates the abort outcome and verifies recovery.
-    let deleteCalls = 0;
-    const mock = vi.fn(
-      (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-        const url = String(input);
-        if (url === `${ASSISTANT_BASE}/conversations` && init?.method === "POST") {
-          return Promise.resolve(
-            jsonResponse({ status: "accepted", actorId: CONVERSATION_ID }),
-          );
-        }
-        if (init?.method === "DELETE") {
-          deleteCalls += 1;
-          if (deleteCalls === 1) {
-            return new Promise<Response>((_, reject) => {
-              setTimeout(
-                () => reject(new DOMException("aborted", "AbortError")),
-                50,
-              );
-            });
+    // locked the conversation. Signal-driven: the mock only rejects when
+    // the request's OWN AbortSignal fires, so this fails if the deadline
+    // controller, timer, or signal pass-through is ever removed.
+    vi.useFakeTimers();
+    try {
+      let deleteCalls = 0;
+      const mock = vi.fn(
+        (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+          const url = String(input);
+          if (
+            url === `${ASSISTANT_BASE}/conversations` &&
+            init?.method === "POST"
+          ) {
+            return Promise.resolve(
+              jsonResponse({ status: "accepted", actorId: CONVERSATION_ID }),
+            );
           }
-          return Promise.resolve(jsonResponse({}));
-        }
-        return Promise.resolve(
-          jsonResponse(
-            { error: "not_found", error_code: -1, message: "404" },
-            404,
-          ),
+          if (init?.method === "DELETE") {
+            deleteCalls += 1;
+            if (deleteCalls === 1) {
+              return new Promise<Response>((_, reject) => {
+                init.signal?.addEventListener("abort", () =>
+                  reject(new DOMException("aborted", "AbortError")),
+                );
+              });
+            }
+            return Promise.resolve(jsonResponse({}));
+          }
+          return Promise.resolve(
+            jsonResponse(
+              { error: "not_found", error_code: -1, message: "404" },
+              404,
+            ),
+          );
+        },
+      );
+      vi.stubGlobal("fetch", mock);
+      const transport = new AevatarAssistantTransport();
+      await transport.createConversation();
+
+      const firstOutcome = transport
+        .deleteConversation(CONVERSATION_ID)
+        .then(
+          () => "resolved",
+          () => "rejected",
         );
-      },
-    );
-    vi.stubGlobal("fetch", mock);
-    const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+      const secondOutcome = transport
+        .deleteConversation(CONVERSATION_ID)
+        .then(
+          () => "resolved",
+          () => "rejected",
+        );
 
-    const first = transport.deleteConversation(CONVERSATION_ID);
-    const second = transport.deleteConversation(CONVERSATION_ID);
-    await expect(first).rejects.toBeTruthy();
-    await expect(second).rejects.toBeTruthy();
+      // Just before the deadline: still one DELETE, still reserved.
+      await vi.advanceTimersByTimeAsync(14_000);
+      expect(deleteCalls).toBe(1);
+      expect(() =>
+        transport.sendMessage(CONVERSATION_ID, "too early", () => {}),
+      ).toThrow("This conversation is being deleted.");
 
-    // Not tombstoned, reservation lifted: the conversation is retryable.
-    expect(() =>
-      transport.sendMessage(CONVERSATION_ID, "still here", () => {}),
-    ).not.toThrow("This conversation is being deleted.");
-    transport.cancelActiveTurn(CONVERSATION_ID);
-    await transport.deleteConversation(CONVERSATION_ID);
-    expect(deleteCalls).toBe(2);
-    expect(() =>
-      transport.sendMessage(CONVERSATION_ID, "after delete", () => {}),
-    ).toThrow("Conversation was not found.");
+      // Crossing the deadline aborts the request; both coalesced callers
+      // reject and the reservation lifts.
+      await vi.advanceTimersByTimeAsync(1_100);
+      expect(await firstOutcome).toBe("rejected");
+      expect(await secondOutcome).toBe("rejected");
+
+      // Not tombstoned: the retry delete goes through.
+      await transport.deleteConversation(CONVERSATION_ID);
+      expect(deleteCalls).toBe(2);
+      expect(() =>
+        transport.sendMessage(CONVERSATION_ID, "after delete", () => {}),
+      ).toThrow("Conversation was not found.");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("coalesces concurrent deletes onto one in-flight operation", async () => {
