@@ -25,6 +25,9 @@ pub struct BillingRouteContext {
     pub credential_class: CredentialClass,
     pub platform_metric: BillingMetric,
     pub resale: Option<ResaleSpec>,
+    /// Admin opt-in from the service's billing config: only services
+    /// explicitly marked platform_billable charge the platform layer.
+    pub(crate) service_platform_billable: bool,
     pub(crate) platform_metered: bool,
     pub(crate) platform_billable: bool,
 }
@@ -54,6 +57,8 @@ impl BillingRouteContext {
                     .filter(|_| credential_class == CredentialClass::NyxidManagedMaster)
             })
             .flatten();
+        let service_platform_billable =
+            service_billing.is_some_and(|billing| billing.platform_billable);
 
         Self {
             ingress,
@@ -69,6 +74,7 @@ impl BillingRouteContext {
             credential_class,
             platform_metric,
             resale,
+            service_platform_billable,
             platform_metered: false,
             platform_billable: false,
         }
@@ -102,6 +108,7 @@ mod tests {
 
     fn context_for(credential_class: CredentialClass) -> BillingRouteContext {
         let billing = ServiceBilling {
+            platform_billable: false,
             resale_billable: true,
             resale_metric: BillingMetric::Tokens,
             lago_resale_metric_code: Some("resale_tokens".to_string()),
@@ -144,6 +151,7 @@ mod tests {
     #[test]
     fn resale_requires_operator_flag() {
         let billing = ServiceBilling {
+            platform_billable: false,
             resale_billable: true,
             resale_metric: BillingMetric::Tokens,
             lago_resale_metric_code: Some("resale_tokens".to_string()),

@@ -292,6 +292,7 @@ export const updateServiceSchema = z
     identity_jwt_audience: z.string().max(500).optional().or(z.literal("")),
     forward_access_token: z.boolean().optional(),
     inject_delegation_token: z.boolean().optional(),
+    platform_billable: z.boolean().optional(),
     delegation_token_scope: z
       .string()
       .max(200, "Scope must be at most 200 characters")

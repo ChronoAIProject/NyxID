@@ -963,12 +963,27 @@ async fn mounted_route_settlement_failure_is_replayed_once_by_reconcile() {
     let owner_id = insert_owner(&db).await;
     let (downstream_url, forwarded_request, release_response, downstream) =
         start_controlled_billing_downstream().await;
+    // Platform charging is opt-in per catalog service, so the recovery
+    // route must resolve to a platform_billable catalog entry for the
+    // wallet hold this test exercises.
+    let mut recovery_catalog = crate::models::downstream_service::test_helpers::dummy_service();
+    recovery_catalog.id = Uuid::new_v4().to_string();
+    recovery_catalog.slug = "billing-recovery-catalog".to_string();
+    recovery_catalog.base_url = downstream_url.clone();
+    recovery_catalog.billing = Some(crate::models::service_billing::ServiceBilling {
+        platform_billable: true,
+        ..Default::default()
+    });
+    db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .insert_one(&recovery_catalog)
+        .await
+        .expect("insert recovery catalog service");
     let service = insert_route_service(
         &db,
         &owner_id,
         "billing-recovery-route",
         &downstream_url,
-        None,
+        Some(&recovery_catalog.id),
         None,
     )
     .await;
@@ -1951,6 +1966,12 @@ fn billing_service(
 }
 
 fn route_context(case: &CoverageCase, request_id: &str, owner_id: &str) -> BillingRouteContext {
+    // These cases exercise the platform charging gate, which is an admin
+    // opt-in per service.
+    let billing = crate::models::service_billing::ServiceBilling {
+        platform_billable: true,
+        ..Default::default()
+    };
     BillingRouteContext::new(
         case.ingress,
         request_id.to_string(),
@@ -1968,7 +1989,7 @@ fn route_context(case: &CoverageCase, request_id: &str, owner_id: &str) -> Billi
             CredentialClass::NodeManaged
         },
         case.metric,
-        None,
+        Some(&billing),
         false,
     )
 }

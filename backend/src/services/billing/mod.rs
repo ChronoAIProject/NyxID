@@ -34,7 +34,9 @@ impl BillingService {
     pub fn new(db: DbHandle, config: Arc<AppConfig>) -> Self {
         let lago = match (&config.lago_api_url, &config.lago_api_key) {
             (Some(url), Some(key)) => match LagoClient::new(url.clone(), key.clone()) {
-                Ok(client) => Some(Arc::new(client) as Arc<dyn LagoApi>),
+                Ok(client) => Some(Arc::new(
+                    client.with_payment_provider_code(config.lago_payment_provider_code.clone()),
+                ) as Arc<dyn LagoApi>),
                 Err(error) => {
                     tracing::warn!(error = %error, "Lago billing client is not configured");
                     None
@@ -154,11 +156,17 @@ impl BillingService {
 
     pub async fn open(&self, ctx: &BillingRouteContext) -> AppResult<MeteredProxyContext> {
         let ctx = if self.config.billing_enabled {
-            self.ensure_wallet_for_charging(&ctx.billing_owner_id)
-                .await?;
-            let platform_billable = self
-                .owner_has_chargeable_wallet(&ctx.billing_owner_id)
-                .await?;
+            // Platform charging is an admin opt-in per service: services
+            // without billing.platform_billable stay free (metered only),
+            // so BYOK and unconfigured services never draw from wallets.
+            let platform_billable = if ctx.service_platform_billable {
+                self.ensure_wallet_for_charging(&ctx.billing_owner_id)
+                    .await?;
+                self.owner_has_chargeable_wallet(&ctx.billing_owner_id)
+                    .await?
+            } else {
+                false
+            };
             ctx.clone().with_platform_metering(platform_billable)
         } else {
             ctx.clone()
@@ -285,6 +293,7 @@ mod tests {
         insert_wallet(&db, owner_id).await;
         let service = BillingService::new(db.clone(), std::sync::Arc::new(test_app_config()));
         let billing = ServiceBilling {
+            platform_billable: true,
             resale_billable: true,
             resale_metric: BillingMetric::Requests,
             lago_resale_metric_code: Some("resale_requests".to_string()),
@@ -392,6 +401,10 @@ mod tests {
         config.lago_plan_code = "starter".to_string();
         let lago = Arc::new(FakeLago::default());
         let service = BillingService::new_with_lago(db.clone(), Arc::new(config), lago.clone());
+        let billable_billing = ServiceBilling {
+            platform_billable: true,
+            ..Default::default()
+        };
         let ctx = BillingRouteContext::new(
             BillingIngress::Proxy,
             Uuid::new_v4().to_string(),
@@ -405,7 +418,7 @@ mod tests {
             "bearer".to_string(),
             CredentialClass::UserOwned,
             BillingMetric::Requests,
-            None::<&ServiceBilling>,
+            Some(&billable_billing),
             false,
         );
 
@@ -436,6 +449,66 @@ mod tests {
         assert_eq!(lago.wallet_creates.load(Ordering::SeqCst), 1);
         assert_eq!(row.layer, BillingLayer::Platform);
         assert_eq!(row.wallet_id.as_deref(), Some(wallet.id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn service_without_platform_billable_opts_out_of_charging() {
+        let Some(db) = connect_test_database("billing_platform_opt_in").await else {
+            return;
+        };
+        role_service::seed_system_roles(&db)
+            .await
+            .expect("seed roles");
+        insert_platform_rate(&db, 1).await;
+        let owner = crate::services::auth_service::register_user(
+            &db,
+            "wallet-optout@example.com",
+            "password123",
+            Some("Wallet Opt Out"),
+            None,
+            true,
+        )
+        .await
+        .expect("create owner");
+        let mut config = test_app_config();
+        config.billing_enabled = true;
+        config.lago_plan_code = "starter".to_string();
+        let lago = Arc::new(FakeLago::default());
+        let service = BillingService::new_with_lago(db.clone(), Arc::new(config), lago.clone());
+        let ctx = BillingRouteContext::new(
+            BillingIngress::Proxy,
+            Uuid::new_v4().to_string(),
+            owner.user_id.clone(),
+            owner.user_id.clone(),
+            None,
+            Some("user-service-1".to_string()),
+            Some("catalog-1".to_string()),
+            Some("service-one".to_string()),
+            NodeIntent::Direct,
+            "bearer".to_string(),
+            CredentialClass::UserOwned,
+            BillingMetric::Requests,
+            None::<&ServiceBilling>,
+            false,
+        );
+
+        service.open(&ctx).await.expect("open metering");
+
+        let wallet = db
+            .collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME)
+            .find_one(doc! { "owner_id": &owner.user_id })
+            .await
+            .expect("query wallet");
+        let row = db
+            .collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
+            .find_one(doc! { "billing_owner_id": &owner.user_id })
+            .await
+            .expect("find usage row")
+            .expect("row exists");
+
+        assert!(wallet.is_none(), "free services must not provision wallets");
+        assert_eq!(lago.wallet_creates.load(Ordering::SeqCst), 0);
+        assert_eq!(row.wallet_id, None, "free services must not hold credits");
     }
 
     async fn insert_platform_rate(db: &mongodb::Database, credits: i64) {
