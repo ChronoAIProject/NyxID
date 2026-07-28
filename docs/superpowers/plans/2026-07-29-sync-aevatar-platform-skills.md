@@ -131,8 +131,8 @@ Verification evidence (2026-07-29):
 
 - [x] Fetch upstream main; rebase and repeat Task 4 if it advanced.
 
-- [ ] Stage scoped files, run cached diff checks, and commit with an imperative message.
+- [x] Stage scoped files, run cached diff checks, and commit with an imperative message.
 
-- [ ] Push `feat/2026-07-29_sync-aevatar-platform-skills` to `eanz17/NyxID`.
+- [x] Push `feat/2026-07-29_sync-aevatar-platform-skills` to `eanz17/NyxID`.
 
-- [ ] Create the PR with authority, closure delta, paths, validation results, and no-runtime-change statement; read it back before reporting.
+- [x] Create the PR with authority, closure delta, paths, validation results, and no-runtime-change statement; read it back before reporting.
