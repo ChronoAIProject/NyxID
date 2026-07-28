@@ -1,7 +1,15 @@
 ---
 name: aevatar-scheduler
-description: Create and manage cron schedules that fire an Aevatar service on a recurring basis, authenticated as the scope owner via NyxID — over the REST API. Use when a user wants to "schedule", "run on a cron", "set up a recurring run", "run every day/hour/Monday", "automate this service on a timer", "preview a cron", "pause/resume/disable a schedule", or "run it now" — or hits token_expired on a scheduled run's late steps. It builds the schedule against a published service (identity + endpoint + payload + serving revision), uses scope-owner NyxID auth (which requires the owner's NyxID broker binding), documents the fire-time credential's fixed 5-minute lifetime and how to design runs around it, and covers preview, enable/disable, run-now, update, and delete. Publish the service first with the service-publisher skill.
-version: "1.7"
+description: >-
+  Use when a user wants to schedule or manage recurring Aevatar work, preview cron, run now, pause
+  or resume, reauthorize, delete an automation, or diagnose scheduled token_expired failures.
+  Route by owner first: a bound Studio Team member workflow uses aevatar_schedule_member_workflow
+  or the member automations API and a dedicated Agent Key; an independent Ornn skill agent or
+  reminder uses aevatar-automation; generic /api/schedules is only for raw service invocations or
+  actor envelopes. Covers preflight, 202 admission-only semantics, credentialSourceKind-aware
+  triage, and Agent Key, NyxID, and Vault lifecycle. Publish callable members or services first
+  with aevatar-service-publisher.
+version: "1.8"
 metadata:
   category: plain
   tag:
@@ -12,9 +20,131 @@ metadata:
     - automation
     - nyxid
     - timer
+    - agent-key
+    - team-member
 ---
 
 # Schedule an Aevatar service on a cron
+
+## Route to the right resource FIRST — three paths, not one
+
+"Run it on a schedule" is three different resources with three different owners, credentials, and
+APIs. Pick before you call anything; using the wrong one is not a shortcut, it is the wrong resource.
+
+| The user wants to schedule… | Resource owner | Canonical entry | Credential |
+|---|---|---|---|
+| An already-bound **Studio Team member** workflow | `scope → team → member` | `aevatar_schedule_member_workflow`, or REST `/api/scopes/{scopeId}/teams/{teamId}/members/{memberId}/automations` | **Dedicated Agent Key** |
+| An independent **scheduled Ornn skill agent** or a **one-shot reminder** | Scheduled agent / catalog actors | `scheduled_agent_creator`, then `agent_builder` — see `aevatar-automation` | **Dedicated Agent Key** |
+| A **raw service invocation or actor envelope** | Generic platform schedule actor | Generic `/api/schedules` — the rest of this skill | Typed source; may be a NyxID binding exchange |
+
+**If the owner is a Team member, the canonical path is the member automation route — not generic
+`/api/schedules`.** Generic `/api/schedules` is a platform-level resource for raw invocations. It
+is supported, but it is *not* a fallback for Team member automation, and reaching for it because
+you already know its shape is the most common mistake here.
+
+Never convert between identities by route position, prefix, equality, or a familiar-looking string:
+`memberId`, draft `workflowId`, `publishedServiceId`, UserService ID, catalog service ID, schedule
+ID, and Agent Key ID are seven distinct things.
+
+## Studio Team member automation (the canonical member path)
+
+Use `aevatar_schedule_member_workflow` in-session, or the owner-scoped REST route. The owner is the
+exact `scopeId + teamId + memberId` tuple; `teamId` is a containment guard. **The server** reads the
+member summary and derives `publishedServiceId` — you never substitute a draft `workflowId`, a
+service ID, a binding ID, a route, a model, or a credential ID for it.
+
+**Preflight is read-only and provisions nothing.** It builds a typed authorization plan from current
+facts: the exact member and containing Team, the bound workflow revision and prepared artifact,
+typed connector and NyxID capability refs, the owner LLM route/model and exact UserService ID where
+required, the owner-scoped NyxID authorization catalog, and policy/version/expiry/disclosure facts.
+Never invent grants, wildcards, node IDs, route or model choices, or caller binding evidence.
+
+**Create** uses `credentialProvisioningKind = dedicated_scheduled_invocation_agent_key`. The server
+revalidates the confirmed permission digest and policy version against current sources before any
+key-creation effect, then requests a fresh, targeted NyxID scope plan for the exact sorted
+UserService IDs. Key creation fixes `allow_all_services = false` and `allow_all_nodes = false` —
+only the targeted plan supplies allowed service IDs, node IDs, and the provider scope-plan digest.
+
+**Secret custody.** The one-time raw key NyxID returns is written **only** to `ISecretVault` under
+purpose `scheduled.invocation-agent-key`. Durable state, events, read models, logs, tools, and
+public APIs expose only non-secret facts: a typed reference, Agent Key ID, expiry, authorization
+fact, and credential generation. **Never ask the user to paste an Agent Key, accept one in schedule
+JSON, print one, store one in an Ornn package, or reconstruct one from an ID.**
+
+### After a `202` — what it does and does not prove
+
+`202 Accepted` (and tool status `accepted` / `pending`) means **command admission only**. It does
+not prove credential issuance completed, the Vault write completed, activation committed, the read
+model observed it, cron fired, or the workflow succeeded.
+
+Reread the canonical owner-scoped automation and require a **newer authoritative `stateVersion`**.
+A ready automation normally shows:
+
+- `authorizationStatus == active`
+- `credentialSourceKind == scheduled_invocation_agent_key`
+- `enabled == true` (firing)
+- a future `credentialExpiresAtUtc`
+- a positive `credentialGeneration`
+- `revocationPending == false`
+
+**`active` is credential health; `enabled` is firing. They are independent dimensions** — do not
+report one as the other.
+
+### Fire and how the workflow gets the credential
+
+Cron and run-now use the same active credential generation. Run-now proves a **manual** fire only;
+it never proves cron-origin execution.
+
+Aevatar projects a borrowed `DurableCallerCredentialRef` into the workflow caller context. The raw
+Agent Key is **not** copied into workflow state. Every LLM, tool, and connector path that needs the
+caller credential resolves that reference through `ISecretVault` **at the moment it is used**, and
+resolution is fail-closed for an absent, expired, revoked, mismatched, or malformed reference.
+
+**So do not describe this path as one 300-second broker token minted at fire and shared for the
+whole run.** That describes a *generic* schedule using a NyxID binding source — a different
+credential source with different lifetime semantics.
+
+### Lifecycle operations
+
+- **Pause / resume.** Pause disables future firing but **preserves the active credential**. Resume
+  re-enables firing if the credential is still usable. Neither is a revoke or a reauthorization —
+  never recreate or revoke a key to resume.
+- **Update.** Cron, timezone, prompt, display name, and enabled changes revalidate current
+  authorization facts. An update **never silently expands key grants** or swaps the active
+  credential. Authorization drift surfaces as an explicit reauthorization requirement.
+- **Reauthorize** (this is what a *new external service dependency* requires). Start from a new
+  preflight and confirmation, provision a **new** dedicated key generation from the newly validated
+  exact plan, and only **after the replacement generation is committed** revoke the old one. Never
+  mutate an existing key in place to widen its authority.
+- **Delete.** The tombstone and revocation intent commit before external cleanup. **NyxID key
+  revocation and Vault secret revocation are independent durable tracks.** The row stays visible as
+  `deleting` / `revocation_pending` while either required track is incomplete. Retry reuses the
+  **original delete operation and idempotency identity** plus fresh owner authority — it never
+  synthesizes a new delete, reauthorization, or credential. Only completion of all required tracks
+  lets the automation disappear.
+- **Expiry and drift.** An expired, missing, revoked, unresolvable, or authorization-mismatched key
+  **fails closed**: the automation moves toward `needs_authorization` and future fire leases are
+  canceled. It must never fall back to an interactive user bearer, a Host default, an inferred
+  binding, an inferred service, or a wildcard grant.
+
+### Stable recovery
+
+- Lost create response → reread by exact owner and **original operation identity**; never create a
+  second schedule with new identities.
+- `authorization_plan_changed` → rerun preflight before retrying.
+- `needs_authorization` → new preflight and explicit reauthorize.
+- `revocation_pending` → retry revocation with the **original delete operation identity**.
+- Missing owner binding or authorization catalog evidence → fail closed and report the prerequisite;
+  never invent evidence or trigger projection repair.
+- Projection pending → report eventual visibility and the required version; never replay or prime
+  projection from the query path.
+
+---
+
+## Generic platform schedule (`/api/schedules`)
+
+Everything below is the **generic** resource: a raw service invocation or actor envelope. Use it
+when that is genuinely what the user wants — not as a fallback for a Team member.
 
 You create a **schedule** that fires a published service on a cron expression,
 authenticated as **you** (the scope owner) through NyxID. Publish the service first
@@ -119,28 +249,54 @@ member/team invoke path. This is not Aevatar `externalExposure`; externalExposur
 needed when the workflow must be registered as a reusable NyxID connector/slug. Trade-off:
 the timer or event sender runs outside Aevatar (a cloud cron would live in Aevatar; this does not).
 
-## The fire-time credential lives 5 minutes — design the run around it
+## The binding-exchange fire-time credential lives 5 minutes — design the run around it
 
-At every fire, Aevatar exchanges the stored broker binding for a **fresh access token** (OAuth
-token-exchange, `subject_token_type=urn:nyxid:params:oauth:token-type:binding-id`) and projects
-that **one** token into the run as its caller credential — minted once, shared by the whole run
+**Scope of this section: generic `/api/schedules` using a NyxID binding source only.** Read
+`credentialSourceKind` before applying any of it. If the run reports
+`credentialSourceKind = scheduled_invocation_agent_key`, none of the numbers below apply — jump to
+*Diagnosing a scheduled-run credential failure*.
+
+For a **binding-exchange** source, at every fire Aevatar exchanges the stored broker binding for a
+**fresh access token** (OAuth token-exchange,
+`subject_token_type=urn:nyxid:params:oauth:token-type:binding-id`) and projects that **one** token
+into the run as its caller credential — minted once, shared by the whole run
 (aevatar: `agents/Aevatar.GAgents.Channel.Identity/Broker/NyxIdRemoteCapabilityBroker.cs`,
 `src/platform/Aevatar.GAgentService.Infrastructure/Schedules/ScheduledServiceInvocationDispatchPort.cs`).
 Broker-issued tokens are pinned to **`BROKER_ACCESS_TTL_SECS = 300`** (NyxID
 `backend/src/services/oauth_broker_service.rs`) so a revoked binding stops working within
 5 minutes without introspection. Deliberate design, not a bug.
 
-**Consequence:** every NyxID-authenticated step in the fired run must complete within ~5 minutes
+**Consequence:** every NyxID-authenticated step in such a fired run must complete within ~5 minutes
 of fire. In a longer run, late steps failing with `token_expired` is the **expected** platform
-behavior — keep scheduled runs short, front-load the NyxID-authenticated steps, or split long
+behavior — keep those scheduled runs short, front-load the NyxID-authenticated steps, or split long
 pipelines into separate schedules. Do not "fix" it by retrying the same run shape.
+
+## Diagnosing a scheduled-run credential failure
+
+**Identify the typed credential source before interpreting any 401 or `token_expired`.** Gather the
+canonical path and owner tuple, `credentialSourceKind`, `authorizationStatus`,
+`credentialExpiresAtUtc`, `credentialGeneration`, `stateVersion`, `lastAuthorizationErrorCode`,
+`revocationPending`, `nyxIdRevocationStatus`, `vaultRevocationStatus`, and the exact run/tool
+failure and timestamp.
+
+| `credentialSourceKind` | Diagnosis |
+|---|---|
+| `nyxid_binding_exchange` | The 300 s broker TTL above is the right hypothesis. Confirm with the exchanged token's `exp − iat` or the repo constant, then fix run shape. |
+| `scheduled_invocation_agent_key` | **Do not diagnose a fixed five-minute broker expiry merely because the call was scheduled.** Inspect key expiry, Vault resolution, reference integrity, committed caller authority, authorization fact, the exact service/node grants versus what the failing step actually called, `credentialGeneration`, and revocation state. Then look at the **downstream** service's own token. A `token_expired` six minutes after fire on this source is **not** explained by the 300 s constant — that constant belongs to a different credential class. |
 
 **Token classes are not interchangeable — never quote one class's TTL for another.** Your
 interactive login token lives for hours (`JWT_ACCESS_TTL_SECS`, a deployment config — code
-default is 900 s); the scheduled run's credential lives 300 s (fixed constant); NyxID API keys
-(`nyxid api-key create`) don't expire at all. When diagnosing any expiry, read the lifetime
-instead of recalling it: decode the JWT actually in hand and report `exp − iat` (numbers only —
-never print the token), or cite the owning repo's constant.
+default is 900 s); a binding-exchange run credential lives 300 s (fixed constant); a dedicated
+scheduled-invocation Agent Key is Vault-held with a policy-governed expiry (a scheduled skill
+agent's default projected lifetime is ~90 days); NyxID API keys (`nyxid api-key create`) don't
+expire at all. When diagnosing any expiry, read the lifetime instead of recalling it: decode the
+JWT actually in hand and report `exp − iat` (numbers only — never print the token), cite the owning
+repo's constant, or read the automation's `credentialExpiresAtUtc` and `credentialGeneration`.
+
+**Never emit secret material** in any report, log excerpt, artifact, or message: no raw Agent Key,
+bearer/access/refresh/delegation/service-account token, Vault reference or ciphertext, permission
+digest, unfiltered API-key inventory, or authorization header. Stable resource IDs may be reported
+for management or cleanup, but never as secret material and never to derive another identity.
 
 ## Create the schedule
 

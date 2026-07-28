@@ -1,7 +1,7 @@
 ---
 name: aevatar-team-builder
 description: Build an Aevatar agent team and its members over the REST API. Use when a user wants to "create a team", "add a member", "make a workflow member / script member / gagent member", "set the team's entry point", or "assemble agents into a team". It creates the team, creates members whose implementation is a workflow (most common), a script, or a hosted gagent, binds each member's concrete implementation (the workflow YAML is attached here), waits for the async binding to succeed, and sets the team entry member. Author the workflow YAML first with the workflow-authoring skill; publish the result as a service with the service-publisher skill.
-version: "1.4"
+version: "1.3"
 metadata:
   category: plain
   tag:
@@ -29,9 +29,7 @@ output is an invocable team. Publishing it as a NyxID service is a separate step
 # token. A raw curl to the aevatar backend with ~/.nyxid/access_token resolves NO scope
 # (scopeResolved:false) and the stored token expires — it is not a usable path.
 # Prerequisite once: the `aevatar` service must be connected — `nyxid service add aevatar`.
-# NOTE: the aevatar backend requires `Content-Type: application/json` on writes (POST/PUT) —
-# omit it and every write returns HTTP 415 Unsupported Media Type. The helper sets it on
-# every call (harmless on bodyless GETs), so the POST/PUT examples below work as written.
+# NyxID treats `-d` as raw bytes, so declare JSON explicitly; Aevatar rejects writes without it.
 aev() { nyxid proxy request aevatar "$@" -H 'Content-Type: application/json'; }   # aev "<path>" [-m POST|PUT|DELETE] [-d '<json>'] [--stream]
 scopeId=$(aev "api/studio/context" | jq -r .scopeId)
 ```

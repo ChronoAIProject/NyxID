@@ -8,7 +8,7 @@ Update the NyxID plugin's bundled Aevatar skills from the stale eight-skill snap
 
 - Aevatar source authority: the refreshed `aevatarAI/aevatar` `feature/integrate` contract used to publish the current skillset.
 - Distribution authority: Ornn skillset GUID `248b99d6-36ff-4d41-bb45-baa25c6a9cad`, version `1.14`.
-- Content authority: each exact Ornn ZIP and its SHA-256 from the skillset closure. Repository copies are derived artifacts, not independently authored variants.
+- Content authority: each exact Ornn ZIP and its SHA-256 from the skillset closure. Repository copies are derived artifacts; host adapters may only preserve invocation safety and satisfy the shared plugin schema without changing business contracts.
 - NyxID integration baseline: `ChronoAIProject/NyxID:main` at `1eaa1dac00560b782bf6091c6ec00cd6cc98a5d8`.
 
 ## Semantic Decision
@@ -50,12 +50,15 @@ The closure hashes returned by Ornn are the verification ledger. A package whose
 
 ## Repository Changes
 
-1. Replace the eight existing Aevatar skill directories with their exact published package contents.
+1. Replace the eight existing Aevatar skill directories with their published package contents.
 2. Add the seven missing skill directories from the same closure.
 3. Keep the generic `skills/nyxid` package independent; change it only if its routing map must mention the bundled Aevatar entry point.
 4. Update `skills/INSTALL.md` so the documented bundle matches the installed directories.
-5. Set all three plugin manifest versions to `0.7.0` and keep their descriptions aligned with the expanded Aevatar bundle.
-6. Add the smallest deterministic verification script or test only if the repository lacks a native check for closure membership, declared versions, and manifest consistency.
+5. Set the Claude, Codex, Cursor, and Claude marketplace manifest versions to `0.7.0` and keep their descriptions aligned with the expanded Aevatar bundle.
+6. Adapt `aevatar-codex-exec-node-setup` for the shared plugin: set the Codex-ingested frontmatter flag to `false`, add `agents/openai.yaml` with `allow_implicit_invocation: false`, and add a body gate that stops unless setup, repair, or proof was explicitly requested.
+7. Compress only the over-limit `aevatar-scheduler` and `aevatar-agent-profile-management` descriptions to the same trigger semantics within the 1,024-character shared-plugin limit.
+8. Preserve the published skill identities while adding explicit JSON `Content-Type` guidance to the NyxID proxy write paths in `aevatar-team-builder`, `aevatar-workflow-authoring`, and `aevatar-platform-map`, because the current CLI intentionally treats `-d` as raw bytes and defaults it to `application/octet-stream`.
+9. Add the smallest deterministic verification script or test only if the repository lacks a native check for closure membership, declared versions, and manifest consistency.
 
 No NyxID backend, frontend, CLI runtime, database, OAuth, proxy, or deployment behavior changes are in scope.
 
@@ -65,9 +68,10 @@ No NyxID backend, frontend, CLI runtime, database, OAuth, proxy, or deployment b
 2. For each closure row, download the declared immutable version from Ornn through NyxID.
 3. Verify the ZIP SHA-256 against `skillHash`, verify the archive, and extract outside the repository.
 4. Compare the extracted package root with the corresponding repository directory.
-5. Copy only verified package files into `skills/<name>/`; delete files absent from the published package.
-6. Update installation metadata and plugin manifests.
-7. Run static checks, skill validation, and package/content readback checks before commit.
+5. Copy verified package files into `skills/<name>/`; delete files absent from the published package.
+6. Apply the six host adapters described above.
+7. Update installation metadata and plugin manifests.
+8. Run static checks, skill validation, and package/content readback checks before commit.
 
 An ambiguous download or read failure is safe to retry as a read. No Ornn publication or other external mutation is required for this repository sync.
 
@@ -76,7 +80,8 @@ An ambiguous download or read failure is safe to retry as a read. No Ornn public
 - Prove the current stale snapshot fails an inventory check against the 15-member closure before changing files.
 - Validate every downloaded ZIP and exact SHA-256.
 - Assert the repository has exactly the 15 expected Aevatar/fallback roots at the declared versions after synchronization.
-- Assert all three plugin manifests are valid JSON and declare `0.7.0`.
+- Assert nine roots are byte-equal to their verified extraction; scheduler/profile differ only in frontmatter descriptions, team-builder/workflow-authoring/platform-map differ only in their JSON `Content-Type` guidance, and node-setup differs only in invocation-policy frontmatter, the explicit-request body gate, and `agents/openai.yaml`.
+- Assert the Claude, Codex, Cursor, and Claude marketplace manifests are valid JSON and declare `0.7.0`.
 - Run `ruby skills/nyxid/evals/run_trigger_evals.rb --validate-only`.
 - Run the skill creator validator for every changed or added skill when compatible with the published package format.
 - Search the synchronized Aevatar skill set for stale identity equality, obsolete global lifecycle, old tool schemas, and raw stored-token guidance; manually inspect every match.
@@ -88,7 +93,7 @@ Credentialed model trigger evaluation remains a trusted CI job on the pull reque
 
 - Hash mismatch: stop before copying that package and report the exact skill/version.
 - Closure changes during work: reread the requested `1.14` closure; do not silently switch versions.
-- Published package conflicts with current Aevatar source: treat it as a publication defect and stop rather than hand-editing a third variant.
+- Published instruction content conflicts with current Aevatar source: treat it as a publication defect and stop rather than hand-editing a third variant.
 - Upstream NyxID advances: rebase before final verification and repeat the relevant diff/validation checks.
 - Ambiguous Git push or PR creation: read back the remote branch or PR before any retry.
 
