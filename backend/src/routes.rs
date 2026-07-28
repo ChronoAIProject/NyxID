@@ -1303,6 +1303,26 @@ pub fn build_router(
             "/conversations/{conversation_id}/approve",
             post(handlers::assistant::decide_approval),
         )
+        .route(
+            "/conversations/{conversation_id}/stop",
+            post(handlers::assistant::stop_turn),
+        )
+        .route(
+            "/conversations/{conversation_id}/steer",
+            post(handlers::assistant::steer_turn),
+        )
+        .route(
+            "/conversations/{conversation_id}/state",
+            get(handlers::assistant::get_state),
+        )
+        .route(
+            "/conversations/{conversation_id}/turns/{turn_id}/steps/{step_id}/retry",
+            post(handlers::assistant::retry_step),
+        )
+        .route(
+            "/conversations/{conversation_id}/turns/{turn_id}/steps/{step_id}/skip",
+            post(handlers::assistant::skip_step),
+        )
         .route("/completions", post(handlers::assistant::completions))
         .route("/workflow-chat", post(handlers::assistant::workflow_chat))
         .route(

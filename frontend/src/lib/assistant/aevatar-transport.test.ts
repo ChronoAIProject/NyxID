@@ -628,6 +628,1017 @@ describe("AevatarAssistantTransport", () => {
     ]);
   });
 
+  it("fires a best-effort server-side stop carrying the turn identity on cancel", async () => {
+    const openStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const encoder = new TextEncoder();
+        controller.enqueue(
+          encoder.encode(
+            [
+              `data: ${JSON.stringify(OBSERVED_FRAMES[0])}\n\n`,
+              `data: ${JSON.stringify(OBSERVED_FRAMES[1])}\n\n`,
+              `data: ${JSON.stringify(OBSERVED_FRAMES[2])}\n\n`,
+            ].join(""),
+          ),
+        );
+      },
+    });
+    const stopBodies: Array<Record<string, unknown>> = [];
+    let streamClientRequestId: string | undefined;
+    stubFetch(
+      routeCreate,
+      (url, init) => {
+        if (
+          url === `${ASSISTANT_BASE}/conversations/${CONVERSATION_ID}/stop` &&
+          init?.method === "POST"
+        ) {
+          stopBodies.push(
+            JSON.parse(String(init.body)) as Record<string, unknown>,
+          );
+          return jsonResponse({ status: "accepted" }, 202);
+        }
+        return undefined;
+      },
+      (url, init) => {
+        if (url.endsWith("/stream") && init?.method === "POST") {
+          streamClientRequestId = (
+            JSON.parse(String(init.body)) as { clientRequestId: string }
+          ).clientRequestId;
+          return new Response(openStream, {
+            status: 200,
+            headers: { "Content-Type": "text/event-stream" },
+          });
+        }
+        return undefined;
+      },
+    );
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    await new Promise<void>((resolve) => {
+      const handle = transport.sendMessage(
+        CONVERSATION_ID,
+        "Hello",
+        (event) => {
+          if (event.event === "turn.completed") resolve();
+          if (event.event === "block.delta") handle.cancel();
+        },
+      );
+    });
+    // The stop POST is fire-and-forget; give its microtask a beat to land.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(stopBodies).toHaveLength(1);
+    const stop = stopBodies[0];
+    expect(stop?.turnId).toBe(TURN_ID);
+    expect(stop?.expectedStateVersion).toBe(0);
+    // Fresh control identities: neither reuses the turn's clientRequestId.
+    expect(stop?.stopRequestId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(stop?.clientRequestId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(stop?.stopRequestId).not.toBe(stop?.clientRequestId);
+    expect(stop?.clientRequestId).not.toBe(streamClientRequestId);
+  });
+
+  it("sends no server-side stop when the turn is never announced", async () => {
+    // A stream that never sends RUN_STARTED: there is never a turn identity
+    // to address, so no stop can go out. (The reader lingers briefly after
+    // the local settle — PRE_START_STOP_WINDOW_MS — in case the announcing
+    // frame is still in flight; see the next test for that path.)
+    const silentStream = new ReadableStream<Uint8Array>({ start() {} });
+    const fetchMock = stubFetch(routeCreate, (url, init) =>
+      url.endsWith("/stream") && init?.method === "POST"
+        ? new Response(silentStream, {
+            status: 200,
+            headers: { "Content-Type": "text/event-stream" },
+          })
+        : undefined,
+    );
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    await new Promise<void>((resolve) => {
+      const handle = transport.sendMessage(
+        CONVERSATION_ID,
+        "Hello",
+        (event) => {
+          if (event.event === "turn.completed") resolve();
+        },
+      );
+      setTimeout(() => handle.cancel(), 0);
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const stopCalls = fetchMock.mock.calls.filter(([input]) =>
+      String(input).endsWith("/stop"),
+    );
+    expect(stopCalls).toHaveLength(0);
+  });
+
+  it("delivers the deferred stop once RUN_STARTED names the turn after a pre-start cancel", async () => {
+    // Aevatar may have accepted the stream even though RUN_STARTED has not
+    // reached the browser yet. Cancel must not discard the only chance to
+    // learn the turnId: the reader stays alive, and the late RUN_STARTED
+    // triggers the stop before the connection drops.
+    let streamController:
+      | ReadableStreamDefaultController<Uint8Array>
+      | undefined;
+    const lateStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        streamController = controller;
+      },
+    });
+    const stopBodies: Array<Record<string, unknown>> = [];
+    stubFetch(
+      routeCreate,
+      (url, init) => {
+        if (url.endsWith("/stop") && init?.method === "POST") {
+          stopBodies.push(
+            JSON.parse(String(init.body)) as Record<string, unknown>,
+          );
+          return jsonResponse({ status: "accepted" }, 202);
+        }
+        return undefined;
+      },
+      (url, init) =>
+        url.endsWith("/stream") && init?.method === "POST"
+          ? new Response(lateStream, {
+              status: 200,
+              headers: { "Content-Type": "text/event-stream" },
+            })
+          : undefined,
+    );
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    const events: TurnEvent[] = [];
+    const handle = transport.sendMessage(CONVERSATION_ID, "Hello", (event) =>
+      events.push(event),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    handle.cancel();
+
+    // The local turn settles immediately; no stop yet (no turnId).
+    expect(events[events.length - 1]?.event).toBe("turn.completed");
+    expect(stopBodies).toHaveLength(0);
+
+    if (!streamController) throw new Error("stream never started");
+    streamController.enqueue(
+      new TextEncoder().encode(
+        `data: ${JSON.stringify(OBSERVED_FRAMES[0])}\n\n`,
+      ),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    expect(stopBodies).toHaveLength(1);
+    expect(stopBodies[0]?.turnId).toBe(TURN_ID);
+    expect(stopBodies[0]?.expectedStateVersion).toBe(0);
+  });
+
+  it("fences a follow-up send behind a pre-start cancel until the deferred stop settles", async () => {
+    // The stop request cannot exist until RUN_STARTED names the turn, but a
+    // follow-up send right after a pre-start cancel must already serialize
+    // behind the eventual stop — otherwise it can overtake the fence.
+    let streamController:
+      | ReadableStreamDefaultController<Uint8Array>
+      | undefined;
+    const lateStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        streamController = controller;
+      },
+    });
+    let stopCalls = 0;
+    let streamCalls = 0;
+    const mock = vi.fn(
+      (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = String(input);
+        if (url === `${ASSISTANT_BASE}/conversations` && init?.method === "POST") {
+          return Promise.resolve(
+            jsonResponse({ status: "accepted", actorId: CONVERSATION_ID }),
+          );
+        }
+        if (url.endsWith("/stop") && init?.method === "POST") {
+          stopCalls += 1;
+          return Promise.resolve(jsonResponse({ status: "accepted" }, 202));
+        }
+        if (url.endsWith("/stream") && init?.method === "POST") {
+          streamCalls += 1;
+          return Promise.resolve(
+            streamCalls === 1
+              ? new Response(lateStream, {
+                  status: 200,
+                  headers: { "Content-Type": "text/event-stream" },
+                })
+              : sseResponse(OBSERVED_FRAMES),
+          );
+        }
+        return Promise.resolve(
+          jsonResponse(
+            { error: "not_found", error_code: -1, message: "404" },
+            404,
+          ),
+        );
+      },
+    );
+    vi.stubGlobal("fetch", mock);
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    const handle = transport.sendMessage(CONVERSATION_ID, "First", () => {});
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    handle.cancel(); // pre-start: no RUN_STARTED yet
+
+    const followUp = new Promise<void>((resolve) => {
+      transport.sendMessage(CONVERSATION_ID, "Second", (event) => {
+        if (event.event === "turn.completed") resolve();
+      });
+    });
+    // The fence holds while the first stream has not announced its turn.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(streamCalls).toBe(1);
+    expect(stopCalls).toBe(0);
+
+    // RUN_STARTED arrives: the deferred stop fires, the fence lifts, and
+    // only then does the follow-up stream go out.
+    if (!streamController) throw new Error("stream never started");
+    streamController.enqueue(
+      new TextEncoder().encode(
+        `data: ${JSON.stringify(OBSERVED_FRAMES[0])}\n\n`,
+      ),
+    );
+    await followUp;
+    expect(stopCalls).toBe(1);
+    expect(streamCalls).toBe(2);
+  });
+
+  it("holds the pre-start fence beyond two seconds (full pre-start window)", async () => {
+    // Regression (codex round 3): an outer 2s race on awaitPendingStop
+    // abandoned the fence before the 5s pre-start window elapsed, letting
+    // a follow-up overtake a RUN_STARTED that arrived between seconds 2
+    // and 5. The fence must hold for the placeholder's full lifetime.
+    let streamController:
+      | ReadableStreamDefaultController<Uint8Array>
+      | undefined;
+    const lateStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        streamController = controller;
+      },
+    });
+    let stopCalls = 0;
+    let streamCalls = 0;
+    const mock = vi.fn(
+      (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = String(input);
+        if (url === `${ASSISTANT_BASE}/conversations` && init?.method === "POST") {
+          return Promise.resolve(
+            jsonResponse({ status: "accepted", actorId: CONVERSATION_ID }),
+          );
+        }
+        if (url.endsWith("/stop") && init?.method === "POST") {
+          stopCalls += 1;
+          return Promise.resolve(jsonResponse({ status: "accepted" }, 202));
+        }
+        if (url.endsWith("/stream") && init?.method === "POST") {
+          streamCalls += 1;
+          return Promise.resolve(
+            streamCalls === 1
+              ? new Response(lateStream, {
+                  status: 200,
+                  headers: { "Content-Type": "text/event-stream" },
+                })
+              : sseResponse(OBSERVED_FRAMES),
+          );
+        }
+        return Promise.resolve(
+          jsonResponse(
+            { error: "not_found", error_code: -1, message: "404" },
+            404,
+          ),
+        );
+      },
+    );
+    vi.stubGlobal("fetch", mock);
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    const handle = transport.sendMessage(CONVERSATION_ID, "First", () => {});
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    handle.cancel(); // pre-start cancel installs the fence
+
+    const followUp = new Promise<void>((resolve) => {
+      transport.sendMessage(CONVERSATION_ID, "Second", (event) => {
+        if (event.event === "turn.completed") resolve();
+      });
+    });
+    // Past the old 2s cliff: the fence must still be holding.
+    await new Promise((resolve) => setTimeout(resolve, 2_300));
+    expect(streamCalls).toBe(1);
+
+    // RUN_STARTED at ~2.4s (inside the 5s window): stop fires, fence
+    // lifts, follow-up proceeds.
+    if (!streamController) throw new Error("stream never started");
+    streamController.enqueue(
+      new TextEncoder().encode(
+        `data: ${JSON.stringify(OBSERVED_FRAMES[0])}\n\n`,
+      ),
+    );
+    await followUp;
+    expect(stopCalls).toBe(1);
+    expect(streamCalls).toBe(2);
+  }, 15_000);
+
+  it("keeps the earlier stop fence when a queued follow-up is cancelled", async () => {
+    // Regression (codex round 4): cancelling a follow-up that is still
+    // QUEUED behind an earlier turn's stop must not install a pre-start
+    // placeholder — that would overwrite the earlier fence and let a third
+    // send overtake the still-pending stop. A never-dispatched run cancels
+    // purely locally.
+    const encoder = new TextEncoder();
+    const firstStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            [
+              `data: ${JSON.stringify(OBSERVED_FRAMES[0])}\n\n`,
+              `data: ${JSON.stringify(OBSERVED_FRAMES[1])}\n\n`,
+              `data: ${JSON.stringify(OBSERVED_FRAMES[2])}\n\n`,
+            ].join(""),
+          ),
+        );
+      },
+    });
+    let releaseStop: (() => void) | undefined;
+    let stopCalls = 0;
+    let streamCalls = 0;
+    const streamBodies: string[] = [];
+    const mock = vi.fn(
+      (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = String(input);
+        if (url === `${ASSISTANT_BASE}/conversations` && init?.method === "POST") {
+          return Promise.resolve(
+            jsonResponse({ status: "accepted", actorId: CONVERSATION_ID }),
+          );
+        }
+        if (url.endsWith("/stop") && init?.method === "POST") {
+          stopCalls += 1;
+          return new Promise<Response>((resolve) => {
+            releaseStop = () =>
+              resolve(jsonResponse({ status: "accepted" }, 202));
+          });
+        }
+        if (url.endsWith("/stream") && init?.method === "POST") {
+          streamCalls += 1;
+          streamBodies.push(String(init?.body));
+          return Promise.resolve(
+            streamCalls === 1
+              ? new Response(firstStream, {
+                  status: 200,
+                  headers: { "Content-Type": "text/event-stream" },
+                })
+              : sseResponse(OBSERVED_FRAMES),
+          );
+        }
+        return Promise.resolve(
+          jsonResponse(
+            { error: "not_found", error_code: -1, message: "404" },
+            404,
+          ),
+        );
+      },
+    );
+    vi.stubGlobal("fetch", mock);
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    // Turn A: streams, gets its turnId, cancelled → stop A held pending.
+    await new Promise<void>((resolve) => {
+      const handle = transport.sendMessage(CONVERSATION_ID, "Turn A", (e) => {
+        if (e.event === "turn.completed") resolve();
+        if (e.event === "block.delta") handle.cancel();
+      });
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(stopCalls).toBe(1);
+    expect(releaseStop).toBeDefined();
+
+    // Turn B: queued behind stop A (its fetch never dispatches), then
+    // cancelled. Must not touch the fence.
+    const handleB = transport.sendMessage(CONVERSATION_ID, "Turn B", () => {});
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(streamCalls).toBe(1);
+    handleB.cancel();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    // Turn C: must still be fenced by stop A.
+    const completedC = new Promise<void>((resolve) => {
+      transport.sendMessage(CONVERSATION_ID, "Turn C", (e) => {
+        if (e.event === "turn.completed") resolve();
+      });
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(streamCalls).toBe(1);
+
+    releaseStop?.();
+    await completedC;
+    // B never dispatched; C is the second and only other stream, sent
+    // after the fence lifted.
+    expect(streamCalls).toBe(2);
+    expect(streamBodies[1]).toContain("Turn C");
+    expect(stopCalls).toBe(1);
+  });
+
+  it("rejects sends while a delete is waiting on the stop fence", async () => {
+    // Regression (codex round 5): deleteConversation removed the run
+    // synchronously, so a successor send admitted during its fence wait
+    // could dispatch a stream before the DELETE and recreate the actor.
+    const encoder = new TextEncoder();
+    const firstStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            [
+              `data: ${JSON.stringify(OBSERVED_FRAMES[0])}\n\n`,
+              `data: ${JSON.stringify(OBSERVED_FRAMES[1])}\n\n`,
+              `data: ${JSON.stringify(OBSERVED_FRAMES[2])}\n\n`,
+            ].join(""),
+          ),
+        );
+      },
+    });
+    let releaseStop: (() => void) | undefined;
+    let deleteCalls = 0;
+    const mock = vi.fn(
+      (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = String(input);
+        if (url === `${ASSISTANT_BASE}/conversations` && init?.method === "POST") {
+          return Promise.resolve(
+            jsonResponse({ status: "accepted", actorId: CONVERSATION_ID }),
+          );
+        }
+        if (url.endsWith("/stop") && init?.method === "POST") {
+          return new Promise<Response>((resolve) => {
+            releaseStop = () =>
+              resolve(jsonResponse({ status: "accepted" }, 202));
+          });
+        }
+        if (url.endsWith("/stream") && init?.method === "POST") {
+          return Promise.resolve(
+            new Response(firstStream, {
+              status: 200,
+              headers: { "Content-Type": "text/event-stream" },
+            }),
+          );
+        }
+        if (init?.method === "DELETE") {
+          deleteCalls += 1;
+          return Promise.resolve(jsonResponse({}));
+        }
+        return Promise.resolve(
+          jsonResponse(
+            { error: "not_found", error_code: -1, message: "404" },
+            404,
+          ),
+        );
+      },
+    );
+    vi.stubGlobal("fetch", mock);
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    await new Promise<void>((resolve) => {
+      const handle = transport.sendMessage(CONVERSATION_ID, "Turn A", (e) => {
+        if (e.event === "turn.completed") resolve();
+        if (e.event === "block.delta") handle.cancel();
+      });
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(releaseStop).toBeDefined();
+
+    const deleting = transport.deleteConversation(CONVERSATION_ID);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(deleteCalls).toBe(0); // still fenced behind the held stop
+    expect(() =>
+      transport.sendMessage(CONVERSATION_ID, "Sneaky send", () => {}),
+    ).toThrow("This conversation is being deleted.");
+
+    releaseStop?.();
+    await deleting;
+    expect(deleteCalls).toBe(1);
+    // After success the tombstone takes over.
+    expect(() =>
+      transport.sendMessage(CONVERSATION_ID, "After delete", () => {}),
+    ).toThrow("Conversation was not found.");
+  });
+
+  it("guards against re-entrant sends and deletes from the cancellation callback", async () => {
+    // Regression (codex round 7): the delete body ran synchronously before
+    // the reservation was installed, so the cancel's synchronous
+    // `turn.completed` callback could re-enter the transport and slip a
+    // send (or a second DELETE) past both guards.
+    const encoder = new TextEncoder();
+    const openStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            [
+              `data: ${JSON.stringify(OBSERVED_FRAMES[0])}\n\n`,
+              `data: ${JSON.stringify(OBSERVED_FRAMES[1])}\n\n`,
+              `data: ${JSON.stringify(OBSERVED_FRAMES[2])}\n\n`,
+            ].join(""),
+          ),
+        );
+      },
+    });
+    let deleteCalls = 0;
+    const mock = vi.fn(
+      (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = String(input);
+        if (url === `${ASSISTANT_BASE}/conversations` && init?.method === "POST") {
+          return Promise.resolve(
+            jsonResponse({ status: "accepted", actorId: CONVERSATION_ID }),
+          );
+        }
+        if (url.endsWith("/stop") && init?.method === "POST") {
+          return Promise.resolve(jsonResponse({ status: "accepted" }, 202));
+        }
+        if (url.endsWith("/stream") && init?.method === "POST") {
+          return Promise.resolve(
+            new Response(openStream, {
+              status: 200,
+              headers: { "Content-Type": "text/event-stream" },
+            }),
+          );
+        }
+        if (init?.method === "DELETE") {
+          deleteCalls += 1;
+          return Promise.resolve(jsonResponse({}));
+        }
+        return Promise.resolve(
+          jsonResponse(
+            { error: "not_found", error_code: -1, message: "404" },
+            404,
+          ),
+        );
+      },
+    );
+    vi.stubGlobal("fetch", mock);
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    let deleteStarted = false;
+    let reentrantSendError: string | null = null;
+    let reentrantDeleteRan = false;
+    const streaming = new Promise<void>((resolve) => {
+      transport.sendMessage(CONVERSATION_ID, "Turn A", (event) => {
+        if (event.event === "block.delta") resolve();
+        if (event.event === "turn.completed" && deleteStarted) {
+          // Synchronous re-entry from the cancellation callback.
+          try {
+            transport.sendMessage(CONVERSATION_ID, "reentrant", () => {});
+          } catch (error) {
+            reentrantSendError =
+              error instanceof Error ? error.message : String(error);
+          }
+          void transport.deleteConversation(CONVERSATION_ID);
+          reentrantDeleteRan = true;
+        }
+      });
+    });
+    await streaming;
+
+    deleteStarted = true;
+    await transport.deleteConversation(CONVERSATION_ID);
+
+    expect(reentrantDeleteRan).toBe(true);
+    expect(reentrantSendError).toBe("This conversation is being deleted.");
+    // The re-entrant delete coalesced: exactly one DELETE on the wire.
+    expect(deleteCalls).toBe(1);
+  });
+
+  it("aborts a hung DELETE at its own deadline and stays retryable", async () => {
+    // Regression (codex rounds 7-8): the delete carried no deadline, so an
+    // accepted-but-unanswered DELETE pinned the reservation forever and
+    // locked the conversation. Signal-driven: the mock only rejects when
+    // the request's OWN AbortSignal fires, so this fails if the deadline
+    // controller, timer, or signal pass-through is ever removed.
+    vi.useFakeTimers();
+    try {
+      let deleteCalls = 0;
+      const mock = vi.fn(
+        (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+          const url = String(input);
+          if (
+            url === `${ASSISTANT_BASE}/conversations` &&
+            init?.method === "POST"
+          ) {
+            return Promise.resolve(
+              jsonResponse({ status: "accepted", actorId: CONVERSATION_ID }),
+            );
+          }
+          if (init?.method === "DELETE") {
+            deleteCalls += 1;
+            if (deleteCalls === 1) {
+              return new Promise<Response>((_, reject) => {
+                init.signal?.addEventListener("abort", () =>
+                  reject(new DOMException("aborted", "AbortError")),
+                );
+              });
+            }
+            return Promise.resolve(jsonResponse({}));
+          }
+          return Promise.resolve(
+            jsonResponse(
+              { error: "not_found", error_code: -1, message: "404" },
+              404,
+            ),
+          );
+        },
+      );
+      vi.stubGlobal("fetch", mock);
+      const transport = new AevatarAssistantTransport();
+      await transport.createConversation();
+
+      const firstOutcome = transport
+        .deleteConversation(CONVERSATION_ID)
+        .then(
+          () => "resolved",
+          () => "rejected",
+        );
+      const secondOutcome = transport
+        .deleteConversation(CONVERSATION_ID)
+        .then(
+          () => "resolved",
+          () => "rejected",
+        );
+
+      // Just before the deadline: still one DELETE, still reserved.
+      await vi.advanceTimersByTimeAsync(14_000);
+      expect(deleteCalls).toBe(1);
+      expect(() =>
+        transport.sendMessage(CONVERSATION_ID, "too early", () => {}),
+      ).toThrow("This conversation is being deleted.");
+
+      // Crossing the deadline aborts the request; both coalesced callers
+      // reject and the reservation lifts.
+      await vi.advanceTimersByTimeAsync(1_100);
+      expect(await firstOutcome).toBe("rejected");
+      expect(await secondOutcome).toBe("rejected");
+
+      // Not tombstoned: the retry delete goes through.
+      await transport.deleteConversation(CONVERSATION_ID);
+      expect(deleteCalls).toBe(2);
+      expect(() =>
+        transport.sendMessage(CONVERSATION_ID, "after delete", () => {}),
+      ).toThrow("Conversation was not found.");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("normalizes numeric index timestamps so multi-row lists sort and sends work", async () => {
+    // Live-stack repro: the chat-history index carries epoch-ms NUMBERS;
+    // with 2+ conversations the sidebar sort called localeCompare on a
+    // number and every send died with "Message not sent". (A one-row list
+    // never invokes the comparator, which is why single-conversation
+    // smoke tests missed it.)
+    stubFetch(
+      routeCreate,
+      (url, init) =>
+        url === `${ASSISTANT_BASE}/conversations` &&
+        (init?.method ?? "GET") === "GET"
+          ? jsonResponse({
+              conversations: [
+                {
+                  id: "conv-old",
+                  title: "Older chat",
+                  createdAt: 1784192889074,
+                  updatedAt: 1784192899074,
+                  messageCount: 2,
+                },
+                {
+                  id: "conv-new",
+                  title: "Newer chat",
+                  createdAt: 1784192989074,
+                  updatedAt: 1784192999074,
+                  messageCount: 4,
+                },
+              ],
+            })
+          : undefined,
+      routeStream(OBSERVED_FRAMES),
+    );
+    const transport = new AevatarAssistantTransport();
+
+    const list = await transport.listConversations();
+    expect(list.map((c) => c.id)).toEqual(["conv-new", "conv-old"]);
+    for (const conversation of list) {
+      expect(typeof conversation.last_message_at).toBe("string");
+      expect(typeof conversation.created_at).toBe("string");
+    }
+
+    // A send with multiple rows in the mirror must still complete.
+    await transport.createConversation();
+    const events = await collectTurn(transport, "Does sending still work?");
+    expect(events[events.length - 1]?.event).toBe("turn.completed");
+  });
+
+  it("coalesces concurrent deletes onto one in-flight operation", async () => {
+    // Regression (codex round 6): a Set-style reservation let an
+    // overlapping delete clear the flag while the other DELETE was still
+    // in flight, re-admitting sends. Concurrent deletes must share one
+    // operation — one DELETE on the wire, both callers settle together.
+    let releaseDelete: (() => void) | undefined;
+    let deleteCalls = 0;
+    const mock = vi.fn(
+      (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = String(input);
+        if (url === `${ASSISTANT_BASE}/conversations` && init?.method === "POST") {
+          return Promise.resolve(
+            jsonResponse({ status: "accepted", actorId: CONVERSATION_ID }),
+          );
+        }
+        if (init?.method === "DELETE") {
+          deleteCalls += 1;
+          return new Promise<Response>((resolve) => {
+            releaseDelete = () => resolve(jsonResponse({}));
+          });
+        }
+        return Promise.resolve(
+          jsonResponse(
+            { error: "not_found", error_code: -1, message: "404" },
+            404,
+          ),
+        );
+      },
+    );
+    vi.stubGlobal("fetch", mock);
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    const first = transport.deleteConversation(CONVERSATION_ID);
+    const second = transport.deleteConversation(CONVERSATION_ID);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(deleteCalls).toBe(1);
+    // While the shared delete is in flight, sends stay rejected.
+    expect(() =>
+      transport.sendMessage(CONVERSATION_ID, "Sneaky send", () => {}),
+    ).toThrow("This conversation is being deleted.");
+
+    releaseDelete?.();
+    await Promise.all([first, second]);
+    expect(deleteCalls).toBe(1);
+    expect(() =>
+      transport.sendMessage(CONVERSATION_ID, "After delete", () => {}),
+    ).toThrow("Conversation was not found.");
+  });
+
+  it("holds an approval decision behind the in-flight stop fence", async () => {
+    // Regression (codex round 5): decideApproval dispatched /approve
+    // without awaiting the conversation's pending stop, so the approval
+    // continuation could overtake a cancelled turn's fence upstream.
+    const encoder = new TextEncoder();
+    const secondStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            [
+              `data: ${JSON.stringify({ type: "RUN_STARTED", turnId: "turn-2", actorId: CONVERSATION_ID })}\n\n`,
+              `data: ${JSON.stringify(OBSERVED_FRAMES[1])}\n\n`,
+              `data: ${JSON.stringify(OBSERVED_FRAMES[2])}\n\n`,
+            ].join(""),
+          ),
+        );
+      },
+    });
+    let releaseStop: (() => void) | undefined;
+    let approveCalls = 0;
+    let streamCalls = 0;
+    const mock = vi.fn(
+      (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = String(input);
+        if (url === `${ASSISTANT_BASE}/conversations` && init?.method === "POST") {
+          return Promise.resolve(
+            jsonResponse({ status: "accepted", actorId: CONVERSATION_ID }),
+          );
+        }
+        if (url.endsWith("/stop") && init?.method === "POST") {
+          return new Promise<Response>((resolve) => {
+            releaseStop = () =>
+              resolve(jsonResponse({ status: "accepted" }, 202));
+          });
+        }
+        if (url.endsWith("/approve") && init?.method === "POST") {
+          approveCalls += 1;
+          return Promise.resolve(sseResponse(OBSERVED_FRAMES));
+        }
+        if (url.endsWith("/stream") && init?.method === "POST") {
+          streamCalls += 1;
+          return Promise.resolve(
+            streamCalls === 1
+              ? sseResponse([
+                  { type: "RUN_STARTED", turnId: TURN_ID },
+                  {
+                    type: "TOOL_APPROVAL_REQUEST",
+                    toolApprovalRequest: {
+                      requestId: "req-fence",
+                      toolName: "lark_post",
+                      message: "Post the digest.",
+                    },
+                  },
+                ])
+              : new Response(secondStream, {
+                  status: 200,
+                  headers: { "Content-Type": "text/event-stream" },
+                }),
+          );
+        }
+        return Promise.resolve(
+          jsonResponse(
+            { error: "not_found", error_code: -1, message: "404" },
+            404,
+          ),
+        );
+      },
+    );
+    vi.stubGlobal("fetch", mock);
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    // Turn 1 parks an actionable approval card at EOF.
+    const turn1 = await collectTurn(transport, "Post the digest");
+    const card = turn1.find(
+      (event) =>
+        event.event === "block.started" &&
+        event.block.type === "approval_card",
+    );
+    if (!card || card.event !== "block.started") {
+      throw new Error("approval card never appeared");
+    }
+
+    // Turn 2 streams, gets cancelled mid-delta -> stop held pending.
+    await new Promise<void>((resolve) => {
+      const handle = transport.sendMessage(CONVERSATION_ID, "Turn 2", (e) => {
+        if (e.event === "turn.completed") resolve();
+        if (e.event === "block.delta") handle.cancel();
+      });
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(releaseStop).toBeDefined();
+
+    // Deciding the old card must wait for turn 2's stop fence.
+    const deciding = transport.decideApproval(
+      CONVERSATION_ID,
+      card.block.block_id,
+      true,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(approveCalls).toBe(0);
+
+    releaseStop?.();
+    await deciding;
+    expect(approveCalls).toBe(1);
+  });
+
+  it("serializes a follow-up send behind the in-flight stop", async () => {
+    // The stop fence must commit upstream before the next :stream goes out;
+    // otherwise the follow-up can arrive first and fail with
+    // ACTIVE_TURN_REQUIRES_STEERING. Hold the stop 202 pending and assert
+    // the second send waits for it.
+    const encoder = new TextEncoder();
+    const firstStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            [
+              `data: ${JSON.stringify(OBSERVED_FRAMES[0])}\n\n`,
+              `data: ${JSON.stringify(OBSERVED_FRAMES[1])}\n\n`,
+              `data: ${JSON.stringify(OBSERVED_FRAMES[2])}\n\n`,
+            ].join(""),
+          ),
+        );
+      },
+    });
+    let releaseStop: (() => void) | undefined;
+    let streamCalls = 0;
+    const mock = vi.fn(
+      (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = String(input);
+        if (url === `${ASSISTANT_BASE}/conversations` && init?.method === "POST") {
+          return Promise.resolve(
+            jsonResponse({ status: "accepted", actorId: CONVERSATION_ID }),
+          );
+        }
+        if (url.endsWith("/stop") && init?.method === "POST") {
+          return new Promise<Response>((resolve) => {
+            releaseStop = () =>
+              resolve(jsonResponse({ status: "accepted" }, 202));
+          });
+        }
+        if (url.endsWith("/stream") && init?.method === "POST") {
+          streamCalls += 1;
+          return Promise.resolve(
+            streamCalls === 1
+              ? new Response(firstStream, {
+                  status: 200,
+                  headers: { "Content-Type": "text/event-stream" },
+                })
+              : sseResponse(OBSERVED_FRAMES),
+          );
+        }
+        return Promise.resolve(
+          jsonResponse(
+            { error: "not_found", error_code: -1, message: "404" },
+            404,
+          ),
+        );
+      },
+    );
+    vi.stubGlobal("fetch", mock);
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    await new Promise<void>((resolve) => {
+      const handle = transport.sendMessage(
+        CONVERSATION_ID,
+        "First turn",
+        (event) => {
+          if (event.event === "turn.completed") resolve();
+          if (event.event === "block.delta") handle.cancel();
+        },
+      );
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(releaseStop).toBeDefined();
+    expect(streamCalls).toBe(1);
+
+    // Follow-up send: must NOT reach /stream while the stop is pending.
+    const followUp = new Promise<void>((resolve) => {
+      transport.sendMessage(CONVERSATION_ID, "Second turn", (event) => {
+        if (event.event === "turn.completed") resolve();
+      });
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(streamCalls).toBe(1);
+
+    releaseStop?.();
+    await followUp;
+    expect(streamCalls).toBe(2);
+  });
+
+  it("keeps the local cancel settled when the server-side stop fails", async () => {
+    const openStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const encoder = new TextEncoder();
+        controller.enqueue(
+          encoder.encode(
+            [
+              `data: ${JSON.stringify(OBSERVED_FRAMES[0])}\n\n`,
+              `data: ${JSON.stringify(OBSERVED_FRAMES[1])}\n\n`,
+              `data: ${JSON.stringify(OBSERVED_FRAMES[2])}\n\n`,
+            ].join(""),
+          ),
+        );
+      },
+    });
+    stubFetch(
+      routeCreate,
+      (url, init) =>
+        url.endsWith("/stop") && init?.method === "POST"
+          ? jsonResponse(
+              { error: "internal", error_code: 1006, message: "boom" },
+              500,
+            )
+          : undefined,
+      (url, init) =>
+        url.endsWith("/stream") && init?.method === "POST"
+          ? new Response(openStream, {
+              status: 200,
+              headers: { "Content-Type": "text/event-stream" },
+            })
+          : undefined,
+    );
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    const events: TurnEvent[] = [];
+    await new Promise<void>((resolve) => {
+      const handle = transport.sendMessage(
+        CONVERSATION_ID,
+        "Hello",
+        (event) => {
+          events.push(event);
+          if (event.event === "turn.completed") resolve();
+          if (event.event === "block.delta") handle.cancel();
+        },
+      );
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const terminal = events[events.length - 1];
+    expect(terminal?.event === "turn.completed" && terminal.status).toBe(
+      "cancelled",
+    );
+  });
+
   it("throws when deciding an approval for an unknown block", async () => {
     stubFetch(routeHistory([]));
     const transport = new AevatarAssistantTransport();
