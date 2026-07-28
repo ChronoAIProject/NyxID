@@ -21,12 +21,19 @@ use crate::services::{
 
 fn llm_credential_class(
     resolved_via_user_service: bool,
+    master_credential: bool,
     target: &proxy_service::ProxyTarget,
 ) -> CredentialClass {
     if target.auth_method == "none" && target.credential.is_empty() {
         CredentialClass::NoAuth
     } else if resolved_via_user_service {
-        CredentialClass::UserOwned
+        // Auto-provisioned UserServices with no user key inject the
+        // catalog master credential; classify by whose key was used.
+        if master_credential {
+            CredentialClass::NyxidManagedMaster
+        } else {
+            CredentialClass::UserOwned
+        }
     } else if !target.service.requires_user_credential && !target.credential.is_empty() {
         CredentialClass::NyxidManagedMaster
     } else {
@@ -280,7 +287,7 @@ pub async fn llm_proxy_request(
     // always None -- and then fall through to the legacy delegation path
     // with the "Provider ... connection required" error, even though the
     // user has a perfectly valid UserService linked by catalog_service_id.
-    let (target, resolved_via_user_service, owner_for_approval) =
+    let (target, resolved_via_user_service, master_credential, owner_for_approval) =
         match proxy_service::resolve_proxy_target_from_user_service(
             &state.db,
             &state.encryption_keys,
@@ -297,7 +304,12 @@ pub async fn llm_proxy_request(
                     .as_ref()
                     .map(|routing| routing.org_user_id.clone())
                     .unwrap_or_else(|| user_id_str.clone());
-                (resolution.target, true, Some(effective_owner))
+                (
+                    resolution.target,
+                    true,
+                    resolution.master_credential,
+                    Some(effective_owner),
+                )
             }
             None => {
                 // Before the legacy fallback, block org viewers whose
@@ -318,7 +330,7 @@ pub async fn llm_proxy_request(
                     &service_id,
                 )
                 .await?;
-                (legacy, false, None)
+                (legacy, false, false, None)
             }
         };
     // Check approval against the owner selected by credential resolution.
@@ -359,7 +371,7 @@ pub async fn llm_proxy_request(
         Some(service.slug.clone()),
         crate::services::billing::NodeIntent::Direct,
         target.auth_method.clone(),
-        llm_credential_class(resolved_via_user_service, &target),
+        llm_credential_class(resolved_via_user_service, master_credential, &target),
         BillingMetric::Tokens,
         target.service.billing.as_ref().or(service.billing.as_ref()),
         state.billing.resale_enabled(),
@@ -634,7 +646,7 @@ pub async fn gateway_request(
     // See `llm_proxy_request` for why we pass `None` as the slug here
     // instead of `provider_slug` -- the URL's provider slug does not
     // match UserService.slug, which is user-chosen at provision time.
-    let (target, resolved_via_user_service) =
+    let (target, resolved_via_user_service, master_credential) =
         match proxy_service::resolve_proxy_target_from_user_service(
             &state.db,
             &state.encryption_keys,
@@ -704,7 +716,7 @@ pub async fn gateway_request(
                         Some(event_data),
                     );
                 }
-                (resolution.target, true)
+                (resolution.target, true, resolution.master_credential)
             }
             None => {
                 let legacy = proxy_service::resolve_proxy_target(
@@ -729,7 +741,7 @@ pub async fn gateway_request(
                         "user_service_id": serde_json::Value::Null,
                     })),
                 );
-                (legacy, false)
+                (legacy, false, false)
             }
         };
 
@@ -771,7 +783,7 @@ pub async fn gateway_request(
         Some(service.slug.clone()),
         crate::services::billing::NodeIntent::Direct,
         target.auth_method.clone(),
-        llm_credential_class(resolved_via_user_service, &target),
+        llm_credential_class(resolved_via_user_service, master_credential, &target),
         BillingMetric::Tokens,
         target.service.billing.as_ref().or(service.billing.as_ref()),
         state.billing.resale_enabled(),

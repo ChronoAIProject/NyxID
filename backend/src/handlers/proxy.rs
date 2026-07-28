@@ -229,6 +229,7 @@ struct PreResolved {
     /// The UserService ID for API key scope checks.
     user_service_id: Option<String>,
     has_server_credential: bool,
+    master_credential: bool,
     /// The user_id that owns the resolved UserService. For personal
     /// resolutions this is the actor; for org-routed resolutions this is
     /// the org's user_id. Used to scope NodeServiceBinding fallback
@@ -599,6 +600,7 @@ async fn proxy_request_inner(
                     node_id: resolved.node_id,
                     user_service_id: Some(resolved.user_service_id),
                     has_server_credential: resolved.has_server_credential,
+                    master_credential: resolved.master_credential,
                     effective_owner_id: resolved
                         .org_routing
                         .as_ref()
@@ -656,6 +658,7 @@ async fn proxy_request_inner(
                 node_id: resolved.node_id,
                 user_service_id: Some(resolved.user_service_id),
                 has_server_credential: resolved.has_server_credential,
+                master_credential: resolved.master_credential,
                 effective_owner_id: resolved
                     .org_routing
                     .as_ref()
@@ -812,6 +815,7 @@ async fn proxy_request_by_slug_inner(
                     node_id: resolved.node_id,
                     user_service_id: Some(resolved.user_service_id),
                     has_server_credential: resolved.has_server_credential,
+                    master_credential: resolved.master_credential,
                     effective_owner_id: resolved
                         .org_routing
                         .as_ref()
@@ -869,6 +873,7 @@ async fn proxy_request_by_slug_inner(
                 node_id: resolved.node_id,
                 user_service_id: Some(resolved.user_service_id),
                 has_server_credential: resolved.has_server_credential,
+                master_credential: resolved.master_credential,
                 effective_owner_id: resolved
                     .org_routing
                     .as_ref()
@@ -1293,6 +1298,7 @@ async fn execute_proxy_inner(
         node_route,
         target,
         has_server_credential,
+        master_credential,
         resolved_user_service_id,
         node_routing_required,
         catalog_service_slug,
@@ -1431,6 +1437,7 @@ async fn execute_proxy_inner(
             node_route,
             pre.target,
             pre.has_server_credential,
+            pre.master_credential,
             pre.user_service_id,
             required,
             catalog_service_slug,
@@ -1480,6 +1487,7 @@ async fn execute_proxy_inner(
             node_route,
             target,
             has_server_credential,
+            false,
             resolved_user_service_id,
             node_routing_required,
             catalog_service_slug,
@@ -1512,6 +1520,7 @@ async fn execute_proxy_inner(
         node_route.is_some(),
         agent_override_applied,
         has_server_credential,
+        master_credential,
         &target,
     );
     let is_ws_candidate = is_ws_upgrade_request(&request);
@@ -2747,16 +2756,39 @@ async fn execute_proxy_inner(
             let idle_timeout =
                 std::time::Duration::from_secs(state.config.proxy_stream_idle_timeout_secs);
             let idle_timeout_secs = state.config.proxy_stream_idle_timeout_secs;
+            let is_json_body = downstream_response
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|ct| ct.to_ascii_lowercase().starts_with("application/json"));
             let mut upstream_stream = downstream_response.bytes_stream();
             let stream_billing = state.billing.clone();
             let stream_metered = metered.clone();
             let request_len = request_body_len;
+            // Chunked JSON bodies (no Content-Length) stream through this
+            // branch; capture a bounded copy so LLM services settle with the
+            // provider-reported token count instead of the byte estimate.
+            let stream_usage_context = if is_json_body {
+                usage_context.clone()
+            } else {
+                None
+            };
+            let stream_resale_metric = billing_ctx.resale.as_ref().map(|spec| spec.metric);
             let stream = async_stream::stream! {
                 let mut response_len: i64 = 0;
+                let mut captured: Option<Vec<u8>> =
+                    stream_usage_context.as_ref().map(|_| Vec::new());
                 loop {
                     match tokio::time::timeout(idle_timeout, upstream_stream.next()).await {
                         Ok(Some(Ok(bytes))) => {
                             response_len += bytes.len() as i64;
+                            if let Some(buf) = captured.as_mut() {
+                                if buf.len() + bytes.len() <= USAGE_CAPTURE_MAX_BYTES {
+                                    buf.extend_from_slice(&bytes);
+                                } else {
+                                    captured = None;
+                                }
+                            }
                             yield Ok::<_, std::io::Error>(bytes);
                         }
                         Ok(Some(Err(e))) => {
@@ -2782,12 +2814,30 @@ async fn execute_proxy_inner(
                         }
                     }
                 }
+                let mut reported_usage = None;
+                let mut model = None;
+                if let Some(ctx) = stream_usage_context
+                    && let Some(buf) = captured
+                    && let Ok(json) = serde_json::from_slice::<serde_json::Value>(&buf)
+                    && let Some(usage) = llm_usage_service::extract_reported_usage(&json)
+                {
+                    model = ctx.model.clone();
+                    llm_usage_service::log_reported_usage_async(ctx, usage.clone());
+                    reported_usage = Some(usage);
+                }
+                let resale = stream_resale_metric.and_then(|metric| {
+                    resale_usage_from_optional_reported(
+                        metric,
+                        reported_usage.as_ref(),
+                        request_len + response_len,
+                    )
+                });
                 settle_meter_async(
                     stream_billing,
                     stream_metered,
-                    llm_platform_usage(None, request_len + response_len),
-                    None,
-                    None,
+                    llm_platform_usage(reported_usage.as_ref(), request_len + response_len),
+                    resale,
+                    model,
                 )
                 .await;
             };
@@ -2944,6 +2994,7 @@ fn final_credential_class(
     node_route_active: bool,
     agent_override_applied: bool,
     has_server_credential: bool,
+    master_credential: bool,
     target: &proxy_service::ProxyTarget,
 ) -> CredentialClass {
     if node_route_active && !has_server_credential {
@@ -2956,7 +3007,14 @@ fn final_credential_class(
         return CredentialClass::AgentOverrideUserOwned;
     }
     if resolved_user_service_id.is_some() {
-        return CredentialClass::UserOwned;
+        // Auto-provisioned UserServices with no user key inject the
+        // catalog master credential; classify by whose key was used,
+        // not by which resolution path matched.
+        return if master_credential {
+            CredentialClass::NyxidManagedMaster
+        } else {
+            CredentialClass::UserOwned
+        };
     }
     if !target.service.requires_user_credential && !target.credential.is_empty() {
         return CredentialClass::NyxidManagedMaster;
@@ -3164,6 +3222,11 @@ async fn settle_meter_async(
 /// Threshold below which non-error responses are buffered (so small API
 /// responses keep the existing diagnostic-logging path).
 const STREAM_SIZE_THRESHOLD: u64 = 256 * 1024;
+
+/// Cap on the bounded response copy kept for LLM usage extraction when a
+/// chunked JSON body streams through the passthrough branch. Bodies larger
+/// than this fall back to the byte-based token estimate.
+const USAGE_CAPTURE_MAX_BYTES: usize = 2 * 1024 * 1024;
 
 /// Content types that should always be streamed regardless of size.
 const STREAMING_CONTENT_TYPES: &[&str] = &[
@@ -4547,9 +4610,10 @@ mod tests {
         ALLOWED_FORWARD_HEADER_PREFIXES, ALLOWED_FORWARD_HEADERS, ALLOWED_WS_FORWARD_HEADERS,
         ConnectionUsageStats, WsPassthroughGuard, add_websocket_usage_provenance,
         apply_agent_attribution_headers, auth_kind_label, collect_forward_headers_with_prefixes,
-        compose_pre_resolved_node_ids, enforce_node_route_scope, is_chat_completions_proxy_path,
-        is_codex_transport_path, is_ws_upgrade_request, should_enforce_runtime_approval,
-        validate_range_header, websocket_realtime_usage_enabled, websocket_resale_usage,
+        compose_pre_resolved_node_ids, enforce_node_route_scope, final_credential_class,
+        is_chat_completions_proxy_path, is_codex_transport_path, is_ws_upgrade_request,
+        should_enforce_runtime_approval, validate_range_header, websocket_realtime_usage_enabled,
+        websocket_resale_usage,
     };
     use crate::models::service_billing::{BillingMetric, ServiceBilling};
     use crate::models::usage_meter::CredentialClass;
@@ -4799,6 +4863,7 @@ mod tests {
 
     fn token_resale_metered_context(credential_class: CredentialClass) -> MeteredProxyContext {
         let billing = ServiceBilling {
+            platform_billable: false,
             resale_billable: true,
             resale_metric: BillingMetric::Tokens,
             lago_resale_metric_code: Some("resale_tokens".to_string()),
@@ -5414,6 +5479,25 @@ mod tests {
             ws_frame_injections: Vec::new(),
             connection_id: None,
         }
+    }
+
+    #[test]
+    fn user_service_with_master_credential_classifies_as_master() {
+        let mut target = make_target("http://localhost:8080");
+        target.auth_method = "bearer".to_string();
+        target.credential = "master-key".to_string();
+
+        // Auto-provisioned UserService (no user key) injecting the catalog
+        // master credential: the platform's key, not the user's.
+        assert_eq!(
+            final_credential_class(Some("us-1"), false, false, true, true, &target),
+            CredentialClass::NyxidManagedMaster
+        );
+        // A UserService backed by the user's own key stays user-owned.
+        assert_eq!(
+            final_credential_class(Some("us-1"), false, false, true, false, &target),
+            CredentialClass::UserOwned
+        );
     }
 
     #[test]

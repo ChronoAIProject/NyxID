@@ -693,6 +693,10 @@ pub struct UserServiceResolution {
     pub node_id: Option<String>,
     pub user_service_id: String,
     pub has_server_credential: bool,
+    /// True when the injected credential is the catalog service's master
+    /// credential (auto-provisioned UserService with no user key), not a
+    /// key the user supplied. Drives resale credential classification.
+    pub master_credential: bool,
     /// Set when the resolved UserService was reached via org membership
     /// (the actor has no personal copy). `None` means personal credentials.
     pub org_routing: Option<OrgRouting>,
@@ -1745,6 +1749,7 @@ async fn finish_resolution(
             node_id: user_service.node_id.clone(),
             user_service_id: user_service.id.clone(),
             has_server_credential: true,
+            master_credential: false,
             org_routing,
             pool_selection,
         });
@@ -1794,6 +1799,7 @@ async fn finish_resolution(
             node_id: user_service.node_id.clone(),
             user_service_id: user_service.id.clone(),
             has_server_credential: true,
+            master_credential: true,
             org_routing,
             pool_selection,
         });
@@ -1867,6 +1873,7 @@ async fn finish_resolution(
             node_id: user_service.node_id.clone(),
             user_service_id: user_service.id.clone(),
             has_server_credential,
+            master_credential: false,
             org_routing,
             pool_selection,
         });
@@ -1918,6 +1925,7 @@ async fn finish_resolution(
         node_id: user_service.node_id.clone(),
         user_service_id: user_service.id.clone(),
         has_server_credential: true,
+        master_credential: false,
         org_routing,
         pool_selection,
     })
