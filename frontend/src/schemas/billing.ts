@@ -31,6 +31,7 @@ export const billingUsageRowSchema = z.object({
   bytes: z.number().int(),
   events: z.number().int().nonnegative(),
   lago_acked: z.boolean(),
+  billable: z.boolean().optional().default(true),
   estimated_credits_micros: z.number().int().nullable().optional(),
 });
 

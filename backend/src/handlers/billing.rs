@@ -56,6 +56,9 @@ pub struct BillingUsageRow {
     pub bytes: i64,
     pub events: i64,
     pub lago_acked: bool,
+    /// False for usage metered on a service without platform billing:
+    /// observability only, no cost, never pushed to Lago.
+    pub billable: bool,
     pub estimated_credits_micros: Option<i64>,
 }
 
@@ -152,6 +155,10 @@ pub async fn get_usage(
     let mut match_doc = doc! {
         "billing_owner_id": &owner_id,
         "quantity": { "$ne": null },
+        // The billing page shows charged usage only: rows without a wallet
+        // were metered for observability (service not platform_billable)
+        // and never cost anything. Resale rows carry a wallet and stay in.
+        "wallet_id": { "$ne": null },
         "created_at": { "$gte": bson::DateTime::from_chrono(since) },
         "status": { "$in": ["finalized", "dead_letter"] },
     };
@@ -174,6 +181,10 @@ pub async fn get_usage(
                     "lago_metric_code": "$lago_metric_code",
                     "layer": "$layer",
                     "lago_acked": "$lago_acked",
+                    // Rows without a wallet were metered for observability
+                    // only (service not platform_billable); they carry no
+                    // cost and are never pushed to Lago.
+                    "billable": { "$ne": [{ "$ifNull": ["$wallet_id", null] }, null] },
                 },
                 "quantity": { "$sum": "$quantity" },
                 "events": { "$sum": 1 },
@@ -199,9 +210,14 @@ pub async fn get_usage(
             .unwrap_or_default();
         let quantity = doc_i64(&doc, "quantity").unwrap_or(0);
         let lago_metric_code = id_doc.get_str("lago_metric_code").unwrap_or("").to_string();
-        let model_rate = find_rate(&state.db, &lago_metric_code, None).await?;
-        let estimated_credits_micros =
-            model_rate.map(|rate| rate.credits_per_unit_micros.saturating_mul(quantity));
+        let billable = id_doc.get_bool("billable").unwrap_or(false);
+        let estimated_credits_micros = if billable {
+            find_rate(&state.db, &lago_metric_code, None)
+                .await?
+                .map(|rate| rate.credits_per_unit_micros.saturating_mul(quantity))
+        } else {
+            Some(0)
+        };
         rows.push(BillingUsageRow {
             service_slug: id_doc.get_str("service_slug").ok().map(ToString::to_string),
             service_id: id_doc.get_str("service_id").ok().map(ToString::to_string),
@@ -221,6 +237,7 @@ pub async fn get_usage(
             },
             events: doc_i64(&doc, "events").unwrap_or(0),
             lago_acked: id_doc.get_bool("lago_acked").unwrap_or(false),
+            billable,
             estimated_credits_micros,
         });
     }
