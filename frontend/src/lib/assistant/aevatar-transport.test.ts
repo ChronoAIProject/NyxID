@@ -1129,6 +1129,146 @@ describe("AevatarAssistantTransport", () => {
     ).toThrow("Conversation was not found.");
   });
 
+  it("guards against re-entrant sends and deletes from the cancellation callback", async () => {
+    // Regression (codex round 7): the delete body ran synchronously before
+    // the reservation was installed, so the cancel's synchronous
+    // `turn.completed` callback could re-enter the transport and slip a
+    // send (or a second DELETE) past both guards.
+    const encoder = new TextEncoder();
+    const openStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            [
+              `data: ${JSON.stringify(OBSERVED_FRAMES[0])}\n\n`,
+              `data: ${JSON.stringify(OBSERVED_FRAMES[1])}\n\n`,
+              `data: ${JSON.stringify(OBSERVED_FRAMES[2])}\n\n`,
+            ].join(""),
+          ),
+        );
+      },
+    });
+    let deleteCalls = 0;
+    const mock = vi.fn(
+      (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = String(input);
+        if (url === `${ASSISTANT_BASE}/conversations` && init?.method === "POST") {
+          return Promise.resolve(
+            jsonResponse({ status: "accepted", actorId: CONVERSATION_ID }),
+          );
+        }
+        if (url.endsWith("/stop") && init?.method === "POST") {
+          return Promise.resolve(jsonResponse({ status: "accepted" }, 202));
+        }
+        if (url.endsWith("/stream") && init?.method === "POST") {
+          return Promise.resolve(
+            new Response(openStream, {
+              status: 200,
+              headers: { "Content-Type": "text/event-stream" },
+            }),
+          );
+        }
+        if (init?.method === "DELETE") {
+          deleteCalls += 1;
+          return Promise.resolve(jsonResponse({}));
+        }
+        return Promise.resolve(
+          jsonResponse(
+            { error: "not_found", error_code: -1, message: "404" },
+            404,
+          ),
+        );
+      },
+    );
+    vi.stubGlobal("fetch", mock);
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    let deleteStarted = false;
+    let reentrantSendError: string | null = null;
+    let reentrantDeleteRan = false;
+    const streaming = new Promise<void>((resolve) => {
+      transport.sendMessage(CONVERSATION_ID, "Turn A", (event) => {
+        if (event.event === "block.delta") resolve();
+        if (event.event === "turn.completed" && deleteStarted) {
+          // Synchronous re-entry from the cancellation callback.
+          try {
+            transport.sendMessage(CONVERSATION_ID, "reentrant", () => {});
+          } catch (error) {
+            reentrantSendError =
+              error instanceof Error ? error.message : String(error);
+          }
+          void transport.deleteConversation(CONVERSATION_ID);
+          reentrantDeleteRan = true;
+        }
+      });
+    });
+    await streaming;
+
+    deleteStarted = true;
+    await transport.deleteConversation(CONVERSATION_ID);
+
+    expect(reentrantDeleteRan).toBe(true);
+    expect(reentrantSendError).toBe("This conversation is being deleted.");
+    // The re-entrant delete coalesced: exactly one DELETE on the wire.
+    expect(deleteCalls).toBe(1);
+  });
+
+  it("rejects both delete callers when the DELETE dies, and stays retryable", async () => {
+    // Regression (codex round 7): the delete carried no deadline, so an
+    // accepted-but-unanswered DELETE pinned the reservation forever and
+    // locked the conversation. The request now aborts on its own deadline;
+    // this simulates the abort outcome and verifies recovery.
+    let deleteCalls = 0;
+    const mock = vi.fn(
+      (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = String(input);
+        if (url === `${ASSISTANT_BASE}/conversations` && init?.method === "POST") {
+          return Promise.resolve(
+            jsonResponse({ status: "accepted", actorId: CONVERSATION_ID }),
+          );
+        }
+        if (init?.method === "DELETE") {
+          deleteCalls += 1;
+          if (deleteCalls === 1) {
+            return new Promise<Response>((_, reject) => {
+              setTimeout(
+                () => reject(new DOMException("aborted", "AbortError")),
+                50,
+              );
+            });
+          }
+          return Promise.resolve(jsonResponse({}));
+        }
+        return Promise.resolve(
+          jsonResponse(
+            { error: "not_found", error_code: -1, message: "404" },
+            404,
+          ),
+        );
+      },
+    );
+    vi.stubGlobal("fetch", mock);
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    const first = transport.deleteConversation(CONVERSATION_ID);
+    const second = transport.deleteConversation(CONVERSATION_ID);
+    await expect(first).rejects.toBeTruthy();
+    await expect(second).rejects.toBeTruthy();
+
+    // Not tombstoned, reservation lifted: the conversation is retryable.
+    expect(() =>
+      transport.sendMessage(CONVERSATION_ID, "still here", () => {}),
+    ).not.toThrow("This conversation is being deleted.");
+    transport.cancelActiveTurn(CONVERSATION_ID);
+    await transport.deleteConversation(CONVERSATION_ID);
+    expect(deleteCalls).toBe(2);
+    expect(() =>
+      transport.sendMessage(CONVERSATION_ID, "after delete", () => {}),
+    ).toThrow("Conversation was not found.");
+  });
+
   it("coalesces concurrent deletes onto one in-flight operation", async () => {
     // Regression (codex round 6): a Set-style reservation let an
     // overlapping delete clear the flag while the other DELETE was still

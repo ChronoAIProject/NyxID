@@ -91,6 +91,11 @@ const PRE_START_STOP_WINDOW_MS = 5_000;
 // entry forever and tax every later send/delete with the full fence wait.
 const STOP_REQUEST_DEADLINE_MS = 10_000;
 
+// Hard deadline on the composite DELETE. The deletion reservation rejects
+// sends and approvals while it holds, so an unanswered DELETE without a
+// bound would lock the conversation permanently.
+const DELETE_REQUEST_DEADLINE_MS = 15_000;
+
 // Inline media larger than this (base64 chars ≈ 6 MB decoded) is summarized
 // as text instead of being embedded as a data: URL artifact.
 const MAX_MEDIA_DATA_CHARS = 8_000_000;
@@ -835,28 +840,51 @@ export class AevatarAssistantTransport implements AssistantTransport {
     // failure would clear it while the other DELETE is still in flight).
     const inFlight = this.deletingConversations.get(conversationId);
     if (inFlight) return inFlight;
-    const operation = (async () => {
+    // The body is DEFERRED to a microtask so the reservation is installed
+    // before any callback-capable work runs: cancelTurn emits
+    // `turn.completed` synchronously, and a re-entrant callback must
+    // already see the deletion guard — otherwise it can admit a send (or
+    // a second delete) into the exact window the reservation closes.
+    const operation = Promise.resolve().then(async () => {
       const run = this.running.get(conversationId);
       if (run) this.cancelTurn(conversationId, run);
       // The cancel above may have fired a `:stop`; let its fence commit
       // before the actor delete races the still-active work upstream.
       await this.awaitPendingStop(conversationId);
-      await assistantApi.del(
-        `${ASSISTANT_PREFIX}/conversations/${conversationId}`,
+      // Own deadline: the reservation rejects sends while it holds, so an
+      // accepted-but-never-answered DELETE must not lock the conversation.
+      const deadline = new AbortController();
+      const deadlineTimer = setTimeout(
+        () => deadline.abort(),
+        DELETE_REQUEST_DEADLINE_MS,
       );
+      try {
+        await apiClient<unknown>(
+          `${ASSISTANT_PREFIX}/conversations/${conversationId}`,
+          {
+            method: "DELETE",
+            preserveSessionOn401: true,
+            signal: deadline.signal,
+          },
+        );
+      } finally {
+        clearTimeout(deadlineTimer);
+      }
       // Local removal only after the server accepted: a failed delete keeps
       // the conversation listed and retryable.
       this.conversations.delete(conversationId);
       this.deletedConversationIds.add(conversationId);
-    })();
+    });
     this.deletingConversations.set(conversationId, operation);
     try {
       await operation;
     } finally {
       // On success the tombstone takes over; on failure the conversation
-      // becomes usable (and retryable) again. Only this owner clears the
-      // reservation — coalesced callers returned the shared promise above.
-      this.deletingConversations.delete(conversationId);
+      // becomes usable (and retryable) again. Identity-checked: only the
+      // entry this owner installed is cleared.
+      if (this.deletingConversations.get(conversationId) === operation) {
+        this.deletingConversations.delete(conversationId);
+      }
     }
   }
 
