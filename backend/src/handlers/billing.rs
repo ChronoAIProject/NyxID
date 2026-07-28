@@ -264,6 +264,18 @@ pub async fn get_usage(
     }))
 }
 
+/// Reject wallet surfaces for owners outside the staged billing rollout.
+async fn ensure_billing_rollout(state: &AppState, owner_id: &str, actor_id: &str) -> AppResult<()> {
+    if crate::services::feature_flag_service::billing_rollout_enabled(&state.db, owner_id, actor_id)
+        .await?
+    {
+        return Ok(());
+    }
+    Err(AppError::Forbidden(
+        "Billing is not enabled for this account".to_string(),
+    ))
+}
+
 #[utoipa::path(
     get,
     path = "/api/v1/billing/wallet",
@@ -282,6 +294,7 @@ pub async fn get_wallet(
         .owner_resolver()
         .resolve_for_wallet_management(&auth_user.user_id.to_string(), None)
         .await?;
+    ensure_billing_rollout(&state, &owner.owner_id, &auth_user.user_id.to_string()).await?;
     if let Some(wallet) = state.billing.get_wallet(&owner.owner_id).await? {
         return Ok(Json(BillingWalletResponse::from_wallet(wallet, false)));
     }
@@ -314,6 +327,7 @@ pub async fn provision_wallet(
         .owner_resolver()
         .resolve_for_wallet_management(&actor_id, body.owner_id.as_deref())
         .await?;
+    ensure_billing_rollout(&state, &owner.owner_id, &actor_id).await?;
     let provisioned = state.billing.ensure_wallet(&owner.owner_id).await?;
 
     Ok(Json(BillingWalletResponse::from_wallet(
@@ -343,6 +357,7 @@ pub async fn create_topup(
         .owner_resolver()
         .resolve_for_wallet_management(&actor_id, body.owner_id.as_deref())
         .await?;
+    ensure_billing_rollout(&state, &owner.owner_id, &actor_id).await?;
     let checkout = state
         .billing
         .create_topup_checkout(&owner.owner_id, body.amount_credits, &body.idempotency_key)

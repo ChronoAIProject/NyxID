@@ -65,14 +65,37 @@ const AI_ASSISTANT_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+/// Staged rollout for usage billing: only flagged owners are charged and see
+/// the billing surface, even when `BILLING_ENABLED` and Lago are configured.
+/// Off by default so charging can be piloted on a staff-selected org cohort.
+pub const BILLING_FLAG_KEY: &str = "experimental:billing";
+
 #[cfg(not(test))]
-pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[AI_ASSISTANT_FLAG];
+const BILLING_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: BILLING_FLAG_KEY,
+    description: "Usage billing and wallet charging (staged rollout).",
+    default_enabled: false,
+};
+
+/// Test builds default the billing flag ON: the billing suites assume
+/// charging is active, and the disabled path is exercised explicitly through
+/// override rows.
+#[cfg(test)]
+const BILLING_FLAG_TEST: FeatureFlagDef = FeatureFlagDef {
+    key: BILLING_FLAG_KEY,
+    description: "Usage billing and wallet charging (staged rollout).",
+    default_enabled: true,
+};
+
+#[cfg(not(test))]
+pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[AI_ASSISTANT_FLAG, BILLING_FLAG];
 
 /// Test builds carry a placeholder flag so the resolution / override pipeline
 /// can exercise multiple definitions alongside the production registry entry.
 #[cfg(test)]
 pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     AI_ASSISTANT_FLAG,
+    BILLING_FLAG_TEST,
     FeatureFlagDef {
         key: "example_ui",
         description: "Test-only placeholder flag.",
@@ -338,6 +361,27 @@ pub async fn resolve_personal_features(
         &membership_roles,
         user_id,
     ))
+}
+
+/// Whether the billing rollout flag is enabled for a billing owner.
+///
+/// The owner is a person for personal wallets (grant-union resolution, so
+/// members of a flagged org are covered on personal surfaces too) or an org
+/// user id for org wallets (that org's own `user -> role -> org` chain with
+/// the acting member, on top of the platform baseline).
+pub async fn billing_rollout_enabled(
+    db: &mongodb::Database,
+    billing_owner_id: &str,
+    actor_user_id: &str,
+) -> AppResult<bool> {
+    let enabled = if billing_owner_id == actor_user_id {
+        resolve_personal_features(db, billing_owner_id).await?
+    } else {
+        let org = list_overrides(db, billing_owner_id).await?;
+        let global = list_platform_overrides(db).await?;
+        resolve_from_overrides(&global, &org, actor_user_id, OrgRole::Member)
+    };
+    Ok(enabled.iter().any(|key| key == BILLING_FLAG_KEY))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

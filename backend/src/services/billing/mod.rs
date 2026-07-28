@@ -156,10 +156,19 @@ impl BillingService {
 
     pub async fn open(&self, ctx: &BillingRouteContext) -> AppResult<MeteredProxyContext> {
         let ctx = if self.config.billing_enabled {
+            // Staged rollout: charging applies only to owners covered by the
+            // billing feature flag. Everyone else is metered for
+            // observability but never charged on either layer.
+            let rollout_enabled = crate::services::feature_flag_service::billing_rollout_enabled(
+                &self.db,
+                &ctx.billing_owner_id,
+                &ctx.actor_user_id,
+            )
+            .await?;
             // Platform charging is an admin opt-in per service: services
             // without billing.platform_billable stay free (metered only),
             // so BYOK and unconfigured services never draw from wallets.
-            let platform_billable = if ctx.service_platform_billable {
+            let platform_billable = if rollout_enabled && ctx.service_platform_billable {
                 self.ensure_wallet_for_charging(&ctx.billing_owner_id)
                     .await?;
                 self.owner_has_chargeable_wallet(&ctx.billing_owner_id)
@@ -167,7 +176,11 @@ impl BillingService {
             } else {
                 false
             };
-            ctx.clone().with_platform_metering(platform_billable)
+            let mut ctx = ctx.clone();
+            if !rollout_enabled {
+                ctx.resale = None;
+            }
+            ctx.with_platform_metering(platform_billable)
         } else {
             ctx.clone()
         };
@@ -509,6 +522,77 @@ mod tests {
         assert!(wallet.is_none(), "free services must not provision wallets");
         assert_eq!(lago.wallet_creates.load(Ordering::SeqCst), 0);
         assert_eq!(row.wallet_id, None, "free services must not hold credits");
+    }
+
+    #[tokio::test]
+    async fn billing_rollout_flag_disabled_skips_charging() {
+        let Some(db) = connect_test_database("billing_rollout_flag_gate").await else {
+            return;
+        };
+        role_service::seed_system_roles(&db)
+            .await
+            .expect("seed roles");
+        insert_platform_rate(&db, 1).await;
+        let owner = crate::services::auth_service::register_user(
+            &db,
+            "wallet-rollout@example.com",
+            "password123",
+            Some("Wallet Rollout"),
+            None,
+            true,
+        )
+        .await
+        .expect("create owner");
+        // Simulate the production default: the rollout flag is off unless a
+        // staff override targets the owner (test builds default it on).
+        crate::services::feature_flag_service::set_platform_override(
+            &db,
+            crate::services::feature_flag_service::BILLING_FLAG_KEY,
+            &crate::services::feature_flag_service::FlagTarget::Global,
+            false,
+            &owner.user_id,
+        )
+        .await
+        .expect("disable billing flag globally");
+
+        let mut config = test_app_config();
+        config.billing_enabled = true;
+        config.lago_plan_code = "starter".to_string();
+        let lago = Arc::new(FakeLago::default());
+        let service = BillingService::new_with_lago(db.clone(), Arc::new(config), lago.clone());
+        let billable_billing = ServiceBilling {
+            platform_billable: true,
+            ..Default::default()
+        };
+        let ctx = BillingRouteContext::new(
+            BillingIngress::Proxy,
+            Uuid::new_v4().to_string(),
+            owner.user_id.clone(),
+            owner.user_id.clone(),
+            None,
+            Some("user-service-1".to_string()),
+            Some("catalog-1".to_string()),
+            Some("service-one".to_string()),
+            NodeIntent::Direct,
+            "bearer".to_string(),
+            CredentialClass::UserOwned,
+            BillingMetric::Requests,
+            Some(&billable_billing),
+            false,
+        );
+
+        service.open(&ctx).await.expect("open metering");
+
+        let wallet = db
+            .collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME)
+            .find_one(doc! { "owner_id": &owner.user_id })
+            .await
+            .expect("query wallet");
+        assert!(
+            wallet.is_none(),
+            "owners outside the rollout must not be charged even on billable services"
+        );
+        assert_eq!(lago.wallet_creates.load(Ordering::SeqCst), 0);
     }
 
     async fn insert_platform_rate(db: &mongodb::Database, credits: i64) {
