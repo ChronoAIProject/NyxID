@@ -476,7 +476,7 @@ mod tests {
         let owner = crate::services::auth_service::register_user(
             &db,
             "wallet-optout@example.com",
-            "password123",
+            &format!("test-{}", Uuid::new_v4()),
             Some("Wallet Opt Out"),
             None,
             true,
@@ -536,7 +536,7 @@ mod tests {
         let owner = crate::services::auth_service::register_user(
             &db,
             "wallet-rollout@example.com",
-            "password123",
+            &format!("test-{}", Uuid::new_v4()),
             Some("Wallet Rollout"),
             None,
             true,
