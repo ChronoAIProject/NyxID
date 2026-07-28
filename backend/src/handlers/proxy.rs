@@ -53,6 +53,7 @@ fn proxy_error_telemetry_fields(err: &AppError) -> (u16, u32) {
         AppError::NodeProxyTimeout => (504, 8002),
         AppError::NodeCredentialMissing(_) => (502, 8004),
         AppError::WsProxyDownstream(_) => (502, 8005),
+        AppError::ClientDisconnected => (499, 8012),
         AppError::ApiKeyScopeForbidden(_) => (403, 9000),
         AppError::ApiKeyScopeInactive => (403, 9001),
         AppError::ApiKeyScopeNotFound(_) => (404, 9002),
@@ -95,7 +96,10 @@ fn proxy_client_disconnected(service_id: &str) -> AppError {
         service_id,
         "Cancelled upstream proxy work after downstream client disconnected"
     );
-    AppError::Internal("Downstream client disconnected".to_string())
+    // Deliberately not `Internal`: the client hanging up is not a server fault,
+    // and this response is never written anywhere. Reporting it as a 500 turns
+    // ordinary client cancellation into false error-rate signal.
+    AppError::ClientDisconnected
 }
 
 /// Stable string label for the auth method that issued this proxy request.
@@ -5863,6 +5867,23 @@ mod tests {
         assert_eq!(
             proxy_error_telemetry_fields(&AppError::WsProxyDownstream("x".into())),
             (502, 8005)
+        );
+    }
+
+    /// Cancelled work must not land in the proxy error rate as a 500 — that is
+    /// what `proxy_client_disconnected` used to do via `AppError::Internal`.
+    #[test]
+    fn proxy_error_telemetry_fields_client_disconnected() {
+        use super::{proxy_client_disconnected, proxy_error_telemetry_fields};
+        use crate::errors::AppError;
+
+        assert!(matches!(
+            proxy_client_disconnected("svc-1"),
+            AppError::ClientDisconnected
+        ));
+        assert_eq!(
+            proxy_error_telemetry_fields(&AppError::ClientDisconnected),
+            (499, 8012)
         );
     }
 
