@@ -946,6 +946,106 @@ describe("AevatarAssistantTransport", () => {
     expect(streamCalls).toBe(2);
   }, 15_000);
 
+  it("keeps the earlier stop fence when a queued follow-up is cancelled", async () => {
+    // Regression (codex round 4): cancelling a follow-up that is still
+    // QUEUED behind an earlier turn's stop must not install a pre-start
+    // placeholder — that would overwrite the earlier fence and let a third
+    // send overtake the still-pending stop. A never-dispatched run cancels
+    // purely locally.
+    const encoder = new TextEncoder();
+    const firstStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            [
+              `data: ${JSON.stringify(OBSERVED_FRAMES[0])}\n\n`,
+              `data: ${JSON.stringify(OBSERVED_FRAMES[1])}\n\n`,
+              `data: ${JSON.stringify(OBSERVED_FRAMES[2])}\n\n`,
+            ].join(""),
+          ),
+        );
+      },
+    });
+    let releaseStop: (() => void) | undefined;
+    let stopCalls = 0;
+    let streamCalls = 0;
+    const streamBodies: string[] = [];
+    const mock = vi.fn(
+      (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = String(input);
+        if (url === `${ASSISTANT_BASE}/conversations` && init?.method === "POST") {
+          return Promise.resolve(
+            jsonResponse({ status: "accepted", actorId: CONVERSATION_ID }),
+          );
+        }
+        if (url.endsWith("/stop") && init?.method === "POST") {
+          stopCalls += 1;
+          return new Promise<Response>((resolve) => {
+            releaseStop = () =>
+              resolve(jsonResponse({ status: "accepted" }, 202));
+          });
+        }
+        if (url.endsWith("/stream") && init?.method === "POST") {
+          streamCalls += 1;
+          streamBodies.push(String(init?.body));
+          return Promise.resolve(
+            streamCalls === 1
+              ? new Response(firstStream, {
+                  status: 200,
+                  headers: { "Content-Type": "text/event-stream" },
+                })
+              : sseResponse(OBSERVED_FRAMES),
+          );
+        }
+        return Promise.resolve(
+          jsonResponse(
+            { error: "not_found", error_code: -1, message: "404" },
+            404,
+          ),
+        );
+      },
+    );
+    vi.stubGlobal("fetch", mock);
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    // Turn A: streams, gets its turnId, cancelled → stop A held pending.
+    await new Promise<void>((resolve) => {
+      const handle = transport.sendMessage(CONVERSATION_ID, "Turn A", (e) => {
+        if (e.event === "turn.completed") resolve();
+        if (e.event === "block.delta") handle.cancel();
+      });
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(stopCalls).toBe(1);
+    expect(releaseStop).toBeDefined();
+
+    // Turn B: queued behind stop A (its fetch never dispatches), then
+    // cancelled. Must not touch the fence.
+    const handleB = transport.sendMessage(CONVERSATION_ID, "Turn B", () => {});
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(streamCalls).toBe(1);
+    handleB.cancel();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    // Turn C: must still be fenced by stop A.
+    const completedC = new Promise<void>((resolve) => {
+      transport.sendMessage(CONVERSATION_ID, "Turn C", (e) => {
+        if (e.event === "turn.completed") resolve();
+      });
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(streamCalls).toBe(1);
+
+    releaseStop?.();
+    await completedC;
+    // B never dispatched; C is the second and only other stream, sent
+    // after the fence lifted.
+    expect(streamCalls).toBe(2);
+    expect(streamBodies[1]).toContain("Turn C");
+    expect(stopCalls).toBe(1);
+  });
+
   it("serializes a follow-up send behind the in-flight stop", async () => {
     // The stop fence must commit upstream before the next :stream goes out;
     // otherwise the follow-up can arrive first and fail with

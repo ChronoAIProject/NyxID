@@ -308,6 +308,14 @@ interface RunningTurn {
    */
   stopPendingStart: boolean;
   /**
+   * The stream (or continuation) fetch actually left the client. A cancel
+   * before dispatch is purely local: nothing reached upstream, so there is
+   * no turn to stop — and, critically, no pre-start placeholder may be
+   * installed, or it would overwrite an earlier turn's still-pending stop
+   * fence and let a later send overtake it.
+   */
+  streamDispatched: boolean;
+  /**
    * Lifts the placeholder fence a pre-start cancel installed in
    * `pendingStops` — called once the deferred stop settles, or when the
    * pre-start window expires without a turn to stop.
@@ -999,6 +1007,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
 
     let response: Response;
     try {
+      run.streamDispatched = true;
       response = await fetch(
         `/api/v1${ASSISTANT_PREFIX}/conversations/${conversationId}/approve`,
         {
@@ -1209,6 +1218,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       clientRequestId: crypto.randomUUID(),
       turnId,
       stopPendingStart: false,
+      streamDispatched: false,
       turnAnnounced: false,
       controller: new AbortController(),
       onEvent,
@@ -1286,6 +1296,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       try {
         // Hand-rolled fetch (not `apiClient`): the response is an SSE stream,
         // and the endpoint 415s without an explicit JSON content type.
+        run.streamDispatched = true;
         response = await fetch(
           `/api/v1${ASSISTANT_PREFIX}/conversations/${conversationId}/stream`,
           {
@@ -1583,15 +1594,29 @@ export class AevatarAssistantTransport implements AssistantTransport {
           run.stopPendingStart = false;
           const releaseFence = run.resolvePreStartFence;
           run.resolvePreStartFence = undefined;
-          this.requestServerStop(conversationId, run);
-          if (releaseFence) {
-            // The placeholder fence lifts only once the real stop settles,
-            // so a waiter serialized on it cannot overtake the fence commit.
-            void (
-              this.pendingStops.get(conversationId) ?? Promise.resolve()
-            ).then(releaseFence);
+          let stopInstalled = false;
+          try {
+            this.requestServerStop(conversationId, run);
+            stopInstalled = true;
+          } finally {
+            if (releaseFence) {
+              if (stopInstalled) {
+                // The placeholder lifts only once the real stop settles, so
+                // a waiter serialized on it cannot overtake the fence
+                // commit.
+                void (
+                  this.pendingStops.get(conversationId) ?? Promise.resolve()
+                ).then(releaseFence);
+              } else {
+                // The stop never launched (synchronous throw): the map may
+                // still hold the placeholder itself — chaining onto it
+                // would deadlock. Retire it outright.
+                this.pendingStops.delete(conversationId);
+                releaseFence();
+              }
+            }
+            run.controller.abort();
           }
-          run.controller.abort();
           return;
         }
         if (!run.turnAnnounced) {
@@ -2585,6 +2610,13 @@ export class AevatarAssistantTransport implements AssistantTransport {
     if (run.turnId) {
       run.controller.abort();
       this.requestServerStop(conversationId, run);
+    } else if (!run.streamDispatched) {
+      // The stream request never left the client (e.g. the send is still
+      // queued behind an earlier turn's stop fence): nothing reached
+      // upstream, so cancel is purely local. Installing a placeholder here
+      // would OVERWRITE that earlier fence and let a later send overtake
+      // the still-pending stop.
+      run.controller.abort();
     } else {
       run.stopPendingStart = true;
       // Install the fence NOW: the stop request cannot exist until
@@ -2690,6 +2722,16 @@ export class AevatarAssistantTransport implements AssistantTransport {
    */
   private requestServerStop(conversationId: string, run: RunningTurn): void {
     if (!run.turnId) return;
+    // Own deadline: a server that accepts but never answers must not pin
+    // the pendingStops entry (and tax every later send with the full fence
+    // wait). A manual controller instead of AbortSignal.timeout so this
+    // never throws on an environment that lacks the static — the deferred
+    // placeholder release depends on this call not throwing.
+    const deadline = new AbortController();
+    const deadlineTimer = setTimeout(
+      () => deadline.abort(),
+      STOP_REQUEST_DEADLINE_MS,
+    );
     const pending = apiClient<unknown>(
       `${ASSISTANT_PREFIX}/conversations/${conversationId}/stop`,
       {
@@ -2701,14 +2743,11 @@ export class AevatarAssistantTransport implements AssistantTransport {
           expectedStateVersion: 0,
         },
         preserveSessionOn401: true,
-        // Own deadline: a server that accepts but never answers must not
-        // pin the pendingStops entry (and tax every later send with the
-        // full fence wait). The abort settles the promise; cleanup runs.
-        signal: AbortSignal.timeout(STOP_REQUEST_DEADLINE_MS),
+        signal: deadline.signal,
       },
     ).then(
-      () => undefined,
-      () => undefined,
+      () => clearTimeout(deadlineTimer),
+      () => clearTimeout(deadlineTimer),
     );
     this.pendingStops.set(conversationId, pending);
     void pending.then(() => {
