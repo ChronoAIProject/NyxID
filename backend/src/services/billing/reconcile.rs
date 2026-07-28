@@ -8,6 +8,7 @@ use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
 
 use crate::config::AppConfig;
 use crate::errors::AppResult;
+use crate::models::billing_rate_cache::BillingRateCache;
 use crate::models::billing_wallet::{BillingWallet, COLLECTION_NAME as BILLING_WALLET};
 use crate::models::usage_meter::{COLLECTION_NAME as USAGE_METER, UsageMeterRow};
 
@@ -37,6 +38,7 @@ pub struct ReconcileStats {
     pub recovered_settlements: u64,
     pub drift_alerts: u64,
     pub wallet_balance_refreshes: u64,
+    pub rate_cache_refreshes: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -75,7 +77,72 @@ impl BillingReconciler {
             .await?;
         self.refresh_wallet_balances(lago.as_ref(), &mut stats)
             .await?;
+        self.refresh_rate_cache(lago.as_ref(), &mut stats).await?;
         Ok(stats)
+    }
+
+    /// Mirror the Lago plan's standard charges into `billing_rate_cache` so
+    /// reservation sizing always has fresh rates. Lago stays the pricing
+    /// authority; this cache only sizes holds. Metrics NyxID meters that the
+    /// plan does not price refresh to zero (unpriced in Lago means free), so
+    /// the gate stays open for them without a manual seed. Fetch failures
+    /// and empty plans leave existing rows untouched: the TTL check remains
+    /// the backstop against charging on stale prices.
+    async fn refresh_rate_cache(
+        &self,
+        lago: &dyn LagoApi,
+        stats: &mut ReconcileStats,
+    ) -> AppResult<()> {
+        let rates = match lago.plan_rates(&self.config.lago_plan_code).await {
+            Ok(rates) => rates,
+            Err(error) => {
+                tracing::warn!(
+                    plan_code = %self.config.lago_plan_code,
+                    error = %error,
+                    "Billing rate cache refresh failed to fetch plan charges"
+                );
+                return Ok(());
+            }
+        };
+        if rates.is_empty() {
+            tracing::warn!(
+                plan_code = %self.config.lago_plan_code,
+                "Billing rate cache refresh found no standard charges; keeping existing rates"
+            );
+            return Ok(());
+        }
+
+        let mut by_code: BTreeMap<String, i64> = rates
+            .into_iter()
+            .map(|rate| (rate.lago_metric_code, rate.credits_per_unit_micros))
+            .collect();
+        for metric_code in [
+            super::meter::PLATFORM_REQUESTS_METRIC_CODE,
+            super::meter::PLATFORM_BYTES_METRIC_CODE,
+            super::meter::PLATFORM_TOKENS_METRIC_CODE,
+        ] {
+            by_code.entry(metric_code.to_string()).or_insert(0);
+        }
+
+        let now = Utc::now();
+        let collection = self
+            .db
+            .collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME);
+        for (metric_code, credits_per_unit_micros) in by_code {
+            let row = BillingRateCache {
+                id: BillingRateCache::cache_id(&metric_code, None),
+                lago_metric_code: metric_code,
+                model: None,
+                credits_per_unit_micros,
+                synced_at: now,
+            };
+            collection
+                .replace_one(doc! { "_id": &row.id }, &row)
+                .upsert(true)
+                .await?;
+            stats.rate_cache_refreshes += 1;
+        }
+        Ok(())
     }
 
     /// Pull wallet balances from Lago into the local cache. Webhooks are the
@@ -250,7 +317,8 @@ pub fn spawn_reconcile_worker(reconciler: BillingReconciler, interval_secs: u64)
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        interval.tick().await;
+        // The first tick fires immediately so a fresh deploy has rate-cache
+        // rows and wallet balances before the first billable request.
         loop {
             interval.tick().await;
             if let Err(error) = reconciler.run_once().await {
@@ -445,6 +513,7 @@ mod tests {
     use serde_json::json;
     use uuid::Uuid;
 
+    use crate::models::billing_rate_cache::BillingRateCache;
     use crate::models::service_billing::BillingMetric;
     use crate::models::usage_meter::{BillingLayer, CredentialClass, UsageMeterRow, UsageStatus};
     use crate::services::billing::lago_client::{
@@ -871,5 +940,141 @@ mod tests {
 
         assert_eq!(stats.pushed, 0);
         assert!(!saved.lago_acked);
+    }
+
+    #[derive(Clone)]
+    struct RatesLago {
+        rates: Vec<super::super::lago_client::PlanRate>,
+    }
+
+    #[async_trait]
+    impl super::LagoApi for RatesLago {
+        async fn ensure_customer(
+            &self,
+            owner: &OwnerProvisionInput,
+        ) -> crate::errors::AppResult<String> {
+            Ok(owner.external_customer_id.clone())
+        }
+
+        async fn ensure_subscription(
+            &self,
+            customer_id: &str,
+            _plan_code: &str,
+        ) -> crate::errors::AppResult<String> {
+            Ok(customer_id.to_string())
+        }
+
+        async fn record_event(&self, event: &LagoEvent) -> Result<LagoAck, LagoError> {
+            Ok(LagoAck {
+                transaction_id: event.transaction_id.clone(),
+            })
+        }
+
+        async fn record_events_batch(
+            &self,
+            _events: &[LagoEvent],
+        ) -> Result<Vec<LagoAck>, LagoError> {
+            Ok(Vec::new())
+        }
+
+        async fn current_usage(
+            &self,
+            customer_id: &str,
+            subscription_id: &str,
+        ) -> crate::errors::AppResult<super::super::lago_client::LagoUsage> {
+            Ok(super::super::lago_client::LagoUsage {
+                customer_id: customer_id.to_string(),
+                subscription_id: subscription_id.to_string(),
+                raw: serde_json::Value::Null,
+            })
+        }
+
+        async fn wallet_balance(&self, _customer_id: &str) -> crate::errors::AppResult<i64> {
+            Ok(0)
+        }
+
+        async fn entitlements(
+            &self,
+            _subscription_id: &str,
+        ) -> crate::errors::AppResult<Vec<super::super::lago_client::Entitlement>> {
+            Ok(Vec::new())
+        }
+
+        async fn plan_rates(
+            &self,
+            _plan_code: &str,
+        ) -> crate::errors::AppResult<Vec<super::super::lago_client::PlanRate>> {
+            Ok(self.rates.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn reconcile_refreshes_rate_cache_from_plan_charges() {
+        let Some(db) = connect_test_database("billing_reconcile_rates").await else {
+            return;
+        };
+        let reconciler = BillingReconciler::new(
+            db.clone(),
+            Some(std::sync::Arc::new(RatesLago {
+                rates: vec![super::super::lago_client::PlanRate {
+                    lago_metric_code: "platform_tokens".to_string(),
+                    credits_per_unit_micros: 5,
+                }],
+            })),
+            std::sync::Arc::new(billing_enabled_config()),
+        );
+
+        let stats = reconciler.run_once().await.expect("run reconcile");
+
+        let collection =
+            db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME);
+        let tokens = collection
+            .find_one(doc! { "_id": "platform_tokens:*" })
+            .await
+            .expect("query tokens rate")
+            .expect("tokens rate exists");
+        let requests = collection
+            .find_one(doc! { "_id": "platform_requests:*" })
+            .await
+            .expect("query requests rate")
+            .expect("unpriced platform metric zero-fills");
+
+        assert_eq!(stats.rate_cache_refreshes, 3);
+        assert_eq!(tokens.credits_per_unit_micros, 5);
+        assert_eq!(requests.credits_per_unit_micros, 0);
+    }
+
+    #[tokio::test]
+    async fn reconcile_keeps_existing_rates_when_plan_has_no_charges() {
+        let Some(db) = connect_test_database("billing_reconcile_rates_empty").await else {
+            return;
+        };
+        let collection =
+            db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME);
+        collection
+            .insert_one(BillingRateCache {
+                id: BillingRateCache::cache_id("platform_tokens", None),
+                lago_metric_code: "platform_tokens".to_string(),
+                model: None,
+                credits_per_unit_micros: 7,
+                synced_at: Utc::now(),
+            })
+            .await
+            .expect("seed rate");
+        let reconciler = BillingReconciler::new(
+            db.clone(),
+            Some(std::sync::Arc::new(RatesLago { rates: Vec::new() })),
+            std::sync::Arc::new(billing_enabled_config()),
+        );
+
+        let stats = reconciler.run_once().await.expect("run reconcile");
+
+        let saved = collection
+            .find_one(doc! { "_id": "platform_tokens:*" })
+            .await
+            .expect("query rate")
+            .expect("rate exists");
+        assert_eq!(stats.rate_cache_refreshes, 0);
+        assert_eq!(saved.credits_per_unit_micros, 7);
     }
 }

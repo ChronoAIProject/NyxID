@@ -36,6 +36,19 @@ pub trait LagoApi: Send + Sync {
     -> AppResult<LagoUsage>;
     async fn wallet_balance(&self, customer_id: &str) -> AppResult<i64>;
     async fn entitlements(&self, subscription_id: &str) -> AppResult<Vec<Entitlement>>;
+    /// Per-unit rates for the plan's standard charges, used to refresh the
+    /// local rate cache. Defaults to empty so fakes opt in explicitly.
+    async fn plan_rates(&self, _plan_code: &str) -> AppResult<Vec<PlanRate>> {
+        Ok(Vec::new())
+    }
+}
+
+/// A per-unit price from a Lago plan charge, converted to micro-credits
+/// (1 credit = 1 USD, matching the wallet rate_amount NyxID provisions).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlanRate {
+    pub lago_metric_code: String,
+    pub credits_per_unit_micros: i64,
 }
 
 #[derive(Clone)]
@@ -393,6 +406,57 @@ impl LagoApi for LagoClient {
             })
             .unwrap_or_default())
     }
+
+    async fn plan_rates(&self, plan_code: &str) -> AppResult<Vec<PlanRate>> {
+        let path = format!("plans/{}", urlencoding::encode(plan_code));
+        let value = self
+            .json_request(reqwest::Method::GET, &path, None)
+            .await
+            .map_err(lago_error_to_app)?;
+        let charges = value
+            .get("plan")
+            .and_then(|plan| plan.get("charges"))
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+
+        let mut rates = Vec::new();
+        for charge in &charges {
+            let Some(code) = value_string(charge, &["billable_metric_code"]).or_else(|| {
+                charge
+                    .get("billable_metric")
+                    .and_then(|metric| value_string(metric, &["code"]))
+            }) else {
+                continue;
+            };
+            let model = value_string(charge, &["charge_model"]).unwrap_or_default();
+            if model != "standard" {
+                tracing::warn!(
+                    metric_code = %code,
+                    charge_model = %model,
+                    "Skipping non-standard Lago charge in rate cache refresh"
+                );
+                continue;
+            }
+            let Some(micros) = charge
+                .get("properties")
+                .and_then(|properties| value_string(properties, &["amount"]))
+                .as_deref()
+                .and_then(decimal_credits_to_micros)
+            else {
+                tracing::warn!(
+                    metric_code = %code,
+                    "Skipping Lago charge with unparseable amount in rate cache refresh"
+                );
+                continue;
+            };
+            rates.push(PlanRate {
+                lago_metric_code: code,
+                credits_per_unit_micros: micros,
+            });
+        }
+        Ok(rates)
+    }
 }
 
 impl LagoClient {
@@ -712,6 +776,38 @@ pub fn extract_wallet_balance_credits(value: &Value) -> Option<i64> {
     })
 }
 
+/// Parse a Lago decimal amount string ("0.000005", "0.01", "1") into
+/// micro-credits without floating point. Digits beyond micro precision are
+/// truncated. Returns None for negative or malformed values.
+pub fn decimal_credits_to_micros(amount: &str) -> Option<i64> {
+    let amount = amount.trim();
+    let (int_part, frac_part) = match amount.split_once('.') {
+        Some((int_part, frac_part)) => (int_part, frac_part),
+        None => (amount, ""),
+    };
+    if int_part.starts_with('-') || frac_part.contains('-') {
+        return None;
+    }
+    let int_value: i64 = if int_part.is_empty() {
+        0
+    } else {
+        int_part.parse().ok()?
+    };
+    let frac_digits: String = frac_part.chars().take(6).collect();
+    if !frac_digits.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    let frac_value: i64 = if frac_digits.is_empty() {
+        0
+    } else {
+        let padded = format!("{frac_digits:0<6}");
+        padded.parse().ok()?
+    };
+    int_value
+        .checked_mul(1_000_000)
+        .and_then(|micros| micros.checked_add(frac_value))
+}
+
 /// Extract the accrued period usage in cents from a Lago current_usage
 /// response (`{"customer_usage": {"total_amount_cents": ...}}`).
 pub fn extract_current_usage_amount_cents(value: &Value) -> Option<i64> {
@@ -967,8 +1063,8 @@ mod tests {
 
     use super::{
         LagoApi, LagoClient, LagoError, LagoErrorKind, LagoEvent, LagoEventProperties,
-        OwnerProvisionInput, classify_lago_failure, extract_active_wallet,
-        extract_wallet_balance_credits, subscription_external_id,
+        OwnerProvisionInput, PlanRate, classify_lago_failure, decimal_credits_to_micros,
+        extract_active_wallet, extract_wallet_balance_credits, subscription_external_id,
     };
 
     async fn spawn_lago_mock(app: axum::Router) -> String {
@@ -999,6 +1095,70 @@ mod tests {
                 &body
             ),
             LagoErrorKind::Duplicate
+        );
+    }
+
+    #[test]
+    fn decimal_credits_parse_to_micros_without_float_drift() {
+        assert_eq!(decimal_credits_to_micros("0.000005"), Some(5));
+        assert_eq!(decimal_credits_to_micros("0.01"), Some(10_000));
+        assert_eq!(decimal_credits_to_micros("1"), Some(1_000_000));
+        assert_eq!(decimal_credits_to_micros("2.5"), Some(2_500_000));
+        assert_eq!(decimal_credits_to_micros(" 0.25 "), Some(250_000));
+        // Sub-micro digits truncate; malformed and negative values reject.
+        assert_eq!(decimal_credits_to_micros("0.0000019"), Some(1));
+        assert_eq!(decimal_credits_to_micros("-1"), None);
+        assert_eq!(decimal_credits_to_micros("abc"), None);
+        assert_eq!(decimal_credits_to_micros("1.2x"), None);
+    }
+
+    #[tokio::test]
+    async fn plan_rates_parse_standard_charges_and_skip_others() {
+        async fn get_plan() -> axum::Json<serde_json::Value> {
+            axum::Json(json!({
+                "plan": {
+                    "code": "starter",
+                    "charges": [
+                        {
+                            "billable_metric_code": "platform_tokens",
+                            "charge_model": "standard",
+                            "properties": { "amount": "0.000005" }
+                        },
+                        {
+                            "billable_metric_code": "platform_requests",
+                            "charge_model": "standard",
+                            "properties": { "amount": "0.01" }
+                        },
+                        {
+                            "billable_metric_code": "resale_tokens",
+                            "charge_model": "graduated",
+                            "properties": {}
+                        }
+                    ]
+                }
+            }))
+        }
+
+        let base_url = spawn_lago_mock(
+            axum::Router::new().route("/api/v1/plans/starter", axum::routing::get(get_plan)),
+        )
+        .await;
+        let client = LagoClient::new(base_url, "test-key".to_string()).expect("client");
+
+        let rates = client.plan_rates("starter").await.expect("plan rates");
+
+        assert_eq!(
+            rates,
+            vec![
+                PlanRate {
+                    lago_metric_code: "platform_tokens".to_string(),
+                    credits_per_unit_micros: 5,
+                },
+                PlanRate {
+                    lago_metric_code: "platform_requests".to_string(),
+                    credits_per_unit_micros: 10_000,
+                },
+            ]
         );
     }
 
