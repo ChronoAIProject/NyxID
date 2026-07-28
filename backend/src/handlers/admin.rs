@@ -806,6 +806,7 @@ pub async fn revoke_user_sessions(
 /// entries in this page. Populated once per request; the result is a two-way
 /// lookup keyed by both `_id` (UUID) and `slug`, since audit event_data may
 /// carry either shape under `service_id` / `service_slug`.
+#[derive(Default)]
 struct ServiceLookup {
     by_id: HashMap<String, ResolvedService>,
     by_slug: HashMap<String, ResolvedService>,
@@ -1000,10 +1001,19 @@ pub async fn list_audit_log(
     )
     .await?;
 
-    let (service_lookup, user_lookup) = tokio::try_join!(
+    // Enrichment is best-effort display data: a lookup failure downgrades the
+    // page to unenriched entries (fields are Option and simply stay absent)
+    // rather than failing a listing whose primary query already succeeded.
+    let (service_lookup, user_lookup) = match tokio::try_join!(
         resolve_service_lookup(&state.db, &entries),
         resolve_user_lookup(&state.db, &entries),
-    )?;
+    ) {
+        Ok(lookups) => lookups,
+        Err(error) => {
+            tracing::warn!(%error, "audit-log enrichment lookups failed; returning unenriched entries");
+            (ServiceLookup::default(), HashMap::new())
+        }
+    };
 
     let items: Vec<AuditLogItem> = entries
         .into_iter()
@@ -2082,6 +2092,95 @@ mod tests {
         );
         assert_eq!(name.as_deref(), Some("OpenAI API"));
         assert_eq!(slug.as_deref(), Some("openai"));
+    }
+
+    #[tokio::test]
+    async fn resolve_lookups_enrich_from_database() {
+        use crate::models::downstream_service::test_helpers::dummy_service;
+        use crate::test_utils::connect_test_database;
+
+        let Some(db) = connect_test_database("admin_audit_enrich").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+
+        let active_id = uuid::Uuid::new_v4().to_string();
+        let active = DownstreamService {
+            id: active_id.clone(),
+            name: "OpenAI API".to_string(),
+            slug: "openai".to_string(),
+            is_active: true,
+            ..dummy_service()
+        };
+        // Deactivated services must still resolve: audit rows reference them
+        // long after an admin retires the catalog entry.
+        let inactive = DownstreamService {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: "Retired Service".to_string(),
+            slug: "retired".to_string(),
+            is_active: false,
+            ..dummy_service()
+        };
+        let services = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
+        services.insert_one(&active).await.expect("insert active");
+        services
+            .insert_one(&inactive)
+            .await
+            .expect("insert inactive");
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let user = make_user(&user_id);
+        db.collection::<User>(USERS)
+            .insert_one(&user)
+            .await
+            .expect("insert user");
+
+        let make_entry = |event_data: serde_json::Value, uid: Option<&str>| AuditLog {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: uid.map(str::to_string),
+            event_type: "proxy_request".to_string(),
+            event_data: Some(event_data),
+            ip_address: None,
+            user_agent: None,
+            api_key_id: None,
+            api_key_name: None,
+            seq: None,
+            prev_hash: None,
+            entry_hash: None,
+            created_at: Utc::now(),
+        };
+        let entries = vec![
+            make_entry(
+                serde_json::json!({ "service_id": active_id }),
+                Some(&user_id),
+            ),
+            make_entry(serde_json::json!({ "service_id": "openai" }), None),
+            make_entry(serde_json::json!({ "service_slug": "retired" }), None),
+        ];
+
+        let service_lookup = resolve_service_lookup(&db, &entries)
+            .await
+            .expect("service lookup");
+        let user_lookup = resolve_user_lookup(&db, &entries)
+            .await
+            .expect("user lookup");
+
+        // UUID and slug references resolve to the same catalog row.
+        let (name, slug) = resolve_entry_service(entries[0].event_data.as_ref(), &service_lookup);
+        assert_eq!(name.as_deref(), Some("OpenAI API"));
+        assert_eq!(slug.as_deref(), Some("openai"));
+        let (name, slug) = resolve_entry_service(entries[1].event_data.as_ref(), &service_lookup);
+        assert_eq!(name.as_deref(), Some("OpenAI API"));
+        assert_eq!(slug.as_deref(), Some("openai"));
+
+        // Inactive service still resolves by slug.
+        let (name, slug) = resolve_entry_service(entries[2].event_data.as_ref(), &service_lookup);
+        assert_eq!(name.as_deref(), Some("Retired Service"));
+        assert_eq!(slug.as_deref(), Some("retired"));
+
+        let (display_name, email) = user_lookup.get(&user_id).cloned().expect("user resolved");
+        assert_eq!(display_name.as_deref(), Some("Test User"));
+        assert_eq!(email, format!("{user_id}@example.com"));
     }
 
     #[test]
