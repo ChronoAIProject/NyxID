@@ -359,6 +359,55 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .build(),
         )
         .await?;
+    // Sort support for the admin audit-log table (`admin_audit_service`).
+    //
+    // Every sortable column there sorts as `{column: d, created_at: d, _id: d}`
+    // with one uniform direction, so each needs its own all-ascending index:
+    // MongoDB can only serve a sort from an index whose key pattern matches the
+    // sort exactly or is its exact reverse, and `_id` must be present because it
+    // is the final tiebreaker. Without these the server does a blocking
+    // in-memory SORT over the whole filtered set on every page load -- it will
+    // allocate up to 100 MB for a single query and then fail the query outright
+    // on collections past that. The mixed-direction indexes above cannot help:
+    // `{event_type: 1, created_at: -1}` matches neither direction of
+    // `{event_type: d, created_at: d, _id: d}`.
+    for sort_key in [
+        "event_type",
+        "api_key_name",
+        "api_key_id",
+        "user_id",
+        "ip_address",
+        "user_agent",
+        // `status` is a bucket over the proxied response status, stored nested.
+        "event_data.response_status",
+    ] {
+        audit
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! { sort_key: 1, "created_at": 1, "_id": 1 })
+                    .options(
+                        IndexOptions::builder()
+                            .name(format!("audit_log_sort_{}", sort_key.replace('.', "_")))
+                            .build(),
+                    )
+                    .build(),
+            )
+            .await?;
+    }
+    // The default sort (`-created_at`) omits the redundant second `created_at`
+    // key, so it needs its own two-key index rather than a prefix of the above.
+    audit
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "created_at": 1, "_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("audit_log_sort_created_at".to_string())
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
 
     let anonymous_usage = db.collection::<mongodb::bson::Document>(ANONYMOUS_ENDPOINT_USAGE);
     anonymous_usage
