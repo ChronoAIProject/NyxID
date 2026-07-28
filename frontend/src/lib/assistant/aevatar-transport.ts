@@ -92,6 +92,11 @@ const STOP_FENCE_WAIT_MS = 2_000;
 // only chance to learn the turnId, leaving the upstream run uncancellable.
 const PRE_START_STOP_WINDOW_MS = 5_000;
 
+// Hard deadline on the `:stop` request itself. Without one, a server that
+// accepts the connection but never answers would pin the `pendingStops`
+// entry forever and tax every later send/delete with the full fence wait.
+const STOP_REQUEST_DEADLINE_MS = 10_000;
+
 // Inline media larger than this (base64 chars ≈ 6 MB decoded) is summarized
 // as text instead of being embedded as a data: URL artifact.
 const MAX_MEDIA_DATA_CHARS = 8_000_000;
@@ -308,6 +313,12 @@ interface RunningTurn {
    * the RUN_STARTED handler then submits the stop and aborts.
    */
   stopPendingStart: boolean;
+  /**
+   * Lifts the placeholder fence a pre-start cancel installed in
+   * `pendingStops` — called once the deferred stop settles, or when the
+   * pre-start window expires without a turn to stop.
+   */
+  resolvePreStartFence?: () => void;
   turnAnnounced: boolean;
   readonly controller: AbortController;
   readonly onEvent: (event: TurnEvent) => void;
@@ -1570,7 +1581,16 @@ export class AevatarAssistantTransport implements AssistantTransport {
           // stop it was waiting on, then drop the connection — the local
           // turn already settled as cancelled.
           run.stopPendingStart = false;
+          const releaseFence = run.resolvePreStartFence;
+          run.resolvePreStartFence = undefined;
           this.requestServerStop(conversationId, run);
+          if (releaseFence) {
+            // The placeholder fence lifts only once the real stop settles,
+            // so a waiter serialized on it cannot overtake the fence commit.
+            void (
+              this.pendingStops.get(conversationId) ?? Promise.resolve()
+            ).then(releaseFence);
+          }
           run.controller.abort();
           return;
         }
@@ -2567,7 +2587,24 @@ export class AevatarAssistantTransport implements AssistantTransport {
       this.requestServerStop(conversationId, run);
     } else {
       run.stopPendingStart = true;
+      // Install the fence NOW: the stop request cannot exist until
+      // RUN_STARTED names the turn, but a follow-up send or delete must
+      // already serialize behind the eventual stop. Lifted when the
+      // deferred stop settles, or when the window expires without a turn.
+      const fence = new Promise<void>((resolve) => {
+        run.resolvePreStartFence = resolve;
+      });
+      this.pendingStops.set(conversationId, fence);
       setTimeout(() => {
+        if (run.stopPendingStart) {
+          // No RUN_STARTED inside the window: nothing to stop.
+          run.stopPendingStart = false;
+          if (this.pendingStops.get(conversationId) === fence) {
+            this.pendingStops.delete(conversationId);
+          }
+          run.resolvePreStartFence?.();
+          run.resolvePreStartFence = undefined;
+        }
         if (!run.controller.signal.aborted) run.controller.abort();
       }, PRE_START_STOP_WINDOW_MS);
     }
@@ -2653,20 +2690,26 @@ export class AevatarAssistantTransport implements AssistantTransport {
    */
   private requestServerStop(conversationId: string, run: RunningTurn): void {
     if (!run.turnId) return;
-    const pending = assistantApi
-      .post<unknown>(
-        `${ASSISTANT_PREFIX}/conversations/${conversationId}/stop`,
-        {
+    const pending = apiClient<unknown>(
+      `${ASSISTANT_PREFIX}/conversations/${conversationId}/stop`,
+      {
+        method: "POST",
+        body: {
           turnId: run.turnId,
           stopRequestId: crypto.randomUUID(),
           clientRequestId: crypto.randomUUID(),
           expectedStateVersion: 0,
         },
-      )
-      .then(
-        () => undefined,
-        () => undefined,
-      );
+        preserveSessionOn401: true,
+        // Own deadline: a server that accepts but never answers must not
+        // pin the pendingStops entry (and tax every later send with the
+        // full fence wait). The abort settles the promise; cleanup runs.
+        signal: AbortSignal.timeout(STOP_REQUEST_DEADLINE_MS),
+      },
+    ).then(
+      () => undefined,
+      () => undefined,
+    );
     this.pendingStops.set(conversationId, pending);
     void pending.then(() => {
       if (this.pendingStops.get(conversationId) === pending) {

@@ -794,6 +794,82 @@ describe("AevatarAssistantTransport", () => {
     expect(stopBodies[0]?.expectedStateVersion).toBe(0);
   });
 
+  it("fences a follow-up send behind a pre-start cancel until the deferred stop settles", async () => {
+    // The stop request cannot exist until RUN_STARTED names the turn, but a
+    // follow-up send right after a pre-start cancel must already serialize
+    // behind the eventual stop — otherwise it can overtake the fence.
+    let streamController:
+      | ReadableStreamDefaultController<Uint8Array>
+      | undefined;
+    const lateStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        streamController = controller;
+      },
+    });
+    let stopCalls = 0;
+    let streamCalls = 0;
+    const mock = vi.fn(
+      (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = String(input);
+        if (url === `${ASSISTANT_BASE}/conversations` && init?.method === "POST") {
+          return Promise.resolve(
+            jsonResponse({ status: "accepted", actorId: CONVERSATION_ID }),
+          );
+        }
+        if (url.endsWith("/stop") && init?.method === "POST") {
+          stopCalls += 1;
+          return Promise.resolve(jsonResponse({ status: "accepted" }, 202));
+        }
+        if (url.endsWith("/stream") && init?.method === "POST") {
+          streamCalls += 1;
+          return Promise.resolve(
+            streamCalls === 1
+              ? new Response(lateStream, {
+                  status: 200,
+                  headers: { "Content-Type": "text/event-stream" },
+                })
+              : sseResponse(OBSERVED_FRAMES),
+          );
+        }
+        return Promise.resolve(
+          jsonResponse(
+            { error: "not_found", error_code: -1, message: "404" },
+            404,
+          ),
+        );
+      },
+    );
+    vi.stubGlobal("fetch", mock);
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+
+    const handle = transport.sendMessage(CONVERSATION_ID, "First", () => {});
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    handle.cancel(); // pre-start: no RUN_STARTED yet
+
+    const followUp = new Promise<void>((resolve) => {
+      transport.sendMessage(CONVERSATION_ID, "Second", (event) => {
+        if (event.event === "turn.completed") resolve();
+      });
+    });
+    // The fence holds while the first stream has not announced its turn.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(streamCalls).toBe(1);
+    expect(stopCalls).toBe(0);
+
+    // RUN_STARTED arrives: the deferred stop fires, the fence lifts, and
+    // only then does the follow-up stream go out.
+    if (!streamController) throw new Error("stream never started");
+    streamController.enqueue(
+      new TextEncoder().encode(
+        `data: ${JSON.stringify(OBSERVED_FRAMES[0])}\n\n`,
+      ),
+    );
+    await followUp;
+    expect(stopCalls).toBe(1);
+    expect(streamCalls).toBe(2);
+  });
+
   it("serializes a follow-up send behind the in-flight stop", async () => {
     // The stop fence must commit upstream before the next :stream goes out;
     // otherwise the follow-up can arrive first and fail with

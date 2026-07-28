@@ -151,18 +151,22 @@ pub fn state_path(user_id: &str, conversation_id: &str) -> AppResult<String> {
     ))
 }
 
-/// Turn/step ids share the conversation-id grammar: opaque server-issued
-/// handles, so anything carrying a separator is a caller reshaping the URL.
-fn validate_control_segment(segment: &str) -> AppResult<()> {
+/// Turn/step ids follow the upstream control-identity grammar
+/// (`TryValidateControlIdentity`): at most 128 chars, no whitespace or
+/// control characters, and none of `/ \ ? #`. Anything else the server may
+/// legitimately issue (`turn.v2`, `step:3`, …) must round-trip, so accepted
+/// segments are percent-encoded before interpolation — an unencoded `:`
+/// inside a step id would collide with the `:retry`/`:skip` suffix parse.
+fn encode_control_segment(segment: &str) -> AppResult<String> {
     let valid = !segment.is_empty()
         && segment.len() <= 128
         && segment
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+            .all(|c| !c.is_whitespace() && !c.is_control() && !matches!(c, '/' | '\\' | '?' | '#'));
     if !valid {
         return Err(AppError::BadRequest("Invalid turn or step id.".to_string()));
     }
-    Ok(())
+    Ok(urlencoding::encode(segment).into_owned())
 }
 
 /// `nyxid-chat/conversations/{id}/turns/{turn}/steps/{step}:retry` --
@@ -173,10 +177,10 @@ pub fn retry_path(
     turn_id: &str,
     step_id: &str,
 ) -> AppResult<String> {
-    validate_control_segment(turn_id)?;
-    validate_control_segment(step_id)?;
+    let turn = encode_control_segment(turn_id)?;
+    let step = encode_control_segment(step_id)?;
     Ok(format!(
-        "{}/turns/{turn_id}/steps/{step_id}:retry",
+        "{}/turns/{turn}/steps/{step}:retry",
         conversation_path(user_id, conversation_id)?
     ))
 }
@@ -189,10 +193,10 @@ pub fn skip_path(
     turn_id: &str,
     step_id: &str,
 ) -> AppResult<String> {
-    validate_control_segment(turn_id)?;
-    validate_control_segment(step_id)?;
+    let turn = encode_control_segment(turn_id)?;
+    let step = encode_control_segment(step_id)?;
     Ok(format!(
-        "{}/turns/{turn_id}/steps/{step_id}:skip",
+        "{}/turns/{turn}/steps/{step}:skip",
         conversation_path(user_id, conversation_id)?
     ))
 }
@@ -313,6 +317,50 @@ mod tests {
                 "api/scopes/{USER}/nyxid-chat/conversations/{CONV}/turns/turn-1/steps/step_a:skip"
             )
         );
+        // Upstream may issue identities with `.` / `:`; they round-trip
+        // percent-encoded so a raw `:` cannot collide with the `:retry`
+        // suffix parse.
+        assert_eq!(
+            retry_path(USER, CONV, "turn.v2", "step:3").unwrap(),
+            format!(
+                "api/scopes/{USER}/nyxid-chat/conversations/{CONV}/turns/turn.v2/steps/step%3A3:retry"
+            )
+        );
+        // A literal `%` also round-trips (doubly-encoded), so a caller
+        // cannot smuggle traversal via pre-encoded sequences.
+        assert_eq!(
+            skip_path(USER, CONV, "turn-1", "%2e%2e").unwrap(),
+            format!(
+                "api/scopes/{USER}/nyxid-chat/conversations/{CONV}/turns/turn-1/steps/%252e%252e:skip"
+            )
+        );
+    }
+
+    #[test]
+    fn rejects_control_segments_outside_the_upstream_grammar() {
+        // The control-identity grammar forbids whitespace, control chars,
+        // and `/ \ ? #` (upstream `TryValidateControlIdentity`); everything
+        // else is accepted and percent-encoded.
+        for bad in [
+            "",
+            "abc/def",
+            "abc\\def",
+            "abc?x=1",
+            "abc#frag",
+            "abc def",
+            "tab\there",
+            "\u{7}bell",
+        ] {
+            assert!(
+                retry_path(USER, CONV, bad, "step_a").is_err(),
+                "expected turn {bad:?} to be rejected"
+            );
+            assert!(retry_path(USER, CONV, "turn-1", bad).is_err());
+            assert!(skip_path(USER, CONV, bad, "step_a").is_err());
+            assert!(skip_path(USER, CONV, "turn-1", bad).is_err());
+        }
+        assert!(retry_path(USER, CONV, &"a".repeat(129), "step_a").is_err());
+        assert!(retry_path(USER, CONV, "turn-1", &"a".repeat(129)).is_err());
         assert_eq!(
             history_index_path(USER),
             format!("api/scopes/{USER}/chat-history")
@@ -343,11 +391,6 @@ mod tests {
             assert!(stop_path(USER, bad).is_err());
             assert!(steer_path(USER, bad).is_err());
             assert!(state_path(USER, bad).is_err());
-            // Escaping turn/step segments is rejected the same way.
-            assert!(retry_path(USER, CONV, bad, "step_a").is_err());
-            assert!(retry_path(USER, CONV, "turn-1", bad).is_err());
-            assert!(skip_path(USER, CONV, bad, "step_a").is_err());
-            assert!(skip_path(USER, CONV, "turn-1", bad).is_err());
         }
         assert!(history_path(USER, &"a".repeat(129)).is_err());
     }
