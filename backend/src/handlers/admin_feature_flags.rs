@@ -85,7 +85,6 @@ pub struct AdminFeatureFlagItem {
     pub key: String,
     pub description: String,
     pub default_enabled: bool,
-    pub org_manageable: bool,
     pub global_override: Option<bool>,
     pub org_overrides: Vec<AdminOrgFeatureFlagOverride>,
     pub user_overrides: Vec<AdminUserFeatureFlagOverride>,
@@ -192,7 +191,6 @@ pub async fn list_feature_flags(
             key: def.key.to_string(),
             description: def.description.to_string(),
             default_enabled: def.default_enabled,
-            org_manageable: def.org_manageable,
             global_override,
             org_overrides,
             user_overrides,
@@ -456,7 +454,7 @@ mod tests {
             return;
         };
         let auth = test_auth_user(&admin_id);
-        let flag_key = "staff_only_ui".to_string();
+        let flag_key = "example_ui".to_string();
         let org_id = Uuid::new_v4().to_string();
         state
             .db
@@ -465,8 +463,7 @@ mod tests {
             .await
             .expect("insert org user");
 
-        // Set an org-wide override (on a staff-only flag: no org_manageable
-        // gate on the platform path). The response echoes the org id.
+        // Set an org-wide override. The response echoes the org id.
         let Json(row) = set_feature_flag(
             State(state.clone()),
             auth.clone(),

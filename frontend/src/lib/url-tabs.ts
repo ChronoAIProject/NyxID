@@ -25,7 +25,6 @@ export const INTEGRATION_GUIDE_TAB_DEFAULT: IntegrationGuideTab = "react";
 export const ORG_DETAIL_TABS = [
   "members",
   "role-permissions",
-  "feature-flags",
   "invites",
   "approvals",
   "service-accounts",
