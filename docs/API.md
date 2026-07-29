@@ -3764,14 +3764,15 @@ curl -X POST http://localhost:3001/api/v1/llm/gateway/v1/chat/completions \
 
 **Endpoint Access Restrictions:**
 
-Delegated tokens are restricted to proxy and LLM gateway endpoints only. All other endpoints (auth, users, API keys, services, admin, MFA, etc.) reject delegated tokens with `403 Forbidden`.
+Delegated tokens retain their native proxy, LLM, and refresh access according to scope. A service-issued token with the exact `account:read` scope may also call eligible management `GET` endpoints; management writes, WebSocket upgrades, and the denied route classes described above still return `403 Forbidden`.
 
-| Endpoint Group                   | Delegated Token Access |
-|----------------------------------|------------------------|
-| `/api/v1/llm/*`                  | Allowed                |
-| `/api/v1/proxy/{id}/{*path}`     | Allowed                |
-| `/api/v1/delegation/refresh`     | Allowed (required)     |
-| All other `/api/v1/*`            | Blocked                |
+| Endpoint Group                                      | Delegated Token Access                              |
+|-----------------------------------------------------|-----------------------------------------------------|
+| `/api/v1/llm/*`                                     | Allowed by native LLM scopes                        |
+| `/api/v1/proxy/{id}/{*path}`                        | Allowed by native proxy scopes                      |
+| `/api/v1/delegation/refresh`                        | Allowed for refreshable delegated scopes            |
+| Eligible management `GET` endpoints                | Allowed only with exact `account:read`              |
+| Management writes, upgrades, and denied GET classes | Blocked                                             |
 
 ---
 
