@@ -70,6 +70,12 @@ describe("ApprovalCard", () => {
 
   it("renders the structured scope row on a pending card", () => {
     render(<ApprovalCard block={approval()} onDecide={vi.fn()} />);
+    const card = screen
+      .getByRole("heading", { name: "Approval required" })
+      .closest("section");
+    expect(card).toHaveClass("border-border", "bg-card");
+    expect(card?.className).not.toContain("warning");
+    expect(card?.querySelector('[class*="warning"]')).toBeNull();
     expect(screen.getByText("Scope")).toBeInTheDocument();
     expect(screen.getByText("lark-bot")).toBeInTheDocument();
     expect(screen.getByText("nyxid_ag_...7f3d")).toBeInTheDocument();

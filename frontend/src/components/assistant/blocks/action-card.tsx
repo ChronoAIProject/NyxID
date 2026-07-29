@@ -45,31 +45,37 @@ function ParameterSummary({
   }
 
   return (
-    <div className="mt-3 space-y-2 rounded-lg bg-white/[0.03] px-3 py-2.5">
+    <div className="space-y-2.5 border-y border-border bg-muted px-4 py-3">
       <div className="flex flex-wrap items-center gap-1.5">
-        <span className="text-[10px] font-semibold uppercase tracking-[1px] text-text-tertiary">
+        <span className="text-[10px] font-semibold uppercase tracking-[1px] text-muted-foreground">
           Service
         </span>
-        <Badge variant="secondary">
-          {clampServiceLabel(
-            params.variant === "catalog" ? params.service_slug : params.name,
-          ) || "Custom"}
+        <Badge variant="secondary" className="max-w-full truncate">
+          <span className="min-w-0 truncate">
+            {clampServiceLabel(
+              params.variant === "catalog" ? params.service_slug : params.name,
+            ) || "Custom"}
+          </span>
         </Badge>
         {endpointHost ? (
-          <Badge variant="secondary">
+          <Badge variant="secondary" className="max-w-full truncate">
             <Globe className="mr-1 h-3 w-3" />
-            {endpointHost}
+            <span className="min-w-0 truncate">{endpointHost}</span>
           </Badge>
         ) : null}
       </div>
       {scopes.length > 0 ? (
         <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-[10px] font-semibold uppercase tracking-[1px] text-text-tertiary">
+          <span className="text-[10px] font-semibold uppercase tracking-[1px] text-muted-foreground">
             Scopes
           </span>
           {scopes.map((scope) => (
-            <Badge key={scope} variant="secondary" className="font-mono">
-              {scope}
+            <Badge
+              key={scope}
+              variant="secondary"
+              className="max-w-full truncate font-mono"
+            >
+              <span className="min-w-0 truncate">{scope}</span>
             </Badge>
           ))}
         </div>
@@ -81,12 +87,16 @@ function ParameterSummary({
           {params.via_node_id ? (
             <Badge variant="info" className="max-w-full truncate font-mono">
               <Server className="mr-1 h-3 w-3" />
-              Node {params.via_node_id}
+              <span className="min-w-0 truncate">
+                Node {params.via_node_id}
+              </span>
             </Badge>
           ) : null}
           {params.target_org_id ? (
             <Badge variant="secondary" className="max-w-full truncate font-mono">
-              Org {params.target_org_id}
+              <span className="min-w-0 truncate">
+                Org {params.target_org_id}
+              </span>
             </Badge>
           ) : null}
         </div>
@@ -200,15 +210,15 @@ export function ActionCard({ block, onProgress, onResolve }: ActionCardProps) {
   }
 
   return (
-    <section className="rounded-xl border border-warning/25 bg-card p-4">
-      <div className="flex items-start gap-3">
-        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-hairline bg-overlay-strong">
+    <section className="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
+      <div className="flex items-start gap-3 px-4 py-3.5">
+        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-border bg-muted">
           {params.variant === "catalog" ? (
             <ServiceIcon slug={params.service_slug} size="sm" />
           ) : params.variant === "custom" ? (
             <Globe className="h-4 w-4 text-muted-foreground" />
           ) : (
-            <AlertTriangle className="h-4 w-4 text-warning" />
+            <AlertTriangle className="h-4 w-4 text-destructive" />
           )}
         </div>
         <div className="min-w-0 flex-1">
@@ -216,7 +226,9 @@ export function ActionCard({ block, onProgress, onResolve }: ActionCardProps) {
             <h3 className="text-[13px] font-semibold text-foreground">
               {descriptor.title(params)}
             </h3>
-            <Badge variant={unsupported ? "destructive" : "warning"}>
+            <Badge
+              variant={unsupported ? "destructive" : busy ? "info" : "secondary"}
+            >
               {unsupported
                 ? "Unsupported"
                 : busy
@@ -233,8 +245,8 @@ export function ActionCard({ block, onProgress, onResolve }: ActionCardProps) {
       <ParameterSummary block={block} />
 
       {!unsupported ? (
-        <div className="mt-3 flex items-start gap-2 rounded-lg border border-warning/15 bg-warning/[0.04] px-3 py-2.5">
-          <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warning" />
+        <div className="flex items-start gap-2 px-4 py-3">
+          <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-info" />
           <p className="text-[11px] leading-relaxed text-muted-foreground">
             You choose the account, routing, and credential. The assistant
             receives only brokered access after you finish.
@@ -242,7 +254,7 @@ export function ActionCard({ block, onProgress, onResolve }: ActionCardProps) {
         </div>
       ) : null}
 
-      <div className="mt-4 flex flex-wrap items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2 border-t border-border bg-muted px-4 py-3">
         {!unsupported ? (
           <Button
             type="button"
@@ -268,7 +280,7 @@ export function ActionCard({ block, onProgress, onResolve }: ActionCardProps) {
           <X />
           Decline
         </Button>
-        <span className="ml-auto text-[10px] text-text-tertiary">
+        <span className="ml-auto text-[10px] text-muted-foreground">
           Nothing is shared until you finish.
         </span>
       </div>

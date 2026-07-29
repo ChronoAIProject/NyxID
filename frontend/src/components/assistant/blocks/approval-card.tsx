@@ -43,7 +43,7 @@ function grantDurationLabel(seconds: number | null): string {
 /** Small mono chip used by the scope row (mockup: `.a-scope code`). */
 function ScopeChip({ children }: { readonly children: ReactNode }) {
   return (
-    <span className="inline-flex min-w-0 items-center gap-1 rounded-md border border-hairline bg-overlay-strong px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+    <span className="inline-flex min-w-0 max-w-full items-center gap-1 rounded-md border border-border bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
       {children}
     </span>
   );
@@ -57,7 +57,7 @@ function ScopeChip({ children }: { readonly children: ReactNode }) {
 function ScopeRow({ block }: { readonly block: ApprovalCardContentBlock }) {
   return (
     <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
-      <span className="text-[10px] font-semibold uppercase tracking-[1px] text-text-tertiary">
+      <span className="text-[10px] font-semibold uppercase tracking-[1px] text-muted-foreground">
         Scope
       </span>
       <ScopeChip>
@@ -201,14 +201,21 @@ export function ApprovalCard({
   const busy = pendingAction !== null;
 
   return (
-    <section className="rounded-xl border border-warning/30 bg-warning/[0.06] p-4">
-      <div className="flex flex-wrap items-center gap-2">
-        <ShieldAlert className="h-4 w-4 text-warning" />
-        <h3 className="text-[12px] font-semibold text-warning">
-          Approval required
-        </h3>
+    <section className="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
+      <div className="flex items-start gap-3 border-b border-border px-4 py-3.5">
+        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border bg-muted">
+          <ShieldAlert className="h-4 w-4 text-muted-foreground" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <h3 className="text-[13px] font-semibold text-foreground">
+            Approval required
+          </h3>
+          <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
+            Review the destination and access scope before this action runs.
+          </p>
+        </div>
         <span
-          className={`ml-auto flex items-center gap-1 font-mono text-[10px] ${
+          className={`flex shrink-0 items-center gap-1 pt-0.5 font-mono text-[10px] ${
             expired || urgent
               ? "font-semibold text-destructive"
               : "text-muted-foreground"
@@ -219,25 +226,27 @@ export function ApprovalCard({
         </span>
       </div>
 
-      <p className="mt-3 text-[13px] font-medium leading-relaxed text-foreground">
-        {block.body}
-      </p>
-
-      <ScopeRow block={block} />
-
-      {block.approval_mode === "grant" && (
-        <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
-          Approving also allows repeat {block.service_slug} writes for the next{" "}
-          {grantDurationLabel(block.grant_duration_sec)} without asking again.
+      <div className="px-4 py-3.5">
+        <p className="text-[13px] font-medium leading-relaxed text-foreground">
+          {block.body}
         </p>
-      )}
 
-      <div className="mt-4 flex flex-wrap items-center gap-2">
+        <ScopeRow block={block} />
+
+        {block.approval_mode === "grant" && (
+          <p className="mt-2.5 text-[11px] leading-relaxed text-muted-foreground">
+            Approving also allows repeat {block.service_slug} writes for the next{" "}
+            {grantDurationLabel(block.grant_duration_sec)} without asking again.
+          </p>
+        )}
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2 border-t border-border bg-muted px-4 py-3">
         <button
           type="button"
           disabled={busy}
           onClick={() => void decide(true)}
-          className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-success/30 bg-success/10 px-3 text-[12px] font-medium text-success transition-colors hover:bg-success/15 disabled:cursor-not-allowed disabled:opacity-40 light:text-foreground"
+          className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-success/40 bg-success/15 px-3 text-[12px] font-medium text-success transition-colors hover:bg-success/20 disabled:cursor-not-allowed disabled:opacity-40 light:text-foreground"
         >
           {pendingAction === "approve" ? (
             <Loader2 className="h-3 w-3 animate-spin light:text-success" />
@@ -250,7 +259,7 @@ export function ApprovalCard({
           type="button"
           disabled={busy}
           onClick={() => void decide(false)}
-          className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-destructive/30 bg-destructive/10 px-3 text-[12px] font-medium text-destructive transition-colors hover:bg-destructive/15 disabled:cursor-not-allowed disabled:opacity-40 light:text-foreground"
+          className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-destructive/40 bg-destructive/15 px-3 text-[12px] font-medium text-destructive transition-colors hover:bg-destructive/20 disabled:cursor-not-allowed disabled:opacity-40 light:text-foreground"
         >
           {pendingAction === "deny" ? (
             <Loader2 className="h-3 w-3 animate-spin light:text-destructive" />
@@ -259,7 +268,7 @@ export function ApprovalCard({
           )}
           Deny
         </button>
-        <span className="ml-auto text-[10px] text-text-tertiary">
+        <span className="ml-auto text-[10px] text-muted-foreground">
           Nothing is sent until you decide.
         </span>
       </div>
