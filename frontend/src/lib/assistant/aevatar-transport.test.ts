@@ -2673,6 +2673,52 @@ describe("chat action cards", () => {
     expect(actionBodies[0]?.actions).toHaveLength(2);
   });
 
+  // The decline button is only disabled once the patched status has rendered,
+  // so a fast double-click can reach the transport twice before React repaints.
+  it("sends one report per action request when a decline is double-fired", async () => {
+    const actionBodies: Array<{ readonly actions: readonly unknown[] }> = [];
+    stubFetch(routeCreate, (url, init) => {
+      if (!url.endsWith("/stream") || init?.method !== "POST") return undefined;
+      const body = JSON.parse(String(init.body)) as {
+        readonly type: string;
+        readonly actions?: readonly unknown[];
+      };
+      if (body.type === "text") {
+        return sseResponse([
+          { type: "RUN_STARTED", turnId: TURN_ID },
+          actionRequestFrame(),
+          { type: "RUN_FINISHED", runFinished: { status: "blocked" } },
+        ]);
+      }
+      actionBodies.push({ actions: body.actions ?? [] });
+      return sseResponse([
+        { type: "RUN_STARTED", turnId: "turn-double-decline" },
+        { type: "RUN_FINISHED" },
+      ]);
+    });
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+    await collectTurn(transport, "Connect GitHub");
+
+    const report = {
+      actionRequestId: "act-action-1",
+      originTurnId: TURN_ID,
+      disposition: "declined",
+    } as const;
+    await new Promise<void>((resolve) => {
+      transport.continueActions(CONVERSATION_ID, TURN_ID, [report], (event) => {
+        if (event.event === "turn.completed") resolve();
+      });
+      // Second click lands before the first continuation settles.
+      expect(
+        transport.continueActions(CONVERSATION_ID, TURN_ID, [report]),
+      ).toBeNull();
+    });
+
+    expect(actionBodies).toHaveLength(1);
+    expect(actionBodies[0]?.actions).toHaveLength(1);
+  });
+
   it("reuses the continuation clientRequestId for automatic delivery retry", async () => {
     let actionAttempts = 0;
     const actionRequestIds: string[] = [];
