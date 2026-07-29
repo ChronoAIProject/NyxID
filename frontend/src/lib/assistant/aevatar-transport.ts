@@ -9,6 +9,7 @@ import {
   actionReportSchema,
   assistantActionRequestSchema,
   buildActionContinueBody,
+  recoverUnsupportedAssistantActionRequest,
   type ActionContinueBody,
   type ActionReport,
   type AssistantActionRequest,
@@ -2059,6 +2060,11 @@ export class AevatarAssistantTransport implements AssistantTransport {
         const request = assistantActionRequestSchema.safeParse(payload);
         if (request.success) {
           this.addActionCard(conversationId, run, request.data);
+        } else {
+          const unsupported = recoverUnsupportedAssistantActionRequest(payload);
+          if (unsupported) {
+            this.addActionCard(conversationId, run, unsupported);
+          }
         }
         return;
       }

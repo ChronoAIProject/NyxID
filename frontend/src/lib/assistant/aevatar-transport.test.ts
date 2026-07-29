@@ -3148,6 +3148,54 @@ describe("chat action cards", () => {
     expect(cards).toHaveLength(1);
     expect(cards[0]).toMatchObject({ status: "unsupported" });
   });
+
+  it("renders malformed recognizable action requests as decline-only cards", async () => {
+    stubFetch(
+      routeCreate,
+      routeStream([
+        { type: "RUN_STARTED", turnId: TURN_ID },
+        actionRequestFrame({
+          actionRequestId: "act-extra-member",
+          unexpected: true,
+        }),
+        actionRequestFrame({
+          actionRequestId: "act-bogus-auth",
+          params: {
+            customService: {
+              name: "Build API",
+              endpointUrl: "https://build.example.test/v1",
+              authMethod: "bogus",
+            },
+          },
+        }),
+        actionRequestFrame({
+          actionRequestId: "act-empty-slug",
+          params: { catalogService: { serviceSlug: "   " } },
+        }),
+        { type: "RUN_FINISHED", runFinished: { status: "blocked" } },
+      ]),
+    );
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+    await collectTurn(transport, "Connect the requested services");
+
+    const history = await transport.getHistory(CONVERSATION_ID);
+    const cards = history.messages
+      .flatMap((message) => message.blocks)
+      .filter((block) => block.type === "action_card");
+    expect(cards).toHaveLength(3);
+    expect(cards.map((card) => card.action_request_id)).toEqual([
+      "act-extra-member",
+      "act-bogus-auth",
+      "act-empty-slug",
+    ]);
+    for (const card of cards) {
+      expect(card).toMatchObject({
+        status: "unsupported",
+        params: { variant: "unknown" },
+      });
+    }
+  });
 });
 
 describe("redaction and tool summaries", () => {

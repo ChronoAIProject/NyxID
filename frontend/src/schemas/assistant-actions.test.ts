@@ -97,6 +97,84 @@ describe("assistant action request schema", () => {
     expect(resolveAssistantAction(wrongVersion).supported).toBe(false);
     expect(resolveAssistantAction(unknownVerb).supported).toBe(false);
   });
+
+  it("rejects unknown members and invalid producer-required values", () => {
+    const validCatalog = {
+      ...BASE_REQUEST,
+      params: { catalogService: { serviceSlug: "api-github" } },
+    };
+    const invalidRequests = [
+      { ...validCatalog, unexpected: true },
+      {
+        ...validCatalog,
+        params: {
+          catalogService: { serviceSlug: "api-github", unexpected: true },
+        },
+      },
+      {
+        ...BASE_REQUEST,
+        params: { catalogService: { serviceSlug: "   " } },
+      },
+      {
+        ...BASE_REQUEST,
+        action: "   ",
+        params: { catalogService: { serviceSlug: "api-github" } },
+      },
+      {
+        ...BASE_REQUEST,
+        params: {
+          customService: {
+            name: "Build API",
+            endpointUrl: "https://build.example.test/v1",
+            authMethod: "bogus",
+          },
+        },
+      },
+      {
+        ...BASE_REQUEST,
+        params: {
+          customService: {
+            name: "   ",
+            endpointUrl: "https://build.example.test/v1",
+            authMethod: "none",
+          },
+        },
+      },
+    ];
+
+    for (const request of invalidRequests) {
+      expect(assistantActionRequestSchema.safeParse(request).success).toBe(false);
+    }
+  });
+
+  it("defaults protobuf-omitted optional fields without opening the schema", () => {
+    const request = assistantActionRequestSchema.parse({
+      schemaVersion: 4,
+      originTurnId: "turn-origin-1",
+      actionRequestId: "act-1",
+      action: "service.connect",
+      params: {
+        customService: {
+          name: "Build API",
+          endpointUrl: "https://build.example.test/v1",
+        },
+      },
+    });
+
+    expect(request).toMatchObject({
+      actorId: "",
+      taskId: "",
+      stepId: "",
+      params: {
+        customService: {
+          authMethod: "none",
+          authKeyName: "",
+          viaNodeId: "",
+          targetOrgId: "",
+        },
+      },
+    });
+  });
 });
 
 describe("action continuation schema", () => {

@@ -13,28 +13,48 @@ export const actionControlIdentitySchema = z
 
 const wireStringSchema = z.string().max(4_096).optional().default("");
 const wireIdSchema = z.string().max(256).optional().default("");
+const requiredWireStringSchema = z
+  .string()
+  .max(4_096)
+  .transform((value) => value.trim())
+  .pipe(z.string().min(1));
 
-export const catalogServiceActionParamsSchema = z.object({
-  serviceSlug: wireStringSchema,
-  requestedScopes: z.array(z.string().max(256)).optional().default([]),
-  viaNodeId: wireIdSchema,
-  targetOrgId: wireIdSchema,
-});
+export const customServiceAuthMethodSchema = z.enum([
+  "bearer",
+  "header",
+  "query",
+  "path",
+  "basic",
+  "body",
+  "none",
+]);
 
-export const customServiceActionParamsSchema = z.object({
-  name: wireStringSchema,
-  endpointUrl: wireStringSchema,
-  authMethod: wireStringSchema,
-  authKeyName: wireStringSchema,
-  viaNodeId: wireIdSchema,
-  targetOrgId: wireIdSchema,
-});
+export const catalogServiceActionParamsSchema = z
+  .object({
+    serviceSlug: requiredWireStringSchema,
+    requestedScopes: z.array(z.string().max(256)).optional().default([]),
+    viaNodeId: wireIdSchema,
+    targetOrgId: wireIdSchema,
+  })
+  .strict();
+
+export const customServiceActionParamsSchema = z
+  .object({
+    name: requiredWireStringSchema,
+    endpointUrl: requiredWireStringSchema,
+    authMethod: customServiceAuthMethodSchema.optional().default("none"),
+    authKeyName: wireStringSchema,
+    viaNodeId: wireIdSchema,
+    targetOrgId: wireIdSchema,
+  })
+  .strict();
 
 export const assistantActionParamsSchema = z
   .object({
     catalogService: catalogServiceActionParamsSchema.optional(),
     customService: customServiceActionParamsSchema.optional(),
   })
+  .strict()
   .optional()
   .default({});
 
@@ -43,20 +63,64 @@ export const assistantActionParamsSchema = z
  * intentionally not literals: structurally valid future requests must render
  * the unsupported fallback card so the user can explicitly decline them.
  */
-export const assistantActionRequestSchema = z.object({
-  schemaVersion: z.number().int(),
-  actorId: wireIdSchema,
-  originTurnId: actionControlIdentitySchema,
-  taskId: wireIdSchema,
-  stepId: wireIdSchema,
-  actionRequestId: actionControlIdentitySchema,
-  action: wireStringSchema,
-  params: assistantActionParamsSchema,
-});
+export const assistantActionRequestSchema = z
+  .object({
+    schemaVersion: z.number().int().optional().default(0),
+    actorId: wireIdSchema,
+    originTurnId: actionControlIdentitySchema,
+    taskId: wireIdSchema,
+    stepId: wireIdSchema,
+    actionRequestId: actionControlIdentitySchema,
+    action: requiredWireStringSchema,
+    params: assistantActionParamsSchema,
+  })
+  .strict();
 
 export type AssistantActionRequest = z.infer<
   typeof assistantActionRequestSchema
 >;
+
+/**
+ * Preserve the user's escape hatch when a recognizable action frame has
+ * malformed params. Only the two control identities needed by
+ * `action.continue` survive; every failed field and unknown member is dropped.
+ */
+export function recoverUnsupportedAssistantActionRequest(
+  payload: unknown,
+): AssistantActionRequest | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return null;
+  }
+  const record = payload as Record<string, unknown>;
+  const actionRequestId = actionControlIdentitySchema.safeParse(
+    record["actionRequestId"],
+  );
+  const originTurnId = actionControlIdentitySchema.safeParse(
+    record["originTurnId"],
+  );
+  if (!actionRequestId.success || !originTurnId.success) return null;
+
+  const rawAction = record["action"];
+  const action =
+    typeof rawAction === "string" && rawAction.trim()
+      ? rawAction.trim().slice(0, 4_096)
+      : "invalid.action";
+  const rawSchemaVersion = record["schemaVersion"];
+  const schemaVersion =
+    typeof rawSchemaVersion === "number" && Number.isInteger(rawSchemaVersion)
+      ? rawSchemaVersion
+      : 0;
+  return {
+    schemaVersion,
+    actorId: "",
+    originTurnId: originTurnId.data,
+    taskId: "",
+    stepId: "",
+    actionRequestId: actionRequestId.data,
+    action,
+    params: {},
+  };
+}
 
 export type ActionCardParams =
   | {
