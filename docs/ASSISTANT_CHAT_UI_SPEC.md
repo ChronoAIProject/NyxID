@@ -41,6 +41,12 @@ The chat uses the main NyxID design system in `DESIGN.md`.
   warning-tinted card body for a normal approval or connection request.
 - The selected pending accent is warm NyxID purple. Do not use blue for the
   approval-card header or add a blue top rail.
+- **Blue (`info`) is not part of the assistant-card palette at all** (design decision
+  2026-07-29): purple already means NyxID interaction, green success, red
+  denial/failure — a third hue carries no meaning here. In-flight status uses the
+  purple `accent` badge; trust/consent icons use the purple family (matching the
+  approval card's shield tile); reference chips (nodes included) are neutral
+  `secondary`.
 - Cards are sectioned, compact, and operational. They use a neutral body,
   explicit dividers, small type, and stable icon/button dimensions.
 - Rich cards are not nested inside decorative parent cards. They render as
@@ -461,7 +467,8 @@ a prompt-injected agent would want pre-approved), plus everything destructive.
 Extends Part I §6/§8.2; these rules bind every card in §17:
 
 - Chip rows: 10px uppercase label + badges. Slugs, scopes, ids, hosts, user codes →
-  `secondary` badges; ids/scopes/codes mono; node refs → `info` badge with server glyph;
+  `secondary` badges; ids/scopes/codes mono; node refs → `secondary` badge with server
+  glyph (no blue — Part I §2);
   every chip `max-w-full truncate`.
 - Scopes render one chip per scope, mono.
 - Custom endpoints render **host only**; invalid or credential-embedding URLs render
@@ -730,6 +737,8 @@ not production code, never imported by the app.
       `us_44` resource ref.
 - [ ] **Zero top accent rails** anywhere: no card in any section or state renders a
       colored bar/strip on any edge.
+- [ ] **Zero blue/info accents** on any card, badge, icon, or event row (Part I §2):
+      in-flight = purple accent, references = neutral, trust icons = purple family.
 - [ ] Renders at 1440px and 390px, dark and light, with no horizontal overflow.
 - [ ] Opened from `file://` in a real browser with zero console errors.
 - [ ] No warning/amber styling on any pending card.
