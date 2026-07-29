@@ -21,6 +21,7 @@ import {
 } from "@/lib/assistant/approvals";
 import { assistantMockStore } from "@/lib/assistant/mock-data";
 import { assistantTransport } from "@/lib/assistant/transport";
+import type { ActionReport } from "@/schemas/assistant-actions";
 import type {
   ActiveTurn,
   Conversation,
@@ -118,9 +119,7 @@ export function useAssistantApprovals() {
   const pending: AssistantApprovalEntry[] = (
     pendingQuery.data?.requests ?? []
   ).map((request) => toAssistantApprovalEntry(request, grantDurationSec));
-  const history: AssistantApprovalEntry[] = (
-    historyQuery.data?.requests ?? []
-  )
+  const history: AssistantApprovalEntry[] = (historyQuery.data?.requests ?? [])
     .filter((request) => request.status !== "pending")
     .map((request) => toAssistantApprovalEntry(request, grantDurationSec));
 
@@ -360,7 +359,10 @@ export function describeSendFailure(error: unknown): {
   readonly message: string;
   readonly description: string;
 } {
-  if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
+  if (
+    error instanceof ApiError &&
+    (error.status === 401 || error.status === 403)
+  ) {
     return {
       message: "Message not sent",
       description:
@@ -437,4 +439,31 @@ export function useDecideApproval(conversationId: string | undefined) {
       });
     },
   });
+}
+
+export function useActionCardActions(conversationId: string | undefined) {
+  const queryClient = useQueryClient();
+
+  return {
+    setInProgress(blockId: string, inProgress: boolean): void {
+      if (!conversationId) return;
+      assistantTransport.setActionCardInProgress(
+        conversationId,
+        blockId,
+        inProgress,
+        createTurnEventPump(queryClient, conversationId),
+      );
+    },
+    async continueAction(report: ActionReport): Promise<void> {
+      if (!conversationId) throw new Error("Select a conversation first.");
+      const handle = assistantTransport.continueActions(
+        conversationId,
+        report.originTurnId,
+        [report],
+        createTurnEventPump(queryClient, conversationId),
+      );
+      if (handle) activeHandles.set(conversationId, handle);
+      await projectTransportState(queryClient, conversationId);
+    },
+  };
 }

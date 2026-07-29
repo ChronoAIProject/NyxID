@@ -18,6 +18,10 @@ export const EMPTY_TURN_STATE: TurnReducerState = {
  */
 export function toTerminalBlock(block: ContentBlock): ContentBlock {
   switch (block.type) {
+    case "action_card":
+      // Browser actions outlive the turn that requested them. In particular,
+      // cancel must not turn a still-actionable card into a zombie receipt.
+      return block;
     case "run":
       if (
         block.state === "completed" ||

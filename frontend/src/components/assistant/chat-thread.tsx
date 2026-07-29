@@ -1,12 +1,14 @@
 import { Fragment, useEffect, useRef } from "react";
 import { AlertCircle } from "lucide-react";
 import { NyxidIcon } from "@/components/brand/nyxid-icon";
+import { ActionCard } from "@/components/assistant/blocks/action-card";
 import { ApprovalCard } from "@/components/assistant/blocks/approval-card";
 import { ArtifactBlock } from "@/components/assistant/blocks/artifact-block";
 import { ConnectCard } from "@/components/assistant/blocks/connect-card";
 import { RunCard } from "@/components/assistant/blocks/run-card";
 import { TextBlock } from "@/components/assistant/blocks/text-block";
 import { formatClockTime } from "@/lib/utils";
+import type { ActionReport } from "@/schemas/assistant-actions";
 import type { AssistantMessage, ContentBlock } from "@/types/assistant";
 
 function UnsupportedContent() {
@@ -42,6 +44,8 @@ function isTextBlock(block: unknown): boolean {
 function renderBlock(
   block: unknown,
   onDecideApproval: (blockId: string, approved: boolean) => Promise<void>,
+  onActionProgress: (blockId: string, inProgress: boolean) => void,
+  onResolveAction: (report: ActionReport) => Promise<void>,
   streaming = false,
 ) {
   if (typeof block !== "object" || block === null || !("type" in block)) {
@@ -60,6 +64,14 @@ function renderBlock(
         <ApprovalCard
           block={typed}
           onDecide={(approved) => onDecideApproval(typed.block_id, approved)}
+        />
+      );
+    case "action_card":
+      return (
+        <ActionCard
+          block={typed}
+          onProgress={onActionProgress}
+          onResolve={onResolveAction}
         />
       );
     case "artifact":
@@ -111,8 +123,10 @@ type MessageGroup = {
  * repeat the icon per message.
  */
 function groupMessages(messages: readonly AssistantMessage[]): MessageGroup[] {
-  const groups: { role: AssistantMessage["role"]; messages: AssistantMessage[] }[] =
-    [];
+  const groups: {
+    role: AssistantMessage["role"];
+    messages: AssistantMessage[];
+  }[] = [];
   for (const message of messages) {
     const last = groups.at(-1);
     if (last && last.role === message.role) last.messages.push(message);
@@ -154,6 +168,8 @@ export function ChatThread({
   thinking = false,
   streaming = false,
   onDecideApproval,
+  onActionProgress = () => undefined,
+  onResolveAction = async () => undefined,
 }: {
   readonly messages: readonly AssistantMessage[];
   /**
@@ -172,6 +188,8 @@ export function ChatThread({
     blockId: string,
     approved: boolean,
   ) => Promise<void>;
+  readonly onActionProgress?: (blockId: string, inProgress: boolean) => void;
+  readonly onResolveAction?: (report: ActionReport) => Promise<void>;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -230,7 +248,12 @@ export function ChatThread({
                         <div className="space-y-3">
                           {(message.blocks as unknown[]).map((block, index) => (
                             <div key={`${blockId(block)}-${String(index)}`}>
-                              {renderBlock(block, onDecideApproval)}
+                              {renderBlock(
+                                block,
+                                onDecideApproval,
+                                onActionProgress,
+                                onResolveAction,
+                              )}
                             </div>
                           ))}
                         </div>
@@ -273,7 +296,11 @@ export function ChatThread({
                               {renderBlock(
                                 block,
                                 onDecideApproval,
-                                streamingGroup && isLastBlock && isTextBlock(block),
+                                onActionProgress,
+                                onResolveAction,
+                                streamingGroup &&
+                                  isLastBlock &&
+                                  isTextBlock(block),
                               )}
                             </div>
                           );

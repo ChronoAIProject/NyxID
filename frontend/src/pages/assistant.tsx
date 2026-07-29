@@ -10,6 +10,7 @@ import { PluginsView } from "@/components/assistant/plugins-view";
 import {
   describeSendFailure,
   useAssistantTurn,
+  useActionCardActions,
   useCancelTurn,
   useConversation,
   useConversations,
@@ -49,6 +50,7 @@ export function AssistantPage({
   const sendMessage = useSendMessage(selectedId);
   const cancelTurn = useCancelTurn(selectedId);
   const decideApproval = useDecideApproval(selectedId);
+  const actionCards = useActionCardActions(selectedId);
   const deleteConversation = useDeleteConversation();
 
   function selectConversation(conversationId: string) {
@@ -145,16 +147,16 @@ export function AssistantPage({
           <ChatThread
             messages={history.data?.messages ?? []}
             thinking={
-              active &&
-              history.data?.messages.at(-1)?.role !== "assistant"
+              active && history.data?.messages.at(-1)?.role !== "assistant"
             }
             streaming={
-              active &&
-              history.data?.messages.at(-1)?.role === "assistant"
+              active && history.data?.messages.at(-1)?.role === "assistant"
             }
             onDecideApproval={(blockId, approved) =>
               decideApproval.mutateAsync({ blockId, approved })
             }
+            onActionProgress={actionCards.setInProgress}
+            onResolveAction={actionCards.continueAction}
           />
         )}
         <ChatComposer

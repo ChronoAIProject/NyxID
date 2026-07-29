@@ -2271,11 +2271,26 @@ function AccessPolicyPicker({
   );
 }
 
+export interface AddKeyDialogCompletion {
+  readonly userServiceId: string;
+}
+
+export interface AddKeyDialogCustomPrefill {
+  readonly name?: string;
+  readonly endpointUrl?: string;
+  readonly authMethod?: string;
+  readonly authKeyName?: string;
+}
+
 export function AddKeyDialog({
   open,
   onOpenChange,
   prefillSlug,
+  prefillNodeId,
+  prefillTargetOrgId,
+  prefillCustom,
   reconnectKey,
+  onSuccess,
 }: {
   readonly open: boolean;
   readonly onOpenChange: (open: boolean) => void;
@@ -2287,7 +2302,14 @@ export function AddKeyDialog({
    * generic catalog grid and have to hunt for the right entry.
    */
   readonly prefillSlug?: string;
+  /** Optional routing defaults supplied by an assistant browser action. */
+  readonly prefillNodeId?: string;
+  readonly prefillTargetOrgId?: string;
+  /** Opens the existing custom-endpoint route with every mappable field set. */
+  readonly prefillCustom?: AddKeyDialogCustomPrefill;
   readonly reconnectKey?: KeyInfo | null;
+  /** Fires only when the user finishes the post-connect success step. */
+  readonly onSuccess?: (result: AddKeyDialogCompletion) => void;
 }) {
   const createKey = useCreateKey();
   const { data: catalogEntries } = useCatalog();
@@ -2343,7 +2365,13 @@ export function AddKeyDialog({
     onOpenChange(next);
   }
 
-  function handleSelectCatalog(entry: CatalogEntry) {
+  function handleSelectCatalog(
+    entry: CatalogEntry,
+    routing: {
+      readonly nodeId?: string;
+      readonly targetOrgId?: string;
+    } = {},
+  ) {
     setSelectedEntry(entry);
     setAuthKey(null);
     // Fresh entry → default back to the managed one-click choice so a prior
@@ -2357,7 +2385,11 @@ export function AddKeyDialog({
       endpointUrl: entry.base_url,
       authMethod: entry.auth_method ?? "bearer",
       authKeyName: entry.auth_key_name ?? "Authorization",
+      nodeId: routing.nodeId ?? "",
     });
+    if (routing.targetOrgId !== undefined) {
+      setTargetOrgId(routing.targetOrgId || null);
+    }
     setStep("routing");
   }
 
@@ -2397,12 +2429,55 @@ export function AddKeyDialog({
     if (!open || !prefillSlug || !catalogEntries) return;
     if (isReconnect) return;
     if (appliedPrefillRef.current === prefillSlug) return;
-    const match = catalogEntries.find((e) => e.slug === prefillSlug);
+    const fallbackSlug = prefillSlug.replace(/^(api|llm)-/, "");
+    const match =
+      catalogEntries.find((e) => e.slug === prefillSlug) ??
+      catalogEntries.find((e) => e.slug === fallbackSlug);
     if (!match) return;
     appliedPrefillRef.current = prefillSlug;
     // eslint-disable-next-line react-hooks/set-state-in-effect -- prefill selection is guarded to run once per slug
-    handleSelectCatalog(match);
-  }, [open, prefillSlug, catalogEntries, isReconnect]);
+    handleSelectCatalog(match, {
+      nodeId: prefillNodeId,
+      targetOrgId: prefillTargetOrgId,
+    });
+  }, [
+    open,
+    prefillSlug,
+    prefillNodeId,
+    prefillTargetOrgId,
+    catalogEntries,
+    isReconnect,
+  ]);
+
+  useEffect(() => {
+    if (!open || !prefillCustom || isReconnect || prefillSlug) return;
+    if (appliedPrefillRef.current === "custom-action") return;
+    appliedPrefillRef.current = "custom-action";
+    const authMethod = prefillCustom.authMethod?.trim() || "bearer";
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- action prefill is guarded to run once per dialog open
+    setSelectedEntry(null);
+    setAuthKey(null);
+    setTargetOrgId(prefillTargetOrgId?.trim() || null);
+    setForm({
+      ...INITIAL_FORM,
+      label: prefillCustom.name?.trim() ?? "",
+      endpointUrl: prefillCustom.endpointUrl?.trim() ?? "",
+      authMethod,
+      authKeyName:
+        prefillCustom.authKeyName?.trim() ||
+        AUTH_METHOD_DEFAULTS[authMethod] ||
+        "Authorization",
+      nodeId: prefillNodeId?.trim() ?? "",
+    });
+    setStep("routing");
+  }, [
+    open,
+    prefillCustom,
+    prefillNodeId,
+    prefillTargetOrgId,
+    prefillSlug,
+    isReconnect,
+  ]);
 
   function handleSelectCustom() {
     setSelectedEntry(null);
@@ -2901,6 +2976,7 @@ export function AddKeyDialog({
             createdKey={createdKey}
             isNodeRouted={Boolean(form.nodeId.trim())}
             onDone={() => {
+              onSuccess?.({ userServiceId: createdKey.id });
               handleOpenChange(false);
             }}
           />

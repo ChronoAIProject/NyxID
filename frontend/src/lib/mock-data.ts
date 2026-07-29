@@ -1558,8 +1558,41 @@ export function isMockMode(): boolean {
   return _mockLatched;
 }
 
-export function getMockResponse(endpoint: string): unknown | undefined {
+export function getMockResponse(
+  endpoint: string,
+  method = "GET",
+  body?: unknown,
+): unknown | undefined {
   const path = endpoint.split("?")[0] ?? endpoint;
+  if (method === "POST" && path === "/keys") {
+    const request =
+      typeof body === "object" && body !== null
+        ? (body as Record<string, unknown>)
+        : {};
+    const requestedSlug =
+      typeof request["service_slug"] === "string"
+        ? request["service_slug"]
+        : "github";
+    const catalogSlug = requestedSlug.replace(/^api-/, "");
+    const template =
+      MOCK_KEYS.find((key) => key.catalog_service_slug === catalogSlug) ??
+      MOCK_KEYS[0];
+    if (!template) return undefined;
+    const label =
+      typeof request["label"] === "string" && request["label"].trim()
+        ? request["label"].trim()
+        : "Mock service";
+    return {
+      ...template,
+      id: "00000000-0000-4000-8000-000000000123",
+      label,
+      name: label,
+      slug: `${catalogSlug}-action-demo`,
+      catalog_service_slug: catalogSlug,
+      status: "active",
+      is_active: true,
+    };
+  }
   for (const handler of MOCK_HANDLERS) {
     const result = handler(path);
     if (result !== undefined) return result;

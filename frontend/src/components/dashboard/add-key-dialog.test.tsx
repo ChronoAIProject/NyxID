@@ -206,6 +206,37 @@ async function typeInto(
 }
 
 describe("AddKeyDialog — custom endpoint path", () => {
+  it("opens the assistant custom-service path with every mappable field prefilled", async () => {
+    const user = userEvent.setup();
+    render(
+      <AddKeyDialog
+        open
+        onOpenChange={vi.fn()}
+        prefillCustom={{
+          name: "Build API",
+          endpointUrl: "https://build.example.test/v1",
+          authMethod: "header",
+          authKeyName: "X-Build-Key",
+        }}
+      />,
+    );
+
+    await user.click(
+      await screen.findByRole("button", { name: /Next: Enter Credentials/i }),
+    );
+
+    expect(document.querySelector("#add-key-label")).toHaveValue("Build API");
+    expect(document.querySelector("#add-key-endpoint")).toHaveValue(
+      "https://build.example.test/v1",
+    );
+    expect(document.querySelector("#add-key-auth-key")).toHaveValue(
+      "X-Build-Key",
+    );
+    expect(document.querySelector("#add-key-auth-method")).toHaveTextContent(
+      "Header",
+    );
+  });
+
   it("creates a key from a hand-entered endpoint and navigates to it", async () => {
     createKeyMutate.mockImplementation((_params, opts) => {
       opts?.onSuccess?.({ id: "new-key-1" });
@@ -327,6 +358,23 @@ describe("AddKeyDialog — custom endpoint path", () => {
 });
 
 describe("AddKeyDialog — catalog template path", () => {
+  it("falls back from an Aevatar-prefixed catalog slug to the live catalog slug", async () => {
+    catalog.entries = [OAUTH_ENTRY];
+    render(
+      <AddKeyDialog
+        open
+        onOpenChange={vi.fn()}
+        prefillSlug="api-github"
+      />,
+    );
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "Configure routing for GitHub",
+      }),
+    ).toBeInTheDocument();
+  });
+
   it("creates a key from a catalog entry, omitting params that match catalog defaults", async () => {
     createKeyMutate.mockImplementation((_params, opts) => {
       opts?.onSuccess?.({ id: "new-key-2" });
@@ -733,6 +781,47 @@ function minCatalogEntry(
 }
 
 describe("AddKeyDialog → ConnectVerifyStep integration (end-to-end wiring)", () => {
+  it("reports the created UserService id only when the success step is finished", async () => {
+    createKeyMutate.mockImplementation((_params, opts) => {
+      opts?.onSuccess?.({
+        id: "user-service-from-action",
+        slug: "custom-action-service",
+      });
+    });
+    const onOpenChange = vi.fn();
+    const onSuccess = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <AddKeyDialog
+        open
+        onOpenChange={onOpenChange}
+        onSuccess={onSuccess}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /Custom Endpoint/i }));
+    await user.click(
+      screen.getByRole("button", { name: /Next: Enter Credentials/i }),
+    );
+    await typeInto(user, "add-key-label", "Action Service");
+    await typeInto(user, "add-key-credential", "obviously-fake-credential");
+    await typeInto(
+      user,
+      "add-key-endpoint",
+      "https://action.example.test/v1",
+    );
+    await user.click(screen.getByRole("button", { name: "Connect Service" }));
+
+    expect(onSuccess).not.toHaveBeenCalled();
+    await user.click(await screen.findByRole("button", { name: "Maybe later" }));
+
+    expect(onSuccess).toHaveBeenCalledOnce();
+    expect(onSuccess).toHaveBeenCalledWith({
+      userServiceId: "user-service-from-action",
+    });
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
   // GLM #8 + Kimi — the intentionally-swallowed createApiKeyMutate
   // in the other tests hides the real dialog → verify-step wiring.
   // This test lets the mint fire onSuccess so we can assert the

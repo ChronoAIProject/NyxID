@@ -3,13 +3,24 @@ import {
   AssistantTurnActiveError,
   AssistantTurnCancelledError,
 } from "@/lib/assistant/errors";
+import { resolveAssistantAction } from "@/lib/assistant/action-registry";
 import { drainSseBuffer, flushSseBuffer } from "@/lib/assistant/sse";
+import {
+  actionReportSchema,
+  assistantActionRequestSchema,
+  buildActionContinueBody,
+  type ActionContinueBody,
+  type ActionReport,
+  type AssistantActionRequest,
+} from "@/schemas/assistant-actions";
 import {
   applyTurnEvent,
   EMPTY_TURN_STATE,
   toTerminalBlock,
 } from "@/lib/assistant/stream";
 import type {
+  ActionCardContentBlock,
+  ActionCardStatus,
   ApprovalCardContentBlock,
   AssistantMessage,
   AssistantTransport,
@@ -85,6 +96,11 @@ const MAX_TOOL_SUMMARY_CHARS = 160;
 // a dropped delivery without hiding a persistently unhealthy transport.
 const STREAM_DELIVERY_ATTEMPTS = 2;
 const RETRYABLE_STREAM_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
+const ACTION_CONTINUATION_REJECTION_CODES = new Set([
+  "NYXID_ACTION_CONTINUATION_INVALID",
+  "NYXID_ACTION_CONTINUATION_CONFLICT",
+  "NYXID_ACTION_CONTINUATION_ACTIVE_TURN",
+]);
 
 /** AG-UI frame vocabulary observed on `nyxid-chat/conversations/{id}:stream`. */
 interface ToolCallPayload {
@@ -255,6 +271,21 @@ interface RunStepState {
   approval_request_id: string | null;
 }
 
+interface PendingActionBatch {
+  readonly id: string;
+  readonly originTurnId: string;
+  readonly reports: Map<string, ActionReport>;
+  onEvent: (event: TurnEvent) => void;
+  clientRequestId: string | null;
+  inFlight: boolean;
+  blocked: boolean;
+}
+
+interface ActionContinuationState {
+  readonly batchId: string;
+  retryQueued: boolean;
+}
+
 interface RunningTurn {
   readonly clientRequestId: string;
   turnId: string | null;
@@ -281,6 +312,8 @@ interface RunningTurn {
   promptedApprovalIds: Set<string>;
   /** Service dedupe key → connect card block_id (for in-place upgrades). */
   promptedConnectSlugs: Map<string, string>;
+  /** Action request id → action card block id. */
+  promptedActionIds: Map<string, string>;
   waitingForApproval: boolean;
   watchdog: ReturnType<typeof setTimeout> | null;
   deliveryStarted: boolean;
@@ -297,6 +330,7 @@ interface RunningTurn {
     readonly code: string;
     readonly message: string;
   } | null;
+  actionContinuation: ActionContinuationState | null;
 }
 
 type StreamConsumptionResult =
@@ -599,6 +633,11 @@ function base64SizeBytes(dataBase64: string): number {
 export class AevatarAssistantTransport implements AssistantTransport {
   private readonly conversations = new Map<string, StoredConversation>();
   private readonly running = new Map<string, RunningTurn>();
+  private readonly pendingActionBatches = new Map<
+    string,
+    PendingActionBatch[]
+  >();
+  private readonly actionDrainBlocked = new Set<string>();
   /**
    * Tombstones for server-accepted deletes: the Chat History index is
    * eventually consistent, so stale list/history responses can still carry
@@ -668,6 +707,8 @@ export class AevatarAssistantTransport implements AssistantTransport {
     // the conversation listed and retryable.
     this.conversations.delete(conversationId);
     this.deletedConversationIds.add(conversationId);
+    this.pendingActionBatches.delete(conversationId);
+    this.actionDrainBlocked.delete(conversationId);
   }
 
   async getHistory(conversationId: string): Promise<ConversationHistory> {
@@ -951,6 +992,259 @@ export class AevatarAssistantTransport implements AssistantTransport {
     };
   }
 
+  setActionCardInProgress(
+    conversationId: string,
+    blockId: string,
+    inProgress: boolean,
+    onEvent: (event: TurnEvent) => void = noopEvent,
+  ): void {
+    const card = this.findActionCard(conversationId, blockId);
+    if (!card) throw new Error("Action request was not found.");
+    if (
+      card.status === "completed" ||
+      card.status === "declined" ||
+      card.status === "failed" ||
+      card.status === "unsupported"
+    ) {
+      return;
+    }
+    this.emitLocalBlockPatch(
+      conversationId,
+      blockId,
+      {
+        status: inProgress ? "in_progress" : "pending",
+        outcome_note: "",
+      },
+      onEvent,
+    );
+  }
+
+  continueActions(
+    conversationId: string,
+    originTurnId: string,
+    reports: readonly ActionReport[],
+    onEvent: (event: TurnEvent) => void = noopEvent,
+  ): TurnHandle | null {
+    if (!this.conversations.has(conversationId)) {
+      throw new Error("Conversation was not found.");
+    }
+    const validatedReports = reports.map((report) =>
+      actionReportSchema.parse(report),
+    );
+    // Validate origin matching, non-empty actions and duplicate ids before
+    // changing any card. The real client id is allocated only when drained.
+    buildActionContinueBody("validation", originTurnId, validatedReports);
+
+    const batches = this.pendingActionBatches.get(conversationId) ?? [];
+    let batch = [...batches]
+      .reverse()
+      .find(
+        (candidate) =>
+          candidate.originTurnId === originTurnId &&
+          candidate.clientRequestId === null &&
+          !candidate.inFlight &&
+          !candidate.blocked,
+      );
+    if (!batch) {
+      batch = {
+        id: newId("action-batch"),
+        originTurnId,
+        reports: new Map(),
+        onEvent,
+        clientRequestId: null,
+        inFlight: false,
+        blocked: false,
+      };
+      batches.push(batch);
+      this.pendingActionBatches.set(conversationId, batches);
+    } else {
+      batch.onEvent = onEvent;
+    }
+
+    for (const report of validatedReports) {
+      const alreadyQueued = batches.some((candidate) =>
+        candidate.reports.has(report.actionRequestId),
+      );
+      if (alreadyQueued) continue;
+      batch.reports.set(report.actionRequestId, report);
+      const card = this.findActionCardByRequestId(
+        conversationId,
+        report.actionRequestId,
+      );
+      if (card) {
+        this.emitLocalBlockPatch(
+          conversationId,
+          card.block_id,
+          {
+            status: this.actionStatusForDisposition(report.disposition),
+            outcome_note: this.actionOutcomeNote(report.disposition),
+          },
+          onEvent,
+        );
+      }
+    }
+
+    return this.drainPendingActions(conversationId);
+  }
+
+  private findActionCard(
+    conversationId: string,
+    blockId: string,
+  ): ActionCardContentBlock | undefined {
+    return this.conversations
+      .get(conversationId)
+      ?.turnState.messages.flatMap((message) => message.blocks)
+      .find(
+        (block): block is ActionCardContentBlock =>
+          block.type === "action_card" && block.block_id === blockId,
+      );
+  }
+
+  private findActionCardByRequestId(
+    conversationId: string,
+    actionRequestId: string,
+  ): ActionCardContentBlock | undefined {
+    return this.conversations
+      .get(conversationId)
+      ?.turnState.messages.flatMap((message) => message.blocks)
+      .find(
+        (block): block is ActionCardContentBlock =>
+          block.type === "action_card" &&
+          block.action_request_id === actionRequestId,
+      );
+  }
+
+  private emitLocalBlockPatch(
+    conversationId: string,
+    blockId: string,
+    patch: Partial<ActionCardContentBlock>,
+    onEvent: (event: TurnEvent) => void,
+  ): void {
+    const stored = this.conversations.get(conversationId);
+    if (!stored) throw new Error("Conversation was not found.");
+    const activeRun = this.running.get(conversationId);
+    if (activeRun) {
+      this.emit(conversationId, activeRun, {
+        cursor: this.nextCursor(activeRun),
+        event: "block.updated",
+        block_id: blockId,
+        patch,
+      });
+      return;
+    }
+    const event: TurnEvent = {
+      cursor: stored.turnState.lastCursor + 1,
+      event: "block.updated",
+      block_id: blockId,
+      patch,
+    };
+    stored.turnState = applyTurnEvent(stored.turnState, event);
+    stored.conversation = {
+      ...stored.conversation,
+      last_message_at: new Date().toISOString(),
+    };
+    onEvent(event);
+  }
+
+  private actionStatusForDisposition(
+    disposition: ActionReport["disposition"],
+  ): ActionCardStatus {
+    if (disposition === "completed") return "completed";
+    if (disposition === "declined") return "declined";
+    return "failed";
+  }
+
+  private actionOutcomeNote(disposition: ActionReport["disposition"]): string {
+    if (disposition === "completed") {
+      return "Connected in NyxID. The assistant received only the new service reference.";
+    }
+    if (disposition === "declined") {
+      return "You declined this request. No service was connected and no credential was shared.";
+    }
+    return "The connection could not be completed. Ask the assistant to request it again.";
+  }
+
+  private drainPendingActions(conversationId: string): TurnHandle | null {
+    const stored = this.conversations.get(conversationId);
+    if (
+      !stored ||
+      this.running.has(conversationId) ||
+      isTurnActive(stored.turnState.activeTurn?.status) ||
+      this.actionDrainBlocked.has(conversationId)
+    ) {
+      return null;
+    }
+    const batch = this.pendingActionBatches
+      .get(conversationId)
+      ?.find(
+        (candidate) =>
+          candidate.reports.size > 0 &&
+          !candidate.inFlight &&
+          !candidate.blocked,
+      );
+    if (!batch) return null;
+
+    batch.clientRequestId ??= crypto.randomUUID();
+    const body = buildActionContinueBody(
+      batch.clientRequestId,
+      batch.originTurnId,
+      [...batch.reports.values()],
+    );
+    const run = this.newRun(batch.onEvent);
+    run.cursor = stored.turnState.lastCursor;
+    run.actionContinuation = { batchId: batch.id, retryQueued: false };
+    batch.inFlight = true;
+    this.running.set(conversationId, run);
+    void this.streamActionContinuation(conversationId, run, body);
+    return {
+      get turnId() {
+        return run.turnId;
+      },
+      cancel: () => this.cancelTurn(conversationId, run),
+    };
+  }
+
+  private findActionBatch(
+    conversationId: string,
+    batchId: string,
+  ): PendingActionBatch | undefined {
+    return this.pendingActionBatches
+      .get(conversationId)
+      ?.find((batch) => batch.id === batchId);
+  }
+
+  private acceptActionBatch(conversationId: string, run: RunningTurn): void {
+    const batchId = run.actionContinuation?.batchId;
+    if (!batchId) return;
+    const batches = this.pendingActionBatches.get(conversationId);
+    if (!batches) return;
+    const index = batches.findIndex((batch) => batch.id === batchId);
+    if (index >= 0) batches.splice(index, 1);
+    if (batches.length === 0) this.pendingActionBatches.delete(conversationId);
+  }
+
+  private keepActionBatchQueued(
+    conversationId: string,
+    run: RunningTurn,
+  ): void {
+    const state = run.actionContinuation;
+    if (!state) return;
+    const batch = this.findActionBatch(conversationId, state.batchId);
+    if (batch) {
+      batch.inFlight = false;
+      batch.blocked = true;
+    }
+    state.retryQueued = true;
+    this.actionDrainBlocked.add(conversationId);
+  }
+
+  private unblockActionBatches(conversationId: string): void {
+    this.actionDrainBlocked.delete(conversationId);
+    for (const batch of this.pendingActionBatches.get(conversationId) ?? []) {
+      batch.blocked = false;
+    }
+  }
+
   /**
    * Fold one Chat History index row into the local mirror. A conversation
    * with a live turn keeps its in-flight mirror (index metadata must not
@@ -1061,12 +1355,14 @@ export class AevatarAssistantTransport implements AssistantTransport {
       openCards: new Map(),
       promptedApprovalIds: new Set(),
       promptedConnectSlugs: new Map(),
+      promptedActionIds: new Map(),
       waitingForApproval: false,
       watchdog: null,
       deliveryStarted: false,
       deliveryTerminal: null,
       deliveryTerminalCount: 0,
       deliveryProtocolError: null,
+      actionContinuation: null,
     };
   }
 
@@ -1081,6 +1377,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     event: TurnEvent,
   ): void {
     if (run.finished) return;
+    let drainActions = false;
     const stored = this.conversations.get(conversationId);
     if (stored) {
       stored.turnState = applyTurnEvent(stored.turnState, event);
@@ -1093,8 +1390,17 @@ export class AevatarAssistantTransport implements AssistantTransport {
       run.finished = true;
       this.clearWatchdog(run);
       this.running.delete(conversationId);
+      if (!run.actionContinuation) {
+        this.unblockActionBatches(conversationId);
+        drainActions = true;
+      } else if (!run.actionContinuation.retryQueued) {
+        drainActions = true;
+      }
     }
     run.onEvent(event);
+    if (drainActions) {
+      queueMicrotask(() => this.drainPendingActions(conversationId));
+    }
   }
 
   private async streamTurn(
@@ -1123,6 +1429,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
             },
             credentials: "include",
             body: JSON.stringify({
+              type: "text",
               prompt,
               clientRequestId: run.clientRequestId,
             }),
@@ -1176,6 +1483,93 @@ export class AevatarAssistantTransport implements AssistantTransport {
     }
 
     if (run.finished || run.controller.signal.aborted) return;
+    this.closeOpenMessage(conversationId, run);
+    this.finalizeActivity(conversationId, run, "failed");
+    this.finishTurn(conversationId, run, "failed", finalFailure);
+  }
+
+  private async streamActionContinuation(
+    conversationId: string,
+    run: RunningTurn,
+    body: ActionContinueBody,
+  ): Promise<void> {
+    let finalFailure = {
+      code: "network_error",
+      message:
+        "The action report could not be delivered. It will be retried after the next turn.",
+    };
+
+    for (let attempt = 0; attempt < STREAM_DELIVERY_ATTEMPTS; attempt += 1) {
+      this.resetDeliveryState(run);
+      let response: Response;
+      try {
+        response = await fetch(
+          `/api/v1${ASSISTANT_PREFIX}/conversations/${conversationId}/stream`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Accept: "text/event-stream",
+            },
+            credentials: "include",
+            // This DTO is already rebuilt from the strict allowlist in
+            // buildActionContinueBody; no card or model object is spread here.
+            body: JSON.stringify(body),
+            signal: run.controller.signal,
+          },
+        );
+      } catch {
+        if (run.finished || run.controller.signal.aborted) return;
+        if (attempt + 1 < STREAM_DELIVERY_ATTEMPTS) continue;
+        break;
+      }
+
+      if (!response.ok) {
+        if (
+          RETRYABLE_STREAM_STATUSES.has(response.status) &&
+          attempt + 1 < STREAM_DELIVERY_ATTEMPTS
+        ) {
+          await response.body?.cancel().catch(() => undefined);
+          continue;
+        }
+        const bodyText = await response.text().catch(() => "");
+        finalFailure = streamStartError(response.status, bodyText);
+        break;
+      }
+
+      const contentType = response.headers.get("content-type") ?? "";
+      if (!contentType.includes("text/event-stream")) {
+        this.acceptActionBatch(conversationId, run);
+        this.finishTurn(conversationId, run, "completed", null);
+        return;
+      }
+      if (!response.body) {
+        finalFailure = {
+          code: "stream_closed",
+          message: "The action continuation closed before it started.",
+        };
+        if (attempt + 1 < STREAM_DELIVERY_ATTEMPTS) continue;
+        break;
+      }
+
+      const result = await this.consumeTurnStream(
+        conversationId,
+        run,
+        response,
+      );
+      if (result.kind === "settled" || run.finished) return;
+      finalFailure = result.error;
+      if (
+        result.kind === "retryable" &&
+        attempt + 1 < STREAM_DELIVERY_ATTEMPTS
+      ) {
+        continue;
+      }
+      break;
+    }
+
+    if (run.finished || run.controller.signal.aborted) return;
+    this.keepActionBatchQueued(conversationId, run);
     this.closeOpenMessage(conversationId, run);
     this.finalizeActivity(conversationId, run, "failed");
     this.finishTurn(conversationId, run, "failed", finalFailure);
@@ -1595,6 +1989,13 @@ export class AevatarAssistantTransport implements AssistantTransport {
         if (blocker) this.addConnectCard(conversationId, run, blocker);
         return;
       }
+      case "nyxid.action.request": {
+        const request = assistantActionRequestSchema.safeParse(payload);
+        if (request.success) {
+          this.addActionCard(conversationId, run, request.data);
+        }
+        return;
+      }
       case "aevatar.tool_approval.pending":
         this.addApprovalCard(
           conversationId,
@@ -1908,6 +2309,67 @@ export class AevatarAssistantTransport implements AssistantTransport {
   // Cards and artifacts.
   // -------------------------------------------------------------------------
 
+  private addActionCard(
+    conversationId: string,
+    run: RunningTurn,
+    request: AssistantActionRequest,
+  ): void {
+    const resolved = resolveAssistantAction(request);
+    const stored = this.conversations.get(conversationId);
+    const existing = stored?.turnState.messages
+      .flatMap((message) => message.blocks)
+      .find(
+        (block): block is ActionCardContentBlock =>
+          block.type === "action_card" &&
+          block.action_request_id === request.actionRequestId,
+      );
+    const knownBlockId =
+      run.promptedActionIds.get(request.actionRequestId) ?? existing?.block_id;
+    if (knownBlockId) {
+      run.promptedActionIds.set(request.actionRequestId, knownBlockId);
+      const terminal =
+        existing?.status === "completed" ||
+        existing?.status === "declined" ||
+        existing?.status === "failed";
+      const status =
+        terminal || existing?.status === "in_progress"
+          ? existing.status
+          : existing?.status === "pending" && !resolved.supported
+            ? "pending"
+            : resolved.supported
+              ? "pending"
+              : "unsupported";
+      this.emit(conversationId, run, {
+        cursor: this.nextCursor(run),
+        event: "block.updated",
+        block_id: knownBlockId,
+        patch: {
+          action: request.action,
+          origin_turn_id: request.originTurnId,
+          params: resolved.params,
+          status,
+          outcome_note: terminal ? existing.outcome_note : "",
+        },
+      });
+      return;
+    }
+
+    const block: ActionCardContentBlock = {
+      type: "action_card",
+      block_id: newId("action-card"),
+      action: request.action,
+      action_request_id: request.actionRequestId,
+      origin_turn_id: request.originTurnId,
+      params: resolved.params,
+      status: resolved.supported ? "pending" : "unsupported",
+      outcome_note: "",
+    };
+    this.appendActivityBlock(conversationId, run, block);
+    run.promptedActionIds.set(request.actionRequestId, block.block_id);
+    // Deliberately excluded from openCards: this browser action remains
+    // interactive after the origin run reaches its normal terminal frame.
+  }
+
   private addApprovalCard(
     conversationId: string,
     run: RunningTurn,
@@ -2151,6 +2613,13 @@ export class AevatarAssistantTransport implements AssistantTransport {
     terminal: NonNullable<RunningTurn["deliveryTerminal"]>,
   ): void {
     this.closeOpenMessage(conversationId, run);
+    if (run.actionContinuation) {
+      const rejected =
+        terminal.kind === "error" &&
+        ACTION_CONTINUATION_REJECTION_CODES.has(terminal.error.code);
+      if (rejected) this.keepActionBatchQueued(conversationId, run);
+      else this.acceptActionBatch(conversationId, run);
+    }
     switch (terminal.kind) {
       case "error":
         this.finalizeActivity(conversationId, run, "failed");
@@ -2335,6 +2804,9 @@ export class AevatarAssistantTransport implements AssistantTransport {
    */
   private cancelTurn(conversationId: string, run: RunningTurn): void {
     if (run.finished) return;
+    if (run.actionContinuation) {
+      this.keepActionBatchQueued(conversationId, run);
+    }
     run.controller.abort();
     this.clearWatchdog(run);
     if (run.currentBlockId) {

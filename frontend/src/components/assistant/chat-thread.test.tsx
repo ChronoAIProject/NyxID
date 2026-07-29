@@ -3,6 +3,14 @@ import { describe, expect, it, vi } from "vitest";
 import type { AssistantMessage } from "@/types/assistant";
 import { ChatThread } from "./chat-thread";
 
+vi.mock("@/components/assistant/blocks/action-card", () => ({
+  ActionCard: ({
+    block,
+  }: {
+    readonly block: { readonly action_request_id: string };
+  }) => <div data-testid="action-card-dispatch">{block.action_request_id}</div>,
+}));
+
 function message(overrides: Partial<AssistantMessage>): AssistantMessage {
   return {
     id: "message-1",
@@ -85,5 +93,39 @@ describe("ChatThread", () => {
     expect(
       screen.queryByRole("status", { name: "Assistant is thinking" }),
     ).not.toBeInTheDocument();
+  });
+
+  it("dispatches action_card blocks to the rich action renderer", () => {
+    render(
+      <ChatThread
+        messages={[
+          message({
+            blocks: [
+              {
+                type: "action_card",
+                block_id: "action-card-1",
+                action: "service.connect",
+                action_request_id: "act-1",
+                origin_turn_id: "turn-1",
+                params: {
+                  variant: "catalog",
+                  service_slug: "api-github",
+                  requested_scopes: ["repo"],
+                  via_node_id: null,
+                  target_org_id: null,
+                },
+                status: "pending",
+                outcome_note: "",
+              },
+            ],
+          }),
+        ]}
+        onDecideApproval={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("action-card-dispatch")).toHaveTextContent(
+      "act-1",
+    );
   });
 });
