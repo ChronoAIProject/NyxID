@@ -1850,7 +1850,7 @@ The MCP proxy maintains session-based activation state in `McpSessionStore`:
 
 ### REST API Compatibility
 
-The REST endpoint `/api/v1/mcp/config` still returns the full executable service and endpoint configuration for backward compatibility with non-MCP clients.
+The REST endpoint `/api/v1/mcp/config` is the stable caller-specific operation catalog for non-MCP consumers. It and MCP `tools/list` share the same canonical loader, including service and node scope filtering. For user-managed rows, the published `service_id` is the exact `UserService.id`; endpoint identities are stable opaque values and are never reconstructed by consumers. The catalog publishes a canonical SHA-256 content digest and typed, non-sensitive diagnostics. Authorization exclusions are non-enumerable.
 
 ---
 

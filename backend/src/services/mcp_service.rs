@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use futures::TryStreamExt;
 use mongodb::bson::doc;
+use sha2::{Digest, Sha256};
 
 use crate::crypto::aes::EncryptionKeys;
 use crate::errors::{AppError, AppResult};
@@ -9,7 +10,9 @@ use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, legacy_http_service_type_filter,
 };
 use crate::models::service_billing::{BillingMetric, PlatformUsage};
-use crate::models::service_endpoint::{COLLECTION_NAME as SERVICE_ENDPOINTS, ServiceEndpoint};
+use crate::models::service_endpoint::{
+    COLLECTION_NAME as SERVICE_ENDPOINTS, OperationResponseContract, ServiceEndpoint,
+};
 use crate::models::usage_meter::CredentialClass;
 use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
 use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
@@ -162,6 +165,9 @@ pub struct McpToolService {
     pub executable: bool,
     /// true if this service has only a generic proxy tool (custom endpoint, no predefined endpoints)
     pub is_generic_proxy: bool,
+    /// The custom OpenAPI document was present but could not produce a valid
+    /// declared operation set, so only the explicitly-marked generic proxy is published.
+    pub invalid_openapi_contract: bool,
 }
 
 fn mcp_credential_class(
@@ -196,6 +202,7 @@ pub struct McpToolEndpoint {
     pub request_content_type: Option<String>,
     pub request_body_required: bool,
     pub response_description: Option<String>,
+    pub response: OperationResponseContract,
 }
 
 /// An MCP tool definition (name + description + JSON Schema input).
@@ -203,6 +210,25 @@ pub struct McpToolDefinition {
     pub name: String,
     pub description: String,
     pub input_schema: serde_json::Value,
+}
+
+/// Caller-visible, non-sensitive catalog diagnostics. Authorization exclusions
+/// are represented only by `*_scope_restricted`; excluded counts and resource
+/// identities are deliberately not exposed.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct McpCatalogDiagnostics {
+    pub no_visible_connections: bool,
+    pub unavailable_services: usize,
+    pub generic_only_services: usize,
+    pub invalid_contract_services: usize,
+    pub service_scope_restricted: bool,
+    pub node_scope_restricted: bool,
+    pub node_scope_exclusions_present: bool,
+}
+
+pub struct McpOperationCatalog {
+    pub services: Vec<McpToolService>,
+    pub diagnostics: McpCatalogDiagnostics,
 }
 
 // ---------------------------------------------------------------------------
@@ -238,6 +264,7 @@ pub async fn load_user_tools(
 /// MCP doesn't advertise tools the caller can't actually invoke. Matches
 /// the scope enforcement in `execute_tool` (seventeenth-round Codex
 /// review P2).
+#[allow(dead_code)]
 pub async fn load_user_tools_scoped(
     db: &mongodb::Database,
     node_ws_manager: &NodeWsManager,
@@ -284,6 +311,217 @@ pub async fn load_user_tools_all_scoped(
 pub enum NodeScope<'a> {
     Unrestricted,
     Allowed(&'a [String]),
+}
+
+/// Service authorization applied before catalog diagnostics and publication.
+#[derive(Clone, Copy)]
+pub enum ServiceScope<'a> {
+    Unrestricted,
+    Allowed(&'a [String]),
+}
+
+impl ServiceScope<'_> {
+    fn permits(&self, service: &McpToolService) -> bool {
+        match self {
+            ServiceScope::Unrestricted => true,
+            ServiceScope::Allowed(ids) => {
+                service.source.is_user_service() && ids.iter().any(|id| id == &service.service_id)
+            }
+        }
+    }
+
+    fn is_restricted(&self) -> bool {
+        matches!(self, ServiceScope::Allowed(_))
+    }
+}
+
+/// Build the canonical caller-specific operation catalog used by both REST
+/// `/api/v1/mcp/config` and MCP `tools/list`.
+pub async fn load_operation_catalog(
+    db: &mongodb::Database,
+    node_ws_manager: &NodeWsManager,
+    user_id: &str,
+    node_scope: NodeScope<'_>,
+    service_scope: ServiceScope<'_>,
+) -> AppResult<McpOperationCatalog> {
+    let node_scope_restricted = matches!(node_scope, NodeScope::Allowed(_));
+    let mut visible = load_user_tools_inner(db, node_ws_manager, user_id, true, node_scope).await?;
+    visible.retain(|service| service_scope.permits(service));
+
+    // A boolean reason is safe for services already visible through service
+    // authorization, while counts or IDs would disclose node topology. The
+    // unrestricted comparison is internal and uses the same canonical loader.
+    let node_scope_excluded_service_ids: HashSet<String> = if node_scope_restricted {
+        let scoped_execution: HashMap<String, bool> = visible
+            .iter()
+            .map(|service| (service.service_id.clone(), service.executable))
+            .collect();
+        let mut before_node_scope =
+            load_user_tools_inner(db, node_ws_manager, user_id, true, NodeScope::Unrestricted)
+                .await?;
+        before_node_scope.retain(|service| service_scope.permits(service));
+        before_node_scope
+            .iter()
+            .filter(|service| {
+                service.executable
+                    && scoped_execution.get(&service.service_id).copied() != Some(true)
+            })
+            .map(|service| service.service_id.clone())
+            .collect()
+    } else {
+        HashSet::new()
+    };
+    let node_scope_exclusions_present = !node_scope_excluded_service_ids.is_empty();
+
+    let no_visible_connections = visible.is_empty() && !node_scope_exclusions_present;
+    let unavailable_services = visible
+        .iter()
+        .filter(|service| {
+            !service.executable
+                && !node_scope_excluded_service_ids.contains(service.service_id.as_str())
+        })
+        .count();
+    visible.retain(|service| service.executable);
+
+    visible.sort_by(|left, right| left.service_id.cmp(&right.service_id));
+    for service in &mut visible {
+        service
+            .endpoints
+            .sort_by(|left, right| left.endpoint_id.cmp(&right.endpoint_id));
+    }
+    validate_catalog_identities(&visible)?;
+
+    let mut invalid_contract_services = visible
+        .iter()
+        .filter(|service| service.invalid_openapi_contract)
+        .count();
+    visible.retain(|service| {
+        let valid = operation_set_is_publishable(service);
+        if !valid {
+            invalid_contract_services += 1;
+            tracing::warn!(
+                service_id = %service.service_id,
+                "Omitting service with invalid MCP operation descriptor"
+            );
+        }
+        valid
+    });
+
+    let generic_only_services = visible
+        .iter()
+        .filter(|service| service.is_generic_proxy)
+        .count();
+    Ok(McpOperationCatalog {
+        services: visible,
+        diagnostics: McpCatalogDiagnostics {
+            no_visible_connections,
+            unavailable_services,
+            generic_only_services,
+            invalid_contract_services,
+            service_scope_restricted: service_scope.is_restricted(),
+            node_scope_restricted,
+            node_scope_exclusions_present,
+        },
+    })
+}
+
+fn operation_set_is_publishable(service: &McpToolService) -> bool {
+    if service.endpoints.is_empty() {
+        return false;
+    }
+    if service.is_generic_proxy {
+        return service.endpoints.len() == 1
+            && service.endpoints[0].endpoint_id == GENERIC_PROXY_ENDPOINT_ID
+            && service.endpoints[0].name == "request";
+    }
+    let mut names = HashSet::new();
+    service.endpoints.iter().all(|endpoint| {
+        operation_descriptor_is_publishable(endpoint) && names.insert(endpoint.name.as_str())
+    })
+}
+
+fn operation_descriptor_is_publishable(endpoint: &McpToolEndpoint) -> bool {
+    if endpoint.endpoint_id.trim().is_empty()
+        || endpoint.name.trim().is_empty()
+        || !endpoint.path.starts_with('/')
+        || !matches!(
+            endpoint.method.as_str(),
+            "GET" | "POST" | "PUT" | "PATCH" | "DELETE"
+        )
+        || endpoint.parameters.as_ref().is_some_and(|parameters| {
+            !parameters.as_array().is_some_and(|parameters| {
+                parameters.iter().all(parameter_descriptor_is_publishable)
+            })
+        })
+        || endpoint
+            .request_content_type
+            .as_ref()
+            .is_some_and(|content_type| {
+                content_type.trim().is_empty()
+                    || reqwest::header::HeaderValue::from_str(content_type).is_err()
+            })
+        || endpoint
+            .request_body_schema
+            .as_ref()
+            .is_some_and(|schema| !schema.is_object() && !schema.is_boolean())
+    {
+        return false;
+    }
+
+    endpoint.response.content_types.iter().all(|content_type| {
+        !content_type.trim().is_empty()
+            && reqwest::header::HeaderValue::from_str(content_type).is_ok()
+    })
+}
+
+fn parameter_descriptor_is_publishable(parameter: &serde_json::Value) -> bool {
+    parameter
+        .get("name")
+        .and_then(|value| value.as_str())
+        .is_some_and(|name| !name.is_empty())
+        && matches!(
+            parameter.get("in").and_then(|value| value.as_str()),
+            Some("path" | "query" | "header" | "cookie")
+        )
+        && parameter
+            .get("required")
+            .is_none_or(serde_json::Value::is_boolean)
+        && parameter
+            .get("schema")
+            .is_none_or(|schema| schema.is_object() || schema.is_boolean())
+}
+
+fn validate_catalog_identities(services: &[McpToolService]) -> AppResult<()> {
+    let mut service_ids = HashSet::new();
+    for service in services {
+        if service.service_id.trim().is_empty() || !service_ids.insert(service.service_id.as_str())
+        {
+            tracing::error!(
+                service_id = %service.service_id,
+                "MCP operation catalog contains a missing or duplicate service identity"
+            );
+            return Err(AppError::Internal(
+                "MCP operation catalog contains ambiguous identities".to_string(),
+            ));
+        }
+
+        let mut endpoint_ids = HashSet::new();
+        for endpoint in &service.endpoints {
+            if endpoint.endpoint_id.trim().is_empty()
+                || !endpoint_ids.insert(endpoint.endpoint_id.as_str())
+            {
+                tracing::error!(
+                    service_id = %service.service_id,
+                    endpoint_id = %endpoint.endpoint_id,
+                    "MCP operation catalog contains a missing or duplicate endpoint identity"
+                );
+                return Err(AppError::Internal(
+                    "MCP operation catalog contains ambiguous identities".to_string(),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 impl<'a> NodeScope<'a> {
@@ -373,24 +611,28 @@ async fn load_user_tools_inner(
     };
 
     let mut seen_ids: HashSet<String> = HashSet::new();
-    let mut valid_platform_services: Vec<&DownstreamService> = Vec::new();
+    let mut valid_platform_services: Vec<(&DownstreamService, bool)> = Vec::new();
 
     for svc in &connected_services {
         if svc.service_type != "http" || svc.service_category == "provider" {
             continue;
         }
+        let mut executable = true;
         if svc.requires_user_credential {
             if let Some(conn) = conn_map.get(svc.id.as_str()) {
                 if conn.credential_encrypted.is_none() && !node_route_set.contains(svc.id.as_str())
                 {
-                    continue;
+                    executable = false;
                 }
             } else {
                 continue;
             }
         }
+        if !include_non_executable && !executable {
+            continue;
+        }
         if seen_ids.insert(svc.id.clone()) {
-            valid_platform_services.push(svc);
+            valid_platform_services.push((svc, executable));
         }
     }
 
@@ -404,7 +646,7 @@ async fn load_user_tools_inner(
             continue;
         }
         if seen_ids.insert(svc.id.clone()) {
-            valid_platform_services.push(svc);
+            valid_platform_services.push((svc, true));
         }
     }
 
@@ -419,10 +661,12 @@ async fn load_user_tools_inner(
     // Collect catalog IDs and slugs from *executable* user services for dedup
     let executable_catalog_ids: HashSet<&str> = all_user_services
         .iter()
+        .filter(|r| r.executable)
         .filter_map(|r| r.service.catalog_service_id.as_deref())
         .collect();
     let executable_slugs: HashSet<&str> = all_user_services
         .iter()
+        .filter(|r| r.executable)
         .map(|r| r.service.slug.as_str())
         .collect();
 
@@ -522,7 +766,7 @@ async fn load_user_tools_inner(
     // Collect all catalog/downstream IDs that need endpoints
     let mut endpoint_service_ids: Vec<&str> = valid_platform_services
         .iter()
-        .map(|s| s.id.as_str())
+        .map(|(service, _)| service.id.as_str())
         .collect();
     for r in &all_user_services {
         if let Some(catalog_id) = r.service.catalog_service_id.as_deref() {
@@ -586,14 +830,16 @@ async fn load_user_tools_inner(
             .map(|ep| ep.label.as_str())
             .unwrap_or(&us.slug);
 
-        let (endpoints, is_generic) = if let Some(catalog_id) = us.catalog_service_id.as_deref() {
+        let (endpoints, is_generic, invalid_openapi_contract) = if let Some(catalog_id) =
+            us.catalog_service_id.as_deref()
+        {
             // Catalog-backed: use the ServiceEndpoint rows pre-parsed at catalog
             // registration time. Unchanged path.
             let eps = eps_by_svc
                 .get(catalog_id)
                 .map(|eps| service_endpoints_to_mcp(eps))
                 .unwrap_or_default();
-            (eps, false)
+            (eps, false, false)
         } else if let Some(spec_url) = user_endpoint.and_then(|ep| ep.openapi_spec_url.as_deref()) {
             // Custom endpoint with a user-supplied OpenAPI spec: fetch + parse
             // through the hardened cache (scoped by owner) and surface each
@@ -601,14 +847,18 @@ async fn load_user_tools_inner(
             // generic proxy tool so a broken spec URL never takes the service
             // offline for the agent.
             match fetch_and_parse_user_spec(spec_url, &r.effective_owner_id).await {
-                Ok(mcp_endpoints) if !mcp_endpoints.is_empty() => (mcp_endpoints, false),
+                Ok(mcp_endpoints) if !mcp_endpoints.is_empty() => (mcp_endpoints, false, false),
                 Ok(_) => {
                     tracing::debug!(
                         user_service_id = %us.id,
                         spec_url = %api_docs_service::redact_url_for_logs(spec_url),
                         "Parsed user OpenAPI spec contained no operations; falling back to generic proxy tool"
                     );
-                    (vec![build_generic_proxy_endpoint(endpoint_label)], true)
+                    (
+                        vec![build_generic_proxy_endpoint(endpoint_label)],
+                        true,
+                        true,
+                    )
                 }
                 Err(error) => {
                     tracing::warn!(
@@ -617,12 +867,16 @@ async fn load_user_tools_inner(
                         %error,
                         "Failed to parse user OpenAPI spec; falling back to generic proxy tool"
                     );
-                    (vec![build_generic_proxy_endpoint(endpoint_label)], true)
+                    (
+                        vec![build_generic_proxy_endpoint(endpoint_label)],
+                        true,
+                        true,
+                    )
                 }
             }
         } else {
             let generic_ep = build_generic_proxy_endpoint(endpoint_label);
-            (vec![generic_ep], true)
+            (vec![generic_ep], true, false)
         };
 
         result.push(McpToolService {
@@ -640,12 +894,13 @@ async fn load_user_tools_inner(
             },
             executable: r.executable,
             is_generic_proxy: is_generic,
+            invalid_openapi_contract,
         });
     }
 
     // 4b. Platform services (skip those covered by an executable user
     // service OR by a node-pinned UserService — see blocked_* sets).
-    for svc in valid_platform_services {
+    for (svc, executable) in valid_platform_services {
         if blocked_catalog_ids.contains(svc.id.as_str()) {
             continue;
         }
@@ -668,8 +923,9 @@ async fn load_user_tools_inner(
             source: McpToolSource::Platform {
                 downstream_service_id: svc.id.clone(),
             },
-            executable: true,
+            executable,
             is_generic_proxy: false,
+            invalid_openapi_contract: false,
         });
     }
 
@@ -690,6 +946,7 @@ fn service_endpoints_to_mcp(eps: &[&ServiceEndpoint]) -> Vec<McpToolEndpoint> {
             request_content_type: ep.request_content_type.clone(),
             request_body_required: ep.effective_request_body_required(),
             response_description: ep.response_description.clone(),
+            response: ep.response.clone(),
         })
         .collect()
 }
@@ -705,10 +962,10 @@ async fn fetch_and_parse_user_spec(
     Ok(parsed
         .into_iter()
         .map(|p| McpToolEndpoint {
-            // User-endpoint operations have no persistent ID; synthesise a
-            // stable one from method+path so downstream logging / metrics can
-            // distinguish tools.
-            endpoint_id: format!("{}:{}", p.method, p.path),
+            // Dynamic operations have no persisted row. Hash the producer's
+            // OpenAPI operationId, falling back to canonical method/path, so
+            // callers receive a stable opaque ID and never derive identity.
+            endpoint_id: opaque_operation_id(p.source_operation_id.as_deref(), &p.method, &p.path),
             name: p.name,
             description: p.description,
             method: p.method,
@@ -718,6 +975,7 @@ async fn fetch_and_parse_user_spec(
             request_content_type: p.request_content_type,
             request_body_required: p.request_body_required,
             response_description: None,
+            response: p.response,
         })
         .collect())
 }
@@ -1067,7 +1325,7 @@ fn classify_credential(
 /// predefined API endpoints. Lets the AI make arbitrary HTTP requests.
 fn build_generic_proxy_endpoint(service_label: &str) -> McpToolEndpoint {
     McpToolEndpoint {
-        endpoint_id: String::new(),
+        endpoint_id: GENERIC_PROXY_ENDPOINT_ID.to_string(),
         name: "request".to_string(),
         description: Some(format!(
             "Make an HTTP request to {service_label}. Specify the method, path, optional raw query string, and optional JSON body."
@@ -1079,7 +1337,22 @@ fn build_generic_proxy_endpoint(service_label: &str) -> McpToolEndpoint {
         request_content_type: Some("application/json".to_string()),
         request_body_required: false,
         response_description: None,
+        response: OperationResponseContract::default(),
     }
+}
+
+const GENERIC_PROXY_ENDPOINT_ID: &str = "nyx_generic_proxy_v1";
+
+fn opaque_operation_id(source_operation_id: Option<&str>, method: &str, path: &str) -> String {
+    let canonical = match source_operation_id {
+        Some(operation_id) => format!("operationId\n{}", operation_id.trim()),
+        None => format!(
+            "methodPath\n{}\n{}",
+            method.trim().to_ascii_uppercase(),
+            path.trim()
+        ),
+    };
+    format!("op_{}", hex::encode(Sha256::digest(canonical.as_bytes())))
 }
 
 /// Build the JSON Schema input for a generic proxy tool. This is separate from
@@ -1487,6 +1760,7 @@ pub async fn load_public_tools(db: &mongodb::Database) -> AppResult<Vec<McpToolS
                 request_content_type: Some("application/json".to_string()),
                 request_body_required: false,
                 response_description: None,
+                response: OperationResponseContract::default(),
             })
             .collect();
 
@@ -1506,6 +1780,7 @@ pub async fn load_public_tools(db: &mongodb::Database) -> AppResult<Vec<McpToolS
             },
             executable: true,
             is_generic_proxy: false,
+            invalid_openapi_contract: false,
         });
     }
 
@@ -1816,7 +2091,7 @@ fn push_required(required: &mut Vec<serde_json::Value>, name: &str) {
 
 const REQUEST_BODY_FIELD_CANDIDATES: &[&str] = &["body", "request_body", "requestBody", "payload"];
 
-const BLOCKED_MCP_HEADER_PARAMETER_NAMES: &[&str] = &[
+pub(crate) const BLOCKED_MCP_HEADER_PARAMETER_NAMES: &[&str] = &[
     "host",
     "authorization",
     "cookie",
@@ -3353,7 +3628,7 @@ mod tests {
 
     fn make_endpoint(name: &str, description: &str) -> McpToolEndpoint {
         McpToolEndpoint {
-            endpoint_id: String::new(),
+            endpoint_id: format!("endpoint-{name}"),
             name: name.to_string(),
             description: Some(description.to_string()),
             method: "GET".to_string(),
@@ -3363,6 +3638,7 @@ mod tests {
             request_content_type: None,
             request_body_required: false,
             response_description: None,
+            response: OperationResponseContract::default(),
         }
     }
 
@@ -3384,6 +3660,7 @@ mod tests {
             },
             executable: true,
             is_generic_proxy: false,
+            invalid_openapi_contract: false,
         }
     }
 
@@ -3408,6 +3685,91 @@ mod tests {
             descriptor.resource.as_deref(),
             Some("/repos/acme/project/contents/README.md")
         );
+    }
+
+    #[test]
+    fn dynamic_operation_identity_is_stable_and_opaque() {
+        let first = opaque_operation_id(None, "get", "/v1/files/{id}");
+        let second = opaque_operation_id(None, "GET", "/v1/files/{id}");
+
+        assert_eq!(first, second);
+        assert!(first.starts_with("op_"));
+        assert!(!first.contains("GET"));
+        assert!(!first.contains("/v1/files"));
+
+        assert_eq!(
+            opaque_operation_id(Some("downloadFile"), "GET", "/v1/files/{id}"),
+            opaque_operation_id(Some("downloadFile"), "POST", "/v2/assets/{id}"),
+        );
+    }
+
+    #[test]
+    fn catalog_identity_validation_fails_closed_on_missing_or_duplicate_ids() {
+        let mut missing_service = make_service(
+            "",
+            "Missing",
+            "missing",
+            vec![make_endpoint("read", "Read")],
+        );
+        assert!(validate_catalog_identities(&[missing_service]).is_err());
+
+        let duplicate_endpoint = make_endpoint("read", "Read");
+        let service = make_service(
+            "service-1",
+            "Duplicate",
+            "duplicate",
+            vec![duplicate_endpoint, make_endpoint("read", "Read again")],
+        );
+        assert!(validate_catalog_identities(&[service]).is_err());
+
+        missing_service = make_service(
+            "service-1",
+            "First",
+            "first",
+            vec![make_endpoint("one", "One")],
+        );
+        let duplicate_service = make_service(
+            "service-1",
+            "Second",
+            "second",
+            vec![make_endpoint("two", "Two")],
+        );
+        assert!(validate_catalog_identities(&[missing_service, duplicate_service]).is_err());
+    }
+
+    #[test]
+    fn service_scope_keeps_only_exact_user_service_identities() {
+        let user_service = McpToolService {
+            source: McpToolSource::UserManaged {
+                user_service_id: "service-allowed".to_string(),
+                effective_owner_id: "owner-1".to_string(),
+                node_id: None,
+                has_server_credential: true,
+            },
+            ..make_service(
+                "service-allowed",
+                "Allowed",
+                "allowed",
+                vec![make_endpoint("read", "Read")],
+            )
+        };
+        let platform = make_service(
+            "service-allowed",
+            "Platform",
+            "platform",
+            vec![make_endpoint("read", "Read")],
+        );
+        let allowed_ids = ["service-allowed".to_string()];
+        let scope = ServiceScope::Allowed(&allowed_ids);
+
+        assert!(scope.permits(&user_service));
+        assert!(!scope.permits(&platform));
+        match &user_service.source {
+            McpToolSource::UserManaged {
+                user_service_id, ..
+            } => assert_eq!(user_service.service_id, *user_service_id),
+            McpToolSource::Platform { .. } => panic!("expected user-managed source"),
+        }
     }
 
     #[test]
@@ -3625,6 +3987,7 @@ mod tests {
                 request_content_type: None,
                 request_body_required: false,
                 response_description: None,
+                response: OperationResponseContract::default(),
                 is_active: true,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
@@ -3684,6 +4047,93 @@ mod tests {
         assert_eq!(unavailable["executable"], false);
         assert_eq!(unavailable["source"], "user_service");
         assert_eq!(unavailable["is_generic_proxy"], true);
+    }
+
+    #[tokio::test]
+    async fn unavailable_unpinned_user_service_does_not_shadow_executable_platform_route() {
+        let Some(db) = connect_test_database("mcp_non_executable_dedup").await else {
+            eprintln!("skipping MCP dedup test: no local MongoDB available");
+            return;
+        };
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let platform_id = uuid::Uuid::new_v4().to_string();
+        let user_service_id = uuid::Uuid::new_v4().to_string();
+        let user_endpoint_id = uuid::Uuid::new_v4().to_string();
+        let slug = "competing-route";
+
+        let mut platform = dummy_service();
+        platform.id = platform_id.clone();
+        platform.name = "Executable Platform Route".to_string();
+        platform.slug = slug.to_string();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(platform)
+            .await
+            .expect("insert platform service");
+
+        db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
+            .insert_one(ServiceEndpoint {
+                id: uuid::Uuid::new_v4().to_string(),
+                service_id: platform_id.clone(),
+                name: "status".to_string(),
+                description: Some("Get status".to_string()),
+                method: "GET".to_string(),
+                path: "/status".to_string(),
+                parameters: None,
+                request_body_schema: None,
+                request_content_type: None,
+                request_body_required: false,
+                response_description: None,
+                response: OperationResponseContract::default(),
+                is_active: true,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .expect("insert platform endpoint");
+
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(test_user_endpoint(
+                &user_endpoint_id,
+                &user_id,
+                "Unavailable User Route",
+                "https://unavailable.example.com",
+                None,
+                Some(&platform_id),
+            ))
+            .await
+            .expect("insert user endpoint");
+        let mut user_service = test_user_service(
+            &user_service_id,
+            &user_id,
+            slug,
+            &user_endpoint_id,
+            Some(&platform_id),
+            None,
+        );
+        user_service.auth_method = "bearer".to_string();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(user_service)
+            .await
+            .expect("insert unavailable user service");
+
+        let catalog = load_operation_catalog(
+            &db,
+            &NodeWsManager::new(30, 100),
+            &user_id,
+            NodeScope::Unrestricted,
+            ServiceScope::Unrestricted,
+        )
+        .await
+        .expect("load operation catalog");
+
+        assert_eq!(catalog.services.len(), 1);
+        assert_eq!(catalog.services[0].service_id, platform_id);
+        assert!(matches!(
+            catalog.services[0].source,
+            McpToolSource::Platform { .. }
+        ));
+        assert_eq!(catalog.diagnostics.unavailable_services, 1);
     }
 
     #[tokio::test]
@@ -3895,6 +4345,7 @@ mod tests {
             request_content_type: Some("application/zip".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let schema = build_input_schema(&endpoint);
@@ -3932,6 +4383,7 @@ mod tests {
             request_content_type: Some("application/xml".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let schema = build_input_schema(&endpoint);
@@ -3957,6 +4409,7 @@ mod tests {
             request_content_type: Some("application/zip".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let schema = build_input_schema(&endpoint);
@@ -3982,6 +4435,7 @@ mod tests {
             request_content_type: Some("application/x-tar".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let schema = build_input_schema(&endpoint);
@@ -4026,6 +4480,7 @@ mod tests {
             request_content_type: None,
             request_body_required: false,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let schema = build_input_schema(&endpoint);
@@ -4058,6 +4513,7 @@ mod tests {
             request_content_type: Some("application/zip".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let schema = build_input_schema(&endpoint);
@@ -4112,6 +4568,7 @@ mod tests {
             request_content_type: Some("application/json".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let schema = build_input_schema(&endpoint);
@@ -4154,6 +4611,7 @@ mod tests {
             request_content_type: Some("application/json".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let schema = build_input_schema(&endpoint);
@@ -4190,6 +4648,7 @@ mod tests {
             request_content_type: Some("application/json".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let schema = build_input_schema(&endpoint);
@@ -4224,6 +4683,7 @@ mod tests {
             request_content_type: Some("application/json".to_string()),
             request_body_required: false,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let schema = build_input_schema(&endpoint);
@@ -4252,6 +4712,7 @@ mod tests {
             request_content_type: None,
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let schema = build_input_schema(&endpoint);
@@ -4278,6 +4739,7 @@ mod tests {
             request_content_type: Some("*/*".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let schema = build_input_schema(&endpoint);
@@ -4309,6 +4771,7 @@ mod tests {
             request_content_type: Some("text/plain".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let schema = build_input_schema(&endpoint);
@@ -4339,6 +4802,7 @@ mod tests {
             request_content_type: Some("application/zip".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let (_, _, _, _, body) = build_proxy_args(
@@ -4370,6 +4834,7 @@ mod tests {
             request_content_type: None,
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let (_, _, _, _, body) = build_proxy_args(
@@ -4398,6 +4863,7 @@ mod tests {
             request_content_type: Some("application/x-tar".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let (_, _, _, _, body) = build_proxy_args(
@@ -4430,6 +4896,7 @@ mod tests {
             request_content_type: Some("application/json".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let (_, _, _, _, body) = build_proxy_args(
@@ -4464,6 +4931,7 @@ mod tests {
             request_content_type: Some("application/json".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let error = build_proxy_args(&endpoint, &serde_json::json!({}))
@@ -4512,6 +4980,7 @@ mod tests {
             request_content_type: Some("application/json".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let (_, path, _, headers, body) = build_proxy_args(
@@ -4567,6 +5036,7 @@ mod tests {
             request_content_type: Some("application/json".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let (_, _, _, headers, body) = build_proxy_args(
@@ -4610,6 +5080,7 @@ mod tests {
             request_content_type: Some("application/json".to_string()),
             request_body_required: false,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let (_, _, _, _, body) = build_proxy_args(&endpoint, &serde_json::json!({}))
@@ -4640,6 +5111,7 @@ mod tests {
             request_content_type: Some("application/zip".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let (_, _, query, _, body) = build_proxy_args(
@@ -4694,6 +5166,7 @@ mod tests {
             request_content_type: Some("application/json".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let (_, path, _, headers, body) = build_proxy_args(
@@ -4755,6 +5228,7 @@ mod tests {
             request_content_type: Some("application/json".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let (_, _, _, headers, body) = build_proxy_args(
@@ -4806,6 +5280,7 @@ mod tests {
             request_content_type: Some("application/json".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let (_, _, _, headers, body) = build_proxy_args(
@@ -4847,6 +5322,7 @@ mod tests {
             request_content_type: Some("application/zip".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let error = build_proxy_args(&endpoint, &serde_json::json!({}))
@@ -4877,6 +5353,7 @@ mod tests {
             request_content_type: Some("text/plain".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let error = build_proxy_args(
@@ -4913,6 +5390,7 @@ mod tests {
             request_content_type: Some("text/plain".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let error = build_proxy_args(
@@ -4950,6 +5428,7 @@ mod tests {
             request_content_type: Some("text/plain".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let (_, _, _, headers, body) = build_proxy_args(
@@ -4987,6 +5466,7 @@ mod tests {
             request_content_type: Some("application/json".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let error = build_proxy_args(
@@ -5016,6 +5496,7 @@ mod tests {
             request_content_type: Some("application/x-www-form-urlencoded".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let (_, _, _, _, body) = build_proxy_args(
@@ -5052,6 +5533,7 @@ mod tests {
             request_content_type: None,
             request_body_required: false,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let error = build_proxy_args(
@@ -5084,6 +5566,7 @@ mod tests {
             request_content_type: None,
             request_body_required: false,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let error = build_proxy_args(
@@ -5122,6 +5605,7 @@ mod tests {
             request_content_type: None,
             request_body_required: false,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let error = build_proxy_args(&endpoint, &serde_json::json!({}))
@@ -5155,6 +5639,7 @@ mod tests {
             request_content_type: None,
             request_body_required: false,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let error = build_proxy_args(&endpoint, &serde_json::json!({}))
@@ -5200,6 +5685,7 @@ mod tests {
             request_content_type: None,
             request_body_required: false,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let query_error = build_proxy_args(&endpoint, &serde_json::json!({}))
@@ -5259,6 +5745,7 @@ mod tests {
             request_content_type: Some("multipart/form-data".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let error = build_proxy_args(&endpoint, &serde_json::json!({ "body": "ignored" }))
@@ -5292,6 +5779,7 @@ mod tests {
             request_content_type: Some("text/plain".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let error = build_proxy_args(
@@ -5324,6 +5812,7 @@ mod tests {
             request_content_type: None,
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         assert_eq!(
@@ -5348,6 +5837,7 @@ mod tests {
             request_content_type: Some("*/*".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         assert_eq!(
@@ -5372,6 +5862,7 @@ mod tests {
             request_content_type: Some("application/zip".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         assert_eq!(
@@ -5393,6 +5884,7 @@ mod tests {
             request_content_type: Some("application/zip".to_string()),
             request_body_required: false,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         assert_eq!(request_content_type_header_value(&endpoint, false), None);
@@ -5418,6 +5910,7 @@ mod tests {
             request_content_type: None,
             request_body_required: false,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         assert_eq!(request_content_type_header_value(&endpoint, false), None);
@@ -5439,6 +5932,7 @@ mod tests {
             request_content_type: Some("application/zip".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let headers =
@@ -5569,6 +6063,7 @@ mod tests {
             request_content_type: None,
             request_body_required: false,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
         assert_eq!(request_body_field_name(&endpoint), "request_body");
     }

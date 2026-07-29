@@ -1546,6 +1546,10 @@ List all active endpoints for a service.
       ],
       "request_body_schema": null,
       "response_description": null,
+      "response": {
+        "content_types": ["application/json"],
+        "binary_artifact": false
+      },
       "is_active": true,
       "created_at": "2025-06-01T10:00:00+00:00",
       "updated_at": "2025-06-01T10:00:00+00:00"
@@ -1589,6 +1593,7 @@ Create a new endpoint for a service.
 | `parameters`           | JSON   | No       | OpenAPI-style parameter definitions                |
 | `request_body_schema`  | JSON   | No       | JSON Schema for the request body                   |
 | `response_description` | string | No       | Description of the expected response               |
+| `response`             | object | No       | Typed success response: `content_types` plus tri-state `binary_artifact` |
 
 ```json
 {
@@ -1652,6 +1657,7 @@ Update an existing endpoint. Only the provided fields are updated (partial updat
 | `parameters`           | JSON?   | No       | OpenAPI-style parameter definitions (null to clear)      |
 | `request_body_schema`  | JSON?   | No       | JSON Schema for the request body (null to clear)         |
 | `response_description` | string? | No       | Description of the expected response (null to clear)     |
+| `response`             | object  | No       | Replacement typed success response contract              |
 | `is_active`            | boolean | No       | Enable or disable the endpoint                           |
 
 **Response (200):**
@@ -1744,6 +1750,10 @@ Fetch the service's `openapi_spec_url` (or legacy `api_spec_url` alias), parse t
       "parameters": [...],
       "request_body_schema": null,
       "response_description": null,
+      "response": {
+        "content_types": ["application/json"],
+        "binary_artifact": false
+      },
       "is_active": true,
       "created_at": "2025-06-01T10:00:00+00:00",
       "updated_at": "2025-06-01T12:00:00+00:00"
@@ -1770,12 +1780,29 @@ curl -X POST http://localhost:3001/api/v1/services/d1e2f3a4-b5c6-7890-1234-56789
 
 #### GET /api/v1/mcp/config
 
-Returns the MCP tool configuration for the authenticated user. Includes all services the user has valid connections to, along with their registered endpoints (tools) and the proxy base URL. Used by MCP clients to auto-configure available tools.
+Returns the stable, caller-specific MCP operation catalog contract. NyxID is the authority for OpenAPI parsing, credential availability, node routing availability, and service/node authorization scope. Consumers must map this normalized catalog into their own types and must not fetch the raw downstream OpenAPI document again.
 
-Services are only included if the user has a valid connection with satisfied credentials:
-- For `connection` services: the user must have a stored encrypted credential.
-- For `internal` services: an active connection record is sufficient.
-- `provider` services are excluded (not proxyable).
+Contract guarantees for `contract_version: "1.0"`:
+
+- For `is_user_service: true`, `service_id` is the exact `UserService.id` used by proxy authorization. Platform catalog services use the exact `DownstreamService.id` and set `is_user_service: false`.
+- `endpoint_id` is a stable, service-local, opaque operation identity. Persisted catalog operations use their stored endpoint UUID. Custom OpenAPI identities remain stable while the source `operationId` remains stable; when it is absent, stability follows the source method/path pair. The generic proxy has its own reserved identity. These generation details are producer semantics only: consumers must not reconstruct or interpret an ID from `name`, `method`, or `path`.
+- Missing or duplicate service identities, or missing/duplicate endpoint identities within one service, fail the request closed. An ambiguous catalog is never published.
+- `is_generic_proxy: true` means the service exposes only NyxID's generic HTTP request operation. It is not a declared OpenAPI operation and must not be admitted as one.
+- Only currently executable operations are in `services`. Credential-unavailable services are counted in diagnostics but omitted. Service and node scope restrictions are applied before publication.
+- `service_scope_restricted` and `node_scope_restricted` report that caller scope is active. `node_scope_exclusions_present` may explain an omission only after service authorization has established that the service is caller-visible; it is a boolean and never enumerates excluded nodes or services. Diagnostics never include excluded-resource counts, IDs, node topology, credential material, tokens, or internal routing details.
+- REST `/mcp/config` and stateless MCP `tools/list` use the same scoped catalog loader. Stateful MCP sessions may show only the subset activated for that session.
+
+`catalog_digest` is the source revision for the normalized descriptor. It is `sha256:<lowercase-hex>` over compact UTF-8 JSON containing exactly `{"contract_version":"1.0","services":[...]}`. Services are sorted by `service_id`, endpoints by `endpoint_id`, and every JSON object key recursively in lexicographic order. `user_id`, `proxy_base_url`, diagnostics, counts, and observation time are excluded. Consumers must not substitute fetch time or a local counter for this digest.
+
+Schema contract:
+
+- `parameters` is either `null` or an OpenAPI parameter array. Supported locations are `path`, `query`, `header`, and `cookie`; each entry expresses requiredness with `required: true`. A required caller-supplied header is therefore an entry with `in: "header"` and `required: true`.
+- Parameter schemas guarantee the `type`, `description`, `format`, `enum`, and `default` keywords.
+- Request bodies use `json-schema-subset-v1`; the guaranteed keywords are listed in `schema_contract.request_body_schema_keywords`. Local `$ref` values are expanded by NyxID. Consumers must fail closed on an operation that requires unsupported schema behavior.
+- Headers listed in `schema_contract.managed_headers`, and names beginning with a listed `managed_header_prefixes` value, are managed by NyxID and cannot be supplied as MCP arguments.
+- `response.content_types` contains normalized declared success media types. `response.binary_artifact` is `true` for a declared binary/file response, `false` for a classifiable non-binary response, and `null` when the source contract is insufficient. Consumers requiring a binary artifact must admit only `true`.
+
+Platform services are included only when the user has a valid connection with satisfied credentials. `provider` services are excluded because they are not proxyable. User-managed services additionally require an executable server credential or an in-scope dispatchable node route.
 
 **Auth:** Required
 
@@ -1783,16 +1810,29 @@ Services are only included if the user has a valid connection with satisfied cre
 
 ```json
 {
+  "contract_version": "1.0",
+  "catalog_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
   "user_id": "550e8400-e29b-41d4-a716-446655440000",
   "proxy_base_url": "https://auth.example.com/api/v1/proxy",
+  "schema_contract": {
+    "parameters_format": "openapi-parameter-array-v1",
+    "parameter_locations": ["path", "query", "header", "cookie"],
+    "parameter_schema_keywords": ["type", "description", "format", "enum", "default"],
+    "request_body_schema_format": "json-schema-subset-v1",
+    "request_body_schema_keywords": ["type", "properties", "required", "items", "additionalProperties", "description", "format", "enum", "default", "minimum", "maximum", "minLength", "maxLength", "allOf", "anyOf", "oneOf"],
+    "required_headers": "parameters entries with in=header and required=true",
+    "managed_headers": ["host", "authorization", "cookie", "set-cookie", "transfer-encoding", "content-length", "connection", "x-forwarded-for", "x-forwarded-host", "x-real-ip", "content-type", "accept"],
+    "managed_header_prefixes": ["x-nyxid-"]
+  },
   "services": [
     {
       "service_id": "d1e2f3a4-b5c6-7890-1234-567890abcdef",
       "service_name": "Stripe API",
       "service_slug": "stripe",
       "description": "Payment processing",
-      "base_url": "https://api.stripe.com",
       "service_category": "connection",
+      "is_user_service": false,
+      "is_generic_proxy": false,
       "endpoints": [
         {
           "endpoint_id": "e1f2a3b4-c5d6-7890-abcd-ef1234567890",
@@ -1804,17 +1844,32 @@ Services are only included if the user has a valid connection with satisfied cre
             {"name": "limit", "in": "query", "schema": {"type": "integer"}}
           ],
           "request_body_schema": null,
-          "response_description": null
+          "request_content_type": null,
+          "request_body_required": false,
+          "response_description": null,
+          "response": {
+            "content_types": ["application/json"],
+            "binary_artifact": false
+          }
         }
       ]
     }
   ],
   "total_services": 1,
-  "total_endpoints": 1
+  "total_endpoints": 1,
+  "diagnostics": {
+    "no_visible_connections": false,
+    "unavailable_services": 0,
+    "generic_only_services": 0,
+    "invalid_contract_services": 0,
+    "service_scope_restricted": false,
+    "node_scope_restricted": false,
+    "node_scope_exclusions_present": false
+  }
 }
 ```
 
-If the user has no active connections or no valid credentials, `services` is an empty array and counts are `0`.
+If the caller has no visible connections, `services` is empty, counts are `0`, and `diagnostics.no_visible_connections` is `true`. Other typed diagnostics distinguish visible-but-unavailable credentials/routes, generic-only fallback, and invalid visible operation contracts without exposing secrets or authorization-excluded resources.
 
 **Example:**
 
