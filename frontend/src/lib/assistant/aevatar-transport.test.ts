@@ -10,7 +10,7 @@ import capturedHistory from "@/lib/assistant/__fixtures__/aevatar-chat-history.j
 import capturedStream from "@/lib/assistant/__fixtures__/aevatar-nyxid-chat-stream.sse?raw";
 import { useAuthStore } from "@/stores/auth-store";
 import type { User } from "@/types/api";
-import type { ContentBlock, TurnEvent } from "@/types/assistant";
+import type { ContentBlock, Conversation, TurnEvent } from "@/types/assistant";
 
 const USER_ID = "add69059-bece-4f0e-9559-99cfd10b47eb";
 const CONVERSATION_ID = "nyxid-chat-f8369965a444433f92ec50e67ad8ee52";
@@ -101,10 +101,51 @@ function stubFetch(...routes: FetchRoute[]): ReturnType<typeof vi.fn> {
   return mock;
 }
 
-const routeCreate: FetchRoute = (url, init) =>
-  url === `${ASSISTANT_BASE}/conversations` && init?.method === "POST"
-    ? jsonResponse({ status: "accepted", actorId: CONVERSATION_ID })
-    : undefined;
+// `createConversation` is client-local now (new chats are workflow
+// conversations created server-side by their first turn), so the legacy
+// `nyxid-chat-…` actor conversations these AG-UI tests exercise are seeded
+// the only way they still arrive: through the Chat History index. The
+// helper stubs one list fetch, seeds `CONVERSATION_ID`, then restores the
+// test's own fetch stub and the list-fetch throttle.
+async function seedActorConversation(
+  transport: AevatarAssistantTransport,
+): Promise<Conversation> {
+  const active = globalThis.fetch;
+  vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (
+      url === `${ASSISTANT_BASE}/conversations` &&
+      (init?.method ?? "GET") === "GET"
+    ) {
+      return Promise.resolve(
+        jsonResponse({
+          conversations: [
+            {
+              id: CONVERSATION_ID,
+              title: "Seeded conversation",
+              updatedAt: "2026-07-29T00:00:00.000Z",
+            },
+          ],
+        }),
+      );
+    }
+    return active(input, init);
+  });
+  try {
+    // The seed must reach the wire even when the test already listed
+    // within the throttle window.
+    (transport as unknown as { listFetchedAt: number }).listFetchedAt = 0;
+    const conversations = await transport.listConversations();
+    const seeded = conversations.find((c) => c.id === CONVERSATION_ID);
+    if (!seeded) throw new Error("seed conversation did not merge");
+    return seeded;
+  } finally {
+    vi.stubGlobal("fetch", active);
+    // Reset the list throttle so tests that assert list behavior still
+    // reach their own stubs.
+    (transport as unknown as { listFetchedAt: number }).listFetchedAt = 0;
+  }
+}
 
 function routeStream(frames: unknown[]): FetchRoute {
   return (url, init) =>
@@ -152,9 +193,9 @@ afterEach(() => {
 
 describe("AevatarAssistantTransport", () => {
   it("adapts the observed AG-UI stream into the PRD turn-event sequence", async () => {
-    stubFetch(routeCreate, routeStream(OBSERVED_FRAMES));
+    stubFetch(routeStream(OBSERVED_FRAMES));
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Say hello in five words.");
 
@@ -188,9 +229,9 @@ describe("AevatarAssistantTransport", () => {
   });
 
   it("serves the streamed transcript from the local mirror during and after the turn", async () => {
-    stubFetch(routeCreate, routeStream(OBSERVED_FRAMES), routeHistory([]));
+    stubFetch(routeStream(OBSERVED_FRAMES), routeHistory([]));
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
     await collectTurn(transport, "Say hello in five words.");
 
     // Server history is empty (materialization lag) — the keep-max guard
@@ -294,9 +335,9 @@ describe("AevatarAssistantTransport", () => {
   });
 
   it("uses RUN_STARTED.turnId as the authoritative handle and event identity", async () => {
-    stubFetch(routeCreate, routeStream(OBSERVED_FRAMES));
+    stubFetch(routeStream(OBSERVED_FRAMES));
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events: TurnEvent[] = [];
     let resolveDone: () => void = () => {};
@@ -370,9 +411,9 @@ describe("AevatarAssistantTransport", () => {
   });
 
   it("keeps a streaming conversation's live title over stale index metadata", async () => {
-    stubFetch(routeCreate, routeStream(OBSERVED_FRAMES));
+    stubFetch(routeStream(OBSERVED_FRAMES));
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
     // Start a turn but don't await it, so the conversation is mid-flight.
     const inflight = collectTurn(transport, "Draft the launch note");
 
@@ -386,9 +427,9 @@ describe("AevatarAssistantTransport", () => {
   });
 
   it("rejects a concurrent send while a turn is active", async () => {
-    stubFetch(routeCreate, routeStream(OBSERVED_FRAMES));
+    stubFetch(routeStream(OBSERVED_FRAMES));
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const first = collectTurn(transport, "First message");
     expect(() => {
@@ -399,7 +440,6 @@ describe("AevatarAssistantTransport", () => {
 
   it("maps RUN_ERROR to a failed turn", async () => {
     stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
         {
@@ -409,7 +449,7 @@ describe("AevatarAssistantTransport", () => {
       ]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Hello");
 
@@ -426,13 +466,13 @@ describe("AevatarAssistantTransport", () => {
   });
 
   it("fails the turn when the stream endpoint rejects the request", async () => {
-    stubFetch(routeCreate, (url, init) =>
+    stubFetch((url, init) =>
       url.endsWith("/stream") && init?.method === "POST"
         ? jsonResponse({ error: "turn_active" }, 409)
         : undefined,
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Hello");
 
@@ -448,7 +488,7 @@ describe("AevatarAssistantTransport", () => {
   it("surfaces the pre-stream error envelope instead of a bare status", async () => {
     // Errors before the SSE stream starts are a JSON `{code, message}`
     // envelope (Chat History contract) — the turn error must carry it.
-    stubFetch(routeCreate, (url, init) =>
+    stubFetch((url, init) =>
       url.endsWith("/stream") && init?.method === "POST"
         ? jsonResponse(
             { code: "UPSTREAM_TIMEOUT", message: "Aevatar timed out." },
@@ -457,7 +497,7 @@ describe("AevatarAssistantTransport", () => {
         : undefined,
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Hello");
 
@@ -469,13 +509,13 @@ describe("AevatarAssistantTransport", () => {
   });
 
   it("gives a stream 401 an auth-specific message, not a bare status", async () => {
-    stubFetch(routeCreate, (url, init) =>
+    stubFetch((url, init) =>
       url.endsWith("/stream") && init?.method === "POST"
         ? jsonResponse({ error: "unauthorized" }, 401)
         : undefined,
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Hello");
 
@@ -491,11 +531,10 @@ describe("AevatarAssistantTransport", () => {
     // RUN_ERROR. That is not a success (the reference client marks it
     // "closed"); the partial text must still settle into the transcript.
     stubFetch(
-      routeCreate,
       routeStream([OBSERVED_FRAMES[0], OBSERVED_FRAMES[1], OBSERVED_FRAMES[2]]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Hello");
 
@@ -513,7 +552,7 @@ describe("AevatarAssistantTransport", () => {
   });
 
   it("fails duplicate terminal frames delivered in separate chunks", async () => {
-    stubFetch(routeCreate, (url, init) =>
+    stubFetch((url, init) =>
       url.endsWith("/stream") && init?.method === "POST"
         ? chunkedSseResponse([
             [
@@ -530,7 +569,7 @@ describe("AevatarAssistantTransport", () => {
         : undefined,
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Hello");
 
@@ -547,7 +586,7 @@ describe("AevatarAssistantTransport", () => {
       .join("");
     // The capture ends right after the last data line — no blank line.
     const body = `${terminatedFrames}data: ${JSON.stringify({ type: "RUN_FINISHED" })}`;
-    stubFetch(routeCreate, (url, init) =>
+    stubFetch((url, init) =>
       url.endsWith("/stream") && init?.method === "POST"
         ? new Response(body, {
             status: 200,
@@ -556,7 +595,7 @@ describe("AevatarAssistantTransport", () => {
         : undefined,
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Hello");
 
@@ -582,7 +621,7 @@ describe("AevatarAssistantTransport", () => {
         );
       },
     });
-    stubFetch(routeCreate, (url, init) =>
+    stubFetch((url, init) =>
       url.endsWith("/stream") && init?.method === "POST"
         ? new Response(openStream, {
             status: 200,
@@ -591,7 +630,7 @@ describe("AevatarAssistantTransport", () => {
         : undefined,
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events: TurnEvent[] = [];
     const done = new Promise<void>((resolve) => {
@@ -646,7 +685,6 @@ describe("AevatarAssistantTransport", () => {
     const stopBodies: Array<Record<string, unknown>> = [];
     let streamClientRequestId: string | undefined;
     stubFetch(
-      routeCreate,
       (url, init) => {
         if (
           url === `${ASSISTANT_BASE}/conversations/${CONVERSATION_ID}/stop` &&
@@ -673,7 +711,7 @@ describe("AevatarAssistantTransport", () => {
       },
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     await new Promise<void>((resolve) => {
       const handle = transport.sendMessage(
@@ -705,7 +743,7 @@ describe("AevatarAssistantTransport", () => {
     // the local settle — PRE_START_STOP_WINDOW_MS — in case the announcing
     // frame is still in flight; see the next test for that path.)
     const silentStream = new ReadableStream<Uint8Array>({ start() {} });
-    const fetchMock = stubFetch(routeCreate, (url, init) =>
+    const fetchMock = stubFetch((url, init) =>
       url.endsWith("/stream") && init?.method === "POST"
         ? new Response(silentStream, {
             status: 200,
@@ -714,7 +752,7 @@ describe("AevatarAssistantTransport", () => {
         : undefined,
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     await new Promise<void>((resolve) => {
       const handle = transport.sendMessage(
@@ -749,7 +787,6 @@ describe("AevatarAssistantTransport", () => {
     });
     const stopBodies: Array<Record<string, unknown>> = [];
     stubFetch(
-      routeCreate,
       (url, init) => {
         if (url.endsWith("/stop") && init?.method === "POST") {
           stopBodies.push(
@@ -768,7 +805,7 @@ describe("AevatarAssistantTransport", () => {
           : undefined,
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events: TurnEvent[] = [];
     const handle = transport.sendMessage(CONVERSATION_ID, "Hello", (event) =>
@@ -841,7 +878,7 @@ describe("AevatarAssistantTransport", () => {
     );
     vi.stubGlobal("fetch", mock);
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const handle = transport.sendMessage(CONVERSATION_ID, "First", () => {});
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -918,7 +955,7 @@ describe("AevatarAssistantTransport", () => {
     );
     vi.stubGlobal("fetch", mock);
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const handle = transport.sendMessage(CONVERSATION_ID, "First", () => {});
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -1007,7 +1044,7 @@ describe("AevatarAssistantTransport", () => {
     );
     vi.stubGlobal("fetch", mock);
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     // Turn A: streams, gets its turnId, cancelled → stop A held pending.
     await new Promise<void>((resolve) => {
@@ -1102,7 +1139,7 @@ describe("AevatarAssistantTransport", () => {
     );
     vi.stubGlobal("fetch", mock);
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     await new Promise<void>((resolve) => {
       const handle = transport.sendMessage(CONVERSATION_ID, "Turn A", (e) => {
@@ -1182,7 +1219,7 @@ describe("AevatarAssistantTransport", () => {
     );
     vi.stubGlobal("fetch", mock);
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     let deleteStarted = false;
     let reentrantSendError: string | null = null;
@@ -1255,7 +1292,7 @@ describe("AevatarAssistantTransport", () => {
       );
       vi.stubGlobal("fetch", mock);
       const transport = new AevatarAssistantTransport();
-      await transport.createConversation();
+      await seedActorConversation(transport);
 
       const firstOutcome = transport
         .deleteConversation(CONVERSATION_ID)
@@ -1301,7 +1338,6 @@ describe("AevatarAssistantTransport", () => {
     // never invokes the comparator, which is why single-conversation
     // smoke tests missed it.)
     stubFetch(
-      routeCreate,
       (url, init) =>
         url === `${ASSISTANT_BASE}/conversations` &&
         (init?.method ?? "GET") === "GET"
@@ -1336,7 +1372,7 @@ describe("AevatarAssistantTransport", () => {
     }
 
     // A send with multiple rows in the mirror must still complete.
-    await transport.createConversation();
+    await seedActorConversation(transport);
     const events = await collectTurn(transport, "Does sending still work?");
     expect(events[events.length - 1]?.event).toBe("turn.completed");
   });
@@ -1372,7 +1408,7 @@ describe("AevatarAssistantTransport", () => {
     );
     vi.stubGlobal("fetch", mock);
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const first = transport.deleteConversation(CONVERSATION_ID);
     const second = transport.deleteConversation(CONVERSATION_ID);
@@ -1461,7 +1497,7 @@ describe("AevatarAssistantTransport", () => {
     );
     vi.stubGlobal("fetch", mock);
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     // Turn 1 parks an actionable approval card at EOF.
     const turn1 = await collectTurn(transport, "Post the digest");
@@ -1554,7 +1590,7 @@ describe("AevatarAssistantTransport", () => {
     );
     vi.stubGlobal("fetch", mock);
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     await new Promise<void>((resolve) => {
       const handle = transport.sendMessage(
@@ -1600,7 +1636,6 @@ describe("AevatarAssistantTransport", () => {
       },
     });
     stubFetch(
-      routeCreate,
       (url, init) =>
         url.endsWith("/stop") && init?.method === "POST"
           ? jsonResponse(
@@ -1617,7 +1652,7 @@ describe("AevatarAssistantTransport", () => {
           : undefined,
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events: TurnEvent[] = [];
     await new Promise<void>((resolve) => {
@@ -1662,9 +1697,9 @@ describe("AevatarAssistantTransport", () => {
     // transport must not depend on the client-side user at all (PRD
     // decision 4). Regression guard against reintroducing a scope segment.
     useAuthStore.getState().setUser(null);
-    const fetchMock = stubFetch(routeCreate, routeStream(OBSERVED_FRAMES));
+    const fetchMock = stubFetch(routeStream(OBSERVED_FRAMES));
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Hello there");
 
@@ -1690,9 +1725,9 @@ describe("AevatarAssistantTransport", () => {
       init?.method === "DELETE"
         ? jsonResponse({})
         : undefined;
-    const fetchMock = stubFetch(routeCreate, routeIndex, routeDelete);
+    const fetchMock = stubFetch(routeIndex, routeDelete);
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
     expect(await transport.listConversations()).toHaveLength(1);
 
     await transport.deleteConversation(CONVERSATION_ID);
@@ -1720,9 +1755,9 @@ describe("AevatarAssistantTransport", () => {
             502,
           )
         : undefined;
-    stubFetch(routeCreate, routeIndex, routeDeleteFailure);
+    stubFetch(routeIndex, routeDeleteFailure);
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     await expect(
       transport.deleteConversation(CONVERSATION_ID),
@@ -1756,7 +1791,7 @@ describe("AevatarAssistantTransport", () => {
       init?.method === "DELETE"
         ? jsonResponse({})
         : undefined;
-    stubFetch(routeCreate, routeDelete, (url, init) =>
+    stubFetch(routeDelete, (url, init) =>
       url.endsWith("/stream") && init?.method === "POST"
         ? new Response(openStream, {
             status: 200,
@@ -1765,7 +1800,7 @@ describe("AevatarAssistantTransport", () => {
         : undefined,
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events: TurnEvent[] = [];
     let deletion: Promise<void> | null = null;
@@ -1819,7 +1854,7 @@ describe("captured production wire shapes", () => {
         controller.close();
       },
     });
-    stubFetch(routeCreate, (url, init) =>
+    stubFetch((url, init) =>
       url.endsWith("/stream") && init?.method === "POST"
         ? new Response(trickle, {
             status: 200,
@@ -1828,7 +1863,7 @@ describe("captured production wire shapes", () => {
         : undefined,
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(
       transport,
@@ -1953,9 +1988,9 @@ describe("captured production wire shapes", () => {
   );
 
   it("sends the exact request shape the aevatar stream endpoint requires", async () => {
-    const fetchMock = stubFetch(routeCreate, routeStream(OBSERVED_FRAMES));
+    const fetchMock = stubFetch(routeStream(OBSERVED_FRAMES));
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     await collectTurn(transport, "Hello there");
 
@@ -1999,7 +2034,6 @@ describe("captured production wire shapes", () => {
 
   it("uses a new clientRequestId for each logical turn across reprojection", async () => {
     const fetchMock = stubFetch(
-      routeCreate,
       routeStream(OBSERVED_FRAMES),
       (url, init) =>
         url === `${ASSISTANT_BASE}/conversations` &&
@@ -2031,7 +2065,7 @@ describe("captured production wire shapes", () => {
       ]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     await collectTurn(transport, "First turn");
     // Post-turn reprojection: server history (equal length) replaces the
@@ -2076,7 +2110,7 @@ describe("captured production wire shapes", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Retry this delivery");
 
@@ -2109,7 +2143,7 @@ describe("captured production wire shapes", () => {
 
   it("retries a successful stream response that has no body", async () => {
     let streamAttempts = 0;
-    const fetchMock = stubFetch(routeCreate, (url, init) => {
+    const fetchMock = stubFetch((url, init) => {
       if (!url.endsWith("/stream") || init?.method !== "POST") return undefined;
       streamAttempts += 1;
       return streamAttempts === 1
@@ -2120,7 +2154,7 @@ describe("captured production wire shapes", () => {
         : sseResponse(OBSERVED_FRAMES);
     });
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Retry the empty delivery");
 
@@ -2173,7 +2207,6 @@ describe("live AG-UI frame taxonomy", () => {
 
   it("maps TOOL_CALL_START/END onto a run step ledger", async () => {
     stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID, actorId: CONVERSATION_ID },
         {
@@ -2192,7 +2225,7 @@ describe("live AG-UI frame taxonomy", () => {
       ]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Search skills");
 
@@ -2238,7 +2271,6 @@ describe("live AG-UI frame taxonomy", () => {
 
   it("keeps policy-denied tool failures ordinary without a connect card", async () => {
     stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
         {
@@ -2262,7 +2294,7 @@ describe("live AG-UI frame taxonomy", () => {
       ]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Open a PR");
 
@@ -2282,7 +2314,6 @@ describe("live AG-UI frame taxonomy", () => {
 
   it("ignores generic and unclassified authorization signals", async () => {
     stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
         {
@@ -2311,7 +2342,7 @@ describe("live AG-UI frame taxonomy", () => {
       ]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Summarize PRs");
 
@@ -2337,7 +2368,6 @@ describe("live AG-UI frame taxonomy", () => {
       },
     };
     stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
         authorizationFrame,
@@ -2350,7 +2380,7 @@ describe("live AG-UI frame taxonomy", () => {
       ]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Summarize my PRs");
 
@@ -2378,7 +2408,6 @@ describe("live AG-UI frame taxonomy", () => {
 
   it("maps a genuinely disconnected service by its canonical slug", async () => {
     stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
         {
@@ -2400,7 +2429,7 @@ describe("live AG-UI frame taxonomy", () => {
       ]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Post to Lark");
 
@@ -2420,7 +2449,7 @@ describe("live AG-UI frame taxonomy", () => {
 
   it("starts a new logical turn after a blocked delivery", async () => {
     let delivery = 0;
-    const fetchMock = stubFetch(routeCreate, (url, init) => {
+    const fetchMock = stubFetch((url, init) => {
       if (!url.endsWith("/stream") || init?.method !== "POST") return undefined;
       delivery += 1;
       return delivery === 1
@@ -2449,7 +2478,7 @@ describe("live AG-UI frame taxonomy", () => {
           ]);
     });
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const blocked = await collectTurn(transport, "Read a private repository");
     const completed = await collectTurn(transport, "Continue after reconnect");
@@ -2474,7 +2503,6 @@ describe("live AG-UI frame taxonomy", () => {
     // The upstream may close the idle stream while the human gate is open
     // (PRD §3.4); that is a pause, not a truncated run.
     stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
         {
@@ -2488,7 +2516,7 @@ describe("live AG-UI frame taxonomy", () => {
       ]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Post the digest");
 
@@ -2523,7 +2551,6 @@ describe("live AG-UI frame taxonomy", () => {
 
   it("streams the approve endpoint's SSE continuation as a follow-on turn", async () => {
     const fetchMock = stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
         {
@@ -2549,7 +2576,7 @@ describe("live AG-UI frame taxonomy", () => {
       routeHistory([]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
     const firstTurn = await collectTurn(transport, "Post the digest");
     const lastFirstCursor = firstTurn[firstTurn.length - 1]?.cursor ?? 0;
     const history = await transport.getHistory(CONVERSATION_ID);
@@ -2611,7 +2638,6 @@ describe("live AG-UI frame taxonomy", () => {
 
   it("fails closed when an approval continuation ends without a terminal frame", async () => {
     stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
         {
@@ -2635,7 +2661,7 @@ describe("live AG-UI frame taxonomy", () => {
       routeHistory([]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
     await collectTurn(transport, "Run an approved action");
     const history = await transport.getHistory(CONVERSATION_ID);
     const card = history.messages
@@ -2669,7 +2695,6 @@ describe("live AG-UI frame taxonomy", () => {
     // active-turn guard and interleave two streams into one reducer.
     let releaseApprove: () => void = () => {};
     stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
         {
@@ -2680,7 +2705,7 @@ describe("live AG-UI frame taxonomy", () => {
       routeHistory([]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
     await collectTurn(transport, "Do the thing");
     const history = await transport.getHistory(CONVERSATION_ID);
     const card = history.messages
@@ -2725,7 +2750,6 @@ describe("live AG-UI frame taxonomy", () => {
     // Codex P2: TOOL_CALL_START directly followed by TOOL_APPROVAL_REQUEST
     // (no toolCallId on the frame) must park the step, not spin forever.
     stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
         {
@@ -2739,7 +2763,7 @@ describe("live AG-UI frame taxonomy", () => {
       ]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Post it");
 
@@ -2760,7 +2784,6 @@ describe("live AG-UI frame taxonomy", () => {
     // list response must not resurrect a server-accepted delete.
     let listCalls = 0;
     stubFetch(
-      routeCreate,
       (url, init) =>
         url === `${ASSISTANT_BASE}/conversations` &&
         (init?.method ?? "GET") === "GET"
@@ -2779,7 +2802,7 @@ describe("live AG-UI frame taxonomy", () => {
           : undefined,
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     await transport.deleteConversation(CONVERSATION_ID);
 
@@ -2790,7 +2813,6 @@ describe("live AG-UI frame taxonomy", () => {
 
   it("settles immediately when the approve endpoint acks with JSON", async () => {
     stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
         {
@@ -2802,7 +2824,7 @@ describe("live AG-UI frame taxonomy", () => {
       routeHistory([]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
     await collectTurn(transport, "Do the thing");
     const history = await transport.getHistory(CONVERSATION_ID);
     const card = history.messages
@@ -2836,7 +2858,6 @@ describe("live AG-UI frame taxonomy", () => {
     // step; deciding must flip it (approved → done/completed) so the
     // transient activity line doesn't show a stale approval clock forever.
     stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
         {
@@ -2855,7 +2876,7 @@ describe("live AG-UI frame taxonomy", () => {
       routeHistory([]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
     await collectTurn(transport, "Post it");
     const history = await transport.getHistory(CONVERSATION_ID);
     const card = history.messages
@@ -2889,7 +2910,6 @@ describe("live AG-UI frame taxonomy", () => {
     // approval_request_id — deciding one card must not settle a step gated
     // on a different pending approval, and the ledger stays parked.
     stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
         {
@@ -2916,7 +2936,7 @@ describe("live AG-UI frame taxonomy", () => {
       routeHistory([]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
     await collectTurn(transport, "Two gated actions");
     const history = await transport.getHistory(CONVERSATION_ID);
     const cardB = history.messages
@@ -2959,7 +2979,6 @@ describe("live AG-UI frame taxonomy", () => {
     // Second-pass codex P2: a terminal run must not carry a non-terminal
     // step — RUN_ERROR after an approval request skips the waiting step.
     stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
         {
@@ -2977,7 +2996,7 @@ describe("live AG-UI frame taxonomy", () => {
       ]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Post it");
 
@@ -2994,7 +3013,6 @@ describe("live AG-UI frame taxonomy", () => {
     // Second-pass codex P2: history hydration must honor tombstones — a
     // projection racing the delete must not write the row back.
     stubFetch(
-      routeCreate,
       routeHistory([
         { id: "h-user", role: "user", content: "hi", timestamp: 1 },
       ]),
@@ -3010,7 +3028,7 @@ describe("live AG-UI frame taxonomy", () => {
           : undefined,
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     await transport.deleteConversation(CONVERSATION_ID);
 
@@ -3027,7 +3045,6 @@ describe("live AG-UI frame taxonomy", () => {
     // fallback.
     let releaseHistory: () => void = () => {};
     stubFetch(
-      routeCreate,
       routeStream(OBSERVED_FRAMES),
       (url, init) =>
         url === `${ASSISTANT_BASE}/conversations/${CONVERSATION_ID}` &&
@@ -3048,7 +3065,7 @@ describe("live AG-UI frame taxonomy", () => {
       },
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
     await collectTurn(transport, "Say hello in five words.");
 
     const baseFetch = fetch;
@@ -3130,7 +3147,6 @@ describe("live AG-UI frame taxonomy", () => {
     // Second-pass codex P2: Stop works during the pre-header window via the
     // transport-level cancel (the caller holds no handle yet).
     stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
         {
@@ -3141,7 +3157,7 @@ describe("live AG-UI frame taxonomy", () => {
       routeHistory([]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
     await collectTurn(transport, "Do it");
     const history = await transport.getHistory(CONVERSATION_ID);
     const card = history.messages
@@ -3186,7 +3202,6 @@ describe("live AG-UI frame taxonomy", () => {
     // (its toast) and settle the turn with a NULL error so the generic
     // reply-failed toast cannot double-fire.
     stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
         {
@@ -3201,7 +3216,7 @@ describe("live AG-UI frame taxonomy", () => {
       routeHistory([]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
     await collectTurn(transport, "Do it");
     const history = await transport.getHistory(CONVERSATION_ID);
     const card = history.messages
@@ -3237,7 +3252,6 @@ describe("live AG-UI frame taxonomy", () => {
 
   it("mines a raw.observed completion for steps and fallback text, never reasoning", async () => {
     stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
         {
@@ -3282,7 +3296,7 @@ describe("live AG-UI frame taxonomy", () => {
       routeHistory([]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Search and finish");
 
@@ -3305,7 +3319,6 @@ describe("live AG-UI frame taxonomy", () => {
 
   it("treats RUN_STOPPED as a terminal stop, not a truncated stream", async () => {
     stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
         {
@@ -3320,7 +3333,7 @@ describe("live AG-UI frame taxonomy", () => {
       ]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Do something long");
 
@@ -3338,7 +3351,6 @@ describe("live AG-UI frame taxonomy", () => {
     // body-keyed terminal frame falling through to UNKNOWN would leave the
     // turn looking truncated when it actually completed.
     stubFetch(
-      routeCreate,
       routeStream([
         { runStarted: { turnId: TURN_ID, actorId: CONVERSATION_ID } },
         { textMessageStart: { messageId: "m-1", role: "assistant" } },
@@ -3350,7 +3362,7 @@ describe("live AG-UI frame taxonomy", () => {
       ]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Hello");
 
@@ -3376,7 +3388,6 @@ describe("live AG-UI frame taxonomy", () => {
 
   it("maps top-level STEP_STARTED/STEP_FINISHED onto the run ledger", async () => {
     stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
         { type: "STEP_STARTED", stepStarted: { stepName: "collect" } },
@@ -3388,7 +3399,7 @@ describe("live AG-UI frame taxonomy", () => {
       ]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Run the workflow");
 
@@ -3404,7 +3415,6 @@ describe("live AG-UI frame taxonomy", () => {
 
   it("maps workflow step customs onto the run ledger", async () => {
     stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
         {
@@ -3425,7 +3435,7 @@ describe("live AG-UI frame taxonomy", () => {
       ]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Plan it");
 
@@ -3441,7 +3451,6 @@ describe("live AG-UI frame taxonomy", () => {
 
   it("embeds MEDIA_CONTENT as a data-URL artifact block", async () => {
     stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
         {
@@ -3456,7 +3465,7 @@ describe("live AG-UI frame taxonomy", () => {
       ]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Chart it");
 
@@ -3486,7 +3495,7 @@ describe("live AG-UI frame taxonomy", () => {
           push({ type: "RUN_STARTED", turnId: TURN_ID });
         },
       });
-      stubFetch(routeCreate, (url, init) =>
+      stubFetch((url, init) =>
         url.endsWith("/stream") && init?.method === "POST"
           ? new Response(openStream, {
               status: 200,
@@ -3495,7 +3504,7 @@ describe("live AG-UI frame taxonomy", () => {
           : undefined,
       );
       const transport = new AevatarAssistantTransport();
-      await transport.createConversation();
+      await seedActorConversation(transport);
 
       const events: TurnEvent[] = [];
       const done = new Promise<void>((resolve) => {
@@ -3540,7 +3549,7 @@ describe("live AG-UI frame taxonomy", () => {
           push({ type: "RUN_STARTED", turnId: TURN_ID });
         },
       });
-      stubFetch(routeCreate, (url, init) =>
+      stubFetch((url, init) =>
         url.endsWith("/stream") && init?.method === "POST"
           ? new Response(openStream, {
               status: 200,
@@ -3549,7 +3558,7 @@ describe("live AG-UI frame taxonomy", () => {
           : undefined,
       );
       const transport = new AevatarAssistantTransport();
-      await transport.createConversation();
+      await seedActorConversation(transport);
 
       const events: TurnEvent[] = [];
       const done = new Promise<void>((resolve) => {
@@ -3627,7 +3636,6 @@ describe("redaction and tool summaries", () => {
 
   it("redacts credentials from RUN_ERROR messages before they render", async () => {
     stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
         {
@@ -3641,7 +3649,7 @@ describe("redaction and tool summaries", () => {
       ]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Hello");
 
@@ -3798,7 +3806,6 @@ describe("connect markers in assistant messages", () => {
 
   it("emits a card from the live stream and keeps the encoding out of prose", async () => {
     stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID, actorId: CONVERSATION_ID },
         { type: "TEXT_MESSAGE_START", textMessageStart: { messageId: "m9" } },
@@ -3813,7 +3820,7 @@ describe("connect markers in assistant messages", () => {
       routeHistory([]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Summarise my merged PRs");
 
@@ -3838,7 +3845,6 @@ describe("connect markers in assistant messages", () => {
 
   it("withholds a half-written marker while it streams", async () => {
     stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID, actorId: CONVERSATION_ID },
         { type: "TEXT_MESSAGE_START", textMessageStart: { messageId: "m9" } },
@@ -3861,7 +3867,7 @@ describe("connect markers in assistant messages", () => {
       routeHistory([]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "go");
 
@@ -3937,7 +3943,6 @@ describe("live/history convergence for connect markers", () => {
     ),
   )("%s", async (_label, content, chunkSize) => {
     stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID, actorId: CONVERSATION_ID },
         { type: "TEXT_MESSAGE_START", textMessageStart: { messageId: "mX" } },
@@ -3951,7 +3956,7 @@ describe("live/history convergence for connect markers", () => {
       routeHistory([]),
     );
     const liveTransport = new AevatarAssistantTransport();
-    await liveTransport.createConversation();
+    await seedActorConversation(liveTransport);
     const events = await collectTurn(liveTransport, "go");
 
     // Final state of every block this message produced, in emission order.
@@ -4032,9 +4037,9 @@ describe("cancel runs the same projection as a normal close", () => {
   async function cancelAfterDeltas(
     deltas: readonly string[],
   ): Promise<TurnEvent[]> {
-    stubFetch(routeCreate, hangingStream(deltas), routeHistory([]));
+    stubFetch(hangingStream(deltas), routeHistory([]));
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
     const events: TurnEvent[] = [];
     let seen = 0;
     await new Promise<void>((resolve) => {
@@ -4146,9 +4151,9 @@ describe("a conversation with no committed turn has no server transcript", () =>
   // conversation" (observed in prod, 2026-07-28).
   it("serves an empty transcript when the history row does not exist yet", async () => {
     // Only the create is routed; stubFetch answers everything else 404.
-    stubFetch(routeCreate);
+    stubFetch();
     const transport = new AevatarAssistantTransport();
-    const conversation = await transport.createConversation();
+    const conversation = await seedActorConversation(transport);
 
     const history = await transport.getHistory(conversation.id);
 
@@ -4157,7 +4162,7 @@ describe("a conversation with no committed turn has no server transcript", () =>
   });
 
   it("still rejects a 404 for a conversation it has never seen", async () => {
-    stubFetch(routeCreate);
+    stubFetch();
     const transport = new AevatarAssistantTransport();
 
     await expect(
@@ -4168,7 +4173,7 @@ describe("a conversation with no committed turn has no server transcript", () =>
   it("still rejects a transient failure on a conversation with no local transcript", async () => {
     // 5xx is a real read failure, not the not-yet-materialized state — it
     // must not be dressed up as a legitimately empty chat.
-    stubFetch(routeCreate, (url, init) =>
+    stubFetch((url, init) =>
       url.startsWith(`${ASSISTANT_BASE}/conversations/`) &&
       (init?.method ?? "GET") === "GET"
         ? jsonResponse(
@@ -4178,8 +4183,337 @@ describe("a conversation with no committed turn has no server transcript", () =>
         : undefined,
     );
     const transport = new AevatarAssistantTransport();
-    const conversation = await transport.createConversation();
+    const conversation = await seedActorConversation(transport);
 
     await expect(transport.getHistory(conversation.id)).rejects.toThrow();
+  });
+});
+
+describe("workflow chat turns (studio engine)", () => {
+  // New conversations run on Aevatar's workflow chat through the typed
+  // `POST /api/v1/assistant/workflow-chat` pass-through. The frame shapes
+  // below mirror the live `/api/chat` capture (2026-07-29): body-keyed
+  // protobuf-JSON envelopes, `aevatar.chat.context` first, trailing
+  // `stateSnapshot` after the terminal.
+  const WORKFLOW_URL = "/api/v1/assistant/workflow-chat";
+  const WORKFLOW_CONVERSATION = "chatc-8bd999c402fb37d60cdcd81e3b78cfd";
+  const WORKFLOW_TURN = "turn-d619940adcd817c4aeb5d1c3e57f1ca5";
+  const RUN_ACTOR = "workflow-definition:studio:run:43bfe86961b44fc2a6422d0b";
+
+  function workflowContextFrame(stateVersion: string): unknown {
+    return {
+      timestamp: "1785297207163",
+      custom: {
+        name: "aevatar.chat.context",
+        payload: {
+          "@type":
+            "type.googleapis.com/aevatar.workflow.runs.WorkflowChatContextPayload",
+          scopeId: USER_ID,
+          conversationId: WORKFLOW_CONVERSATION,
+          turnId: WORKFLOW_TURN,
+          stateVersion,
+        },
+      },
+    };
+  }
+
+  const WORKFLOW_PREAMBLE = [
+    workflowContextFrame("3"),
+    {
+      custom: {
+        name: "aevatar.run.context",
+        payload: {
+          "@type":
+            "type.googleapis.com/aevatar.workflow.runs.WorkflowRunContextPayload",
+          actorId: RUN_ACTOR,
+          workflowName: "studio",
+          commandId: "00e6f0aa-8670-4405-9911-7903a6616cbd",
+        },
+      },
+    },
+    { runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } },
+    { stepStarted: { stepName: "reply" } },
+  ];
+
+  const WORKFLOW_TAIL = [
+    { stepFinished: { stepName: "reply" } },
+    { usage: {} },
+    {
+      runFinished: {
+        threadId: RUN_ACTOR,
+        result: {
+          "@type":
+            "type.googleapis.com/aevatar.workflow.runs.WorkflowRunResultPayload",
+          output: "Here's what's available on your NyxID account.",
+        },
+      },
+    },
+    { stateSnapshot: { snapshot: { actorId: RUN_ACTOR } } },
+  ];
+
+  function routeWorkflow(frames: unknown[]): FetchRoute {
+    return (url, init) =>
+      url === WORKFLOW_URL && init?.method === "POST"
+        ? sseResponse(frames)
+        : undefined;
+  }
+
+  function collectWorkflowTurn(
+    transport: AevatarAssistantTransport,
+    conversationId: string,
+    content: string,
+  ): Promise<TurnEvent[]> {
+    return new Promise((resolve, reject) => {
+      const events: TurnEvent[] = [];
+      try {
+        transport.sendMessage(conversationId, content, (event) => {
+          events.push(event);
+          if (event.event === "turn.completed") resolve(events);
+        });
+      } catch (error) {
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
+  }
+
+  it("creates conversations locally and runs the first turn through the workflow route", async () => {
+    const mock = stubFetch(
+      routeWorkflow([
+        ...WORKFLOW_PREAMBLE,
+        { textMessageStart: { messageId: "wm-1" } },
+        {
+          textMessageContent: {
+            delta: "Here's what's available on your NyxID account.",
+          },
+        },
+        { textMessageEnd: {} },
+        ...WORKFLOW_TAIL,
+      ]),
+    );
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+    expect(conversation.id.startsWith("workflow-pending-")).toBe(true);
+    // Create is client-local: nothing goes to the wire until the send.
+    expect(mock).not.toHaveBeenCalled();
+
+    const events = await collectWorkflowTurn(transport, conversation.id, "hi");
+
+    const turnCall = mock.mock.calls.find(
+      ([input]) => String(input) === WORKFLOW_URL,
+    );
+    expect(turnCall).toBeDefined();
+    const body = JSON.parse(String(turnCall?.[1]?.body)) as Record<
+      string,
+      unknown
+    >;
+    // First turn = create intent: no conversation id, but an idempotency
+    // command id the retry loop can replay.
+    expect(body["conversationId"]).toBeUndefined();
+    expect(typeof body["commandId"]).toBe("string");
+    expect(body["prompt"]).toBe("hi");
+
+    const terminal = events[events.length - 1];
+    expect(terminal?.event === "turn.completed" && terminal.status).toBe(
+      "completed",
+    );
+    const completed = events.find((event) => event.event === "block.completed");
+    expect(completed?.event === "block.completed" && completed.block).toEqual({
+      type: "text",
+      block_id: "wm-1-text",
+      text: "Here's what's available on your NyxID account.",
+    });
+
+    // `aevatar.chat.context` aliased the placeholder to the server id: the
+    // conversation now reports the `chatc-…` id through either address.
+    const history = await transport.getHistory(conversation.id);
+    expect(history.conversation.id).toBe(WORKFLOW_CONVERSATION);
+    expect(history.messages.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("renders the run result when nothing streamed as text", async () => {
+    stubFetch(routeWorkflow([...WORKFLOW_PREAMBLE, ...WORKFLOW_TAIL]));
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+
+    const events = await collectWorkflowTurn(transport, conversation.id, "hi");
+
+    const textBlocks = events.filter(
+      (event) =>
+        event.event === "block.completed" && event.block.type === "text",
+    );
+    expect(
+      textBlocks.some(
+        (event) =>
+          event.event === "block.completed" &&
+          event.block.type === "text" &&
+          event.block.text ===
+            "Here's what's available on your NyxID account.",
+      ),
+    ).toBe(true);
+    expect(events[events.length - 1]?.event).toBe("turn.completed");
+  });
+
+  it("continues the conversation with the observed stateVersion and a fresh commandId", async () => {
+    const mock = stubFetch(
+      routeWorkflow([
+        ...WORKFLOW_PREAMBLE,
+        { textMessageStart: { messageId: "wm-1" } },
+        { textMessageContent: { delta: "First." } },
+        { textMessageEnd: {} },
+        ...WORKFLOW_TAIL,
+      ]),
+    );
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+    await collectWorkflowTurn(transport, conversation.id, "first");
+    await collectWorkflowTurn(transport, conversation.id, "second");
+
+    const turnBodies = mock.mock.calls
+      .filter(([input]) => String(input) === WORKFLOW_URL)
+      .map(
+        ([, init]) =>
+          JSON.parse(String(init?.body)) as Record<string, unknown>,
+      );
+    expect(turnBodies).toHaveLength(2);
+    expect(turnBodies[0]?.["conversationId"]).toBeUndefined();
+    // The follow-up addresses the server conversation with the read fence
+    // from the first turn's chat.context (stateVersion "3").
+    expect(turnBodies[1]?.["conversationId"]).toBe(WORKFLOW_CONVERSATION);
+    expect(turnBodies[1]?.["minimumStateVersion"]).toBe(3);
+    expect(turnBodies[1]?.["commandId"]).not.toBe(
+      turnBodies[0]?.["commandId"],
+    );
+  });
+
+  it("maps runError to a failed turn with its upstream code", async () => {
+    stubFetch(
+      routeWorkflow([
+        ...WORKFLOW_PREAMBLE,
+        { runError: { code: "WORKFLOW_FAILED", message: "engine died" } },
+      ]),
+    );
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+
+    const events = await collectWorkflowTurn(transport, conversation.id, "hi");
+
+    const terminal = events[events.length - 1];
+    expect(
+      terminal?.event === "turn.completed" && {
+        status: terminal.status,
+        code: terminal.error?.code,
+      },
+    ).toEqual({ status: "failed", code: "WORKFLOW_FAILED" });
+  });
+
+  it("cancels client-side without posting the actor surface's :stop", async () => {
+    const encoder = new TextEncoder();
+    let preambleSent = false;
+    const mock = stubFetch((url, init) => {
+      if (url === WORKFLOW_URL && init?.method === "POST") {
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            pull(controller) {
+              if (!preambleSent) {
+                preambleSent = true;
+                controller.enqueue(
+                  encoder.encode(
+                    WORKFLOW_PREAMBLE.map(
+                      (frame) => `data: ${JSON.stringify(frame)}\n\n`,
+                    ).join(""),
+                  ),
+                );
+                return;
+              }
+              // Hang: the run is still executing server-side.
+              return new Promise<never>(() => {});
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "text/event-stream" } },
+        );
+      }
+      return undefined;
+    });
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+
+    const events: TurnEvent[] = [];
+    const terminal = new Promise<void>((resolve) => {
+      const handle = transport.sendMessage(
+        conversation.id,
+        "hi",
+        (event) => {
+          events.push(event);
+          if (event.event === "turn.completed") resolve();
+          if (event.event === "turn.status" && event.status === "running") {
+            handle.cancel();
+          }
+        },
+      );
+    });
+    await terminal;
+
+    expect(
+      events.some(
+        (event) =>
+          event.event === "turn.completed" && event.status === "cancelled",
+      ),
+    ).toBe(true);
+    expect(
+      mock.mock.calls.some(([input]) => String(input).endsWith("/stop")),
+    ).toBe(false);
+  });
+
+  it("deletes an aliased conversation through its server id", async () => {
+    const mock = stubFetch(
+      routeWorkflow([
+        ...WORKFLOW_PREAMBLE,
+        { textMessageStart: { messageId: "wm-1" } },
+        { textMessageContent: { delta: "First." } },
+        { textMessageEnd: {} },
+        ...WORKFLOW_TAIL,
+      ]),
+      (_url, init) =>
+        init?.method === "DELETE" ? jsonResponse({}) : undefined,
+    );
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+    await collectWorkflowTurn(transport, conversation.id, "first");
+
+    await transport.deleteConversation(conversation.id);
+
+    expect(
+      mock.mock.calls.some(
+        ([input, init]) =>
+          String(input) ===
+            `${ASSISTANT_BASE}/conversations/${WORKFLOW_CONVERSATION}` &&
+          init?.method === "DELETE",
+      ),
+    ).toBe(true);
+    await expect(transport.getHistory(conversation.id)).rejects.toThrow(
+      "Conversation was not found.",
+    );
+    await expect(
+      transport.getHistory(WORKFLOW_CONVERSATION),
+    ).rejects.toThrow("Conversation was not found.");
+  });
+});
+
+describe("workflow conversations fail approvals honestly", () => {
+  // `:approve` addresses a nyxid-chat ACTOR; a workflow run resumes through
+  // `runs/{runId}:resume`, which the mount does not proxy. The card can
+  // still render (the workflow mapper emits `aevatar.tool_approval.pending`),
+  // so the decision must fail with a legible message instead of a 404.
+  it("refuses to post the actor approve route for a chatc conversation", async () => {
+    const mock = stubFetch();
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+
+    await expect(
+      transport.decideApproval(conversation.id, "block-1", true),
+    ).rejects.toThrow(/Approvals cannot be decided from this chat yet/);
+    expect(
+      mock.mock.calls.some(([input]) => String(input).endsWith("/approve")),
+    ).toBe(false);
   });
 });

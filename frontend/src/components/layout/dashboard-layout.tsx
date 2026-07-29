@@ -12,9 +12,11 @@ import { useAuthStore } from "@/stores/auth-store";
 import { useLogout, useUser } from "@/hooks/use-auth";
 import { useShouldShowOnboarding } from "@/hooks/use-onboarding";
 import { useApplyTheme } from "@/hooks/use-theme";
+import { normalizeScreenKey } from "@/lib/assistant/screen-context";
 import { NyxidLogo } from "@/components/brand/nyxid-logo";
 import { OnboardingTakeover } from "@/components/dashboard/onboarding-takeover";
 import { ThemeToggle } from "@/components/dashboard/theme-toggle";
+import { useAssistantContextStore } from "@/stores/assistant-context-store";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -59,7 +61,7 @@ export function DashboardLayout() {
   // queryFn syncs the auth store, so server-side capability changes (feature
   // flags flipped by an admin, mutation-triggered ["user"] invalidations)
   // reach flag-gated UI like the sidebar without a hard reload.
-  useUser();
+  const userQuery = useUser();
   const [commandOpen, setCommandOpen] = useState(false);
   const [mobileNavState, setMobileNavState] = useState<"closed" | "open" | "closing">("closed");
   const [rightPanel, setRightPanel] = useState<React.ReactNode>(null);
@@ -74,6 +76,14 @@ export function DashboardLayout() {
   useEffect(() => {
     document.title = `nyxid - ${sectionTitleFor(pathname)}`;
   }, [pathname]);
+
+  useEffect(() => {
+    const screenKey = normalizeScreenKey(pathname);
+    const userId = userQuery.data?.id ?? useAuthStore.getState().user?.id;
+    if (userId && screenKey) {
+      useAssistantContextStore.getState().recordScreen(userId, screenKey);
+    }
+  }, [pathname, userQuery.data?.id]);
 
   const closeMobileNav = useCallback(() => setMobileNavState("closing"), []);
 
