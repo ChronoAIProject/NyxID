@@ -1114,7 +1114,7 @@ Only services with valid connections and satisfied credentials are included:
 
 ### Backward Compatibility
 
-The REST endpoint `/api/v1/mcp/config` still returns the full list of all tools for clients that don't support the MCP protocol.
+The REST endpoint `/api/v1/mcp/config` returns the same caller-scoped executable operation set used by stateless MCP `tools/list`, plus stable opaque identities, a canonical content digest, response media/binary metadata, and non-sensitive diagnostics. Scoped callers never receive excluded service/node identities or exclusion counts.
 
 When a tool is called, the proxy:
 1. Resolves the service and endpoint from the tool name.

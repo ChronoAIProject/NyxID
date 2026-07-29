@@ -7,6 +7,19 @@ fn default_request_body_required() -> bool {
     true
 }
 
+/// Normalized success-response metadata for an operation.
+///
+/// `binary_artifact` is intentionally tri-state. `None` means the source
+/// contract did not provide enough information to classify the response, so
+/// consumers can fail closed instead of treating an unknown response as text.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct OperationResponseContract {
+    #[serde(default)]
+    pub content_types: Vec<String>,
+    #[serde(default)]
+    pub binary_artifact: Option<bool>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ServiceEndpoint {
     #[serde(rename = "_id")]
@@ -26,6 +39,8 @@ pub struct ServiceEndpoint {
     pub request_body_required: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_description: Option<String>,
+    #[serde(default)]
+    pub response: OperationResponseContract,
     pub is_active: bool,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
@@ -60,6 +75,10 @@ mod tests {
             request_content_type: Some("application/json".to_string()),
             request_body_required: true,
             response_description: Some("200 OK".to_string()),
+            response: OperationResponseContract {
+                content_types: vec!["application/json".to_string()],
+                binary_artifact: Some(false),
+            },
             is_active: true,
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -83,6 +102,18 @@ mod tests {
             endpoint.request_body_required,
             restored.request_body_required
         );
+        assert_eq!(endpoint.response, restored.response);
+    }
+
+    #[test]
+    fn legacy_document_defaults_response_contract_to_unknown() {
+        let endpoint = make_endpoint();
+        let mut doc = bson::to_document(&endpoint).expect("serialize");
+        doc.remove("response");
+
+        let restored: ServiceEndpoint = bson::from_document(doc).expect("deserialize legacy row");
+        assert!(restored.response.content_types.is_empty());
+        assert_eq!(restored.response.binary_artifact, None);
     }
 
     #[test]
