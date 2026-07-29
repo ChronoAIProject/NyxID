@@ -1177,8 +1177,19 @@ export class AevatarAssistantTransport implements AssistantTransport {
     approved: boolean,
     onEvent?: (event: TurnEvent) => void,
   ): Promise<TurnHandle | null> {
+    conversationId = this.canonicalConversationId(conversationId);
     if (this.deletingConversations.has(conversationId)) {
       throw new Error("This conversation is being deleted.");
+    }
+    // `:approve` addresses a nyxid-chat conversation ACTOR. A workflow run
+    // resumes through `runs/{runId}:resume`, which this mount does not
+    // proxy — posting the actor route with a `chatc-…` id would 404 with a
+    // misleading message. Fail honestly instead: the gate is real, we just
+    // cannot decide it from here yet.
+    if (isWorkflowConversationId(conversationId)) {
+      throw new Error(
+        "Approvals cannot be decided from this chat yet. Approve the request in NyxID (Approvals) and send your message again.",
+      );
     }
     const stored = this.conversations.get(conversationId);
     const card = stored?.turnState.messages

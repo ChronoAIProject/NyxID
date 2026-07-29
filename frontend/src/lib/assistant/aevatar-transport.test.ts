@@ -4498,3 +4498,22 @@ describe("workflow chat turns (studio engine)", () => {
     ).rejects.toThrow("Conversation was not found.");
   });
 });
+
+describe("workflow conversations fail approvals honestly", () => {
+  // `:approve` addresses a nyxid-chat ACTOR; a workflow run resumes through
+  // `runs/{runId}:resume`, which the mount does not proxy. The card can
+  // still render (the workflow mapper emits `aevatar.tool_approval.pending`),
+  // so the decision must fail with a legible message instead of a 404.
+  it("refuses to post the actor approve route for a chatc conversation", async () => {
+    const mock = stubFetch();
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+
+    await expect(
+      transport.decideApproval(conversation.id, "block-1", true),
+    ).rejects.toThrow(/Approvals cannot be decided from this chat yet/);
+    expect(
+      mock.mock.calls.some(([input]) => String(input).endsWith("/approve")),
+    ).toBe(false);
+  });
+});

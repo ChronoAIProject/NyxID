@@ -448,6 +448,35 @@ call: make the product chat call the same engine the Aevatar console uses —
   tools 403 into NyxID and answers degrade instead of crashing — the G9
   decision is still open); a mid-session placeholder URL dies on reload
   (sidebar row recovers it); `workflow-chat/ws` remains dead code.
+- **G18 [P2] Approvals cannot be decided on the workflow surface.** `:approve`
+  addresses a nyxid-chat conversation ACTOR; a workflow run resumes through
+  scope-service `runs/{runId}:resume`, which this mount does not proxy. The
+  card can still RENDER (the workflow mapper emits
+  `aevatar.tool_approval.pending` / `aevatar.human_input.request`), so
+  `decideApproval` fails fast with a legible message pointing at the NyxID
+  Approvals page rather than 404-ing the actor route. Not a regression —
+  G1 already recorded that no approval could be completed from the browser on
+  the actor surface either. Fix = proxy the resume route (new mount entry +
+  `runId`/`stepId` plumbing from the run-context frame) when approvals become
+  a product requirement.
+
+**Compatibility review (2026-07-29, post-implementation).** Every changed
+symbol was traced to its consumers before merge:
+`POST /assistant/workflow-chat` had **no** callers anywhere in the repo (dead
+since the transport-toggle removal), so tightening it to a typed body breaks
+nothing; `execute_proxy`'s two production callers are unchanged and still run
+`TargetMode::CallerAddressed` with every caller-state gate intact; the
+`filter_chat_history_index` widening is additive (a user with only
+`nyxid-chat-` rows sees an identical list); and every workflow-specific branch
+in the transport is gated on `run.protocol === "workflow"` or an id-prefix
+test, so legacy `nyxid-chat-…` conversations stream, cancel, stop, approve,
+reload, and delete exactly as before. The one intended behavior change for
+legacy conversations is that new ones can no longer be *created* — existing
+ones stay fully continuable. On the `AdminManaged` branch, `master_credential`
+and `has_server_credential` are inert (both only matter when a
+`user_service_id` or node route is present, and neither is), so billing
+classification, approvals, audit, identity propagation, and delegation
+injection all behave as on the caller-addressed path.
 
 ### Contract layers dev ships that the FE transport does not speak (2026-07-29)
 
