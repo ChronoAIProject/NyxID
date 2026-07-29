@@ -645,27 +645,64 @@ not production code, never imported by the app.
    rendered as a numbered storyboard so every stage is visible without interaction
    (an optional click-through walkthrough may sit on top, but the storyboard is the
    requirement). It answers "what does the CTA actually lead to, and what pings Aevatar."
-   Stages, using the GitHub catalog example (`req_7`, `api-github`, scopes `repo`):
-   1. **Card pending** — the shipped pending card.
-   2. **Modal · Service** — `AddKeyDialog` catalog step, GitHub preselected from
-      `prefillSlug`. Modal mockups must mirror the real dialog's structure (dialog
-      chrome, step header, step indicator, footer buttons per
-      `components/dashboard/add-key-dialog.tsx` and `step-header.tsx`) — static
-      mockups, no real logic.
-   3. **Modal · Routing** — direct vs via-node choice, prefill applied.
-   4. **Modal · Authorize** — the OAuth handoff step: "Continue to GitHub" + copy
-      stating the popup runs on NyxID's surface and the token never enters the chat.
-   5. **Modal · Verify** — success state, created service summary (`us_44`), Done.
-   6. **Card completed** — the receipt state, and directly beneath it the
-      **auto-continue event**: a small transcript event row —
-      `→ action.continue posted · req_7 completed · resource us_44` — annotated
-      "automatic — no user action", followed by the assistant's follow-up text bubble
-      to show the conversation resuming.
-   7. **Branches**, each as its own storyboard frame: (a) **error** — the Authorize
-      step's in-modal retryable error state, plus the card's terminal `failed`
-      receipt with its auto-continue row (`disposition: failed`); (b) **declined** —
-      Decline pressed on the card: declined receipt + auto-continue row
-      (`disposition: declined`, no modal).
+
+   **Fidelity rule (hard):** every modal frame must be a faithful mockup of a real
+   `WizardStep` state in `components/dashboard/add-key-dialog.tsx` (+
+   `connect-verify-step.tsx`), using the REAL `StepHeader` title/description strings
+   from the code — quoted below, verified 2026-07-29. The real dialog has **no numeric
+   step indicator** ("1 of 3" does not exist — do not invent one); its chrome is the
+   `Dialog` shell + `StepHeader` (service icon, title, description) + step body + Back.
+   Machine facts that the storyboard must respect: on `prefillSlug` the **catalog step
+   is skipped** (`handleSelectCatalog` auto-advances to `routing`); the
+   managed-vs-Custom-App OAuth client choice is **inline on the routing screen**;
+   `handleRoutingDirect` routes oauth2 → `oauth` (managed) / `oauth_credentials` (BYO),
+   device_code providers → `device_code`, key-paste entries → `form`; "Via credential
+   node" → `node_setup`; every auth completion lands on `verify`.
+
+   **Primary path** (managed OAuth, GitHub example — `req_7`, `api-github`, scopes
+   `repo`):
+   1. **Card pending** — the shipped pending card. Caption: CTA opens `AddKeyDialog`
+      with `prefillSlug="api-github"`; catalog step skipped.
+   2. **Modal · `routing`** — StepHeader "Configure routing for GitHub" + entry
+      description. Body: routing choice **Direct** (selected) vs **Via credential
+      node** (lists online nodes), the inline OAuth client source choice
+      (**NyxID-managed** selected vs **Custom App**), Back + Continue.
+   3. **Modal · `oauth`** — StepHeader "Connect to GitHub" / "This service uses OAuth
+      to authenticate. Click the button below to connect your account." Body: the
+      scope picker pills (`repo` preselected from the request; platform-allowlist
+      gating on the managed path), the Connect button (opens the provider popup —
+      caption: the token lands NyxID-side, never in the chat), Back.
+   4. **Modal · `verify`** — `ConnectVerifyStep`, the aha-moment step: StepHeader
+      "GitHub connected"; body per its real sub-machine (`idle → minting →
+      probe_running → probe_success | mint_failed | probe_failed`): agent-key panel,
+      env snippet, live probe diagnostic (the first real 200 through the broker),
+      actions **Create Agent Key** / **Maybe later** / **Done**. Caption: Done (and
+      Maybe later — the UserService already exists) fires
+      `onSuccess({userServiceId})`.
+   5. **Card completed** — the receipt state, and directly beneath it the
+      **auto-continue event row**: `→ action.continue posted · req_7 completed ·
+      resource us_44`, annotated "automatic — no user action", followed by the
+      assistant's follow-up text bubble showing the conversation resuming.
+   6. **Branches**, each its own frame: (a) **OAuth error** — the `oauth` step's
+      real inline error + retry (recoverable, stays in the modal); (b) **failed** —
+      the card's terminal `failed` receipt + auto-continue row
+      (`disposition: failed`); (c) **declined** — Decline on the card, no modal:
+      declined receipt + auto-continue row (`disposition: declined`).
+
+   **Other real modalities** — a compact secondary strip, one faithful frame each,
+   real step headers quoted:
+   - **`device_code`** ×3 sub-states (`DeviceCodeStep`): configure — "Connect to
+     {Service}" / "This service uses a device code to authenticate. Click continue to
+     request a code." (with scope picker where supported); requesting — spinner,
+     "Requesting code from {Service}..."; success — "{Service} connected" / "Your
+     {Service} account has been connected successfully."
+   - **`form`** (API-key paste, e.g. `api-github-pat`) — "Configure {Service}".
+   - **`node_setup`** — "{Service} — Node setup" / "Configure credentials on your
+     node agent."
+   - **`oauth_credentials`** (Custom App / BYO) — the client-ID + client-secret form
+     reached from the routing screen's Custom App choice.
+   - **`catalog`** — the grid as the entry point when there is **no** usable prefill
+     (unknown slug falls back to manual pick).
 6. Every card carries its verb as a mono caption, its risk as the badge, §17 tags as small
    chips, and a shipped/target marker (`service.connect` ×2 + states = shipped; all else
    target).
@@ -680,10 +717,14 @@ not production code, never imported by the app.
 - [ ] The computed card count equals the §17 inventory, and every §17 row appears exactly
       once (cross-check the data array verb-by-verb against §17).
 - [ ] States section shows all six states matching Part I §8.
-- [ ] Flow section shows every stage of requirement 5 — five modal mockups
-      (Service/Routing/Authorize/Verify plus the Authorize error state), the completed
-      card with its auto-continue event row, and both branches (failed, declined),
-      all visible without interaction.
+- [ ] Flow section shows every stage of requirement 5: the primary path (pending card →
+      `routing` → `oauth` → `verify` → completed card + auto-continue row + follow-up
+      bubble), the three branches (OAuth in-modal error, failed, declined), and the
+      six secondary-modality frames (`device_code` ×3, `form`, `node_setup`,
+      `oauth_credentials`, `catalog`) — all visible without interaction.
+- [ ] Every modal frame uses the real step-machine state name and the real StepHeader
+      title/description strings quoted in requirement 5 — no invented steps, no
+      invented "N of M" indicators, catalog step shown as skipped on prefill.
 - [ ] The auto-continue rows are annotated "automatic — no user action" and show the
       disposition (`completed` / `failed` / `declined`) and, for completed, the
       `us_44` resource ref.
