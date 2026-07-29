@@ -88,6 +88,48 @@ pub fn history_index_path(user_id: &str) -> String {
     format!("api/scopes/{user_id}/chat-history")
 }
 
+/// Actor-id prefix of a `nyxid-chat` conversation (upstream
+/// `NyxIdChatServiceDefaults.ActorIdPrefix`; ids are `nyxid-chat-{guid:N}`).
+const NYXID_CHAT_ACTOR_PREFIX: &str = "nyxid-chat-";
+
+/// Conversation-id prefix of a workflow-chat conversation (upstream
+/// `ChatHistoryActorIds.CreateConversationId`; ids are `chatc-{hash[..32]}`).
+const WORKFLOW_CHAT_CONVERSATION_PREFIX: &str = "chatc-";
+
+/// Drop chat-history rows this surface cannot address.
+///
+/// `chat-history` is a **shared** read model. Two families in it are ours:
+/// `nyxid-chat-…` conversation actors (turns via `:stream`) and `chatc-…`
+/// workflow-chat conversations (turns via `POST /assistant/workflow-chat`,
+/// continued with `conversation.conversationId`). Anything else in the index
+/// belongs to another product surface and is dropped, keeping the client
+/// honest about what it can address: every id this route returns is a valid
+/// target for its family's turn route, the transcript route, and delete.
+///
+/// Shape-tolerant by design — an index that is not `{"conversations": [...]}`
+/// (or a row without a string `id`) is returned untouched, matching the
+/// deploy-independence posture of the transcript route.
+pub fn filter_chat_history_index(index: &mut serde_json::Value) -> bool {
+    let Some(rows) = index
+        .get_mut("conversations")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return false;
+    };
+    let before = rows.len();
+    rows.retain(|row| {
+        row.get("id")
+            .and_then(serde_json::Value::as_str)
+            // Keep unknown-shaped rows: a row we cannot classify is not
+            // evidence that it belongs to another surface.
+            .is_none_or(|id| {
+                id.starts_with(NYXID_CHAT_ACTOR_PREFIX)
+                    || id.starts_with(WORKFLOW_CHAT_CONVERSATION_PREFIX)
+            })
+    });
+    rows.len() != before
+}
+
 /// `chat-history/conversations/{id}` -- transcript read.
 pub fn history_path(user_id: &str, conversation_id: &str) -> AppResult<String> {
     validate_conversation_id(conversation_id)?;
@@ -223,6 +265,110 @@ pub fn workflow_chat_path() -> String {
     "api/chat".to_string()
 }
 
+/// The one workflow the assistant surface may start. Pinned server-side:
+/// Aevatar's `/api/chat` runs whatever catalog workflow the body names
+/// (`direct`, `auto`, `auto_review`, file-loaded definitions, …), and which
+/// engine backs the platform chat is a platform decision, not a caller input.
+pub const WORKFLOW_CHAT_WORKFLOW: &str = "studio";
+
+/// Matches the client cap in `aevatar-transport.ts` (`MAX_MESSAGE_CHARS`).
+const WORKFLOW_CHAT_PROMPT_MAX_CHARS: usize = 32_768;
+
+/// The caller half of the workflow-chat turn contract. Everything else in
+/// Aevatar's `HttpChatInput` (workflow selection, inline YAML, llmControl,
+/// toolContext, metadata, headers) is deliberately not expressible here.
+///
+/// `deny_unknown_fields` keeps client drift loud: Aevatar rejects unknown
+/// body members (`JsonUnmappedMemberHandling.Disallow`), and a field that
+/// silently vanished here would surface as a confusing upstream 400 instead.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkflowChatTurnRequest {
+    pub prompt: String,
+    /// `chatc-…` conversation to continue; absent starts a new conversation.
+    #[serde(default)]
+    pub conversation_id: Option<String>,
+    /// Chat-history read fence for continuations: the `stateVersion` the
+    /// client last observed. Aevatar requires `> 0` alongside a conversation
+    /// id (`CHAT_HISTORY_RESERVATION_UNAVAILABLE` otherwise).
+    #[serde(default)]
+    pub minimum_state_version: Option<i64>,
+    /// Client idempotency identity for the create/turn (Aevatar replays the
+    /// same conversation/turn for a repeated id, 409s on payload mismatch).
+    #[serde(default)]
+    pub command_id: Option<String>,
+}
+
+/// Opaque client token (command ids): UUID-shaped material only, so nothing
+/// structural or attacker-shaped rides through to the upstream body.
+fn validate_client_token(value: &str, label: &str) -> AppResult<()> {
+    let valid = !value.is_empty()
+        && value.len() <= 64
+        && value.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+    if !valid {
+        return Err(AppError::BadRequest(format!("Invalid {label}.")));
+    }
+    Ok(())
+}
+
+/// Build the upstream `/api/chat` body for a caller turn request.
+///
+/// The `conversation` object is always present: without it Aevatar runs the
+/// turn ephemerally and **persists nothing** to chat history, which would
+/// silently drop the conversation from the sidebar contract. `workflow` is
+/// pinned to [`WORKFLOW_CHAT_WORKFLOW`]. A body `scopeId` is ignored by
+/// Aevatar (trusted scope wins), so none is sent.
+pub fn workflow_chat_body(request: &WorkflowChatTurnRequest) -> AppResult<serde_json::Value> {
+    let prompt = request.prompt.trim();
+    if prompt.is_empty() || request.prompt.chars().count() > WORKFLOW_CHAT_PROMPT_MAX_CHARS {
+        return Err(AppError::BadRequest(format!(
+            "Prompt must contain between 1 and {WORKFLOW_CHAT_PROMPT_MAX_CHARS} characters."
+        )));
+    }
+
+    let conversation = match (&request.conversation_id, request.minimum_state_version) {
+        (None, None) => serde_json::json!({ "conversationId": null }),
+        (None, Some(_)) => {
+            return Err(AppError::BadRequest(
+                "minimumStateVersion requires a conversationId.".to_string(),
+            ));
+        }
+        (Some(id), version) => {
+            validate_conversation_id(id)?;
+            if !id.starts_with(WORKFLOW_CHAT_CONVERSATION_PREFIX) {
+                // A `nyxid-chat-…` actor id is a different surface; failing
+                // fast beats an upstream CONVERSATION_NOT_FOUND after a run
+                // was already admitted.
+                return Err(AppError::BadRequest(
+                    "Only workflow conversations can be continued here.".to_string(),
+                ));
+            }
+            let Some(version) = version.filter(|v| *v > 0) else {
+                return Err(AppError::BadRequest(
+                    "Continuing a conversation requires the last observed minimumStateVersion."
+                        .to_string(),
+                ));
+            };
+            serde_json::json!({ "conversationId": id, "minimumStateVersion": version })
+        }
+    };
+
+    let command_id = match &request.command_id {
+        Some(id) => {
+            validate_client_token(id, "commandId")?;
+            id.clone()
+        }
+        None => uuid::Uuid::new_v4().to_string(),
+    };
+
+    Ok(serde_json::json!({
+        "commandId": command_id,
+        "conversation": conversation,
+        "prompt": request.prompt,
+        "workflow": WORKFLOW_CHAT_WORKFLOW,
+    }))
+}
+
 /// `api/ws/chat` -- WebSocket twin of the workflow chat
 /// (`StartWorkflowChatWebSocket`).
 pub fn workflow_chat_ws_path() -> String {
@@ -283,6 +429,63 @@ mod tests {
 
     const USER: &str = "add69059-bece-4f0e-9559-99cfd10b47eb";
     const CONV: &str = "nyxid-chat-f8369965a444433f92ec50e67ad8ee52";
+
+    /// The chat-history index is shared across product surfaces. Both of
+    /// ours stay — `nyxid-chat-…` actors (turns via `:stream`) and `chatc-…`
+    /// workflow conversations (turns via the workflow-chat route) — while
+    /// rows from any other surface are dropped.
+    #[test]
+    fn history_index_keeps_both_addressable_families() {
+        let mut index = serde_json::json!({
+            "conversations": [
+                { "id": "chatc-650906f30cc985fa341477281303b6de", "title": "workflow chat" },
+                { "id": CONV, "title": "assistant chat", "messageCount": 7 },
+                { "id": "voicec-9c1d3f24a88b41f7", "title": "another product" },
+                { "id": "nyxid-chat-bb78fd3b1d834e6b958f8dbc626cef17", "messageCount": 0 },
+            ]
+        });
+        assert!(filter_chat_history_index(&mut index));
+        let ids: Vec<&str> = index["conversations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                "chatc-650906f30cc985fa341477281303b6de",
+                CONV,
+                "nyxid-chat-bb78fd3b1d834e6b958f8dbc626cef17"
+            ]
+        );
+    }
+
+    #[test]
+    fn history_index_filter_reports_no_change_when_every_row_is_addressable() {
+        let mut index = serde_json::json!({
+            "conversations": [{ "id": CONV }, { "id": "chatc-650906f30cc985fa3414" }]
+        });
+        assert!(!filter_chat_history_index(&mut index));
+        assert_eq!(index["conversations"].as_array().unwrap().len(), 2);
+    }
+
+    /// Shape drift must not empty the sidebar: an index we do not recognise,
+    /// or a row without a string id, is left exactly as upstream sent it.
+    #[test]
+    fn history_index_filter_leaves_unknown_shapes_untouched() {
+        let mut array_shaped = serde_json::json!([{ "id": "chatc-1" }]);
+        assert!(!filter_chat_history_index(&mut array_shaped));
+        assert_eq!(array_shaped.as_array().unwrap().len(), 1);
+
+        let mut missing_key = serde_json::json!({ "rows": [{ "id": "chatc-1" }] });
+        assert!(!filter_chat_history_index(&mut missing_key));
+        assert!(missing_key.get("conversations").is_none());
+
+        let mut idless = serde_json::json!({ "conversations": [{ "title": "no id" }] });
+        assert!(!filter_chat_history_index(&mut idless));
+        assert_eq!(idless["conversations"].as_array().unwrap().len(), 1);
+    }
 
     #[test]
     fn builds_the_aevatar_paths_from_the_server_side_scope() {
@@ -405,6 +608,117 @@ mod tests {
             assert!(state_path(USER, bad).is_err());
         }
         assert!(history_path(USER, &"a".repeat(129)).is_err());
+    }
+
+    const WORKFLOW_CONV: &str = "chatc-650906f30cc985fa341477281303b6de";
+
+    fn turn_request(json: serde_json::Value) -> WorkflowChatTurnRequest {
+        serde_json::from_value(json).unwrap()
+    }
+
+    /// The upstream body is server-built end to end: pinned workflow, always
+    /// a `conversation` object (persistence contract), never a `scopeId`.
+    #[test]
+    fn workflow_body_creates_a_conversation_with_the_pinned_workflow() {
+        let body = workflow_chat_body(&turn_request(serde_json::json!({
+            "prompt": "hi",
+            "commandId": "0d4b0a52-3d5f-4d2e-9f10-8f6f9b1c2d3e",
+        })))
+        .unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "commandId": "0d4b0a52-3d5f-4d2e-9f10-8f6f9b1c2d3e",
+                "conversation": { "conversationId": null },
+                "prompt": "hi",
+                "workflow": "studio",
+            })
+        );
+    }
+
+    #[test]
+    fn workflow_body_continues_with_the_observed_state_version() {
+        let body = workflow_chat_body(&turn_request(serde_json::json!({
+            "prompt": "and then?",
+            "conversationId": WORKFLOW_CONV,
+            "minimumStateVersion": 18,
+        })))
+        .unwrap();
+        assert_eq!(body["conversation"]["conversationId"], WORKFLOW_CONV);
+        assert_eq!(body["conversation"]["minimumStateVersion"], 18);
+        assert_eq!(body["workflow"], "studio");
+        // No client commandId: the server mints one (idempotency identity
+        // must always exist for create-replay recovery).
+        assert!(
+            body["commandId"].as_str().is_some_and(|id| !id.is_empty()),
+            "server must mint a commandId"
+        );
+    }
+
+    #[test]
+    fn workflow_body_rejects_out_of_contract_turns() {
+        // Empty / oversized prompt.
+        assert!(workflow_chat_body(&turn_request(serde_json::json!({ "prompt": "  " }))).is_err());
+        assert!(
+            workflow_chat_body(&turn_request(
+                serde_json::json!({ "prompt": "a".repeat(32_769) })
+            ))
+            .is_err()
+        );
+        // Continuation without the read fence (upstream would 503).
+        assert!(
+            workflow_chat_body(&turn_request(serde_json::json!({
+                "prompt": "hi", "conversationId": WORKFLOW_CONV,
+            })))
+            .is_err()
+        );
+        assert!(
+            workflow_chat_body(&turn_request(serde_json::json!({
+                "prompt": "hi", "conversationId": WORKFLOW_CONV, "minimumStateVersion": 0,
+            })))
+            .is_err()
+        );
+        // Fence without a conversation.
+        assert!(
+            workflow_chat_body(&turn_request(serde_json::json!({
+                "prompt": "hi", "minimumStateVersion": 3,
+            })))
+            .is_err()
+        );
+        // A nyxid-chat actor id is the other surface.
+        assert!(
+            workflow_chat_body(&turn_request(serde_json::json!({
+                "prompt": "hi", "conversationId": CONV, "minimumStateVersion": 3,
+            })))
+            .is_err()
+        );
+        // Path-escaping conversation ids and non-token command ids.
+        assert!(
+            workflow_chat_body(&turn_request(serde_json::json!({
+                "prompt": "hi", "conversationId": "chatc-a/b", "minimumStateVersion": 3,
+            })))
+            .is_err()
+        );
+        assert!(
+            workflow_chat_body(&turn_request(serde_json::json!({
+                "prompt": "hi", "commandId": "not a token!",
+            })))
+            .is_err()
+        );
+        // Unknown fields fail loudly instead of silently dropping.
+        assert!(
+            serde_json::from_value::<WorkflowChatTurnRequest>(serde_json::json!({
+                "prompt": "hi", "workflow": "direct",
+            }))
+            .is_err(),
+            "a caller-supplied workflow selection must be rejected"
+        );
+        assert!(
+            serde_json::from_value::<WorkflowChatTurnRequest>(serde_json::json!({
+                "prompt": "hi", "scopeId": "someone-else",
+            }))
+            .is_err()
+        );
     }
 
     #[test]
