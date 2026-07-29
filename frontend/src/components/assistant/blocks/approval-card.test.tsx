@@ -68,7 +68,7 @@ describe("ApprovalCard", () => {
     expect(screen.getByText("Nothing was sent.")).toBeInTheDocument();
   });
 
-  it("renders the structured scope row on a pending card", () => {
+  it("renders the purple pending treatment without a top highlight", () => {
     render(<ApprovalCard block={approval()} onDecide={vi.fn()} />);
     const card = screen
       .getByRole("heading", { name: "Approval required" })
@@ -76,8 +76,8 @@ describe("ApprovalCard", () => {
     expect(card).toHaveClass("border-border", "bg-card");
     expect(card?.className).not.toContain("warning");
     expect(card?.querySelector('[class*="warning"]')).toBeNull();
-    expect(card?.firstElementChild).toHaveClass("bg-info");
-    expect(screen.getByText("Pending")).toBeInTheDocument();
+    expect(card?.firstElementChild).toHaveClass("flex", "border-b");
+    expect(screen.getByText("Pending")).toHaveClass("text-nyx-secondary-400");
     expect(screen.getByText("Scope")).toBeInTheDocument();
     expect(screen.getByText("lark-bot")).toBeInTheDocument();
     expect(screen.getByText("nyxid_ag_...7f3d")).toBeInTheDocument();
@@ -85,7 +85,7 @@ describe("ApprovalCard", () => {
     expect(screen.getByText(/expires in 14 min/)).toBeInTheDocument();
   });
 
-  it("explains what a grant-mode approval allows", () => {
+  it("keeps grant approvals purple and explains the broader approval", () => {
     render(
       <ApprovalCard
         block={{
@@ -96,6 +96,15 @@ describe("ApprovalCard", () => {
         onDecide={vi.fn()}
       />,
     );
+    expect(screen.getByText("Pending")).toHaveClass(
+      "text-nyx-secondary-400",
+    );
+    expect(
+      screen
+        .getByRole("heading", { name: "Approval required" })
+        .closest("section")
+        ?.querySelector('[class*="warning"]'),
+    ).toBeNull();
     expect(screen.getByText("grant · 1 h")).toBeInTheDocument();
     expect(
       screen.getByText(/repeat lark-bot writes for the next 1 h/),
