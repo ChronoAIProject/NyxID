@@ -30,7 +30,7 @@ use crate::crypto::jwt::{
     MCP_DELEGATION_TOKEN_TTL_SECS, TokenRestrictionClaims, generate_delegated_access_token,
 };
 use crate::errors::{AppError, AppResult};
-use crate::handlers::proxy::execute_proxy;
+use crate::handlers::proxy::execute_admin_proxy;
 use crate::models::downstream_service::DownstreamService;
 use crate::mw::auth::{AuthMethod, AuthUser, PROXY_SCOPE, scope_allows_rest_proxy};
 use crate::services::assistant_service;
@@ -40,6 +40,10 @@ use crate::services::assistant_service;
 const MAX_CREATE_RESPONSE_BYTES: usize = 64 * 1024;
 /// The actor index is bare `{actorId}` rows (~60 bytes each).
 const MAX_INDEX_RESPONSE_BYTES: usize = 512 * 1024;
+/// The chat-history index carries titles and counts per row (~300 bytes
+/// each), and unlike the actor index it is buffered on the user-facing read
+/// path, so it gets its own headroom.
+const MAX_HISTORY_INDEX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 
 /// Server-initiated upstream request derived from a caller request (the
 /// materialization polls, the history half of the composite delete).
@@ -179,8 +183,14 @@ async fn forward(
     // Addressing the catalog service by id drives the DownstreamService
     // (admin/master-credential) resolution path. Never route by slug here:
     // the slug resolver would prefer a caller-owned `UserService`.
+    //
+    // `execute_admin_proxy` (not `execute_proxy`) because the caller never
+    // named this target: the platform did. Caller-owned routing state must
+    // not decide whether a platform surface works — see its doc comment for
+    // the three inputs it switches off and why the delegation token still
+    // carries the caller's restrictions.
     let mut resolved_slug = String::new();
-    execute_proxy(
+    execute_admin_proxy(
         state,
         auth_user,
         &service.id,
@@ -284,13 +294,43 @@ async fn wait_for_conversation_materialization(
 /// creation targets the `nyxid-chat` actor, while the list is the materialized
 /// history read model, so a freshly created conversation appears here only
 /// after its first completed turn.
+///
+/// That read model is shared with Aevatar's workflow chat, so the rows are
+/// filtered down to `nyxid-chat` actors before they reach the client — see
+/// `assistant_service::filter_chat_history_index`. A body that does not parse,
+/// or whose shape we do not recognise, streams through byte-for-byte: this
+/// route stays shape-agnostic like the transcript route, and a mixed list is
+/// a better failure than an empty one. A body past the buffer cap cannot be
+/// re-streamed once buffering has failed, so it surfaces as an internal error
+/// rather than a silently truncated list.
 pub async fn list_conversations(
     State(state): State<AppState>,
     auth_user: AuthUser,
     request: Request<Body>,
 ) -> AppResult<Response> {
     let path = assistant_service::history_index_path(&auth_user.user_id.to_string());
-    forward(&state, &auth_user, path, request).await
+    let response = forward(&state, &auth_user, path, request).await?;
+    if !response.status().is_success() {
+        return Ok(response);
+    }
+    let (mut parts, body) = response.into_parts();
+    let Ok(bytes) = to_bytes(body, MAX_HISTORY_INDEX_RESPONSE_BYTES).await else {
+        return Err(AppError::Internal(
+            "assistant: conversation index exceeded the buffer cap".to_string(),
+        ));
+    };
+    let Ok(mut index) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return Ok(Response::from_parts(parts, Body::from(bytes)));
+    };
+    if !assistant_service::filter_chat_history_index(&mut index) {
+        return Ok(Response::from_parts(parts, Body::from(bytes)));
+    }
+    let Ok(filtered) = serde_json::to_vec(&index) else {
+        return Ok(Response::from_parts(parts, Body::from(bytes)));
+    };
+    // The upstream length no longer describes the body we are sending.
+    parts.headers.remove(header::CONTENT_LENGTH);
+    Ok(Response::from_parts(parts, Body::from(filtered)))
 }
 
 /// `GET /api/v1/assistant/conversations/{id}` -- transcript.
@@ -476,7 +516,20 @@ pub async fn completions(
     .await
 }
 
-/// `POST /api/v1/assistant/workflow-chat` -- ad-hoc workflow chat SSE stream.
+/// Bounds the caller turn body: a 32k-char prompt is ≤128 KiB of UTF-8 plus
+/// JSON escaping headroom.
+const MAX_WORKFLOW_CHAT_REQUEST_BYTES: usize = 256 * 1024;
+
+/// `POST /api/v1/assistant/workflow-chat` -- workflow ("studio") chat turn,
+/// answered as the upstream SSE stream.
+///
+/// The caller body is the typed `WorkflowChatTurnRequest` (prompt +
+/// conversation continuation + idempotency id); the upstream `/api/chat`
+/// body is built server-side with the workflow pinned to `studio` and the
+/// `conversation` object always present, so every turn persists to chat
+/// history and no caller can select another engine or smuggle fields into
+/// Aevatar's strict `HttpChatInput`. Scope comes from the propagated
+/// identity token (Aevatar ignores any body scope).
 ///
 /// Streams Aevatar's raw workflow engine events (`aevatar.raw.observed`
 /// envelopes carrying workflow YAML, system prompts, and kernel state) to the
@@ -488,6 +541,25 @@ pub async fn workflow_chat(
     auth_user: AuthUser,
     request: Request<Body>,
 ) -> AppResult<Response> {
+    let (mut parts, body) = request.into_parts();
+    let bytes = to_bytes(body, MAX_WORKFLOW_CHAT_REQUEST_BYTES)
+        .await
+        .map_err(|_| {
+            AppError::BadRequest("Workflow chat request body is too large.".to_string())
+        })?;
+    let turn: assistant_service::WorkflowChatTurnRequest = serde_json::from_slice(&bytes)
+        .map_err(|e| AppError::BadRequest(format!("Invalid workflow chat request: {e}")))?;
+    let upstream = assistant_service::workflow_chat_body(&turn)?;
+    let payload = serde_json::to_vec(&upstream).map_err(|_| {
+        AppError::Internal("assistant: failed to encode the workflow chat body".to_string())
+    })?;
+    // The upstream length is the rebuilt body's, not the caller's.
+    parts.headers.remove(header::CONTENT_LENGTH);
+    parts.headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    let request = Request::from_parts(parts, Body::from(payload));
     forward(
         &state,
         &auth_user,
@@ -498,7 +570,7 @@ pub async fn workflow_chat(
 }
 
 /// `GET /api/v1/assistant/workflow-chat/ws` -- WebSocket twin of the workflow
-/// chat. `execute_proxy` detects the upgrade headers and bridges the socket;
+/// chat. The proxy detects the upgrade headers and bridges the socket;
 /// browser callers authenticate via the session cookie since WebSocket
 /// clients cannot set an `Authorization` header.
 pub async fn workflow_chat_ws(

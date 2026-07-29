@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { useAuthStore } from "./auth-store";
+import { useAssistantContextStore } from "./assistant-context-store";
+import { useAssistantDraftStore } from "./assistant-draft-store";
 import { ApiError } from "@/lib/api-client";
 
 vi.mock("@/lib/api-client", async () => {
@@ -31,6 +33,13 @@ async function getApiMock() {
 }
 
 beforeEach(() => {
+  localStorage.clear();
+  useAssistantContextStore.setState({
+    ownerUserId: null,
+    lastScreen: null,
+    bindings: {},
+  });
+  useAssistantDraftStore.setState({ ownerUserId: null, drafts: {} });
   useAuthStore.setState({
     user: null,
     isAuthenticated: false,
@@ -154,12 +163,22 @@ describe("logout", () => {
     apiMock.post.mockResolvedValueOnce(undefined);
 
     useAuthStore.setState({ isAuthenticated: true, mfaRequired: true });
+    useAssistantContextStore
+      .getState()
+      .bindConversation("u1", "/keys", "conversation-private");
+    useAssistantDraftStore
+      .getState()
+      .saveDraft("u1", "conv:conversation-private", "Private draft");
     await useAuthStore.getState().logout();
 
     const state = useAuthStore.getState();
     expect(state.user).toBeNull();
     expect(state.isAuthenticated).toBe(false);
     expect(state.mfaRequired).toBe(false);
+    expect(useAssistantContextStore.getState().bindings).toEqual({});
+    expect(useAssistantDraftStore.getState().drafts).toEqual({});
+    expect(localStorage.getItem("nyxid.assistant_context")).toBeNull();
+    expect(localStorage.getItem("nyxid.assistant_drafts")).toBeNull();
   });
 
   it("clears state even if API call fails", async () => {

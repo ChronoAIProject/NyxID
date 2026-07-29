@@ -412,6 +412,104 @@ pub async fn resolve_service_by_slug(
         .ok_or_else(|| AppError::NotFound("Service not found".to_string()))
 }
 
+/// Resolve a platform-owned downstream service with NO caller state.
+///
+/// This backs surfaces where the target is chosen by the server, not named
+/// by the caller (today: the assistant chat pass-through). The caller cannot
+/// address anything else, so every per-user input that the caller-addressed
+/// path consults is deliberately skipped:
+///
+/// - **no `UserServiceConnection` lookup** -- a user who once connected the
+///   same catalog service personally and then disconnected it would otherwise
+///   get `You have disconnected from this service` on a platform surface they
+///   never connected;
+/// - **no gateway-URL override** -- that is a per-user provider concept
+///   (`UserProviderToken.gateway_url`), and a service whose base URL only
+///   exists per user cannot back a platform surface;
+/// - **no per-user credential** -- guarded below: a `requires_user_credential`
+///   service is a provisioning error here, not a caller error.
+///
+/// The credential is the service row's master credential, exactly as the
+/// caller-addressed path resolves it for `service_category = "internal"`.
+pub async fn resolve_admin_proxy_target(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    service_id: &str,
+) -> AppResult<ProxyTarget> {
+    let service = db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find_one(doc! { "_id": service_id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Downstream service not found".to_string()))?;
+
+    // A misconfigured platform row is a server fault, not a caller error:
+    // the caller had no say in which service this is.
+    if !service.is_active {
+        return Err(AppError::Internal(format!(
+            "platform service '{}' is inactive",
+            service.slug
+        )));
+    }
+    if service.service_type != "http" {
+        return Err(AppError::Internal(format!(
+            "platform service '{}' is not an HTTP service",
+            service.slug
+        )));
+    }
+    if service.service_category == "provider" {
+        return Err(AppError::Internal(format!(
+            "platform service '{}' is a provider and cannot be proxied",
+            service.slug
+        )));
+    }
+    if service.requires_user_credential {
+        return Err(AppError::Internal(format!(
+            "platform service '{}' requires a user credential and cannot back a platform surface",
+            service.slug
+        )));
+    }
+
+    let catalog_default_headers = service.default_request_headers.clone().unwrap_or_default();
+    let ws_frame_injections = service.ws_frame_injections.clone();
+
+    if service.auth_method == "none" {
+        return Ok(ProxyTarget {
+            base_url: service.base_url.clone(),
+            auth_method: service.auth_method.clone(),
+            auth_key_name: service.auth_key_name.clone(),
+            credential: String::new(),
+            service,
+            catalog_default_headers,
+            user_service_default_headers: Vec::new(),
+            ws_frame_injections,
+            connection_id: None,
+        });
+    }
+
+    // SEC-M3: raw decrypted bytes stay wrapped so they zero on drop.
+    let decrypted_bytes = Zeroizing::new(
+        encryption_keys
+            .decrypt(&service.credential_encrypted)
+            .await?,
+    );
+    let credential = String::from_utf8((*decrypted_bytes).clone()).map_err(|e| {
+        tracing::error!("Credential UTF-8 decode failed: {e}");
+        AppError::Internal("Failed to decode credential".to_string())
+    })?;
+
+    Ok(ProxyTarget {
+        base_url: service.base_url.clone(),
+        auth_method: service.auth_method.clone(),
+        auth_key_name: service.auth_key_name.clone(),
+        credential,
+        service,
+        catalog_default_headers,
+        user_service_default_headers: Vec::new(),
+        ws_frame_injections,
+        connection_id: None,
+    })
+}
+
 /// Resolve the downstream service and credential for a proxy request.
 ///
 /// Enforces that the user has an active connection. For "connection" services,
