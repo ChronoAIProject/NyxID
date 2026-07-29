@@ -77,6 +77,7 @@ export function ServiceEditPage() {
       identity_jwt_audience: "",
       forward_access_token: false,
       inject_delegation_token: false,
+      platform_billable: false,
       delegation_token_scope: "",
       homepage_url: "",
       repository_url: "",
@@ -124,6 +125,7 @@ export function ServiceEditPage() {
         identity_jwt_audience: service.identity_jwt_audience ?? "",
         forward_access_token: service.forward_access_token ?? false,
         inject_delegation_token: service.inject_delegation_token ?? false,
+        platform_billable: service.billing?.platform_billable ?? false,
         delegation_token_scope: service.delegation_token_scope || "llm:proxy",
         homepage_url: service.homepage_url ?? "",
         repository_url: service.repository_url ?? "",
@@ -247,6 +249,12 @@ export function ServiceEditPage() {
                   supports_authoring_via_nyx: data.supports_authoring_via_nyx ?? false,
                   supports_websocket: data.supports_websocket ?? false,
                   supports_streaming: data.supports_streaming ?? false,
+                },
+                // Preserve resale config; the toggle only controls the
+                // platform-layer opt-in.
+                billing: {
+                  ...(service?.billing ?? {}),
+                  platform_billable: data.platform_billable ?? false,
                 },
                 ws_frame_injections: data.ws_frame_injections ?? [],
                 ...(defaultRequestHeadersPayload !== undefined
@@ -918,6 +926,36 @@ export function ServiceEditPage() {
                           }
                           onCheckedChange={(v) =>
                             form.setValue("forward_access_token", v)
+                          }
+                        />
+                      </div>
+                    </div>
+
+                    <Separator className="my-2" />
+                    <div className="space-y-4">
+                      <div className="space-y-1">
+                        <h3 className="text-[13px] font-semibold">Billing</h3>
+                        <p className="text-xs text-muted-foreground">
+                          Services are free by default: usage is metered for
+                          observability but never charged. Enable platform
+                          billing to reserve and charge wallet credits for
+                          requests to this service at the plan&apos;s
+                          platform rates.
+                        </p>
+                      </div>
+
+                      <div className="flex items-center justify-between rounded-lg border border-border p-3">
+                        <Label
+                          htmlFor="platform-billable"
+                          className="text-[12px] font-normal"
+                        >
+                          Charge wallet credits (platform billing)
+                        </Label>
+                        <Switch
+                          id="platform-billable"
+                          checked={form.watch("platform_billable") ?? false}
+                          onCheckedChange={(v) =>
+                            form.setValue("platform_billable", v)
                           }
                         />
                       </div>

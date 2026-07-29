@@ -1,11 +1,13 @@
 ---
 name: aevatar-workflow-authoring
 description: Author, validate, and persist an executable aevatar workflow from a natural-language request — use it when the user wants to create, build, set up, or automate a multi-step task as a runnable aevatar workflow (make a workflow that…, automate…, build a pipeline…, set up a recurring…). It generates workflow YAML, dispatch-validates it, then saves it as a reusable workflow that can be re-run and watched in the observatory. Not for running an existing workflow — search for that and start it instead.
-version: "1.5"
+version: "2.1"
 metadata:
   category: tool-based
   tool-list:
     - nyxid_services
+    - list_external_workflow_capabilities
+    - inspect_external_workflow_capability_readiness
     - aevatar_start_workflow
     - ornn_publish_skill
   tag:
@@ -31,7 +33,7 @@ Everything you need is in this document — the DSL, the engine rules, the tools
 
 1. **Confirm the intent is authoring.** The user wants a *new* runnable workflow. If they want to run something that already exists, stop and search for it instead.
 2. **Clarify just enough.** Pin down: the trigger/input, the ordered steps, the desired output, and which external services (if any) are involved. Ask only what you cannot reasonably infer; do not over-interrogate.
-3. **Inventory connectors (only if external calls are needed).** Call `nyxid_services` with `{"action":"list"}` to see what the user actually has connected. If a step needs a connector the user does not have, say so plainly and stop or degrade — never author a step against a connector that does not exist.
+3. **Discover the exact external operation (only if external calls are needed).** Call `list_external_workflow_capabilities` with `{}` (or `max_results`) and copy one descriptor's exact `selector`. Then call `inspect_external_workflow_capability_readiness` with that `selector` plus `execution_mode: "interactive"` for a current user run or `"durable"` for a scheduled/background run. If readiness is blocked, report its typed blocker; never reconstruct a selector from a display slug or author a route that was not listed.
 4. **Author the YAML.** Apply the DSL below and obey every rule in **Engine rules (must obey)**. Prefer the reliable-core primitives; use advanced primitives only when the task truly needs them.
 5. **Validate by dispatching one test run — fire-and-observe, do NOT wait for completion.** Call `aevatar_start_workflow` **once** with the draft inline (`workflow_yamls`). It returns in a second or two with a `run_id` and a status like `accepted`/`streaming` — **that return is your structural pass** (the YAML parsed and dispatched). If instead it returns a parse/validation/4xx error, fix the YAML and retry (cap **2**). **Never poll or wait for `run_finished`, and never re-invoke `aevatar_start_workflow` to "check status"** — the run continues asynchronously and is watchable in the observatory; looping on it stalls the turn.
 6. **Persist as a reusable workflow.** Once the draft dispatches without a parse error, call `ornn_publish_skill` with the final workflow in `workflow_yamls` (see **Persisting**). This creates a private skill in the user's account containing the workflow.
@@ -116,9 +118,13 @@ steps:
 ```yaml
 - id: fetch
   type: tool_call
+  capability:
+    nyxid_operation:
+      user_service_id: <copied-user-service-id>
+      operation_id: <listed-operation-id>
   parameters:
     tool: nyxid_proxy
-    arguments: '{"slug":"my-http-service","path":"/v1/items","method":"GET"}'
+    arguments: '{"query":{}}'
 ```
 
 `code_execute` — run deterministic Python/JavaScript/TypeScript/Bash in the sandbox.
@@ -279,22 +285,52 @@ Advanced notes: `human_approval`/`wait_signal` suspend the run until a resume/si
 > - **`transform op: split` joins all parts with `\n---\n` and ignores any `index`** — it is for fan-out, not single-element extraction. To use one segment of `a/b` (e.g. an `owner/repo` in a path), pass the whole string where the `/` is already correct rather than splitting it apart.
 > - **`conditional.condition`** is interpolated first; if the result is not literally `true`/`false`, the engine does a substring `$input.Contains(condition)`. Since there is no `contains` function, build "any/all contain token" checks around this: `concat` the inputs into one string in the prior step, then set `condition` to the literal token.
 > - **`parallel` (and `race`) feed every branch the *same* `$input`** and each sub-step is always an `llm_call`. For *different* input per branch — the "N different sources" shape — split a list with `foreach` / `map_reduce` instead. All four merge sub-step outputs with `\n---\n`. `map_reduce`'s map sub-steps receive **no** per-step parameters (drive them via the map role's `system_prompt`); only `foreach` passes `sub_param_*` to each child, so per-item `tool_call` fetches must use `foreach`.
+> - **`switch.on` that resolves to empty silently takes the WRONG branch.** `switch` evaluates `on` first; if it resolves to empty — e.g. `${steps.read.json.off_count}` when that field is absent, which is exactly what happens when the prior tool returned an *error envelope* (`{"error":true,"status":503,...}`) instead of the expected object — `switch` **falls back to matching the step's whole `$input`**, and matching is exact → **substring-contains** → `_default`. So a 503 error body substring-matches a branch key `"0"` (via `"503"`/`"8001"`) and quietly routes as if the value were `0`. **Always make `on` a clean, never-empty token:** `on: "${eq(steps.read.json.off_count, '0')}"` with branches `"true"` / `"false"` / `_default`. Never branch on a raw count/field that can go missing.
+> - **A side-effecting workflow MUST read back and assert the real end state — a step "success" does NOT mean the side effect happened.** Because a failed tool call returns its error as ordinary step output (above), an action step like `turn_on` / `post` / `create` completes "successfully" even when nothing changed (e.g. the downstream returned 503). Pattern: after the action, add a `tool_call` that **reads the real state** (have the upstream API compute a scalar you can branch on — e.g. an HA `/template` returning `{"off_count":N}`), `switch` on `${eq(<count>,'0')}`; on the not-yet-satisfied branch `delay` + re-read for a bounded retry, and on final failure route to a `guard` with `on_fail: fail` so the **run actually fails** (red in the observatory) instead of a green run that did nothing. Do not trust `${steps.<action>.success}`.
 
 ---
 
 ## Accessing external services
 
-There are two distinct mechanisms. Pick the one that matches what the user actually has connected — they are separate subsystems.
+There are three NyxID invocation modes plus a separate host-connector subsystem. Do not mix their fields.
 
-- **nyxid-brokered services (the common case in this scenario).** A user connecting through nyxid has services exposed as nyxid connectors. Call them with a `tool_call` on the `nyxid_proxy` tool, passing a JSON string in `arguments`:
-  ```yaml
-  - id: call_api
-    type: tool_call
-    parameters:
-      tool: "nyxid_proxy"
-      arguments: '{"slug":"<service-slug>","path":"/v1/resource","method":"POST","body":{"k":"v"}}'
+- **Raw current-turn `nyxid_proxy`.** First select an exact UserService instance. The call requires `service_id + slug + path`; method defaults to GET. Optional fields are `body`, non-sensitive `headers`, and `response_mode`:
+  ```json
+  {
+    "service_id": "<selected-user-service-id>",
+    "slug": "<service-slug>",
+    "path": "/v1/resource",
+    "method": "POST",
+    "body": {"k": "v"}
+  }
   ```
-  Read fields back with `${steps.call_api.json.<field>}`. Discover available slugs first with `nyxid_services` `{"action":"list"}`; if the needed slug is absent, tell the user and stop or degrade. Note: `connector_call` does **not** reach nyxid services — it only resolves connectors registered in the workflow connector registry, a different subsystem.
+  This is a direct current-turn tool call, not workflow YAML.
+- **Interactive connected-service operation.** Use the request-local `nyxid_service_operation__*` tool name emitted in the current tool catalog. Supply the enumerated `user_service_id` plus only fields present in that operation's dynamic schema. Never derive the tool name from a slug or reuse a tool name from another request.
+- **Compiled workflow operation.** Call `list_external_workflow_capabilities`, copy the exact descriptor `selector`, inspect it for the required execution mode, and persist it beside the step as `capability.nyxid_operation`:
+  ```json
+  {
+    "selector": {
+      "nyx_id_operation": {
+        "user_service_id": "us-lark-7",
+        "operation_id": "get-message"
+      }
+    },
+    "execution_mode": "interactive"
+  }
+  ```
+  Pass that whole object to `inspect_external_workflow_capability_readiness`; `nyx_id_operation` is required and must not be flattened.
+  ```yaml
+  - id: fetch_message
+    type: tool_call
+    capability:
+      nyxid_operation:
+        user_service_id: us-lark-7
+        operation_id: get-message
+    parameters:
+      tool: nyxid_proxy
+      arguments: '{"path_params":{"message_id":"m-42"}}'
+  ```
+  The compiler's admission proof owns UserService identity, slug, operation ID, method, path template, digest, schemas, and response policy. Runtime `arguments` may contain only admitted `path_params`, `query`, `headers`, `body`, and `response_mode`. Do not send `service_id`, `user_service_id`, `slug`, `path`, `method`, `operation_id`, or a contract digest in `arguments`.
 - **Registered workflow connectors.** If the capability is a connector registered in the workflow connector registry, call it with `connector_call` and authorize it on the role:
   ```yaml
   roles:
@@ -366,9 +402,7 @@ source.)
 # auto-refreshes your token. A raw curl with ~/.nyxid/access_token resolves NO scope
 # (scopeResolved:false) and the stored token expires — it is not a usable path.
 # Prerequisite once: the `aevatar` service must be connected — `nyxid service add aevatar`.
-# NOTE: the aevatar backend requires `Content-Type: application/json` on writes (POST/PUT,
-# including the `draft-run` validation call below) — omit it and you get HTTP 415 Unsupported
-# Media Type. The helper sets it on every call (harmless on bodyless GETs).
+# NyxID treats `-d` as raw bytes, so declare JSON explicitly; Aevatar rejects writes without it.
 aev() { nyxid proxy request aevatar "$@" -H 'Content-Type: application/json'; }   # aev "<path>" [-m POST|PUT|DELETE] [-d '<json>'] [--stream]
 NYX=$(tr -d '\n' < ~/.nyxid/base_url)               # e.g. https://nyx.chrono-ai.fun
 scopeId=$(aev "api/studio/context" | jq -r .scopeId)
@@ -497,9 +531,13 @@ roles:
 steps:
   - id: fetch
     type: tool_call
+    capability:
+      nyxid_operation:
+        user_service_id: <copied-user-service-id>
+        operation_id: <listed-operation-id>
     parameters:
       tool: nyxid_proxy
-      arguments: '{"slug":"<service-slug>","path":"/v1/items","method":"GET"}'
+      arguments: '{"query":{}}'
     next: classify
   - id: classify
     type: llm_call
@@ -742,6 +780,6 @@ One `map_reduce` step is n8n's "N source branches → merge node": the map phase
 - [ ] Any date/time the logic needs is injected via input, not assumed.
 - [ ] No hardcoded `model:` unless the user demanded one.
 - [ ] Arithmetic / totals / dedup use `transform`, not `llm_call`.
-- [ ] Every external call uses an existing connector (verified via `nyxid_services`) through `nyxid_proxy` or a typed tool.
+- [ ] Every workflow external call copied an exact listed selector, passed readiness for its execution mode, and puts only runtime operation values in `nyxid_proxy.arguments`; raw current-turn proxy calls use exact `service_id + slug + path`.
 - [ ] One `aevatar_start_workflow` dispatch returned a `run_id` with no parse error — you did **not** wait for/poll `run_finished` (the run finishes async; report the `run_id` + observatory).
 - [ ] Any parallel fan-out uses the right primitive: same input → `parallel` / `race`; a list of different items → `foreach` (concatenate) or `map_reduce` (synthesize). Per-item `tool_call` fetches use `foreach`, not `map_reduce`.

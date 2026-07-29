@@ -4,6 +4,7 @@
 // catalog entries with no matching connection as "Available to add".
 
 import type { CatalogEntry, KeyInfo } from "@/types/keys";
+import type { ConnectCardContentBlock } from "@/types/assistant";
 
 export type PluginKind = "connector" | "skill";
 
@@ -19,8 +20,12 @@ export interface ConnectorCardItem {
   /** Footer meta shown for not-yet-added items (e.g. "api key", "oauth"). */
   readonly meta: string;
   readonly added: boolean;
-  /** Added items only: UserService id for the `/keys/$keyId` manage page. */
-  readonly manageKeyId?: string;
+  /**
+   * Added items only: every UserService id behind this card. A service with
+   * several credentials keeps them all here so the manage modal can show them
+   * together rather than handing the user off to the Studio keys list.
+   */
+  readonly manageKeyIds?: readonly string[];
   /** Available items only: catalog slug for the `/keys?slug=` connect deep link. */
   readonly connectSlug?: string;
 }
@@ -61,6 +66,28 @@ function categoryOf(serviceType: string): string {
   return serviceType === "ssh" ? "Connector · SSH" : "Connector";
 }
 
+/**
+ * Which connect modality a catalog entry actually drives.
+ *
+ * The assistant's `connect_card` block carries an `auth_kind`, but it is
+ * display data only — the live authorization frame doesn't know the modality,
+ * so the transport fills in `"api_key"` as a placeholder. The card must
+ * resolve the real one from the catalog before choosing an affordance, or an
+ * OAuth service gets offered a paste-your-key button.
+ *
+ * Same detection as `catalogMeta` above, narrowed to the three modalities the
+ * card renders. Anything that isn't OAuth or device code is handled by the
+ * credential form, so it maps to `api_key`.
+ */
+export function catalogAuthKind(
+  entry: CatalogEntry,
+): ConnectCardContentBlock["auth_kind"] {
+  const providerType = (entry.provider_type ?? "").toLowerCase();
+  if (providerType === "oauth2") return "oauth";
+  if (providerType === "device_code") return "device_code";
+  return "api_key";
+}
+
 /** One card per connected SERVICE: a service with several credentials still
  *  renders once (no duplicates), with the connection count as its meta. */
 function addedServiceItem(
@@ -86,7 +113,7 @@ function addedServiceItem(
         ? `${String(group.length)} connections`
         : first.credential_type.replaceAll("_", " "),
     added: true,
-    manageKeyId: group.length === 1 ? first.id : undefined,
+    manageKeyIds: group.map((key) => key.id),
   };
 }
 
@@ -102,7 +129,7 @@ function addedCustomItem(key: KeyInfo): ConnectorCardItem {
       `Connected through the NyxID proxy (${key.endpoint_url}).`,
     meta: key.credential_type.replaceAll("_", " "),
     added: true,
-    manageKeyId: key.id,
+    manageKeyIds: [key.id],
   };
 }
 

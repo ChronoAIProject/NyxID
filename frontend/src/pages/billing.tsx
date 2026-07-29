@@ -366,12 +366,18 @@ function UsageSummary({
                     <TableCell>{labelize(row.metric)}</TableCell>
                     <TableCell className="text-right">{formatNumber(row.quantity)}</TableCell>
                     <TableCell className="text-right">
-                      {formatEstimatedCredits(row.estimated_credits_micros)}
+                      {row.billable === false
+                        ? "—"
+                        : formatEstimatedCredits(row.estimated_credits_micros)}
                     </TableCell>
                     <TableCell>
-                      <Badge variant={row.lago_acked ? "success" : "secondary"}>
-                        {row.lago_acked ? "Acked" : "Pending"}
-                      </Badge>
+                      {row.billable === false ? (
+                        <Badge variant="secondary">Free</Badge>
+                      ) : (
+                        <Badge variant={row.lago_acked ? "success" : "secondary"}>
+                          {row.lago_acked ? "Acked" : "Pending"}
+                        </Badge>
+                      )}
                     </TableCell>
                   </TableRow>
                 ))

@@ -579,10 +579,10 @@ fn is_scoped_api_key(auth: &McpAuthContext) -> bool {
 /// Names of tools that SSH-gate on agent scope.
 const SSH_META_TOOL_NAMES: &[&str] = &["nyx__ssh_exec", "nyx__ssh_list_services"];
 
-/// Drop user-managed services the API key is not scoped to, and reject all
-/// platform services (scoped API keys are UserService-only, matching the REST
-/// proxy check in `execute_proxy_inner`). OAuth/session callers keep every
-/// service since `allow_all_services` is `true` in `McpAuthContext::user`.
+/// Drop user-managed services the caller is not scoped to, and reject all
+/// platform services. Scoped API keys and relay tokens are UserService-only,
+/// matching the REST proxy check in `execute_proxy_inner`; unrestricted
+/// OAuth/session callers keep every service.
 fn filter_services_by_scope(
     services: Vec<mcp_service::McpToolService>,
     auth: &McpAuthContext,
@@ -1166,6 +1166,9 @@ async fn handle_tools_call(
         "nyx__discover_services" => {
             return handle_meta_discover(state, &auth.user_id, &arguments, request.id.clone())
                 .await;
+        }
+        "nyx__list_connected_services" => {
+            return handle_meta_list_connected(state, auth, &arguments, request.id.clone()).await;
         }
         "nyx__connect_service" => {
             return handle_meta_connect(
@@ -1759,27 +1762,13 @@ async fn handle_meta_search(
         return tool_result(request_id, "Search query too long (max 200 chars)", true);
     }
 
-    // Load ALL user tools including non-executable (for discovery).
-    // Scope-aware so scoped keys don't see tools whose only dispatchable
-    // routes are outside their node allow-list (twentieth-round Codex
-    // P2).
-    let services = match mcp_service::load_user_tools_all_scoped(
-        &state.db,
-        state.node_ws_manager.as_ref(),
-        &auth.user_id,
-        mcp_node_scope(auth),
-    )
-    .await
-    {
+    let services = match load_all_services_for_meta_tools(state, auth).await {
         Ok(s) => s,
         Err(e) => {
             tracing::error!("Failed to load tools for search: {e}");
             return tool_result(request_id, "Failed to load tools", true);
         }
     };
-
-    // Scoped API keys only see services in their allow-list.
-    let services = filter_services_by_scope(services, auth);
 
     // Search across ALL tools (does NOT activate services -- use nyx__call_tool
     // to invoke discovered tools, which auto-activates on first call)
@@ -1805,6 +1794,46 @@ async fn handle_meta_search(
     });
 
     let text = serde_json::to_string_pretty(&response_json).unwrap_or_default();
+    tool_result(request_id, &text, false)
+}
+
+/// Load connected services through the same node- and service-scoped chain
+/// used by MCP metadata tools.
+async fn load_all_services_for_meta_tools(
+    state: &AppState,
+    auth: &McpAuthContext,
+) -> crate::errors::AppResult<Vec<mcp_service::McpToolService>> {
+    let services = mcp_service::load_user_tools_all_scoped(
+        &state.db,
+        state.node_ws_manager.as_ref(),
+        &auth.user_id,
+        mcp_node_scope(auth),
+    )
+    .await?;
+    Ok(filter_services_by_scope(services, auth))
+}
+
+async fn handle_meta_list_connected(
+    state: &AppState,
+    auth: &McpAuthContext,
+    arguments: &serde_json::Value,
+    request_id: Option<serde_json::Value>,
+) -> Response {
+    let query = arguments.get("query").and_then(|query| query.as_str());
+    if query.is_some_and(|query| query.len() > 200) {
+        return tool_result(request_id, "Search query too long (max 200 chars)", true);
+    }
+
+    let services = match load_all_services_for_meta_tools(state, auth).await {
+        Ok(services) => services,
+        Err(error) => {
+            tracing::error!("Failed to load connected services: {error}");
+            return tool_result(request_id, "Failed to load connected services", true);
+        }
+    };
+
+    let result = mcp_service::list_connected_services(&services, query);
+    let text = serde_json::to_string_pretty(&result).unwrap_or_default();
     tool_result(request_id, &text, false)
 }
 
@@ -2835,6 +2864,7 @@ mod tests {
                 node_id: None,
                 has_server_credential: true,
             },
+            executable: true,
             is_generic_proxy: false,
         }
     }
@@ -2850,6 +2880,7 @@ mod tests {
             source: McpToolSource::Platform {
                 downstream_service_id: id.into(),
             },
+            executable: true,
             is_generic_proxy: false,
         }
     }
@@ -2861,6 +2892,38 @@ mod tests {
         let filtered = filter_services_by_scope(services, &auth);
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].service_id, "svc-a");
+    }
+
+    #[test]
+    fn connected_services_listing_respects_api_key_allow_list() {
+        let auth = api_key_auth(vec!["svc-a".into()]);
+        let services = vec![
+            user_managed("svc-a"),
+            user_managed("svc-b"),
+            platform("svc-c"),
+        ];
+
+        let visible = filter_services_by_scope(services, &auth);
+        let result = mcp_service::list_connected_services(&visible, None);
+        let services = result["services"].as_array().expect("services array");
+
+        assert_eq!(result["count"], 1);
+        assert_eq!(services[0]["service_id"], "svc-a");
+    }
+
+    #[test]
+    fn connected_services_listing_respects_relay_allow_list() {
+        let mut auth = McpAuthContext::user("user-1".into(), AuthMethod::Relay);
+        auth.allow_all_services = false;
+        auth.allowed_service_ids = vec!["svc-b".into()];
+        let services = vec![user_managed("svc-a"), user_managed("svc-b")];
+
+        let visible = filter_services_by_scope(services, &auth);
+        let result = mcp_service::list_connected_services(&visible, None);
+        let services = result["services"].as_array().expect("services array");
+
+        assert_eq!(result["count"], 1);
+        assert_eq!(services[0]["service_id"], "svc-b");
     }
 
     #[test]
@@ -3533,6 +3596,7 @@ mod tests {
         assert!(SSH_META_TOOL_NAMES.contains(&"nyx__ssh_exec"));
         assert!(SSH_META_TOOL_NAMES.contains(&"nyx__ssh_list_services"));
         assert!(!SSH_META_TOOL_NAMES.contains(&"nyx__call_tool"));
+        assert!(!SSH_META_TOOL_NAMES.contains(&"nyx__list_connected_services"));
     }
 
     // -----------------------------------------------------------------------

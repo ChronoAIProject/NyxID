@@ -1,14 +1,14 @@
 {
   "name": "nyxid",
-  "description": "NyxID skills marketplace — credential broker so agents call downstream APIs (OpenAI, Anthropic, GitHub, Lark, custom APIs, SSH, MCP) without ever seeing raw keys or tokens.",
+  "description": "NyxID skills marketplace — credential brokering plus the synchronized Aevatar platform skill family.",
   "owner": {
     "name": "ChronoAIProject"
   },
   "plugins": [
     {
       "name": "nyxid",
-      "description": "Brokers credentials for downstream services through the nyxid CLI so the agent never sees raw API keys or OAuth tokens. Use to connect/add a service, set up an API key, proxy requests, or manage credentials, nodes, MCP, channels and SSH.",
-      "version": "0.6.0",
+      "description": "Brokers downstream credentials through the nyxid CLI and bundles synchronized Aevatar platform skills for workflows, teams, services, schedules, channels, and managed Codex.",
+      "version": "0.7.0",
       "source": "./",
       "author": {
         "name": "ChronoAIProject"

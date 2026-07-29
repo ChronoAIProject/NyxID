@@ -8,8 +8,17 @@ export interface DataTableSearchGroup<Key extends string> {
   readonly values: readonly string[];
 }
 
-export type DataTableFilterValueType = "enum" | "boolean" | "date";
-export type DataTableFilterOperator = "is" | "includes" | "between";
+/**
+ * `text` is a free-text-only filter: the column it targets is too
+ * high-cardinality to enumerate as checkboxes (UUIDs, IPs, User-Agent strings),
+ * so it carries no options and is matched server-side as a `contains`.
+ */
+export type DataTableFilterValueType = "enum" | "boolean" | "date" | "text";
+export type DataTableFilterOperator =
+  | "is"
+  | "includes"
+  | "between"
+  | "contains";
 
 export interface DataTableFilterOption {
   readonly value: string;

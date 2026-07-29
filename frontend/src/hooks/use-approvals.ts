@@ -112,11 +112,15 @@ export function useRemoveDevice() {
 
 // --- Approval Requests ---
 
+// No `refetchInterval` here by design: approval liveness is moving to a
+// server-pushed SSE stream, so nothing in the app polls this endpoint.
+// Cross-surface decisions (Telegram, mobile, another tab) land on the next
+// window focus / mount until that stream ships. Local decisions still
+// refresh immediately — `useDecideApproval` invalidates this key.
 export function useApprovalRequests(
   page: number = 1,
   perPage: number = 20,
   status?: string,
-  options?: { readonly refetchIntervalMs?: number },
 ) {
   return useQuery({
     queryKey: ["approvals", "requests", page, perPage, status],
@@ -130,10 +134,6 @@ export function useApprovalRequests(
         `/approvals/requests?${params.toString()}`,
       );
     },
-    // Polling only fires while the tab is focused (TanStack default); used
-    // by the assistant surfaces so decisions made elsewhere (Telegram,
-    // mobile, another tab) show up without a manual refresh.
-    refetchInterval: options?.refetchIntervalMs,
   });
 }
 

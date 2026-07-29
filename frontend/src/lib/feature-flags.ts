@@ -17,6 +17,7 @@
  */
 export const FEATURE_FLAG = {
   AI_ASSISTANT: "experimental:ai-assistant",
+  BILLING: "experimental:billing",
 } as const;
 
 type FeatureFlagKey = (typeof FEATURE_FLAG)[keyof typeof FEATURE_FLAG];

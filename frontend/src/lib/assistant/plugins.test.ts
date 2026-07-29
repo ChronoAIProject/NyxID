@@ -54,7 +54,7 @@ describe("deriveConnectorItems", () => {
       [makeEntry({})],
     );
     expect(added).toHaveLength(1);
-    expect(added[0]?.manageKeyId).toBe("key-1");
+    expect(added[0]?.manageKeyIds).toEqual(["key-1"]);
     expect(available).toHaveLength(1);
   });
 
@@ -68,15 +68,16 @@ describe("deriveConnectorItems", () => {
     );
     expect(added).toHaveLength(1);
     expect(added[0]?.meta).toBe("2 connections");
-    // Multi-connection cards manage from the keys list, not one key detail.
-    expect(added[0]?.manageKeyId).toBeUndefined();
+    // Every credential rides on the one card, so the manage modal can show
+    // them together instead of handing off to the keys list.
+    expect(added[0]?.manageKeyIds).toEqual(["key-1", "key-8"]);
     expect(added[0]?.iconSlug).toBe("openai");
     expect(available).toHaveLength(0);
   });
 
-  it("keeps single-connection manage links pointing at the key detail", () => {
+  it("carries the single connection's key id on its card", () => {
     const { added } = deriveConnectorItems([makeKey({})], [makeEntry({})]);
-    expect(added[0]?.manageKeyId).toBe("key-1");
+    expect(added[0]?.manageKeyIds).toEqual(["key-1"]);
     expect(added[0]?.iconSlug).toBe("openai");
   });
 

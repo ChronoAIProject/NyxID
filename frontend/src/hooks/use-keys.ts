@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import type {
@@ -31,6 +32,63 @@ export function useKey(keyId: string) {
     },
     enabled: Boolean(keyId),
   });
+}
+
+/** Terminal states of a placeholder key created for an out-of-band flow. */
+export const KEY_AUTH_ACTIVE = "active";
+export const KEY_AUTH_FAILED = "failed";
+
+/**
+ * Poll one key while an out-of-band authorization finishes elsewhere.
+ *
+ * OAuth hands the user to the provider in a separate tab, so nothing in this
+ * tab observes the callback. Polling the placeholder key is how we learn the
+ * flow ended: `pending_auth` → `active` on success, `failed` when the user
+ * denies or abandons it (the backend's lazy placeholder reconciliation
+ * converges abandoned flows to `failed`).
+ *
+ * Shares `["keys", keyId]` with `useKey` so a completed flow warms the same
+ * cache entry. Polls only while `enabled` — never leave this running behind a
+ * closed dialog or a card that already resolved.
+ */
+export function useKeyAuthorizationStatus(
+  keyId: string | null,
+  enabled: boolean,
+) {
+  const queryClient = useQueryClient();
+  const active = Boolean(keyId) && enabled;
+  const query = useQuery({
+    queryKey: ["keys", keyId],
+    queryFn: async (): Promise<KeyInfo> => {
+      return api.get<KeyInfo>(`/keys/${keyId ?? ""}`);
+    },
+    enabled: active,
+    // 2 s while waiting on a human in another tab; refetch the moment they
+    // come back so the card flips without waiting out the interval. Stops
+    // dead once the row is terminal — a caller that leaves its dialog open
+    // must not keep hitting `/keys/:id` forever.
+    refetchInterval: (current) => {
+      const status = current.state.data?.status;
+      if (status === KEY_AUTH_ACTIVE || status === KEY_AUTH_FAILED) {
+        return false;
+      }
+      return active ? 2_000 : false;
+    },
+    refetchOnWindowFocus: active,
+  });
+
+  // This query watches ONE key; the assistant's connect card reads the
+  // `["keys"]` list. Without this the dialog can say Connected while the
+  // transcript card is still Authorizing, because nothing refreshes the list
+  // the card renders from. `exact` keeps it off this query's own key.
+  const status = query.data?.status;
+  useEffect(() => {
+    if (status === KEY_AUTH_ACTIVE || status === KEY_AUTH_FAILED) {
+      void queryClient.invalidateQueries({ queryKey: ["keys"], exact: true });
+    }
+  }, [status, queryClient]);
+
+  return query;
 }
 
 interface UseCatalogOptions {

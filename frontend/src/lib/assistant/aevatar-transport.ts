@@ -1,8 +1,15 @@
-import { apiClient } from "@/lib/api-client";
+import { ApiError, apiClient } from "@/lib/api-client";
 import {
+  AssistantProtocolError,
   AssistantTurnActiveError,
   AssistantTurnCancelledError,
 } from "@/lib/assistant/errors";
+import {
+  connectMarkerToBlock,
+  hasConnectMarker,
+  renderableText,
+  splitConnectMarkers,
+} from "@/lib/assistant/connect-fence";
 import { drainSseBuffer, flushSseBuffer } from "@/lib/assistant/sse";
 import {
   applyTurnEvent,
@@ -73,6 +80,21 @@ const MAX_MESSAGE_CHARS = 32_768;
 // slow one. Suspended while a human approval gate is open — external gates
 // have no deadline the client can impose.
 const STREAM_PROGRESS_TIMEOUT_MS = 120_000;
+
+// How long a pre-RUN_STARTED cancel keeps the reader alive waiting for the
+// frame that names the server turn. Without it the abort would discard the
+// only chance to learn the turnId, leaving the upstream run uncancellable.
+const PRE_START_STOP_WINDOW_MS = 5_000;
+
+// Hard deadline on the `:stop` request itself. Without one, a server that
+// accepts the connection but never answers would pin the `pendingStops`
+// entry forever and tax every later send/delete with the full fence wait.
+const STOP_REQUEST_DEADLINE_MS = 10_000;
+
+// Hard deadline on the composite DELETE. The deletion reservation rejects
+// sends and approvals while it holds, so an unanswered DELETE without a
+// bound would lock the conversation permanently.
+const DELETE_REQUEST_DEADLINE_MS = 15_000;
 
 // Inline media larger than this (base64 chars ≈ 6 MB decoded) is summarized
 // as text instead of being embedded as a data: URL artifact.
@@ -215,11 +237,31 @@ interface RoleChatCompletion {
 interface AevatarHistoryIndexEntry {
   readonly id?: string;
   readonly title?: string;
-  readonly createdAt?: string;
-  readonly updatedAt?: string;
+  /** Observed as both ISO strings and epoch-ms numbers upstream. */
+  readonly createdAt?: string | number;
+  readonly updatedAt?: string | number;
   readonly messageCount?: number;
   readonly llmRoute?: string | null;
   readonly llmModel?: string | null;
+}
+
+/**
+ * Normalize an index timestamp to an ISO string. The chat-history index
+ * has been observed sending epoch-ms numbers (message timestamps in the
+ * same API are epoch ms too); a number leaking into
+ * `Conversation.last_message_at` crashes the sidebar sort's
+ * `localeCompare` — which only fires once the list has 2+ rows, so a
+ * single-conversation smoke test never sees it.
+ */
+function indexTimestampToIso(
+  value: string | number | undefined,
+  fallback: string,
+): string {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return new Date(value).toISOString();
+  }
+  if (typeof value === "string" && value) return value;
+  return fallback;
 }
 
 interface AevatarConversationListResponse {
@@ -240,6 +282,32 @@ interface AevatarHistoryEntry {
   readonly turnId?: unknown;
 }
 
+/**
+ * Transcript read (`chat-history/conversations/{id}`), in both shapes we
+ * accept.
+ *
+ * Aevatar PR #2923 wrapped the flat array in `{messages, stateVersion}`, where
+ * `stateVersion` is the conversation read model's materialized watermark. The
+ * legacy array stays accepted because NyxID and Aevatar deploy independently:
+ * committing to one shape breaks chat either now or the moment Aevatar ships.
+ *
+ * REMOVE the array branch once every supported Aevatar environment is
+ * confirmed on the wrapped contract — not after a single prod probe.
+ *
+ * `stateVersion` is deliberately **ignored** — not read, not validated, not
+ * stored. It is the continuation watermark for `POST /api/chat`, and NyxID's
+ * production transport is `nyxid-chat/…:stream`, which has no such parameter.
+ * Storing an unread watermark would be state nobody maintains
+ * (`mergeIndexEntry` rebuilds `StoredConversation` and would silently drop
+ * it), and *requiring* it would turn a field with zero consumers into an
+ * outage. Acceptance is therefore keyed only on array-valued `messages`.
+ * `stateVersion` becomes load-bearing only if the transport migrates to
+ * `/api/chat`.
+ */
+type AevatarHistoryResponse =
+  | readonly AevatarHistoryEntry[]
+  | { readonly messages?: unknown; readonly stateVersion?: unknown };
+
 interface StoredConversation {
   conversation: Conversation;
   turnState: TurnReducerState;
@@ -258,6 +326,26 @@ interface RunStepState {
 interface RunningTurn {
   readonly clientRequestId: string;
   turnId: string | null;
+  /**
+   * A cancel landed before RUN_STARTED delivered the server turn id. The
+   * reader stays alive (bounded) so the announcing frame can still arrive;
+   * the RUN_STARTED handler then submits the stop and aborts.
+   */
+  stopPendingStart: boolean;
+  /**
+   * The stream (or continuation) fetch actually left the client. A cancel
+   * before dispatch is purely local: nothing reached upstream, so there is
+   * no turn to stop — and, critically, no pre-start placeholder may be
+   * installed, or it would overwrite an earlier turn's still-pending stop
+   * fence and let a later send overtake it.
+   */
+  streamDispatched: boolean;
+  /**
+   * Lifts the placeholder fence a pre-start cancel installed in
+   * `pendingStops` — called once the deferred stop settles, or when the
+   * pre-start window expires without a turn to stop.
+   */
+  resolvePreStartFence?: () => void;
   turnAnnounced: boolean;
   readonly controller: AbortController;
   readonly onEvent: (event: TurnEvent) => void;
@@ -265,6 +353,8 @@ interface RunningTurn {
   currentMessageId: string | null;
   currentBlockId: string | null;
   accumulatedText: string;
+  /** Prose already forwarded as `block.delta`; markers are withheld. */
+  emittedText: string;
   finished: boolean;
   /** Any assistant text streamed this turn (gates the batched-content fallback). */
   sawText: boolean;
@@ -379,6 +469,58 @@ function historyError(
   };
 }
 
+/**
+ * Project one message's stored text into typed blocks.
+ *
+ * This is the only reason connect cards survive a reload. Aevatar's history
+ * returns a flat `content` string per message and the FE may call nothing but
+ * chat + history, so a card that lived only in a live SSE frame is gone the
+ * moment the tab reloads — precisely when it matters, since "I'll go fetch my
+ * API key" is the most likely time for a user to navigate away.
+ *
+ * Messages with no marker keep the exact single-text-block shape they had
+ * before, so nothing that doesn't use markers changes behaviour.
+ */
+function textToBlocks(text: string, messageId: string): readonly ContentBlock[] {
+  if (!hasConnectMarker(text)) {
+    return [{ type: "text", block_id: `${messageId}-text`, text }];
+  }
+  const segments = splitConnectMarkers(text);
+  // The live path opens `${messageId}-text` on TEXT_MESSAGE_START, before it
+  // can know whether the message even begins with prose. So the canonical
+  // projection ALWAYS leads with that block — empty when the message opens
+  // with a marker — and both paths agree block-for-block. Without this the
+  // two diverge in order and id, and a reload silently reshuffles the
+  // transcript.
+  const leading = segments[0]?.kind === "text" ? segments[0].text : "";
+  const blocks: ContentBlock[] = [
+    { type: "text", block_id: `${messageId}-text`, text: leading },
+  ];
+  let textIndex = 1;
+  let connectIndex = 0;
+  for (const segment of segments.slice(
+    segments[0]?.kind === "text" ? 1 : 0,
+  )) {
+    if (segment.kind === "text") {
+      blocks.push({
+        type: "text",
+        block_id: `${messageId}-text-${String(textIndex)}`,
+        text: segment.text,
+      });
+      textIndex += 1;
+    } else if (segment.kind === "connect") {
+      blocks.push(
+        connectMarkerToBlock(
+          segment.marker,
+          `${messageId}-connect-${String(connectIndex)}`,
+        ),
+      );
+      connectIndex += 1;
+    }
+  }
+  return blocks;
+}
+
 function historyEntryToMessage(
   entry: AevatarHistoryEntry,
   index: number,
@@ -393,12 +535,43 @@ function historyEntryToMessage(
     id,
     role: entry.role,
     schema_version: 1,
-    blocks: text ? [{ type: "text", block_id: `${id}-text`, text }] : [],
+    // Markers are Aevatar-authored, so only assistant messages carry them;
+    // a user pasting the encoding into chat must never mint a card.
+    blocks: text
+      ? entry.role === "assistant"
+        ? [...textToBlocks(text, id)]
+        : [{ type: "text", block_id: `${id}-text`, text }]
+      : [],
     created_at: isoFromEpochMs(entry.timestamp, new Date(0).toISOString()),
     ...(turnId ? { turnId } : {}),
     ...(status ? { status } : {}),
     ...(error !== undefined ? { error } : {}),
   };
+}
+
+/**
+ * Narrow a transcript read to its message entries, or reject it.
+ *
+ * Strict on purpose. A permissive reader that degraded `{}` or
+ * `{messages: null}` to an empty transcript would render "no messages" for a
+ * broken upstream — the same silent failure the `stateVersion` wrapper caused
+ * against the old array-typed reader. An empty array (or an empty wrapped
+ * `messages`) remains a valid answer meaning deleted / not yet materialized /
+ * zero turns; only a body that is neither accepted shape is a protocol error.
+ */
+function readHistoryEntries(
+  body: AevatarHistoryResponse,
+): readonly AevatarHistoryEntry[] {
+  if (Array.isArray(body)) return body;
+  if (body && typeof body === "object") {
+    const { messages } = body as { readonly messages?: unknown };
+    if (Array.isArray(messages)) {
+      return messages as readonly AevatarHistoryEntry[];
+    }
+  }
+  throw new AssistantProtocolError(
+    "The conversation history response did not match the expected shape.",
+  );
 }
 
 function deriveTitle(messages: AssistantMessage[]): string | null {
@@ -600,6 +773,14 @@ export class AevatarAssistantTransport implements AssistantTransport {
   private readonly conversations = new Map<string, StoredConversation>();
   private readonly running = new Map<string, RunningTurn>();
   /**
+   * In-flight `:stop` fence per conversation. Follow-up sends and the
+   * composite delete serialize behind it so a fast next action cannot
+   * reach Aevatar before the stop fence commits. Every entry is
+   * self-bounded (stop deadline / pre-start window), so waiters await it
+   * directly.
+   */
+  private readonly pendingStops = new Map<string, Promise<void>>();
+  /**
    * Tombstones for server-accepted deletes: the Chat History index is
    * eventually consistent, so stale list/history responses can still carry
    * a row we just deleted. Tombstones are PERMANENT for the transport's
@@ -608,6 +789,16 @@ export class AevatarAssistantTransport implements AssistantTransport {
    * retire and resurrects the conversation.
    */
   private readonly deletedConversationIds = new Set<string>();
+  /**
+   * Deletion-in-progress reservation: the one in-flight delete operation
+   * per conversation, installed before the delete's cancel and fence wait
+   * and cleared when it settles (the tombstone takes over on success).
+   * Sends and approvals are rejected while present — otherwise a
+   * successor turn admitted during the fence wait can dispatch its stream
+   * before the DELETE and recreate the actor the user asked to remove.
+   * Concurrent deletes coalesce onto the stored promise.
+   */
+  private readonly deletingConversations = new Map<string, Promise<void>>();
   private listFetchedAt = 0;
 
   async listConversations(): Promise<Conversation[]> {
@@ -627,7 +818,12 @@ export class AevatarAssistantTransport implements AssistantTransport {
     }
     return [...this.conversations.values()]
       .map((stored) => stored.conversation)
-      .sort((a, b) => b.last_message_at.localeCompare(a.last_message_at));
+      .sort((a, b) =>
+        // Timestamps are normalized to ISO strings at the index boundary;
+        // String() keeps a stray non-string from crashing the whole list
+        // (ISO strings order identically either way).
+        String(b.last_message_at).localeCompare(String(a.last_message_at)),
+      );
   }
 
   async createConversation(): Promise<Conversation> {
@@ -659,15 +855,62 @@ export class AevatarAssistantTransport implements AssistantTransport {
     // reference client's abort-then-delete order. The server side is the
     // #1199 composite delete (actor + history row, 404-tolerant), so one
     // call retires both upstream surfaces.
-    const run = this.running.get(conversationId);
-    if (run) this.cancelTurn(conversationId, run);
-    await assistantApi.del(
-      `${ASSISTANT_PREFIX}/conversations/${conversationId}`,
-    );
-    // Local removal only after the server accepted: a failed delete keeps
-    // the conversation listed and retryable.
-    this.conversations.delete(conversationId);
-    this.deletedConversationIds.add(conversationId);
+    //
+    // Reserve the conversation for the whole delete: the cancel below emits
+    // the terminal synchronously, so without the reservation a successor
+    // send admitted during the fence wait could dispatch its stream before
+    // the DELETE and recreate the actor the user asked to remove.
+    // Concurrent deletes COALESCE onto the one in-flight operation — a
+    // flag-style reservation is not ownership-safe (an overlapping call's
+    // failure would clear it while the other DELETE is still in flight).
+    const inFlight = this.deletingConversations.get(conversationId);
+    if (inFlight) return inFlight;
+    // The body is DEFERRED to a microtask so the reservation is installed
+    // before any callback-capable work runs: cancelTurn emits
+    // `turn.completed` synchronously, and a re-entrant callback must
+    // already see the deletion guard — otherwise it can admit a send (or
+    // a second delete) into the exact window the reservation closes.
+    const operation = Promise.resolve().then(async () => {
+      const run = this.running.get(conversationId);
+      if (run) this.cancelTurn(conversationId, run);
+      // The cancel above may have fired a `:stop`; let its fence commit
+      // before the actor delete races the still-active work upstream.
+      await this.awaitPendingStop(conversationId);
+      // Own deadline: the reservation rejects sends while it holds, so an
+      // accepted-but-never-answered DELETE must not lock the conversation.
+      const deadline = new AbortController();
+      const deadlineTimer = setTimeout(
+        () => deadline.abort(),
+        DELETE_REQUEST_DEADLINE_MS,
+      );
+      try {
+        await apiClient<unknown>(
+          `${ASSISTANT_PREFIX}/conversations/${conversationId}`,
+          {
+            method: "DELETE",
+            preserveSessionOn401: true,
+            signal: deadline.signal,
+          },
+        );
+      } finally {
+        clearTimeout(deadlineTimer);
+      }
+      // Local removal only after the server accepted: a failed delete keeps
+      // the conversation listed and retryable.
+      this.conversations.delete(conversationId);
+      this.deletedConversationIds.add(conversationId);
+    });
+    this.deletingConversations.set(conversationId, operation);
+    try {
+      await operation;
+    } finally {
+      // On success the tombstone takes over; on failure the conversation
+      // becomes usable (and retryable) again. Identity-checked: only the
+      // entry this owner installed is cleared.
+      if (this.deletingConversations.get(conversationId) === operation) {
+        this.deletingConversations.delete(conversationId);
+      }
+    }
   }
 
   async getHistory(conversationId: string): Promise<ConversationHistory> {
@@ -684,19 +927,47 @@ export class AevatarAssistantTransport implements AssistantTransport {
         has_more: false,
       };
     }
-    let stored: StoredConversation | undefined;
+    let stored: StoredConversation;
     try {
       stored = await this.loadHistory(conversationId);
-    } catch {
+    } catch (error) {
+      // Delete wins over every other outcome, including the throws below:
+      // once the conversation is tombstoned, "not found" is the answer, not
+      // whatever the doomed read happened to fail with.
+      if (this.deletedConversationIds.has(conversationId)) {
+        throw new Error("Conversation was not found.");
+      }
+      // A contract break must reach the user. Swallowing it here is what
+      // turned the PR #2923 array→`{messages, stateVersion}` change into a
+      // blank transcript instead of a visible failure.
+      if (error instanceof AssistantProtocolError) throw error;
+      // Nothing local to answer with.
+      if (!existing) throw error;
+      // 404 is the EXPECTED answer for a conversation that has not yet
+      // completed a turn. The two upstream halves materialize at different
+      // times: `nyxid-chat` mints the actor at create, while the
+      // `chat-history` row is only written when a turn reaches a terminal.
+      // Aevatar's `HandleGetConversation` maps a missing read-model document
+      // to 404 — NOT to an empty array — so every brand-new conversation
+      // 404s here, as does the window between a turn's terminal frame and
+      // its history materialization. For a conversation we already hold,
+      // that is "no server transcript yet", and the local mirror is the
+      // truthful answer rather than a failure.
+      const noServerTranscriptYet =
+        error instanceof ApiError && error.status === 404;
+      // Transient failures (network, 5xx) may serve the local mirror — but
+      // only when it holds a real transcript. A conversation the index
+      // merged in carries `EMPTY_TURN_STATE`, and answering with that would
+      // dress a failed read as a legitimately empty chat.
+      if (!noServerTranscriptYet && existing.turnState.messages.length === 0) {
+        throw error;
+      }
       stored = existing;
     }
     // Re-check AFTER the await: a delete completing while the history
     // request was in flight must not be answered with the pre-delete
     // snapshot captured above (the fallback `existing`).
     if (this.deletedConversationIds.has(conversationId)) {
-      throw new Error("Conversation was not found.");
-    }
-    if (!stored) {
       throw new Error("Conversation was not found.");
     }
     return {
@@ -714,6 +985,9 @@ export class AevatarAssistantTransport implements AssistantTransport {
     const stored = this.conversations.get(conversationId);
     if (!stored) {
       throw new Error("Conversation was not found.");
+    }
+    if (this.deletingConversations.has(conversationId)) {
+      throw new Error("This conversation is being deleted.");
     }
     if (
       this.running.has(conversationId) ||
@@ -795,6 +1069,9 @@ export class AevatarAssistantTransport implements AssistantTransport {
     approved: boolean,
     onEvent?: (event: TurnEvent) => void,
   ): Promise<TurnHandle | null> {
+    if (this.deletingConversations.has(conversationId)) {
+      throw new Error("This conversation is being deleted.");
+    }
     const stored = this.conversations.get(conversationId);
     const card = stored?.turnState.messages
       .flatMap((message) => message.blocks)
@@ -834,8 +1111,19 @@ export class AevatarAssistantTransport implements AssistantTransport {
     run.cursor = stored.turnState.lastCursor;
     this.running.set(conversationId, run);
 
+    // Reservation first, THEN the fence: the approve must not overtake a
+    // prior turn's still-pending stop upstream, and the reservation keeps
+    // concurrent sends out while this waits. A cancel landing during the
+    // wait settles the run before anything was dispatched — bail with no
+    // continuation rather than posting a decision for a cancelled flow.
+    await this.awaitPendingStop(conversationId);
+    if (run.finished || run.controller.signal.aborted) {
+      return null;
+    }
+
     let response: Response;
     try {
+      run.streamDispatched = true;
       response = await fetch(
         `/api/v1${ASSISTANT_PREFIX}/conversations/${conversationId}/approve`,
         {
@@ -964,13 +1252,14 @@ export class AevatarAssistantTransport implements AssistantTransport {
       return;
     }
     const epoch0 = new Date(0).toISOString();
-    const createdAt =
-      entry.createdAt ?? existing?.conversation.created_at ?? epoch0;
-    const lastMessageAt =
-      entry.updatedAt ??
-      entry.createdAt ??
-      existing?.conversation.last_message_at ??
-      createdAt;
+    const createdAt = indexTimestampToIso(
+      entry.createdAt,
+      existing?.conversation.created_at ?? epoch0,
+    );
+    const lastMessageAt = indexTimestampToIso(
+      entry.updatedAt ?? entry.createdAt,
+      existing?.conversation.last_message_at ?? createdAt,
+    );
     const title =
       entry.title?.trim() || existing?.conversation.title || "Conversation";
     const conversation: Conversation = {
@@ -994,7 +1283,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
   private async loadHistory(
     conversationId: string,
   ): Promise<StoredConversation> {
-    const entries = await assistantApi.get<AevatarHistoryEntry[]>(
+    const body = await assistantApi.get<AevatarHistoryResponse>(
       `${ASSISTANT_PREFIX}/conversations/${conversationId}`,
     );
     // The conversation may have been deleted while this request was in
@@ -1003,6 +1292,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     if (this.deletedConversationIds.has(conversationId)) {
       throw new Error("Conversation was not found.");
     }
+    const entries = readHistoryEntries(body);
     const existing = this.conversations.get(conversationId);
     const messages = entries
       .map((entry, index) => historyEntryToMessage(entry, index))
@@ -1044,6 +1334,8 @@ export class AevatarAssistantTransport implements AssistantTransport {
     return {
       clientRequestId: crypto.randomUUID(),
       turnId,
+      stopPendingStart: false,
+      streamDispatched: false,
       turnAnnounced: false,
       controller: new AbortController(),
       onEvent,
@@ -1051,6 +1343,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       currentMessageId: null,
       currentBlockId: null,
       accumulatedText: "",
+      emittedText: "",
       finished: false,
       sawText: false,
       activityMessageId: null,
@@ -1102,17 +1395,25 @@ export class AevatarAssistantTransport implements AssistantTransport {
     run: RunningTurn,
     prompt: string,
   ): Promise<void> {
+    // Serialize behind a previous turn's in-flight stop so this send cannot
+    // arrive upstream before the fence commits.
+    await this.awaitPendingStop(conversationId);
+
     let finalFailure = {
       code: "network_error",
       message: "The assistant stream could not be reached. Try again.",
     };
 
     for (let attempt = 0; attempt < STREAM_DELIVERY_ATTEMPTS; attempt += 1) {
+      // A cancel can settle the run between attempts (the pre-RUN_STARTED
+      // path defers its abort); a finished run must never re-POST.
+      if (run.finished || run.controller.signal.aborted) return;
       this.resetDeliveryState(run);
       let response: Response;
       try {
         // Hand-rolled fetch (not `apiClient`): the response is an SSE stream,
         // and the endpoint 415s without an explicit JSON content type.
+        run.streamDispatched = true;
         response = await fetch(
           `/api/v1${ASSISTANT_PREFIX}/conversations/${conversationId}/stream`,
           {
@@ -1125,6 +1426,10 @@ export class AevatarAssistantTransport implements AssistantTransport {
             body: JSON.stringify({
               prompt,
               clientRequestId: run.clientRequestId,
+              // Aevatar NyxIdChatEndpoints.Streaming.cs:58 uses an ordinal
+              // discriminator comparison, so a normal turn requires this
+              // exact lowercase value.
+              type: "text",
             }),
             signal: run.controller.signal,
           },
@@ -1302,6 +1607,14 @@ export class AevatarAssistantTransport implements AssistantTransport {
     this.clearWatchdog(run);
     if (run.finished || run.waitingForApproval) return;
     run.watchdog = setTimeout(() => {
+      // A hung run holds the conversation actor: without a server-side stop
+      // the next send fails with ACTIVE_TURN_REQUIRES_STEERING until the
+      // run reaches its own terminal. Best-effort, like user cancel.
+      // Pre-RUN_STARTED this is a no-op BY DESIGN: after a full watchdog
+      // period of silence there is no addressable turn identity, and no
+      // announcing frame is coming — unlike a user cancel, which defers
+      // its abort for a bounded window because the frame may be in flight.
+      this.requestServerStop(conversationId, run);
       this.closeOpenMessage(conversationId, run);
       this.finalizeActivity(conversationId, run, "failed");
       this.finishTurn(conversationId, run, "failed", {
@@ -1391,6 +1704,36 @@ export class AevatarAssistantTransport implements AssistantTransport {
           return;
         }
         if (!run.turnId) run.turnId = authoritativeTurnId;
+        if (run.stopPendingStart) {
+          // A cancel landed before this frame named the turn. Deliver the
+          // stop it was waiting on, then drop the connection — the local
+          // turn already settled as cancelled.
+          run.stopPendingStart = false;
+          const releaseFence = run.resolvePreStartFence;
+          run.resolvePreStartFence = undefined;
+          let stop: Promise<void> | null = null;
+          try {
+            stop = this.requestServerStop(conversationId, run);
+          } finally {
+            if (releaseFence) {
+              if (stop) {
+                // The placeholder lifts only once the real stop settles
+                // (chained on the RAW stop, never the composed map entry —
+                // the entry contains the placeholder itself and chaining
+                // onto it would deadlock), so a waiter serialized on the
+                // fence cannot overtake the fence commit.
+                void stop.then(releaseFence);
+              } else {
+                // The stop never launched (synchronous throw): release the
+                // placeholder outright; the composed entry retires itself
+                // once every component has settled.
+                releaseFence();
+              }
+            }
+            run.controller.abort();
+          }
+          return;
+        }
         if (!run.turnAnnounced) {
           run.turnAnnounced = true;
           this.emit(conversationId, run, {
@@ -1408,6 +1751,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
         run.currentMessageId = messageId;
         run.currentBlockId = `${messageId}-text`;
         run.accumulatedText = "";
+        run.emittedText = "";
         this.emit(conversationId, run, {
           cursor: this.nextCursor(run),
           event: "message.started",
@@ -1429,11 +1773,20 @@ export class AevatarAssistantTransport implements AssistantTransport {
         if (!delta || !run.currentBlockId) return;
         run.accumulatedText += delta;
         run.sawText = true;
+        // Stream only text the user should see. A connect marker is
+        // structure, not prose: emitting it raw would flash half-written
+        // JSON into the transcript before the card replaces it at message
+        // end. `renderableText` withholds the marker (and anything after an
+        // unterminated one), so we forward just the newly-safe suffix.
+        const safeText = renderableText(run.accumulatedText);
+        if (safeText.length <= run.emittedText.length) return;
+        const pending = safeText.slice(run.emittedText.length);
+        run.emittedText = safeText;
         this.emit(conversationId, run, {
           cursor: this.nextCursor(run),
           event: "block.delta",
           block_id: run.currentBlockId,
-          text: delta,
+          text: pending,
         });
         return;
       }
@@ -2185,24 +2538,52 @@ export class AevatarAssistantTransport implements AssistantTransport {
 
   private closeOpenMessage(conversationId: string, run: RunningTurn): void {
     if (!run.currentMessageId || !run.currentBlockId) return;
+    const messageId = run.currentMessageId;
+    // One projection for both paths. `textToBlocks` is the same function
+    // `historyEntryToMessage` uses, so the blocks a live turn produces are
+    // block-for-block identical to what a reload replays — same order, same
+    // ids, same text. Deriving them separately here is how they drift.
+    const blocks = textToBlocks(run.accumulatedText, messageId);
+    const [leadingBlock, ...appended] = blocks;
+
+    // The leading block is already open from TEXT_MESSAGE_START; complete it
+    // in place under its existing id rather than starting a second one.
     this.emit(conversationId, run, {
       cursor: this.nextCursor(run),
       event: "block.completed",
       block_id: run.currentBlockId,
-      block: {
-        type: "text",
-        block_id: run.currentBlockId,
-        text: run.accumulatedText,
-      },
+      block:
+        leadingBlock?.type === "text"
+          ? { ...leadingBlock, block_id: run.currentBlockId }
+          : { type: "text", block_id: run.currentBlockId, text: "" },
     });
+
+    appended.forEach((block, offset) => {
+      this.emit(conversationId, run, {
+        cursor: this.nextCursor(run),
+        event: "block.started",
+        message_id: messageId,
+        block_id: block.block_id,
+        index: offset + 1,
+        block,
+      });
+      this.emit(conversationId, run, {
+        cursor: this.nextCursor(run),
+        event: "block.completed",
+        block_id: block.block_id,
+        block,
+      });
+    });
+
     this.emit(conversationId, run, {
       cursor: this.nextCursor(run),
       event: "message.completed",
-      message_id: run.currentMessageId,
+      message_id: messageId,
     });
     run.currentMessageId = null;
     run.currentBlockId = null;
     run.accumulatedText = "";
+    run.emittedText = "";
   }
 
   /**
@@ -2327,17 +2708,66 @@ export class AevatarAssistantTransport implements AssistantTransport {
   }
 
   /**
-   * Client-side stop: aevatar's nyxid-chat surface has no cancel endpoint,
-   * so cancelling aborts the SSE fetch and settles the local turn per the
-   * PRD stop-flow — every open block reaches a terminal state (§5.6). The
-   * server-side run may still finish; its full reply then surfaces on the
-   * next history reload.
+   * Stop flow: settles the local turn per the PRD stop-flow — every open
+   * block reaches a terminal state (§5.6) — and fires a best-effort `:stop`
+   * control command so Aevatar commits a stop fence instead of running the
+   * turn to its own terminal. When the server has already announced the
+   * turn, the fetch aborts immediately and the stop goes out with that
+   * turnId. When cancel lands BEFORE RUN_STARTED, the reader is kept alive
+   * (bounded) so the announcing frame can still deliver the turnId the stop
+   * needs; the RUN_STARTED handler then stops and aborts. The stop is
+   * 202-accepted and asynchronous upstream; if it fails or never fires, the
+   * pre-existing behavior stands (the run finishes server-side and surfaces
+   * on the next history reload).
    */
   private cancelTurn(conversationId: string, run: RunningTurn): void {
     if (run.finished) return;
-    run.controller.abort();
+    if (run.turnId) {
+      run.controller.abort();
+      this.requestServerStop(conversationId, run);
+    } else if (!run.streamDispatched) {
+      // The stream request never left the client (e.g. the send is still
+      // queued behind an earlier turn's stop fence): nothing reached
+      // upstream, so cancel is purely local. Installing a placeholder here
+      // would OVERWRITE that earlier fence and let a later send overtake
+      // the still-pending stop.
+      run.controller.abort();
+    } else {
+      run.stopPendingStart = true;
+      // Install the fence NOW: the stop request cannot exist until
+      // RUN_STARTED names the turn, but a follow-up send or delete must
+      // already serialize behind the eventual stop. Lifted when the
+      // deferred stop settles, or when the window expires without a turn.
+      // trackFence COMPOSES with any live entry instead of replacing it.
+      const fence = new Promise<void>((resolve) => {
+        run.resolvePreStartFence = resolve;
+      });
+      this.trackFence(conversationId, fence);
+      setTimeout(() => {
+        if (run.stopPendingStart) {
+          // No RUN_STARTED inside the window: nothing to stop. Resolve
+          // only — the composed map entry retires itself once every
+          // component has settled.
+          run.stopPendingStart = false;
+          run.resolvePreStartFence?.();
+          run.resolvePreStartFence = undefined;
+        }
+        if (!run.controller.signal.aborted) run.controller.abort();
+      }, PRE_START_STOP_WINDOW_MS);
+    }
     this.clearWatchdog(run);
     if (run.currentBlockId) {
+      // Cancel runs the SAME projection as a normal message close. Two things
+      // go wrong otherwise: the partial text is emitted raw, so a marker the
+      // streaming path deliberately withheld leaks into the transcript as
+      // visible prose; and any card in the cancelled text is never emitted, so
+      // stopping a turn and then reloading it show different transcripts.
+      const messageId = run.currentMessageId;
+      const projected = textToBlocks(
+        run.accumulatedText,
+        messageId ?? run.currentBlockId,
+      );
+      const [leadingBlock, ...appended] = projected;
       const stored = this.conversations.get(conversationId);
       const openBlock = stored?.turnState.messages
         .flatMap((message) => message.blocks)
@@ -2346,23 +2776,40 @@ export class AevatarAssistantTransport implements AssistantTransport {
         cursor: this.nextCursor(run),
         event: "block.completed",
         block_id: run.currentBlockId,
-        block: openBlock
-          ? toTerminalBlock(openBlock)
-          : {
-              type: "text",
-              block_id: run.currentBlockId,
-              text: run.accumulatedText,
-            },
+        block:
+          leadingBlock?.type === "text"
+            ? { ...leadingBlock, block_id: run.currentBlockId }
+            : openBlock
+              ? toTerminalBlock(openBlock)
+              : { type: "text", block_id: run.currentBlockId, text: "" },
       });
-      if (run.currentMessageId) {
+      if (messageId) {
+        appended.forEach((block, offset) => {
+          this.emit(conversationId, run, {
+            cursor: this.nextCursor(run),
+            event: "block.started",
+            message_id: messageId,
+            block_id: block.block_id,
+            index: offset + 1,
+            block,
+          });
+          this.emit(conversationId, run, {
+            cursor: this.nextCursor(run),
+            event: "block.completed",
+            block_id: block.block_id,
+            block: toTerminalBlock(block),
+          });
+        });
         this.emit(conversationId, run, {
           cursor: this.nextCursor(run),
           event: "message.completed",
-          message_id: run.currentMessageId,
+          message_id: messageId,
         });
       }
       run.currentMessageId = null;
       run.currentBlockId = null;
+      run.accumulatedText = "";
+      run.emittedText = "";
     }
     this.finalizeActivity(conversationId, run, "cancelled");
     if (run.turnId) {
@@ -2374,5 +2821,92 @@ export class AevatarAssistantTransport implements AssistantTransport {
       });
     }
     this.finishTurn(conversationId, run, "cancelled", null);
+  }
+
+  /**
+   * Best-effort server-side stop (the `feature/integrate` `:stop` control
+   * contract): a fresh `stopRequestId` per intent keeps the command
+   * idempotent upstream, and `expectedStateVersion: 0` skips the
+   * optimistic-concurrency fence — the transport does not track actor
+   * state versions. Requires the server-announced `turnId` (a
+   * pre-RUN_STARTED cancel defers here via `stopPendingStart`). Failures
+   * are swallowed — stop is an upgrade over the previous client-only
+   * cancel, never a new failure mode — but the in-flight request is
+   * tracked in `pendingStops` so follow-up sends and deletes serialize
+   * behind the fence.
+   */
+  private requestServerStop(
+    conversationId: string,
+    run: RunningTurn,
+  ): Promise<void> | null {
+    if (!run.turnId) return null;
+    // Own deadline: a server that accepts but never answers must not pin
+    // the pendingStops entry (and tax every later send with the full fence
+    // wait). A manual controller instead of AbortSignal.timeout so this
+    // never throws on an environment that lacks the static — the deferred
+    // placeholder release depends on this call not throwing.
+    const deadline = new AbortController();
+    const deadlineTimer = setTimeout(
+      () => deadline.abort(),
+      STOP_REQUEST_DEADLINE_MS,
+    );
+    const pending = apiClient<unknown>(
+      `${ASSISTANT_PREFIX}/conversations/${conversationId}/stop`,
+      {
+        method: "POST",
+        body: {
+          turnId: run.turnId,
+          stopRequestId: crypto.randomUUID(),
+          clientRequestId: crypto.randomUUID(),
+          expectedStateVersion: 0,
+        },
+        preserveSessionOn401: true,
+        signal: deadline.signal,
+      },
+    ).then(
+      () => clearTimeout(deadlineTimer),
+      () => clearTimeout(deadlineTimer),
+    );
+    this.trackFence(conversationId, pending);
+    return pending;
+  }
+
+  /**
+   * Register a fence component for the conversation, COMPOSING with any
+   * live entry rather than replacing it — no control path may drop a
+   * still-pending fence someone else could be relying on. Every component
+   * is self-bounded, so the composition is too; the entry retires itself
+   * once everything it covers has settled.
+   */
+  private trackFence(conversationId: string, component: Promise<void>): void {
+    const prior = this.pendingStops.get(conversationId);
+    const tracked = prior
+      ? Promise.all([prior, component]).then(() => undefined)
+      : component;
+    this.pendingStops.set(conversationId, tracked);
+    void tracked.then(() => {
+      if (this.pendingStops.get(conversationId) === tracked) {
+        this.pendingStops.delete(conversationId);
+      }
+    });
+  }
+
+  /**
+   * Wait for this conversation's in-flight `:stop` fence before the next
+   * send or delete goes out. Without this, a fast follow-up can reach
+   * Aevatar ahead of the stop — request ordering across HTTP connections
+   * is not guaranteed — and fail with ACTIVE_TURN_REQUIRES_STEERING.
+   *
+   * Awaited DIRECTLY, no outer race: every tracked promise is
+   * self-bounded — a real stop by its STOP_REQUEST_DEADLINE_MS abort, a
+   * pre-start placeholder by the PRE_START_STOP_WINDOW_MS expiry (plus,
+   * when RUN_STARTED lands late in the window, the chained stop's own
+   * deadline). An outer bound shorter than the placeholder lifetime would
+   * reopen the exact overtake the fence exists to prevent.
+   */
+  private async awaitPendingStop(conversationId: string): Promise<void> {
+    const pending = this.pendingStops.get(conversationId);
+    if (!pending) return;
+    await pending;
   }
 }

@@ -1,5 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { useCatalog, useCreateKey } from "@/hooks/use-keys";
+import {
+  KEY_AUTH_ACTIVE,
+  KEY_AUTH_FAILED,
+  useCatalog,
+  useCreateKey,
+  useKeyAuthorizationStatus,
+} from "@/hooks/use-keys";
 import { useNodes } from "@/hooks/use-nodes";
 import { useOrgs } from "@/hooks/use-orgs";
 import {
@@ -8,7 +14,6 @@ import {
   usePollDeviceCode,
 } from "@/hooks/use-providers";
 import { ApiError, api } from "@/lib/api-client";
-import { hardRedirect } from "@/lib/navigation";
 import { UpstreamScopePicker } from "@/components/shared/upstream-scope-picker";
 import { copyToClipboard } from "@/lib/utils";
 import { Button, ButtonIcon } from "@/components/ui/button";
@@ -1437,6 +1442,20 @@ function OAuthStep({
   const [selectedScopes, setSelectedScopes] = useState<readonly string[]>(
     grantedScopes.length > 0 ? grantedScopes : (catalogEntry.default_scopes ?? []),
   );
+  // In-dialog authorization handoff. The whole-tab `hardRedirect` this
+  // replaced destroyed any surface hosting the dialog — fatal for the
+  // assistant's in-chat connect card, which cannot survive its own tab
+  // navigating to GitHub. Instead we keep the dialog mounted, show the
+  // authorization URL as an explicit user-clicked link (a real user gesture,
+  // so no popup blocker is involved), and poll the placeholder key until the
+  // provider callback lands. Same shape DeviceCodeStep already uses.
+  const [authorizationUrl, setAuthorizationUrl] = useState<string | null>(null);
+  const [pendingKeyId, setPendingKeyId] = useState<string | null>(null);
+  const authorizing = authorizationUrl !== null;
+  const pendingKey = useKeyAuthorizationStatus(pendingKeyId, authorizing);
+  const authorizationStatus = pendingKey.data?.status;
+  const authorized = authorizationStatus === KEY_AUTH_ACTIVE;
+  const authorizationFailed = authorizationStatus === KEY_AUTH_FAILED;
 
   async function handleConnect() {
     if (!catalogEntry.provider_config_id) return;
@@ -1466,7 +1485,8 @@ function OAuthStep({
         keyId: key.id,
         ...(targetOrgId ? { targetOrgId } : {}),
       });
-      hardRedirect(response.authorization_url);
+      setPendingKeyId(key.id);
+      setAuthorizationUrl(response.authorization_url);
     } catch (err) {
       await cleanupPendingAuthKey(key, { protectExistingKey: reconnectMode });
       if (!reconnectMode) {
@@ -1476,6 +1496,70 @@ function OAuthStep({
         err instanceof ApiError ? err.message : "Failed to start OAuth flow";
       setError(message);
     }
+  }
+
+  if (authorizing) {
+    return (
+      <div className="space-y-4">
+        <StepHeader
+          slug={catalogEntry?.slug}
+          title={`Authorize ${catalogEntry.name}`}
+          description={`Open ${catalogEntry.name} to approve access. Leave this open — it updates automatically when you're done.`}
+        />
+
+        <a
+          href={authorizationUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="flex w-full items-center justify-center gap-2 rounded-lg bg-primary px-3 py-2 text-[13px] font-medium text-primary-foreground transition-opacity hover:opacity-90"
+        >
+          <ExternalLink className="h-4 w-4" />
+          Open {catalogEntry.name}
+        </a>
+
+        <div
+          className="flex items-center gap-2 rounded-lg border border-hairline bg-overlay px-3 py-2 text-[12px]"
+          role="status"
+          aria-live="polite"
+        >
+          {authorized ? (
+            <>
+              <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-success" />
+              <span className="text-foreground">
+                Connected. Credential sealed in NyxID&apos;s vault.
+              </span>
+            </>
+          ) : authorizationFailed ? (
+            <>
+              <AlertCircle className="h-3.5 w-3.5 shrink-0 text-destructive" />
+              <span className="text-destructive">
+                Authorization was denied or expired.
+              </span>
+            </>
+          ) : (
+            <>
+              <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-text-tertiary" />
+              <span className="text-muted-foreground">
+                Waiting for {catalogEntry.name}…
+              </span>
+            </>
+          )}
+        </div>
+
+        {authorizationFailed && (
+          <Button
+            variant="outline"
+            className="w-full"
+            onClick={() => {
+              setAuthorizationUrl(null);
+              setPendingKeyId(null);
+            }}
+          >
+            Try again
+          </Button>
+        )}
+      </div>
+    );
   }
 
   return (

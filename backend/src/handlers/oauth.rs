@@ -1683,8 +1683,15 @@ async fn issue_authorization_code(
         non_empty_resources(&params.resource),
     )
     .await?;
-    let (resource_uris, allowed_service_ids, service_restricted) =
-        match (resolved_resources, consent.allowed_service_ids.as_ref()) {
+    // The NyxID MCP endpoint resource is narrowing-neutral (NyxID#1226): an
+    // mcp-only request takes the same arms as an omitted `resource`, with the
+    // canonical `{BASE_URL}/mcp` URI carried into the grant's resource list.
+    let mcp_resource_uri = resolved_resources
+        .as_ref()
+        .and_then(|resolved| resolved.mcp_resource_uri.clone());
+    let service_resources = resolved_resources.filter(|resolved| !resolved.service_ids.is_empty());
+    let (mut resource_uris, allowed_service_ids, service_restricted) =
+        match (service_resources, consent.allowed_service_ids.as_ref()) {
             (Some(resolved), _) if consent.allow_all_services => {
                 (resolved.resource_uris, resolved.service_ids, true)
             }
@@ -1708,6 +1715,9 @@ async fn issue_authorization_code(
             (None, Some(consented_ids)) => (Vec::new(), consented_ids.clone(), true),
             (None, None) => (Vec::new(), Vec::new(), true),
         };
+    if let Some(mcp) = mcp_resource_uri {
+        resource_uris.push(mcp);
+    }
     let code = oauth_service::create_authorization_code(
         &state.db,
         &params.client_id,

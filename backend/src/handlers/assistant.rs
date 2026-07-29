@@ -8,7 +8,7 @@
 //! Every route is an explicit mapping onto one Aevatar path. A blanket
 //! `/{*path}` pass-through would expose all ~248 routes of Aevatar's spec
 //! (admin, workflow, and streaming-proxy surfaces included) through a
-//! session-authed mount; the assistant needs nine.
+//! session-authed mount; the assistant needs fourteen.
 //!
 //! Forwarding goes through `proxy::execute_proxy`, so credential injection,
 //! identity propagation, per-agent rate limiting, approval gating, and audit
@@ -294,6 +294,13 @@ pub async fn list_conversations(
 }
 
 /// `GET /api/v1/assistant/conversations/{id}` -- transcript.
+///
+/// The body is opaque here: NyxID never parses or reshapes it. Aevatar PR
+/// #2923 wrapped the flat `[StoredChatMessage]` array in
+/// `{messages, stateVersion}`, and both shapes stream through this route
+/// unmodified -- the client owns the decoding (see the transcript reader in
+/// `frontend/src/lib/assistant/aevatar-transport.ts`). Keeping the route
+/// shape-agnostic is what lets Aevatar and NyxID deploy independently.
 pub async fn get_history(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -366,6 +373,91 @@ pub async fn decide_approval(
     request: Request<Body>,
 ) -> AppResult<Response> {
     let path = assistant_service::approve_path(&auth_user.user_id.to_string(), &conversation_id)?;
+    forward(&state, &auth_user, path, request).await
+}
+
+/// `POST /api/v1/assistant/conversations/{id}/stop` -- stop active work.
+///
+/// Forwards the caller's control body (`turnId`, `stopRequestId`,
+/// `clientRequestId`, `expectedStateVersion`) verbatim to Aevatar's `:stop`
+/// route. Aevatar answers 202-accepted and commits a stop fence; without this
+/// route, cancel is a client-side abort only and the server run keeps
+/// executing until its own terminal.
+pub async fn stop_turn(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(conversation_id): Path<String>,
+    request: Request<Body>,
+) -> AppResult<Response> {
+    let path = assistant_service::stop_path(&auth_user.user_id.to_string(), &conversation_id)?;
+    forward(&state, &auth_user, path, request).await
+}
+
+/// `POST /api/v1/assistant/conversations/{id}/steer` -- redirect active
+/// work (`turnId`, `steeringId`, `clientRequestId`, `instruction`, optional
+/// `inputParts`, `expectedStateVersion`), forwarded verbatim to `:steer`.
+/// The contract's answer to "send while a turn is active": a plain text
+/// submission is rejected with `ACTIVE_TURN_REQUIRES_STEERING`; this is the
+/// sanctioned redirect.
+pub async fn steer_turn(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(conversation_id): Path<String>,
+    request: Request<Body>,
+) -> AppResult<Response> {
+    let path = assistant_service::steer_path(&auth_user.user_id.to_string(), &conversation_id)?;
+    forward(&state, &auth_user, path, request).await
+}
+
+/// `GET /api/v1/assistant/conversations/{id}/state` -- conditional
+/// current-state query. The `afterStateVersion` / `turnId` cursors ride the
+/// forwarded query string (`execute_proxy` preserves it); results are the
+/// contract's `current` / `not_modified` / `reload_required` / `not_found`
+/// envelope. This is the reconnect surface for a page reload mid-turn.
+pub async fn get_state(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(conversation_id): Path<String>,
+    request: Request<Body>,
+) -> AppResult<Response> {
+    let path = assistant_service::state_path(&auth_user.user_id.to_string(), &conversation_id)?;
+    forward(&state, &auth_user, path, request).await
+}
+
+/// `POST /api/v1/assistant/conversations/{id}/turns/{turn}/steps/{step}/retry`
+/// -- retry one step (`taskId`, `retryRequestId`, `clientRequestId`,
+/// `expectedOperationGeneration`, `expectedStateVersion`), forwarded
+/// verbatim to `:retry`. Availability is actor-computed upstream; NyxID
+/// only validates the path segments.
+pub async fn retry_step(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path((conversation_id, turn_id, step_id)): Path<(String, String, String)>,
+    request: Request<Body>,
+) -> AppResult<Response> {
+    let path = assistant_service::retry_path(
+        &auth_user.user_id.to_string(),
+        &conversation_id,
+        &turn_id,
+        &step_id,
+    )?;
+    forward(&state, &auth_user, path, request).await
+}
+
+/// `POST /api/v1/assistant/conversations/{id}/turns/{turn}/steps/{step}/skip`
+/// -- skip one optional step, forwarded verbatim to `:skip`.
+pub async fn skip_step(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path((conversation_id, turn_id, step_id)): Path<(String, String, String)>,
+    request: Request<Body>,
+) -> AppResult<Response> {
+    let path = assistant_service::skip_path(
+        &auth_user.user_id.to_string(),
+        &conversation_id,
+        &turn_id,
+        &step_id,
+    )?;
     forward(&state, &auth_user, path, request).await
 }
 

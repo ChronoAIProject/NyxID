@@ -235,6 +235,11 @@ export function usePollDeviceCode() {
         void queryClient.invalidateQueries({ queryKey: ["provider-tokens"] });
         void queryClient.invalidateQueries({ queryKey: ["providers"] });
         void queryClient.invalidateQueries({ queryKey: ["llm-status"] });
+        // The assistant's in-chat connect card derives its connected state
+        // from `useKeys()` (connect-card.tsx). Without this the card stays
+        // "Not connected" after a successful device-code flow until some
+        // unrelated refetch happens.
+        void queryClient.invalidateQueries({ queryKey: ["keys"] });
       }
     },
   });

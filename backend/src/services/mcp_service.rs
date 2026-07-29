@@ -157,6 +157,9 @@ pub struct McpToolService {
     pub service_category: String,
     pub endpoints: Vec<McpToolEndpoint>,
     pub source: McpToolSource,
+    /// Whether the service can currently execute requests with its configured
+    /// credential and routing state.
+    pub executable: bool,
     /// true if this service has only a generic proxy tool (custom endpoint, no predefined endpoints)
     pub is_generic_proxy: bool,
 }
@@ -635,6 +638,7 @@ async fn load_user_tools_inner(
                 node_id: us.node_id.clone(),
                 has_server_credential: r.has_server_credential,
             },
+            executable: r.executable,
             is_generic_proxy: is_generic,
         });
     }
@@ -664,6 +668,7 @@ async fn load_user_tools_inner(
             source: McpToolSource::Platform {
                 downstream_service_id: svc.id.clone(),
             },
+            executable: true,
             is_generic_proxy: false,
         });
     }
@@ -722,6 +727,7 @@ struct ResolvedUserService {
     service: UserService,
     effective_owner_id: String,
     has_server_credential: bool,
+    executable: bool,
 }
 
 /// Load all callable UserServices for the user: personal + org-shared (where
@@ -909,6 +915,7 @@ async fn load_callable_user_services(
             service: us,
             effective_owner_id: user_id.to_string(),
             has_server_credential: cred_info.has_server_credential,
+            executable: cred_info.is_executable,
         });
     }
 
@@ -948,6 +955,7 @@ async fn load_callable_user_services(
             service: us,
             effective_owner_id: org_user_id,
             has_server_credential: cred_info.has_server_credential,
+            executable: cred_info.is_executable,
         });
     }
 
@@ -1062,7 +1070,7 @@ fn build_generic_proxy_endpoint(service_label: &str) -> McpToolEndpoint {
         endpoint_id: String::new(),
         name: "request".to_string(),
         description: Some(format!(
-            "Make an HTTP request to {service_label}. Specify the method, path, and optional JSON body."
+            "Make an HTTP request to {service_label}. Specify the method, path, optional raw query string, and optional JSON body."
         )),
         method: "POST".to_string(),
         path: String::new(),
@@ -1088,7 +1096,11 @@ fn build_generic_proxy_input_schema() -> serde_json::Value {
             },
             "path": {
                 "type": "string",
-                "description": "Request path (e.g., /v1/chat/completions)"
+                "description": "Request path, optionally including a raw query string (e.g., /stats?period=today)"
+            },
+            "query": {
+                "type": "string",
+                "description": "Optional raw query string without the leading ?. Preserves repeated keys and percent-encoding; omit when path includes a query string."
             },
             "body": {
                 "description": "Request body (JSON object). Omit for GET/DELETE requests."
@@ -1103,7 +1115,7 @@ fn build_generic_proxy_input_schema() -> serde_json::Value {
 // ---------------------------------------------------------------------------
 
 /// Generate MCP tool definitions from loaded services.
-/// Always includes the three `nyx__` meta-tools.
+/// Always includes the built-in `nyx__` meta-tools.
 ///
 /// `activated_service_ids` controls which services' tools are included:
 /// - `None` = include all services (backward compat for REST /mcp/config)
@@ -1135,7 +1147,9 @@ pub fn generate_tool_definitions(
     tools.push(McpToolDefinition {
         name: "nyx__discover_services".to_string(),
         description: "Browse available services you can connect to on this NyxID instance. \
-            Returns services you are NOT yet connected to."
+            Returns services you are NOT yet connected to. For services you are already \
+            connected to, use nyx__list_connected_services. Services that require no \
+            credential are auto-connected and appear there."
             .to_string(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -1150,6 +1164,24 @@ pub fn generate_tool_definitions(
                     "description": "Optional: filter by service category"
                 }
             }
+        }),
+    });
+
+    tools.push(McpToolDefinition {
+        name: "nyx__list_connected_services".to_string(),
+        description: "List services you are already connected to, including services that \
+            are currently unavailable. Services that require no credential are auto-connected \
+            and appear here. This is the complement of nyx__discover_services."
+            .to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Optional substring filter over service name, slug, or description"
+                }
+            },
+            "required": []
         }),
     });
 
@@ -1472,6 +1504,7 @@ pub async fn load_public_tools(db: &mongodb::Database) -> AppResult<Vec<McpToolS
             source: McpToolSource::Platform {
                 downstream_service_id: svc.id,
             },
+            executable: true,
             is_generic_proxy: false,
         });
     }
@@ -2985,16 +3018,43 @@ pub async fn execute_tool(
 }
 
 /// Build proxy arguments from a generic proxy tool call.
-/// Extracts method, path, and body from the tool arguments directly.
+/// Extracts method, path, query, and body from the tool arguments directly.
 fn build_generic_proxy_args(args: &serde_json::Value) -> AppResult<ProxyArgs> {
-    let path = match args.get("path").and_then(|v| v.as_str()) {
-        Some(p) => p.trim_start_matches('/').to_string(),
+    let requested_path = match args.get("path").and_then(|v| v.as_str()) {
+        Some(path) => path,
         None => {
             return Err(AppError::BadRequest(
                 "Missing required parameter: path".to_string(),
             ));
         }
     };
+
+    let (path, embedded_query) = match requested_path.split_once('?') {
+        Some((path, query)) => (path, Some(query)),
+        None => (requested_path, None),
+    };
+    let explicit_query = match args.get("query") {
+        Some(serde_json::Value::String(query)) => Some(query.as_str()),
+        Some(_) => {
+            return Err(AppError::BadRequest(
+                "Invalid parameter: query must be a string".to_string(),
+            ));
+        }
+        None => None,
+    };
+
+    if embedded_query.is_some() && explicit_query.is_some() {
+        return Err(AppError::BadRequest(
+            "Specify query parameters either in path or query, not both".to_string(),
+        ));
+    }
+
+    let query = embedded_query.or(explicit_query);
+    if query.is_some_and(|query| query.contains('#')) {
+        return Err(AppError::BadRequest("Invalid proxy path".to_string()));
+    }
+    proxy_service::validate_requested_proxy_path(path)?;
+    let path = path.trim_start_matches('/').to_string();
 
     let method = parse_proxy_method(args.get("method").and_then(|v| v.as_str()).unwrap_or("GET"))?;
 
@@ -3010,7 +3070,7 @@ fn build_generic_proxy_args(args: &serde_json::Value) -> AppResult<ProxyArgs> {
         Some(bytes::Bytes::from(bytes))
     });
 
-    Ok((method, path, None, Vec::new(), body))
+    Ok((method, path, query.map(str::to_string), Vec::new(), body))
 }
 
 fn parse_proxy_method(method: &str) -> AppResult<reqwest::Method> {
@@ -3089,6 +3149,55 @@ pub fn search_all_tools(services: &[McpToolService], query: &str) -> SearchResul
 }
 
 // ---------------------------------------------------------------------------
+// Meta-tool: nyx__list_connected_services
+// ---------------------------------------------------------------------------
+
+/// Summarize the connected services already loaded for an MCP caller.
+pub fn list_connected_services(
+    services: &[McpToolService],
+    query: Option<&str>,
+) -> serde_json::Value {
+    let query = query
+        .map(str::trim)
+        .filter(|query| !query.is_empty())
+        .map(str::to_lowercase);
+
+    let results: Vec<serde_json::Value> = services
+        .iter()
+        .filter(|service| {
+            query.as_ref().is_none_or(|query| {
+                service.service_name.to_lowercase().contains(query)
+                    || service.service_slug.to_lowercase().contains(query)
+                    || service
+                        .description
+                        .as_deref()
+                        .is_some_and(|description| description.to_lowercase().contains(query))
+            })
+        })
+        .map(|service| {
+            let source = match &service.source {
+                McpToolSource::Platform { .. } => "platform",
+                McpToolSource::UserManaged { .. } => "user_service",
+            };
+            serde_json::json!({
+                "service_id": service.service_id,
+                "name": service.service_name,
+                "slug": service.service_slug,
+                "description": service.description,
+                "category": service.service_category,
+                "source": source,
+                "executable": service.executable,
+                "tool_count": service.endpoints.len(),
+                "is_generic_proxy": service.is_generic_proxy,
+            })
+        })
+        .collect();
+
+    let count = results.len();
+    serde_json::json!({ "services": results, "count": count })
+}
+
+// ---------------------------------------------------------------------------
 // Meta-tool: nyx__discover_services
 // ---------------------------------------------------------------------------
 
@@ -3099,15 +3208,24 @@ pub async fn discover_services(
     query: Option<&str>,
     category: Option<&str>,
 ) -> AppResult<serde_json::Value> {
-    // Load old-model connections
+    // Load all old-model connections so an inactive row can distinguish an
+    // explicit disconnect from an auto-connected service with no row.
     let connections: Vec<UserServiceConnection> = db
         .collection::<UserServiceConnection>(CONNECTIONS)
-        .find(doc! { "user_id": user_id, "is_active": true })
+        .find(doc! { "user_id": user_id })
         .await?
         .try_collect()
         .await?;
 
-    let connected_ids: HashSet<&str> = connections.iter().map(|c| c.service_id.as_str()).collect();
+    let connected_ids: HashSet<&str> = connections
+        .iter()
+        .filter(|connection| connection.is_active)
+        .map(|connection| connection.service_id.as_str())
+        .collect();
+    let connection_ids: HashSet<&str> = connections
+        .iter()
+        .map(|connection| connection.service_id.as_str())
+        .collect();
 
     // Load new-model AI Services -- exclude catalog services already provisioned
     let user_services: Vec<UserService> = db
@@ -3148,6 +3266,11 @@ pub async fn discover_services(
         .filter(|svc| {
             // Already connected via old model
             if connected_ids.contains(svc.id.as_str()) {
+                return false;
+            }
+            // Credential-free services are auto-connected unless an inactive
+            // connection row records an explicit disconnect.
+            if !svc.requires_user_credential && !connection_ids.contains(svc.id.as_str()) {
                 return false;
             }
             // Already provisioned as a UserService (by catalog ID or slug match)
@@ -3225,6 +3348,8 @@ pub async fn connect_service(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::downstream_service::test_helpers::dummy_service;
+    use crate::test_utils::{connect_test_database, test_user_endpoint, test_user_service};
 
     fn make_endpoint(name: &str, description: &str) -> McpToolEndpoint {
         McpToolEndpoint {
@@ -3257,6 +3382,7 @@ mod tests {
             source: McpToolSource::Platform {
                 downstream_service_id: id.to_string(),
             },
+            executable: true,
             is_generic_proxy: false,
         }
     }
@@ -3410,6 +3536,236 @@ mod tests {
         assert!(result.matched_service_ids.is_empty());
     }
 
+    // -- list_connected_services tests --
+
+    #[test]
+    fn list_connected_services_filters_by_name_slug_and_description() {
+        let mut weather = make_service(
+            "svc-1",
+            "Forecast Service",
+            "weather",
+            vec![make_endpoint("get_forecast", "Get weather forecast")],
+        );
+        weather.description = Some("Hourly climate data".to_string());
+        let news = make_service(
+            "svc-2",
+            "News",
+            "news",
+            vec![make_endpoint("headlines", "Get headlines")],
+        );
+
+        let services = [weather, news];
+        for query in ["FORECAST", "weather", "CLIMATE"] {
+            let result = list_connected_services(&services, Some(query));
+            let matches = result["services"].as_array().expect("services array");
+
+            assert_eq!(result["count"], 1);
+            assert_eq!(matches[0]["service_id"], "svc-1");
+            assert_eq!(matches[0]["tool_count"], 1);
+            assert_eq!(matches[0]["source"], "platform");
+        }
+    }
+
+    #[tokio::test]
+    async fn connected_service_loader_excludes_unconnected_and_marks_unavailable() {
+        let Some(db) = connect_test_database("mcp_connected_services").await else {
+            eprintln!("skipping MCP connected-services test: no local MongoDB available");
+            return;
+        };
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let connected_id = uuid::Uuid::new_v4().to_string();
+        let unconnected_id = uuid::Uuid::new_v4().to_string();
+        let unavailable_id = uuid::Uuid::new_v4().to_string();
+
+        let mut connected = dummy_service();
+        connected.id = connected_id.clone();
+        connected.name = "Connected Platform".to_string();
+        connected.slug = "connected-platform".to_string();
+        connected.description = Some("Connected service".to_string());
+        connected.requires_user_credential = true;
+
+        let mut unconnected = dummy_service();
+        unconnected.id = unconnected_id.clone();
+        unconnected.name = "Unconnected Platform".to_string();
+        unconnected.slug = "unconnected-platform".to_string();
+        unconnected.requires_user_credential = true;
+
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_many(vec![connected, unconnected])
+            .await
+            .expect("insert platform services");
+
+        db.collection::<UserServiceConnection>(CONNECTIONS)
+            .insert_one(UserServiceConnection {
+                id: uuid::Uuid::new_v4().to_string(),
+                user_id: user_id.clone(),
+                service_id: connected_id.clone(),
+                credential_encrypted: Some(vec![1]),
+                credential_type: Some("api_key".to_string()),
+                credential_label: None,
+                metadata: None,
+                is_active: true,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .expect("insert connection");
+
+        db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
+            .insert_one(ServiceEndpoint {
+                id: uuid::Uuid::new_v4().to_string(),
+                service_id: connected_id.clone(),
+                name: "status".to_string(),
+                description: Some("Get status".to_string()),
+                method: "GET".to_string(),
+                path: "/status".to_string(),
+                parameters: None,
+                request_body_schema: None,
+                request_content_type: None,
+                request_body_required: false,
+                response_description: None,
+                is_active: true,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .expect("insert endpoint");
+
+        let endpoint_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(test_user_endpoint(
+                &endpoint_id,
+                &user_id,
+                "Unavailable User Service",
+                "https://unavailable.example.com",
+                None,
+                None,
+            ))
+            .await
+            .expect("insert user endpoint");
+        let mut unavailable = test_user_service(
+            &unavailable_id,
+            &user_id,
+            "unavailable-user-service",
+            &endpoint_id,
+            None,
+            None,
+        );
+        unavailable.auth_method = "bearer".to_string();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(unavailable)
+            .await
+            .expect("insert unavailable user service");
+
+        let node_ws_manager = NodeWsManager::new(30, 100);
+        let loaded =
+            load_user_tools_all_scoped(&db, &node_ws_manager, &user_id, NodeScope::Unrestricted)
+                .await
+                .expect("load connected services");
+        let result = list_connected_services(&loaded, None);
+        let services = result["services"].as_array().expect("services array");
+
+        assert_eq!(result["count"], 2);
+        assert!(
+            services
+                .iter()
+                .any(|service| service["service_id"] == connected_id)
+        );
+        assert!(
+            services
+                .iter()
+                .all(|service| service["service_id"] != unconnected_id)
+        );
+        let unavailable = services
+            .iter()
+            .find(|service| service["service_id"] == unavailable_id)
+            .expect("unavailable connected service should be listed");
+        assert_eq!(unavailable["executable"], false);
+        assert_eq!(unavailable["source"], "user_service");
+        assert_eq!(unavailable["is_generic_proxy"], true);
+    }
+
+    #[tokio::test]
+    async fn discover_and_connected_services_are_disjoint_for_auto_connect_states() {
+        let Some(db) = connect_test_database("mcp_auto_connect_complement").await else {
+            eprintln!("skipping MCP auto-connect test: no local MongoDB available");
+            return;
+        };
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let auto_connected_id = uuid::Uuid::new_v4().to_string();
+        let auto_disconnected_id = uuid::Uuid::new_v4().to_string();
+        let credential_required_id = uuid::Uuid::new_v4().to_string();
+
+        let mut auto_connected = dummy_service();
+        auto_connected.id = auto_connected_id.clone();
+        auto_connected.name = "Auto Connected".to_string();
+        auto_connected.slug = "auto-connected".to_string();
+        auto_connected.requires_user_credential = false;
+
+        let mut auto_disconnected = dummy_service();
+        auto_disconnected.id = auto_disconnected_id.clone();
+        auto_disconnected.name = "Auto Disconnected".to_string();
+        auto_disconnected.slug = "auto-disconnected".to_string();
+        auto_disconnected.requires_user_credential = false;
+
+        let mut credential_required = dummy_service();
+        credential_required.id = credential_required_id.clone();
+        credential_required.name = "Credential Required".to_string();
+        credential_required.slug = "credential-required".to_string();
+        credential_required.requires_user_credential = true;
+
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_many(vec![auto_connected, auto_disconnected, credential_required])
+            .await
+            .expect("insert discovery services");
+
+        db.collection::<UserServiceConnection>(CONNECTIONS)
+            .insert_one(UserServiceConnection {
+                id: uuid::Uuid::new_v4().to_string(),
+                user_id: user_id.clone(),
+                service_id: auto_disconnected_id.clone(),
+                credential_encrypted: None,
+                credential_type: None,
+                credential_label: None,
+                metadata: None,
+                is_active: false,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .expect("insert explicit disconnect");
+
+        let node_ws_manager = NodeWsManager::new(30, 100);
+        let loaded =
+            load_user_tools_all_scoped(&db, &node_ws_manager, &user_id, NodeScope::Unrestricted)
+                .await
+                .expect("load connected services");
+        let connected = list_connected_services(&loaded, None);
+        let discover = discover_services(&db, &user_id, None, Some("connection"))
+            .await
+            .expect("discover services");
+
+        let service_ids = |result: &serde_json::Value| -> HashSet<String> {
+            result["services"]
+                .as_array()
+                .expect("services array")
+                .iter()
+                .filter_map(|service| service["service_id"].as_str().map(str::to_string))
+                .collect()
+        };
+        let connected_ids = service_ids(&connected);
+        let discover_ids = service_ids(&discover);
+
+        assert_eq!(connected_ids, HashSet::from([auto_connected_id]));
+        assert_eq!(
+            discover_ids,
+            HashSet::from([auto_disconnected_id, credential_required_id])
+        );
+        assert!(connected_ids.is_disjoint(&discover_ids));
+    }
+
     // -- generate_tool_definitions tests --
 
     #[test]
@@ -3424,8 +3780,8 @@ mod tests {
         let empty_set = HashSet::new();
         let tools = generate_tool_definitions(&services, Some(&empty_set));
 
-        // Should only have the 12 meta-tools (4 core + 2 SSH + 6 oracle)
-        assert_eq!(tools.len(), 12);
+        // Should only have the 13 meta-tools (5 core + 2 SSH + 6 oracle)
+        assert_eq!(tools.len(), 13);
         assert!(tools.iter().all(|t| t.name.starts_with("nyx__")));
     }
 
@@ -3450,8 +3806,8 @@ mod tests {
         activated.insert("svc-1".to_string());
         let tools = generate_tool_definitions(&services, Some(&activated));
 
-        // 12 meta-tools + 1 weather tool (news excluded)
-        assert_eq!(tools.len(), 13);
+        // 13 meta-tools + 1 weather tool (news excluded)
+        assert_eq!(tools.len(), 14);
         assert!(tools.iter().any(|t| t.name == "weather__get_forecast"));
         assert!(!tools.iter().any(|t| t.name == "news__headlines"));
     }
@@ -3475,8 +3831,8 @@ mod tests {
 
         let tools = generate_tool_definitions(&services, None);
 
-        // 12 meta-tools + 2 service tools
-        assert_eq!(tools.len(), 14);
+        // 13 meta-tools + 2 service tools
+        assert_eq!(tools.len(), 15);
         assert!(tools.iter().any(|t| t.name == "weather__get_forecast"));
         assert!(tools.iter().any(|t| t.name == "news__headlines"));
     }
@@ -3509,6 +3865,18 @@ mod tests {
         );
         assert_eq!(required_for("nyx__oracle_extract"), vec!["pool", "url"]);
         assert_eq!(required_for("nyx__oracle_session"), vec!["conversation_id"]);
+    }
+
+    #[test]
+    fn generate_tool_definitions_includes_connected_services_meta_tool() {
+        let tools = generate_tool_definitions(&[], None);
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name == "nyx__list_connected_services")
+            .expect("connected-services meta-tool");
+
+        assert_eq!(tool.input_schema["required"], serde_json::json!([]));
+        assert!(tool.input_schema["properties"]["query"].is_object());
     }
 
     #[test]
@@ -5253,6 +5621,77 @@ mod tests {
         let schema = build_generic_proxy_input_schema();
         let required = schema["required"].as_array().unwrap();
         assert!(required.contains(&serde_json::Value::String("path".into())));
+        assert_eq!(schema["properties"]["query"]["type"], "string");
+        assert!(!required.contains(&serde_json::Value::String("query".into())));
+    }
+
+    #[test]
+    fn build_generic_proxy_args_separates_embedded_query_verbatim() {
+        let (method, path, query, headers, body) = build_generic_proxy_args(&serde_json::json!({
+            "path": "/stats?tag=a&tag=b&name=Nyx%20ID&empty="
+        }))
+        .expect("embedded query should be accepted");
+
+        assert_eq!(method, reqwest::Method::GET);
+        assert_eq!(path, "stats");
+        assert_eq!(query.as_deref(), Some("tag=a&tag=b&name=Nyx%20ID&empty="));
+        assert!(headers.is_empty());
+        assert!(body.is_none());
+    }
+
+    #[test]
+    fn build_generic_proxy_args_accepts_explicit_raw_query() {
+        let (_, path, query, _, _) = build_generic_proxy_args(&serde_json::json!({
+            "path": "stats",
+            "query": "redirect=/search?q=nyx&empty="
+        }))
+        .expect("explicit raw query should be accepted");
+
+        assert_eq!(path, "stats");
+        assert_eq!(query.as_deref(), Some("redirect=/search?q=nyx&empty="));
+    }
+
+    #[test]
+    fn build_generic_proxy_args_rejects_ambiguous_or_fragmented_query() {
+        let ambiguous = build_generic_proxy_args(&serde_json::json!({
+            "path": "stats?period=today",
+            "query": "limit=10"
+        }))
+        .expect_err("dual query sources should be rejected");
+        assert!(matches!(
+            ambiguous,
+            AppError::BadRequest(message) if message.contains("either in path or query")
+        ));
+
+        for args in [
+            serde_json::json!({"path": "stats?period=today#summary"}),
+            serde_json::json!({"path": "stats", "query": "period=today#summary"}),
+        ] {
+            let error =
+                build_generic_proxy_args(&args).expect_err("URI fragments should not be forwarded");
+            assert!(matches!(
+                error,
+                AppError::BadRequest(message) if message == "Invalid proxy path"
+            ));
+        }
+    }
+
+    #[test]
+    fn build_generic_proxy_args_preserves_path_security_checks() {
+        for path in [
+            "https://example.test/stats?period=today",
+            "//example.test/stats?period=today",
+            "a/../stats?period=today",
+            "stats%3Fperiod%3Dtoday",
+            "stats#summary",
+        ] {
+            let error = build_generic_proxy_args(&serde_json::json!({"path": path}))
+                .expect_err("unsafe request target should be rejected");
+            assert!(
+                matches!(error, AppError::BadRequest(message) if message == "Invalid proxy path"),
+                "unexpected error for {path}"
+            );
+        }
     }
 
     #[test]
@@ -5304,6 +5743,7 @@ mod tests {
             node_id: None,
             user_service_id: "user-service".to_string(),
             has_server_credential: false,
+            master_credential: false,
             org_routing: org_user_id.map(|org_user_id| proxy_service::OrgRouting {
                 org_user_id: org_user_id.to_string(),
                 member_user_id: actor_user_id.to_string(),

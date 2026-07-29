@@ -78,6 +78,27 @@ describe("ChatThread", () => {
     );
   });
 
+  it("reserves tail room and fades over the composer it scrolls behind", () => {
+    const { container } = render(
+      <ChatThread
+        messages={[
+          message({
+            blocks: [{ type: "text", block_id: "text-1", text: "Answer" }],
+          }),
+        ]}
+        bottomInset={140}
+        onDecideApproval={vi.fn()}
+      />,
+    );
+
+    const scroller = container.querySelector<HTMLElement>(".overflow-y-auto");
+    expect(scroller?.style.maskImage).toContain("calc(100% - 140px)");
+    // Tail padding keeps the last turn clear of the composer at scroll bottom.
+    expect(
+      scroller?.firstElementChild?.getAttribute("style"),
+    ).toContain("140px");
+  });
+
   it("hides the thinking indicator once assistant content streams", () => {
     render(
       <ChatThread

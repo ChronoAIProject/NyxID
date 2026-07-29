@@ -24,7 +24,6 @@ import type {
   UpdateBrokerSettingsRequest,
 } from "@/types/admin";
 import type { DataTableSearchApplyMode } from "@/types/data-table";
-import type { DataTableColumnPreferences } from "@/lib/data-table-preferences";
 import { useAuthStore } from "@/stores/auth-store";
 import { PageHeader } from "@/components/shared/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -62,22 +61,15 @@ import {
   Table,
   TableBody,
   TableCell,
-  TableHead,
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
 import {
   AlertTriangle,
-  ArrowDown,
-  ArrowUp,
-  ArrowUpDown,
   ChevronLeft,
   ChevronRight,
-  GripVertical,
   KeyRound,
   Loader2,
-  Pin,
-  PinOff,
   RotateCcw,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -104,18 +96,14 @@ import {
   DataTableSearch,
 } from "@/components/data-table/data-table-controls";
 import {
-  clampColumnWidth,
-  columnWidthVar,
-  columnWidthVars,
-  frozenColumnFields,
-  stickyColumnLeft,
-  sumOfColumnWidths,
-} from "@/lib/data-table-columns";
-import {
-  isDefaultColumnLayout,
-  loadColumnPreferences,
-  saveColumnPreferences,
-} from "@/lib/data-table-preferences";
+  DATA_TABLE_CLASS_NAME,
+  DataTableBadgeCell,
+  DataTableCellShell,
+  DataTableColumnHeader,
+  nextDataTableSort,
+  useDataTableColumns,
+  type DataTableColumn,
+} from "@/components/data-table/data-table-columns";
 
 type ClientAction = {
   readonly client: AdminOAuthClient;
@@ -169,15 +157,7 @@ type OAuthClientSortField =
   | "allowed_scopes"
   | "created_at";
 
-type OAuthClientColumn = {
-  readonly field: OAuthClientSortField;
-  readonly label: string;
-  /** Starting width, and the width a double-click on the resize handle restores. */
-  readonly defaultWidth: number;
-  readonly cellClassName?: string;
-};
-
-const OAUTH_CLIENT_COLUMNS: readonly OAuthClientColumn[] = [
+const OAUTH_CLIENT_COLUMNS: readonly DataTableColumn<OAuthClientSortField>[] = [
   {
     field: "client_name",
     label: "Client",
@@ -217,86 +197,8 @@ const OAUTH_CLIENT_COLUMNS: readonly OAuthClientColumn[] = [
   },
 ];
 
-const DEFAULT_COLUMN_ORDER = OAUTH_CLIENT_COLUMNS.map((column) => column.field);
-
-const MIN_COLUMN_WIDTH = 96;
-const MAX_COLUMN_WIDTH = 640;
-const COLUMN_RESIZE_STEP = 16;
-
-type ColumnWidths = Readonly<Record<OAuthClientSortField, number>>;
-
-const DEFAULT_COLUMN_WIDTHS = Object.fromEntries(
-  OAUTH_CLIENT_COLUMNS.map((column) => [column.field, column.defaultWidth]),
-) as ColumnWidths;
-
-type ColumnPreferences = DataTableColumnPreferences<OAuthClientSortField>;
-
-const DEFAULT_COLUMN_PREFERENCES: ColumnPreferences = {
-  order: DEFAULT_COLUMN_ORDER,
-  frozenThrough: null,
-  widths: DEFAULT_COLUMN_WIDTHS,
-};
-
-const COLUMN_WIDTH_BOUNDS = { min: MIN_COLUMN_WIDTH, max: MAX_COLUMN_WIDTH };
-
 /** Bump the version suffix when a change makes stored layouts unreadable. */
 const COLUMN_PREFERENCES_KEY = "nyxid.table.admin-oauth-clients.columns.v1";
-
-type ColumnDropTarget = {
-  readonly field: OAuthClientSortField;
-  readonly position: "before" | "after";
-};
-
-/**
- * Divider marking the frozen edge, drawn as a pseudo-element rather than a
- * `border-r`. A collapsed border belongs to the table's border grid, not to the
- * cell, so it stays behind with the grid when a sticky cell is offset -- the
- * frozen edge would lose its line as soon as the table scrolls horizontally.
- * What the sticky cell paints itself travels with it at every scroll offset.
- */
-const FROZEN_EDGE_CLASS =
-  "shadow-[3px_0_6px_-4px_rgba(0,0,0,0.35)] before:pointer-events-none before:absolute before:inset-y-0 before:right-0 before:z-10 before:w-0.5 before:bg-border before:content-['']";
-
-function getColumn(field: OAuthClientSortField): OAuthClientColumn {
-  const column = OAUTH_CLIENT_COLUMNS.find((item) => item.field === field);
-  if (!column) throw new Error(`Unknown OAuth client column: ${field}`);
-  return column;
-}
-
-function isColumnField(value: unknown): value is OAuthClientSortField {
-  return OAUTH_CLIENT_COLUMNS.some((column) => column.field === value);
-}
-
-function moveColumnToIndex(
-  order: readonly OAuthClientSortField[],
-  field: OAuthClientSortField,
-  targetIndex: number,
-): OAuthClientSortField[] {
-  const sourceIndex = order.indexOf(field);
-  if (sourceIndex < 0) return [...order];
-  const next = order.filter((item) => item !== field);
-  next.splice(Math.max(0, Math.min(targetIndex, next.length)), 0, field);
-  return next;
-}
-
-function reorderColumnsForDrop(
-  order: readonly OAuthClientSortField[],
-  source: OAuthClientSortField,
-  target: OAuthClientSortField,
-  position: ColumnDropTarget["position"],
-): OAuthClientSortField[] {
-  if (source === target) return [...order];
-  const withoutSource = order.filter((field) => field !== source);
-  const targetIndex = withoutSource.indexOf(target);
-  if (targetIndex < 0) return [...order];
-  const insertionIndex = targetIndex + (position === "after" ? 1 : 0);
-  withoutSource.splice(insertionIndex, 0, source);
-  return withoutSource;
-}
-
-function resizeColumnWidth(width: number): number {
-  return clampColumnWidth(width, MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH);
-}
 
 const DEFAULT_COLUMN_SORT: Record<OAuthClientSortField, AdminOAuthClientSort> =
   {
@@ -317,250 +219,6 @@ type OAuthClientSearchEditTarget =
       readonly value: string;
     };
 
-function sortDirection(
-  sort: AdminOAuthClientSort,
-  field: OAuthClientSortField,
-): "ascending" | "descending" | undefined {
-  if (sort === field) return "ascending";
-  if (sort === `-${field}`) return "descending";
-  return undefined;
-}
-
-function nextColumnSort(
-  sort: AdminOAuthClientSort,
-  field: OAuthClientSortField,
-): AdminOAuthClientSort {
-  const ascending = field as AdminOAuthClientSort;
-  const descending = `-${field}` as AdminOAuthClientSort;
-  if (sort === ascending) return descending;
-  if (sort === descending) return ascending;
-  return DEFAULT_COLUMN_SORT[field];
-}
-
-function ReorderableTableHead({
-  column,
-  sort,
-  disabled,
-  frozen,
-  lastFrozen,
-  stickyLeft,
-  width,
-  resizing,
-  dragging,
-  dropPosition,
-  onSort,
-  onDragStart,
-  onDragOver,
-  onDrop,
-  onDragEnd,
-  onMoveByKeyboard,
-  onToggleFreeze,
-  onResizeStart,
-  onResizeByKeyboard,
-  onResizeReset,
-}: {
-  readonly column: OAuthClientColumn;
-  readonly sort: AdminOAuthClientSort;
-  readonly disabled: boolean;
-  readonly frozen: boolean;
-  readonly lastFrozen: boolean;
-  readonly stickyLeft: string | undefined;
-  readonly width: number;
-  readonly resizing: boolean;
-  readonly dragging: boolean;
-  readonly dropPosition: ColumnDropTarget["position"] | undefined;
-  readonly onSort: (sort: AdminOAuthClientSort) => void;
-  readonly onDragStart: (
-    field: OAuthClientSortField,
-    event: React.DragEvent<HTMLButtonElement>,
-  ) => void;
-  readonly onDragOver: (
-    field: OAuthClientSortField,
-    event: React.DragEvent<HTMLTableCellElement>,
-  ) => void;
-  readonly onDrop: (
-    field: OAuthClientSortField,
-    event: React.DragEvent<HTMLTableCellElement>,
-  ) => void;
-  readonly onDragEnd: () => void;
-  readonly onMoveByKeyboard: (
-    field: OAuthClientSortField,
-    key: "ArrowLeft" | "ArrowRight" | "Home" | "End",
-  ) => void;
-  readonly onToggleFreeze: (field: OAuthClientSortField) => void;
-  readonly onResizeStart: (
-    field: OAuthClientSortField,
-    event: React.PointerEvent<HTMLDivElement>,
-  ) => void;
-  readonly onResizeByKeyboard: (
-    field: OAuthClientSortField,
-    key: "ArrowLeft" | "ArrowRight" | "Home",
-  ) => void;
-  readonly onResizeReset: (field: OAuthClientSortField) => void;
-}) {
-  const { field, label } = column;
-  const direction = sortDirection(sort, field);
-  const Icon =
-    direction === "ascending"
-      ? ArrowUp
-      : direction === "descending"
-        ? ArrowDown
-        : ArrowUpDown;
-  const next = nextColumnSort(sort, field);
-  const nextDirection = next.startsWith("-") ? "descending" : "ascending";
-
-  return (
-    <TableHead
-      aria-label={label}
-      aria-sort={direction ?? "none"}
-      data-column={field}
-      data-dragging={dragging || undefined}
-      data-drop-position={dropPosition}
-      data-frozen={frozen || undefined}
-      data-frozen-edge={lastFrozen || undefined}
-      data-resizing={resizing || undefined}
-      style={frozen ? { left: stickyLeft } : undefined}
-      onDragOver={(event) => onDragOver(field, event)}
-      onDrop={(event) => onDrop(field, event)}
-      className={cn(
-        "group/header relative h-10 p-0 transition-colors",
-        frozen && "sticky z-30 bg-card",
-        lastFrozen && FROZEN_EDGE_CLASS,
-        direction && "text-foreground",
-      )}
-    >
-      {/* Tint overlays, never a background swap: a frozen header must keep an
-          opaque background or the columns scrolling underneath show through. */}
-      <span
-        className="pointer-events-none absolute inset-0 bg-accent opacity-0 transition-opacity group-hover/header:opacity-100"
-        aria-hidden="true"
-      />
-      {direction && (
-        <span
-          className="pointer-events-none absolute inset-0 bg-primary/[0.07]"
-          aria-hidden="true"
-        />
-      )}
-      {dropPosition && (
-        <span
-          data-testid={`column-drop-indicator-${field}`}
-          className={cn(
-            "pointer-events-none absolute inset-y-0 z-30 w-0.5 bg-primary",
-            dropPosition === "before" ? "left-0" : "right-0",
-          )}
-          aria-hidden="true"
-        />
-      )}
-      <div
-        className={cn(
-          // Right padding keeps the pin button clear of the resize handle.
-          "flex h-full min-w-0 items-center pr-1.5",
-          dragging && "opacity-55",
-        )}
-      >
-        <button
-          type="button"
-          draggable
-          aria-label={`Move ${label} column`}
-          title={`Move ${label} column`}
-          onDragStart={(event) => onDragStart(field, event)}
-          onDragEnd={onDragEnd}
-          onKeyDown={(event) => {
-            if (
-              event.key === "ArrowLeft" ||
-              event.key === "ArrowRight" ||
-              event.key === "Home" ||
-              event.key === "End"
-            ) {
-              event.preventDefault();
-              onMoveByKeyboard(field, event.key);
-            }
-          }}
-          className="flex h-full w-7 shrink-0 cursor-grab items-center justify-center text-muted-foreground opacity-0 outline-none transition-opacity hover:text-foreground focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring active:cursor-grabbing group-hover/header:opacity-100 group-focus-within/header:opacity-100"
-        >
-          <GripVertical className="h-3.5 w-3.5" aria-hidden="true" />
-        </button>
-        <button
-          type="button"
-          className={cn(
-            "group/sort flex h-full min-w-0 flex-1 items-center gap-1.5 text-left text-[10px] font-semibold uppercase tracking-normal outline-none transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50",
-            direction && "text-foreground",
-          )}
-          disabled={disabled}
-          aria-label={`Sort by ${label}, ${nextDirection}`}
-          title={`Sort by ${label}, ${nextDirection}`}
-          onClick={() => onSort(next)}
-        >
-          <span className="truncate">{label}</span>
-          <Icon
-            className={cn(
-              "h-3.5 w-3.5 shrink-0",
-              direction
-                ? "text-primary"
-                : "text-muted-foreground/55 group-hover/sort:text-muted-foreground",
-            )}
-            aria-hidden="true"
-          />
-        </button>
-        <button
-          type="button"
-          aria-label={
-            lastFrozen
-              ? `Unfreeze columns through ${label}`
-              : `Freeze columns through ${label}`
-          }
-          title={lastFrozen ? "Unfreeze columns" : "Freeze through this column"}
-          aria-pressed={lastFrozen}
-          onClick={() => onToggleFreeze(field)}
-          className={cn(
-            "flex h-full w-7 shrink-0 items-center justify-center outline-none transition-opacity hover:text-foreground focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring group-hover/header:opacity-100 group-focus-within/header:opacity-100",
-            lastFrozen
-              ? "text-primary opacity-100"
-              : "text-muted-foreground opacity-0",
-          )}
-        >
-          {lastFrozen ? (
-            <PinOff className="h-3.5 w-3.5" aria-hidden="true" />
-          ) : (
-            <Pin className="h-3.5 w-3.5" aria-hidden="true" />
-          )}
-        </button>
-      </div>
-      <div
-        role="separator"
-        aria-orientation="vertical"
-        aria-label={`Resize ${label} column`}
-        aria-valuenow={width}
-        aria-valuemin={MIN_COLUMN_WIDTH}
-        aria-valuemax={MAX_COLUMN_WIDTH}
-        tabIndex={0}
-        title={`Drag to resize ${label}, double-click to reset`}
-        onPointerDown={(event) => onResizeStart(field, event)}
-        onDoubleClick={() => onResizeReset(field)}
-        onKeyDown={(event) => {
-          if (
-            event.key === "ArrowLeft" ||
-            event.key === "ArrowRight" ||
-            event.key === "Home"
-          ) {
-            event.preventDefault();
-            onResizeByKeyboard(field, event.key);
-          }
-        }}
-        className="group/resize absolute inset-y-0 right-0 z-40 flex w-1.5 cursor-col-resize touch-none justify-center outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
-      >
-        <span
-          aria-hidden="true"
-          className={cn(
-            "h-full w-0.5 transition-colors group-hover/resize:bg-primary",
-            resizing && "bg-primary",
-          )}
-        />
-      </div>
-    </TableHead>
-  );
-}
-
 export function AdminOAuthClientsPage() {
   const navigate = useNavigate();
   const routeSearch = useSearch({
@@ -568,23 +226,18 @@ export function AdminOAuthClientsPage() {
   }) as AdminOAuthClientSearchState;
   const currentUser = useAuthStore((s) => s.user);
   const canWrite = canAdminWrite(currentUser);
-  const [columnPreferences, setColumnPreferences] = useState(() =>
-    loadColumnPreferences(
-      COLUMN_PREFERENCES_KEY,
-      DEFAULT_COLUMN_PREFERENCES,
-      COLUMN_WIDTH_BOUNDS,
-    ),
-  );
-  const [draggingColumn, setDraggingColumn] =
-    useState<OAuthClientSortField | null>(null);
-  const [columnDropTarget, setColumnDropTarget] =
-    useState<ColumnDropTarget | null>(null);
-  const [columnAnnouncement, setColumnAnnouncement] = useState("");
-  const draggingColumnRef = useRef<OAuthClientSortField | null>(null);
-  const [resizingColumn, setResizingColumn] =
-    useState<OAuthClientSortField | null>(null);
-  const detachResizeRef = useRef<(() => void) | null>(null);
-  const tableRef = useRef<HTMLTableElement>(null);
+  const {
+    order: columnOrder,
+    announcement: columnAnnouncement,
+    resizingColumn,
+    tableRef,
+    tableStyle,
+    columnStyle,
+    isDefaultLayout: isDefaultColumnLayout,
+    resetLayout: resetColumnLayout,
+    headerProps: columnHeaderProps,
+    cellProps: columnCellProps,
+  } = useDataTableColumns(OAUTH_CLIENT_COLUMNS, COLUMN_PREFERENCES_KEY);
   const appliedSearch = routeSearch.search ?? "";
   const [searchDraft, setSearchDraft] = useState("");
   const [selectedSearchField, setSelectedSearchField] =
@@ -662,10 +315,6 @@ export function AdminOAuthClientsPage() {
     appliedSearchFilters.length > 0 ||
     appliedStructuredFilters.length > 0,
   );
-  const columnOrder = columnPreferences.order;
-  const frozenThrough = columnPreferences.frozenThrough;
-  const columnWidths = columnPreferences.widths;
-  const frozenFields = frozenColumnFields(columnOrder, frozenThrough);
 
   const updateListSearch = useCallback(
     (patch: Partial<AdminOAuthClientSearchState>, replace = false) => {
@@ -889,228 +538,6 @@ export function AdminOAuthClientsPage() {
     );
   }
 
-  function announceColumnPosition(
-    field: OAuthClientSortField,
-    order: readonly OAuthClientSortField[],
-  ) {
-    setColumnAnnouncement(
-      `${getColumn(field).label} column moved to position ${String(
-        order.indexOf(field) + 1,
-      )} of ${String(order.length)}`,
-    );
-  }
-
-  function updateColumnOrder(
-    nextOrder: readonly OAuthClientSortField[],
-    movedField: OAuthClientSortField,
-  ) {
-    setColumnPreferences((previous) => ({
-      ...previous,
-      order: nextOrder,
-    }));
-    announceColumnPosition(movedField, nextOrder);
-  }
-
-  function handleColumnDragStart(
-    field: OAuthClientSortField,
-    event: React.DragEvent<HTMLButtonElement>,
-  ) {
-    draggingColumnRef.current = field;
-    setDraggingColumn(field);
-    setColumnDropTarget(null);
-    event.dataTransfer.effectAllowed = "move";
-    event.dataTransfer.setData("text/plain", field);
-  }
-
-  function dropPositionForEvent(
-    event: React.DragEvent<HTMLTableCellElement>,
-  ): ColumnDropTarget["position"] {
-    const bounds = event.currentTarget.getBoundingClientRect();
-    return event.clientX < bounds.left + bounds.width / 2 ? "before" : "after";
-  }
-
-  function handleColumnDragOver(
-    field: OAuthClientSortField,
-    event: React.DragEvent<HTMLTableCellElement>,
-  ) {
-    const source = draggingColumnRef.current;
-    if (!source || source === field) return;
-    event.preventDefault();
-    event.dataTransfer.dropEffect = "move";
-    const nextTarget: ColumnDropTarget = {
-      field,
-      position: dropPositionForEvent(event),
-    };
-    setColumnDropTarget((current) =>
-      current?.field === nextTarget.field &&
-      current.position === nextTarget.position
-        ? current
-        : nextTarget,
-    );
-  }
-
-  function clearColumnDragState() {
-    draggingColumnRef.current = null;
-    setDraggingColumn(null);
-    setColumnDropTarget(null);
-  }
-
-  function handleColumnDrop(
-    field: OAuthClientSortField,
-    event: React.DragEvent<HTMLTableCellElement>,
-  ) {
-    const transferredField = event.dataTransfer.getData("text/plain");
-    const source =
-      draggingColumnRef.current ??
-      (isColumnField(transferredField) ? transferredField : null);
-    if (!source || source === field) {
-      clearColumnDragState();
-      return;
-    }
-
-    event.preventDefault();
-    const position =
-      columnDropTarget?.field === field
-        ? columnDropTarget.position
-        : dropPositionForEvent(event);
-    const nextOrder = reorderColumnsForDrop(
-      columnOrder,
-      source,
-      field,
-      position,
-    );
-    updateColumnOrder(nextOrder, source);
-    clearColumnDragState();
-  }
-
-  function handleColumnKeyboardMove(
-    field: OAuthClientSortField,
-    key: "ArrowLeft" | "ArrowRight" | "Home" | "End",
-  ) {
-    const sourceIndex = columnOrder.indexOf(field);
-    const targetIndex =
-      key === "Home"
-        ? 0
-        : key === "End"
-          ? columnOrder.length - 1
-          : key === "ArrowLeft"
-            ? Math.max(0, sourceIndex - 1)
-            : Math.min(columnOrder.length - 1, sourceIndex + 1);
-    if (sourceIndex < 0 || sourceIndex === targetIndex) return;
-    updateColumnOrder(
-      moveColumnToIndex(columnOrder, field, targetIndex),
-      field,
-    );
-  }
-
-  function toggleFrozenColumns(field: OAuthClientSortField) {
-    setColumnPreferences((previous) => ({
-      ...previous,
-      frozenThrough: previous.frozenThrough === field ? null : field,
-    }));
-  }
-
-  function commitColumnWidth(field: OAuthClientSortField, width: number) {
-    setColumnPreferences((previous) => ({
-      ...previous,
-      widths: { ...previous.widths, [field]: width },
-    }));
-    setColumnAnnouncement(
-      `${getColumn(field).label} column resized to ${String(width)} pixels`,
-    );
-  }
-
-  /**
-   * The drag is tracked on the window, so it survives the pointer leaving the
-   * handle, and it writes the column's width variable straight to the table
-   * rather than through state -- the browser then reflows the columns, the
-   * table width, and any frozen offsets without re-rendering a single row.
-   *
-   * The listeners go on at pointerdown rather than in an effect keyed on the
-   * resizing column: an effect does not run until after the next commit, and a
-   * pointer event landing in that gap would be dropped -- a `pointerup` there
-   * would strand the table mid-resize.
-   */
-  function handleResizeStart(
-    field: OAuthClientSortField,
-    event: React.PointerEvent<HTMLDivElement>,
-  ) {
-    if (event.button !== 0) return;
-    // Keep the pointer press off the header's sort button and drag handle.
-    event.preventDefault();
-    event.stopPropagation();
-
-    const startWidth = columnWidths[field];
-    const resize = { startX: event.clientX, width: startWidth };
-    setResizingColumn(field);
-
-    function handleMove(moveEvent: PointerEvent) {
-      resize.width = resizeColumnWidth(
-        startWidth + moveEvent.clientX - resize.startX,
-      );
-      tableRef.current?.style.setProperty(
-        columnWidthVar(field),
-        `${String(resize.width)}px`,
-      );
-    }
-
-    function handleEnd() {
-      detachResize();
-      setResizingColumn(null);
-      if (resize.width !== startWidth) commitColumnWidth(field, resize.width);
-    }
-
-    function detachResize() {
-      detachResizeRef.current = null;
-      window.removeEventListener("pointermove", handleMove);
-      window.removeEventListener("pointerup", handleEnd);
-      window.removeEventListener("pointercancel", handleEnd);
-    }
-
-    detachResizeRef.current = detachResize;
-    window.addEventListener("pointermove", handleMove);
-    window.addEventListener("pointerup", handleEnd);
-    window.addEventListener("pointercancel", handleEnd);
-  }
-
-  // Drop a drag still in flight if the table unmounts under it.
-  useEffect(() => () => detachResizeRef.current?.(), []);
-
-  useEffect(() => {
-    saveColumnPreferences(
-      COLUMN_PREFERENCES_KEY,
-      columnPreferences,
-      DEFAULT_COLUMN_PREFERENCES,
-    );
-  }, [columnPreferences]);
-
-  function resetColumnLayout() {
-    setColumnPreferences(DEFAULT_COLUMN_PREFERENCES);
-    setColumnAnnouncement("Column layout reset");
-  }
-
-  function handleResizeKeyboard(
-    field: OAuthClientSortField,
-    key: "ArrowLeft" | "ArrowRight" | "Home",
-  ) {
-    const current = columnWidths[field];
-    const next =
-      key === "Home"
-        ? getColumn(field).defaultWidth
-        : resizeColumnWidth(
-            current +
-              (key === "ArrowRight" ? COLUMN_RESIZE_STEP : -COLUMN_RESIZE_STEP),
-          );
-    if (next === current) return;
-    commitColumnWidth(field, next);
-  }
-
-  function resetColumnWidth(field: OAuthClientSortField) {
-    const { defaultWidth } = getColumn(field);
-    if (columnWidths[field] === defaultWidth) return;
-    commitColumnWidth(field, defaultWidth);
-  }
-
   function stageBrokerCapability(client: AdminOAuthClient, enabled: boolean) {
     const removingLegacyScope =
       !enabled &&
@@ -1212,19 +639,34 @@ export function AdminOAuthClientsPage() {
       case "client_name":
         return (
           <div className="min-w-0 space-y-1">
-            <p className="truncate text-sm font-medium text-foreground">
+            <p
+              className="line-clamp-2 break-words text-sm font-medium text-foreground"
+              title={client.client_name}
+            >
               {client.client_name}
             </p>
-            <p className="truncate font-mono text-[11px] text-muted-foreground">
+            <p
+              className="line-clamp-2 break-all font-mono text-[11px] text-muted-foreground"
+              title={client.id}
+            >
               {client.id}
             </p>
           </div>
         );
       case "client_type":
-        return <Badge variant="secondary">{client.client_type}</Badge>;
+        return (
+          <DataTableBadgeCell>
+            <Badge variant="secondary">{client.client_type}</Badge>
+          </DataTableBadgeCell>
+        );
       case "created_by":
         return (
-          <span className="break-all">{client.created_by ?? "ownerless"}</span>
+          <span
+            className="line-clamp-2 break-all"
+            title={client.created_by ?? "ownerless"}
+          >
+            {client.created_by ?? "ownerless"}
+          </span>
         );
       case "broker":
         return canWrite ? (
@@ -1494,54 +936,30 @@ export function AdminOAuthClientsPage() {
               <Table
                 ref={tableRef}
                 containerClassName="overscroll-x-none"
-                className="table-fixed [&_td]:overflow-hidden [&_td]:py-1.5"
-                style={{
-                  minWidth: sumOfColumnWidths(columnOrder),
-                  ...columnWidthVars(columnOrder, columnWidths),
-                }}
+                className={DATA_TABLE_CLASS_NAME}
+                style={tableStyle}
               >
                 <colgroup>
                   {columnOrder.map((field) => (
-                    <col
-                      key={field}
-                      style={{ width: `var(${columnWidthVar(field)})` }}
-                    />
+                    <col key={field} style={columnStyle(field)} />
                   ))}
                 </colgroup>
                 <TableHeader>
                   <TableRow>
-                    {columnOrder.map((field) => {
-                      const column = getColumn(field);
-                      return (
-                        <ReorderableTableHead
-                          key={field}
-                          column={column}
-                          sort={listParams.sort}
-                          disabled={!canSortColumn(field)}
-                          frozen={frozenFields.includes(field)}
-                          lastFrozen={frozenThrough === field}
-                          stickyLeft={stickyColumnLeft(frozenFields, field)}
-                          width={columnWidths[field]}
-                          resizing={resizingColumn === field}
-                          dragging={draggingColumn === field}
-                          dropPosition={
-                            columnDropTarget?.field === field
-                              ? columnDropTarget.position
-                              : undefined
-                          }
-                          onSort={updateSort}
-                          onDragStart={handleColumnDragStart}
-                          onDragOver={handleColumnDragOver}
-                          onDrop={handleColumnDrop}
-                          onDragEnd={clearColumnDragState}
-                          onMoveByKeyboard={handleColumnKeyboardMove}
-                          onToggleFreeze={toggleFrozenColumns}
-                          onResizeStart={handleResizeStart}
-                          onResizeByKeyboard={handleResizeKeyboard}
-                          onResizeReset={resetColumnWidth}
-                        />
-                      );
-                    })}
+                    {columnOrder.map((field) => (
+                      <DataTableColumnHeader
+                        key={field}
+                        {...columnHeaderProps(field)}
+                        sort={listParams.sort}
+                        nextSort={nextDataTableSort(
+                          listParams.sort,
+                          field,
+                          DEFAULT_COLUMN_SORT,
+                        )}
+                        disabled={!canSortColumn(field)}
+                        onSort={updateSort}
+                      />
+                    ))}
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -1550,38 +968,13 @@ export function AdminOAuthClientsPage() {
                       key={client.id}
                       className="group/row hover:bg-muted/45"
                     >
-                      {columnOrder.map((field) => {
-                        const column = getColumn(field);
-                        const frozen = frozenFields.includes(field);
-                        return (
-                          <TableCell
-                            key={field}
-                            data-column={field}
-                            data-frozen={frozen || undefined}
-                            data-frozen-edge={
-                              frozenThrough === field || undefined
-                            }
-                            style={
-                              frozen
-                                ? {
-                                    left: stickyColumnLeft(frozenFields, field),
-                                  }
-                                : undefined
-                            }
-                            className={cn(
-                              column.cellClassName,
-                              // Opaque base so scrolled columns stay hidden; the row
-                              // hover tint rides on top as an overlay so a frozen cell
-                              // reads the same as the rest of its row.
-                              frozen &&
-                                "sticky z-20 bg-card after:pointer-events-none after:absolute after:inset-0 after:transition-colors after:duration-300 after:content-[''] group-hover/row:after:bg-muted/45",
-                              frozenThrough === field && FROZEN_EDGE_CLASS,
-                            )}
-                          >
+                      {columnOrder.map((field) => (
+                        <TableCell key={field} {...columnCellProps(field)}>
+                          <DataTableCellShell>
                             {renderOAuthClientCell(client, field)}
-                          </TableCell>
-                        );
-                      })}
+                          </DataTableCellShell>
+                        </TableCell>
+                      ))}
                     </TableRow>
                   ))}
                 </TableBody>
@@ -1595,10 +988,7 @@ export function AdminOAuthClientsPage() {
                 {String(total)} clients
               </p>
               <div className="flex flex-wrap items-center gap-2">
-                {!isDefaultColumnLayout(
-                  columnPreferences,
-                  DEFAULT_COLUMN_PREFERENCES,
-                ) && (
+                {!isDefaultColumnLayout && (
                   <Button
                     type="button"
                     variant="ghost"

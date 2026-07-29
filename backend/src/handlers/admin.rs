@@ -7,15 +7,20 @@ use futures::TryStreamExt;
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 
+use std::collections::{HashMap, HashSet};
+
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::handlers::admin_helpers::{require_admin, require_admin_or_operator};
-use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};
+use crate::models::audit_log::AuditLog;
+use crate::models::downstream_service::{
+    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
+};
 use crate::models::user::{COLLECTION_NAME as USERS, PlatformRole, User};
 use crate::mw::auth::AuthUser;
 use crate::services::{
-    admin_user_service, audit_chain_service, audit_service, consent_service, oauth_client_service,
-    platform_settings_service, role_service,
+    admin_audit_service, admin_user_service, audit_chain_service, audit_service, consent_service,
+    oauth_client_service, platform_settings_service, role_service,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
@@ -31,12 +36,23 @@ pub struct UserListQuery {
     pub user_type: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct AuditLogQuery {
     pub page: Option<u64>,
     pub per_page: Option<u64>,
+    /// Legacy exact-match filters, predating the admin table controls.
     pub user_id: Option<String>,
     pub api_key_id: Option<String>,
+    pub search: Option<String>,
+    pub search_filters: Option<String>,
+    pub custom_filters: Option<String>,
+    pub event_type: Option<String>,
+    pub status: Option<String>,
+    pub actor: Option<String>,
+    pub created_dates: Option<String>,
+    pub created_from: Option<String>,
+    pub created_to: Option<String>,
+    pub sort: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -85,6 +101,23 @@ pub struct AuditLogItem {
     pub ip_address: Option<String>,
     pub user_agent: Option<String>,
     pub created_at: String,
+    /// Human-readable service display name resolved from the referenced
+    /// DownstreamService at query time. `None` when the event has no
+    /// service context or the referenced service no longer exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_name: Option<String>,
+    /// Canonical service slug (e.g. `"openai"`) resolved at query time.
+    /// `None` when the event has no service context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_slug: Option<String>,
+    /// Display name of the acting user resolved at query time. `None` when
+    /// the event has no user, the user was deleted, or no name is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_display_name: Option<String>,
+    /// Email of the acting user resolved at query time. `None` when the
+    /// event has no user or the user was deleted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_email: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -93,6 +126,61 @@ pub struct AuditLogListResponse {
     pub total: u64,
     pub page: u64,
     pub per_page: u64,
+    pub filter_options: AuditLogFilterOptions,
+}
+
+/// Describes the audit table's controls to the client, so the UI never hardcodes
+/// a domain the server would reject.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct AuditLogFilterOptions {
+    pub sorts: Vec<&'static str>,
+    pub search_fields: Vec<AuditLogSearchField>,
+    pub fields: Vec<AuditLogFilterField>,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct AuditLogSearchField {
+    pub key: &'static str,
+    pub label: &'static str,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditLogFilterValueType {
+    Enum,
+    Date,
+    /// Free-text only: the column is too high-cardinality to enumerate as
+    /// options (UUIDs, IPs, User-Agent strings).
+    Text,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditLogFilterOperator {
+    Is,
+    Between,
+    Contains,
+}
+
+/// Owned rather than `&'static str` because the event-type options are
+/// discovered from the data at request time.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct AuditLogFilterOption {
+    pub value: String,
+    pub label: String,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct AuditLogFilterField {
+    pub key: &'static str,
+    pub label: &'static str,
+    pub value_type: AuditLogFilterValueType,
+    pub operator: AuditLogFilterOperator,
+    pub multiple: bool,
+    pub options: Vec<AuditLogFilterOption>,
+    /// Whether the filter also accepts free text, matched as a case-insensitive
+    /// `contains` against the field's stored column and OR'd with its options.
+    pub supports_custom_text: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -714,9 +802,168 @@ pub async fn revoke_user_sessions(
     }))
 }
 
+/// Batch-resolves the DownstreamService rows referenced by any of the audit
+/// entries in this page. Populated once per request; the result is a two-way
+/// lookup keyed by both `_id` (UUID) and `slug`, since audit event_data may
+/// carry either shape under `service_id` / `service_slug`.
+#[derive(Default)]
+struct ServiceLookup {
+    by_id: HashMap<String, ResolvedService>,
+    by_slug: HashMap<String, ResolvedService>,
+}
+
+#[derive(Clone)]
+struct ResolvedService {
+    name: String,
+    slug: String,
+}
+
+/// Collect unique service references from a page of audit entries and
+/// batch-load matching DownstreamService rows in at most two MongoDB round-
+/// trips (one by `_id`, one by `slug`). Missing services degrade to `None`
+/// downstream rather than surfacing an error -- referenced services can be
+/// legitimately deleted after the audit event was recorded.
+async fn resolve_service_lookup(
+    db: &mongodb::Database,
+    entries: &[AuditLog],
+) -> AppResult<ServiceLookup> {
+    let mut ids: HashSet<String> = HashSet::new();
+    let mut slugs: HashSet<String> = HashSet::new();
+    for entry in entries {
+        collect_service_refs(entry.event_data.as_ref(), &mut ids, &mut slugs);
+    }
+
+    let mut by_id: HashMap<String, ResolvedService> = HashMap::new();
+    let mut by_slug: HashMap<String, ResolvedService> = HashMap::new();
+
+    if !ids.is_empty() {
+        let id_vec: Vec<String> = ids.into_iter().collect();
+        let services: Vec<DownstreamService> = db
+            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find(doc! { "_id": { "$in": &id_vec } })
+            .await?
+            .try_collect()
+            .await?;
+        for s in services {
+            let resolved = ResolvedService {
+                name: s.name.clone(),
+                slug: s.slug.clone(),
+            };
+            by_slug.insert(s.slug.clone(), resolved.clone());
+            by_id.insert(s.id, resolved);
+        }
+    }
+    if !slugs.is_empty() {
+        let slug_vec: Vec<String> = slugs.into_iter().collect();
+        let services: Vec<DownstreamService> = db
+            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find(doc! { "slug": { "$in": &slug_vec } })
+            .await?
+            .try_collect()
+            .await?;
+        for s in services {
+            let resolved = ResolvedService {
+                name: s.name.clone(),
+                slug: s.slug.clone(),
+            };
+            by_id.insert(s.id.clone(), resolved.clone());
+            by_slug.insert(s.slug, resolved);
+        }
+    }
+
+    Ok(ServiceLookup { by_id, by_slug })
+}
+
+fn collect_service_refs(
+    event_data: Option<&serde_json::Value>,
+    ids: &mut HashSet<String>,
+    slugs: &mut HashSet<String>,
+) {
+    let Some(data) = event_data else { return };
+    if let Some(v) = data.get("service_slug").and_then(|v| v.as_str())
+        && !v.is_empty()
+    {
+        slugs.insert(v.to_string());
+    }
+    if let Some(v) = data.get("service_id").and_then(|v| v.as_str())
+        && !v.is_empty()
+    {
+        // `service_id` is a UUID for /proxy/{uuid}/... routes and a slug
+        // for /proxy/s/{slug}/... routes -- probe both indexes.
+        if uuid::Uuid::parse_str(v).is_ok() {
+            ids.insert(v.to_string());
+        } else {
+            slugs.insert(v.to_string());
+        }
+    }
+}
+
+fn resolve_entry_service(
+    event_data: Option<&serde_json::Value>,
+    lookup: &ServiceLookup,
+) -> (Option<String>, Option<String>) {
+    let Some(data) = event_data else {
+        return (None, None);
+    };
+    let candidate_slug = data.get("service_slug").and_then(|v| v.as_str());
+    let candidate_id_or_slug = data.get("service_id").and_then(|v| v.as_str());
+
+    if let Some(slug) = candidate_slug
+        && let Some(hit) = lookup.by_slug.get(slug)
+    {
+        return (Some(hit.name.clone()), Some(hit.slug.clone()));
+    }
+    if let Some(value) = candidate_id_or_slug {
+        if let Some(hit) = lookup.by_id.get(value) {
+            return (Some(hit.name.clone()), Some(hit.slug.clone()));
+        }
+        if let Some(hit) = lookup.by_slug.get(value) {
+            return (Some(hit.name.clone()), Some(hit.slug.clone()));
+        }
+    }
+
+    // Reference exists in event_data but no catalog row matched (deleted
+    // service, or a slug/UUID that never existed): surface the raw slug so
+    // the UI still has something to render.
+    let raw_slug = candidate_slug
+        .or_else(|| candidate_id_or_slug.filter(|v| uuid::Uuid::parse_str(v).is_err()))
+        .map(|s| s.to_string());
+    (None, raw_slug)
+}
+
+/// Batch-resolves display name + email for the acting users referenced by a
+/// page of audit entries (one MongoDB round-trip). Deleted users simply drop
+/// out of the map and render as UUID-only downstream.
+async fn resolve_user_lookup(
+    db: &mongodb::Database,
+    entries: &[AuditLog],
+) -> AppResult<HashMap<String, (Option<String>, String)>> {
+    let ids: Vec<String> = entries
+        .iter()
+        .filter_map(|e| e.user_id.clone())
+        .collect::<HashSet<String>>()
+        .into_iter()
+        .collect();
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let users: Vec<User> = db
+        .collection::<User>(USERS)
+        .find(doc! { "_id": { "$in": &ids } })
+        .await?
+        .try_collect()
+        .await?;
+    Ok(users
+        .into_iter()
+        .map(|u| (u.id, (u.display_name, u.email)))
+        .collect())
+}
+
 /// GET /api/v1/admin/audit-log
 ///
-/// Query the audit log (admin only). Supports pagination and user_id filter.
+/// Query the audit log (admin only). Supports server-side pagination, sorting,
+/// scoped search, and filtering; the legacy `user_id` / `api_key_id` exact-match
+/// params still work alongside the table controls.
 pub async fn list_audit_log(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -726,66 +973,79 @@ pub async fn list_audit_log(
     require_admin_or_operator(&state, &auth_user, "admin.audit_log.list").await?;
 
     let page = query.page.unwrap_or(1).max(1);
-    let per_page = query.per_page.unwrap_or(50).min(100);
-    let offset = (page - 1) * per_page;
+    let per_page = query.per_page.unwrap_or(50).clamp(1, 100);
+    let sort = query.sort.as_deref().unwrap_or("-created_at");
 
-    let mut filter = doc! {};
-    if let Some(ref uid) = query.user_id {
-        filter.insert("user_id", uid);
-    }
-    if let Some(ref api_key_id) = query.api_key_id {
-        filter.insert("api_key_id", api_key_id);
-    }
+    // Summarize the applied controls as an opaque marker list rather than the raw
+    // values (which are PII-adjacent). `None` when nothing was applied.
+    let filter_marker = audit_log_filter_marker(&query);
 
-    // Summarize filters as an opaque marker list rather than the raw IDs
-    // (which are PII-adjacent). `None` when no filter was applied.
-    let filter_marker: Option<String> = {
-        let mut parts: Vec<&str> = Vec::new();
-        if query.user_id.is_some() {
-            parts.push("user_id");
-        }
-        if query.api_key_id.is_some() {
-            parts.push("api_key_id");
-        }
-        if parts.is_empty() {
-            None
-        } else {
-            Some(parts.join(","))
+    let (entries, total) = admin_audit_service::list_entries(
+        &state.db,
+        admin_audit_service::AdminAuditLogListParams {
+            page,
+            per_page,
+            search: query.search.as_deref(),
+            search_filters: query.search_filters.as_deref(),
+            custom_filters: query.custom_filters.as_deref(),
+            event_type: query.event_type.as_deref(),
+            status: query.status.as_deref(),
+            actor: query.actor.as_deref(),
+            user_id: query.user_id.as_deref(),
+            api_key_id: query.api_key_id.as_deref(),
+            created_dates: query.created_dates.as_deref(),
+            created_from: query.created_from.as_deref(),
+            created_to: query.created_to.as_deref(),
+            sort,
+        },
+    )
+    .await?;
+
+    // Enrichment is best-effort display data: a lookup failure downgrades the
+    // page to unenriched entries (fields are Option and simply stay absent)
+    // rather than failing a listing whose primary query already succeeded.
+    let (service_lookup, user_lookup) = match tokio::try_join!(
+        resolve_service_lookup(&state.db, &entries),
+        resolve_user_lookup(&state.db, &entries),
+    ) {
+        Ok(lookups) => lookups,
+        Err(error) => {
+            tracing::warn!(%error, "audit-log enrichment lookups failed; returning unenriched entries");
+            (ServiceLookup::default(), HashMap::new())
         }
     };
 
-    let total = state
-        .db
-        .collection::<AuditLog>(AUDIT_LOG)
-        .count_documents(filter.clone())
-        .await?;
-
-    let entries: Vec<AuditLog> = state
-        .db
-        .collection::<AuditLog>(AUDIT_LOG)
-        .find(filter)
-        .sort(doc! { "created_at": -1 })
-        .skip(offset)
-        .limit(per_page as i64)
-        .await?
-        .try_collect()
-        .await?;
-
     let items: Vec<AuditLogItem> = entries
         .into_iter()
-        .map(|e| AuditLogItem {
-            id: e.id,
-            seq: e.seq,
-            user_id: e.user_id,
-            api_key_id: e.api_key_id,
-            api_key_name: e.api_key_name,
-            event_type: e.event_type,
-            event_data: e.event_data,
-            ip_address: e.ip_address,
-            user_agent: e.user_agent,
-            created_at: e.created_at.to_rfc3339(),
+        .map(|e| {
+            let (service_name, service_slug) =
+                resolve_entry_service(e.event_data.as_ref(), &service_lookup);
+            let (user_display_name, user_email) = e
+                .user_id
+                .as_deref()
+                .and_then(|uid| user_lookup.get(uid).cloned())
+                .map(|(display_name, email)| (display_name, Some(email)))
+                .unwrap_or((None, None));
+            AuditLogItem {
+                id: e.id,
+                seq: e.seq,
+                user_id: e.user_id,
+                api_key_id: e.api_key_id,
+                api_key_name: e.api_key_name,
+                event_type: e.event_type,
+                event_data: e.event_data,
+                ip_address: e.ip_address,
+                user_agent: e.user_agent,
+                created_at: e.created_at.to_rfc3339(),
+                service_name,
+                service_slug,
+                user_display_name,
+                user_email,
+            }
         })
         .collect();
+
+    let event_types = admin_audit_service::distinct_event_types(&state.db).await?;
 
     emit_event(
         state.telemetry.as_deref(),
@@ -802,7 +1062,145 @@ pub async fn list_audit_log(
         total,
         page,
         per_page,
+        filter_options: audit_log_filter_options(event_types),
     }))
+}
+
+/// Names the controls that were applied, never their values.
+fn audit_log_filter_marker(query: &AuditLogQuery) -> Option<String> {
+    let applied = [
+        ("user_id", query.user_id.is_some()),
+        ("api_key_id", query.api_key_id.is_some()),
+        ("search", query.search.is_some()),
+        ("search_filters", query.search_filters.is_some()),
+        ("custom_filters", query.custom_filters.is_some()),
+        ("event_type", query.event_type.is_some()),
+        ("status", query.status.is_some()),
+        ("actor", query.actor.is_some()),
+        (
+            "created_at",
+            query.created_dates.is_some()
+                || query.created_from.is_some()
+                || query.created_to.is_some(),
+        ),
+    ];
+
+    let parts: Vec<&str> = applied
+        .iter()
+        .filter_map(|(name, applied)| applied.then_some(*name))
+        .collect();
+    (!parts.is_empty()).then(|| parts.join(","))
+}
+
+fn audit_log_filter_option(value: &str, label: &str) -> AuditLogFilterOption {
+    AuditLogFilterOption {
+        value: value.to_string(),
+        label: label.to_string(),
+    }
+}
+
+/// Single source of truth: a filter offers a custom-text box exactly when the
+/// service can map it to a stored column to run the `contains` against.
+fn audit_log_filter_takes_custom_text(key: &str) -> bool {
+    admin_audit_service::admin_custom_text_field(key).is_some()
+}
+
+fn audit_log_status_label(bucket: &str) -> &'static str {
+    match bucket {
+        "2xx" => "2xx Success",
+        "3xx" => "3xx Redirect",
+        "4xx" => "4xx Client error",
+        "5xx" => "5xx Server error",
+        _ => "No status",
+    }
+}
+
+fn audit_log_actor_label(actor: &str) -> &'static str {
+    match actor {
+        "user" => "User session",
+        "agent" => "Agent API key",
+        _ => "Anonymous",
+    }
+}
+
+fn audit_log_filter_options(event_types: Vec<String>) -> AuditLogFilterOptions {
+    AuditLogFilterOptions {
+        sorts: admin_audit_service::ADMIN_SORT_OPTIONS.to_vec(),
+        search_fields: admin_audit_service::ADMIN_SEARCH_FIELDS
+            .iter()
+            .map(|(key, label)| AuditLogSearchField { key, label })
+            .collect(),
+        fields: vec![
+            AuditLogFilterField {
+                key: "event_type",
+                label: "Event type",
+                value_type: AuditLogFilterValueType::Enum,
+                operator: AuditLogFilterOperator::Is,
+                multiple: true,
+                options: event_types
+                    .iter()
+                    .map(|event_type| audit_log_filter_option(event_type, event_type))
+                    .collect(),
+                supports_custom_text: audit_log_filter_takes_custom_text("event_type"),
+            },
+            AuditLogFilterField {
+                key: "status",
+                label: "Status",
+                value_type: AuditLogFilterValueType::Enum,
+                operator: AuditLogFilterOperator::Is,
+                multiple: true,
+                options: admin_audit_service::ADMIN_STATUS_FILTERS
+                    .iter()
+                    .map(|bucket| audit_log_filter_option(bucket, audit_log_status_label(bucket)))
+                    .collect(),
+                supports_custom_text: audit_log_filter_takes_custom_text("status"),
+            },
+            AuditLogFilterField {
+                key: "actor",
+                label: "Actor",
+                value_type: AuditLogFilterValueType::Enum,
+                operator: AuditLogFilterOperator::Is,
+                multiple: true,
+                options: admin_audit_service::ADMIN_ACTOR_FILTERS
+                    .iter()
+                    .map(|actor| audit_log_filter_option(actor, audit_log_actor_label(actor)))
+                    .collect(),
+                supports_custom_text: audit_log_filter_takes_custom_text("actor"),
+            },
+            AuditLogFilterField {
+                key: "created_at",
+                label: "Created",
+                value_type: AuditLogFilterValueType::Date,
+                operator: AuditLogFilterOperator::Between,
+                multiple: true,
+                options: vec![],
+                supports_custom_text: audit_log_filter_takes_custom_text("created_at"),
+            },
+            audit_log_text_filter_field("api_key_name", "Agent"),
+            audit_log_text_filter_field("user_id", "User ID"),
+            audit_log_text_filter_field("api_key_id", "API Key ID"),
+            audit_log_text_filter_field("ip_address", "IP address"),
+            audit_log_text_filter_field("user_agent", "User agent"),
+        ],
+    }
+}
+
+/// A column filtered only by free text, because its values are unbounded
+/// (UUIDs, IPs, User-Agent strings) and cannot be offered as checkboxes.
+fn audit_log_text_filter_field(key: &'static str, label: &'static str) -> AuditLogFilterField {
+    debug_assert!(
+        audit_log_filter_takes_custom_text(key),
+        "a text filter must map to a stored column the server can match against",
+    );
+    AuditLogFilterField {
+        key,
+        label,
+        value_type: AuditLogFilterValueType::Text,
+        operator: AuditLogFilterOperator::Contains,
+        multiple: false,
+        options: vec![],
+        supports_custom_text: true,
+    }
 }
 
 /// GET /api/v1/admin/audit-log/verify
@@ -1623,6 +2021,198 @@ mod tests {
     use super::*;
     use crate::models::user::{PlatformRole, User, UserType};
     use chrono::Utc;
+
+    fn lookup_with(id: &str, slug: &str, name: &str) -> ServiceLookup {
+        let resolved = ResolvedService {
+            name: name.to_string(),
+            slug: slug.to_string(),
+        };
+        let mut by_id = HashMap::new();
+        by_id.insert(id.to_string(), resolved.clone());
+        let mut by_slug = HashMap::new();
+        by_slug.insert(slug.to_string(), resolved);
+        ServiceLookup { by_id, by_slug }
+    }
+
+    #[test]
+    fn collect_service_refs_splits_uuid_and_slug() {
+        let mut ids = HashSet::new();
+        let mut slugs = HashSet::new();
+        let uuid = "550e8400-e29b-41d4-a716-446655440000";
+        collect_service_refs(
+            Some(&serde_json::json!({ "service_id": uuid })),
+            &mut ids,
+            &mut slugs,
+        );
+        collect_service_refs(
+            Some(&serde_json::json!({ "service_id": "openai" })),
+            &mut ids,
+            &mut slugs,
+        );
+        collect_service_refs(
+            Some(&serde_json::json!({ "service_slug": "openclaw" })),
+            &mut ids,
+            &mut slugs,
+        );
+        collect_service_refs(
+            Some(&serde_json::json!({ "service_id": "" })),
+            &mut ids,
+            &mut slugs,
+        );
+        collect_service_refs(None, &mut ids, &mut slugs);
+        assert_eq!(ids.len(), 1);
+        assert!(ids.contains(uuid));
+        assert_eq!(slugs.len(), 2);
+        assert!(slugs.contains("openai") && slugs.contains("openclaw"));
+    }
+
+    #[test]
+    fn resolve_entry_service_resolves_by_slug_and_id() {
+        let uuid = "550e8400-e29b-41d4-a716-446655440000";
+        let lookup = lookup_with(uuid, "openai", "OpenAI API");
+
+        // event_data carrying the canonical slug
+        let (name, slug) = resolve_entry_service(
+            Some(&serde_json::json!({ "service_slug": "openai" })),
+            &lookup,
+        );
+        assert_eq!(name.as_deref(), Some("OpenAI API"));
+        assert_eq!(slug.as_deref(), Some("openai"));
+
+        // service_id as UUID (from /proxy/{uuid}/... routes)
+        let (name, slug) =
+            resolve_entry_service(Some(&serde_json::json!({ "service_id": uuid })), &lookup);
+        assert_eq!(name.as_deref(), Some("OpenAI API"));
+        assert_eq!(slug.as_deref(), Some("openai"));
+
+        // service_id as slug (from /proxy/s/{slug}/... routes)
+        let (name, slug) = resolve_entry_service(
+            Some(&serde_json::json!({ "service_id": "openai" })),
+            &lookup,
+        );
+        assert_eq!(name.as_deref(), Some("OpenAI API"));
+        assert_eq!(slug.as_deref(), Some("openai"));
+    }
+
+    #[tokio::test]
+    async fn resolve_lookups_enrich_from_database() {
+        use crate::models::downstream_service::test_helpers::dummy_service;
+        use crate::test_utils::connect_test_database;
+
+        let Some(db) = connect_test_database("admin_audit_enrich").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+
+        let active_id = uuid::Uuid::new_v4().to_string();
+        let active = DownstreamService {
+            id: active_id.clone(),
+            name: "OpenAI API".to_string(),
+            slug: "openai".to_string(),
+            is_active: true,
+            ..dummy_service()
+        };
+        // Deactivated services must still resolve: audit rows reference them
+        // long after an admin retires the catalog entry.
+        let inactive = DownstreamService {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: "Retired Service".to_string(),
+            slug: "retired".to_string(),
+            is_active: false,
+            ..dummy_service()
+        };
+        let services = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
+        services.insert_one(&active).await.expect("insert active");
+        services
+            .insert_one(&inactive)
+            .await
+            .expect("insert inactive");
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let user = make_user(&user_id);
+        db.collection::<User>(USERS)
+            .insert_one(&user)
+            .await
+            .expect("insert user");
+
+        let make_entry = |event_data: serde_json::Value, uid: Option<&str>| AuditLog {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: uid.map(str::to_string),
+            event_type: "proxy_request".to_string(),
+            event_data: Some(event_data),
+            ip_address: None,
+            user_agent: None,
+            api_key_id: None,
+            api_key_name: None,
+            seq: None,
+            prev_hash: None,
+            entry_hash: None,
+            created_at: Utc::now(),
+        };
+        let entries = vec![
+            make_entry(
+                serde_json::json!({ "service_id": active_id }),
+                Some(&user_id),
+            ),
+            make_entry(serde_json::json!({ "service_id": "openai" }), None),
+            make_entry(serde_json::json!({ "service_slug": "retired" }), None),
+        ];
+
+        let service_lookup = resolve_service_lookup(&db, &entries)
+            .await
+            .expect("service lookup");
+        let user_lookup = resolve_user_lookup(&db, &entries)
+            .await
+            .expect("user lookup");
+
+        // UUID and slug references resolve to the same catalog row.
+        let (name, slug) = resolve_entry_service(entries[0].event_data.as_ref(), &service_lookup);
+        assert_eq!(name.as_deref(), Some("OpenAI API"));
+        assert_eq!(slug.as_deref(), Some("openai"));
+        let (name, slug) = resolve_entry_service(entries[1].event_data.as_ref(), &service_lookup);
+        assert_eq!(name.as_deref(), Some("OpenAI API"));
+        assert_eq!(slug.as_deref(), Some("openai"));
+
+        // Inactive service still resolves by slug.
+        let (name, slug) = resolve_entry_service(entries[2].event_data.as_ref(), &service_lookup);
+        assert_eq!(name.as_deref(), Some("Retired Service"));
+        assert_eq!(slug.as_deref(), Some("retired"));
+
+        let (display_name, email) = user_lookup.get(&user_id).cloned().expect("user resolved");
+        assert_eq!(display_name.as_deref(), Some("Test User"));
+        assert_eq!(email, format!("{user_id}@example.com"));
+    }
+
+    #[test]
+    fn resolve_entry_service_unmatched_falls_back_to_raw_slug() {
+        let lookup = ServiceLookup {
+            by_id: HashMap::new(),
+            by_slug: HashMap::new(),
+        };
+        // Slug that no longer matches a catalog row still surfaces raw
+        let (name, slug) = resolve_entry_service(
+            Some(&serde_json::json!({ "service_slug": "deleted-service" })),
+            &lookup,
+        );
+        assert_eq!(name, None);
+        assert_eq!(slug.as_deref(), Some("deleted-service"));
+
+        // Unmatched UUID yields nothing renderable (raw UUID is already in event_data)
+        let (name, slug) = resolve_entry_service(
+            Some(&serde_json::json!({ "service_id": "550e8400-e29b-41d4-a716-446655440000" })),
+            &lookup,
+        );
+        assert_eq!(name, None);
+        assert_eq!(slug, None);
+
+        // No service context at all
+        let (name, slug) = resolve_entry_service(Some(&serde_json::json!({ "foo": 1 })), &lookup);
+        assert_eq!(name, None);
+        assert_eq!(slug, None);
+        let (name, slug) = resolve_entry_service(None, &lookup);
+        assert_eq!(name, None);
+        assert_eq!(slug, None);
+    }
 
     fn make_user(id: &str) -> User {
         let now = Utc::now();

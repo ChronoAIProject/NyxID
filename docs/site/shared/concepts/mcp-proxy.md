@@ -29,9 +29,11 @@ NyxID also exposes a small number of built-in tools for navigation:
 
 | Tool | Purpose |
 |------|---------|
-| `nyx__discover_services` | Browse all available services |
-| `nyx__search_tools` | Search and activate tools by keyword |
+| `nyx__discover_services` | Browse services that are not connected |
+| `nyx__list_connected_services` | List connected services, including currently unavailable ones |
+| `nyx__search_tools` | Search connected tools by keyword |
 | `nyx__connect_service` | Connect to a specific service and activate its tools |
+| `nyx__call_tool` | Invoke a connected tool by name and activate its service |
 
 ## How a tool call flows
 

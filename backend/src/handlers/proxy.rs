@@ -12,6 +12,9 @@ use tokio_stream::wrappers::ReceiverStream;
 use utoipa::ToSchema;
 
 use crate::AppState;
+use crate::downstream_disconnect::{
+    CancelOnDropStream, request_cancellation, until_client_disconnect,
+};
 use crate::errors::{AppError, AppResult};
 use crate::models::service_account::{COLLECTION_NAME as SERVICE_ACCOUNTS, ServiceAccount};
 use crate::models::service_billing::{BillingMetric, PlatformUsage, ResaleUsage};
@@ -50,6 +53,7 @@ fn proxy_error_telemetry_fields(err: &AppError) -> (u16, u32) {
         AppError::NodeProxyTimeout => (504, 8002),
         AppError::NodeCredentialMissing(_) => (502, 8004),
         AppError::WsProxyDownstream(_) => (502, 8005),
+        AppError::ClientDisconnected => (499, 8012),
         AppError::ApiKeyScopeForbidden(_) => (403, 9000),
         AppError::ApiKeyScopeInactive => (403, 9001),
         AppError::ApiKeyScopeNotFound(_) => (404, 9002),
@@ -85,6 +89,17 @@ fn emit_proxy_error_telemetry(
             status,
         },
     );
+}
+
+fn proxy_client_disconnected(service_id: &str) -> AppError {
+    tracing::debug!(
+        service_id,
+        "Cancelled upstream proxy work after downstream client disconnected"
+    );
+    // Deliberately not `Internal`: the client hanging up is not a server fault,
+    // and this response is never written anywhere. Reporting it as a 500 turns
+    // ordinary client cancellation into false error-rate signal.
+    AppError::ClientDisconnected
 }
 
 /// Stable string label for the auth method that issued this proxy request.
@@ -218,6 +233,7 @@ struct PreResolved {
     /// The UserService ID for API key scope checks.
     user_service_id: Option<String>,
     has_server_credential: bool,
+    master_credential: bool,
     /// The user_id that owns the resolved UserService. For personal
     /// resolutions this is the actor; for org-routed resolutions this is
     /// the org's user_id. Used to scope NodeServiceBinding fallback
@@ -588,6 +604,7 @@ async fn proxy_request_inner(
                     node_id: resolved.node_id,
                     user_service_id: Some(resolved.user_service_id),
                     has_server_credential: resolved.has_server_credential,
+                    master_credential: resolved.master_credential,
                     effective_owner_id: resolved
                         .org_routing
                         .as_ref()
@@ -645,6 +662,7 @@ async fn proxy_request_inner(
                 node_id: resolved.node_id,
                 user_service_id: Some(resolved.user_service_id),
                 has_server_credential: resolved.has_server_credential,
+                master_credential: resolved.master_credential,
                 effective_owner_id: resolved
                     .org_routing
                     .as_ref()
@@ -801,6 +819,7 @@ async fn proxy_request_by_slug_inner(
                     node_id: resolved.node_id,
                     user_service_id: Some(resolved.user_service_id),
                     has_server_credential: resolved.has_server_credential,
+                    master_credential: resolved.master_credential,
                     effective_owner_id: resolved
                         .org_routing
                         .as_ref()
@@ -858,6 +877,7 @@ async fn proxy_request_by_slug_inner(
                 node_id: resolved.node_id,
                 user_service_id: Some(resolved.user_service_id),
                 has_server_credential: resolved.has_server_credential,
+                master_credential: resolved.master_credential,
                 effective_owner_id: resolved
                     .org_routing
                     .as_ref()
@@ -1235,6 +1255,7 @@ async fn execute_proxy_inner(
     pre_resolved: Option<PreResolved>,
     resolved_slug: &mut String,
 ) -> AppResult<Response> {
+    let downstream_cancellation = request_cancellation(&request);
     let billing_egress_permit = enforce_proxy_billing_classification(&request)?;
 
     let user_id_str = auth_user.user_id.to_string();
@@ -1281,6 +1302,7 @@ async fn execute_proxy_inner(
         node_route,
         target,
         has_server_credential,
+        master_credential,
         resolved_user_service_id,
         node_routing_required,
         catalog_service_slug,
@@ -1419,6 +1441,7 @@ async fn execute_proxy_inner(
             node_route,
             pre.target,
             pre.has_server_credential,
+            pre.master_credential,
             pre.user_service_id,
             required,
             catalog_service_slug,
@@ -1468,6 +1491,7 @@ async fn execute_proxy_inner(
             node_route,
             target,
             has_server_credential,
+            false,
             resolved_user_service_id,
             node_routing_required,
             catalog_service_slug,
@@ -1500,6 +1524,7 @@ async fn execute_proxy_inner(
         node_route.is_some(),
         agent_override_applied,
         has_server_credential,
+        master_credential,
         &target,
     );
     let is_ws_candidate = is_ws_upgrade_request(&request);
@@ -2413,26 +2438,30 @@ async fn execute_proxy_inner(
         );
 
         state.billing.mark_forwarded(&metered).await?;
-        let mut response = chatgpt_translator::send_to_chatgpt(
-            &translated.body,
-            &bearer_token,
-            is_streaming,
-            is_chat_completions_path,
-            query.as_deref(),
-            Some(llm_usage_service::UsageAuditContext {
-                db: state.db.clone(),
-                user_id: user_id_str.clone(),
-                provider_slug: None,
-                service_id: Some(service_id.to_string()),
-                model,
-                path: path.to_string(),
-                api_key_id: auth_user.api_key_id.clone(),
-                api_key_name: auth_user.api_key_name.clone(),
-            }),
-            Some(usage_complete),
-            billing_egress_permit,
+        let mut response = until_client_disconnect(
+            &downstream_cancellation,
+            chatgpt_translator::send_to_chatgpt(
+                &translated.body,
+                &bearer_token,
+                is_streaming,
+                is_chat_completions_path,
+                query.as_deref(),
+                Some(llm_usage_service::UsageAuditContext {
+                    db: state.db.clone(),
+                    user_id: user_id_str.clone(),
+                    provider_slug: None,
+                    service_id: Some(service_id.to_string()),
+                    model,
+                    path: path.to_string(),
+                    api_key_id: auth_user.api_key_id.clone(),
+                    api_key_name: auth_user.api_key_name.clone(),
+                }),
+                Some(usage_complete),
+                billing_egress_permit,
+            ),
         )
-        .await?;
+        .await
+        .map_err(|_| proxy_client_disconnected(service_id))??;
 
         let status = response.status();
 
@@ -2462,22 +2491,26 @@ async fn execute_proxy_inner(
 
     // Reuse the shared reqwest::Client from AppState for connection pooling.
     state.billing.mark_forwarded(&metered).await?;
-    let downstream_response = proxy_service::forward_request(
-        &state.http_client,
-        &target,
-        reqwest_method,
-        path,
-        query.as_deref(),
-        reqwest_headers,
-        proxy_service::ProxyBody::Buffered(body),
-        identity_headers,
-        delegated,
-        caller_token.as_deref(),
-        &state.token_exchange_cache,
-        &state.cloud_response_cache,
-        billing_egress_permit,
+    let downstream_response = until_client_disconnect(
+        &downstream_cancellation,
+        proxy_service::forward_request(
+            &state.http_client,
+            &target,
+            reqwest_method,
+            path,
+            query.as_deref(),
+            reqwest_headers,
+            proxy_service::ProxyBody::Buffered(body),
+            identity_headers,
+            delegated,
+            caller_token.as_deref(),
+            &state.token_exchange_cache,
+            &state.cloud_response_cache,
+            billing_egress_permit,
+        ),
     )
-    .await?;
+    .await
+    .map_err(|_| proxy_client_disconnected(service_id))??;
 
     // Convert reqwest Response back to axum Response
     let status = StatusCode::from_u16(downstream_response.status().as_u16())
@@ -2538,6 +2571,7 @@ async fn execute_proxy_inner(
             let stream_metered = metered.clone();
             let request_len = request_body_len;
             let resale_metric = billing_ctx.resale.as_ref().map(|spec| spec.metric);
+            let task_cancellation = downstream_cancellation.clone();
 
             tokio::spawn(async move {
                 let mut sse_buffer = String::new();
@@ -2546,8 +2580,39 @@ async fn execute_proxy_inner(
                 let mut response_len: i64 = 0;
 
                 loop {
-                    match tokio::time::timeout(idle_timeout, upstream_stream.next()).await {
-                        Ok(Some(Ok(bytes))) => {
+                    let next = until_client_disconnect(
+                        &task_cancellation,
+                        tokio::time::timeout(idle_timeout, upstream_stream.next()),
+                    )
+                    .await;
+                    match next {
+                        Err(_) => {
+                            drop(upstream_stream);
+                            let usage = usage_accumulator.finalize();
+                            if let Some(usage) = usage.clone() {
+                                llm_usage_service::log_reported_usage_async(
+                                    stream_usage_context.clone(),
+                                    usage,
+                                );
+                            }
+                            let resale = resale_metric.and_then(|metric| {
+                                resale_usage_from_optional_reported(
+                                    metric,
+                                    usage.as_ref(),
+                                    request_len + response_len,
+                                )
+                            });
+                            settle_meter_async(
+                                stream_billing,
+                                stream_metered,
+                                llm_platform_usage(usage.as_ref(), request_len + response_len),
+                                resale,
+                                stream_usage_context.model.clone(),
+                            )
+                            .await;
+                            return;
+                        }
+                        Ok(Ok(Some(Ok(bytes)))) => {
                             response_len += bytes.len() as i64;
                             sse_buffer.push_str(&String::from_utf8_lossy(&bytes));
                             while let Some(event) = parse_sse_event(&mut sse_buffer) {
@@ -2562,6 +2627,7 @@ async fn execute_proxy_inner(
                             }
 
                             if tx.send(Ok(bytes)).await.is_err() {
+                                drop(upstream_stream);
                                 let usage = usage_accumulator.finalize();
                                 if let Some(usage) = usage.clone() {
                                     llm_usage_service::log_reported_usage_async(
@@ -2587,7 +2653,7 @@ async fn execute_proxy_inner(
                                 return;
                             }
                         }
-                        Ok(Some(Err(e))) => {
+                        Ok(Ok(Some(Err(e)))) => {
                             tracing::error!(
                                 service_id = %service_id_owned,
                                 error = %e,
@@ -2623,7 +2689,7 @@ async fn execute_proxy_inner(
                                 .await;
                             return;
                         }
-                        Ok(None) => {
+                        Ok(Ok(None)) => {
                             let usage = usage_accumulator.finalize();
                             if let Some(usage) = usage.clone() {
                                 llm_usage_service::log_reported_usage_async(
@@ -2648,7 +2714,7 @@ async fn execute_proxy_inner(
                             .await;
                             return;
                         }
-                        Err(_) => {
+                        Ok(Err(_)) => {
                             tracing::warn!(
                                 service_id = %service_id_owned,
                                 idle_timeout_secs,
@@ -2682,7 +2748,10 @@ async fn execute_proxy_inner(
                 }
             });
 
-            let body = Body::from_stream(ReceiverStream::new(rx));
+            let body = Body::from_stream(CancelOnDropStream::new(
+                ReceiverStream::new(rx),
+                downstream_cancellation.clone(),
+            ));
             response_builder
                 .body(body)
                 .map_err(|e| AppError::Internal(format!("Failed to build response: {e}")))?
@@ -2691,16 +2760,39 @@ async fn execute_proxy_inner(
             let idle_timeout =
                 std::time::Duration::from_secs(state.config.proxy_stream_idle_timeout_secs);
             let idle_timeout_secs = state.config.proxy_stream_idle_timeout_secs;
+            let is_json_body = downstream_response
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|ct| ct.to_ascii_lowercase().starts_with("application/json"));
             let mut upstream_stream = downstream_response.bytes_stream();
             let stream_billing = state.billing.clone();
             let stream_metered = metered.clone();
             let request_len = request_body_len;
+            // Chunked JSON bodies (no Content-Length) stream through this
+            // branch; capture a bounded copy so LLM services settle with the
+            // provider-reported token count instead of the byte estimate.
+            let stream_usage_context = if is_json_body {
+                usage_context.clone()
+            } else {
+                None
+            };
+            let stream_resale_metric = billing_ctx.resale.as_ref().map(|spec| spec.metric);
             let stream = async_stream::stream! {
                 let mut response_len: i64 = 0;
+                let mut captured: Option<Vec<u8>> =
+                    stream_usage_context.as_ref().map(|_| Vec::new());
                 loop {
                     match tokio::time::timeout(idle_timeout, upstream_stream.next()).await {
                         Ok(Some(Ok(bytes))) => {
                             response_len += bytes.len() as i64;
+                            if let Some(buf) = captured.as_mut() {
+                                if buf.len() + bytes.len() <= USAGE_CAPTURE_MAX_BYTES {
+                                    buf.extend_from_slice(&bytes);
+                                } else {
+                                    captured = None;
+                                }
+                            }
                             yield Ok::<_, std::io::Error>(bytes);
                         }
                         Ok(Some(Err(e))) => {
@@ -2726,26 +2818,50 @@ async fn execute_proxy_inner(
                         }
                     }
                 }
+                let mut reported_usage = None;
+                let mut model = None;
+                if let Some(ctx) = stream_usage_context
+                    && let Some(buf) = captured
+                    && let Ok(json) = serde_json::from_slice::<serde_json::Value>(&buf)
+                    && let Some(usage) = llm_usage_service::extract_reported_usage(&json)
+                {
+                    model = ctx.model.clone();
+                    llm_usage_service::log_reported_usage_async(ctx, usage.clone());
+                    reported_usage = Some(usage);
+                }
+                let resale = stream_resale_metric.and_then(|metric| {
+                    resale_usage_from_optional_reported(
+                        metric,
+                        reported_usage.as_ref(),
+                        request_len + response_len,
+                    )
+                });
                 settle_meter_async(
                     stream_billing,
                     stream_metered,
-                    llm_platform_usage(None, request_len + response_len),
-                    None,
-                    None,
+                    llm_platform_usage(reported_usage.as_ref(), request_len + response_len),
+                    resale,
+                    model,
                 )
                 .await;
             };
-            let body = Body::from_stream(stream);
+            let body = Body::from_stream(CancelOnDropStream::new(
+                stream,
+                downstream_cancellation.clone(),
+            ));
             response_builder
                 .body(body)
                 .map_err(|e| AppError::Internal(format!("Failed to build response: {e}")))?
         }
     } else {
         // Buffer small / error responses so we can log diagnostics.
-        let response_body = downstream_response
-            .bytes()
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to read downstream response: {e}")))?;
+        let response_body =
+            until_client_disconnect(&downstream_cancellation, downstream_response.bytes())
+                .await
+                .map_err(|_| proxy_client_disconnected(service_id))?
+                .map_err(|e| {
+                    AppError::Internal(format!("Failed to read downstream response: {e}"))
+                })?;
 
         if !status.is_success() {
             let body_preview =
@@ -2882,6 +2998,7 @@ fn final_credential_class(
     node_route_active: bool,
     agent_override_applied: bool,
     has_server_credential: bool,
+    master_credential: bool,
     target: &proxy_service::ProxyTarget,
 ) -> CredentialClass {
     if node_route_active && !has_server_credential {
@@ -2894,7 +3011,14 @@ fn final_credential_class(
         return CredentialClass::AgentOverrideUserOwned;
     }
     if resolved_user_service_id.is_some() {
-        return CredentialClass::UserOwned;
+        // Auto-provisioned UserServices with no user key inject the
+        // catalog master credential; classify by whose key was used,
+        // not by which resolution path matched.
+        return if master_credential {
+            CredentialClass::NyxidManagedMaster
+        } else {
+            CredentialClass::UserOwned
+        };
     }
     if !target.service.requires_user_credential && !target.credential.is_empty() {
         return CredentialClass::NyxidManagedMaster;
@@ -3102,6 +3226,19 @@ async fn settle_meter_async(
 /// Threshold below which non-error responses are buffered (so small API
 /// responses keep the existing diagnostic-logging path).
 const STREAM_SIZE_THRESHOLD: u64 = 256 * 1024;
+
+/// Cap on the bounded response copy kept for LLM usage extraction when a
+/// chunked JSON body streams through the passthrough branch. Bodies larger
+/// than this fall back to the byte-based token estimate.
+///
+/// This buffer is a second copy of the body, retained for the lifetime of the
+/// response and multiplied by in-flight LLM request concurrency, so the cap is
+/// what bounds the handler's worst-case footprint. 512 KiB of JSON is on the
+/// order of 100k output tokens in a single non-streaming completion — past what
+/// providers will return in one response — so real bodies stay under it. Going
+/// over is not a billing regression: the fallback byte estimate is what every
+/// one of these responses used before usage capture existed.
+const USAGE_CAPTURE_MAX_BYTES: usize = 512 * 1024;
 
 /// Content types that should always be streamed regardless of size.
 const STREAMING_CONTENT_TYPES: &[&str] = &[
@@ -4485,9 +4622,10 @@ mod tests {
         ALLOWED_FORWARD_HEADER_PREFIXES, ALLOWED_FORWARD_HEADERS, ALLOWED_WS_FORWARD_HEADERS,
         ConnectionUsageStats, WsPassthroughGuard, add_websocket_usage_provenance,
         apply_agent_attribution_headers, auth_kind_label, collect_forward_headers_with_prefixes,
-        compose_pre_resolved_node_ids, enforce_node_route_scope, is_chat_completions_proxy_path,
-        is_codex_transport_path, is_ws_upgrade_request, should_enforce_runtime_approval,
-        validate_range_header, websocket_realtime_usage_enabled, websocket_resale_usage,
+        compose_pre_resolved_node_ids, enforce_node_route_scope, final_credential_class,
+        is_chat_completions_proxy_path, is_codex_transport_path, is_ws_upgrade_request,
+        should_enforce_runtime_approval, validate_range_header, websocket_realtime_usage_enabled,
+        websocket_resale_usage,
     };
     use crate::models::service_billing::{BillingMetric, ServiceBilling};
     use crate::models::usage_meter::CredentialClass;
@@ -4737,6 +4875,7 @@ mod tests {
 
     fn token_resale_metered_context(credential_class: CredentialClass) -> MeteredProxyContext {
         let billing = ServiceBilling {
+            platform_billable: false,
             resale_billable: true,
             resale_metric: BillingMetric::Tokens,
             lago_resale_metric_code: Some("resale_tokens".to_string()),
@@ -5355,6 +5494,25 @@ mod tests {
     }
 
     #[test]
+    fn user_service_with_master_credential_classifies_as_master() {
+        let mut target = make_target("http://localhost:8080");
+        target.auth_method = "bearer".to_string();
+        target.credential = "master-key".to_string();
+
+        // Auto-provisioned UserService (no user key) injecting the catalog
+        // master credential: the platform's key, not the user's.
+        assert_eq!(
+            final_credential_class(Some("us-1"), false, false, true, true, &target),
+            CredentialClass::NyxidManagedMaster
+        );
+        // A UserService backed by the user's own key stays user-owned.
+        assert_eq!(
+            final_credential_class(Some("us-1"), false, false, true, false, &target),
+            CredentialClass::UserOwned
+        );
+    }
+
+    #[test]
     fn ws_url_converts_http_to_ws() {
         let target = make_target("http://localhost:8080");
         let url = build_downstream_ws_url(&target, "socket", None, &[]).unwrap();
@@ -5717,6 +5875,23 @@ mod tests {
         assert_eq!(
             proxy_error_telemetry_fields(&AppError::WsProxyDownstream("x".into())),
             (502, 8005)
+        );
+    }
+
+    /// Cancelled work must not land in the proxy error rate as a 500 — that is
+    /// what `proxy_client_disconnected` used to do via `AppError::Internal`.
+    #[test]
+    fn proxy_error_telemetry_fields_client_disconnected() {
+        use super::{proxy_client_disconnected, proxy_error_telemetry_fields};
+        use crate::errors::AppError;
+
+        assert!(matches!(
+            proxy_client_disconnected("svc-1"),
+            AppError::ClientDisconnected
+        ));
+        assert_eq!(
+            proxy_error_telemetry_fields(&AppError::ClientDisconnected),
+            (499, 8012)
         );
     }
 

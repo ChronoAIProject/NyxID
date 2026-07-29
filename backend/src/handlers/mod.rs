@@ -51,7 +51,6 @@ pub mod openclaw_channel;
 pub mod oracle_pools;
 pub mod oracle_tasks;
 pub mod oracle_worker;
-pub mod org_feature_flags;
 pub mod org_role_scopes;
 pub mod orgs;
 pub mod providers;

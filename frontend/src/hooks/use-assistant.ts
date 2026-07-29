@@ -39,10 +39,6 @@ export const assistantKeys = {
   workspace: [...ROOT, "workspace"] as const,
 } as const;
 
-// Live-update cadence for real approval data. Pending requests are
-// time-sensitive (they expire), so they poll faster than history.
-const PENDING_APPROVALS_POLL_MS = 5_000;
-const APPROVAL_HISTORY_POLL_MS = 15_000;
 // One page comfortably above anything a single user accumulates as
 // simultaneously-pending; the badge uses the server-side total anyway.
 const PENDING_APPROVALS_PAGE_SIZE = 50;
@@ -50,22 +46,42 @@ const APPROVAL_HISTORY_PAGE_SIZE = 20;
 
 const activeHandles = new Map<string, TurnHandle>();
 
+/**
+ * Warm the query cache from the transport. BEST EFFORT, and deliberately
+ * non-throwing.
+ *
+ * This runs on the send path (before and after the stream starts), so a
+ * failure here used to abort the send itself: the two reads shared one
+ * `Promise.all`, and a rejected transcript read took the whole projection —
+ * and its caller — down with it. That is how a transcript 404 stopped the
+ * stream POST from ever being issued.
+ *
+ * Each half now projects independently and a rejection is swallowed: the
+ * cache simply keeps whatever it already had. Failures are NOT hidden from
+ * the user — `useConversation`/`useConversations` run the same reads as real
+ * queries and surface their own error state; this function only declines to
+ * make a cache-warming failure fatal to an unrelated flow.
+ */
 async function projectTransportState(
   queryClient: QueryClient,
   conversationId: string,
 ): Promise<void> {
-  const [history, conversations] = await Promise.all([
+  const [history, conversations] = await Promise.allSettled([
     assistantTransport.getHistory(conversationId),
     assistantTransport.listConversations(),
   ]);
-  queryClient.setQueryData<ConversationHistory>(
-    assistantKeys.history(conversationId),
-    () => history,
-  );
-  queryClient.setQueryData<Conversation[]>(
-    assistantKeys.conversations,
-    () => conversations,
-  );
+  if (history.status === "fulfilled") {
+    queryClient.setQueryData<ConversationHistory>(
+      assistantKeys.history(conversationId),
+      () => history.value,
+    );
+  }
+  if (conversations.status === "fulfilled") {
+    queryClient.setQueryData<Conversation[]>(
+      assistantKeys.conversations,
+      () => conversations.value,
+    );
+  }
   await queryClient.invalidateQueries({ queryKey: assistantKeys.workspace });
 }
 
@@ -84,14 +100,15 @@ function turnFromEvent(event: TurnEvent): ActiveTurn | undefined {
 }
 
 /**
- * Pending approval requests, polled so requests raised (or decided) from
- * anywhere — agents hitting the proxy, Telegram, mobile, another tab —
- * appear live. Shares its query cache with the sidebar badge.
+ * Pending approval requests. Shares its query cache with the sidebar badge.
+ *
+ * Polling is intentionally off: liveness for requests raised (or decided)
+ * elsewhere — agents hitting the proxy, Telegram, mobile, another tab — is
+ * moving to a server-pushed SSE stream. Until that lands, the list refreshes
+ * on mount, on window focus, and on any local decision.
  */
 function usePendingApprovalRequests() {
-  return useApprovalRequests(1, PENDING_APPROVALS_PAGE_SIZE, "pending", {
-    refetchIntervalMs: PENDING_APPROVALS_POLL_MS,
-  });
+  return useApprovalRequests(1, PENDING_APPROVALS_PAGE_SIZE, "pending");
 }
 
 /**
@@ -101,12 +118,7 @@ function usePendingApprovalRequests() {
 export function useAssistantApprovals() {
   const settings = useNotificationSettings();
   const pendingQuery = usePendingApprovalRequests();
-  const historyQuery = useApprovalRequests(
-    1,
-    APPROVAL_HISTORY_PAGE_SIZE,
-    undefined,
-    { refetchIntervalMs: APPROVAL_HISTORY_POLL_MS },
-  );
+  const historyQuery = useApprovalRequests(1, APPROVAL_HISTORY_PAGE_SIZE);
 
   // Grant-mode approvals create a reusable grant with the user-configured
   // expiry; surface that duration on the card so "approve" is informed.
@@ -157,7 +169,7 @@ export function useWorkspaceCounts() {
 
 // One stable sonner id for the whole surface: refetches and the history query
 // failing alongside the list update this toast instead of stacking a new one
-// every poll.
+// on every refetch.
 const TRANSPORT_TOAST_ID = "assistant-transport-unavailable";
 
 /**
@@ -184,6 +196,27 @@ export function describeTransportError(error: unknown): {
     message: "Could not load your chats",
     description: "The assistant backend did not respond. Retrying shortly.",
   };
+}
+
+/**
+ * One line for the non-blocking transcript-read notice. Deliberately short:
+ * it renders inline above a working thread, not as a full-page failure.
+ *
+ * A 404 is called out separately because it is not really a fault — the
+ * conversation actor and its chat-history row materialize at different times
+ * upstream, so a conversation with no completed turn has no transcript to
+ * return. Saying "failed" there would be a lie.
+ */
+export function describeHistoryError(error: unknown): string {
+  if (error instanceof ApiError) {
+    if (error.status === 404) {
+      return "This conversation has no saved transcript yet.";
+    }
+    if (error.status === 401 || error.status === 403) {
+      return "The chat backend rejected the request for this transcript.";
+    }
+  }
+  return "Could not load earlier messages in this conversation.";
 }
 
 function useTransportErrorToast(isError: boolean, error: unknown): void {
@@ -221,10 +254,27 @@ export function useAssistantTurn(conversationId: string | undefined) {
   });
 }
 
+/**
+ * Single-flight guard around actor creation, shared by every path that can
+ * allocate one: the "New chat" button and the empty-state auto-create in
+ * `useSendMessage`. Both are legitimately in flight at once now that the
+ * button navigates optimistically — the user can type and send into the
+ * draft thread before the actor lands — and without one promise between
+ * them that send would allocate a second actor and stream into it.
+ */
+let pendingCreate: Promise<Conversation> | null = null;
+
+function createConversationOnce(): Promise<Conversation> {
+  pendingCreate ??= assistantTransport.createConversation().finally(() => {
+    pendingCreate = null;
+  });
+  return pendingCreate;
+}
+
 export function useCreateConversation() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: () => assistantTransport.createConversation(),
+    mutationFn: () => createConversationOnce(),
     onSuccess: async (conversation) => {
       await projectTransportState(queryClient, conversation.id);
     },
@@ -308,12 +358,6 @@ function createTurnEventPump(
   };
 }
 
-// Single-flight guard for the empty-state auto-create: two sends racing in
-// before React commits the disabled/sending state must share ONE created
-// conversation (the second is then rejected by the active-turn guard)
-// instead of allocating two actors and streaming into both.
-let pendingAutoCreate: Promise<Conversation> | null = null;
-
 /**
  * Send a message into the bound conversation — or, when no conversation is
  * selected (the "New chat" empty state), create one first and send there.
@@ -327,12 +371,11 @@ export function useSendMessage(conversationId: string | undefined) {
     mutationFn: async (content: string): Promise<SentMessage> => {
       let target = conversationId;
       if (!target) {
-        pendingAutoCreate ??= assistantTransport
-          .createConversation()
-          .finally(() => {
-            pendingAutoCreate = null;
-          });
-        const conversation = await pendingAutoCreate;
+        // Shares `createConversationOnce` with the "New chat" button: two
+        // sends racing before React commits the disabled state, or a send
+        // landing mid-provision, all resolve to the SAME actor (the losers
+        // are then rejected by the active-turn guard).
+        const conversation = await createConversationOnce();
         target = conversation.id;
         await projectTransportState(queryClient, target);
       }

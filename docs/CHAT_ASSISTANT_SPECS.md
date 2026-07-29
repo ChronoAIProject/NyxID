@@ -59,9 +59,11 @@ sessions + proxy-only identity handling). Changes:
   envelopes surface as the turn error (401/403 keeps the auth-specific,
   you-are-still-signed-in copy); EOF without `RUN_FINISHED`/`RUN_ERROR` is a
   failed `stream_closed` turn (was: silently reported success); the final
-  unterminated SSE frame is flushed; bare-`\r` framing normalized; every
-  `:stream` body carries a per-conversation `sessionId` (optional upstream,
-  reference-aligned).
+  unterminated SSE frame is flushed; bare-`\r` framing normalized.
+  *(Correction, 2026-07-28: this cut originally described a per-conversation
+  `sessionId` on the `:stream` body. That field was never shipped, and the
+  current Aevatar contract deprecates and ignores it — the body is
+  `{type:"text", prompt, clientRequestId}`; see cut 6.)*
 - **Reference-mandated aevatar row config** (README, nyxid-chat):
   `identity_propagation_mode:"jwt"`, `identity_jwt_audience:"urn:aevatar:api"`,
   `inject_delegation_token:true`, `forward_access_token:false`. Prod row drift
@@ -98,6 +100,99 @@ sessions + proxy-only identity handling). Changes:
   key, or an OAuth Authorization-Code + PKCE access token carrying the aevatar
   RFC 8707 resource (re-minted from a `binding_id` via token exchange). The backend
   already supports all of that; see TD-3.
+
+## Implemented in cut 5 (2026-07-23 — Aevatar PR #2923 transcript-shape alignment)
+
+Aevatar PR #2923 wrapped the chat-history detail response in
+`{messages, stateVersion}`, added a `conversation.minimumStateVersion`
+continuation requirement to `POST /api/chat`, and added `stateVersion` to the
+`aevatar.chat.context` SSE payload. No routes added or removed. What NyxID
+changed (approach reviewed by codex `gpt-5.6-sol`, session
+`019f8d1e-ee56-78b2-915d-2897fc5b64c0`):
+
+- **Frontend (the only functional change).** `loadHistory` typed the body as
+  `AevatarHistoryEntry[]` and called `.map` on it; the wrapper made that throw,
+  and `getHistory`'s catch-all fallback served the index-merged empty mirror —
+  so every conversation would have rendered **blank, with no error**. The
+  transcript read now goes through one strict decoder accepting exactly the
+  legacy array and the wrapper; anything else raises `AssistantProtocolError`.
+- **Fallback narrowed.** `getHistory` no longer swallows every failure: a
+  protocol error always surfaces, and a transient failure serves the mirror only
+  when the mirror holds a real transcript. An index-only placeholder
+  (`EMPTY_TURN_STATE`) can no longer be dressed up as a successful empty read.
+- **`stateVersion` is ignored, deliberately** — not read, not validated, not
+  stored; wrapped acceptance is keyed **only** on array-valued `messages`. It is
+  the continuation watermark for `/api/chat`, and NyxID's production transport is
+  `nyxid-chat/…:stream`, which has no such parameter. Storing it would be state
+  nobody maintains (`mergeIndexEntry` rebuilds `StoredConversation` and would
+  silently drop it); *requiring* it would turn a field with zero consumers into
+  an outage. It becomes load-bearing only on an `/api/chat` migration.
+- **Backend: no functional change.** `get_history` never parses the body; both
+  shapes stream through `execute_proxy` unmodified. That shape-agnosticism is
+  what lets Aevatar and NyxID deploy independently.
+- **Legacy-array branch is intentional, bounded compat.** The deployed Aevatar
+  shape could not be verified from this environment (unauthenticated probe →
+  401), and the two services deploy independently: committing to one shape
+  breaks chat either immediately or the moment Aevatar ships. Removal condition,
+  recorded at the type: delete the array branch once **every** supported Aevatar
+  environment is confirmed on the wrapper — not after one prod probe.
+- **Not done (out of scope):** migrating the production transport from `:stream`
+  to `POST /api/chat` + `aevatar.chat.context`. That is a transport rewrite and
+  belongs with `CHAT_REWORK_SPEC.md`.
+
+## Implemented in cut 6 (2026-07-28 — `feature/integrate` alignment: `:stop` pass-through)
+
+The authoritative Aevatar contract is now `aevatarAI/aevatar` branch
+`feature/integrate` (`docs/canon/nyxid-chat-api.md` + the
+`agents/Aevatar.GAgents.NyxidChat` host), superseding the `eanz17/nyxid-chat`
+sample. A full conformance pass (2026-07-27) against that branch found the
+stream-body `type` discriminator gap (fixed in #1251: body is
+`{type:"text", prompt, clientRequestId}`; `sessionId` is deprecated and
+ignored upstream) and the missing stop control. This cut adds the stop:
+
+- **Backend:** `POST /api/v1/assistant/conversations/{id}/stop` →
+  `…/nyxid-chat/conversations/{id}:stop` (`stop_path` in
+  `assistant_service.rs`, `stop_turn` in `handlers/assistant.rs`, same
+  `forward()`/`execute_proxy` funnel, body forwarded verbatim). Aevatar
+  answers `202 {status:"accepted", requestId, commandId, correlationId,
+  stateUrl}` and commits a stop fence: no later old-plan LLM round or tool
+  may start.
+- **Frontend:** `cancelTurn` and the stream watchdog now fire a best-effort
+  `POST …/stop` with `{turnId, stopRequestId, clientRequestId,
+  expectedStateVersion: 0}` (fresh UUID control identities;
+  `expectedStateVersion <= 0` skips the optimistic-concurrency fence
+  upstream, which the transport does not track). Failures are swallowed —
+  the pre-existing client-abort behavior is the floor. The approval pause
+  (`pauseForApproval`) deliberately does **not** stop: the server turn is
+  waiting for the decision. Two codex (gpt-5.6-sol) P1s hardened the
+  timing: (a) follow-up sends and the composite delete serialize behind
+  the in-flight stop fence so they cannot reach Aevatar before the fence
+  commits — awaited directly, since every fence entry is self-bounded
+  (the stop request carries `STOP_REQUEST_DEADLINE_MS`, the pre-start
+  placeholder expires with `PRE_START_STOP_WINDOW_MS`); (b) a cancel that
+  lands before `RUN_STARTED` installs that placeholder synchronously and
+  defers its abort so the announcing frame can still deliver the `turnId`
+  the stop needs. The 120s watchdog's pre-`RUN_STARTED` abort stays
+  client-only by design: after that much silence there is no addressable
+  turn identity, and no announcing frame is coming.
+- **Backend (cut 6b):** the remaining conversation-control surfaces are now
+  pass-throughs too — `:steer`, `GET …/state` (cursors ride the forwarded
+  query string), and per-step `:retry`/`:skip`. Turn/step path segments
+  follow the upstream control-identity grammar (≤128 UTF-16 code units, no
+  whitespace/control chars, none of `/ \ ? #`) and are percent-encoded on
+  interpolation; `%` and dot-only segments are documented NyxID narrowings
+  (fail closed here instead of deeper in the proxy's repeat-decode
+  hardening). No UI consumers yet: steering
+  and step controls need task-frame rendering (the FE currently ignores
+  `nyxid.task.*` CUSTOM frames), and reconnect-via-state is a follow-up.
+- **Known remaining `feature/integrate` gaps (deliberate, recorded):**
+  FE rendering of the `nyxid.task.*` / `nyxid.action.request` CUSTOM frames,
+  FE consumers for steer/retry/skip/state, and the NyxID-owned
+  `GET /api/v1/assistant/actions` registry (schema v4) with the
+  `action.continue` stream body. The registry is default-disabled on the
+  Aevatar side (`Aevatar:NyxId:AssistantActions:Enabled=false`, fails closed
+  `NYXID_ACTION_UNSUPPORTED`), so its absence is compatible until the
+  browser-action handoff is scheduled.
 
 ## Implemented in cut 4 (2026-07-18 — TD-3 interim bridge: marker-hardened forward token)
 
@@ -248,13 +343,21 @@ none surface as a surprise "next broken leg":**
 
 ## Enable-ready (proven, awaiting a decision — not blocked on code)
 
+> **Superseded in part by Aevatar PR #2923 (see the cut below).** The
+> `chatHistory:{conversationId,turnId,userText}` intent described here is no
+> longer the whole story: continuation on `/api/chat` now also requires
+> `conversation:{conversationId, minimumStateVersion>0}`, and the caller must
+> **not** splice transcript into `prompt` — Aevatar injects server history into
+> the workflow context itself. The product decision below is unchanged.
+
 `/api/chat` history-write is verified working. To make workflow-mode (or any
-`/api/chat`) turns persist and appear in the unified history list, the only change is
-the frontend sending `chatHistory:{conversationId,turnId,userText}` (all trim-nonempty)
-on the run. Deferred because it changes product behavior (workflow chats currently
-reset on reload by design, per Calvin's earlier waiver) and would surface workflow
-conversations in the nyxid-chat history list but not the workflow transport's own
-in-memory list. Decision needed: should workflow/`/api/chat` chats persist?
+`/api/chat`) turns persist and appear in the unified history list, the frontend
+must send the history-write intent on the run (plus the #2923 continuation
+watermark above). Deferred because it changes product behavior (workflow chats
+currently reset on reload by design, per Calvin's earlier waiver) and would
+surface workflow conversations in the nyxid-chat history list but not the
+workflow transport's own in-memory list. Decision needed: should
+workflow/`/api/chat` chats persist?
 
 ## Guiding constraints (Calvin, 2026-07-17)
 
@@ -306,6 +409,11 @@ in-memory list. Decision needed: should workflow/`/api/chat` chats persist?
 | `DELETE /api/v1/assistant/conversations/{id}` | actor delete **+** history-row delete | composite — **implemented** (cut 3) |
 | `POST /api/v1/assistant/conversations/{id}/stream` | `...:stream` (AG-UI SSE) | unchanged |
 | `POST /api/v1/assistant/conversations/{id}/approve` | `...:approve` | unchanged |
+| `POST /api/v1/assistant/conversations/{id}/stop` | `...:stop` | **added** (cut 6) — 202-accepted stop fence |
+| `POST /api/v1/assistant/conversations/{id}/steer` | `...:steer` | **added** (cut 6) — steering control, no UI consumer yet |
+| `GET /api/v1/assistant/conversations/{id}/state` | `.../state` | **added** (cut 6) — conditional state query, cursors via query string |
+| `POST .../turns/{turn}/steps/{step}/retry` | `...:retry` | **added** (cut 6) — per-step retry, no UI consumer yet |
+| `POST .../turns/{turn}/steps/{step}/skip` | `...:skip` | **added** (cut 6) — per-step skip, no UI consumer yet |
 | `POST /api/v1/assistant/completions` | `v1/chat/completions` | unchanged |
 | `POST /api/v1/assistant/workflow-chat` | `api/chat` | unchanged; body forwarded verbatim (TD-2) |
 | `GET /api/v1/assistant/workflow-chat/ws` | `api/ws/chat` | unchanged (TD-2) |
@@ -317,10 +425,17 @@ From the Studio Chat History API contract:
 - Index: `{"conversations": [...]}` sorted by `updatedAt` desc; fields `id, title,
   serviceId, serviceKind, createdAt, updatedAt, messageCount, llmRoute?, llmModel?`.
   No pagination. Titles come from the server — no client-side title synthesis.
-- Detail: flat `[StoredChatMessage]`; ids are `{turnId}:user` / `{turnId}:assistant`;
-  `status` is `complete|error`; **an empty array is a valid answer** meaning
-  deleted / not yet materialized / zero turns — never treat it as an error and never
-  refuse to replace cached state with it.
+- Detail: **two accepted shapes** — the legacy flat `[StoredChatMessage]`, and
+  Aevatar PR #2923's `{messages: [StoredChatMessage], stateVersion}` wrapper.
+  Entry shape is identical in both: ids are `{turnId}:user` / `{turnId}:assistant`,
+  `status` is `complete|error`. Acceptance is keyed **only** on array-valued
+  `messages`; `stateVersion` is ignored by this transport (see cut 5). Anything
+  that is neither shape is a protocol error and must surface, not degrade to empty.
+  **An empty transcript is a valid answer** (`[]` or `{"messages":[]}`) meaning
+  deleted / not yet materialized / zero turns — never treat it as an error. It
+  replaces cached state *except* under the deliberate keep-max guard: for a few
+  hundred ms after a turn completes the read model lags the local mirror, and a
+  shorter server answer there is staleness, not truth.
 - Delete: `200` with empty body; the read model is eventually consistent — the row
   may briefly reappear in the index. Use optimistic removal + a short client-side
   tombstone.
@@ -329,6 +444,15 @@ From the Studio Chat History API contract:
   `{conversationId, turnId, userText}` intent (all three trim-nonempty or the server
   returns 400 `INVALID_CHAT_HISTORY`). `nyxid-chat` conversations persist history
   server-side on their own; the intent only matters for workflow-chat runs.
+- **Continuation on `/api/chat` (PR #2923).** A new conversation passes
+  `conversation:{conversationId:null}`. Continuing an existing one **must** pass
+  `conversation:{conversationId, minimumStateVersion>0}`, where the watermark is the
+  `stateVersion` last read from the detail endpoint or from the SSE
+  `aevatar.chat.context` payload (which gained the field). Behind the watermark →
+  `503 CHAT_HISTORY_RESERVATION_UNAVAILABLE` (re-read the conversation, then retry);
+  unknown conversation → `404 CONVERSATION_NOT_FOUND`. Callers must stop splicing
+  local transcript into `prompt` — `prompt` is this turn's user input only, and the
+  server injects the history context into the workflow run.
 - Errors before the SSE stream starts are a JSON envelope `{code, message}`; errors
   after the stream starts arrive as SSE frames. Parse them separately.
 
@@ -359,8 +483,10 @@ harness).**
    messageCount; llmRoute/llmModel optional). Delete the up-to-20-request title
    fan-out (F13).
 2. Delete: optimistic removal + short tombstone against eventual consistency (F15).
-3. Fix the keep-max guard so a legitimately empty transcript replaces cached state
-   (F14).
+3. ~~Fix the keep-max guard so a legitimately empty transcript replaces cached
+   state (F14).~~ **Not done, deliberately** — the keep-max guard is load-bearing
+   against post-turn materialization lag (the server briefly answers shorter than
+   the local mirror). See the empty-transcript rule under "Contract facts".
 4. Parse pre-SSE `{code, message}` envelopes instead of collapsing to
    `http_<status>` (F16).
 5. (Optional, only if workflow-mode history is wanted now) send `chatHistory`

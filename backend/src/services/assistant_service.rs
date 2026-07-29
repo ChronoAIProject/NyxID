@@ -120,6 +120,96 @@ pub fn approve_path(user_id: &str, conversation_id: &str) -> AppResult<String> {
     ))
 }
 
+/// `nyxid-chat/conversations/{id}:stop` -- stop active work (202-accepted
+/// control command; Aevatar commits a stop fence before any successor
+/// operation may start).
+pub fn stop_path(user_id: &str, conversation_id: &str) -> AppResult<String> {
+    Ok(format!(
+        "{}:stop",
+        conversation_path(user_id, conversation_id)?
+    ))
+}
+
+/// `nyxid-chat/conversations/{id}:steer` -- redirect active work
+/// (202-accepted; Aevatar serializes the steering fence and starts a
+/// server-owned continuation turn at a safe checkpoint).
+pub fn steer_path(user_id: &str, conversation_id: &str) -> AppResult<String> {
+    Ok(format!(
+        "{}:steer",
+        conversation_path(user_id, conversation_id)?
+    ))
+}
+
+/// `nyxid-chat/conversations/{id}/state` -- conditional current-state query
+/// (GET; `afterStateVersion` / `turnId` cursors ride the forwarded query
+/// string). This is the contract's reconnect surface: clients poll it
+/// instead of replaying events.
+pub fn state_path(user_id: &str, conversation_id: &str) -> AppResult<String> {
+    Ok(format!(
+        "{}/state",
+        conversation_path(user_id, conversation_id)?
+    ))
+}
+
+/// Turn/step ids follow the upstream control-identity grammar
+/// (`TryValidateControlIdentity`): at most 128 UTF-16 code units (the C#
+/// `string.Length` the upstream counts — NOT bytes, so 65 `é`s pass), no
+/// whitespace or control characters, and none of `/ \ ? #`. Accepted
+/// segments are percent-encoded before interpolation — an unencoded `:`
+/// inside a step id would collide with the `:retry`/`:skip` suffix parse.
+///
+/// Two documented NyxID narrowings of the upstream grammar, both
+/// fail-closed here rather than deeper with a less precise error:
+/// - `%` is rejected: the proxy's path hardening repeat-decodes nested
+///   escapes, so a literal `%2F`-shaped id would be 400'd downstream even
+///   double-encoded.
+/// - dot-only segments (`.`, `..`) are rejected: they form
+///   traversal-shaped path segments if any later layer normalizes.
+fn encode_control_segment(segment: &str) -> AppResult<String> {
+    let valid = !segment.is_empty()
+        && segment.encode_utf16().count() <= 128
+        && segment.chars().all(|c| {
+            !c.is_whitespace() && !c.is_control() && !matches!(c, '/' | '\\' | '?' | '#' | '%')
+        })
+        && !segment.chars().all(|c| c == '.');
+    if !valid {
+        return Err(AppError::BadRequest("Invalid turn or step id.".to_string()));
+    }
+    Ok(urlencoding::encode(segment).into_owned())
+}
+
+/// `nyxid-chat/conversations/{id}/turns/{turn}/steps/{step}:retry` --
+/// retry one failed/interrupted step (202-accepted control command).
+pub fn retry_path(
+    user_id: &str,
+    conversation_id: &str,
+    turn_id: &str,
+    step_id: &str,
+) -> AppResult<String> {
+    let turn = encode_control_segment(turn_id)?;
+    let step = encode_control_segment(step_id)?;
+    Ok(format!(
+        "{}/turns/{turn}/steps/{step}:retry",
+        conversation_path(user_id, conversation_id)?
+    ))
+}
+
+/// `nyxid-chat/conversations/{id}/turns/{turn}/steps/{step}:skip` -- skip
+/// one optional step (202-accepted control command).
+pub fn skip_path(
+    user_id: &str,
+    conversation_id: &str,
+    turn_id: &str,
+    step_id: &str,
+) -> AppResult<String> {
+    let turn = encode_control_segment(turn_id)?;
+    let step = encode_control_segment(step_id)?;
+    Ok(format!(
+        "{}/turns/{turn}/steps/{step}:skip",
+        conversation_path(user_id, conversation_id)?
+    ))
+}
+
 /// `v1/chat/completions` -- OpenAI-compatible surface. Scope-free: the
 /// endpoint is stateless and carries its history in the request body.
 pub fn completions_path() -> String {
@@ -213,6 +303,77 @@ mod tests {
             format!("api/scopes/{USER}/nyxid-chat/conversations/{CONV}:approve")
         );
         assert_eq!(
+            stop_path(USER, CONV).unwrap(),
+            format!("api/scopes/{USER}/nyxid-chat/conversations/{CONV}:stop")
+        );
+        assert_eq!(
+            steer_path(USER, CONV).unwrap(),
+            format!("api/scopes/{USER}/nyxid-chat/conversations/{CONV}:steer")
+        );
+        assert_eq!(
+            state_path(USER, CONV).unwrap(),
+            format!("api/scopes/{USER}/nyxid-chat/conversations/{CONV}/state")
+        );
+        assert_eq!(
+            retry_path(USER, CONV, "turn-1", "step_a").unwrap(),
+            format!(
+                "api/scopes/{USER}/nyxid-chat/conversations/{CONV}/turns/turn-1/steps/step_a:retry"
+            )
+        );
+        assert_eq!(
+            skip_path(USER, CONV, "turn-1", "step_a").unwrap(),
+            format!(
+                "api/scopes/{USER}/nyxid-chat/conversations/{CONV}/turns/turn-1/steps/step_a:skip"
+            )
+        );
+        // Upstream may issue identities with `.` / `:`; they round-trip
+        // percent-encoded so a raw `:` cannot collide with the `:retry`
+        // suffix parse.
+        assert_eq!(
+            retry_path(USER, CONV, "turn.v2", "step:3").unwrap(),
+            format!(
+                "api/scopes/{USER}/nyxid-chat/conversations/{CONV}/turns/turn.v2/steps/step%3A3:retry"
+            )
+        );
+        // Non-ASCII identities count UTF-16 code units like the upstream
+        // C# validator: 65 `é`s are 65 units (130 UTF-8 bytes) and pass.
+        let accented = "é".repeat(65);
+        assert!(retry_path(USER, CONV, &accented, "step_a").is_ok());
+    }
+
+    #[test]
+    fn rejects_control_segments_outside_the_upstream_grammar() {
+        // The control-identity grammar forbids whitespace, control chars,
+        // and `/ \ ? #` (upstream `TryValidateControlIdentity`); everything
+        // else is accepted and percent-encoded.
+        // `%` and dot-only segments are documented NyxID narrowings of the
+        // upstream grammar: nested escapes would be 400'd by the proxy's
+        // repeat-decode hardening, and `.`/`..` are traversal-shaped.
+        for bad in [
+            "",
+            "abc/def",
+            "abc\\def",
+            "abc?x=1",
+            "abc#frag",
+            "abc def",
+            "tab\there",
+            "\u{7}bell",
+            "%2e%2e",
+            "a%2Fb",
+            ".",
+            "..",
+        ] {
+            assert!(
+                retry_path(USER, CONV, bad, "step_a").is_err(),
+                "expected turn {bad:?} to be rejected"
+            );
+            assert!(retry_path(USER, CONV, "turn-1", bad).is_err());
+            assert!(skip_path(USER, CONV, bad, "step_a").is_err());
+            assert!(skip_path(USER, CONV, "turn-1", bad).is_err());
+        }
+        assert!(retry_path(USER, CONV, &"a".repeat(129), "step_a").is_err());
+        assert!(retry_path(USER, CONV, "turn-1", &"a".repeat(129)).is_err());
+        assert_eq!(
             history_index_path(USER),
             format!("api/scopes/{USER}/chat-history")
         );
@@ -239,6 +400,9 @@ mod tests {
             );
             assert!(stream_path(USER, bad).is_err());
             assert!(approve_path(USER, bad).is_err());
+            assert!(stop_path(USER, bad).is_err());
+            assert!(steer_path(USER, bad).is_err());
+            assert!(state_path(USER, bad).is_err());
         }
         assert!(history_path(USER, &"a".repeat(129)).is_err());
     }

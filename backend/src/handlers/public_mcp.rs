@@ -311,6 +311,7 @@ mod tests {
         billable_svc.id = Uuid::new_v4().to_string();
         billable_svc.slug = "billable-service".to_string();
         billable_svc.billing = Some(ServiceBilling {
+            platform_billable: false,
             resale_billable: true,
             resale_metric: BillingMetric::Tokens,
             lago_resale_metric_code: Some("resale_tokens".to_string()),

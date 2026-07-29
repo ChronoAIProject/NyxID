@@ -73,6 +73,7 @@ pub async fn create_connection(config: &AppConfig) -> Result<DbHandle, mongodb::
 
     backfill_downstream_service_types(&db).await?;
     migrate_legacy_api_spec_url(&db).await?;
+    migrate_remove_org_scoped_feature_flag_overrides(&db).await?;
     backfill_onboarding_state(&db).await?;
 
     Ok(db)
@@ -259,6 +260,16 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .build(),
         )
         .await?;
+    // Non-partial slug lookup for read paths that must also see inactive
+    // services (e.g. admin audit-log enrichment); the partial unique index
+    // above only covers `is_active: true` rows and cannot serve those queries.
+    services
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "slug": 1, "is_active": 1 })
+                .build(),
+        )
+        .await?;
     services
         .create_index(
             IndexModel::builder()
@@ -343,6 +354,55 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                         .name("audit_log_seq_unique".to_string())
                         .unique(true)
                         .partial_filter_expression(doc! { "seq": { "$exists": true } })
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    // Sort support for the admin audit-log table (`admin_audit_service`).
+    //
+    // Every sortable column there sorts as `{column: d, created_at: d, _id: d}`
+    // with one uniform direction, so each needs its own all-ascending index:
+    // MongoDB can only serve a sort from an index whose key pattern matches the
+    // sort exactly or is its exact reverse, and `_id` must be present because it
+    // is the final tiebreaker. Without these the server does a blocking
+    // in-memory SORT over the whole filtered set on every page load -- it will
+    // allocate up to 100 MB for a single query and then fail the query outright
+    // on collections past that. The mixed-direction indexes above cannot help:
+    // `{event_type: 1, created_at: -1}` matches neither direction of
+    // `{event_type: d, created_at: d, _id: d}`.
+    for sort_key in [
+        "event_type",
+        "api_key_name",
+        "api_key_id",
+        "user_id",
+        "ip_address",
+        "user_agent",
+        // `status` is a bucket over the proxied response status, stored nested.
+        "event_data.response_status",
+    ] {
+        audit
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! { sort_key: 1, "created_at": 1, "_id": 1 })
+                    .options(
+                        IndexOptions::builder()
+                            .name(format!("audit_log_sort_{}", sort_key.replace('.', "_")))
+                            .build(),
+                    )
+                    .build(),
+            )
+            .await?;
+    }
+    // The default sort (`-created_at`) omits the redundant second `created_at`
+    // key, so it needs its own two-key index rather than a prefix of the above.
+    audit
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "created_at": 1, "_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("audit_log_sort_created_at".to_string())
                         .build(),
                 )
                 .build(),
@@ -2374,6 +2434,31 @@ async fn backfill_org_scope_sources(db: &Database) -> Result<(), mongodb::error:
         );
     }
 
+    Ok(())
+}
+
+/// Drop role- and member-scoped feature-flag override rows left behind by the
+/// removed org self-serve surface. No management surface can list or clear
+/// them anymore (the platform-admin API only writes global, per-user, and
+/// org-wide targets), so leaving them in place would silently keep affecting
+/// resolution with no way to see why. Org-wide rows are kept — they are the
+/// platform-admin org rollout targeting.
+async fn migrate_remove_org_scoped_feature_flag_overrides(
+    db: &Database,
+) -> Result<(), mongodb::error::Error> {
+    let overrides = db.collection::<Document>("feature_flag_overrides");
+    let removed = overrides
+        .delete_many(doc! {
+            "org_user_id": { "$type": "string" },
+            "target_kind": { "$in": ["role", "user"] },
+        })
+        .await?;
+    if removed.deleted_count > 0 {
+        tracing::info!(
+            count = removed.deleted_count,
+            "Removed org role/member feature-flag overrides from the retired org self-serve surface"
+        );
+    }
     Ok(())
 }
 
