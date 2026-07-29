@@ -223,7 +223,10 @@ but retains Decline so the user can unblock the model safely.
 
 Supported pending cards use:
 
-- a 3 px purple interaction rail;
+- **no top accent rail** — no colored bar or gradient strip on any card edge, in any
+  state (design decision 2026-07-29: edge accents read as generic AI output). The
+  pending affordance is the purple icon tile plus the accent badge, matching the
+  approval card;
 - neutral card sections and footer;
 - a service icon or custom endpoint icon;
 - an `Action required` purple accent badge;
@@ -443,8 +446,8 @@ default until the backend action registry exists and becomes authoritative.
 | Risk | Interaction | Card form | Rationale |
 |---|---|---|---|
 | `low` | Execute immediately, show a receipt. No prompt. | **Receipt card**: outcome title + safe note + reference chips + microtag "Executed immediately — no confirmation" | Config-level changes; prompting here trains reflexive clicking and spends the attention needed for prompts that matter |
-| `grant` | One confirmation — the CTA and its journey. | **Action card** (Part I §8 anatomy), purple rail | Changes what someone or something can reach, or collects/reveals a credential |
-| `destructive` | Confirmation every time, never remembered. | **Action card**, red (`destructive`) rail, destructive badge, warning line "This cannot be undone. You will be asked every time." | Irreversible; the repeat confirmation is the point |
+| `grant` | One confirmation — the CTA and its journey. | **Action card** (Part I §8 anatomy): neutral surface, purple icon tile + accent badge. No top accent rail (no card has one, any state). | Changes what someone or something can reach, or collects/reveals a credential |
+| `destructive` | Confirmation every time, never remembered. | **Action card**: neutral surface, red icon tile + destructive badge, warning line "This cannot be undone. You will be asked every time." No rail. | Irreversible; the repeat confirmation is the point |
 
 Footer microcopy by class: secret-bearing grant → "Nothing is shared until you finish.";
 other grant → "One confirmation."; destructive → "Asked every time. Never remembered."
@@ -631,30 +634,67 @@ not production code, never imported by the app.
    (action card, receipt). No hand-written per-card HTML blocks.
 3. Tokens must be transcribed from `frontend/src/app.css` (the live source of truth) as
    CSS custom properties — dark values default, light values behind a working theme
-   toggle. Purple rail `--color-nyx-secondary-400` (#A672FB); primary CTA gradient
-   `#A672FB → #5E00F5`; badge recipes per `components/ui/badge.tsx`. Chat-column layout,
-   max-width 680px, with section headers per §17 group carrying the group's one-line why.
+   toggle. Pending accent = purple icon tile + badge on `--color-nyx-secondary-400`
+   (#A672FB); primary CTA gradient `#A672FB → #5E00F5`; badge recipes per
+   `components/ui/badge.tsx`. **No top accent rails on any card, any state.**
+   Chat-column layout, max-width 680px, with section headers per §17 group carrying the
+   group's one-line why.
 4. A **States** section first: `service.connect` in all six states (pending, in_progress,
    completed, declined, failed, unsupported) exactly as shipped in `action-card.tsx`.
-5. Every card carries its verb as a mono caption, its risk as the badge, §17 tags as small
+5. A **Flow** section immediately after States: the continuous wizard-style journey,
+   rendered as a numbered storyboard so every stage is visible without interaction
+   (an optional click-through walkthrough may sit on top, but the storyboard is the
+   requirement). It answers "what does the CTA actually lead to, and what pings Aevatar."
+   Stages, using the GitHub catalog example (`req_7`, `api-github`, scopes `repo`):
+   1. **Card pending** — the shipped pending card.
+   2. **Modal · Service** — `AddKeyDialog` catalog step, GitHub preselected from
+      `prefillSlug`. Modal mockups must mirror the real dialog's structure (dialog
+      chrome, step header, step indicator, footer buttons per
+      `components/dashboard/add-key-dialog.tsx` and `step-header.tsx`) — static
+      mockups, no real logic.
+   3. **Modal · Routing** — direct vs via-node choice, prefill applied.
+   4. **Modal · Authorize** — the OAuth handoff step: "Continue to GitHub" + copy
+      stating the popup runs on NyxID's surface and the token never enters the chat.
+   5. **Modal · Verify** — success state, created service summary (`us_44`), Done.
+   6. **Card completed** — the receipt state, and directly beneath it the
+      **auto-continue event**: a small transcript event row —
+      `→ action.continue posted · req_7 completed · resource us_44` — annotated
+      "automatic — no user action", followed by the assistant's follow-up text bubble
+      to show the conversation resuming.
+   7. **Branches**, each as its own storyboard frame: (a) **error** — the Authorize
+      step's in-modal retryable error state, plus the card's terminal `failed`
+      receipt with its auto-continue row (`disposition: failed`); (b) **declined** —
+      Decline pressed on the card: declined receipt + auto-continue row
+      (`disposition: declined`, no modal).
+6. Every card carries its verb as a mono caption, its risk as the badge, §17 tags as small
    chips, and a shipped/target marker (`service.connect` ×2 + states = shipped; all else
    target).
-6. Header shows counts (total, per risk tier) **computed from the data array** — the
+7. Header shows counts (total, per risk tier) **computed from the data array** — the
    completeness check, never hardcoded.
-7. Icons: small inline SVG set (lucide-style, stroke currentColor). No icon fonts, no
+8. Icons: small inline SVG set (lucide-style, stroke currentColor). No icon fonts, no
    external images.
-8. Example ids only; no realistic secrets or tokens anywhere in the file.
+9. Example ids only; no realistic secrets or tokens anywhere in the file.
 
 **Acceptance gates (verify before done):**
 
 - [ ] The computed card count equals the §17 inventory, and every §17 row appears exactly
       once (cross-check the data array verb-by-verb against §17).
 - [ ] States section shows all six states matching Part I §8.
+- [ ] Flow section shows every stage of requirement 5 — five modal mockups
+      (Service/Routing/Authorize/Verify plus the Authorize error state), the completed
+      card with its auto-continue event row, and both branches (failed, declined),
+      all visible without interaction.
+- [ ] The auto-continue rows are annotated "automatic — no user action" and show the
+      disposition (`completed` / `failed` / `declined`) and, for completed, the
+      `us_44` resource ref.
+- [ ] **Zero top accent rails** anywhere: no card in any section or state renders a
+      colored bar/strip on any edge.
 - [ ] Renders at 1440px and 390px, dark and light, with no horizontal overflow.
 - [ ] Opened from `file://` in a real browser with zero console errors.
 - [ ] No warning/amber styling on any pending card.
 - [ ] `rg -i "secret|token|password" docs/assistant-action-cards-showcase.html` yields
       only prose about secrets ("shown once", "never rendered"), never values.
-- [ ] Grant cards: purple rail + CTA + Decline. Destructive: red rail + "Asked every
-      time. Never remembered." Low: receipt form only, no CTA.
+- [ ] Grant cards: purple icon tile + accent badge + CTA + Decline. Destructive: red
+      tile + destructive badge + "Asked every time. Never remembered." Low: receipt
+      form only, no CTA.
 
