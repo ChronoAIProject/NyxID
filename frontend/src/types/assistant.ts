@@ -118,6 +118,8 @@ export interface ActionCardContentBlock {
   readonly action: string;
   readonly action_request_id: string;
   readonly origin_turn_id: string;
+  /** Actor that emitted the request; used only to address action.continue. */
+  readonly actor_id?: string;
   readonly params: ActionCardParams;
   readonly status: ActionCardStatus;
   readonly outcome_note: string;

@@ -383,6 +383,8 @@ interface RunStepState {
 interface PendingActionBatch {
   readonly id: string;
   readonly originTurnId: string;
+  /** NyxId chat actor that owns the origin turn. */
+  readonly actorId: string | null;
   readonly reports: Map<string, ActionReport>;
   onEvent: (event: TurnEvent) => void;
   clientRequestId: string | null;
@@ -1457,12 +1459,36 @@ export class AevatarAssistantTransport implements AssistantTransport {
     // changing any card. The real client id is allocated only when drained.
     buildActionContinueBody("validation", originTurnId, validatedReports);
 
+    const stored = this.conversations.get(conversationId);
+    const actorIds = new Set(
+      validatedReports
+        .map(
+          (report) =>
+            this.findActionCardByRequestId(
+              conversationId,
+              report.actionRequestId,
+            )?.actor_id,
+        )
+        .filter((actorId): actorId is string => Boolean(actorId)),
+    );
+    if (actorIds.size > 1) {
+      throw new AssistantProtocolError(
+        "Action reports from different conversation actors cannot share a batch.",
+      );
+    }
+    const actorId =
+      actorIds.values().next().value ??
+      (stored && !isWorkflowConversationId(stored.conversation.id)
+        ? stored.conversation.id
+        : null);
+
     const batches = this.pendingActionBatches.get(conversationId) ?? [];
     let batch = [...batches]
       .reverse()
       .find(
         (candidate) =>
           candidate.originTurnId === originTurnId &&
+          candidate.actorId === actorId &&
           candidate.clientRequestId === null &&
           !candidate.inFlight &&
           !candidate.blocked,
@@ -1471,6 +1497,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       batch = {
         id: newId("action-batch"),
         originTurnId,
+        actorId,
         reports: new Map(),
         onEvent,
         clientRequestId: null,
@@ -1650,14 +1677,11 @@ export class AevatarAssistantTransport implements AssistantTransport {
       );
     if (!batch) return null;
 
-    // `action.continue` belongs to the nyxid-chat actor protocol. New chat
-    // conversations now use the studio workflow surface (`chatc-*`), whose
-    // strict `/workflow-chat` DTO accepts text turns only; sending this body
-    // there would be rejected, while treating the workflow id as an actor id
-    // would post to a resource that does not exist. Keep the report and show
-    // the truthful undelivered receipt until the backend exposes an action
-    // continuation route for workflow conversations.
-    if (isWorkflowConversationId(stored.conversation.id)) {
+    // `action.continue` belongs to the nyxid-chat actor protocol even when the
+    // visible conversation runs on the studio workflow surface. The action
+    // frame carries its owning ConversationActorId; never substitute the
+    // workflow `chatc-*` id or send the control body to `/workflow-chat`.
+    if (!batch.actorId) {
       batch.blocked = true;
       this.actionDrainBlocked.add(conversationId);
       this.updateActionBatchOutcomeNotes(conversationId, batch, false);
@@ -1679,7 +1703,12 @@ export class AevatarAssistantTransport implements AssistantTransport {
     };
     batch.inFlight = true;
     this.running.set(conversationId, run);
-    void this.streamActionContinuation(conversationId, run, body);
+    void this.streamActionContinuation(
+      conversationId,
+      batch.actorId,
+      run,
+      body,
+    );
     return {
       get turnId() {
         return run.turnId;
@@ -2060,6 +2089,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
 
   private async streamActionContinuation(
     conversationId: string,
+    actorId: string,
     run: RunningTurn,
     body: ActionContinueBody,
   ): Promise<void> {
@@ -2080,7 +2110,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       try {
         run.streamDispatched = true;
         response = await fetch(
-          `/api/v1${ASSISTANT_PREFIX}/conversations/${conversationId}/stream`,
+          `/api/v1${ASSISTANT_PREFIX}/conversations/${encodeURIComponent(actorId)}/stream`,
           {
             method: "POST",
             headers: {
@@ -3081,6 +3111,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
         patch: {
           action: request.action,
           origin_turn_id: request.originTurnId,
+          actor_id: request.actorId || undefined,
           params: resolved.params,
           status,
           outcome_note: terminal ? existing.outcome_note : "",
@@ -3095,6 +3126,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       action: request.action,
       action_request_id: request.actionRequestId,
       origin_turn_id: request.originTurnId,
+      actor_id: request.actorId || undefined,
       params: resolved.params,
       status: resolved.supported ? "pending" : "unsupported",
       outcome_note: "",

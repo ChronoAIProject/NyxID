@@ -105,6 +105,7 @@ describe("assistant action request schema", () => {
     };
     const invalidRequests = [
       { ...validCatalog, unexpected: true },
+      { ...validCatalog, actorId: "invalid/actor" },
       {
         ...validCatalog,
         params: {
@@ -143,7 +144,9 @@ describe("assistant action request schema", () => {
     ];
 
     for (const request of invalidRequests) {
-      expect(assistantActionRequestSchema.safeParse(request).success).toBe(false);
+      expect(assistantActionRequestSchema.safeParse(request).success).toBe(
+        false,
+      );
     }
   });
 

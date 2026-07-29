@@ -4974,6 +4974,7 @@ describe("workflow chat turns (studio engine)", () => {
   const WORKFLOW_CONVERSATION = "chatc-8bd999c402fb37d60cdcd81e3b78cfd";
   const WORKFLOW_TURN = "turn-d619940adcd817c4aeb5d1c3e57f1ca5";
   const RUN_ACTOR = "workflow-definition:studio:run:43bfe86961b44fc2a6422d0b";
+  const ACTION_ACTOR = "nyxid-chat-workflow-action-1";
 
   function workflowContextFrame(stateVersion: string): unknown {
     return {
@@ -5265,25 +5266,45 @@ describe("workflow chat turns (studio engine)", () => {
     );
   });
 
-  it("does not post an action continuation to a workflow-only conversation", async () => {
+  it("posts a workflow action continuation to the actor named by its frame", async () => {
+    const actionBodies: Record<string, unknown>[] = [];
     const mock = stubFetch(
       routeWorkflow([
         ...WORKFLOW_PREAMBLE,
         actionRequestFrame({
-          actorId: WORKFLOW_CONVERSATION,
+          actorId: ACTION_ACTOR,
           originTurnId: WORKFLOW_TURN,
         }),
         { runFinished: { threadId: RUN_ACTOR, status: "blocked" } },
         { stateSnapshot: { snapshot: { actorId: RUN_ACTOR } } },
       ]),
+      (url, init) => {
+        if (
+          url !== `${ASSISTANT_BASE}/conversations/${ACTION_ACTOR}/stream` ||
+          init?.method !== "POST"
+        ) {
+          return undefined;
+        }
+        actionBodies.push(
+          JSON.parse(String(init.body)) as Record<string, unknown>,
+        );
+        return sseResponse([
+          {
+            type: "RUN_STARTED",
+            actorId: ACTION_ACTOR,
+            turnId: "turn-action-continuation-1",
+          },
+          { type: "RUN_FINISHED" },
+        ]);
+      },
     );
     const transport = new AevatarAssistantTransport();
     const conversation = await transport.createConversation();
     await collectWorkflowTurn(transport, conversation.id, "Connect GitHub");
 
     const events: TurnEvent[] = [];
-    expect(
-      transport.continueActions(
+    await new Promise<void>((resolve) => {
+      const handle = transport.continueActions(
         conversation.id,
         WORKFLOW_TURN,
         [
@@ -5298,9 +5319,13 @@ describe("workflow chat turns (studio engine)", () => {
             },
           },
         ],
-        (event) => events.push(event),
-      ),
-    ).toBeNull();
+        (event) => {
+          events.push(event);
+          if (event.event === "turn.completed") resolve();
+        },
+      );
+      expect(handle).not.toBeNull();
+    });
 
     expect(
       mock.mock.calls.some(
@@ -5317,12 +5342,24 @@ describe("workflow chat turns (studio engine)", () => {
         .map(([, init]) => JSON.parse(String(init?.body)) as { type?: string })
         .some((body) => body.type === "action.continue"),
     ).toBe(false);
+    expect(actionBodies).toHaveLength(1);
+    expect(actionBodies[0]).toMatchObject({
+      type: "action.continue",
+      originTurnId: WORKFLOW_TURN,
+      actions: [
+        {
+          actionRequestId: "act-action-1",
+          originTurnId: WORKFLOW_TURN,
+          disposition: "completed",
+        },
+      ],
+    });
     expect(
       events.some(
         (event) =>
           event.event === "block.updated" &&
           "outcome_note" in event.patch &&
-          event.patch.outcome_note?.includes("has not reached the assistant"),
+          event.patch.outcome_note?.includes("assistant received"),
       ),
     ).toBe(true);
   });

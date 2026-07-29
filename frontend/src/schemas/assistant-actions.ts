@@ -13,6 +13,10 @@ export const actionControlIdentitySchema = z
 
 const wireStringSchema = z.string().max(4_096).optional().default("");
 const wireIdSchema = z.string().max(256).optional().default("");
+const optionalControlIdentitySchema = z
+  .union([z.literal(""), actionControlIdentitySchema])
+  .optional()
+  .default("");
 const requiredWireStringSchema = z
   .string()
   .max(4_096)
@@ -66,7 +70,7 @@ export const assistantActionParamsSchema = z
 export const assistantActionRequestSchema = z
   .object({
     schemaVersion: z.number().int().optional().default(0),
-    actorId: wireIdSchema,
+    actorId: optionalControlIdentitySchema,
     originTurnId: actionControlIdentitySchema,
     taskId: wireIdSchema,
     stepId: wireIdSchema,
@@ -110,9 +114,10 @@ export function recoverUnsupportedAssistantActionRequest(
     typeof rawSchemaVersion === "number" && Number.isInteger(rawSchemaVersion)
       ? rawSchemaVersion
       : 0;
+  const actorId = optionalControlIdentitySchema.safeParse(record["actorId"]);
   return {
     schemaVersion,
-    actorId: "",
+    actorId: actorId.success ? actorId.data : "",
     originTurnId: originTurnId.data,
     taskId: "",
     stepId: "",
