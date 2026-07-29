@@ -13,6 +13,11 @@ const HTTP_TIMEOUT_SECS: u64 = 20;
 /// keeping the interactive checkout call responsive.
 const PAYMENT_URL_MAX_ATTEMPTS: u32 = 5;
 const PAYMENT_URL_RETRY_DELAY_MS: u64 = 600;
+/// Invoice attachment + finalization for a wallet transaction usually
+/// completes within a couple of seconds; ~6s of polling covers a busy
+/// worker while keeping the interactive top-up call responsive.
+const INVOICE_FINALIZE_MAX_ATTEMPTS: u32 = 10;
+const INVOICE_FINALIZE_RETRY_DELAY_MS: u64 = 600;
 
 #[async_trait]
 pub trait LagoApi: Send + Sync {
@@ -287,13 +292,20 @@ impl LagoApi for LagoClient {
                 "Lago top-up response did not include a wallet transaction id".to_string(),
             )
         })?;
+        // The invoice must be finalized BEFORE the first payment URL
+        // request. On Lago >= 1.50 an early request does not fail: it
+        // permanently caches a Stripe session snapshotted from the $0
+        // draft invoice, leaving an unpayable checkout.
+        let lago_invoice_id = self
+            .await_topup_invoice_finalized(wallet_id, &transaction)
+            .await?;
         let payment_details = self
             .generate_wallet_transaction_payment_url(&transaction.wallet_transaction_id)
             .await?;
 
         Ok(WalletTopUpCheckout {
             wallet_transaction_id: transaction.wallet_transaction_id,
-            lago_invoice_id: transaction.lago_invoice_id,
+            lago_invoice_id: Some(lago_invoice_id),
             payment_url: payment_details.payment_url,
             payment_provider: Some(payment_details.payment_provider),
         })
@@ -465,6 +477,81 @@ impl LagoApi for LagoClient {
 }
 
 impl LagoClient {
+    /// Wait for the invoice of a freshly created wallet transaction to be
+    /// attached and finalized. Lago does both asynchronously (typically
+    /// within a couple of seconds), and requesting the payment URL earlier
+    /// bakes the draft state into the checkout session.
+    async fn await_topup_invoice_finalized(
+        &self,
+        wallet_id: &str,
+        transaction: &WalletTopUpTransaction,
+    ) -> AppResult<String> {
+        let mut invoice_id = transaction.lago_invoice_id.clone();
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            if invoice_id.is_none() {
+                invoice_id = self
+                    .find_transaction_invoice_id(wallet_id, &transaction.wallet_transaction_id)
+                    .await?;
+            }
+            if let Some(id) = invoice_id.as_deref() {
+                let value = self
+                    .json_request(
+                        reqwest::Method::GET,
+                        &format!("invoices/{}", urlencoding::encode(id)),
+                        None,
+                    )
+                    .await
+                    .map_err(lago_error_to_app)?;
+                let status = value
+                    .get("invoice")
+                    .and_then(|invoice| value_string(invoice, &["status"]))
+                    .unwrap_or_default();
+                if status == "finalized" {
+                    return Ok(id.to_string());
+                }
+            }
+            if attempt >= INVOICE_FINALIZE_MAX_ATTEMPTS {
+                return Err(AppError::BillingProviderUnavailable(
+                    "Lago top-up invoice was not finalized in time; retry the top-up".to_string(),
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(INVOICE_FINALIZE_RETRY_DELAY_MS)).await;
+        }
+    }
+
+    /// Resolve the invoice id of a wallet transaction whose create response
+    /// did not carry one yet (invoice attachment is asynchronous).
+    async fn find_transaction_invoice_id(
+        &self,
+        wallet_id: &str,
+        wallet_transaction_id: &str,
+    ) -> AppResult<Option<String>> {
+        let value = self
+            .json_request(
+                reqwest::Method::GET,
+                &format!(
+                    "wallets/{}/wallet_transactions?per_page=50",
+                    urlencoding::encode(wallet_id)
+                ),
+                None,
+            )
+            .await
+            .map_err(lago_error_to_app)?;
+        Ok(value
+            .get("wallet_transactions")
+            .and_then(Value::as_array)
+            .and_then(|items| {
+                items
+                    .iter()
+                    .find(|item| {
+                        value_string(item, &["lago_id"]).as_deref() == Some(wallet_transaction_id)
+                    })
+                    .and_then(|item| value_string(item, &["lago_invoice_id"]))
+            }))
+    }
+
     async fn get_wallet_by_customer_id(&self, customer_id: &str) -> AppResult<Option<LagoWallet>> {
         let value = self
             .json_request(
@@ -1520,6 +1607,14 @@ mod tests {
                 .route(
                     "/api/v1/wallet_transactions/txn-1/payment_url",
                     axum::routing::post(generate_payment_url),
+                )
+                .route(
+                    "/api/v1/invoices/invoice-1",
+                    axum::routing::get(|| async {
+                        axum::Json(json!({
+                            "invoice": { "lago_id": "invoice-1", "status": "finalized" }
+                        }))
+                    }),
                 ),
         )
         .await;
@@ -1539,6 +1634,156 @@ mod tests {
         assert_eq!(checkout.payment_url, "https://pay.example/checkout");
         assert_eq!(checkout.lago_invoice_id.as_deref(), Some("invoice-1"));
         assert_eq!(checkout.payment_provider.as_deref(), Some("stripe"));
+    }
+
+    #[tokio::test]
+    async fn create_wallet_topup_waits_for_invoice_finalization() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+        let invoice_polls = std::sync::Arc::new(AtomicUsize::new(0));
+        let finalized_before_url = std::sync::Arc::new(AtomicUsize::new(0));
+        let polls = invoice_polls.clone();
+        let gate = finalized_before_url.clone();
+        let gate_check = finalized_before_url.clone();
+
+        let base_url = spawn_lago_mock(
+            axum::Router::new()
+                .route(
+                    "/api/v1/wallet_transactions",
+                    // Create response carries no invoice id yet: attachment
+                    // is asynchronous on the Lago side.
+                    axum::routing::post(|| async {
+                        axum::Json(json!({
+                            "wallet_transaction": { "id": "txn-wait" }
+                        }))
+                    }),
+                )
+                .route(
+                    "/api/v1/wallets/wallet-1/wallet_transactions",
+                    axum::routing::get(|| async {
+                        axum::Json(json!({
+                            "wallet_transactions": [
+                                { "lago_id": "txn-wait", "lago_invoice_id": "invoice-wait" }
+                            ]
+                        }))
+                    }),
+                )
+                .route(
+                    "/api/v1/invoices/invoice-wait",
+                    axum::routing::get(move || {
+                        let polls = polls.clone();
+                        let gate = gate.clone();
+                        async move {
+                            let status = if polls.fetch_add(1, AtomicOrdering::SeqCst) < 1 {
+                                "draft"
+                            } else {
+                                gate.store(1, AtomicOrdering::SeqCst);
+                                "finalized"
+                            };
+                            axum::Json(json!({
+                                "invoice": { "lago_id": "invoice-wait", "status": status }
+                            }))
+                        }
+                    }),
+                )
+                .route(
+                    "/api/v1/wallet_transactions/txn-wait/payment_url",
+                    axum::routing::post(move || {
+                        let gate = gate_check.clone();
+                        async move {
+                            assert_eq!(
+                                gate.load(AtomicOrdering::SeqCst),
+                                1,
+                                "payment URL must not be requested before finalization"
+                            );
+                            axum::Json(json!({
+                                "wallet_transaction_payment_details": {
+                                    "payment_url": "https://pay.example/finalized",
+                                    "payment_provider": "stripe"
+                                }
+                            }))
+                        }
+                    }),
+                ),
+        )
+        .await;
+        let client = LagoClient::new(base_url, "test-key".to_string()).expect("client");
+
+        let checkout = client
+            .create_wallet_topup(
+                "wallet-1",
+                &super::WalletTopUpInput {
+                    external_id: "topup-wait".to_string(),
+                    amount_credits: 1,
+                },
+            )
+            .await
+            .expect("create wallet topup");
+
+        assert_eq!(checkout.payment_url, "https://pay.example/finalized");
+        assert_eq!(checkout.lago_invoice_id.as_deref(), Some("invoice-wait"));
+        assert!(invoice_polls.load(AtomicOrdering::SeqCst) >= 2);
+    }
+
+    #[tokio::test]
+    async fn create_wallet_topup_never_mints_a_url_for_an_unfinalized_invoice() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+        let url_calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let url_counter = url_calls.clone();
+
+        let base_url = spawn_lago_mock(
+            axum::Router::new()
+                .route(
+                    "/api/v1/wallet_transactions",
+                    axum::routing::post(|| async {
+                        axum::Json(json!({
+                            "wallet_transaction": {
+                                "id": "txn-stuck",
+                                "lago_invoice_id": "invoice-stuck"
+                            }
+                        }))
+                    }),
+                )
+                .route(
+                    "/api/v1/invoices/invoice-stuck",
+                    axum::routing::get(|| async {
+                        axum::Json(json!({
+                            "invoice": { "lago_id": "invoice-stuck", "status": "draft" }
+                        }))
+                    }),
+                )
+                .route(
+                    "/api/v1/wallet_transactions/txn-stuck/payment_url",
+                    axum::routing::post(move || {
+                        let calls = url_counter.clone();
+                        async move {
+                            calls.fetch_add(1, AtomicOrdering::SeqCst);
+                            axum::Json(json!({}))
+                        }
+                    }),
+                ),
+        )
+        .await;
+        let client = LagoClient::new(base_url, "test-key".to_string()).expect("client");
+
+        let error = client
+            .create_wallet_topup(
+                "wallet-1",
+                &super::WalletTopUpInput {
+                    external_id: "topup-stuck".to_string(),
+                    amount_credits: 1,
+                },
+            )
+            .await
+            .expect_err("must fail when the invoice never finalizes");
+
+        assert!(error.to_string().contains("not finalized"));
+        assert_eq!(
+            url_calls.load(AtomicOrdering::SeqCst),
+            0,
+            "a draft invoice must never get a checkout session"
+        );
     }
 
     #[tokio::test]
@@ -1584,6 +1829,14 @@ mod tests {
                 .route(
                     "/api/v1/wallet_transactions/txn-1/payment_url",
                     axum::routing::post(generate_payment_url),
+                )
+                .route(
+                    "/api/v1/invoices/invoice-1",
+                    axum::routing::get(|| async {
+                        axum::Json(json!({
+                            "invoice": { "lago_id": "invoice-1", "status": "finalized" }
+                        }))
+                    }),
                 ),
         )
         .await;
